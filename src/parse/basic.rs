@@ -8,6 +8,7 @@ impl Parser<'_> {
         self.scoped(|p| {
             let next = p.peek_next_token();
             use TokenKind::*;
+            let mut not_matched = false;
             let result = match next.kind {
                 Int => Ok(NodeBuilder::new(NodeKind::Int, p.next_token_span()).build(&mut p.ast)),
                 Real => Ok(NodeBuilder::new(NodeKind::Real, p.next_token_span()).build(&mut p.ast)),
@@ -27,9 +28,14 @@ impl Parser<'_> {
                 ),
                 Null => Ok(NodeBuilder::new(NodeKind::Null, p.next_token_span()).build(&mut p.ast)),
 
-                _ => Ok(0),
+                _ => {
+                    not_matched = true;
+                    Ok(0)
+                }
             };
-            p.eat_tokens(1);
+            if !not_matched {
+                p.eat_tokens(1);
+            }
             result
         })
     }
@@ -45,9 +51,15 @@ impl Parser<'_> {
     // symbol -> . id
     pub fn try_symbol(&mut self) -> ParseResult {
         self.scoped_with_expected_prefix(&[TokenKind::Dot, TokenKind::Id], |p| {
+            let dot_span = p.next_token_span(); // 获取点号的span
             p.eat_tokens(1);
             let id = p.try_id()?;
-            Ok(NodeBuilder::new(NodeKind::Symbol, p.current_span())
+            
+            // 计算从点号开始到id结束的span
+            let id_span = p.ast.get_span(id).unwrap_or(rustc_span::DUMMY_SP);
+            let symbol_span = rustc_span::Span::new(dot_span.lo(), id_span.hi());
+            
+            Ok(NodeBuilder::new(NodeKind::Symbol, symbol_span)
                 .add_single_child(id)
                 .build(&mut p.ast))
         })
@@ -71,7 +83,11 @@ impl Parser<'_> {
                     if rule.ends_with_semicolon() {
                         // TODO: 如果规则以分号结尾, 有些特殊规则需要处理
                         if !p.eat_token(rule.separator) {
-                            break 'outer;
+                            if p.node_ends_with_right_brace(node) {
+                                continue 'outer;
+                            } else {
+                                break 'outer;
+                            }
                         } else {
                             continue 'outer; // 如果匹配到分隔符, 继续外层循环
                         }
@@ -92,6 +108,30 @@ impl Parser<'_> {
 
             Ok(nodes)
         })
+    }
+
+    // TODO: 非常低效
+    fn node_ends_with_right_brace(&self, node: NodeIndex) -> bool {
+        if let Some(span) = self.ast.get_span(node) {
+            let source_file = self.source_map.lookup_source_file(span.lo());
+
+            let source_content = match &source_file.src {
+                Some(content) => content.as_str(),
+                None => {
+                    eprintln!("Error: Source file content not available");
+                    return false;
+                }
+            };
+            // Check if the last character of the node's span is a right brace
+            if let Some(last_char) =
+                source_content.get(span.hi().0 as usize - 1..span.hi().0 as usize)
+            {
+                return last_char == "}";
+            } else {
+                eprintln!("Error: Node span is out of bounds in source content");
+            }
+        }
+        false
     }
 
     pub fn try_multi_with_bracket(
@@ -115,6 +155,92 @@ impl Parser<'_> {
             Ok(nodes)
         })
     }
+
+    pub fn try_unary(
+        &mut self,
+        rule: Rule,
+        prefix: TokenKind,
+        result_kind: NodeKind,
+        info: String,
+    ) -> ParseResult {
+        self.scoped_with_expected_prefix(&[prefix], |p| {
+            p.eat_tokens(1); // 吃掉前缀标记
+            let node = (rule.parser)(p)?;
+            if node == 0 {
+                return Err(ParseError::invalid_syntax(
+                    info,
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+            Ok(NodeBuilder::new(result_kind, p.current_span())
+                .add_single_child(node)
+                .build(&mut p.ast))
+        })
+    }
+
+    pub fn try_property(&mut self) -> ParseResult {
+        self.scoped_with_expected_prefix(&[TokenKind::Dot, TokenKind::Id], |p| {
+            p.eat_tokens(1); // 吃掉点号
+            let id = p.try_id()?;
+            if id == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected an identifier after `.`".to_string(),
+                    TokenKind::Id,
+                    p.current_span(),
+                ));
+            }
+            let expr = p.try_expr()?;
+            if expr == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected an expression after `.`".to_string(),
+                    p.peek_next_token().kind,
+                    p.current_span(),
+                ));
+            }
+
+            Ok(NodeBuilder::new(NodeKind::Property, p.current_span())
+                .add_single_child(id)
+                .add_single_child(expr)
+                .build(&mut p.ast))
+        })
+    }
+
+    pub fn try_property_assign(&mut self) -> ParseResult {
+        self.scoped_with_expected_prefix(&[TokenKind::Dot, TokenKind::Id, TokenKind::Eq], |p| {
+            p.eat_tokens(1); // 吃掉点号
+            let id = p.try_id()?;
+            if id == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected an identifier after `.`".to_string(),
+                    TokenKind::Id,
+                    p.current_span(),
+                ));
+            }
+            if !p.eat_token(TokenKind::Eq) {
+                return Err(ParseError::unexpected_token(
+                    TokenKind::Eq,
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+            let expr = p.try_expr()?;
+            if expr == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected an expression after `=`".to_string(),
+                    p.peek_next_token().kind,
+                    p.current_span(),
+                ));
+            }
+
+            Ok(
+                NodeBuilder::new(NodeKind::PropertyAssignment, p.current_span())
+                    .add_single_child(id)
+                    .add_single_child(expr)
+                    .build(&mut p.ast),
+            )
+        })
+    }
 }
 
 pub struct Rule {
@@ -122,7 +248,7 @@ pub struct Rule {
     pub parser: Box<dyn Fn(&mut Parser) -> ParseResult>,
     pub degree: (),
 
-    // 分隔符, 例如: `,` 或 `;`
+    // 分隔符, `,` 或 `;`
     pub separator: TokenKind,
 }
 
@@ -151,6 +277,7 @@ impl Rule {
         }
     }
 
+    #[inline]
     pub fn ends_with_semicolon(&self) -> bool {
         self.separator == TokenKind::Semi
     }

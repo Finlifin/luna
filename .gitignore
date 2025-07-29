@@ -1,1 +1,3 @@
 /target
+*.lisp
+test_project

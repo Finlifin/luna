@@ -29,7 +29,7 @@ impl Parser<'_> {
     }
 
     pub fn parse(&mut self, diag_ctx: &mut DiagnosticContext) {
-        match self.try_expr() {
+        match self.try_file_scope() {
             Ok(node_index) => {
                 self.ast.root = node_index;
             }

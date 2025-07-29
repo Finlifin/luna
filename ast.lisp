@@ -1,6 +1,1 @@
-
-(ListOf 
-    (Int TODO) 
-    (Int TODO) 
-    (Int TODO) 
-    (Int TODO))
+(FileScope (ModuleDef (Id A) [] (Block (FunctionDef (Id manbo) [] (<invalid node>) (<invalid node>) [] (Block )) (ModuleDef (Id B) [] (Block (FunctionDef (Id hello) [] (<invalid node>) (<invalid node>) [] (Block (ExprStatement (Call (Id manbo) )))) (ModuleDef (Id B) [] (Block (FunctionDef (Id hello) [] (<invalid node>) (<invalid node>) [] (Block (ExprStatement (Call (Id manbo) )))) (ModuleDef (Id C) [] (Block (FunctionDef (Id hello) [] (<invalid node>) (<invalid node>) [] (Block (ExprStatement (Call (Id manbo) )))))))))))) (ModuleDef (Id B) [] (Block (ModuleDef (Id C) [] (Block )) (StructDef (Id LinkedList) [(ClauseTypeDecl where T)] (Block (StructField (Id head) (OptionalType (PointerType (Id Node)))) (StructDef (Id Node) [] (Block (StructField (Id data) (Id T)) (StructField (Id next) (OptionalType (PointerType (Id Node)))))))))) (FunctionDef (Id factorial) [(ParamTyped (Id n) (Id Integer))] (Id Integer) (<invalid node>) [] (Block (IfStatement (BoolEq (Id n) (Int 0)) (Block (ExprStatement (Int 1))) (Block (ExprStatement (Mul (Id n) (Call (Id factorial) (Sub (Id n) (Int 1))))))))))

@@ -1,1 +1,54 @@
-[1, 2, 3, 4]
+mod A {
+    fn manbo() {}
+    mod B {
+        fn hello() {
+            manbo();
+        }
+
+        mod B {
+            fn hello() {
+                manbo();
+            }
+
+            mod C {
+                fn hello() {
+                    manbo();
+                }
+            }
+        }
+    }
+}
+
+mod B {
+    mod C {}
+    struct LinkedList where T {
+        head: ?*Node,
+
+        struct Node {
+            data: T,
+            next: ?*Node,
+        }
+    }
+}
+
+
+
+-- 递归求阶乘
+fn factorial(n: Integer) -> Integer {
+    if n == 0 {
+        1
+    } else {
+        n * factorial(n - 1)
+    }
+}
+
+
+
+
+
+
+
+
+
+
+

@@ -1,6 +1,7 @@
+use core::slice;
 use std::fmt::Display;
 
-use rustc_span::Span;
+use rustc_span::{SourceMap, Span};
 
 /// Node index type, for future extensibility
 pub type NodeIndex = u32;
@@ -41,10 +42,6 @@ impl Ast {
     }
 
     pub fn add_node(&mut self, descriptor: NodeBuilder) -> NodeIndex {
-        let node_index = self.nodes.len() as NodeIndex;
-        // 记录当前节点的子节点在 children 数组中的起始位置
-        let children_start_pos = self.children.len() as NodeIndex;
-
         let children_indexes: Vec<_> = descriptor
             .children
             .iter()
@@ -56,16 +53,17 @@ impl Ast {
                         // 先存储子节点数量
                         self.children.push(child_indices.len() as NodeIndex);
                         // 然后存储所有子节点索引
-                        self.children.extend(child_indices.iter().cloned());
+                        self.children.extend_from_slice(&child_indices);
                         len_index
                     }
                 }
             })
             .collect();
 
-        children_indexes
-            .iter()
-            .for_each(|child_index| self.children.push(*child_index));
+        let node_index = self.nodes.len() as NodeIndex;
+        let children_start_pos = self.children.len() as NodeIndex;
+
+        self.children.extend(children_indexes);
         // 添加节点信息
         self.nodes.push(descriptor.kind);
         self.spans.push(descriptor.span);
@@ -107,7 +105,7 @@ pub struct NodeBuilder {
     children: Vec<Child>,
 }
 
-enum Child {
+pub enum Child {
     Single(NodeIndex),        // 单个子节点
     Multiple(Vec<NodeIndex>), // 多个子节点
 }
@@ -176,236 +174,349 @@ pub enum NodeKind {
     Symbol,
 
     // exprs
-    DefinitionAsExpr,
-    StatementAsExpr,
-    PatternAsExpr,
+    DefinitionAsExpr, // a
+    StatementAsExpr,  // a
+    PatternAsExpr,    // a
 
-    IntExtension,
-    RealExtension,
-    CharExtension,
-    StrExtension,
+    LiteralExtension, // a
 
     ListOf,
     Tuple,
     Object,
-    Lambda,
+    Lambda, // N, a, b
 
-    BoolNot,
+    BoolNot, // a
+
+    ErrorNew,
 
     SelfLower,
     SelfCap,
     Null,
 
-    EffectQualifiedType,
-    ErrorQualifiedType,
-    ReachabilityQualifiedType,
-    OptionalType,
-    TraitObjectType,
-    PointerType,
-    ForallType,
-    ForType,
+    EffectQualifiedType,       // a, b
+    ErrorQualifiedType,        // a, b
+    ReachabilityQualifiedType, // a, b
+    OptionalType,              // a
+    TraitObjectType,           // a
+    PointerType,               // a
+    ForallType,                // N, a
+    ForType,                   // N, b
 
-    RangeTo,
-    RangeToInclusive,
-    RangeFrom,
-    RangeFromTo,
-    RangeFromToInclusive,
+    RangeFull,
+    RangeTo,              // a
+    RangeToInclusive,     // a
+    RangeFrom,            // a
+    RangeFromTo,          // a, b
+    RangeFromToInclusive, // a, b
 
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Mod,
-    AddAdd,
-    BoolEq,
-    BoolNotEq,
-    BoolAnd,
-    BoolOr,
-    BoolGt,
-    BoolGtEq,
-    BoolLt,
-    BoolLtEq,
-    BoolImplies,
-    BoolMatches,
+    Add,         // a, b
+    Sub,         // a, b
+    Mul,         // a, b
+    Div,         // a, b
+    Mod,         // a, b
+    AddAdd,      // a, b
+    BoolEq,      // a, b
+    BoolNotEq,   // a, b
+    BoolAnd,     // a, b
+    BoolOr,      // a, b
+    BoolGt,      // a, b
+    BoolGtEq,    // a, b
+    BoolLt,      // a, b
+    BoolLtEq,    // a, b
+    BoolImplies, // a, b
+    BoolMatches, // a, b
 
-    Arrow, // for function types or arrow expressions
+    Arrow, // a, b
 
-    TypedWith,
-    Subtype,
-    TraitBound,
-    FieldMethodBound,
-    DeclarationBound,
+    TypedWith,        // a, b
+    Subtype,          // a, b
+    TraitBound,       // a, b
+    FieldMethodBound, // TODO
+    DeclarationBound, // TODO
 
-    Select,
-    Image,
-    Pipe,
-    PipePrepend,
+    Select,      // a, b
+    Image,       // a, b
+    Pipe,        // a, b
+    PipePrepend, // a, b
 
-    Deref,
-    Refer,
-    Await,
-    HandlerApply,
-    TypeCast,
-    AsDyn,
+    Deref,        // a
+    Refer,        // a
+    Await,        // a
+    HandlerApply, // a, b
+    TypeCast,     // a, b
+    AsDyn,        // a, b
 
-    EffectElimination,
-    ErrorElimination,
-    OptionElimination,
-    EffectPropagation,
-    ErrorPropagation,
-    OptionPropagation,
+    EffectElimination, // a, N
+    ErrorElimination,  // a, N
+    OptionElimination, // a, b
+    EffectPropagation, // a
+    ErrorPropagation,  // a
+    OptionPropagation, // a
 
-    Call,
-    IndexCall,
-    ObjectCall,
-    DiamondCall,
+    Call,        // a, N
+    IndexCall,   // a, b
+    ObjectCall,  // a, N
+    DiamondCall, // a, N
 
-    PostMatch,
-    PatternArm,
-    ConditionArm,
-    CatchArm,
+    PostMatch,    // a, N
+    PatternArm,   // a, b
+    ConditionArm, // a, b
+    CatchArm,     // a, b
 
     // statements
-    ExprAsStatement,
-    ExprStatement,
-    ConstDecl,
-    LetDecl,
-    ReturnStatement,
-    ResumeStatement,
-    BreakStatement,
-    ContinueStatement,
-    IfStatement,
-    IfIsMatch,
-    IfMatch,
-    WhenStatement,
-    WhileLoop,
-    WhileIsMatch,
-    WhileMatch,
-    ForLoop,
+    ExprAsStatement, // a
+    // expr
+    ExprStatement, // a
+    // expr = expr
+    Assign, // a, b
+    // expr += expr
+    AddAssign, // a, b
+    // expr -= expr
+    SubAssign, // a, b
+    // expr *= expr
+    MulAssign, // a, b
+    // expr /= expr
+    DivAssign, // a, b
+    // const pattern (: type)? = expr
+    ConstDecl, // a, b, c
+    // let pattern (: type)? = expr
+    LetDecl, // a, b, c
+    // return expr? if_guard?
+    ReturnStatement, // a, b
+    // resume expr? if_guard?
+    ResumeStatement, // a, b
+    // break label? if_guard?
+    BreakStatement, // a, b
+    // continue label? if_guard?
+    ContinueStatement, // a, b
+    // if condition block else?
+    IfStatement, // a, b, c
+    // if expr is pattern do block else?
+    IfIsMatch, // a, b, c, d
+    // if expr is do { branches }
+    IfMatch, // a, N
+    // when { condition branches }
+    WhenStatement, // N
+    // while (: label)? condition block
+    WhileLoop, // a, b, c
+    // while (: label)? expr is pattern do block
+    WhileIsMatch, // a, b, c, d
+    // while (: label)? expr is do { branches }
+    WhileMatch, // a, b, N
+    // for (: label)? pattern in expr block
+    ForLoop, // a, b, c, d
 
     // patterns
-    PatternIfGuard,
-    PatternAndIs,
-    PatternAsBind,
-    PatternOr,
-    PatternOptionSome,
-    PatternErrorOk,
-    PatternError,
-    PatternCall,
-    PatternObjectCall,
-    PatternDiamondCall,
-    PatternFromExpr,
-    PatternRangeTo,
-    PatternRangeToInclusive,
-    PatternRangeFrom,
-    PatternRangeFromTo,
-    PatternRangeFromToInclusive,
-    PropertyPattern,
-    PatternRecord,
-    PatternList,
-    PatternTuple,
-    PatternBitVecBin,
-    PatternBitVecOct,
-    PatternBitVecHex,
-    PatternAsync,
-    PatternNot,
-    PatternTypeBind,
+    PatternIfGuard,              // a, b
+    PatternAndIs,                // a, b, c
+    PatternAsBind,               // a, b
+    PatternOr,                   // a, b
+    PatternOptionSome,           // a
+    PatternErrorOk,              // a
+    PatternError,                // a
+    PatternCall,                 // a, N
+    PatternObjectCall,           // a, N
+    PatternDiamondCall,          // a, N
+    ExprAsPattern,               // a
+    PatternRangeTo,              // a
+    PatternRangeToInclusive,     // a
+    PatternRangeFrom,            // a
+    PatternRangeFromTo,          // a, b
+    PatternRangeFromToInclusive, // a, b
+    PropertyPattern,             // a, b
+    PatternRecord,               // N
+    PatternList,                 // N
+    PatternTuple,                // N
+    PatternBitVecBin,            // TODO
+    PatternBitVecOct,            // TODO
+    PatternBitVecHex,            // TODO
+    PatternAsync,                // a
+    PatternNot,                  // a
+    PatternTypeBind,             // a
 
     // items
-    FunctionDef,
-    EffectDef,
-    HandlesDef,
+    // fn id? ( params ) (-> return_type)? (handles eff)? clauses?  (block | = expr)
+    FunctionDef, // a, N, b, c, N, d
+    // fn id? <params> (-> return_type)? clauses? block
+    DiamondFunctionDef, // a, B, b, N, c
+    // effect id? ( params ) clauses?
+    EffectDef, // a, N, b, N
+    // handles eff fn ( params ) (-> return_type)? clauses? block
+    HandlesDef, // a, N, b, N, c
 
-    StructDef,
-    StructField,
+    // struct id? clauses? block
+    StructDef, // a, N, b
+    // id : type (= init)?
+    StructField, // a, b, c
 
-    EnumDef,
-    EnumVariantWithPattern,
-    EnumVariantWithTuple,
-    EnumVariantWithStruct,
-    EnumVariantWithSubEnum,
+    // enum id? clauses? block
+    EnumDef, // a, N, b
+    // id = pattern
+    EnumVariantWithPattern, // a, b
+    // id ( tuple_elements )
+    EnumVariantWithTuple, // a, N
+    // id { struct_fields }
+    EnumVariantWithStruct, // a, N
+    // id . { variants }
+    EnumVariantWithSubEnum, // a, N
 
-    UnionDef,
-    UnionVariant,
+    // union id? clauses? block
+    UnionDef, // a, N, b
+    // id : type
+    UnionVariant, // a, b
 
-    TraitDef,
-    ImplDef,
-    ExtendDef,
-    DeriveDef,
+    // trait id? (: super)? clauses? block
+    TraitDef, // a, b, N, c
+    // impl type clauses? block
+    ImplDef, // a, N, b
+    // impl trait for type clauses? block
+    ImplTraitDef, // a, b, N, c
+    // extend type clauses? block
+    ExtendDef, // a, N, b
+    // extend trait for type clauses? block
+    ExtendTraitDef, // a, b, N, c
+    // derive traits for type clauses?
+    DeriveDef, // N, a, N
 
-    Typealias,
-    Newtype,
+    // typealias id (< params >) = type
+    Typealias, // a, N, b
+    // newtype id (< params >) = type
+    Newtype, // a, N, b
 
-    ModuleDef,
+    // mod id? clauses? block
+    ModuleDef, // a, N, b
 
     // imports
-    ModStatement,
-    UseStatement,
-    PathSelect,
-    PathSelectMulti,
-    PathSelectAll,
-    SuperPath,
-    ExcludePath,
-    PackagePath,
+    // mod id
+    ModStatement, // a
+    // use path
+    UseStatement, // a
+    // path . id
+    PathSelect, // a, b
+    // path . { paths }
+    PathSelectMulti, // a, N
+    // path . *
+    PathSelectAll, // a
+    // . path
+    SuperPath, // a
+    // not path
+    ExcludePath, // a
+    // @ path
+    PackagePath, // a
+    // path as id
     PathAsBind,
 
     // clauses and verification related statements
-    Asserts,
-    Assumes,
-    Axiom,
-    Invariant,
-    Decreases,
-    Outcomes,
-    Requires,
+    // asserts expr
+    Asserts, // a
+    // assumes expr
+    Assumes, // a
+    // axiom expr
+    Axiom, // a
+    // invariant expr
+    Invariant, // a
+    // decreases expr
+    Decreases, // a
+    // TODO
+    Outcomes, // TODO
+    // requires expr
+    Requires, // a
+    // ensures expr
     Ensures,
 
-    ClauseTraitBoundDecl,
-    ClauseDecl,
-    ClauseOptionalDecl,
+    // id :- expr
+    ClauseTraitBoundDecl, // a, b
+    // id : expr
+    ClauseDecl, // a, b
+    // .id (: expr)? (= init)?
+    ClauseOptionalDecl, // a, b, c
+    // id
     ClauseTypeDecl,
 
     // parameters
-    ParamOptional,
-    ParamTyped,
-    ParamTraitBound,
-    ParamId,
-    ParamOptionalId,
+    // .id : expr = expr
+    ParamOptional, // a, b, c
+    // id : expr
+    ParamTyped, // a, b
+    // id :- expr
+    ParamTraitBound, // a, b
+    // self
     ParamSelf,
+    // *self
     ParamSelfRef,
+    // itself
     ParamItself,
+    // *itself
     ParamItselfRef,
-    ParamRestBind,
+    // ... id : expr
+    ParamRestBind, // a, b
 
     // blocks
-    Block,
-    AtomicBlock,
-    DoBlock,
-    AsyncBlock,
-    ComptimeBlock,
+    // { (items | statements | ...)* }
+    Block, // N
+    // atomic(exprs) block
+    AtomicBlock, // N, a
+    // do block
+    DoBlock, // a
+    // async block
+    AsyncBlock, // a
+    // comptime block
+    ComptimeBlock, // a
 
     // others
-    FileScope,
-    Attribute,
-    AttributeSetTrue,
-    Property,
-    PropertyAssignment,
-
-    Multi,
+    FileScope, // N
+    // ^expr term
+    Attribute, // a, b
+    // inline fn ... => AttributeSetTrue("flurry_keyword_inline", FunctionDef(...))
+    AttributeSetTrue, // a, b
+    // .id expr
+    Property, // a, b
+    // .id = expr
+    PropertyAssignment, // a, b
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeType {
+    // No children
     NoChild,
-    // a
+    // Single child: a
     SingleChild,
-    // a, b
+    // Two children: a, b
     DoubleChildren,
-    // N
+    // Three children: a, b, c
+    TripleChildren,
+    // Four children: a, b, c, d
+    QuadrupleChildren,
+    // Multiple children: N
     MultiChildren,
-    // a, N
+    // Single child with multi children: a, N
     SingleWithMultiChildren,
-    // a, b, N
+    // Two children with multi children: a, b, N
     DoubleWithMultiChildren,
+    // Three children with multi children: a, b, c, N
+    TripleWithMultiChildren,
+
+    // Complex patterns for specific node types
+    // Function definitions: a, N, b, c, N, d (id, params, return_type, handles_effect, clauses, body)
+    FunctionDefChildren,
+    // Diamond function definitions: a, N, b, N, c (id, type_params, return_type, clauses, body)
+    DiamondFunctionDefChildren,
+    // Effect definitions: a, N, b, N (id, params, return_type, clauses)
+    EffectDefChildren,
+    // Handles definitions: a, N, b, N, c (effect, params, return_type, clauses, body)
+    HandlesDefChildren,
+    // Struct/Enum/Union definitions: a, N, b (id, clauses, body)
+    TypeDefChildren,
+    // Trait definitions: a, b, N, c (id, super_trait, clauses, body)
+    TraitDefChildren,
+    // Impl trait definitions: a, b, N, c (trait, type, clauses, body)
+    ImplTraitDefChildren,
+    // Extend trait definitions: a, b, N, c (trait, type, clauses, body)
+    ExtendTraitDefChildren,
+    // Derive definitions: N, a, N (traits, type, clauses)
+    DeriveDefChildren,
+    // Type alias/newtype: a, N, b (id, type_params, type)
+    TypeAliasChildren,
 }
 
 impl NodeKind {
@@ -413,107 +524,48 @@ impl NodeKind {
         use NodeKind::*;
 
         match self {
-            Invalid => NodeType::NoChild,
+            // No children
+            Invalid | Id | Str | Int | Real | Char | Bool | Unit | Symbol | SelfLower | SelfCap
+            | Null | ParamSelf | ParamSelfRef | ParamItself | ParamItselfRef | ClauseTypeDecl
+            | RangeFull => NodeType::NoChild,
 
-            Id | Str | Int | Real | Char | Bool | Unit | SelfCap | SelfLower | Null => {
-                NodeType::NoChild
-            }
-
-            // Single child
+            // Single child (a)
             DefinitionAsExpr
             | StatementAsExpr
             | PatternAsExpr
-            | IntExtension
-            | RealExtension
-            | CharExtension
-            | StrExtension
-            | Symbol
+            | LiteralExtension
             | BoolNot
-            | EffectQualifiedType
-            | ErrorQualifiedType
-            | ReachabilityQualifiedType
+            | ErrorNew
             | OptionalType
             | TraitObjectType
             | PointerType
-            | ForallType
-            | ForType
             | RangeTo
             | RangeToInclusive
             | RangeFrom
-            | RangeFromTo
-            | RangeFromToInclusive
             | Deref
             | Refer
             | Await
-            | HandlerApply
-            | TypeCast
-            | AsDyn
-            | EffectElimination
-            | ErrorElimination
-            | OptionElimination
             | EffectPropagation
             | ErrorPropagation
             | OptionPropagation
             | ExprAsStatement
             | ExprStatement
-            | ReturnStatement
-            | ResumeStatement
-            | BreakStatement
-            | ContinueStatement
-            | PatternIfGuard
-            | PatternAndIs
-            | PatternAsBind
             | PatternOptionSome
             | PatternErrorOk
             | PatternError
-            | PatternFromExpr
+            | ExprAsPattern
             | PatternRangeTo
             | PatternRangeToInclusive
             | PatternRangeFrom
-            | PatternRangeFromTo
-            | PatternRangeFromToInclusive
             | PatternAsync
             | PatternNot
             | PatternTypeBind
-            | Block
-            | AtomicBlock
             | DoBlock
             | AsyncBlock
-            | ComptimeBlock => NodeType::SingleChild,
-
-            // Double children
-            Add | Sub | Mul | Div | Mod | AddAdd | BoolEq | BoolNotEq | BoolAnd | BoolOr
-            | BoolGt | BoolGtEq | BoolLt | BoolLtEq | BoolImplies | BoolMatches | Arrow
-            | TypedWith | Subtype | TraitBound | FieldMethodBound | DeclarationBound | Select
-            | Image | Pipe | PipePrepend | IndexCall | PostMatch | PatternArm | ConditionArm
-            | CatchArm | ConstDecl | LetDecl | IfStatement | IfIsMatch | IfMatch
-            | WhenStatement | WhileLoop | WhileIsMatch | WhileMatch | ForLoop | PatternOr
-            | StructField | UnionVariant | Typealias | Newtype | PathSelect | PathAsBind
-            | ParamOptional | ParamTyped | ParamTraitBound | Property | PropertyAssignment => {
-                NodeType::DoubleChildren
-            }
-
-            // Multi children
-            ListOf | Tuple | Object | Lambda | PatternRecord | PatternList | PatternTuple
-            | PatternBitVecBin | PatternBitVecOct | PatternBitVecHex | StructDef | EnumDef
-            | UnionDef | TraitDef | ImplDef | ExtendDef | DeriveDef | ModuleDef | UseStatement
-            | PathSelectMulti | PathSelectAll | Multi => NodeType::MultiChildren,
-
-            // Single with multi children
-            Call
-            | ObjectCall
-            | DiamondCall
-            | PatternCall
-            | PatternObjectCall
-            | PatternDiamondCall
-            | FunctionDef
-            | EffectDef
-            | HandlesDef
-            | EnumVariantWithPattern
-            | EnumVariantWithTuple
-            | EnumVariantWithStruct
-            | EnumVariantWithSubEnum
+            | ComptimeBlock
             | ModStatement
+            | UseStatement
+            | PathSelectAll
             | SuperPath
             | ExcludePath
             | PackagePath
@@ -522,26 +574,160 @@ impl NodeKind {
             | Axiom
             | Invariant
             | Decreases
-            | Outcomes
-            | Requires
-            | Ensures
-            | PropertyPattern => NodeType::SingleWithMultiChildren,
+            | Requires => NodeType::SingleChild,
 
-            // Double with multi children
-            ClauseTraitBoundDecl | ClauseDecl | ClauseOptionalDecl | ClauseTypeDecl => {
-                NodeType::DoubleWithMultiChildren
-            }
+            // Double children (a, b)
+            EffectQualifiedType
+            | ErrorQualifiedType
+            | ReachabilityQualifiedType
+            | RangeFromTo
+            | RangeFromToInclusive
+            | Add
+            | Sub
+            | Mul
+            | Div
+            | Mod
+            | AddAdd
+            | BoolEq
+            | BoolNotEq
+            | BoolAnd
+            | BoolOr
+            | BoolGt
+            | BoolGtEq
+            | BoolLt
+            | BoolLtEq
+            | BoolImplies
+            | BoolMatches
+            | Arrow
+            | TypedWith
+            | Subtype
+            | TraitBound
+            | Select
+            | ClauseDecl
+            | Image
+            | Pipe
+            | PipePrepend
+            | HandlerApply
+            | TypeCast
+            | AsDyn
+            | OptionElimination
+            | Assign
+            | AddAssign
+            | SubAssign
+            | MulAssign
+            | DivAssign
+            | IndexCall
+            | PatternArm
+            | ConditionArm
+            | CatchArm
+            | PatternOr
+            | PatternRangeFromTo
+            | PatternRangeFromToInclusive
+            | PropertyPattern
+            | EnumVariantWithPattern
+            | StructField
+            | UnionVariant
+            | ClauseTraitBoundDecl
+            | PathSelect
+            | PathAsBind
+            | ParamTyped
+            | ParamTraitBound
+            | ParamRestBind
+            | Property
+            | PropertyAssignment
+            | Attribute
+            | ReturnStatement
+            | ResumeStatement
+            | BreakStatement
+            | ContinueStatement
+            | AttributeSetTrue => NodeType::DoubleChildren,
 
-            // No child (remaining)
-            ParamId | ParamOptionalId | ParamSelf | ParamSelfRef | ParamItself | ParamItselfRef
-            | ParamRestBind | FileScope | Attribute | AttributeSetTrue => NodeType::NoChild,
+            // Triple children (a, b, c)
+            ConstDecl | LetDecl | IfStatement | WhileLoop | PatternIfGuard | PatternAndIs
+            | PatternAsBind | ClauseOptionalDecl | ParamOptional => NodeType::TripleChildren,
+
+            // Quadruple children (a, b, c, d)
+            IfIsMatch | WhileIsMatch | ForLoop => NodeType::QuadrupleChildren,
+
+            // Multi children (N)
+            ListOf | Tuple | Object | Block | PatternRecord | PatternList | PatternTuple
+            | WhenStatement | PatternBitVecBin | PatternBitVecOct | PatternBitVecHex
+            | FileScope => NodeType::MultiChildren,
+
+            // Single with multi children (a, N)
+            ForallType
+            | ForType
+            | EffectElimination
+            | ErrorElimination
+            | Call
+            | ObjectCall
+            | DiamondCall
+            | PostMatch
+            | PatternCall
+            | PatternObjectCall
+            | PatternDiamondCall
+            | IfMatch
+            | EnumVariantWithTuple
+            | EnumVariantWithStruct
+            | EnumVariantWithSubEnum => NodeType::SingleWithMultiChildren,
+
+            // Double with multi children (a, b, N)
+            Lambda | AtomicBlock | WhileMatch => NodeType::DoubleWithMultiChildren,
+
+            // Complex children patterns
+            // fn id? ( params ) (-> return_type)? (handles eff)? clauses?  (block | = expr)
+            FunctionDef => NodeType::FunctionDefChildren, // a, N, b, c, N, d
+            // fn id? <params> (-> return_type)? clauses? block
+            DiamondFunctionDef => NodeType::DiamondFunctionDefChildren, // a, N, b, N, c
+            // effect id? ( params ) clauses?
+            EffectDef => NodeType::EffectDefChildren, // a, N, b, N
+            // handles eff fn ( params ) (-> return_type)? clauses? block
+            HandlesDef => NodeType::HandlesDefChildren, // a, N, b, N, c
+            // struct id? clauses? block
+            StructDef => NodeType::TypeDefChildren, // a, N, b
+            // enum id? clauses? block
+            EnumDef => NodeType::TypeDefChildren, // a, N, b
+            // union id? clauses? block
+            UnionDef => NodeType::TypeDefChildren, // a, N, b
+            // trait id? (: super)? clauses? block
+            TraitDef => NodeType::TraitDefChildren, // a, b, N, c
+            // impl type clauses? block
+            ImplDef => NodeType::TypeDefChildren, // a, N, b
+            // impl trait for type clauses? block
+            ImplTraitDef => NodeType::ImplTraitDefChildren, // a, b, N, c
+            // extend type clauses? block
+            ExtendDef => NodeType::TypeDefChildren, // a, N, b
+            // extend trait for type clauses? block
+            ExtendTraitDef => NodeType::ExtendTraitDefChildren, // a, b, N, c
+            // derive traits for type clauses?
+            DeriveDef => NodeType::DeriveDefChildren, // N, a, N
+            // typealias id (< params >) = type
+            Typealias => NodeType::TypeAliasChildren, // a, N, b
+            // newtype id (< params >) = type
+            Newtype => NodeType::TypeAliasChildren, // a, N, b
+            // mod id? clauses? block
+            ModuleDef => NodeType::TypeDefChildren, // a, N, b
+            // path . { paths }
+            PathSelectMulti => NodeType::SingleWithMultiChildren, // a, N
+
+            // TODO items
+            FieldMethodBound | DeclarationBound | Outcomes | Ensures => NodeType::SingleChild,
         }
     }
 }
 
 impl Ast {
-    pub fn get(&self, index: NodeIndex, shape: NodeType) -> Option<NodeBuilder> {
+    pub fn get(&self, index: NodeIndex, note_type: NodeType) -> Option<NodeBuilder> {
         todo!("Implement get method for Ast with NodeDescriptor");
+    }
+
+    pub fn get_multi_child_slice(&self, slice_len_index: NodeIndex) -> Option<&[NodeIndex]> {
+        if slice_len_index == 0 || slice_len_index >= self.children.len() as NodeIndex {
+            return None;
+        }
+        let slice_len_index = slice_len_index as usize;
+        let count = self.children[slice_len_index] as usize;
+        Some(&self.children[slice_len_index + 1..slice_len_index + count + 1])
     }
 }
 
@@ -558,16 +744,53 @@ impl Display for NodeKind {
 }
 
 impl Ast {
-    // TODO: 添加对source map的访问来展开span
-    pub fn dump_to_s_expression(&self, node_index: NodeIndex, source_map: ()) -> String {
+    pub fn source_content(&self, node_index: NodeIndex, source_map: &SourceMap) -> Option<String> {
+        if node_index == 0 {
+            return None;
+        }
+        if let Some(span) = self.get_span(node_index) {
+            let source_file = source_map.lookup_source_file(span.lo());
+            if let Some(content) = &source_file.src {
+                let byte_start = (span.lo().0 - source_file.start_pos.0) as usize;
+                let byte_end = (span.hi().0 - source_file.start_pos.0) as usize;
+                Some(content[byte_start..byte_end].trim().to_string())
+            } else {
+                eprintln!("Error: Source file content not available");
+                None
+            }
+        } else {
+            None
+        }
+    }
+    
+    // TODO: 记得改进unwarp
+    pub fn dump_to_s_expression(&self, node_index: NodeIndex, source_map: &SourceMap) -> String {
+        if node_index == 0 {
+            return "(<invalid node>)".to_string();
+        }
         if let Some(kind) = self.get_node_kind(node_index) {
             match kind.node_type() {
                 NodeType::NoChild => {
-                    format!("({} TODO)", kind)
+                    let source_file =
+                        source_map.lookup_source_file(self.get_span(node_index).unwrap().lo());
+
+                    let source_content = match &source_file.src {
+                        Some(content) => content.as_str(),
+                        None => {
+                            eprintln!("Error: Source file content not available");
+                            return "<invalid source>".to_string();
+                        }
+                    };
+
+                    let byte_start = (self.get_span(node_index).unwrap().lo().0
+                        - source_file.start_pos.0) as usize;
+                    let byte_end = (self.get_span(node_index).unwrap().hi().0
+                        - source_file.start_pos.0) as usize;
+                    format!("({} {})", kind, source_content[byte_start..byte_end].trim())
                 }
                 NodeType::SingleChild => {
-                    let child_index = self.get_children(node_index)[0];
-                    // self.dump_to_s_expression(child_index, source_map)
+                    let children = self.get_children(node_index);
+                    let child_index = children[0];
                     format!(
                         "({} {})",
                         kind,
@@ -583,18 +806,351 @@ impl Ast {
                         self.dump_to_s_expression(children[1], source_map)
                     )
                 }
+                NodeType::TripleChildren => {
+                    let children = self.get_children(node_index);
+                    format!(
+                        "({} {} {} {})",
+                        kind,
+                        self.dump_to_s_expression(children[0], source_map),
+                        self.dump_to_s_expression(children[1], source_map),
+                        self.dump_to_s_expression(children[2], source_map)
+                    )
+                }
+                NodeType::QuadrupleChildren => {
+                    let children = self.get_children(node_index);
+                    format!(
+                        "({} {} {} {} {})",
+                        kind,
+                        self.dump_to_s_expression(children[0], source_map),
+                        self.dump_to_s_expression(children[1], source_map),
+                        self.dump_to_s_expression(children[2], source_map),
+                        self.dump_to_s_expression(children[3], source_map)
+                    )
+                }
                 NodeType::MultiChildren => {
-                    let count = self.get_children(node_index)[0];
-                    let children = &self.get_children(node_index)[1..count as usize + 1];
-                    let children = children
+                    let elements = self.get_children(node_index)[0];
+                    let child_nodes = self.get_multi_child_slice(elements).unwrap();
+                    let children_str = child_nodes
                         .iter()
                         .map(|&child_index| self.dump_to_s_expression(child_index, source_map))
                         .collect::<Vec<_>>()
                         .join(" ");
-                    format!("({} {})", kind, children)
+                    format!("({} {})", kind, children_str)
                 }
-                _ => {
-                    format!("(TODO node type: {:?})", kind.node_type())
+                NodeType::SingleWithMultiChildren => {
+                    let children = self.get_children(node_index);
+                    let first_child = children[0];
+                    let multi_children_node = children[1];
+                    let multi_children = self.get_multi_child_slice(multi_children_node).unwrap();
+                    let multi_children_str = multi_children
+                        .iter()
+                        .map(|&child_index| self.dump_to_s_expression(child_index, source_map))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    format!(
+                        "({} {} {})",
+                        kind,
+                        self.dump_to_s_expression(first_child, source_map),
+                        multi_children_str
+                    )
+                }
+                NodeType::DoubleWithMultiChildren => {
+                    let children = self.get_children(node_index);
+                    let first_child = children[0];
+                    let second_child = children[1];
+                    let multi_children_node = children[2];
+                    let multi_children = self.get_multi_child_slice(multi_children_node).unwrap();
+                    let multi_children_str = multi_children
+                        .iter()
+                        .map(|&child_index| self.dump_to_s_expression(child_index, source_map))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    format!(
+                        "({} {} {} {})",
+                        kind,
+                        self.dump_to_s_expression(first_child, source_map),
+                        self.dump_to_s_expression(second_child, source_map),
+                        multi_children_str
+                    )
+                }
+                NodeType::TripleWithMultiChildren => {
+                    let children = self.get_children(node_index);
+                    let first_child = children[0];
+                    let second_child = children[1];
+                    let third_child = children[2];
+                    let multi_children_node = children[3];
+                    let multi_children = self.get_multi_child_slice(multi_children_node).unwrap();
+                    let multi_children_str = multi_children
+                        .iter()
+                        .map(|&child_index| self.dump_to_s_expression(child_index, source_map))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    format!(
+                        "({} {} {} {} {})",
+                        kind,
+                        self.dump_to_s_expression(first_child, source_map),
+                        self.dump_to_s_expression(second_child, source_map),
+                        self.dump_to_s_expression(third_child, source_map),
+                        multi_children_str
+                    )
+                }
+
+                // Complex children patterns
+                NodeType::FunctionDefChildren => {
+                    // a, N, b, c, N, d (id, params, return_type, handles_effect, clauses, body)
+                    let children = self.get_children(node_index);
+                    let id = children[0];
+                    let params_node = children[1];
+                    let return_type = children[2];
+                    let handles_effect = children[3];
+                    let clauses_node = children[4];
+                    let body = children[5];
+
+                    let params = self.get_multi_child_slice(params_node).unwrap();
+                    let params_str = params
+                        .iter()
+                        .map(|&child_index| self.dump_to_s_expression(child_index, source_map))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let clauses = self.get_multi_child_slice(clauses_node).unwrap();
+                    let clauses_str = clauses
+                        .iter()
+                        .map(|&child_index| self.dump_to_s_expression(child_index, source_map))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+
+                    format!(
+                        "({} {} [{}] {} {} [{}] {})",
+                        kind,
+                        self.dump_to_s_expression(id, source_map),
+                        params_str,
+                        self.dump_to_s_expression(return_type, source_map),
+                        self.dump_to_s_expression(handles_effect, source_map),
+                        clauses_str,
+                        self.dump_to_s_expression(body, source_map)
+                    )
+                }
+
+                NodeType::DiamondFunctionDefChildren => {
+                    // a, N, b, N, c (id, type_params, return_type, clauses, body)
+                    let children = self.get_children(node_index);
+                    let id = children[0];
+                    let type_params_node = children[1];
+                    let return_type = children[2];
+                    let clauses_node = children[3];
+                    let body = children[4];
+
+                    let type_params = self.get_multi_child_slice(type_params_node).unwrap();
+                    let type_params_str = type_params
+                        .iter()
+                        .map(|&child_index| self.dump_to_s_expression(child_index, source_map))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let clauses = self.get_multi_child_slice(clauses_node).unwrap();
+                    let clauses_str = clauses
+                        .iter()
+                        .map(|&child_index| self.dump_to_s_expression(child_index, source_map))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+
+                    format!(
+                        "({} {} <{}> {} [{}] {})",
+                        kind,
+                        self.dump_to_s_expression(id, source_map),
+                        type_params_str,
+                        self.dump_to_s_expression(return_type, source_map),
+                        clauses_str,
+                        self.dump_to_s_expression(body, source_map)
+                    )
+                }
+
+                NodeType::EffectDefChildren => {
+                    // a, N, b, N (id, params, return_type, clauses)
+                    let children = self.get_children(node_index);
+                    let id = children[0];
+                    let params_node = children[1];
+                    let return_type = children[2];
+                    let clauses_node = children[3];
+
+                    let params = self.get_multi_child_slice(params_node).unwrap();
+                    let params_str = params
+                        .iter()
+                        .map(|&child_index| self.dump_to_s_expression(child_index, source_map))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let clauses = self.get_multi_child_slice(clauses_node).unwrap();
+                    let clauses_str = clauses
+                        .iter()
+                        .map(|&child_index| self.dump_to_s_expression(child_index, source_map))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+
+                    format!(
+                        "({} {} [{}] {} [{}])",
+                        kind,
+                        self.dump_to_s_expression(id, source_map),
+                        params_str,
+                        self.dump_to_s_expression(return_type, source_map),
+                        clauses_str
+                    )
+                }
+
+                NodeType::HandlesDefChildren => {
+                    // a, N, b, N, c (effect, params, return_type, clauses, body)
+                    let children = self.get_children(node_index);
+                    let effect = children[0];
+                    let params_node = children[1];
+                    let return_type = children[2];
+                    let clauses_node = children[3];
+                    let body = children[4];
+
+                    let params = self.get_multi_child_slice(params_node).unwrap();
+                    let params_str = params
+                        .iter()
+                        .map(|&child_index| self.dump_to_s_expression(child_index, source_map))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let clauses = self.get_multi_child_slice(clauses_node).unwrap();
+                    let clauses_str = clauses
+                        .iter()
+                        .map(|&child_index| self.dump_to_s_expression(child_index, source_map))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+
+                    format!(
+                        "({} {} [{}] {} [{}] {})",
+                        kind,
+                        self.dump_to_s_expression(effect, source_map),
+                        params_str,
+                        self.dump_to_s_expression(return_type, source_map),
+                        clauses_str,
+                        self.dump_to_s_expression(body, source_map)
+                    )
+                }
+
+                NodeType::TypeDefChildren => {
+                    // a, N, b (id, clauses, body)
+                    let children = self.get_children(node_index);
+                    let id = children[0];
+                    let clauses_node = children[1];
+                    let body = children[2];
+
+                    let clauses = self.get_multi_child_slice(clauses_node).unwrap();
+                    let clauses_str = clauses
+                        .iter()
+                        .map(|&child_index| self.dump_to_s_expression(child_index, source_map))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+
+                    format!(
+                        "({} {} [{}] {})",
+                        kind,
+                        self.dump_to_s_expression(id, source_map),
+                        clauses_str,
+                        self.dump_to_s_expression(body, source_map)
+                    )
+                }
+
+                NodeType::TraitDefChildren => {
+                    // a, b, N, c (id, super_trait, clauses, body)
+                    let children = self.get_children(node_index);
+                    let id = children[0];
+                    let super_trait = children[1];
+                    let clauses_node = children[2];
+                    let body = children[3];
+
+                    let clauses = self.get_multi_child_slice(clauses_node).unwrap();
+                    let clauses_str = clauses
+                        .iter()
+                        .map(|&child_index| self.dump_to_s_expression(child_index, source_map))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+
+                    format!(
+                        "({} {} {} [{}] {})",
+                        kind,
+                        self.dump_to_s_expression(id, source_map),
+                        self.dump_to_s_expression(super_trait, source_map),
+                        clauses_str,
+                        self.dump_to_s_expression(body, source_map)
+                    )
+                }
+
+                NodeType::ImplTraitDefChildren | NodeType::ExtendTraitDefChildren => {
+                    // a, b, N, c (trait, type, clauses, body)
+                    let children = self.get_children(node_index);
+                    let trait_expr = children[0];
+                    let type_expr = children[1];
+                    let clauses_node = children[2];
+                    let body = children[3];
+
+                    let clauses = self.get_multi_child_slice(clauses_node).unwrap();
+                    let clauses_str = clauses
+                        .iter()
+                        .map(|&child_index| self.dump_to_s_expression(child_index, source_map))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+
+                    format!(
+                        "({} {} {} [{}] {})",
+                        kind,
+                        self.dump_to_s_expression(trait_expr, source_map),
+                        self.dump_to_s_expression(type_expr, source_map),
+                        clauses_str,
+                        self.dump_to_s_expression(body, source_map)
+                    )
+                }
+
+                NodeType::DeriveDefChildren => {
+                    // N, a, N (traits, type, clauses)
+                    let children = self.get_children(node_index);
+                    let traits_node = children[0];
+                    let type_expr = children[1];
+                    let clauses_node = children[2];
+
+                    let traits = self.get_multi_child_slice(traits_node).unwrap();
+                    let traits_str = traits
+                        .iter()
+                        .map(|&child_index| self.dump_to_s_expression(child_index, source_map))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let clauses = self.get_multi_child_slice(clauses_node).unwrap();
+                    let clauses_str = clauses
+                        .iter()
+                        .map(|&child_index| self.dump_to_s_expression(child_index, source_map))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+
+                    format!(
+                        "({} [{}] {} [{}])",
+                        kind,
+                        traits_str,
+                        self.dump_to_s_expression(type_expr, source_map),
+                        clauses_str
+                    )
+                }
+
+                NodeType::TypeAliasChildren => {
+                    // a, N, b (id, type_params, type)
+                    let children = self.get_children(node_index);
+                    let id = children[0];
+                    let type_params_node = children[1];
+                    let type_expr = children[2];
+
+                    let type_params = self.get_multi_child_slice(type_params_node).unwrap();
+                    let type_params_str = type_params
+                        .iter()
+                        .map(|&child_index| self.dump_to_s_expression(child_index, source_map))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+
+                    format!(
+                        "({} {} <{}> {})",
+                        kind,
+                        self.dump_to_s_expression(id, source_map),
+                        type_params_str,
+                        self.dump_to_s_expression(type_expr, source_map)
+                    )
                 }
             }
         } else {

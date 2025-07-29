@@ -134,7 +134,7 @@ impl<'a> Lexer<'a> {
             }
             '_' => {
                 self.advance();
-                Ok(Token::new(TokenKind::Underscore, start, self.cursor))
+                Ok(Token::new(TokenKind::Id, start, self.cursor))
             }
 
             // Complex tokens
@@ -376,7 +376,20 @@ impl<'a> Lexer<'a> {
 
     fn is_separated(&self, start: Index) -> bool {
         let has_space_before = if start > 0 {
-            self.src.chars().nth(start - 1).map(|c| c.is_whitespace()).unwrap_or(false)
+            // 正确处理UTF-8：从字节位置向前查找前一个字符
+            // 找到最后一个有效UTF-8字符的开始位置
+            let mut char_start = start;
+            while char_start > 0 {
+                char_start -= 1;
+                if self.src.is_char_boundary(char_start) {
+                    break;
+                }
+            }
+            if char_start < start {
+                self.src[char_start..start].chars().next().map(|c| c.is_whitespace()).unwrap_or(false)
+            } else {
+                false
+            }
         } else {
             false
         };
@@ -749,6 +762,14 @@ impl<'a> Lexer<'a> {
                 '.' => {
                     if has_dot {
                         // 已经有小数点了
+                        break;
+                    }
+                    // 检查下一个字符，如果也是点，则不应该消费这个点（可能是范围操作符 ..）
+                    if let Some('.') = self.peek_char() {
+                        break;
+                    }
+                    // 检查点后面是否跟着数字，如果不是则不消费（避免像 "18.foo" 这样的情况）
+                    if !matches!(self.peek_char(), Some('0'..='9')) {
                         break;
                     }
                     has_dot = true;

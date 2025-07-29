@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 pub type Index = usize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TokenKind {
     // operators
     Plus,           // +
