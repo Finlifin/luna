@@ -1,7 +1,7 @@
 use core::slice;
 use std::fmt::Display;
 
-use rustc_span::{SourceMap, Span};
+use rustc_span::{BytePos, SourceMap, Span};
 
 /// Node index type, for future extensibility
 pub type NodeIndex = u32;
@@ -749,6 +749,7 @@ impl Ast {
             return None;
         }
         if let Some(span) = self.get_span(node_index) {
+            // let span = span.with_lo(self.start_pos + span.lo());
             let source_file = source_map.lookup_source_file(span.lo());
             if let Some(content) = &source_file.src {
                 let byte_start = (span.lo().0 - source_file.start_pos.0) as usize;

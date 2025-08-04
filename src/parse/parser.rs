@@ -1,3 +1,5 @@
+use rustc_span::BytePos;
+
 use crate::diagnostic::{DiagnosticContext, FlurryError};
 use crate::lex::{Token, TokenKind};
 use crate::parse::ast::*;
@@ -10,12 +12,17 @@ pub struct Parser<'a> {
     pub(crate) ast: Ast,
     pub(crate) cursor: usize,
     pub(crate) cursor_stack: Vec<usize>,
+    pub start_pos: BytePos,
 
     errors: Vec<ParseError>,
 }
 
 impl Parser<'_> {
-    pub fn new(source_map: &rustc_span::SourceMap, tokens: Vec<Token>) -> Parser {
+    pub fn new(
+        source_map: &rustc_span::SourceMap,
+        tokens: Vec<Token>,
+        start_pos: BytePos,
+    ) -> Parser {
         let mut result = Parser {
             source_map,
             tokens,
@@ -23,6 +30,7 @@ impl Parser<'_> {
             cursor_stack: Vec::new(),
             errors: Vec::new(),
             ast: Ast::new(),
+            start_pos,
         };
         result.enter();
         result
@@ -165,21 +173,21 @@ impl Parser<'_> {
     /// Get the span from the cursor stack top to cursor + 1
     pub fn current_span(&self) -> rustc_span::Span {
         if let Some(&start) = self.cursor_stack.last() {
-            // Convert token positions to byte positions
-            let start_pos = if start < self.tokens.len() {
+            // Convert token positions to byte positions relative to start_pos
+            let start_offset = if start < self.tokens.len() {
                 self.tokens[start].from
             } else {
                 0
             };
-            let end_pos = if self.cursor < self.tokens.len() {
+            let end_offset = if self.cursor < self.tokens.len() {
                 self.tokens[self.cursor].to
             } else {
-                start_pos
+                start_offset
             };
 
             rustc_span::Span::new(
-                rustc_span::BytePos(start_pos as u32),
-                rustc_span::BytePos(end_pos as u32),
+                self.start_pos + rustc_span::BytePos(start_offset as u32),
+                self.start_pos + rustc_span::BytePos(end_offset as u32),
             )
         } else {
             println!("Warning: cursor stack is empty, returning dummy span");
@@ -191,8 +199,8 @@ impl Parser<'_> {
         if self.cursor + 1 < self.tokens.len() {
             let token = &self.tokens[self.cursor + 1];
             rustc_span::Span::new(
-                rustc_span::BytePos(token.from as u32),
-                rustc_span::BytePos(token.to as u32),
+                self.start_pos + rustc_span::BytePos(token.from as u32),
+                self.start_pos + rustc_span::BytePos(token.to as u32),
             )
         } else {
             rustc_span::DUMMY_SP

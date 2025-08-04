@@ -2,24 +2,24 @@ mod vfs_visitor;
 pub use vfs_visitor::*;
 
 mod vfs_scope_scanner;
-pub use vfs_scope_scanner::*;
 use std::{
-    fs,
+    cell::RefCell,
+    fs, mem,
     ops::{Deref, DerefMut},
     path::PathBuf,
     sync::Arc,
 };
+pub use vfs_scope_scanner::*;
 
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_span::{FileNameDisplayPreference, SourceFile, SourceMap};
 
 use crate::parse::ast::Ast;
 
-
 pub struct Vfs {
     pub root: NodeId,
     pub nodes: FxIndexMap<NodeId, Node>,
-    pub asts: FxIndexMap<NodeId, Ast>,
+    pub asts: RefCell<FxIndexMap<NodeId, Ast>>,
     pub project_path: PathBuf,
 }
 
@@ -77,10 +77,18 @@ impl Vfs {
             root: 0,
             nodes: FxIndexMap::default(),
             project_path,
-            asts: FxIndexMap::default(),
+            asts: RefCell::new(FxIndexMap::default()),
         };
         result.root = result.add_node(root_dir);
         result
+    }
+
+    pub fn put_ast(&self, node_id: NodeId, ast: Ast) {
+        self.asts.borrow_mut().insert(node_id, ast);
+    }
+
+    pub fn get_ast<'vfs>(&'vfs self, node_id: NodeId) -> Option<&'vfs Ast> {
+        unsafe { mem::transmute(self.asts.borrow().get(&node_id)) }
     }
 
     pub fn new_in_current_dir() -> Self {
@@ -125,23 +133,32 @@ impl Vfs {
             let entry = entry?;
             let path = entry.path();
             let file_name = entry.file_name().to_string_lossy().to_string();
-
+            
             if path.is_dir() {
                 // Check if this directory should be ignored
                 if ignores.contains(&file_name.as_str()) {
                     continue;
                 }
-
+                
                 // Create directory node
-                let dir_node = Node::Directory(parent_node, file_name, Vec::new());
+                let dir_node = if path.file_name().unwrap().to_string_lossy().eq("src") {
+                    Node::SpecialDirectory(
+                        parent_node,
+                        file_name,
+                        Vec::new(),
+                        SpecialDirectoryType::Src,
+                    )
+                } else {
+                    Node::Directory(parent_node, file_name, Vec::new())
+                };
                 let dir_id = self.add_node(dir_node);
-
+                
                 // Recursively process subdirectory
                 self.build_directory_recursive(source_map, dir_id, &path, ignores)?;
             } else if path.is_file() {
                 // Only add source files (you can customize the extensions as needed)
                 if let Some(ext) = path.extension() {
-                    if ext == "fl" || ext == "rs" || ext == "txt" || ext == "md" {
+                    if ext == "fl" {
                         // Load file as SourceFile
                         if let Ok(source_file) = source_map.load_file(&path) {
                             self.add_file(parent_node, source_file);
@@ -158,8 +175,12 @@ impl Vfs {
         let node_id = self.nodes.len() + 1; // Ensure node_id starts from 1
         let parent = node.parent();
         self.nodes.insert(node_id, node);
-        if let Some(Node::Directory(_, _, children)) = self.nodes.get_mut(&parent) {
-            children.push(node_id);
+        match self.nodes.get_mut(&parent) {
+            Some(Node::Directory(_, _, children))
+            | Some(Node::SpecialDirectory(_, _, children, _)) => {
+                children.push(node_id);
+            }
+            _ => {}
         }
         node_id
     }
@@ -167,10 +188,56 @@ impl Vfs {
     pub fn add_file(&mut self, parent: NodeId, source_file: Arc<SourceFile>) -> NodeId {
         let node_id = self.nodes.len() + 1; // Ensure node_id starts from 1
         self.nodes.insert(node_id, Node::File(parent, source_file));
-        if let Some(Node::Directory(_, _, children)) = self.nodes.get_mut(&parent) {
-            children.push(node_id);
+        match self.nodes.get_mut(&parent) {
+            Some(Node::Directory(_, _, children))
+            | Some(Node::SpecialDirectory(_, _, children, _)) => {
+                children.push(node_id);
+            }
+            _ => {}
         }
         node_id
+    }
+
+    pub fn resolve(&self, path: &[&str]) -> Option<NodeId> {
+        let mut current_node = self.root;
+        for segment in path {
+            if let Some(Node::Directory(_, _, children))
+            | Some(Node::SpecialDirectory(_, _, children, _)) = self.nodes.get(&current_node)
+            {
+                if let Some(&child_id) = children.iter().find(|&&id| {
+                    match self.nodes.get(&id) {
+                        // 匹配文件
+                        Some(Node::File(_, source_file) | Node::SpecialFile(_, source_file, _)) => {
+                            let file_name = source_file.name.prefer_local().to_string();
+                            let module_name = if let Some(name) = file_name.rfind('/') {
+                                &file_name[name + 1..]
+                            } else {
+                                &file_name
+                            };
+
+                            module_name == *segment
+                        }
+                        // 匹配目录
+                        Some(
+                            Node::Directory(_, name, _) | Node::SpecialDirectory(_, name, _, _),
+                        ) => name == segment,
+                        None => false,
+                    }
+                }) {
+                    current_node = child_id;
+                } else {
+                    println!("[DEBUG] Segment not found: {}", segment);
+                    return None; // Segment not found
+                }
+            } else {
+                println!(
+                    "[DEBUG] Current node is not a directory: {:?}",
+                    self.nodes.get(&current_node)
+                );
+                return None; // Not a directory
+            }
+        }
+        Some(current_node)
     }
 
     pub fn node_name(&self, node: NodeId) -> String {

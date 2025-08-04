@@ -1,7 +1,15 @@
+pub mod candidate;
+
+use crate::{
+    basic::create_source_map,
+    context::scope::{ScopeId, Symbol},
+    parse::ast,
+    vfs,
+};
 use internment::{Arena, ArenaIntern};
 use rustc_data_structures::fx::FxHashMap;
 use rustc_span::SourceMap;
-use crate::{basic::create_source_map, context::scope::{ScopeId, Symbol}};
+use std::{cell::RefCell, fmt::Display};
 
 pub trait HirNode {}
 
@@ -20,7 +28,14 @@ pub struct Hir {
     params_arena: Arena<[Param<'static>]>,
     properties_arena: Arena<[Property<'static>]>,
 
-    map: FxHashMap<HirId, HirMapping<'static>>,
+    map: RefCell<FxHashMap<HirId, HirMapping<'static>>>,
+    impls: RefCell<FxHashMap<SExpr<'static>, Vec<HirId>>>,
+}
+
+impl Display for Hir {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.map.borrow())
+    }
 }
 
 // owner == 0 if the Hir is not owned by any specific context
@@ -30,6 +45,11 @@ pub enum HirMapping<'hir> {
     Pattern(SPattern<'hir>, HirId),
     Definition(SDefinition<'hir>, HirId),
     Param(SParam<'hir>, HirId),
+    Clause(SClause<'hir>, HirId),
+    Unresolved(vfs::NodeId, ast::NodeIndex, HirId),
+    UnresolvedFileScope(vfs::NodeId, HirId),
+    UnresolvedPackage(vfs::NodeId),
+    UnresolvedDirectoryModule(vfs::NodeId, HirId),
 }
 
 impl Hir {
@@ -48,19 +68,40 @@ impl Hir {
             clauses_arena: Arena::new(),
             params_arena: Arena::new(),
             properties_arena: Arena::new(),
-            map: FxHashMap::default(),
+            map: RefCell::new(FxHashMap::default()),
+            impls: RefCell::new(FxHashMap::default()),
         }
     }
 
-    pub fn put(&mut self, value: HirMapping<'_>) -> HirId {
-        let id = self.map.len();
+    pub fn put(&self, value: HirMapping<'_>) -> HirId {
+        let mut map = self.map.borrow_mut();
+        let id = map.len();
         let static_value: HirMapping<'static> = unsafe { std::mem::transmute(value) };
-        self.map.insert(id, static_value);
+        map.insert(id, static_value);
         id
     }
 
-    pub fn get(&self, id: HirId) -> Option<&HirMapping<'_>> {
-        self.map.get(&id)
+    pub fn remove(&self, id: HirId) {
+        self.map.borrow_mut().remove(&id);
+    }
+
+    pub fn put_impl(&self, expr: SExpr<'_>, id: HirId) {
+        let mut impls = self.impls.borrow_mut();
+        let static_expr: SExpr<'static> = unsafe { std::mem::transmute(expr) };
+        impls.entry(static_expr).or_insert_with(Vec::new).push(id);
+    }
+
+    pub fn get_impl(&self, expr: SExpr<'_>) -> Option<Vec<HirId>> {
+        self.impls.borrow().get(&expr).cloned()
+    }
+
+    pub fn update(&self, id: HirId, value: HirMapping<'_>) {
+        let static_value: HirMapping<'static> = unsafe { std::mem::transmute(value) };
+        self.map.borrow_mut().insert(id, static_value);
+    }
+
+    pub fn get(&self, id: HirId) -> Option<HirMapping<'static>> {
+        self.map.borrow().get(&id).copied()
     }
 
     pub fn intern_str<'hir>(&'hir self, s: &str) -> Symbol<'hir> {
@@ -170,7 +211,7 @@ pub enum Expr<'hir> {
 
     IntLiteral(i64),
     BoolLiteral(bool),
-    RealLiteral(i32, u32), // (numerator, denominator)
+    RealLiteral(i32, u32), 
     StrLiteral(Symbol<'hir>),
     CharLiteral(char),
     SymbolLiteral(Symbol<'hir>),
@@ -178,6 +219,7 @@ pub enum Expr<'hir> {
     Null,
     Undefined,
     Unit,
+    Any,
 
     List(MExpr<'hir>),
     Tuple(MExpr<'hir>),
@@ -298,7 +340,16 @@ pub enum Definition<'hir> {
     EnumVariantWithPattern(Symbol<'hir>, SPattern<'hir>),
     EnumVariantWithSubEnum(Symbol<'hir>, MDefinition<'hir>),
     Function(Function<'hir>),
-    
+    FileScope {
+        name: Symbol<'hir>,
+        items: MDefinition<'hir>,
+        scope_id: ScopeId,
+    },
+    Package {
+        name: Symbol<'hir>,
+        items: MDefinition<'hir>,
+        scope_id: ScopeId,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -350,7 +401,7 @@ pub struct Struct<'hir> {
     pub name: Symbol<'hir>,
     pub clauses: MClause<'hir>,
     pub fields: MDefinition<'hir>,
-    pub items: MDefinition<'hir>,
+    pub scope_id: ScopeId,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

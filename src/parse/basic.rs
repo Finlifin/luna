@@ -122,11 +122,16 @@ impl Parser<'_> {
                     return false;
                 }
             };
+            
+            // Calculate the relative offset from the source file start
+            let file_start = source_file.start_pos;
+            let relative_end = (span.hi().0 - file_start.0) as usize;
+            
             // Check if the last character of the node's span is a right brace
-            if let Some(last_char) =
-                source_content.get(span.hi().0 as usize - 1..span.hi().0 as usize)
-            {
-                return last_char == "}";
+            if relative_end > 0 && relative_end <= source_content.len() {
+                if let Some(last_char) = source_content.get(relative_end - 1..relative_end) {
+                    return last_char == "}";
+                }
             } else {
                 eprintln!("Error: Node span is out of bounds in source content");
             }

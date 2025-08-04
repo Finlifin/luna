@@ -169,7 +169,6 @@ impl VfsVisitor for VfsSExpressionVisitor {
             SpecialDirectoryType::Scripts => "scripts",
             SpecialDirectoryType::Resources => "resources",
         };
-
         if children.is_empty() {
             format!("(special-directory \"{}\" :type {})", name, type_str)
         } else {
@@ -185,105 +184,4 @@ impl VfsVisitor for VfsSExpressionVisitor {
 pub fn dump_vfs_to_s_expression(vfs: &Vfs, node_id: NodeId) -> String {
     let mut visitor = VfsSExpressionVisitor::new();
     visit_vfs(&mut visitor, vfs, node_id)
-}
-
-/// 节点统计 visitor 示例
-pub struct VfsNodeCountVisitor {
-    file_count: usize,
-    directory_count: usize,
-}
-
-impl VfsNodeCountVisitor {
-    pub fn new() -> Self {
-        VfsNodeCountVisitor {
-            file_count: 0,
-            directory_count: 0,
-        }
-    }
-
-    pub fn get_file_count(&self) -> usize {
-        self.file_count
-    }
-
-    pub fn get_directory_count(&self) -> usize {
-        self.directory_count
-    }
-
-    pub fn get_total_count(&self) -> usize {
-        self.file_count + self.directory_count
-    }
-}
-
-impl VfsVisitor for VfsNodeCountVisitor {
-    type Output = ();
-
-    fn visit_node(&mut self, vfs: &Vfs, node_id: NodeId) -> Self::Output {
-        if node_id == 0 {
-            return;
-        }
-        self.default_visit_node(vfs, node_id);
-
-        // Recursively visit children
-        if let Some(node) = vfs.nodes.get(&node_id) {
-            match node {
-                Node::Directory(_, _, children) | Node::SpecialDirectory(_, _, children, _) => {
-                    for &child_id in children {
-                        self.visit_node(vfs, child_id);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    fn visit_file(
-        &mut self,
-        _vfs: &Vfs,
-        _node_id: NodeId,
-        _source_file: &Arc<SourceFile>,
-    ) -> Self::Output {
-        self.file_count += 1;
-    }
-
-    fn visit_directory(
-        &mut self,
-        _vfs: &Vfs,
-        _node_id: NodeId,
-        _name: &str,
-        _children: &[NodeId],
-    ) -> Self::Output {
-        self.directory_count += 1;
-    }
-
-    fn visit_special_file(
-        &mut self,
-        _vfs: &Vfs,
-        _node_id: NodeId,
-        _source_file: &Arc<SourceFile>,
-        _file_type: SpecialFileType,
-    ) -> Self::Output {
-        self.file_count += 1;
-    }
-
-    fn visit_special_directory(
-        &mut self,
-        _vfs: &Vfs,
-        _node_id: NodeId,
-        _name: &str,
-        _children: &[NodeId],
-        _dir_type: SpecialDirectoryType,
-    ) -> Self::Output {
-        self.directory_count += 1;
-    }
-}
-
-/// 便利函数：统计 VFS 中的节点数量
-pub fn count_vfs_nodes(vfs: &Vfs, node_id: NodeId) -> (usize, usize, usize) {
-    let mut visitor = VfsNodeCountVisitor::new();
-    visit_vfs(&mut visitor, vfs, node_id);
-    (
-        visitor.get_file_count(),
-        visitor.get_directory_count(),
-        visitor.get_total_count(),
-    )
 }

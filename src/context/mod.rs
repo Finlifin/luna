@@ -1,9 +1,8 @@
 use std::mem;
 
-use internment::Arena;
-use rustc_span::{SourceMap, source_map};
+use rustc_span::SourceMap;
 
-use crate::{basic::create_source_map, diagnostic::DiagnosticContext};
+use crate::diagnostic::DiagnosticContext;
 
 pub mod scan;
 pub mod scope;
