@@ -1,3 +1,4 @@
 /target
 *.lisp
 test_project
+.metals
