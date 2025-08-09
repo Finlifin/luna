@@ -1,8 +1,11 @@
-use std::collections::HashMap;
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+};
 
 use internment::ArenaIntern;
 
-use crate::hir::HirId;
+use crate::hir::{Clause, HirId, Import, MClause, MImport};
 
 pub type Symbol<'hir> = ArenaIntern<'hir, str>;
 pub type ScopeId = usize;
@@ -21,8 +24,8 @@ pub struct Scope<'hir> {
     parent: Option<ScopeId>,
     // 匿名作用域怎么办
     items: Vec<Item<'hir>>,
-    imports: (),
-    clauses: (),
+    imports: RefCell<Vec<Import<'hir>>>,
+    clauses: RefCell<Vec<Clause<'hir>>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -64,8 +67,8 @@ impl<'hir> Scope<'hir> {
             name,
             items: Vec::new(),
             ordered,
-            imports: (),
-            clauses: (),
+            imports: RefCell::new(vec![]),
+            clauses: RefCell::new(vec![]),
         }
     }
 }
@@ -138,6 +141,39 @@ impl<'hir> ScopeManager<'hir> {
             if let Some(item) = scope.items.iter().rev().find(|s| s.symbol == name) {
                 return Some(item.clone());
             }
+            return scope
+                .imports
+                .borrow()
+                .iter()
+                .rev()
+                .find_map(|import| match import {
+                    Import::All(scope_id) => self.lookup(name, *scope_id),
+                    Import::Multi(scope_id, names) => names.iter().rev().find_map(|&import_name| {
+                        if import_name == name {
+                            self.lookup(name, *scope_id)
+                        } else {
+                            None
+                        }
+                    }),
+                    Import::Single(scope_id, import_name) => {
+                        if *import_name == name {
+                            self.lookup(name, *scope_id)
+                        } else {
+                            None
+                        }
+                    }
+                    Import::Alias {
+                        scope_id,
+                        alias,
+                        original,
+                    } => {
+                        if *alias == name {
+                            self.lookup(*original, *scope_id)
+                        } else {
+                            None
+                        }
+                    }
+                });
         }
         None
     }
@@ -197,12 +233,42 @@ impl<'hir> ScopeManager<'hir> {
         }
     }
 
+    pub fn add_clause(
+        &self,
+        scope_id: ScopeId,
+        clause: Clause<'hir>,
+    ) -> Result<(), ScopeError<'hir>> {
+        if let Some(scope) = self.scopes.get(&scope_id) {
+            scope.clauses.borrow_mut().push(clause);
+            Ok(())
+        } else {
+            Err(ScopeError::InvalidParentScope(scope_id))
+        }
+    }
+
+    pub fn add_import(
+        &self,
+        scope_id: ScopeId,
+        import: Import<'hir>,
+    ) -> Result<(), ScopeError<'hir>> {
+        if let Some(scope) = self.scopes.get(&scope_id) {
+            scope.imports.borrow_mut().push(import);
+            Ok(())
+        } else {
+            Err(ScopeError::InvalidParentScope(scope_id))
+        }
+    }
+
     pub fn scope_name(&self, scope_id: ScopeId) -> Option<Symbol<'hir>> {
         self.scopes.get(&scope_id).and_then(|s| s.name)
     }
 
     pub fn scope_hir_id(&self, scope_id: ScopeId) -> Option<HirId> {
         self.scopes.get(&scope_id).map(|s| s.id)
+    }
+
+    pub fn scope_parent(&self, scope_id: ScopeId) -> Option<ScopeId> {
+        self.scopes.get(&scope_id).and_then(|s| s.parent)
     }
 }
 
@@ -292,10 +358,33 @@ impl<'hir> ScopeVisitor<'hir> for ScopeSExpressionVisitor {
             }
         }
 
+        // if parts.is_empty() {
+        //     format!(
+        //         "({} %{} :parent {})",
+        //         scope_name,
+        //         scope.id,
+        //         scope.parent.unwrap_or(0)
+        //     )
+        // } else {
+        //     format!(
+        //         "({} {} %{} :parent {})",
+        //         scope_name,
+        //         parts.join(" "),
+        //         scope.id,
+        //         scope.parent.unwrap_or(0)
+        //     )
+        // }
+        let imports = scope
+            .imports
+            .borrow()
+            .iter()
+            .map(|i| format!("{}", i))
+            .collect::<Vec<_>>()
+            .join(" ");
         if parts.is_empty() {
-            format!("({})", scope_name)
+            format!("({} :imports {})", scope_name, imports)
         } else {
-            format!("({} {})", scope_name, parts.join(" "))
+            format!("({} :imports {} {})", scope_name, imports, parts.join(" "),)
         }
     }
 

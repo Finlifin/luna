@@ -76,16 +76,16 @@ pub fn get_expr_op_info(token_kind: TokenKind) -> ExprOpInfo {
 pub fn get_pattern_op_info(token_kind: TokenKind) -> ExprOpInfo {
     match token_kind {
         // 模式相关操作符
-        TokenKind::If => ExprOpInfo::new(10, NodeKind::PatternIfGuard),      // if
-        TokenKind::And => ExprOpInfo::new(10, NodeKind::PatternAndIs),       // and
-        TokenKind::As => ExprOpInfo::new(20, NodeKind::PatternAsBind),       // as
-        TokenKind::Or => ExprOpInfo::new(30, NodeKind::PatternOr),           // or
+        TokenKind::If => ExprOpInfo::new(10, NodeKind::PatternIfGuard), // if
+        TokenKind::And => ExprOpInfo::new(10, NodeKind::PatternAndIs),  // and
+        TokenKind::As => ExprOpInfo::new(20, NodeKind::PatternAsBind),  // as
+        TokenKind::Or => ExprOpInfo::new(30, NodeKind::PatternOr),      // or
         TokenKind::Question => ExprOpInfo::new(40, NodeKind::PatternOptionSome), // ?
-        TokenKind::Bang => ExprOpInfo::new(40, NodeKind::PatternErrorOk),    // !
-        TokenKind::LParen => ExprOpInfo::new(80, NodeKind::PatternCall),     // (
+        TokenKind::Bang => ExprOpInfo::new(40, NodeKind::PatternErrorOk), // !
+        TokenKind::LParen => ExprOpInfo::new(80, NodeKind::PatternCall), // (
         TokenKind::LBrace => ExprOpInfo::new(80, NodeKind::PatternObjectCall), // {
-        TokenKind::Lt => ExprOpInfo::new(80, NodeKind::PatternDiamondCall),  // <
-        TokenKind::Dot => ExprOpInfo::new(90, NodeKind::Select),             // .
+        TokenKind::Lt => ExprOpInfo::new(80, NodeKind::PatternDiamondCall), // <
+        TokenKind::Dot => ExprOpInfo::new(90, NodeKind::Select),        // .
 
         _ => ExprOpInfo::new(-1, NodeKind::Invalid), // 默认无效操作符
     }

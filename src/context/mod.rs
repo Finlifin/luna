@@ -1,10 +1,7 @@
-use std::mem;
-
 use rustc_span::SourceMap;
 
 use crate::diagnostic::DiagnosticContext;
 
-pub mod scan;
 pub mod scope;
 
 pub struct CompilerContext<'hir> {
@@ -22,7 +19,7 @@ impl<'hir> CompilerContext<'hir> {
         }
     }
 
-    pub fn diag_ctx<'ctx>(&'ctx mut self) -> &'ctx mut DiagnosticContext<'ctx> {
-        unsafe { mem::transmute(&mut self.diag_ctx) }
+    pub fn diag_ctx<'ctx>(&'ctx self) -> &'ctx DiagnosticContext<'ctx> {
+        &self.diag_ctx
     }
 }

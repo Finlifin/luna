@@ -149,7 +149,7 @@ impl FlurryError for LexError {
         }
     }
 
-    fn emit(&self, diag_ctx: &mut DiagnosticContext, base_pos: rustc_span::BytePos) {
+    fn emit(&self, diag_ctx: &DiagnosticContext, base_pos: rustc_span::BytePos) {
         let span = self.to_span(base_pos);
         let error_code = self.error_code();
         

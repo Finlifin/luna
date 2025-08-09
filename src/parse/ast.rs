@@ -399,8 +399,6 @@ pub enum NodeKind {
     PathSelectAll, // a
     // . path
     SuperPath, // a
-    // not path
-    ExcludePath, // a
     // @ path
     PackagePath, // a
     // path as id
@@ -567,7 +565,6 @@ impl NodeKind {
             | UseStatement
             | PathSelectAll
             | SuperPath
-            | ExcludePath
             | PackagePath
             | Asserts
             | Assumes
@@ -763,7 +760,7 @@ impl Ast {
             None
         }
     }
-    
+
     // TODO: 记得改进unwarp
     pub fn dump_to_s_expression(&self, node_index: NodeIndex, source_map: &SourceMap) -> String {
         if node_index == 0 {

@@ -36,7 +36,7 @@ impl Parser<'_> {
         result
     }
 
-    pub fn parse(&mut self, diag_ctx: &mut DiagnosticContext) {
+    pub fn parse(&mut self, diag_ctx: &DiagnosticContext) {
         match self.try_file_scope() {
             Ok(node_index) => {
                 self.ast.root = node_index;
@@ -217,16 +217,3 @@ impl Parser<'_> {
 }
 
 pub type ParseResult = Result<NodeIndex, ParseError>;
-
-trait ResultExtension {
-    fn is_skipped(&self) -> bool;
-}
-
-impl ResultExtension for ParseResult {
-    fn is_skipped(&self) -> bool {
-        match self {
-            Ok(node_index) => *node_index == 0,
-            Err(_) => false,
-        }
-    }
-}

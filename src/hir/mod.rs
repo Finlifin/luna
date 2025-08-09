@@ -1,4 +1,5 @@
 pub mod candidate;
+pub mod display;
 
 use crate::{
     basic::create_source_map,
@@ -6,13 +7,14 @@ use crate::{
     parse::ast,
     vfs,
 };
+use core::panic;
 use internment::{Arena, ArenaIntern};
 use rustc_data_structures::fx::FxHashMap;
 use rustc_span::SourceMap;
 use std::{cell::RefCell, fmt::Display};
 
-pub trait HirNode {}
-
+// there are lots of unsafe methods in this module,
+// make sure each item that requires 'hir come from the same Hir instance
 pub struct Hir {
     pub str_arena: Arena<str>,
     pub source_map: SourceMap,
@@ -24,6 +26,7 @@ pub struct Hir {
     exprs_arena: Arena<[Expr<'static>]>,
     patterns_arena: Arena<[Pattern<'static>]>,
     definitions_arena: Arena<[Definition<'static>]>,
+    imports: Arena<[Import<'static>]>,
     clauses_arena: Arena<[Clause<'static>]>,
     params_arena: Arena<[Param<'static>]>,
     properties_arena: Arena<[Property<'static>]>,
@@ -65,6 +68,7 @@ impl Hir {
             exprs_arena: Arena::new(),
             patterns_arena: Arena::new(),
             definitions_arena: Arena::new(),
+            imports: Arena::new(),
             clauses_arena: Arena::new(),
             params_arena: Arena::new(),
             properties_arena: Arena::new(),
@@ -79,6 +83,56 @@ impl Hir {
         let static_value: HirMapping<'static> = unsafe { std::mem::transmute(value) };
         map.insert(id, static_value);
         id
+    }
+
+    pub fn put_clause<'hir>(&'hir self, clause: Clause<'_>) -> (HirId, SClause<'hir>) {
+        let mut map = self.map.borrow_mut();
+        let id = map.len();
+        // replace the clause with id
+        match clause {
+            Clause::TypeDecl { symbol, .. } => {
+                let clause = self.intern_clause(Clause::TypeDecl {
+                    symbol,
+                    self_id: id,
+                });
+                let static_clause: SClause<'static> = unsafe { std::mem::transmute(clause) };
+                map.insert(id, HirMapping::Clause(static_clause, id));
+                (id, static_clause)
+            }
+            Clause::TypeTraitBounded {
+                symbol,
+                trait_bound,
+                ..
+            } => {
+                let clause = self.intern_clause(Clause::TypeTraitBounded {
+                    symbol,
+                    trait_bound,
+                    self_id: id,
+                });
+                let static_clause: SClause<'static> = unsafe { std::mem::transmute(clause) };
+                map.insert(id, HirMapping::Clause(static_clause, id));
+                (id, static_clause)
+            }
+            Clause::Decl {
+                symbol,
+                ty,
+                default,
+                ..
+            } => {
+                let clause = self.intern_clause(Clause::Decl {
+                    symbol,
+                    ty,
+                    default,
+                    self_id: id,
+                });
+                let static_clause: SClause<'static> = unsafe { std::mem::transmute(clause) };
+                map.insert(id, HirMapping::Clause(static_clause, id));
+                (id, static_clause)
+            }
+            _ => {
+                panic!("Unimplemented clause type: {:?}", clause)
+            }
+        }
     }
 
     pub fn remove(&self, id: HirId) {
@@ -204,6 +258,7 @@ pub type MDefinition<'hir> = ArenaIntern<'hir, [Definition<'hir>]>;
 pub type MClause<'hir> = ArenaIntern<'hir, [Clause<'hir>]>;
 pub type MParam<'hir> = ArenaIntern<'hir, [Param<'hir>]>;
 pub type MProperty<'hir> = ArenaIntern<'hir, [Property<'hir>]>;
+pub type MImport<'hir> = ArenaIntern<'hir, [Import<'hir>]>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Expr<'hir> {
@@ -211,7 +266,7 @@ pub enum Expr<'hir> {
 
     IntLiteral(i64),
     BoolLiteral(bool),
-    RealLiteral(i32, u32), 
+    RealLiteral(i32, u32),
     StrLiteral(Symbol<'hir>),
     CharLiteral(char),
     SymbolLiteral(Symbol<'hir>),
@@ -370,10 +425,22 @@ pub enum FnKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Clause<'hir> {
-    TypeDecl(Symbol<'hir>),
-    TypeTraitBounded(Symbol<'hir>, SExpr<'hir>),
+    TypeDecl {
+        symbol: Symbol<'hir>,
+        self_id: HirId,
+    },
+    TypeTraitBounded {
+        symbol: Symbol<'hir>,
+        trait_bound: SExpr<'hir>,
+        self_id: HirId,
+    },
     // if the default value is None, it means it must not be a optional parameter
-    Decl(Symbol<'hir>, MPattern<'hir>, Option<SExpr<'hir>>),
+    Decl {
+        symbol: Symbol<'hir>,
+        ty: SExpr<'hir>,
+        default: Option<SExpr<'hir>>,
+        self_id: HirId,
+    },
     Requires,
     Ensures,
     Decreases,
@@ -438,6 +505,18 @@ pub enum UnaryOp {
 pub struct Property<'hir> {
     pub name: Symbol<'hir>,
     pub value: SExpr<'hir>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Import<'hir> {
+    All(ScopeId),
+    Multi(ScopeId, Vec<Symbol<'hir>>),
+    Single(ScopeId, Symbol<'hir>),
+    Alias {
+        scope_id: ScopeId,
+        alias: Symbol<'hir>,
+        original: Symbol<'hir>,
+    },
 }
 
 #[test]

@@ -1,10 +1,1 @@
-
-(FileScope 
-    (ModuleDef 
-        (Id A) [] 
-        (Block 
-            (FunctionDef 
-                (Id a) [] 
-                (<invalid node>) 
-                (<invalid node>) [] 
-                (Block )))))
+(FileScope (ModuleDef (Id A) [] (Block (UseStatement (PathSelectMulti (Id B) (Id D))) (UseStatement (PathSelect (Id D) (Id Student))))) (ModuleDef (Id B) [] (Block (UseStatement (PathSelectAll (Id C))))) (ModuleDef (Id C) [] (Block (ModuleDef (Id D) [] (Block (StructDef (Id Student) [] (Block (StructField (Id teacher) (Id Teacher)))))))))

@@ -1,7 +1,6 @@
 mod vfs_visitor;
 pub use vfs_visitor::*;
 
-mod vfs_scope_scanner;
 use std::{
     cell::RefCell,
     fs, mem,
@@ -9,7 +8,6 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
-pub use vfs_scope_scanner::*;
 
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_span::{FileNameDisplayPreference, SourceFile, SourceMap};
@@ -133,13 +131,13 @@ impl Vfs {
             let entry = entry?;
             let path = entry.path();
             let file_name = entry.file_name().to_string_lossy().to_string();
-            
+
             if path.is_dir() {
                 // Check if this directory should be ignored
                 if ignores.contains(&file_name.as_str()) {
                     continue;
                 }
-                
+
                 // Create directory node
                 let dir_node = if path.file_name().unwrap().to_string_lossy().eq("src") {
                     Node::SpecialDirectory(
@@ -152,7 +150,7 @@ impl Vfs {
                     Node::Directory(parent_node, file_name, Vec::new())
                 };
                 let dir_id = self.add_node(dir_node);
-                
+
                 // Recursively process subdirectory
                 self.build_directory_recursive(source_map, dir_id, &path, ignores)?;
             } else if path.is_file() {

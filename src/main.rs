@@ -1,3 +1,5 @@
+#![allow(warnings)]
+
 mod ast_lower;
 mod basic;
 mod comptime;
@@ -7,17 +9,20 @@ mod hir;
 mod lex;
 mod parse;
 mod query;
+mod scan;
 mod typing;
 mod vfs;
 
 use std::path::Path;
 
+use rustc_span::BytePos;
+
 use crate::{
-    context::{scope::{ScopeManager, ScopeSExpressionVisitor}, CompilerContext},
+    context::{CompilerContext, scope::ScopeSExpressionVisitor},
+    diagnostic::FlurryError,
     hir::Hir,
-    parse::ast_visitor::dump_ast_to_s_expression,
-    query::QueryEngine,
-    vfs::{dump_vfs_to_s_expression, VfsScopeScanner},
+    scan::{ImportResolver, ScanOrchestrator},
+    vfs::dump_vfs_to_s_expression,
 };
 
 fn main() {
@@ -38,18 +43,47 @@ fn main() {
         &hir.source_map,
     );
 
-    let mut vfs_scanner = VfsScopeScanner::new();
-    let _scan_result = vfs_scanner.scan_vfs(&vfs, &mut context, &hir);
+    let mut vfs_scanner = ScanOrchestrator::new();
+    let unresolved_imports = match vfs_scanner.run(&vfs, &mut context, &hir) {
+        Ok(imports) => imports,
+        Err(e) => {
+            e.emit(&context.diag_ctx(), BytePos(0));
+            return;
+        }
+    };
 
-    let lowering_context = ast_lower::LoweringContext::new(&mut context, &hir, &vfs);
-    lowering_context.lower().expect("Failed to lower AST");
+    let main_file_ast = vfs
+        .get_ast(vfs.resolve(&["src", "main.fl"]).unwrap())
+        .expect("Failed to get main file AST");
+    let _ = std::fs::write(
+        "ast.lisp",
+        main_file_ast.dump_to_s_expression(main_file_ast.root, &hir.source_map),
+    );
+
+    let mut import_resolver = ImportResolver::new(&context, &hir, &vfs, unresolved_imports);
+    if let Err(e) = import_resolver.resolve() {
+        e.emit(&context.diag_ctx(), BytePos(0));
+    }
     let mut scope_visitor = ScopeSExpressionVisitor::new();
     let scope_s_expr = context.scope_manager.accept(&mut scope_visitor);
     std::fs::write("scope.lisp", &scope_s_expr).unwrap();
-    let vfs_s_expr = dump_vfs_to_s_expression(&vfs, vfs.root);
-    std::fs::write("vfs.lisp", &vfs_s_expr).unwrap();
-    dbg!(hir.get(context.scope_manager.scope_hir_id(context.scope_manager.root).unwrap()).unwrap());
+    // let lowering_context = ast_lower::LoweringContext::new(&context, &hir, &vfs);
+    // if let Err(e) = lowering_context.lower() {
+    //     e.emit(context.diag_ctx(), BytePos(0));
+    //     return;
+    // }
 
+    // let vfs_s_expr = dump_vfs_to_s_expression(&vfs, vfs.root);
+    // std::fs::write("vfs.lisp", &vfs_s_expr).unwrap();
+    // dbg!(
+    //     hir.get(
+    //         context
+    //             .scope_manager
+    //             .scope_hir_id(context.scope_manager.root)
+    //             .unwrap()
+    //     )
+    //     .unwrap()
+    // );
 
     // // Demonstrate the query system with dependency tracking
     // println!("\n=== Query System Demo with Dependency Tracking ===");

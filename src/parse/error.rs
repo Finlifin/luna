@@ -1,4 +1,7 @@
-use crate::{diagnostic::FlurryError, lex::{Token, TokenKind}};
+use crate::{
+    diagnostic::{DiagnosticContext, FlurryError},
+    lex::TokenKind,
+};
 
 pub const PARSE_ERROR_BASE: u32 = 2000;
 
@@ -26,7 +29,9 @@ impl ParseError {
         match self {
             ParseError::UnexpectedToken { message, .. } => message,
             ParseError::InvalidSyntax { message, .. } => message,
-            ParseError::MeetPostObjectStart => "Received unexpected MeetPostObjectStart, this is a bug",
+            ParseError::MeetPostObjectStart => {
+                "Received unexpected MeetPostObjectStart, this is a bug"
+            }
             ParseError::MeetPostId => "Received unexpected MeetPostId, this is a bug",
         }
     }
@@ -67,15 +72,12 @@ impl FlurryError for ParseError {
             ParseError::MeetPostId => PARSE_ERROR_BASE + 4,
         }
     }
-    
-    fn emit(
-        &self,
-        diag_ctx: &mut crate::diagnostic::DiagnosticContext,
-        _base_pos: rustc_span::BytePos,
-    ) {
+
+    fn emit(&self, diag_ctx: &DiagnosticContext, _base_pos: rustc_span::BytePos) {
         let span = self.to_span();
-        
-        diag_ctx.error(self.message().to_string())
+
+        diag_ctx
+            .error(self.message().to_string())
             .with_code(self.error_code())
             .with_error_label(span, self.message().to_string())
             .with_primary_span(span)

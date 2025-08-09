@@ -12,6 +12,7 @@ impl Parser<'_> {
                 TokenKind::Let => p.try_let_statement(),
                 TokenKind::Const => p.try_const_statement(),
                 TokenKind::If => p.try_if_statement(),
+                TokenKind::Use => p.try_use_statement(),
                 TokenKind::When => p.try_when_statement(),
                 TokenKind::While => p.try_while_loop(),
                 TokenKind::For => p.try_for_loop(),
@@ -154,6 +155,133 @@ impl Parser<'_> {
                 .add_single_child(expr)
                 .add_single_child(init)
                 .build(&mut p.ast))
+        })
+    }
+
+    pub fn try_use_statement(&mut self) -> ParseResult {
+        self.scoped_with_expected_prefix(TokenKind::Use.as_ref(), |p| {
+            p.eat_tokens(1);
+            let path = p.try_path()?;
+            if path == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected a path after 'use'".to_string(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+
+            Ok(NodeBuilder::new(NodeKind::UseStatement, p.current_span())
+                .add_single_child(path)
+                .build(&mut p.ast))
+        })
+    }
+
+    pub fn try_path(&mut self) -> ParseResult {
+        self.scoped(|p| {
+            let next = p.peek_next_token();
+            let mut left = p.try_prefix_path()?;
+
+            while p.eat_token(TokenKind::Dot) {
+                let next = p.peek_next_token();
+                match next.kind {
+                    TokenKind::Id => {
+                        let id = p.try_id()?;
+                        left = NodeBuilder::new(NodeKind::PathSelect, p.current_span())
+                            .add_single_child(left)
+                            .add_single_child(id)
+                            .build(&mut p.ast);
+                    }
+                    TokenKind::Star | TokenKind::SeparatedStar => {
+                        p.eat_tokens(1);
+                        left = NodeBuilder::new(NodeKind::PathSelectAll, p.current_span())
+                            .add_single_child(left)
+                            .build(&mut p.ast);
+                    }
+                    TokenKind::LBrace => {
+                        p.eat_tokens(1);
+                        let mut items = vec![];
+                        while !p.peek(TokenKind::RBrace.as_ref()) {
+                            let item = p.try_path()?;
+                            if item == 0 {
+                                return Err(ParseError::invalid_syntax(
+                                    "Expected pathes inside `{}`".to_string(),
+                                    p.peek_next_token().kind,
+                                    p.next_token_span(),
+                                ));
+                            }
+                            items.push(item);
+                            if !p.eat_token(TokenKind::Comma) {
+                                if !p.peek(TokenKind::RBrace.as_ref()) {
+                                    return Err(ParseError::unexpected_token(
+                                        TokenKind::Comma,
+                                        p.peek_next_token().kind,
+                                        p.next_token_span(),
+                                    ));
+                                }
+                                break;
+                            }
+                        }
+                        if !p.eat_token(TokenKind::RBrace) {
+                            return Err(ParseError::unexpected_token(
+                                TokenKind::RBrace,
+                                p.peek_next_token().kind,
+                                p.next_token_span(),
+                            ));
+                        }
+                        left = NodeBuilder::new(NodeKind::PathSelectMulti, p.current_span())
+                            .add_single_child(left)
+                            .add_multiple_children(items)
+                            .build(&mut p.ast);
+                    }
+                    _ => {
+                        return Err(ParseError::invalid_syntax(
+                            "Expected an identifier or `{` or `*` or `as` after '.'".to_string(),
+                            next.kind,
+                            p.next_token_span(),
+                        ));
+                    }
+                }
+            }
+
+            Ok(left)
+        })
+    }
+
+    pub fn try_prefix_path(&mut self) -> ParseResult {
+        self.scoped(|p| {
+            let next = p.peek_next_token();
+            match next.kind {
+                TokenKind::Id => p.try_id(),
+                TokenKind::Dot => {
+                    p.eat_tokens(1);
+                    let sub_path = p.try_prefix_path()?;
+                    if sub_path == 0 {
+                        return Err(ParseError::invalid_syntax(
+                            "Expected a sub-path after '.'".to_string(),
+                            p.peek_next_token().kind,
+                            p.next_token_span(),
+                        ));
+                    }
+                    Ok(NodeBuilder::new(NodeKind::SuperPath, p.current_span())
+                        .add_single_child(sub_path)
+                        .build(&mut p.ast))
+                }
+                TokenKind::At => {
+                    p.eat_tokens(1);
+                    let sub_path = p.try_prefix_path()?;
+                    if sub_path == 0 {
+                        return Err(ParseError::invalid_syntax(
+                            "Expected a sub-path after '@'".to_string(),
+                            p.peek_next_token().kind,
+                            p.next_token_span(),
+                        ));
+                    }
+                    Ok(NodeBuilder::new(NodeKind::PackagePath, p.current_span())
+                        .add_single_child(sub_path)
+                        .build(&mut p.ast))
+                }
+                _ => Ok(0),
+            }
         })
     }
 
@@ -852,6 +980,13 @@ impl Parser<'_> {
                 Rule::semicolon("item", |p| p.try_item()),
                 Rule::semicolon("statement", |p| p.try_statement()),
             ])?;
+            if p.peek_next_token().kind != TokenKind::Eof {
+                return Err(ParseError::unexpected_token(
+                    TokenKind::Eof,
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
             Ok(NodeBuilder::new(NodeKind::FileScope, p.current_span())
                 .add_multiple_children(nodes)
                 .build(&mut p.ast))

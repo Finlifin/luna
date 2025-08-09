@@ -1,14 +1,17 @@
 pub mod emitter;
 
-use rustc_span::{FileNameDisplayPreference, SourceMap, Span};
 use ariadne::{Color, ColorGenerator, Label, Report, ReportKind, Source};
-use std::fmt;
+use rustc_span::{FileNameDisplayPreference, SourceMap, Span};
+use std::{
+    cell::{Cell, RefCell},
+    fmt, mem,
+};
 
 // 罢了, warning也用这个trait吧
 pub trait FlurryError {
     fn error_code(&self) -> u32;
     fn error_name(&self) -> &'static str;
-    fn emit(&self, diag_ctx: &mut DiagnosticContext, base_pos: rustc_span::BytePos);
+    fn emit(&self, diag_ctx: &DiagnosticContext, base_pos: rustc_span::BytePos);
 }
 
 /// Diagnostic severity level
@@ -49,7 +52,11 @@ pub struct DiagnosticMessage {
 
 impl DiagnosticMessage {
     pub fn new(span: Span, message: String, level: Level) -> Self {
-        Self { span, message, level }
+        Self {
+            span,
+            message,
+            level,
+        }
     }
 }
 
@@ -134,7 +141,9 @@ impl DiagnosticBuilder {
     }
 
     pub fn with_label(mut self, span: Span, message: String, level: Level) -> Self {
-        self.diagnostic.labels.push(DiagnosticMessage::new(span, message, level));
+        self.diagnostic
+            .labels
+            .push(DiagnosticMessage::new(span, message, level));
         self
     }
 
@@ -168,7 +177,7 @@ impl DiagnosticBuilder {
         self.diagnostic
     }
 
-    pub fn emit(self, context: &mut DiagnosticContext) {
+    pub fn emit(self, context: &DiagnosticContext) {
         context.emit(self.diagnostic);
     }
 }
@@ -176,18 +185,18 @@ impl DiagnosticBuilder {
 /// Context for managing and emitting diagnostics
 pub struct DiagnosticContext<'a> {
     source_map: &'a SourceMap,
-    emitted_diagnostics: Vec<Diagnostic>,
-    error_count: usize,
-    warning_count: usize,
+    emitted_diagnostics: RefCell<Vec<Diagnostic>>,
+    error_count: Cell<usize>,
+    warning_count: Cell<usize>,
 }
 
 impl<'a> DiagnosticContext<'a> {
     pub fn new(source_map: &'a SourceMap) -> Self {
         Self {
             source_map,
-            emitted_diagnostics: Vec::new(),
-            error_count: 0,
-            warning_count: 0,
+            emitted_diagnostics: RefCell::new(Vec::new()),
+            error_count: Cell::new(0),
+            warning_count: Cell::new(0),
         }
     }
 
@@ -195,38 +204,42 @@ impl<'a> DiagnosticContext<'a> {
         self.source_map
     }
 
-    pub fn emit(&mut self, diagnostic: Diagnostic) {
+    pub fn emit(&self, diagnostic: Diagnostic) {
         match diagnostic.level {
-            Level::Error => self.error_count += 1,
-            Level::Warning => self.warning_count += 1,
+            Level::Error => self.error_count.set(self.error_count.get() + 1),
+            Level::Warning => self.warning_count.set(self.warning_count.get() + 1),
             _ => {}
         }
 
         // Emit to ariadne
         self.emit_to_ariadne(&diagnostic);
-        
+
         // Store for later analysis
-        self.emitted_diagnostics.push(diagnostic);
+        self.emitted_diagnostics.borrow_mut().push(diagnostic);
     }
 
     pub fn error_count(&self) -> usize {
-        self.error_count
+        self.error_count.get()
     }
 
     pub fn warning_count(&self) -> usize {
-        self.warning_count
+        self.warning_count.get()
     }
 
     pub fn has_errors(&self) -> bool {
-        self.error_count > 0
+        self.error_count.get() > 0
     }
 
     pub fn has_warnings(&self) -> bool {
-        self.warning_count > 0
+        self.warning_count.get() > 0
     }
 
-    pub fn diagnostics(&self) -> &[Diagnostic] {
-        &self.emitted_diagnostics
+    pub unsafe fn diagnostics<'b>(&'b self) -> &'b [Diagnostic] {
+        unsafe {
+            mem::transmute::<&[Diagnostic], &'b [Diagnostic]>(
+                self.emitted_diagnostics.borrow().as_ref(),
+            )
+        }
     }
 
     /// Create a new diagnostic builder
@@ -250,15 +263,23 @@ impl<'a> DiagnosticContext<'a> {
     fn emit_to_ariadne(&self, diagnostic: &Diagnostic) {
         let primary_span = diagnostic.primary_span.unwrap_or_else(|| {
             // Use the first label span if no primary span is provided
-            diagnostic.labels.first()
+            diagnostic
+                .labels
+                .first()
                 .map(|label| label.span)
                 .unwrap_or(rustc_span::DUMMY_SP)
         });
 
         let source_file = self.source_map.lookup_source_file(primary_span.lo());
         let mut colors = ColorGenerator::new();
-        let file_id_str = format!("{}", source_file.name.display(FileNameDisplayPreference::Local).to_string_lossy());
-        
+        let file_id_str = format!(
+            "{}",
+            source_file
+                .name
+                .display(FileNameDisplayPreference::Local)
+                .to_string_lossy()
+        );
+
         // Convert byte positions to character positions for ariadne
         let source_content = match &source_file.src {
             Some(content) => content.as_str(),
@@ -267,21 +288,23 @@ impl<'a> DiagnosticContext<'a> {
                 return;
             }
         };
-        
+
         let byte_start = (primary_span.lo().0 - source_file.start_pos.0) as usize;
         let byte_end = (primary_span.hi().0 - source_file.start_pos.0) as usize;
-        
+
         // Convert byte indices to character indices by counting UTF-8 chars
-        let char_start = source_content.get(..byte_start.min(source_content.len()))
+        let char_start = source_content
+            .get(..byte_start.min(source_content.len()))
             .map(|s| s.chars().count())
             .unwrap_or(0);
-        let char_end = source_content.get(..byte_end.min(source_content.len()))
+        let char_end = source_content
+            .get(..byte_end.min(source_content.len()))
             .map(|s| s.chars().count())
             .unwrap_or(char_start);
-        
+
         let mut report = Report::build(
             diagnostic.level.to_ariadne_kind(),
-            (&file_id_str, char_start..char_end)
+            (&file_id_str, char_start..char_end),
         );
 
         if let Some(code) = diagnostic.code {
@@ -296,22 +319,24 @@ impl<'a> DiagnosticContext<'a> {
             let label_file = self.source_map.lookup_source_file(label.span.lo());
             if std::ptr::eq(label_file.as_ref(), source_file.as_ref()) {
                 let color = colors.next();
-                
+
                 let label_byte_start = (label.span.lo().0 - source_file.start_pos.0) as usize;
                 let label_byte_end = (label.span.hi().0 - source_file.start_pos.0) as usize;
-                
+
                 // Convert byte indices to character indices for label
-                let label_char_start = source_content.get(..label_byte_start.min(source_content.len()))
+                let label_char_start = source_content
+                    .get(..label_byte_start.min(source_content.len()))
                     .map(|s| s.chars().count())
                     .unwrap_or(0);
-                let label_char_end = source_content.get(..label_byte_end.min(source_content.len()))
+                let label_char_end = source_content
+                    .get(..label_byte_end.min(source_content.len()))
                     .map(|s| s.chars().count())
                     .unwrap_or(label_char_start);
-                
+
                 report = report.with_label(
                     Label::new((&file_id_str, label_char_start..label_char_end))
                         .with_message(&label.message)
-                        .with_color(color)
+                        .with_color(color),
                 );
             }
         }
@@ -334,8 +359,11 @@ impl<'a> DiagnosticContext<'a> {
                 return;
             }
         };
-        
-        if let Err(e) = report.finish().print((&file_id_str, Source::from(source_content))) {
+
+        if let Err(e) = report
+            .finish()
+            .print((&file_id_str, Source::from(source_content)))
+        {
             eprintln!("Error printing diagnostic: {}", e);
         }
     }
@@ -346,7 +374,10 @@ impl<'a> fmt::Debug for DiagnosticContext<'a> {
         f.debug_struct("DiagnosticContext")
             .field("error_count", &self.error_count)
             .field("warning_count", &self.warning_count)
-            .field("diagnostics_count", &self.emitted_diagnostics.len())
+            .field(
+                "diagnostics_count",
+                &self.emitted_diagnostics.borrow().len(),
+            )
             .finish()
     }
 }
