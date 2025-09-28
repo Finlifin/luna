@@ -1,22 +1,10 @@
-use std::option;
-
 use super::*;
 use crate::{
-    context::{
-        CompilerContext,
-        scope::{Item, ScopeId},
-    },
-    hir::{
-        BinaryOp, BlockKind, Definition, Expr, Hir, HirMapping, Module, Property, SDefinition,
-        Struct,
-    },
-    hir_binary,
-    hir_expr,
-    hir_op,
-    hir_str,
-    parse::ast::{self, Ast, NodeKind},
-    vfs::{self, NodeIdExt, Vfs}, // HIR macros are automatically available through #[macro_export]
+    context::scope::Item,
+    hir::{BlockKind, Expr, Property},
+    hir_op, hir_str,
 };
+use ast::{Ast, NodeKind};
 
 use crate::{hir_int, hir_ref}; // Explicit macro imports
 

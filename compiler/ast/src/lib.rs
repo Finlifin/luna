@@ -1,5 +1,6 @@
 use std::fmt::Display;
 
+pub mod ast_visitor;
 use rustc_span::{SourceMap, Span};
 
 /// Node index type, for future extensibility

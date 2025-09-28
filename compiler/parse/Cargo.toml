@@ -1,0 +1,10 @@
+[package]
+name = "parse"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+diagnostic = { path = "../diagnostic" }
+lex = { path = "../lex" }
+ast = { path = "../ast" }
+rustc_span = { workspace = true }

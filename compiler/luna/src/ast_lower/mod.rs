@@ -2,15 +2,14 @@ mod definition;
 mod error;
 mod expr;
 mod pattern;
-
 use crate::{
     context::{CompilerContext, scope::Item},
     hir::{Definition, Hir, HirId, HirMapping, Module},
-    parse::ast::{self, Ast},
-    vfs::{NodeIdExt, Vfs},
 };
+use ast::Ast;
 use core::panic;
 pub use error::*;
+use vfs::{NodeIdExt, Vfs};
 
 pub struct LoweringContext<'hir, 'ctx, 'vfs> {
     pub ctx: &'ctx CompilerContext<'hir>,

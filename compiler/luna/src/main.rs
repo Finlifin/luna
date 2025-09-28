@@ -4,27 +4,17 @@ mod ast_lower;
 mod basic;
 mod comptime;
 mod context;
-mod diagnostic;
 mod hir;
 mod intrinsic;
-mod lex;
-mod parse;
-mod query;
 mod scan;
 mod typing;
-mod vfs;
 
 use std::path::Path;
 
+use diagnostic::FlurryError;
 use rustc_span::BytePos;
 
-use crate::{
-    context::{CompilerContext, scope::ScopeSExpressionVisitor},
-    diagnostic::FlurryError,
-    hir::Hir,
-    scan::{ImportResolver, ScanOrchestrator},
-    vfs::dump_vfs_to_s_expression,
-};
+use crate::{context::CompilerContext, hir::Hir, scan::ScanOrchestrator};
 
 fn main() {
     let hir = Hir::new();

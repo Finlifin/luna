@@ -1,6 +1,6 @@
-use rustc_span::{Span, BytePos};
+use diagnostic::{DiagnosticContext, FlurryError};
+use rustc_span::{BytePos, Span};
 use std::fmt;
-use crate::diagnostic::{FlurryError, DiagnosticContext};
 
 /// Global error codes for the lexer
 pub const LEX_ERROR_BASE: u32 = 1000;
@@ -17,25 +17,13 @@ pub const LEX_EMPTY_CHAR: u32 = LEX_ERROR_BASE + 8;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LexError {
     /// Unterminated string literal
-    UnterminatedString {
-        start: u32,
-        message: String,
-    },
+    UnterminatedString { start: u32, message: String },
     /// Unterminated character literal
-    UnterminatedChar {
-        start: u32,
-        message: String,
-    },
+    UnterminatedChar { start: u32, message: String },
     /// Unterminated comment
-    UnterminatedComment {
-        start: u32,
-        message: String,
-    },
+    UnterminatedComment { start: u32, message: String },
     /// Unterminated macro content
-    UnterminatedMacro {
-        start: u32,
-        message: String,
-    },
+    UnterminatedMacro { start: u32, message: String },
     /// Invalid escape sequence
     InvalidEscape {
         start: u32,
@@ -43,10 +31,7 @@ pub enum LexError {
         message: String,
     },
     /// Invalid number format
-    InvalidNumber {
-        start: u32,
-        message: String,
-    },
+    InvalidNumber { start: u32, message: String },
     /// Unexpected character
     UnexpectedChar {
         position: u32,
@@ -54,10 +39,7 @@ pub enum LexError {
         message: String,
     },
     /// Empty character literal
-    EmptyChar {
-        start: u32,
-        message: String,
-    },
+    EmptyChar { start: u32, message: String },
 }
 
 impl LexError {
@@ -91,26 +73,23 @@ impl LexError {
         let start = self.start_position();
         let end = match self {
             // 对于未终止的字符串，只高亮开始的引号
-            LexError::UnterminatedString { .. } => start + 1, 
+            LexError::UnterminatedString { .. } => start + 1,
             // 对于未终止的字符，只高亮开始的引号
-            LexError::UnterminatedChar { .. } => start + 1, 
-            // 对于空字符，高亮整个 '' 
-            LexError::EmptyChar { .. } => start + 2, 
+            LexError::UnterminatedChar { .. } => start + 1,
+            // 对于空字符，高亮整个 ''
+            LexError::EmptyChar { .. } => start + 2,
             // 对于无效转义，高亮转义序列 (如 \q 为 2 个字符)
-            LexError::InvalidEscape { .. } => start + 2, 
+            LexError::InvalidEscape { .. } => start + 2,
             // 对于无效数字，只高亮开始位置
             LexError::InvalidNumber { .. } => start + 1,
             // 对于意外字符，高亮整个字符（考虑Unicode）
             LexError::UnexpectedChar { .. } => start + 1,
             // 对于未终止的注释，高亮注释开始
             LexError::UnterminatedComment { .. } => start + 2,
-            // 对于未终止的宏，高亮宏开始 '{ 
+            // 对于未终止的宏，高亮宏开始 '{
             LexError::UnterminatedMacro { .. } => start + 2,
         };
-        Span::new(
-            BytePos(base_pos.0 + start),
-            BytePos(base_pos.0 + end)
-        )
+        Span::new(BytePos(base_pos.0 + start), BytePos(base_pos.0 + end))
     }
 }
 
@@ -152,30 +131,40 @@ impl FlurryError for LexError {
     fn emit(&self, diag_ctx: &DiagnosticContext, base_pos: rustc_span::BytePos) {
         let span = self.to_span(base_pos);
         let error_code = self.error_code();
-        
+
         match self {
             LexError::UnterminatedString { .. } => {
-                diag_ctx.error(self.message().to_string())
+                diag_ctx
+                    .error(self.message().to_string())
                     .with_code(error_code)
                     .with_primary_span(span)
                     .with_error_label(span, "String literal is not terminated".to_string())
-                    .with_help("Add a closing quote (\") to terminate the string literal".to_string())
+                    .with_help(
+                        "Add a closing quote (\") to terminate the string literal".to_string(),
+                    )
                     .emit(diag_ctx);
             }
             LexError::UnterminatedChar { .. } => {
-                diag_ctx.error(self.message().to_string())
+                diag_ctx
+                    .error(self.message().to_string())
                     .with_code(error_code)
                     .with_primary_span(span)
                     .with_error_label(span, "Character literal is not terminated".to_string())
-                    .with_help("Add a closing single quote (') to terminate the character literal".to_string())
+                    .with_help(
+                        "Add a closing single quote (') to terminate the character literal"
+                            .to_string(),
+                    )
                     .emit(diag_ctx);
             }
             LexError::EmptyChar { .. } => {
-                diag_ctx.error(self.message().to_string())
+                diag_ctx
+                    .error(self.message().to_string())
                     .with_code(error_code)
                     .with_primary_span(span)
                     .with_error_label(span, "Character literal cannot be empty".to_string())
-                    .with_help("Add a character between the single quotes, e.g., 'a' or '\\n'".to_string())
+                    .with_help(
+                        "Add a character between the single quotes, e.g., 'a' or '\\n'".to_string(),
+                    )
                     .emit(diag_ctx);
             }
             LexError::InvalidEscape { escape_char, .. } => {
@@ -187,15 +176,19 @@ impl FlurryError for LexError {
                     .emit(diag_ctx);
             }
             LexError::InvalidNumber { .. } => {
-                diag_ctx.error(self.message().to_string())
+                diag_ctx
+                    .error(self.message().to_string())
                     .with_code(error_code)
                     .with_primary_span(span)
                     .with_error_label(span, "Invalid number format".to_string())
-                    .with_help("Make sure decimal numbers have digits after the decimal point".to_string())
+                    .with_help(
+                        "Make sure decimal numbers have digits after the decimal point".to_string(),
+                    )
                     .emit(diag_ctx);
             }
             LexError::UnexpectedChar { char, .. } => {
-                diag_ctx.error(self.message().to_string())
+                diag_ctx
+                    .error(self.message().to_string())
                     .with_code(error_code)
                     .with_primary_span(span)
                     .with_error_label(span, format!("Unexpected character '{}'", char))
@@ -203,7 +196,8 @@ impl FlurryError for LexError {
                     .emit(diag_ctx);
             }
             LexError::UnterminatedComment { .. } => {
-                diag_ctx.error(self.message().to_string())
+                diag_ctx
+                    .error(self.message().to_string())
                     .with_code(error_code)
                     .with_primary_span(span)
                     .with_error_label(span, "Comment is not terminated".to_string())
@@ -211,7 +205,8 @@ impl FlurryError for LexError {
                     .emit(diag_ctx);
             }
             LexError::UnterminatedMacro { .. } => {
-                diag_ctx.error(self.message().to_string())
+                diag_ctx
+                    .error(self.message().to_string())
                     .with_code(error_code)
                     .with_primary_span(span)
                     .with_error_label(span, "Macro content is not terminated".to_string())

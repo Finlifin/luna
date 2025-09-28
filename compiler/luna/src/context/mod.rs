@@ -1,14 +1,10 @@
-use std::primitive;
-
-use rustc_span::SourceMap;
-
 use crate::{
-    context::scope::Item,
-    diagnostic::DiagnosticContext,
-    hir::{Definition, Expr, Hir, HirMapping, Module},
-    hir_expr, hir_int, hir_placeholder, hir_put_expr, hir_str, hir_symbol, hir_update,
+    hir::{Definition, Hir, Module},
+    hir_placeholder, hir_update,
     intrinsic::setup_intrinsics,
 };
+use diagnostic::DiagnosticContext;
+use rustc_span::SourceMap;
 
 pub mod scope;
 

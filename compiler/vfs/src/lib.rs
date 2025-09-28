@@ -12,7 +12,7 @@ use std::{
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_span::{FileNameDisplayPreference, SourceFile, SourceMap};
 
-use crate::parse::ast::Ast;
+use ast::Ast;
 
 pub struct Vfs {
     pub root: NodeId,

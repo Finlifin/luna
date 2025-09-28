@@ -1,13 +1,9 @@
 use super::*;
 use crate::{
-    context::{
-        CompilerContext,
-        scope::{Item, ScopeId, Symbol},
-    },
-    hir::{Definition, Expr, Hir, HirMapping, Module, Pattern, SDefinition, Struct},
-    parse::ast::{self, Ast},
-    vfs::{self, NodeIdExt, Vfs},
+    context::scope::{Item, Symbol},
+    hir::{Expr, Pattern},
 };
+use ast::Ast;
 
 impl<'hir, 'ctx, 'vfs> LoweringContext<'hir, 'ctx, 'vfs> {
     pub fn lower_pattern(

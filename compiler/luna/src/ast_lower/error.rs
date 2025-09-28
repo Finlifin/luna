@@ -1,4 +1,4 @@
-use crate::diagnostic::{DiagnosticContext, FlurryError};
+use diagnostic::{DiagnosticContext, FlurryError};
 
 // AST lowering error codes
 pub const LOWER_ERROR_BASE: u32 = 4000;

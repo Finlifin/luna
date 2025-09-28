@@ -1,5 +1,5 @@
-use crate::lex::TokenKind;
-use crate::parse::ast::NodeKind;
+use ast::NodeKind;
+use lex::TokenKind;
 
 /// 操作符信息，包含优先级和对应的AST标签
 #[derive(Debug, Clone, Copy)]

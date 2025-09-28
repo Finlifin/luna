@@ -5,16 +5,13 @@ pub mod macros;
 
 use crate::{
     basic::create_source_map,
-    context::scope::{ScopeId, ScopeManager, Symbol},
+    context::scope::{ScopeId, Symbol},
     intrinsic::Intrinsic,
-    parse::ast,
-    vfs,
 };
 use core::panic;
 use internment::{Arena, ArenaIntern};
 use rustc_data_structures::fx::FxHashMap;
 use rustc_span::SourceMap;
-use std::collections::HashSet;
 use std::{cell::RefCell, fmt::Display, mem};
 
 // there are lots of unsafe methods in this module,

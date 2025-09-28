@@ -1,22 +1,19 @@
-use rustc_span::SourceFile;
-use std::{collections::HashMap, sync::Arc};
-
 use super::{
     ast_scanner::AstScopeScanner,
     error::{ScanError, ScanResult},
 };
 use crate::{
     context::{CompilerContext, scope::ScopeId},
-    diagnostic::FlurryError,
     hir::{Hir, HirId, HirMapping},
-    lex::lex,
-    parse::{
-        ast::{self, Ast},
-        parser::Parser,
-    },
     scan::PendingImport,
-    vfs::{Node, NodeId, SpecialDirectoryType, Vfs},
 };
+use ast::Ast;
+use diagnostic::FlurryError;
+use lex::lex;
+use parse::parser::Parser;
+use rustc_span::SourceFile;
+use std::{collections::HashMap, sync::Arc};
+use vfs::{Node, NodeId, SpecialDirectoryType, Vfs};
 
 /// Virtual file system scan context: orchestrates scanning of directories and files into scopes.
 pub struct VfsScopeScanner<'hir, 'ctx, 'vfs> {
@@ -190,7 +187,7 @@ impl<'hir, 'ctx, 'vfs> VfsScopeScanner<'hir, 'ctx, 'vfs> {
         // 解析AST
         let mut parser = Parser::new(&self.hir.source_map, tokens, source_file.start_pos);
         parser.parse(self.ctx.diag_ctx());
-        self.vfs.put_ast(node_id, parser.ast);
+        self.vfs.put_ast(node_id, parser.finalize());
         let ast = self.vfs.get_ast(node_id).ok_or_else(|| {
             ScanError::InternalError("AST not found while we just added it".into())
         })?;
@@ -336,7 +333,7 @@ impl<'hir, 'ctx, 'vfs> VfsScopeScanner<'hir, 'ctx, 'vfs> {
         // 解析AST
         let mut parser = Parser::new(&self.hir.source_map, tokens, source_file.start_pos);
         parser.parse(self.ctx.diag_ctx());
-        self.vfs.put_ast(node_id, parser.ast);
+        self.vfs.put_ast(node_id, parser.finalize());
         let ast = self.vfs.get_ast(node_id).ok_or_else(|| {
             ScanError::InternalError("AST not found while we just added it".into())
         })?;

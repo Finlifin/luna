@@ -5,14 +5,13 @@ mod vfs_scanner;
 
 pub use error::*;
 pub use import_resolution::*;
-pub use vfs_scanner::*;
-
 use std::collections::HashMap;
+use vfs::Vfs;
+pub use vfs_scanner::*;
 
 use crate::{
     context::{CompilerContext, scope::ScopeId},
     hir::Hir,
-    vfs::Vfs,
 };
 
 /// Orchestrates the scan pass over the virtual file system, building scopes and collecting imports.

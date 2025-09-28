@@ -1,7 +1,5 @@
-use crate::{
-    diagnostic::{DiagnosticContext, FlurryError},
-    lex::TokenKind,
-};
+use diagnostic::{DiagnosticContext, FlurryError};
+use lex::TokenKind;
 
 pub const PARSE_ERROR_BASE: u32 = 2000;
 

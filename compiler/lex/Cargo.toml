@@ -1,0 +1,12 @@
+[package]
+name = "lex"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "lex"
+path = "src/lib.rs"
+
+[dependencies]
+rustc_span = { workspace = true }
+diagnostic = { path = "../diagnostic" }

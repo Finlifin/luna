@@ -1,9 +1,9 @@
 use rustc_span::BytePos;
 
-use crate::diagnostic::{DiagnosticContext, FlurryError};
-use crate::lex::{Token, TokenKind};
-use crate::parse::ast::*;
-use crate::parse::error::*;
+use super::error::*;
+use ast::*;
+use diagnostic::{DiagnosticContext, FlurryError};
+use lex::{Token, TokenKind};
 
 // hand-write peg parser
 pub struct Parser<'a> {

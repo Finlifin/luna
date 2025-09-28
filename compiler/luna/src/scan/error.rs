@@ -1,4 +1,4 @@
-use crate::diagnostic::{DiagnosticContext, FlurryError};
+use diagnostic::{DiagnosticContext, FlurryError};
 
 // Scope scanning error codes
 /// Base error code for scan pass errors.

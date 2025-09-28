@@ -1,7 +1,7 @@
-use crate::lex::TokenKind;
-use crate::parse::ast::*;
-use crate::parse::error::*;
-use crate::parse::parser::*;
+use super::error::*;
+use super::parser::*;
+use ast::*;
+use lex::TokenKind;
 
 impl Parser<'_> {
     // Try parse a single attribute prefix: `^ expr`.

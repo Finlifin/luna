@@ -1,5 +1,7 @@
 use std::default;
 
+use ast::{Ast, NodeIndex, NodeKind};
+
 use super::error::{ScanError, ScanResult};
 use crate::{
     context::{
@@ -7,8 +9,6 @@ use crate::{
         scope::{Item, ScopeId},
     },
     hir::*,
-    parse::ast::{self, Ast, NodeIndex, NodeKind},
-    vfs,
 };
 
 /// AST scan context that holds all necessary state for scanning AST into scopes.

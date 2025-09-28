@@ -1,17 +1,9 @@
 use super::*;
 use crate::{
-    context::{
-        CompilerContext,
-        scope::{Item, ScopeId},
-    },
-    hir::{
-        Definition, Expr, FnKind, Function, Hir, HirId, HirMapping, Module, Param, SDefinition,
-        Struct,
-    },
-    parse::ast::{self, Ast},
-    vfs::{self, NodeIdExt, Vfs},
-    // HIR macros are automatically available through #[macro_export]
+    context::scope::Item,
+    hir::{Definition, FnKind, Function, HirId, HirMapping, Param},
 };
+use ast::Ast;
 
 use crate::{hir_clauses, hir_module, hir_struct, hir_struct_field}; // Explicit macro imports
 

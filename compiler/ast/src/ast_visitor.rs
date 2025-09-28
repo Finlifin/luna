@@ -1,4 +1,4 @@
-use super::ast::{Ast, NodeIndex, NodeKind, NodeType};
+use super::{Ast, NodeIndex, NodeKind, NodeType};
 use rustc_span::SourceMap;
 
 /// AST visitor trait，用于遍历 AST 并对每个节点执行操作

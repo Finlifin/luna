@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use rustc_span::{FileNameDisplayPreference, SourceFile};
 
-use crate::vfs::{Node, NodeId, SpecialDirectoryType, SpecialFileType, Vfs};
+use crate::{Node, NodeId, SpecialDirectoryType, SpecialFileType, Vfs};
 
 /// VFS visitor trait，用于遍历 VFS 树并对每个节点执行操作
 pub trait VfsVisitor {

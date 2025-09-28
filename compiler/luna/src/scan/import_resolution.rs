@@ -1,13 +1,14 @@
 use std::{collections::HashMap, path, vec};
 
+use ast::{Ast, NodeIndex, NodeKind};
+use vfs::Vfs;
+
 use crate::{
     context::{
         CompilerContext,
         scope::{self, Item, ScopeId},
     },
     hir::{Hir, Import},
-    parse::ast::{self, Ast, NodeIndex, NodeKind},
-    vfs::Vfs,
 };
 
 use super::error::*;
