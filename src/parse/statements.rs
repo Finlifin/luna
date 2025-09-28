@@ -5,7 +5,7 @@ use crate::parse::error::*;
 use crate::parse::parser::*;
 
 impl Parser<'_> {
-    pub fn try_statement(&mut self) -> ParseResult {
+    pub fn try_statement_or_definition(&mut self) -> ParseResult {
         self.scoped(|p| {
             let token = p.peek_next_token();
             match token.kind {
@@ -22,6 +22,23 @@ impl Parser<'_> {
                 TokenKind::Continue => p.try_continue_statement(),
                 TokenKind::LBrace => p.try_block(),
 
+                TokenKind::Struct => p.try_struct(),
+                TokenKind::Enum => p.try_enum(),
+                TokenKind::Trait => p.try_trait(),
+                TokenKind::Impl => p.try_implementation(),
+                TokenKind::Extend => p.try_extension(),
+                TokenKind::Derive => p.try_derivation(),
+                TokenKind::Fn => p.try_function(),
+                TokenKind::Mod => p.try_module(),
+                TokenKind::Effect => p.try_effect(),
+                TokenKind::Typealias => p.try_typealias(),
+                TokenKind::Newtype => p.try_newtype(),
+                TokenKind::Case => p.try_case(),
+                TokenKind::Test => p.try_test(),
+                // TokenKind::Lemma
+                // TokenKind::Predicate
+                // TokenKind::Union
+                // TokenKind::Static
                 TokenKind::Axiom => p.try_unary(
                     Rule::semicolon("predicate expression", |p| p.try_expr()),
                     TokenKind::Axiom,
@@ -734,10 +751,9 @@ impl Parser<'_> {
     pub fn try_block(&mut self) -> ParseResult {
         self.scoped_with_expected_prefix(TokenKind::LBrace.as_ref(), |p| {
             let nodes = p.try_multi_with_bracket(
-                &[
-                    Rule::semicolon("statement", |p| p.try_statement()),
-                    Rule::semicolon("item", |p| p.try_item()),
-                ],
+                &[Rule::semicolon("statement or definition", |p| {
+                    p.try_statement_or_definition()
+                })],
                 (TokenKind::LBrace, TokenKind::RBrace),
             )?;
 
@@ -752,7 +768,7 @@ impl Parser<'_> {
             if p.peek(TokenKind::LBrace.as_ref()) {
                 p.try_block()
             } else {
-                p.try_statement()
+                p.try_statement_or_definition()
             }
         })
     }
@@ -971,14 +987,13 @@ impl Parser<'_> {
         })
     }
 
-    // TODO: 实际上, 现在遇到无效代码会直接结束, 应该添加错误处理
-    // TODO: 应该新增一个方法, 在try_multi后检查最后一项是否闭合
     pub fn try_file_scope(&mut self) -> ParseResult {
         self.scoped(|p| {
             let nodes = p.try_multi(&[
                 Rule::comma("property", |p| p.try_property()),
-                Rule::semicolon("item", |p| p.try_item()),
-                Rule::semicolon("statement", |p| p.try_statement()),
+                Rule::semicolon("statement or definition", |p| {
+                    p.try_statement_or_definition()
+                }),
             ])?;
             if p.peek_next_token().kind != TokenKind::Eof {
                 return Err(ParseError::unexpected_token(

@@ -135,6 +135,7 @@ impl Parser<'_> {
                 | TokenKind::True
                 | TokenKind::SelfCap
                 | TokenKind::SelfLower
+                | TokenKind::Underscore
                 | TokenKind::Null => p.try_atomic(),
 
                 TokenKind::Dot => p.try_range_to_or_symbol(option),

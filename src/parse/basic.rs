@@ -4,12 +4,70 @@ use crate::parse::error::*;
 use crate::parse::parser::*;
 
 impl Parser<'_> {
+    // Try parse a single attribute prefix: `^ expr`.
+    // Returns 0 (and consumes nothing) if the next token is not `^`.
+    pub fn try_attribute_prefix(&mut self) -> ParseResult {
+        self.scoped(|p| {
+            if p.peek_next_token().kind != TokenKind::Caret {
+                return Ok(0);
+            }
+            // consume '^'
+            p.eat_tokens(1);
+            let expr = p.try_expr()?;
+            if expr == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected attribute expression after `^`".to_string(),
+                    p.peek_next_token().kind,
+                    p.current_span(),
+                ));
+            }
+            Ok(expr)
+        })
+    }
+
+    // Try parse a chain of attribute prefixes. Stops when no further `^`.
+    // Returns an empty Vec if none found (and consumes nothing).
+    pub fn try_attribute_prefix_chain(&mut self) -> Result<Vec<NodeIndex>, ParseError> {
+        self.scoped(|p| {
+            let mut attrs = Vec::new();
+            loop {
+                let attr = p.try_attribute_prefix()?;
+                if attr == 0 {
+                    break;
+                }
+                attrs.push(attr);
+            }
+            Ok(attrs)
+        })
+    }
+
+    // TODO: GPT写的, 拉胯, 没有用scoped
+    fn wrap_with_attributes(&mut self, mut target: NodeIndex, attrs: &[NodeIndex]) -> NodeIndex {
+        // Writing order: first parsed attribute should be the outermost wrapper.
+        // attrs collected in textual order; we fold from last to first to keep that property.
+        for &attr_expr in attrs.iter().rev() {
+            let span_a = self.ast.get_span(attr_expr).unwrap_or(rustc_span::DUMMY_SP);
+            let span_t = self.ast.get_span(target).unwrap_or(rustc_span::DUMMY_SP);
+            let lo = std::cmp::min(span_a.lo(), span_t.lo());
+            let hi = std::cmp::max(span_a.hi(), span_t.hi());
+            let span = rustc_span::Span::new(lo, hi);
+            target = NodeBuilder::new(NodeKind::Attribute, span)
+                .add_single_child(attr_expr)
+                .add_single_child(target)
+                .build(&mut self.ast);
+        }
+        target
+    }
+
     pub fn try_atomic(&mut self) -> ParseResult {
         self.scoped(|p| {
             let next = p.peek_next_token();
             use TokenKind::*;
             let mut not_matched = false;
             let result = match next.kind {
+                Underscore => {
+                    Ok(NodeBuilder::new(NodeKind::Wildcard, p.next_token_span()).build(&mut p.ast))
+                }
                 Int => Ok(NodeBuilder::new(NodeKind::Int, p.next_token_span()).build(&mut p.ast)),
                 Real => Ok(NodeBuilder::new(NodeKind::Real, p.next_token_span()).build(&mut p.ast)),
                 Str => Ok(NodeBuilder::new(NodeKind::Str, p.next_token_span()).build(&mut p.ast)),
@@ -54,11 +112,11 @@ impl Parser<'_> {
             let dot_span = p.next_token_span(); // 获取点号的span
             p.eat_tokens(1);
             let id = p.try_id()?;
-            
+
             // 计算从点号开始到id结束的span
             let id_span = p.ast.get_span(id).unwrap_or(rustc_span::DUMMY_SP);
             let symbol_span = rustc_span::Span::new(dot_span.lo(), id_span.hi());
-            
+
             Ok(NodeBuilder::new(NodeKind::Symbol, symbol_span)
                 .add_single_child(id)
                 .build(&mut p.ast))
@@ -70,6 +128,8 @@ impl Parser<'_> {
         self.scoped(|p| {
             let mut nodes = Vec::new();
             'outer: loop {
+                // New: attempt attribute chain at start of each element parse round.
+                let attrs = p.try_attribute_prefix_chain()?; // may be empty, consumption rolled back automatically
                 let mut matched_any_rule = false;
                 'inner: for rule in rules {
                     let node: NodeIndex = match (rule.parser)(p) {
@@ -79,11 +139,16 @@ impl Parser<'_> {
                     };
 
                     matched_any_rule = true;
-                    nodes.push(node);
+                    let final_node = if !attrs.is_empty() {
+                        p.wrap_with_attributes(node, &attrs)
+                    } else {
+                        node
+                    };
+                    nodes.push(final_node);
                     if rule.ends_with_semicolon() {
                         // TODO: 如果规则以分号结尾, 有些特殊规则需要处理
                         if !p.eat_token(rule.separator) {
-                            if p.node_ends_with_right_brace(node) {
+                            if p.node_ends_with_right_brace() {
                                 continue 'outer;
                             } else {
                                 break 'outer;
@@ -101,6 +166,10 @@ impl Parser<'_> {
                 }
 
                 if !matched_any_rule {
+                    // If we had attributes but no rule matched, this is an error (attributes consumed tokens)
+                    // Detect by re-parsing single '^' lookahead: simpler: attrs empty means safe break.
+                    // Here we only know attrs from this round are empty (rolled back). To catch the case where
+                    // user wrote '^' then nothing legal, the attribute prefix parser would have errored already.
                     // 没有匹配到任何规则, 退出循环
                     break;
                 }
@@ -110,33 +179,9 @@ impl Parser<'_> {
         })
     }
 
-    // TODO: 非常低效
-    fn node_ends_with_right_brace(&self, node: NodeIndex) -> bool {
-        if let Some(span) = self.ast.get_span(node) {
-            let source_file = self.source_map.lookup_source_file(span.lo());
-
-            let source_content = match &source_file.src {
-                Some(content) => content.as_str(),
-                None => {
-                    eprintln!("Error: Source file content not available");
-                    return false;
-                }
-            };
-            
-            // Calculate the relative offset from the source file start
-            let file_start = source_file.start_pos;
-            let relative_end = (span.hi().0 - file_start.0) as usize;
-            
-            // Check if the last character of the node's span is a right brace
-            if relative_end > 0 && relative_end <= source_content.len() {
-                if let Some(last_char) = source_content.get(relative_end - 1..relative_end) {
-                    return last_char == "}";
-                }
-            } else {
-                eprintln!("Error: Node span is out of bounds in source content");
-            }
-        }
-        false
+    // 检查上一个 token 是否为右大括号
+    fn node_ends_with_right_brace(&self) -> bool {
+        self.current_token().kind == TokenKind::RBrace
     }
 
     pub fn try_multi_with_bracket(
@@ -151,11 +196,16 @@ impl Parser<'_> {
                 Err(err) => return Err(err),
             };
             if !p.eat_token(bracket.1) {
-                return Err(ParseError::unexpected_token(
-                    bracket.1,
-                    p.peek_next_token().kind,
-                    p.next_token_span(),
-                ));
+                let expected = rules
+                    .iter()
+                    .map(|rule| rule.name)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(ParseError::InvalidSyntax {
+                    message: format!("Expected {} or `{}`", expected, bracket.1.lexme()),
+                    found: p.next_token().kind,
+                    span: p.current_span(),
+                });
             }
             Ok(nodes)
         })
@@ -285,5 +335,32 @@ impl Rule {
     #[inline]
     pub fn ends_with_semicolon(&self) -> bool {
         self.separator == TokenKind::Semi
+    }
+}
+
+#[repr(u32)]
+pub enum BuiltinAttribute {
+    KWPrivate,
+    KWComptime,
+    KWPure,
+    KWSpec,
+    KWHandles,
+    KWAsync,
+    KWUnsafe,
+    KWGhost,
+}
+
+impl BuiltinAttribute {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BuiltinAttribute::KWPrivate => "flurry_kw_private",
+            BuiltinAttribute::KWComptime => "flurry_kw_comptime",
+            BuiltinAttribute::KWPure => "flurry_kw_pure",
+            BuiltinAttribute::KWSpec => "flurry_kw_spec",
+            BuiltinAttribute::KWHandles => "flurry_kw_handles",
+            BuiltinAttribute::KWAsync => "flurry_kw_async",
+            BuiltinAttribute::KWGhost => "flurry_kw_ghost",
+            BuiltinAttribute::KWUnsafe => "flurry_kw_unsafe",
+        }
     }
 }

@@ -140,6 +140,7 @@ impl Parser<'_> {
                 | TokenKind::True
                 | TokenKind::SelfCap
                 | TokenKind::SelfLower
+                | TokenKind::Underscore
                 | TokenKind::Null => p.try_atomic(),
 
                 TokenKind::LParen => p.try_unit_or_parenthesis_or_tuple(),
@@ -545,7 +546,7 @@ impl Parser<'_> {
             // TODO: 元组展开
             let args = p.try_multi_with_bracket(
                 &[
-                    Rule::comma("optional arg", |p| p.try_property_assign()),
+                    Rule::comma("optional argument", |p| p.try_property_assign()),
                     Rule::comma("function argument", |p| p.try_expr()),
                 ],
                 (TokenKind::LParen, TokenKind::RParen),
@@ -969,7 +970,7 @@ impl Parser<'_> {
         self.scoped_with_expected_prefix(TokenKind::Match.as_ref(), |p| {
             p.eat_tokens(1);
 
-            if !p.eat_token(TokenKind::LBrace) {
+            if !p.peek(TokenKind::LBrace.as_ref()) {
                 return Err(ParseError::invalid_syntax(
                     "Expected '{' after 'match' in post match expression".to_string(),
                     p.peek_next_token().kind,
@@ -977,15 +978,10 @@ impl Parser<'_> {
                 ));
             }
 
-            let arms = p.try_multi(&[Rule::comma("match arm", |p| p.try_pattern_arm())])?;
-
-            if !p.eat_token(TokenKind::RBrace) {
-                return Err(ParseError::invalid_syntax(
-                    "Expected '}' after match arms".to_string(),
-                    p.peek_next_token().kind,
-                    p.next_token_span(),
-                ));
-            }
+            let arms = p.try_multi_with_bracket(
+                &[Rule::comma("match arm", |p| p.try_pattern_arm())],
+                (TokenKind::LBrace, TokenKind::RBrace),
+            )?;
 
             Ok(NodeBuilder::new(NodeKind::PostMatch, p.current_span())
                 .add_single_child(left)

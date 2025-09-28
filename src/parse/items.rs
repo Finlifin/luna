@@ -156,12 +156,67 @@ impl Parser<'_> {
         })
     }
 
+    fn parse_predicate_clause(&mut self, keyword: TokenKind) -> ParseResult {
+        self.eat_tokens(1); // eat the keyword
+        let label_id = if self.eat_token(TokenKind::Colon) {
+            let id = self.try_id()?;
+            if id == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected an identifier after `:`".to_string(),
+                    TokenKind::Id,
+                    self.current_span(),
+                ));
+            }
+            id
+        } else {
+            0
+        };
+
+        let predicate = self.try_expr_without_object_call()?;
+        if predicate == 0 {
+            return Err(ParseError::invalid_syntax(
+                format!(
+                    "Expected a predicate expression after `{}`",
+                    keyword.lexme()
+                ),
+                self.peek_next_token().kind,
+                self.current_span(),
+            ));
+        }
+
+        Ok(NodeBuilder::new(
+            match keyword {
+                TokenKind::Requires => NodeKind::Requires,
+                TokenKind::Ensures => NodeKind::Ensures,
+                TokenKind::Decreases => NodeKind::Decreases,
+                // TokenKind::Outcomes => NodeKind::Outcomes,
+                _ => unreachable!(),
+            },
+            self.current_span(),
+        )
+        .add_single_child(label_id)
+        .add_single_child(predicate)
+        .build(&mut self.ast))
+    }
+
     // T
     // T:- trait_bound_expr
     // id: type_expr
     // .id: type_expr = default_value_expr
+    // requires(: label_id)? type_expr
+    // ensures(: label_id)? type_expr
+    // decreases(: label_id)? type_expr
+    // outcomes
     pub fn try_clause(&mut self) -> ParseResult {
         self.scoped(|p| {
+            match p.peek_next_token().kind {
+                TokenKind::Requires => return p.parse_predicate_clause(TokenKind::Requires),
+                TokenKind::Ensures => return p.parse_predicate_clause(TokenKind::Ensures),
+                TokenKind::Decreases => return p.parse_predicate_clause(TokenKind::Decreases),
+                // TokenKind::Outcomes => return parse_predicate_clause(p, TokenKind::Outcomes),
+                _ => (),
+            }
+
             if p.peek(&[TokenKind::Id, TokenKind::Colon]) {
                 let id = p.try_id()?;
                 p.eat_tokens(1); // eat the colon
@@ -191,7 +246,7 @@ impl Parser<'_> {
                     ));
                 }
                 return Ok(
-                    NodeBuilder::new(NodeKind::ClauseTraitBoundDecl, p.current_span())
+                    NodeBuilder::new(NodeKind::ClauseTraitBound, p.current_span())
                         .add_single_child(id)
                         .add_single_child(trait_bound)
                         .build(&mut p.ast),
@@ -249,27 +304,51 @@ impl Parser<'_> {
     pub fn try_clauses(&mut self) -> Result<Vec<NodeIndex>, ParseError> {
         self.scoped_with_expected_prefix(TokenKind::Where.as_ref(), |p| {
             p.eat_tokens(1); // eat the 'where'
-            p.try_multi(&[Rule::comma("clause", |p| p.try_clause())])
+            let clauses = p.try_multi(&[Rule::comma("clause", |p| p.try_clause())])?;
+            if clauses.is_empty() {
+                return Err(ParseError::invalid_syntax(
+                    "Expected at least one clause after `where`".to_string(),
+                    TokenKind::Id,
+                    p.current_span(),
+                ));
+            }
+            Ok(clauses)
         })
     }
 
-    pub fn try_item(&mut self) -> ParseResult {
-        self.scoped(|p| {
-            let next = p.peek_next_token();
-            return match next.kind {
-                TokenKind::Struct => p.try_struct(),
-                TokenKind::Enum => p.try_enum(),
-                TokenKind::Trait => p.try_trait(),
-                TokenKind::Impl => p.try_implementation(),
-                TokenKind::Extend => p.try_extension(),
-                TokenKind::Fn => p.try_function(),
-                TokenKind::Mod => p.try_module(),
-                // TokenKind::Effect => p.try_effect(),
-                // TokenKind::Typealias => p.try_typealias(),
-                // TokenKind::Newtype => p.try_newtype(),
-                // TokenKind::Handles => p.try_handles(),
-                _ => Ok(0),
-            };
+    // -> result_id: type_expr
+    // -> type_expr
+    pub fn try_return_type(&mut self) -> ParseResult {
+        self.scoped_with_expected_prefix(TokenKind::Arrow.as_ref(), |p| {
+            p.eat_tokens(1); // eat the '->'
+            if p.peek(&[TokenKind::Id, TokenKind::Colon]) {
+                let id = p.try_id()?;
+                p.eat_tokens(1); // eat the colon
+                let ty = p.try_expr_without_object_call()?;
+                if ty == 0 {
+                    return Err(ParseError::invalid_syntax(
+                        "Expected a type after `:`".to_string(),
+                        p.peek_next_token().kind,
+                        p.current_span(),
+                    ));
+                }
+                return Ok(
+                    NodeBuilder::new(NodeKind::ReturnTypeWithId, p.current_span())
+                        .add_single_child(id)
+                        .add_single_child(ty)
+                        .build(&mut p.ast),
+                );
+            }
+
+            let ty = p.try_expr_without_object_call()?;
+            if ty == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected a type after `->`".to_string(),
+                    p.peek_next_token().kind,
+                    p.current_span(),
+                ));
+            }
+            Ok(ty)
         })
     }
 
@@ -292,8 +371,9 @@ impl Parser<'_> {
                 &[
                     Rule::comma("struct field", |p| p.try_struct_field()),
                     Rule::comma("property", |p| p.try_property()),
-                    Rule::semicolon("item", |p| p.try_item()),
-                    Rule::semicolon("statement", |p| p.try_statement()),
+                    Rule::semicolon("statement or definition", |p| {
+                        p.try_statement_or_definition()
+                    }),
                 ],
                 (TokenKind::LBrace, TokenKind::RBrace),
             )?;
@@ -373,8 +453,9 @@ impl Parser<'_> {
                 &[
                     Rule::comma("enum variant", |p| p.try_enum_variant()),
                     Rule::comma("property", |p| p.try_property()),
-                    Rule::semicolon("item", |p| p.try_item()),
-                    Rule::semicolon("statement", |p| p.try_statement()),
+                    Rule::semicolon("statement or definition", |p| {
+                        p.try_statement_or_definition()
+                    }),
                 ],
                 (TokenKind::LBrace, TokenKind::RBrace),
             )?;
@@ -507,8 +588,9 @@ impl Parser<'_> {
             let nodes = p.try_multi_with_bracket(
                 &[
                     Rule::comma("property", |p| p.try_property()),
-                    Rule::semicolon("item", |p| p.try_item()),
-                    Rule::semicolon("statement", |p| p.try_statement()),
+                    Rule::semicolon("statement or definition", |p| {
+                        p.try_statement_or_definition()
+                    }),
                 ],
                 (TokenKind::LBrace, TokenKind::RBrace),
             )?;
@@ -542,19 +624,7 @@ impl Parser<'_> {
                 (TokenKind::LParen, TokenKind::RParen),
             )?;
 
-            let return_type = if p.eat_token(TokenKind::Arrow) {
-                let ty = p.try_expr_without_object_call()?;
-                if ty == 0 {
-                    return Err(ParseError::invalid_syntax(
-                        "Expected a return type after `->`".to_string(),
-                        p.peek_next_token().kind,
-                        p.current_span(),
-                    ));
-                }
-                ty
-            } else {
-                0
-            };
+            let return_type = p.try_return_type()?;
 
             let handles = if p.eat_token(TokenKind::Handles) {
                 let eff = p.try_expr_without_object_call()?;
@@ -605,8 +675,9 @@ impl Parser<'_> {
                 let nodes = p.try_multi_with_bracket(
                     &[
                         Rule::comma("property", |p| p.try_property()),
-                        Rule::semicolon("item", |p| p.try_item()),
-                        Rule::semicolon("statement", |p| p.try_statement()),
+                        Rule::semicolon("statement or definition", |p| {
+                            p.try_statement_or_definition()
+                        }),
                     ],
                     (TokenKind::LBrace, TokenKind::RBrace),
                 )?;
@@ -660,8 +731,9 @@ impl Parser<'_> {
             let nodes = p.try_multi_with_bracket(
                 &[
                     Rule::comma("property", |p| p.try_property()),
-                    Rule::semicolon("item", |p| p.try_item()),
-                    Rule::semicolon("statement", |p| p.try_statement()),
+                    Rule::semicolon("statement or definition", |p| {
+                        p.try_statement_or_definition()
+                    }),
                 ],
                 (TokenKind::LBrace, TokenKind::RBrace),
             )?;
@@ -712,8 +784,9 @@ impl Parser<'_> {
                 let nodes = p.try_multi_with_bracket(
                     &[
                         Rule::comma("property", |p| p.try_property()),
-                        Rule::semicolon("item", |p| p.try_item()),
-                        Rule::semicolon("statement", |p| p.try_statement()),
+                        Rule::semicolon("statement or definition", |p| {
+                            p.try_statement_or_definition()
+                        }),
                     ],
                     (TokenKind::LBrace, TokenKind::RBrace),
                 )?;
@@ -741,8 +814,9 @@ impl Parser<'_> {
                 let nodes = p.try_multi_with_bracket(
                     &[
                         Rule::comma("property", |p| p.try_property()),
-                        Rule::semicolon("item", |p| p.try_item()),
-                        Rule::semicolon("statement", |p| p.try_statement()),
+                        Rule::semicolon("statement or definition", |p| {
+                            p.try_statement_or_definition()
+                        }),
                     ],
                     (TokenKind::LBrace, TokenKind::RBrace),
                 )?;
@@ -796,8 +870,9 @@ impl Parser<'_> {
                 let nodes = p.try_multi_with_bracket(
                     &[
                         Rule::comma("property", |p| p.try_property()),
-                        Rule::semicolon("item", |p| p.try_item()),
-                        Rule::semicolon("statement", |p| p.try_statement()),
+                        Rule::semicolon("statement or definition", |p| {
+                            p.try_statement_or_definition()
+                        }),
                     ],
                     (TokenKind::LBrace, TokenKind::RBrace),
                 )?;
@@ -825,8 +900,9 @@ impl Parser<'_> {
                 let nodes = p.try_multi_with_bracket(
                     &[
                         Rule::comma("property", |p| p.try_property()),
-                        Rule::semicolon("item", |p| p.try_item()),
-                        Rule::semicolon("statement", |p| p.try_statement()),
+                        Rule::semicolon("statement or definition", |p| {
+                            p.try_statement_or_definition()
+                        }),
                     ],
                     (TokenKind::LBrace, TokenKind::RBrace),
                 )?;
@@ -840,6 +916,260 @@ impl Parser<'_> {
                     .add_multiple_children(clauses)
                     .add_single_child(block)
                     .build(&mut p.ast))
+            }
+        })
+    }
+
+    pub fn try_derivation(&mut self) -> ParseResult {
+        self.scoped_with_expected_prefix(TokenKind::Derive.as_ref(), |p| {
+            p.eat_tokens(1); // eat the 'derive'
+            let traits =
+                p.try_multi(&[Rule::comma("trait", |p| p.try_expr_without_object_call())])?;
+            if traits.is_empty() {
+                return Err(ParseError::invalid_syntax(
+                    "Expected at least one trait to derive".to_string(),
+                    p.peek_next_token().kind,
+                    p.current_span(),
+                ));
+            }
+
+            let target = p.try_expr_without_object_call()?;
+            if target == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected a target type to derive for".to_string(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+
+            let clauses = p.try_clauses()?;
+
+            Ok(NodeBuilder::new(NodeKind::DeriveDef, p.current_span())
+                .add_multiple_children(traits)
+                .add_single_child(target)
+                .add_multiple_children(clauses)
+                .build(&mut p.ast))
+        })
+    }
+
+    pub fn try_effect(&mut self) -> ParseResult {
+        self.scoped_with_expected_prefix(TokenKind::Effect.as_ref(), |p| {
+            p.eat_tokens(1); // eat the 'effect'
+            let id = p.try_id()?;
+            if !p.peek(TokenKind::LParen.as_ref()) {
+                return Err(ParseError::unexpected_token(
+                    TokenKind::LParen,
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+            let params = p.try_multi_with_bracket(
+                &[Rule::comma("parameter", |p| p.try_param())],
+                (TokenKind::LParen, TokenKind::RParen),
+            )?;
+
+            let return_type = p.try_return_type()?;
+
+            let clauses = p.try_clauses()?;
+
+            Ok(NodeBuilder::new(NodeKind::EffectDef, p.current_span())
+                .add_single_child(id)
+                .add_multiple_children(params)
+                .add_single_child(return_type)
+                .add_multiple_children(clauses)
+                .build(&mut p.ast))
+        })
+    }
+
+    // typealias id ( <param*> )? = type_expr
+    pub fn try_typealias(&mut self) -> ParseResult {
+        self.scoped_with_expected_prefix(TokenKind::Typealias.as_ref(), |p| {
+            p.eat_tokens(1);
+            let id = p.try_id()?;
+            if id == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected identifier after 'typealias'".to_string(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+
+            let params = p.try_multi_with_bracket(
+                &[Rule::comma("parameter", |p| p.try_param())],
+                (TokenKind::Lt, TokenKind::Gt),
+            )?;
+
+            if !p.eat_token(TokenKind::Eq) {
+                return Err(ParseError::unexpected_token(
+                    TokenKind::Eq,
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+            let type_expr = p.try_expr_without_object_call()?;
+            if type_expr == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected type expression after '='".to_string(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+
+            Ok(NodeBuilder::new(NodeKind::Typealias, p.current_span())
+                .add_single_child(id)
+                .add_multiple_children(params)
+                .add_single_child(type_expr)
+                .build(&mut p.ast))
+        })
+    }
+
+    // newtype id ( <param*> )? = type_expr
+    pub fn try_newtype(&mut self) -> ParseResult {
+        self.scoped_with_expected_prefix(TokenKind::Newtype.as_ref(), |p| {
+            p.eat_tokens(1);
+            let id = p.try_id()?;
+            if id == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected identifier after 'newtype'".to_string(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+
+            let params = p.try_multi_with_bracket(
+                &[Rule::comma("parameter", |p| p.try_param())],
+                (TokenKind::Lt, TokenKind::Gt),
+            )?;
+
+            if !p.eat_token(TokenKind::Eq) {
+                return Err(ParseError::unexpected_token(
+                    TokenKind::Eq,
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+            let type_expr = p.try_expr_without_object_call()?;
+            if type_expr == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected type expression after '='".to_string(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+
+            Ok(NodeBuilder::new(NodeKind::Newtype, p.current_span())
+                .add_single_child(id)
+                .add_multiple_children(params)
+                .add_single_child(type_expr)
+                .build(&mut p.ast))
+        })
+    }
+
+    // test id? block
+    pub fn try_test(&mut self) -> ParseResult {
+        self.scoped_with_expected_prefix(TokenKind::Test.as_ref(), |p| {
+            p.eat_tokens(1); // eat the 'test'
+            let id = p.try_id()?;
+            if !p.peek(TokenKind::LBrace.as_ref()) {
+                return Err(ParseError::invalid_syntax(
+                    "expected a block after `test` declaration".to_string(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+            let nodes = p.try_multi_with_bracket(
+                &[
+                    Rule::comma("property", |p| p.try_property()),
+                    Rule::semicolon("statement or definition", |p| {
+                        p.try_statement_or_definition()
+                    }),
+                ],
+                (TokenKind::LBrace, TokenKind::RBrace),
+            )?;
+            let block = NodeBuilder::new(NodeKind::Block, p.current_span())
+                .add_multiple_children(nodes)
+                .build(&mut p.ast);
+            Ok(NodeBuilder::new(NodeKind::TestDef, p.current_span())
+                .add_single_child(id)
+                .add_single_child(block)
+                .build(&mut p.ast))
+        })
+    }
+
+    // case id ((param*))? -> return_type clauses? ((= expr) | block)
+    pub fn try_case(&mut self) -> ParseResult {
+        self.scoped_with_expected_prefix(TokenKind::Case.as_ref(), |p| {
+            p.eat_tokens(1); // eat the 'case'
+            let id = p.try_id()?;
+            if id == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected an identifier after `case`".to_string(),
+                    TokenKind::Id,
+                    p.current_span(),
+                ));
+            }
+
+            let params = p.try_multi_with_bracket(
+                &[Rule::comma("parameter", |p| p.try_param())],
+                (TokenKind::LParen, TokenKind::RParen),
+            )?;
+
+            let return_type = p.try_return_type()?;
+            if return_type == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected a return type after `->`".to_string(),
+                    p.peek_next_token().kind,
+                    p.current_span(),
+                ));
+            }
+
+            let clauses = p.try_clauses()?;
+
+            if p.eat_token(TokenKind::Eq) {
+                let expr = p.try_expr()?;
+                if expr == 0 {
+                    return Err(ParseError::invalid_syntax(
+                        "Expected an expression after `=`".to_string(),
+                        p.peek_next_token().kind,
+                        p.current_span(),
+                    ));
+                }
+                Ok(NodeBuilder::new(NodeKind::CaseDef, p.current_span())
+                    .add_single_child(id)
+                    .add_multiple_children(params)
+                    .add_single_child(return_type)
+                    .add_multiple_children(clauses)
+                    .add_single_child(expr)
+                    .build(&mut p.ast))
+            } else if p.peek(TokenKind::LBrace.as_ref()) {
+                let nodes = p.try_multi_with_bracket(
+                    &[
+                        Rule::comma("property", |p| p.try_property()),
+                        Rule::semicolon("statement or definition", |p| {
+                            p.try_statement_or_definition()
+                        }),
+                    ],
+                    (TokenKind::LBrace, TokenKind::RBrace),
+                )?;
+
+                let block = NodeBuilder::new(NodeKind::Block, p.current_span())
+                    .add_multiple_children(nodes)
+                    .build(&mut p.ast);
+
+                Ok(NodeBuilder::new(NodeKind::CaseDef, p.current_span())
+                    .add_single_child(id)
+                    .add_multiple_children(params)
+                    .add_single_child(return_type)
+                    .add_multiple_children(clauses)
+                    .add_single_child(block)
+                    .build(&mut p.ast))
+            } else {
+                Err(ParseError::invalid_syntax(
+                    "Expected `=` followed by an expression or a block after case declaration"
+                        .to_string(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ))
             }
         })
     }

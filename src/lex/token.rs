@@ -5,164 +5,164 @@ pub type Index = usize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TokenKind {
     // operators
-    Plus,           // +
-    PlusEq,         // +=
-    PlusPlus,       // ++
-    SeparatedPlus,  // " + "
-    Lt,             // <
-    LtEq,           // <=
-    SeparatedLt,    // " < "
-    Gt,             // >
-    GtEq,           // >=
-    SeparatedGt,    // " > "
-    Bang,           // !
-    BangEq,         // !=
-    Minus,          // -
-    Arrow,          // ->
-    MinusEq,        // -=
-    SeparatedMinus, // " - "
-    Dot,            // .
-    Colon,          // :
-    ColonColon,     // ::
-    ColonTilde,     // :~
-    ColonMinus,     // :-
-    Star,           // *
-    StarEq,         // *=
-    SeparatedStar,  // " * "
-    Slash,          // /
-    SlashEq,        // /=
-    SeparatedSlash, // " / "
-    Percent,        // %
-    PercentEq,      // %=
+    Plus,             // +
+    PlusEq,           // +=
+    PlusPlus,         // ++
+    SeparatedPlus,    // " + "
+    Lt,               // <
+    LtEq,             // <=
+    SeparatedLt,      // " < "
+    Gt,               // >
+    GtEq,             // >=
+    SeparatedGt,      // " > "
+    Bang,             // !
+    BangEq,           // !=
+    Minus,            // -
+    Arrow,            // ->
+    MinusEq,          // -=
+    SeparatedMinus,   // " - "
+    Dot,              // .
+    Colon,            // :
+    ColonColon,       // ::
+    ColonTilde,       // :~
+    ColonMinus,       // :-
+    Star,             // *
+    StarEq,           // *=
+    SeparatedStar,    // " * "
+    Slash,            // /
+    SlashEq,          // /=
+    SeparatedSlash,   // " / "
+    Percent,          // %
+    PercentEq,        // %=
     SeparatedPercent, // " % "
-    Eq,             // =
-    FatArrow,       // =>
-    EqEq,           // ==
-    EqEqEq,         // ==>
-    Tilde,          // ~
-    TildeGt,        // ~>
-    Pipe,           // |
-    PipeGt,         // |>
-    Hash,           // #
-    Question,       // ?
-    Backslash,      // \
-    Ampersand,      // &
-    LBracket,       // [
-    RBracket,       // ]
-    LParen,         // (
-    RParen,         // )
-    LBrace,         // {
-    RBrace,         // }
-    Comma,          // ,
-    Quote,          // '
-    Semi,           // ;
-    Caret,          // ^
-    Dollar,         // $
-    At,             // @
-    Underscore,     // _
+    Eq,               // =
+    FatArrow,         // =>
+    EqEq,             // ==
+    EqEqEq,           // ==>
+    Tilde,            // ~
+    TildeGt,          // ~>
+    Pipe,             // |
+    PipeGt,           // |>
+    Hash,             // #
+    Question,         // ?
+    Backslash,        // \
+    Ampersand,        // &
+    LBracket,         // [
+    RBracket,         // ]
+    LParen,           // (
+    RParen,           // )
+    LBrace,           // {
+    RBrace,           // }
+    Comma,            // ,
+    Quote,            // '
+    Semi,             // ;
+    Caret,            // ^
+    Dollar,           // $
+    At,               // @
+    Underscore,       // _
 
     // primitive literals
-    Str,            // "..."
-    Int,            // 123
-    IntBin,         // 0b1010
-    IntOct,         // 0o777
-    IntHex,         // 0xFF
-    Real,           // 123.45
-    RealSci,        // 1.23e-4 (scientific notation)
-    Char,           // 'a' or '\n' or '\x{1F600}'
+    Str,     // "..."
+    Int,     // 123
+    IntBin,  // 0b1010
+    IntOct,  // 0o777
+    IntHex,  // 0xFF
+    Real,    // 123.45
+    RealSci, // 1.23e-4 (scientific notation)
+    Char,    // 'a' or '\n' or '\x{1F600}'
 
     // keywords
-    And,            // and
-    As,             // as
-    Asserts,        // asserts
-    Assumes,        // assumes
-    Async,          // async
-    Atomic,         // atomic
-    Axiom,          // axiom
-    Await,          // await
-    Bool,           // bool
-    Break,          // break
-    Case,           // case
-    Catch,          // catch
-    Comptime,       // comptime
-    Const,          // const
-    Continue,       // continue
-    Decreases,      // decreases
-    Define,         // define
-    Derive,         // derive
-    Do,             // do
-    Dyn,            // dyn
-    Effect,         // effect
-    Else,           // else
-    Ensures,        // ensures
-    Enum,           // enum
-    Error,          // error
-    Exists,         // exists
-    Extend,         // extend
-    Extern,         // extern
-    False,          // false
-    Fn,             // fn
-    FnCap,          // Fn
-    For,            // for
-    Forall,         // forall
-    Ghost,          // ghost
-    Handles,        // handles
-    If,             // if
-    Impl,           // impl
-    In,             // in
-    Inline,         // inline
-    Invariant,      // invariant
-    Is,             // is
-    Itself,         // itself
-    Lemma,          // lemma
-    Let,            // let
-    Match,          // match
-    Matches,        // matches
-    Move,           // move
-    Mod,            // mod
-    Mut,            // mut
-    Newtype,        // newtype
-    Not,            // not
-    Null,           // null
-    Opaque,         // opaque
-    Opens,          // opens
-    Or,             // or
-    Outcomes,        // outcome
-    Perform,        // perform
-    Predicate,      // predicate
-    Private,        // private
-    Pub,            // pub
-    Pure,           // pure
-    Ref,            // ref
-    Refines,        // refines
-    Requires,       // requires
-    Resume,         // resume
-    Return,         // return
-    SelfLower,      // self
-    SelfCap,        // Self
-    Spec,           // spec
-    Static,         // static
-    Struct,         // struct
-    Test,           // test
-    Trait,          // trait
-    True,           // true
-    Typealias,      // typealias
-    Union,          // union
-    Unsafe,         // unsafe
-    Use,            // use
-    When,           // when
-    While,          // while
-    Where,          // where
+    And,       // and
+    As,        // as
+    Asserts,   // asserts
+    Assumes,   // assumes
+    Async,     // async
+    Atomic,    // atomic
+    Axiom,     // axiom
+    Await,     // await
+    Bool,      // bool
+    Break,     // break
+    Case,      // case
+    Catch,     // catch
+    Comptime,  // comptime
+    Const,     // const
+    Continue,  // continue
+    Decreases, // decreases
+    Define,    // define
+    Derive,    // derive
+    Do,        // do
+    Dyn,       // dyn
+    Effect,    // effect
+    Else,      // else
+    Ensures,   // ensures
+    Enum,      // enum
+    Error,     // error
+    Exists,    // exists
+    Extend,    // extend
+    Extern,    // extern
+    False,     // false
+    Fn,        // fn
+    FnCap,     // Fn
+    For,       // for
+    Forall,    // forall
+    Ghost,     // ghost
+    Handles,   // handles
+    If,        // if
+    Impl,      // impl
+    In,        // in
+    Inline,    // inline
+    Invariant, // invariant
+    Is,        // is
+    Itself,    // itself
+    Lambda,    // lambda
+    Lemma,     // lemma
+    Let,       // let
+    Lift,      // lift
+    Match,     // match
+    Matches,   // matches
+    Move,      // move
+    Mod,       // mod
+    Newtype,   // newtype
+    Not,       // not
+    Null,      // null
+    Opaque,    // opaque
+    Opens,     // opens
+    Or,        // or
+    Outcomes,  // outcome
+    Predicate, // predicate
+    Private,   // private
+    Pure,      // pure
+    KwQuote,   // quote
+    Ref,       // ref
+    Refines,   // refines
+    Requires,  // requires
+    Resume,    // resume
+    Return,    // return
+    SelfLower, // self
+    SelfCap,   // Self
+    Spec,      // spec
+    Static,    // static
+    Struct,    // struct
+    Test,      // test
+    Trait,     // trait
+    True,      // true
+    Typealias, // typealias
+    Union,     // union
+    Unsafe,    // unsafe
+    Use,       // use
+    When,      // when
+    While,     // while
+    Where,     // where
 
     // others
-    Id,             // identifier
-    MacroContent,   // macro content, 当lexer碰到`'`字符后, 向后看到第一个非空字符为 `{` 的时候, 
-                    // 认为是宏内容, 开始识别macro content, 并按栈式处理遇到的 `{` 和 `}`, 当最后一个 `}` 闭合栈时, 
-                    // 结束macro content, 这时的 `from` 是 `'` 的位置, `to` 是最后一个 `}` 的位置
-    Comment,        // -- comment or {- comment -}
-    Invalid,        // invalid token
-    Sof,            // start of file
-    Eof,            // end of file
+    Id,           // identifier
+    MacroContent, // macro content, 当lexer碰到`'`字符后, 向后看到第一个非空字符为 `{` 的时候,
+    // 认为是宏内容, 开始识别macro content, 并按栈式处理遇到的 `{` 和 `}`, 当最后一个 `}` 闭合栈时,
+    // 结束macro content, 这时的 `from` 是 `'` 的位置, `to` 是最后一个 `}` 的位置
+    Comment, // -- comment or {- comment -}
+    Invalid, // invalid token
+    Sof,     // start of file
+    Eof,     // end of file
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -179,7 +179,7 @@ impl AsRef<[TokenKind]> for TokenKind {
 }
 
 impl TokenKind {
-    pub fn lexme(&self) -> &'static str {
+    pub fn lexme(self) -> &'static str {
         match self {
             TokenKind::Plus => "+",
             TokenKind::PlusEq => "+=",
@@ -278,13 +278,14 @@ impl TokenKind {
             TokenKind::Invariant => "invariant",
             TokenKind::Is => "is",
             TokenKind::Itself => "itself",
+            TokenKind::Lambda => "lambda",
             TokenKind::Lemma => "lemma",
             TokenKind::Let => "let",
+            TokenKind::Lift => "lift",
             TokenKind::Match => "match",
             TokenKind::Matches => "matches",
             TokenKind::Move => "move",
             TokenKind::Mod => "mod",
-            TokenKind::Mut => "mut",
             TokenKind::Newtype => "newtype",
             TokenKind::Not => "not",
             TokenKind::Null => "null",
@@ -292,11 +293,10 @@ impl TokenKind {
             TokenKind::Opens => "opens",
             TokenKind::Or => "or",
             TokenKind::Outcomes => "outcomes",
-            TokenKind::Perform => "perform",
             TokenKind::Predicate => "predicate",
             TokenKind::Private => "private",
-            TokenKind::Pub => "pub",
             TokenKind::Pure => "pure",
+            TokenKind::KwQuote => "quote",
             TokenKind::Ref => "ref",
             TokenKind::Refines => "refines",
             TokenKind::Requires => "requires",
@@ -384,13 +384,14 @@ impl Token {
         map.insert("invariant", TokenKind::Invariant);
         map.insert("is", TokenKind::Is);
         map.insert("itself", TokenKind::Itself);
+        map.insert("lambda", TokenKind::Lambda);
         map.insert("lemma", TokenKind::Lemma);
         map.insert("let", TokenKind::Let);
+        map.insert("lift", TokenKind::Lift);
         map.insert("match", TokenKind::Match);
         map.insert("matches", TokenKind::Matches);
         map.insert("move", TokenKind::Move);
         map.insert("mod", TokenKind::Mod);
-        map.insert("mut", TokenKind::Mut);
         map.insert("newtype", TokenKind::Newtype);
         map.insert("not", TokenKind::Not);
         map.insert("null", TokenKind::Null);
@@ -398,11 +399,10 @@ impl Token {
         map.insert("opens", TokenKind::Opens);
         map.insert("or", TokenKind::Or);
         map.insert("outcomes", TokenKind::Outcomes);
-        map.insert("perform", TokenKind::Perform);
         map.insert("predicate", TokenKind::Predicate);
         map.insert("private", TokenKind::Private);
-        map.insert("pub", TokenKind::Pub);
         map.insert("pure", TokenKind::Pure);
+        map.insert("quote", TokenKind::KwQuote);
         map.insert("ref", TokenKind::Ref);
         map.insert("refines", TokenKind::Refines);
         map.insert("requires", TokenKind::Requires);
@@ -423,6 +423,7 @@ impl Token {
         map.insert("when", TokenKind::When);
         map.insert("while", TokenKind::While);
         map.insert("where", TokenKind::Where);
+        map.insert("_", TokenKind::Underscore);
         map
     }
 }

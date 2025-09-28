@@ -170,6 +170,15 @@ impl Parser<'_> {
         }
     }
 
+    /// Get the previous token (relative to current cursor position)
+    pub fn previous_token(&self) -> Token {
+        if self.cursor == 0 {
+            Token::new(TokenKind::Eof, 0, 0)
+        } else {
+            self.tokens[self.cursor - 1]
+        }
+    }
+
     /// Get the span from the cursor stack top to cursor + 1
     pub fn current_span(&self) -> rustc_span::Span {
         if let Some(&start) = self.cursor_stack.last() {

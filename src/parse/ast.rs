@@ -1,14 +1,13 @@
-use core::slice;
 use std::fmt::Display;
 
-use rustc_span::{BytePos, SourceMap, Span};
+use rustc_span::{SourceMap, Span};
 
 /// Node index type, for future extensibility
 pub type NodeIndex = u32;
 
 #[derive(Debug, Clone)]
 pub struct Ast {
-    // 一下三个字段, 每一位元素对应一个节点
+    // 以下三个字段, 每一位元素对应一个节点
     // 节点的索引从 1 开始, 0 保留用于无效节点
     // 对于一个节点, 如 for i :: nodes[i] == Add(lhs, rhs), 则children[i] == lhs, children[i + 1] == rhs
     // 子节点也可能被映射为多个次子节点,
@@ -88,6 +87,17 @@ impl Ast {
             return None;
         }
         Some(self.nodes[node_index as usize])
+    }
+
+    pub fn get_node(&self, node_index: NodeIndex) -> Option<(NodeKind, Span, &[NodeIndex])> {
+        if node_index == 0 || node_index > self.nodes.len() as NodeIndex {
+            return None;
+        }
+        Some((
+            self.nodes[node_index as usize],
+            self.spans[node_index as usize],
+            self.get_children(node_index),
+        ))
     }
 
     /// 获取节点的 span
@@ -172,6 +182,7 @@ pub enum NodeKind {
     Bool,
     Unit,
     Symbol,
+    Wildcard, // _
 
     // exprs
     DefinitionAsExpr, // a
@@ -339,10 +350,10 @@ pub enum NodeKind {
     FunctionDef, // a, N, b, c, N, d
     // fn id? <params> (-> return_type)? clauses? block
     DiamondFunctionDef, // a, B, b, N, c
-    // effect id? ( params ) clauses?
+    // effect id? ( params ) (-> return_type)? clauses?
     EffectDef, // a, N, b, N
-    // handles eff fn ( params ) (-> return_type)? clauses? block
-    HandlesDef, // a, N, b, N, c
+    // id: type_expr
+    ReturnTypeWithId, // a, b
 
     // struct id? clauses? block
     StructDef, // a, N, b
@@ -378,6 +389,9 @@ pub enum NodeKind {
     // derive traits for type clauses?
     DeriveDef, // N, a, N
 
+    // case id ((params))? -> return_type clauses? ((= expr) | block)
+    CaseDef, // a, N, b, N, c
+
     // typealias id (< params >) = type
     Typealias, // a, N, b
     // newtype id (< params >) = type
@@ -385,6 +399,8 @@ pub enum NodeKind {
 
     // mod id? clauses? block
     ModuleDef, // a, N, b
+    // test id? block
+    TestDef, // a, b
 
     // imports
     // mod id
@@ -405,25 +421,25 @@ pub enum NodeKind {
     PathAsBind,
 
     // clauses and verification related statements
-    // asserts expr
-    Asserts, // a
-    // assumes expr
-    Assumes, // a
-    // axiom expr
-    Axiom, // a
-    // invariant expr
-    Invariant, // a
-    // decreases expr
-    Decreases, // a
+    // asserts(: label_id)? expr
+    Asserts, // a, b
+    // assumes(: label_id)? expr
+    Assumes, // a, b
+    // axiom(: label_id)? expr
+    Axiom, // a, b
+    // invariant(: label_id)? expr
+    Invariant, // a, b
+    // decreases(: label_id)? expr
+    Decreases, // a, b
     // TODO
     Outcomes, // TODO
-    // requires expr
-    Requires, // a
-    // ensures expr
-    Ensures,
+    // requires(: label_id)? expr
+    Requires, // a, b
+    // ensures(: label_id)? expr
+    Ensures, // a, b
 
     // id :- expr
-    ClauseTraitBoundDecl, // a, b
+    ClauseTraitBound, // a, b
     // id : expr
     ClauseDecl, // a, b
     // .id (: expr)? (= init)?
@@ -501,8 +517,6 @@ pub enum NodeType {
     DiamondFunctionDefChildren,
     // Effect definitions: a, N, b, N (id, params, return_type, clauses)
     EffectDefChildren,
-    // Handles definitions: a, N, b, N, c (effect, params, return_type, clauses, body)
-    HandlesDefChildren,
     // Struct/Enum/Union definitions: a, N, b (id, clauses, body)
     TypeDefChildren,
     // Trait definitions: a, b, N, c (id, super_trait, clauses, body)
@@ -523,9 +537,9 @@ impl NodeKind {
 
         match self {
             // No children
-            Invalid | Id | Str | Int | Real | Char | Bool | Unit | Symbol | SelfLower | SelfCap
-            | Null | ParamSelf | ParamSelfRef | ParamItself | ParamItselfRef | ClauseTypeDecl
-            | RangeFull => NodeType::NoChild,
+            Invalid | Id | Str | Int | Real | Char | Bool | Unit | Symbol | Wildcard
+            | SelfLower | SelfCap | Null | ParamSelf | ParamSelfRef | ParamItself
+            | ParamItselfRef | ClauseTypeDecl | RangeFull => NodeType::NoChild,
 
             // Single child (a)
             DefinitionAsExpr
@@ -565,13 +579,7 @@ impl NodeKind {
             | UseStatement
             | PathSelectAll
             | SuperPath
-            | PackagePath
-            | Asserts
-            | Assumes
-            | Axiom
-            | Invariant
-            | Decreases
-            | Requires => NodeType::SingleChild,
+            | PackagePath => NodeType::SingleChild,
 
             // Double children (a, b)
             EffectQualifiedType
@@ -624,7 +632,7 @@ impl NodeKind {
             | EnumVariantWithPattern
             | StructField
             | UnionVariant
-            | ClauseTraitBoundDecl
+            | ClauseTraitBound
             | PathSelect
             | PathAsBind
             | ParamTyped
@@ -632,12 +640,21 @@ impl NodeKind {
             | ParamRestBind
             | Property
             | PropertyAssignment
+            | TestDef
             | Attribute
             | ReturnStatement
             | ResumeStatement
             | BreakStatement
             | ContinueStatement
-            | AttributeSetTrue => NodeType::DoubleChildren,
+            | ReturnTypeWithId
+            | AttributeSetTrue
+            | Asserts
+            | Assumes
+            | Axiom
+            | Invariant
+            | Decreases
+            | Requires
+            | Ensures => NodeType::DoubleChildren,
 
             // Triple children (a, b, c)
             ConstDecl | LetDecl | IfStatement | WhileLoop | PatternIfGuard | PatternAndIs
@@ -675,11 +692,9 @@ impl NodeKind {
             // fn id? ( params ) (-> return_type)? (handles eff)? clauses?  (block | = expr)
             FunctionDef => NodeType::FunctionDefChildren, // a, N, b, c, N, d
             // fn id? <params> (-> return_type)? clauses? block
-            DiamondFunctionDef => NodeType::DiamondFunctionDefChildren, // a, N, b, N, c
+            DiamondFunctionDef | CaseDef => NodeType::DiamondFunctionDefChildren, // a, N, b, N, c
             // effect id? ( params ) clauses?
             EffectDef => NodeType::EffectDefChildren, // a, N, b, N
-            // handles eff fn ( params ) (-> return_type)? clauses? block
-            HandlesDef => NodeType::HandlesDefChildren, // a, N, b, N, c
             // struct id? clauses? block
             StructDef => NodeType::TypeDefChildren, // a, N, b
             // enum id? clauses? block
@@ -708,7 +723,7 @@ impl NodeKind {
             PathSelectMulti => NodeType::SingleWithMultiChildren, // a, N
 
             // TODO items
-            FieldMethodBound | DeclarationBound | Outcomes | Ensures => NodeType::SingleChild,
+            FieldMethodBound | DeclarationBound | Outcomes => NodeType::SingleChild,
         }
     }
 }
@@ -990,39 +1005,6 @@ impl Ast {
                         params_str,
                         self.dump_to_s_expression(return_type, source_map),
                         clauses_str
-                    )
-                }
-
-                NodeType::HandlesDefChildren => {
-                    // a, N, b, N, c (effect, params, return_type, clauses, body)
-                    let children = self.get_children(node_index);
-                    let effect = children[0];
-                    let params_node = children[1];
-                    let return_type = children[2];
-                    let clauses_node = children[3];
-                    let body = children[4];
-
-                    let params = self.get_multi_child_slice(params_node).unwrap();
-                    let params_str = params
-                        .iter()
-                        .map(|&child_index| self.dump_to_s_expression(child_index, source_map))
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    let clauses = self.get_multi_child_slice(clauses_node).unwrap();
-                    let clauses_str = clauses
-                        .iter()
-                        .map(|&child_index| self.dump_to_s_expression(child_index, source_map))
-                        .collect::<Vec<_>>()
-                        .join(" ");
-
-                    format!(
-                        "({} {} [{}] {} [{}] {})",
-                        kind,
-                        self.dump_to_s_expression(effect, source_map),
-                        params_str,
-                        self.dump_to_s_expression(return_type, source_map),
-                        clauses_str,
-                        self.dump_to_s_expression(body, source_map)
                     )
                 }
 

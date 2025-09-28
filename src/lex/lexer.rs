@@ -132,10 +132,6 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 Ok(Token::new(TokenKind::Dollar, start, self.cursor))
             }
-            '_' => {
-                self.advance();
-                Ok(Token::new(TokenKind::Id, start, self.cursor))
-            }
 
             // Complex tokens
             '"' => self.recognize_string(start),
