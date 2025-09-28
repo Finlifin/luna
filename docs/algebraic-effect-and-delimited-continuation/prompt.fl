@@ -1,0 +1,19 @@
+effect suspend() -> T where T;
+
+fn do_something() -> #suspend<T> void where T {
+    let data = async_get_data();
+    suspend()#;
+    process(data);
+}
+
+
+test {
+    let queue = ...;
+    
+    do_something()# {
+        suspend(catch k) => {
+            queue.push_back(k);
+            
+        }
+    }
+}

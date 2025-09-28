@@ -1,0 +1,72 @@
+-- 对于克隆轻量的类型，flurry引导用户使用STM
+-- 对于克隆重的类型，flurry引导用户使用有序锁
+
+-- BTO-based Software Transactional Memory
+-- BTO策略相比其他STM策略更均衡，优化方向也更多
+trait Transactional where requires Self:- Clone + Send + Sync {}
+
+struct Resource where T:- Transactional {
+    data: T,
+    version: u64,
+}
+
+derive Clone for Resource<T> where T:- Transactional;
+derive Copy for Resource<T> where T:- Transactional + Copy;
+
+
+let global_clock: Atomic<u64> = Atomic.new(0);
+-- 假设我们有两个资源，其是共享的
+let destination: Resource<i32> = ...;
+let source: Resource<i32> = ...;
+
+test {
+    let amount = 100;
+    -- atomic语法块
+    -- 理论上，我们可以直接根据atomic要求的变量，直接在栈上分配log，
+    -- 而新的log会覆盖旧的log, 因此所需的空间是确定的，而不需要动态分配等操作
+    -- 块结束则尝试提交
+    -- 如果提交失败，则默认重试
+    -- 还需要一种锁机制来确保正确提交
+    atomic(destination, source) {
+        let src = source.read();
+        destination.write(src + amount);
+        source.write(src - amount);
+    }
+}
+
+
+-- Ordered Lock
+struct OrderedLock where T:- Send + Sync {
+    data: T,
+    current_thread_id: ThreadId,
+    lock: Mutex<()>,
+}
+
+let destination: OrderedLock<i32> = ...;
+let source: OrderedLock<i32> = ...;
+test {
+    let amount = 100;
+    -- 有序锁假设：全局的task按照同一顺序获取锁，则不会死锁
+    -- 进入块时，根据*捕获变量的地址*，对捕获变量进行排序，然后按地址顺序获取锁
+    -- 显然这也可以在栈上完成，而不需要动态分配
+    -- 块结束则释放所有锁
+    atomic(destination, source) {
+        let src = source.data;
+        destination.data = src + amount;
+        source.data = src - amount;
+    }
+}
+
+-- 考虑stm的控制策略
+test {
+    let amount = 100;
+    atomic(destination, source) {
+        -- 我们在第一个操作这里await，如果有其他事务正在提交
+        let src = source.read().use(std.stm.await);
+        -- 这两个操作失败则整个事务失败，传播为整个事务的错误
+        destination.write(src + amount)!;
+        source.write(src - amount)!;
+    -- 设置retry err handler，use语法与设置effect handler一致
+    }.use(std.stm.retry);
+}
+

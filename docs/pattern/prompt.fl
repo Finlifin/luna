@@ -1,0 +1,191 @@
+fn map(cell: ?T, lambda f: F) -> ?U 
+where T, U, F:- Fn(T) -> U {
+    cell match {
+        value? => f(value),
+        _ => null,
+    }
+}
+
+test {
+    let a: ?i32 = 3;
+    let b = map(a, _ + 1);
+
+    let seq = (1..5)
+        .into_iter()
+        .map(_ * 2)
+        .filter(_ % 3 == 0)
+        .collect<Vec<_>>();
+}
+
+{-
+flurry尝试往多个方向发展模式匹配：
+    1、pattern链
+    2、自定义pattern、pattern view
+    3、二进制匹配
+    4、跨元素匹配
+    5、逻辑化匹配语义
+    6、...
+-}
+
+-- 1、pattern链
+-- 选课逻辑展示
+fn select_course(student: Student, course: Course) {
+    -- 不仅有if guard, 还有直接续接: pattern and expr is pattern
+    -- if is pattern do ...， 后置的match是if expr is do { branches }的语法糖，if is系列匹配还有些额外特性
+	if student is { class_id: class_id? }
+			and get_class(class_id) is class?
+			and get_major(class.major_id) is major?
+			if course.satified(major) do {
+			println("选课成功");
+	}
+}
+
+-- 2、自定义pattern、pattern view
+-- 没有副作用的case，是pattern view
+struct Student {
+    id: i32,
+    name: String,
+    class_id: i32,
+    major_id: i32,
+}
+
+struct Course {
+    id: i32,
+    name: String,
+    age: i32,
+    credits: i32,
+
+    -- pattern view
+    -- 注意其语法，不允许副作用
+    case adult(self) -> ?(i32, String) = { id, name, age } if age >= 18;
+
+    -- 可以定义更复杂、可以带有副作用的自定义pattern
+    case satified(self) -> ?(i32, String) {
+        if self.credits > 3 do {
+            (self.id, self.name)?
+        } else {
+            null
+        }
+    }
+}
+
+test {
+    let student: ?Student = current_context()?.student;
+    if student is .adult(id, name)? and student is .satified? {
+        println("学生 {} 可以选课 {}", name, id);
+    }
+}
+
+-- 3、二进制匹配
+{-
+flurry尝试使用位向量映射来表示抽象晦涩、难维护的位操作，并应用loop-free的超优化技术来编译为最佳的位操作代码。
+-}
+test {
+    let a: u8 = 0xAF;
+    let b: u8 = 0x3C;
+    let c: u16 = (a'bitvec ++ b'bitvec).as(u16);
+    
+    let a: BitVec<8> = 0xAF;
+    let b: BitVec<8> = 0x3C;
+    let c: BitVec<16> = a ++ b;
+    let d: BitVec<8> = a or b;
+    let e: BitVec<8> = a and b;
+    let f: BitVec<8> = not a;
+
+    -- 就目前的例子来看，bitvec可能显得有些多余，但其是作为更多高级特性的基础存在的
+    let num: f32 = 13.625;
+    if num'bitvec is 0b(sign: u1) 10000010(exponent: u8) 10110100000000000000000(mantissa: BitVec<23>) {
+        println("sign: {}, exponent: {}, mantissa: {}", sign, exponent, mantissa);
+    }
+
+    if num'bitvec is do {
+        -- NaN
+        -- 在bitvec pattern中，可以绑定为解构出的子vec为bitvec类型，或者同大小的其他类型，即使看起来挺不安全，但还是比传统的位操作安全，未来考虑unsafe情况时再讨论
+        0b(sign: u1) 11111111(exponent: u8) (mantissa: BitVec<23>) if mantissa != 0 => println("NaN"),
+        -- infinity
+        0b(sign: u1) 11111111(exponent: u8) 00000000000000000000000(mantissa: BitVec<23>) => println("Infinity"),
+        -- negative infinity
+        0b1 11111111 (0: BitVec<23>) ... => println("-Infinity"),
+        _ => (),
+    }
+}
+
+-- 4、跨元素匹配
+-- dynamic sized occurrence type
+enum Utf8CodePoint {
+    -- 基底类型决定了这个类型的大小、对齐
+    .basic_type u8,
+    .pattern_view_defined true,
+    .discrete_tag true,
+    -- 一个数据实例可能占用多个基底类型的内存空间
+    .dst true,
+    
+    -- single byte
+    -- 0zzzzzzz => 00000000 00000000 0zzzzzzz
+    one = 0b0(ascii_char: ArbitarySizedUnsigedInt<7>),
+    
+    -- two bytes
+    -- 110yyyyy 10zzzzzz => 00000000 00000yyy yyzzzzzz
+    -- 像这样一个enum invariant，就当是一个enum invariant with tuple，可以解构出两个对应位置的值
+    two = 0b110(ys: BitVec<5>) 10(zs: BitVec<6>),
+    
+    -- three bytes
+    -- 1110xxxx 10yyyyyy 10zzzzzz => 00000000 xxxxyyyy yyzzzzzz
+    three = 0b1110(xs: BitVec<4>) 10(ys: BitVec<6>) 10(zs: BitVec<6>),
+
+    -- four bytes
+    -- 11110www 10xxxxxx 10yyyyyy 10zzzzzz
+    four = 0b11110(ws: BitVec<3>) 10(xs: BitVec<6>) 10(ys: BitVec<6>) 10(zs: BitVec<6>),
+
+    -- unchecked
+    fn decode(*self) -> Tuple<u32, usize> {
+        -- 跨多元素匹配
+        if ptr'dst_deref is do {
+            -- 依旧期望编译器能够将这些超优化为最佳决策树
+            .one(c) => (c.as(u32), 1),
+            -- (++): fn(BitVec<m>, BitVec<n>) -> BitVec<m + n>
+            -- bitvec一个bit向量，由编码进类型参数的位数决定长度，
+            -- 对bitvec的操作，如连接、bit and、bit or等，
+            -- 都是对bitvec转换的抽象映射，将由编译器通过superoptimization技术编译为对齐的位操作，
+            -- 一个bitvec可以cast为相应大小的类型，可以对表达式取bitvec像来获取该表达式内存单元的抽象bitvec表示，
+            -- 如 let x = 12u64; let bitvec: BitVec<64> = x'bitvec;
+            .two(ys, zs) => ((ys ++ zs).as(u32), 2),
+            .three(xs, ys, zs) => ((xs ++ ys ++ zs).as(u32), 3),
+            .four(ws, xs, ys, zs) => ((ws ++ xs ++ ys ++ zs).as(u32), 4),
+            _ => std.panic("invalid utf8"),
+        }
+    }
+}
+
+newtype str = Slice<u8>;
+
+impl str {
+    -- 遍历每个码点的迭代器
+    struct Points {
+        buf: str,
+        -- 当前码点的起始位置
+        next: usize,
+    }
+
+    impl Iterator<u32> for Points {
+        fn next(*self) -> ?u32 {
+            return null if self.next >= self.buf.len();
+
+            let (code_point, size) = self.buf[self.next].ref.as(*Utf8CodePoint).decode();
+            self.next += size;
+            code_point
+        }
+    }
+}
+
+-- 5、逻辑化匹配语义
+-- 有 or, not，注意没有 and，因为and被用于pattern链语法
+test {
+    let a = 3;
+
+    a match {
+        1..5 or 10..15 => println("a in 1..5 or 10..15"),
+        not 60..90 => println("a not in 60..90"),
+        _ => (),
+    }
+}

@@ -1,1 +1,41 @@
-(FileScope (ModuleDef (Id A) [] (Block (UseStatement (PathSelectMulti (Id B) (Id D))) (UseStatement (PathSelect (Id D) (Id Student))))) (ModuleDef (Id B) [] (Block (UseStatement (PathSelectAll (Id C))))) (ModuleDef (Id C) [] (Block (ModuleDef (Id D) [] (Block (StructDef (Id Student) [] (Block (StructField (Id teacher) (Id Teacher)))))))))
+
+(FileScope 
+    (StructDef 
+        (Id Student) [] 
+        (Block 
+            (StructField 
+                (Id name) 
+                (Id String)) 
+            (StructField 
+                (Id age) 
+                (Id u32)) 
+            (StructField 
+                (Id grade) 
+                (Id String)) 
+            (CaseDef 
+                (Id adult) <
+                (ParamSelfRef 
+                    (*self)> 
+                    (OptionalType 
+                        (DiamondCall 
+                            (Id Tuple) 
+                            (PointerType 
+                                (Id String)) 
+                            (PointerType 
+                                (Id u32)))) [] 
+                    (Block 
+                        (ReturnStatement 
+                            (Tuple 
+                                (Select 
+                                    (SelfLower self) 
+                                    (Id name)) 
+                                (Select 
+                                    (SelfLower self) 
+                                    (Id age))) 
+                            (BoolGtEq 
+                                (Select 
+                                    (SelfLower self) 
+                                    (Id age)) 
+                                (Int 18))) 
+                        (ExprStatement 
+                            (Null null))))))))

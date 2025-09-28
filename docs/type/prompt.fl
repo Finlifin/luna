@@ -1,0 +1,410 @@
+---------------------
+-- Two-level type
+---------------------
+-- Comptime universe: U1, Comptime context: C1
+  -- 所有需要类型表达式的地方
+  -- C0中的const声明的init表达式
+  -- comptime函数的body
+  -- 传入comptime函数的实参，除非是quote参数
+  -- C0中的comptime block
+  -- 内联控制流的condition表达式，如 inline if comptime_expr { ... }
+  -- ...
+-- Runtime universe: U0, Runtime context: C0
+-- Lift: U0 type to U1 type
+-- Quote: U0 expr to U1 expr 
+-- forall T: U0 => lift T : U1
+-- forall e: U0 => quote e : U1
+-- Splice: U1 expr to U0 expr
+-- forall e: U1 => ~e : U0, 实践中，~被flurry隐去，
+-- 也就是说U1宇宙中的表达式可以直接用在U0宇宙中，flurry会自动转换到U0中的代理类型(除非没有代理类型，比如Type)
+-- ("沉降"概念已经被splice取代)
+-- 另外，Type: U1
+pure comptime fn type_of(quote val: Any) -> Type = val'type;
+-- 这里的usize实际上是U1中的usize
+pure comptime fn size_of(quote val: Any) -> usize = Type.size_of(val'type);
+-- 自动splice到U0中的usize
+-- 在runtime context中。后文默认在runtime context中，除非指明C1
+println("i32 size: {}", size_of(23));
+
+--------------------------
+-- Gradual dependent type
+--------------------------
+-- Any the type, any the value
+-- gradual consistent: 
+-- forall T: Type => Any ~ T and T ~ Any
+-- 更多具体的consistent relation rules...
+-- forall e: Any => any ~ e and e ~ any
+-- comptime flurry在进行interpretation/normalization/instantiation时会自动插入类型检查
+
+-- C1
+let values: List<Any> = [23, 'a', "manbo", .something];
+let manbo: Any = values.get(2);
+asserts manbo'type == str;
+
+
+---------------------
+-- Occurrence type
+---------------------
+-- *在C0中*，类型信息可以通过内联控制流可以向分支的子作用域传递类型谓词
+fn show(data: T) -> String where T {
+    inline when {
+        T:- Display => fmt.format("{}", data),
+        T:- AsStr => data.as_str().to_string(),
+        -- 如果它有to_string方法
+        T:~ to_string : fn(*itself) -> String => data.to_string(),
+        -- {any} 是兜底的
+        _ => fmt.format("{any}", data),
+    }
+}
+
+fn concat(xs: S, ys: S) -> O
+-- 在调用点，这里O flurry暂时没有手段自动推理，通常需要就地进行concat的instantiation
+where S, O
+requires S == String or 
+    S matches Array<Any, any> or
+    S matches Vec<Any> {
+    -- 因为match是后置调用，考虑到解析问题，flurry提供了完全prefix的模式匹配表达式，if expr is pattern? do ...
+    -- 这样就方便与inline关键字组合了
+    inline if S is do {
+        String => xs + ys,
+        -- 'T 解构并绑定出 T 类型变量，因为类型的pattern有些特殊，与平常pattern只需要一个id就能绑定变量不一样
+        Array<'T, 'len> => {
+            let neo: Array<T, len * 2> = undefined;
+            xs.into_iter().enumerate().foreach(|e, i| neo[i] = e);
+            ys.into_iter().enumerate().foreach(|e, i| neo[i + len] = e);
+            neo
+        },
+        Vec<'T> => xs.into_iter().join(ys.into_iter()).collect<Vec<T>>(),
+    }
+}
+
+-- 有许多flurry特性依赖于此，比如bitvec binding, 在此不过多赘述
+
+---------------------
+-- Runtime dependent type
+---------------------
+-- 实际上这部分我还没设计好
+-- 显式依赖类型
+-- 目前只有Array支持，这也是最实用的
+struct Continuation {
+    .dynamic_sized_type .dependent_type,
+    -- 此动态类型有两个动态数组
+    -- 编译器就此知道数据的布局，生成访问各个元素的正确方法
+    pc: usize,
+    saved_stack_size: usize,
+    saved_prompt_stack_size: usize,
+    saved_stack: Array<u8, quote self.saved_stack_size>,
+    saved_prompt_stack: Array<PromptEntry, quote self.saved_prompt_stack_size>,
+}
+
+----------------------------
+-- Traits, implementations
+----------------------------
+
+---------------------
+-- Extensions
+---------------------
+
+---------------------
+-- Option, Errors, Effects
+---------------------
+-- Option type: forall<T> ?T
+-- 像zig一样，T的值可以自动转换为?T的值。但我不知道是否应该表达为子类型关系
+let alright: usize = 23;
+let ok: ?usize = alright;
+ok match {
+    some_val? => println("some_val: {}", some_val),
+    null => println("null"),
+}
+
+-- 或者可以直接判断
+if ok == null {
+    println("ok is null");
+} else {
+    println("ok is {}", ok.unwrap());
+}
+
+-- 有传播规则
+--  e: A, e.f : B, o: ?A
+-- ----------------------
+--  o?.f : ?B
+let student: ?Student = Student { .name "julia", .age 18 };
+asserts student?.age : ?u32;
+
+-- Error quanlified type: forall<Es: Set<Type>, T> !Es T
+-- 像zig一样，T的值可以自动转换为!Es T的值, 并且
+-- forall A: Set<Type>, B: Set<Type>, T: Type => Subset(A, B) ==> !A T <: !B T
+-- 其中 forall<T> Set<T>是U1类型
+let result: ![&static str] i32 = 23;
+let result2: ![&static str] i32 = error "an error occurred";
+let result3: ![&static str, NetworkErr] i32 = error NetworkErr.Timeout("不是哥们");
+result = result2;
+asserts ![] i32 == i32;
+asserts ![&static str] i32 <: ![&static str, NetworkErr] i32;
+-- forall A: Set<Type>, B: Set<Type>, T: Type => !A !B T == !Merge(A, B) T
+asserts ![&static str] ![NetworkErr] i32 == ![&static str, NetworkErr] i32;
+asserts ![&static str, NetworkErr] i32 == ![NetworkErr, &static str] i32;
+-- 另外有语法糖，forall<E: Type, T: Type> !E T == ![E] T
+let result4: !NetworkErr i32 = error NetworkErr.Timeout("不是哥们");
+
+fn fetch_user_data(user_id: i32) -> !NetworkErr !serde.json.ParseErr !UserData.Err UserData {
+    -- id必须8位以上
+    return error UserData.Err.InvalidID if user_id < 10000000;
+    -- http.get: fn(String) -> !NetworkErr, expr!将表达式的错误情况传播出去，并转换为对应的Error type
+    let response = http.get(format("https://api.example.com/users/{}", user_id))!;
+    response.status match {
+        -- 实际上这里用不用`!`传播都一样
+        .ok.* => serde.json.parse(UserData, response.body)!,
+        _ => ...
+    }
+}
+
+-- Effect quanlified type: forall<Es: Set<Effect>, T> #Es T
+-- 这里的effect是algebraic effect, 注意与memory effect区分
+-- 代数效应限定类型与错误限定类型大体一样，只是effect set的元素是Effect, 而不是Type, 这里只给出公理
+-- forall A: Set<Effect>, B: Set<Effect>, T: Type => #A #B T == #Merge(A, B) T
+-- forall<E: Effect, T: Type> #E T == #[E] T
+
+
+test {
+    use http;
+
+    let response = http.get("http://example.com").use(http.retry(.limit = 5))! {
+        .RetryExhausted(limit) => {
+            println("请求重试次数达到上限: {}，请检查你的网络连接", limit);
+            return;
+        }
+    }
+}
+
+enum RetryErr {
+    RetryExhausted(u32, Vec<HttpErr>),
+}
+
+struct RetryHandler {
+    limit: u32,
+    tried: u32,
+
+    fn new(limit: u32) -> Self {
+        Self { .limit limit, .tried 1 }
+    }
+
+    -- 恐怕我们需要捕获整个error handler被应用的表达式(当然，只有在你写了catch的情况下)
+    fn retry(*self, handles e: !HttpErr T, catch rerun: F) -> !RetryErr T 
+    where T, F:- Fn() -> !HttpErr T
+    {
+        let errors = Vec.new();
+        e match {
+            error e => errors.push(e),
+            _ => std.panic("unreachable branch reached"),
+        }
+        -- 或者，我们可以提供另一个error handler, 以后再说
+        -- let err = e.use(std.errs.get(HttpErr)).unwrap();
+
+        for i in 1..self.limit {
+            self.tried += 1;
+            rerun() match {
+                error e => errors.push(e),
+                v => return v,
+            }
+        }
+
+        return error RetryErr.RetryExhausted(self.limit, errors);
+    }
+}
+
+fn retry(.limit: u32 = 5) -> RetryHandler {
+    RetryHandler.new(limit)
+}
+
+---------------------
+-- Polymorphic type
+---------------------
+-- 通常指forall type, (flurry中还没有exist type)
+-- 比如forall<T> Vec<T>
+-- 这是真正的泛型类型，而不是for<T> Type, 那是pure comptime fn<T> -> Type的语法糖
+-- 目前出现于类型系统的形式化描述中
+
+---------------------
+-- Type predicates
+---------------------
+-- skip
+
+---------------------
+-- Reachability type
+---------------------
+-- 同样是限定类型语法: forall T: Type, Rs: Set<Reachability> &Rs T
+-- 不同精度的longest
+fn longest(x: str, y: str) -> &x &y str {
+    return x if x.len() > y.len();
+    y
+}
+
+fn longest(x: S, y: S) -> &x &y S where S:- AsStr {
+    return x if x.as_str().len() > y.as_str().len();
+    y
+}
+
+-- 让我们考虑更细粒度的可达性图，可达性图不止追踪变量，还追踪内存块
+-- 我们这里将返回值连接至x, y的data，即data的内存块，而不是str！
+fn longest(x: str, y: str) -> &x.data &y.data str {
+    return x if x.len() > y.len();
+    y
+}
+
+-- 理解为
+impl str {
+    ^memory_view
+    fn data(self) -> builtin.MemoryView {
+        self.ptr'refcell
+    }
+}
+
+struct Student {
+    name: String,
+    age: u32,
+
+    ^memory_view
+    fn vname(self) -> String {
+        self.name'cell
+    }
+}
+
+test {
+    let student = Student { .name "julia".to_string(), .age 18 };
+    let name = student.name;
+    student.age += 1;
+    -- 我们只修改了age, name: &student.vname String 仍然有效
+    println("student name: {}, age: {}", name, student.age);
+}
+
+-- Indexed memory views of regions of variables
+struct Vec where T {
+    data: *T,
+    length: usize,
+    capacity: usize,
+
+    -- 一般来说，当两个index不一样时，`at`指向的内存块也不一样
+    -- 调用端需要证明这一点
+    -- 并且，显然该视图依赖于self.data
+    ^memory_view
+    fn at(self, index: usize) -> builtin.MemoryView {
+        self.data[index]'refcell
+    }
+
+    -- 我们用一个模糊的outcome分支`blur`来表示可能的内存重新分配
+    fn push(*self, value: T) 
+    where outcomes case blur => std.mem.effects.realloc(self.data)
+    {
+        if self.length == self.capacity {
+            self.grow();
+        }
+        self.data[self.length] = value;
+        self.length += 1;
+    }
+
+    fn get(*self, index: usize) -> &self.at(index) *T {
+        self.data[index]
+    }
+}
+
+test {
+    let vec = Vec.new();
+    vec.push(23);
+    vec.push(42);
+
+    let first = vec.get(0);
+    let second = vec.get(1);
+    second.* += 1;
+    println("first: {}, second: {}", first, second);
+}
+
+-- 对于树这样的结构，其节点地址不变，indexed memory view在此理应更有用
+-- 从某种角度说，这种节点的生命周期跟树的生命周期一样长
+struct BinarySearchTree where T:- math.Ord {
+    root: ?*Node,
+    node_count: usize,
+
+    -- 对于外部来说，用不同的index就可以指代出不同的 memory view
+    -- 对于内部来说，也许需要定义有益于编译器推理的内容，来帮助编译器检查memory view的有效性和其与key的双射性
+    ^memory_view
+    fn at(self, key: T) -> builtin.MemoryView {
+        ...
+    }
+}
+
+test {
+    let bst = BinarySearchTree.new();
+    bst.insert(23);
+    bst.insert(42);
+
+    let node_23 = bst.get(23);
+    let node_42 = bst.get(42);
+    node_42.value += 1;
+    -- 甚至可以再插入一个节点，因为该操作不会影响已有节点内存视图的有效性
+    let _ = bst.insert(30);
+    println("node_23: {}, node_42: {}", node_23.value, node_42.value);
+}
+
+struct Something {
+    data: usize,
+    data_ref: *usize,
+
+    fn new(data: usize) -> Self {
+        let result: Self = undefined;
+        result.data = data;
+        result.data_ref = result.data.ref;
+        result
+    }
+}
+
+struct Slice where T {
+    data: *T,
+    length: usize,
+
+    -- disjoint ranges for separated memory views
+    ^memory_view
+    fn sub(self, range: Range) -> builtin.MemoryView {
+        self.data[range]'refcell
+    }
+        
+    ^memory_view
+    fn at(self, index: usize) -> builtin.MemoryView {
+        self.data[index]'refcell
+    }
+    
+    -- 在range中:
+    -- predicate disjoint(r1: Range, r2: Range) {
+    --     r1.end <= r2.start or r2.end <= r1.start
+    -- }
+
+    axiom disjoint_ranges_for_separated_memory_views {
+        forall s: Slice, r1: Range, r2: Range =>
+            Range.disjoint(r1, r2) ==> builtin.MemoryView.separated(s.sub(r1), s.sub(r2))
+    }
+
+    axiom distinct_indices_for_separated_memory_views {
+        forall s: Slice, i1: usize, i2: usize =>
+            i1 != i2 and i1 < s.length and i2 < s.length ==> 
+            builtin.MemoryView.separated(s.at(i1), s.at(i2))
+    }
+
+    axiom index_inclusion {
+        forall s: Slice, r: Range, i: usize =>
+            i >= r.start and i < r.end and r.end <= s.length ==> 
+            builtin.MemoryView.included(s.at(i), s.sub(r))
+    }
+}
+
+---------------------
+-- Refinement type
+---------------------
+
+
+
+9.23 读论文
+9.24 读论文
+9.25 读论文
+9.26 读论文
+9.27 读论文
+forall date: Date => date > 9.23 ==> 读论文

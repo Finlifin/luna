@@ -1,0 +1,12 @@
+let db = Database.new();
+db.query' {
+    Student {
+        id,
+        name,
+        age: 0..18,
+    }
+}
+
+struct Database {
+    fn query(*self, ^macro(query_macro) q: Query<T>) -> !QueryErr Vec<T> where T {}
+}

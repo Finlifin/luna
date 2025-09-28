@@ -1,0 +1,13 @@
+fn test() {
+    let x = 42;
+    let y = x + 1;
+    {
+        let z = y * 2;
+        z
+    }
+}
+
+fn tuple_pattern() {
+    let (a, b) = (1, 2);
+    a + b
+}

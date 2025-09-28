@@ -1,0 +1,490 @@
+-- 即使我为flurry设计表达力极强的各种特性，但我还是希望能够在definition-site进行完备的检查。
+-- 据此，flurry需要区分出两种概念:
+-- - (normalization | elaboration ?， 其实我也不知道该如何称呼): 
+--     指在定义端用对程序进行的各种检查和转换，通过符号执行、smt拓展、加强过的类型推导、部分编译执行等手段，保证程序不会在定义端出错。
+-- - instantiation:
+--     指在调用端，发起的编译时求值过程。
+
+-- 对于这样一个定义，就不应该通过normalization检查:
+fn add(x: T, y: T) -> T where T {
+    x + y
+    -- error: requires `T` to implement `Add`
+}
+
+-- 以下两种方式都可以通过normalization检查，当T不满足约束时，两种的报错方式并不一致
+-- 前者会在instantiation阶段报错，后者会在normalization阶段报错
+fn add(x: T, y: T) -> T where T {
+    -- 通过occurrence type, 向子作用域传递类型谓词
+    -- 注意，occurrence type依旧是normalization阶段行为，
+    -- 如果我们不传播该信息，则子作用域依旧无法通过normalization检查
+    inline if T:- Add<T> {
+        x + y
+    } else {
+        meta.compile_error("requires `T` to implement `Add`")
+    }
+}
+
+fn add(x: T, y: T) -> T where T:- Add<T> {
+    x + y
+}
+
+-- 也就是说，如果我们再包裹一层
+fn wrap_add(x: T, y: T) -> T where T {
+    -- 那么对wrap_add进行normalization时，第一种add不会报错，第二种会报错
+    -- 而第一种方式会在wrap_add的instantiation时报错
+    add(x, y)
+}
+
+-- 这是作者常年被zig、c++等缺乏normalization、rust等缺乏instantiation灵活性的语言折磨后的设计取向
+
+{- proposal: 子句中不再可以添加任意的编译时计算条件 -}
+fn something_for_the_feature() where build.features.enabled(.feature_name) { ... }
+-- 在normalization&instantiation模型下，这样的代码相当歧义，
+-- 使用者会感到相当困惑，不知道该条件会在normalization还是instantiation "执行"
+-- 如果是在normalization，我们还可能需要引入连接comptime evaluator的theory solver, 甚至可能需要额外措施保证全局一致性
+-- 对于这样的需求，我们完全可以放到函数内检查：
+fn something_for_the_feature() {
+    -- 这样的代码相当容易理解
+    inline if not build.features.enabled(.feature_name) {
+        meta.compile_error("This function is not available while the feature is disabled");
+    }
+    ...
+}
+-- 但是，这样的代码会在normalization时进行执行，**而不是在instantiation时执行**
+-- 因为如果我们定义这样的代码在instantiation时执行，那么这个函数是不纯的，记得我们的pure comptime fn函数签名吗
+-- 如果我们像缓存`Instantiation(something_for_the_feature)`这样的东西，那么我们就无法保证纯性
+-- 因此，这样的代码只能在normalization时执行, 这也符合直觉
+
+-- 为了留一些东西在instantiation时执行，我们可以利用一种子句参数，可选子句参数
+fn something_for_the_feature()
+-- 可选参数的默认值，在调用端进行计算，但是在定义端进行解析
+where .feature_enabled: bool = build.features.enabled(.feature_name)
+{
+    -- 这样的代码相当容易理解
+    inline if not feature_enabled {
+        meta.compile_error("This function is not available while the feature is disabled");
+    }
+    ...
+}
+
+fn something_only_for_testing_env()
+where .is_testing: bool = build.env == .testing {
+    inline if not is_testing {
+        meta.compile_error("This function is only available in testing env");
+    }
+    ...
+}
+-- 这样，将编译时副作用参数化，就不会破坏pure comptime fn的纯性
+
+-- 之前，为了获取调用端的信息，我们引入了implicit comptime参数
+-- 现在，我们可以利用可选子句参数来实现类似的功能
+fn println_call_site_src_span()
+-- 也许需要一个@get_source_span()之类的内建函数，那都是以后的事了
+where .src_span: SrcSpan = meta.compiler.src.get_span() {
+    -- U1的值可以参与编译时字符串插值
+    println("called at $src_span");
+}
+-- 类似的，还可以获取caller等等
+
+
+{- 一个经典flurry代码例子 -}
+-- 愿景：尽量通过符号执行、smt等手段，在normalization阶段，
+-- 验证merge函数的正确性，或者精确地要求用户添加必要的约束
+fn merge(xs: Array<T, m>, ys: Array<T, n>) -> Array<T, m + n>
+where T, m: usize, n: usize {
+    let result: Array<T, m + n> = undefined;
+    -- 注意这不是verfied mode，所以不要求验证result访问没有越界、初始化等
+    -- 实际上，以现有形式化验证理论，这里几乎不可以能够验证成功，带有闭包会涉及higher order logic
+    xs.into_iter().enumerate().for_each(|(i, x)| result[i] = x);
+    ys.into_iter().enumerate().for_each(|(i, y)| result[m + i] = y);
+    result
+}
+
+-- 愿景： 通过各种推理手段，尽量地进行类型推导、子句参数推导，或者精确地要求用户添加必要的类型注释、子句参数
+-- add<i32>(1, 2), 这里i32就是子句参数
+test {
+    -- 注意，即使在运行时上下文中，字面量也是comptime的，然后会被splice到对应的运行时常量
+    -- 也就是说： [1, 2, 3]: List<Integer>, a: Array<i32, 3>, 当然我们不能保证splice都能成功
+    let a = [1, 2, 3];
+    let b = [4, 5];
+    let c = merge(a, b);
+}
+
+{- 在flurry设计中，merge就是一个类型为
+pure comptime<T: Type, m: usize, n: usize> -> fn(Array<T, m>, Array<T, n>) -> Array<T, m+n>
+的变量，即一个返回U0函数的U1函数，只不过这个函数传参时是用尖括号而不是圆括号，
+它是柯里化函数，而不是什么泛型模板，其性质有严格理论定义的，而不是什么compilation hack，
+而子句可以声明子句参数这是flurry提供的通用语法糖，因为它们太普遍了，并且所有人都希望某些参数可以被推导，
+于是我们有了"尖括号参数"，即子句参数
+-}
+const my_merge: fn(Array<i32, 8>, Array<i32, 8>) -> Array<i32, 16> = merge<i32, 8, 8>;
+
+test {
+    let a = [1, 2, 3, 4, 5, 6, 7, 8];
+    let b = [9, 10, 11, 12, 13, 14, 15, 16];
+    let c = my_merge(a, b);
+}
+
+
+
+{- 考虑编译器内部数据表示 -}
+-- 标准类型
+-- 比如
+const the_merge: for<T, m: usize, n: usize> fn(Array<T, m>, Array<T, n>) -> Array<T, m+n> = merge;
+-- 类型检查/推导用到的类型
+-- show: forall<T:- Display> fn(T) -> String
+-- 实际上show: for<T:- Display> fn(T) -> String
+-- 注意区分for和forall
+fn show(x: T) -> String where T:- Display {
+    x.to_string()
+}
+
+
+{- 考虑comptime evaluator -}
+
+{- 考虑子定义对父定义的子句参数引用 -}
+
+{- 考虑一些作用域问题 -}
+-- 1、可被use语句导入的项，都是静态作用域中的项
+-- 下面这个结构体定义，它就不是静态作用域，因为它不是具体的类型定义，它需要子句参数
+-- 所以显然`use Vec.new;`这样的语句是不合法的
+-- 如果你想要一个类似的new, 你可以就地定义一个
+-- const new_vec: fn() -> Vec<i32> = Vec<i32>.new;
+-- 或者 fn new_vec() -> Vec<T> where T = Vec<T>.new();
+struct Vec where T {
+    ...
+    fn new() -> Vec<T> { ... }
+}
+-- 这样的定义，那就是静态作用域
+-- use Point.new;
+struct Point {
+    x: i32,
+    y: i32,
+
+    fn new(x: i32, y: i32) -> Point {
+        Point { x, y }
+    }
+}
+-- 一般我们的模块就是这样组织的，所以模块就是一种专门设计用于静态作用域组织的类型
+mod A {
+    struct S { ... }
+    fn f() { ... }
+    
+    comptime {
+        asserts A: Type;
+    }
+}
+-- implementation 只能在线性作用域中定义，所以可以赋予其位置无关的特性(即implementation不会引用到外部的子句参数)
+
+-- 2、线性作用域
+-- 静态作用域是无序的，线性作用域是有序的
+-- 静态作用域是全局的，线性作用域是局部的
+-- 因此静态作用域的管理相对简单，
+-- 而线性作用域则要考虑extension遮蔽、变量遮蔽、变量索引、参数索引、子句参数索引、控制流分支、模式匹配中的变量绑定、词法代数效应处理器绑定等等问题
+-- 复杂度集中爆发
+-- 并且，到了normalization阶段，我们还有处理类型命题的传播、用于子句参数推理的推理变量维护等等问题
+
+
+
+-- 3、Strongest Type Constraint
+-- 这两个函数都无法通过normalization检查
+fn show(data: T) -> T 
+where T, requires T:- ToString or T:: to_string: fn(*itself) -> String {
+    data.to_string()
+}
+
+fn show(data: T) -> String where T {
+    inline if T:- ToString or T:: to_string: fn(*itself) -> String {
+        data.to_string()
+    } else {
+        meta.compile_error("requires `T` to implement `ToString` or provide a `to_string` method");
+    }   
+}
+-- 因为在normalization阶段，`data.to_string()`关于`T`最强的类型约束是`T:- ToString or T:: to_string: fn(*itself) -> String`
+-- 编译器无法确定`data.to_string()`要重写成`ToString.to_string(data)`还是`T.to_string(data)`
+-- 报错应该引导用户导出更强的类型约束
+fn show(data: T) -> String 
+where T, requires T:- ToString or T:: to_string: fn(*itself) -> String {
+    inline if T:- ToString {
+        data.to_string()
+    } else {
+        data.to_string()
+    }
+}
+
+fn show(data: T) -> String where T {
+    inline if T:- ToString or T:: to_string: fn(*itself) -> String {
+        -- 用户可能需要在这里执行一些两个literals都支持的操作
+        -- ...
+        inline if T:- ToString {
+            data.to_string()
+        } else {
+            data.to_string()
+        }
+    } else {
+        meta.compile_error("requires `T` to implement `ToString` or provide a `to_string` method");
+    }   
+}
+
+-- 4、Contextual Constraint Collecting
+struct Vec where T {
+    ...
+    fn new() -> Vec<T> { ... }
+}
+-- 你可能会问，那Vec定义中的，到底属于什么作用域呢？
+-- 在语义上，Vec等价于
+pure comptime fn Vec<T> -> Type {
+    struct Inner {
+        len: usize,
+        capacity: usize,
+        data: *Array<T, usize>,
+
+        fn new() -> Vec { ... }
+    }
+    Inner
+} -- 注意这个不是良定义
+
+-- 也就是说，Vec只有实例化了，才会有一个具体的类型，才会有一个具体的静态作用域
+-- 在此基础上，为了`Vec.new()`这类符合我们使用习惯的用法有效，引入contextual constraint collecting
+test {
+    -- 照理说，Vec只有application一种用法，无法直接作为解析左项来使用
+    -- 且new并不是泛型函数，解析到Vec.new时，类型推导时，无法收集到Vec.new: forall<T> fn() -> Vec<T>这样的约束信息
+    -- 需要在约束收集的时候就下点手脚
+    -- 我们引入surrouding context的概念,
+    -- 在collector遍历到`Vec.new()`时，这是一个application, 将ApplicationCaller([args ast])压入surrouding context stack
+    -- 然后遍历到`Vec.new`时，这是一个select, 将SelectBase("new")压入surrouding context stack
+    -- 遍历到Vec时，这是一个良定义的、返回一个类型的范式，此时我们检查top of surrouding context stack
+    --   - 如果是NormalFormApplication(...), 那么按正常、标准的方式处理
+    --   - 如果是SelectBase(...), 那么我们在InferCtxt中为Vec的子句参数创建变量，然后这些变量代回填到Vec的子句参数中，
+    --     这样，Vec.new就被解析为Vec<?T>.new,
+    --   - 其余情况暂不考虑
+    -- 处理完后Vec, 我们退回`Vec.new`，因为Vec是良定义的，我们实际上可以预测Vec<T>中有这么一个new，即使Vec<T>还没有被实例化
+    -- 这样，Vec.new就被解析为Vec<?T>.new, 其中T指向InferCtxt中的一个变量，那么也就得到Vec.new: forall<T> fn() -> Vec<T>
+    -- 然后我们退回`Vec.new()`, 这时我们就可以按正常方式处理了
+    -- 最后退回到`let v = ...`, 这时就可以绑定v: Vec<?T>
+    let v = Vec.new();
+    -- v: Vec<?T>
+    -- Vec是良定义的，那么可以预测Vec<?T>中有这么一个push: fn(*itself, T)
+    -- 于是我们就可以解析v.push(1u32), 并收集到`?T == u32`
+    v.push(1u32);
+    -- 这样的约束收集过程相当高效，不需要回溯，并且直观，语法制导的规则选择让编译器行为可预测
+    -- 最后进行unification就好了，这里只涉及简单类型变量和等式约束，用不到smt等过程
+}
+
+-- 于是引申出*良定义*的概念，即 definition with clause parameters 这种情况，在被实例化前，它们就已经具备了相当详细的作用域信息了，相当于*预静态作用域*
+
+
+-- 5、类型的多精度语法分解与implementation索引 (Grammaric Decomposition)
+-- 由于任意类型的implementation可能出现在包的任意静态作用域中，
+-- 当我们寻找implementation的所有candidate时，可能每次都需要穷举所有的implementation
+-- 即使改implementation于当前类型无关
+-- *这里我们先不考虑孤儿规则，实际上孤儿规则在flurry中需要重新阐述*
+impl MyTrait for Vec<T> where T:- MyTrait {
+    fn my_method(*self) { ... }
+}
+
+impl MyTrait for T where T {
+    -- default implementation for all types
+    fn my_method(*self) { ... }
+}
+
+impl MyTrait for i32 {
+    fn my_method(*self) { ... }
+}
+
+impl MyTrait for Vec<Tuple<T, i32>> where T:- MyTrait {
+    fn my_method(*self) { ... }
+}
+
+impl MyTrait for SomethingOther { ... }
+
+test {
+    let v: Vec<Tuple<i32, i32>> = ...;
+    v.my_method();
+    -- 这时，按照标准模型，编译器需要穷举所有的implementation，寻找candidate
+    -- 对任意的select查询，我们可能都需要穷举所有的implementation来寻找candidate！
+    -- 这显然是不可接受的，即使有一定的缓存机制
+    -- 因此，编译器需要一种更精准的implementation索引机制
+}
+
+-- 考虑类型的多精度语法分解，任意normalized类型，可以根据语法结构，分解为多颗对原树保留不同精度的抽象树
+-- 对于Tuple<Vec<Tuple<i32, i32>>, i32>, 分解为：
+-- degree、representation，注意，degree是语法分解的量化精度，即子树高度-1，
+-- 当然，最后一级除外，最后一级是类似本身，没有navie type可以继续抽象为Any了，而代入navie type本身，子树高度不变
+-- 0、Any
+-- 1、Tuple<Any, Any>
+-- 2、Tuple<Vec<Any>, Any>
+-- 3、Tuple<Vec<Tuple<Any, Any>>, i32>
+-- 4、Tuple<Vec<Tuple<i32, i32>>, i32>
+
+-- 那么，此时我们可以按implementation target type最高精度子树来索引implementation
+-- impls.insert(Tuple<Any, Any>, the_impl);
+impl Tuple<T, T> where T { ... }
+
+-- 注意，语法分解时，如果同级存在Any，并且无法找到navie type带入该Any, 那么就不能再继续分解下去了
+-- 所以是不存在Tuple<Vec<Any>, Any>这种分解的，
+-- 也就是说，所有的Any都必须在同一级，不能跨级
+-- impls.insert(Tuple<Any, Any>, the_impl);
+impl Tuple<Vec<T>, T> where T { ... }
+
+-- impls.insert(Vec<Tuple<i32, i32>>, the_impl);
+impl Vec<Tuple<i32, i32>> { ... }
+
+-- degree该额外提供了对implementation具体程度的描述
+-- 即使在一些歧义的情况下，也能帮我们找到*最详细*的implementation
+
+-- 当我们查询Vec<Tuple<i32, i32>>所有的implementation candidates时
+-- 我们先分解Vec<Tuple<i32, i32>>为
+-- 0、Any
+-- 1、Vec<Any>
+-- 2、Vec<Tuple<Any, Any>>
+-- 3、Vec<Tuple<i32, i32>>
+-- 然后依次
+-- impls.get(Vec<Tuple<i32, i32>>)
+-- impls.get(Vec<Tuple<Any, Any>>)
+-- impls.get(Vec<Any>)
+-- impls.get(Any)
+-- 并且缓存该candidate查询结果
+-- 然后再从candidate中找合理的implementation
+
+-- 这样的索引机制，还额外带来了一个好处
+-- 那就是，可以对不完整的类型进行查询
+struct Vec where T {
+    ...
+}
+
+impl Vec<T> where T {
+    fn new() -> Vec<T> { ... }
+    fn push(*self, T) { ... }
+}
+
+test {
+    let v: Vec<i32> = Vec.new();
+    -- 我们拓展Vec的contextual解析过程
+    -- 在我们知道需要给Vec分配一个推理变量之后，
+    -- 可以知道 Vec.new() 其实是 Vec<?T>.new()
+    -- 即使Vec<?T>是不完整的，也可以进行Vec<Any>查询，由此找到new的定义
+    v.push(1);
+}
+
+-- 定义统一： 对于带有子句参数的"静态作用域"，称为*预静态作用域*；
+--          对于带有子句参数的"线性作用域"，称为*预线性作用域*；
+
+-- 6、extension栈
+-- 在查找implementation前，我们可能先要循着extension，逐一寻找是否有合适的extension
+struct Analyzer where T {
+    ...
+    scopes: Stack<(StaticScope, usize)>, -- (每一个static scope，应该记录其向extension栈push了多少个extension， 方便退出时pop)
+    linear_context: LinearContext,
+    extensions: Stack<Extension>,
+}
+
+
+-- 7、trait的comptime/runtime两面性
+-- 考虑编译器query的hash
+-- 对于Instantiation(say_you_say_me<i32, 23>)这种pure comptime fn查询，为了hash它，
+-- 对于所有子句参数，我们希望它的类型实现了Hash + Eq
+-- 那么Hash和Eq是runtime还是comptime的呢？
+-- 显然这里需要是comptime的
+-- 但是当我们需要runtime的Hash + Eq时怎么办呢？
+-- 难道分开两套trait体系吗？
+-- 这太不优雅了
+-- 于是我们引入trait的comptime/runtime两面性
+trait Eq {
+    comptime fn comptime_eq(self, other: Self) -> bool;
+    comptime fn comptime_ne(self, other: Self) -> bool = not self.comptime_eq(other);
+
+    fn eq(*self, other: Self) -> bool;
+    fn ne(*self, other: Self) -> bool = not self.eq(other);
+}
+
+-- U0中的类型只能实现非comptime限定的部分，那么其有了runtime的Eq
+-- U1中的类型只能实现comptime限定的部分，那么其有了comptime的
+-- 注意，很多定义，在U0和U1中是复用的
+struct Point {
+    x: i32,
+    y: i32,
+}
+-- 这里Point即是U0中的类型，也是U1中的类型，并U1 point可以自动splice到U0 point
+-- 对于这样的类型，也可以独立选择实现Eq的两个面，或者都实现
+impl Eq for Point {
+    comptime fn comptime_eq(self, other: Self) -> bool {
+        self.x == other.x and self.y == other.y
+    }
+
+    fn eq(*self, other: Self) -> bool {
+        self.x == other.x and self.y == other.y
+    }
+}
+
+
+-- 8、孤儿原则的重新阐述
+
+
+-- 9、关联类型
+trait Iterator {
+    assoc Output: Type;
+
+    fn next(*self) -> ?Self.as(Iterator).Output;
+}
+
+-- 泛型关联类型
+trait Collectable {
+    assoc Output: for<T> Type = Vec<T> where T:- Clone;
+
+    fn collect(*self) -> Self.as(Collectable).Output;
+}
+
+
+
+-- Nano passes of normalization
+-- normalization前，编译器已经完成了ast lowering，并对id进行了解析 (id 解析了如何锁定到具体的定义?)
+-- normalization在基础的HIR上进行操作。
+-- Normalization(definition_id) query驱动对应的definition_id的normalization过程
+
+-- Signature Normalization
+-- 首先我们需要识别definition的类型，然后对其进行signature normalization
+-- 拿函数举例，
+fn add(x: T, y: T) -> T where T:- Add<T> {
+    x + y
+}
+-- + 分配FnDefinition
+-- + 逐一处理子句参数，注意，后面的子句参数可以依赖前面的子句参数
+-- + 处理参数，参数可以依赖子句参数，或者前面出现的comptime参数
+-- + 处理返回值，返回值可以依赖子句参数、comptime参数
+-- + 处理非参数子句，比如requires、ensures等
+
+-- 一般来说，要求签名是完整注释类型的，为了局部类型推导
+
+
+
+-- Deeper Name Resolution & Constraints collecting
+-- 为了使HIR有意义，首先需要做的就是将其类型化，类型化的第一步就是约束收集
+-- 约束收集遍历fn body, 遇到inline控制流时，还应分析其comptime上下文内容有无依赖子句参数、参数，
+-- 没有则标记，在类型检查完成后，在normalization的最后阶段直接就地进行comptime evaluation
+-- 如果依赖了子句参数、参数，
+--   如果其中有类型命题，也许我们需要类似path condition的东西，将类型命题记录下来?
+--   如果没有，则其不影响类型化过程
+-- 除了inline控制流中的编译时表达式，其它编译时表达式也应该分析其对子句参数、参数的依赖，便于在normalization的最后阶段进行comptime evaluation
+
+
+-- Unification
+-- Comptime evaluation
+
+
+
+{-
+考虑上下文链：
+    ... -> C[n-1] -> C[n] -> C[n+1] -> ...
+struct Vec where T {
+    ...
+    fn new() -> Self { ... }
+}
+
+则Vec的parent context是C[n-1], Vec内是C[n], Vec.new内部context是C[n+1], 如果其内还有块，那就是C[n+2]，以此类推
+C[x]会储存该context内的所有变量、参数、子句参数、类型命题、extension等信息，在子Context中，对这些内存的引用，都会带有一个偏移量，
+例如, C[n]中引用了C[n]中的子句参数，则偏移量是0, C[n+1]中引用了C[n]中的子句参数，则偏移量是1
+
+C[x]也是分不同种类的，例如，当我们开始解析一个函数时，会承担推理上下文的作用，在normalization的某些pass中，将进行约束收集、子句参数推导等等工作
+
+-}
