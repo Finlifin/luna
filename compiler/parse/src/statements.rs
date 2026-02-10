@@ -9,6 +9,7 @@ impl Parser<'_> {
         self.scoped(|p| {
             let token = p.peek_next_token();
             match token.kind {
+                // statements
                 TokenKind::Let => p.try_let_statement(),
                 TokenKind::Const => p.try_const_statement(),
                 TokenKind::If => p.try_if_statement(),
@@ -21,9 +22,22 @@ impl Parser<'_> {
                 TokenKind::Break => p.try_break_statement(),
                 TokenKind::Continue => p.try_continue_statement(),
                 TokenKind::LBrace => p.try_block(),
+                TokenKind::Inline => p.try_inline_statement(),
 
+                // Async/Unsafe: if followed by '{', it's a block expression;
+                // otherwise it's a keyword modifier on a definition.
+                TokenKind::Unsafe | TokenKind::Async => {
+                    if p.peek(&[token.kind, TokenKind::LBrace]) {
+                        p.try_expr_statement()
+                    } else {
+                        p.try_keyword_modified_definition()
+                    }
+                }
+
+                // definitions
                 TokenKind::Struct => p.try_struct(),
                 TokenKind::Enum => p.try_enum(),
+                TokenKind::Union => p.try_union(),
                 TokenKind::Trait => p.try_trait(),
                 TokenKind::Impl => p.try_implementation(),
                 TokenKind::Extend => p.try_extension(),
@@ -35,10 +49,13 @@ impl Parser<'_> {
                 TokenKind::Newtype => p.try_newtype(),
                 TokenKind::Case => p.try_case(),
                 TokenKind::Test => p.try_test(),
-                // TokenKind::Lemma
-                // TokenKind::Predicate
-                // TokenKind::Union
-                // TokenKind::Static
+
+                // keyword-modifier definitions (these start definitions)
+                TokenKind::Pure | TokenKind::Comptime | TokenKind::Spec
+                | TokenKind::Verified | TokenKind::Atomic | TokenKind::Extern
+                | TokenKind::Private => p.try_keyword_modified_definition(),
+
+                // verification statements
                 TokenKind::Axiom => p.try_unary(
                     Rule::semicolon("predicate expression", |p| p.try_expr()),
                     TokenKind::Axiom,
@@ -84,6 +101,24 @@ impl Parser<'_> {
 
                 _ => p.try_expr_statement(),
             }
+        })
+    }
+
+    /// inline statement_expr
+    fn try_inline_statement(&mut self) -> ParseResult {
+        self.scoped_with_expected_prefix(TokenKind::Inline.as_ref(), |p| {
+            p.eat_tokens(1); // consume 'inline'
+            let inner = p.try_statement_or_definition()?;
+            if inner == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected a statement expression after `inline`".to_string(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+            Ok(NodeBuilder::new(NodeKind::InlineStatement, p.current_span())
+                .add_single_child(inner)
+                .build(&mut p.ast))
         })
     }
 
@@ -195,7 +230,6 @@ impl Parser<'_> {
 
     pub fn try_path(&mut self) -> ParseResult {
         self.scoped(|p| {
-            let next = p.peek_next_token();
             let mut left = p.try_prefix_path()?;
 
             while p.eat_token(TokenKind::Dot) {
@@ -203,14 +237,14 @@ impl Parser<'_> {
                 match next.kind {
                     TokenKind::Id => {
                         let id = p.try_id()?;
-                        left = NodeBuilder::new(NodeKind::PathSelect, p.current_span())
+                        left = NodeBuilder::new(NodeKind::ProjectionPath, p.current_span())
                             .add_single_child(left)
                             .add_single_child(id)
                             .build(&mut p.ast);
                     }
                     TokenKind::Star | TokenKind::SeparatedStar => {
                         p.eat_tokens(1);
-                        left = NodeBuilder::new(NodeKind::PathSelectAll, p.current_span())
+                        left = NodeBuilder::new(NodeKind::ProjectionAllPath, p.current_span())
                             .add_single_child(left)
                             .build(&mut p.ast);
                     }
@@ -245,7 +279,7 @@ impl Parser<'_> {
                                 p.next_token_span(),
                             ));
                         }
-                        left = NodeBuilder::new(NodeKind::PathSelectMulti, p.current_span())
+                        left = NodeBuilder::new(NodeKind::ProjectionMultiPath, p.current_span())
                             .add_single_child(left)
                             .add_multiple_children(items)
                             .build(&mut p.ast);
@@ -305,7 +339,7 @@ impl Parser<'_> {
     pub fn try_if_statement(&mut self) -> ParseResult {
         self.scoped_with_expected_prefix(TokenKind::If.as_ref(), |p| {
             p.eat_tokens(1);
-            let expr = p.try_expr_without_object_call()?;
+            let expr = p.try_expr_without_extended_call()?;
             if expr == 0 {
                 return Err(ParseError::invalid_syntax(
                     "Expected a condition expression after 'if'".to_string(),
@@ -428,7 +462,7 @@ impl Parser<'_> {
             }
 
             let arms = p.try_multi_with_bracket(
-                &[Rule::semicolon("pattern arm", |p| p.try_pattern_arm())],
+                &[Rule::semicolon("case arm", |p| p.try_case_arm())],
                 (TokenKind::LBrace, TokenKind::RBrace),
             )?;
 
@@ -458,7 +492,7 @@ impl Parser<'_> {
                 0
             };
 
-            let expr = p.try_expr_without_object_call()?;
+            let expr = p.try_expr_without_extended_call()?;
             if expr == 0 {
                 return Err(ParseError::invalid_syntax(
                     "Expected a condition expression after 'while'".to_string(),
@@ -488,7 +522,7 @@ impl Parser<'_> {
                 ));
             }
 
-            Ok(NodeBuilder::new(NodeKind::WhileLoop, p.current_span())
+            Ok(NodeBuilder::new(NodeKind::WhileStatement, p.current_span())
                 .add_single_child(label)
                 .add_single_child(expr)
                 .add_single_child(body)
@@ -544,7 +578,7 @@ impl Parser<'_> {
             }
 
             let arms = p.try_multi_with_bracket(
-                &[Rule::semicolon("pattern arm", |p| p.try_pattern_arm())],
+                &[Rule::semicolon("case arm", |p| p.try_case_arm())],
                 (TokenKind::LBrace, TokenKind::RBrace),
             )?;
 
@@ -592,7 +626,7 @@ impl Parser<'_> {
                 ));
             }
 
-            let expr = p.try_expr_without_object_call()?;
+            let expr = p.try_expr_without_extended_call()?;
             if expr == 0 {
                 return Err(ParseError::invalid_syntax(
                     "Expected an iterable expression after 'in'".to_string(),
@@ -618,7 +652,7 @@ impl Parser<'_> {
                 ));
             }
 
-            Ok(NodeBuilder::new(NodeKind::ForLoop, p.current_span())
+            Ok(NodeBuilder::new(NodeKind::ForStatement, p.current_span())
                 .add_single_child(label)
                 .add_single_child(pattern)
                 .add_single_child(expr)
@@ -680,7 +714,7 @@ impl Parser<'_> {
         })
     }
 
-    pub fn try_pattern_arm(&mut self) -> ParseResult {
+    pub fn try_case_arm(&mut self) -> ParseResult {
         self.scoped(|p| {
             let pattern = p.try_pattern()?;
             if pattern == 0 {
@@ -704,7 +738,7 @@ impl Parser<'_> {
                 ));
             }
 
-            Ok(NodeBuilder::new(NodeKind::PatternArm, p.current_span())
+            Ok(NodeBuilder::new(NodeKind::CaseArm, p.current_span())
                 .add_single_child(pattern)
                 .add_single_child(body)
                 .build(&mut p.ast))
@@ -773,29 +807,54 @@ impl Parser<'_> {
         })
     }
 
+    /// Parse a definition prefixed by keyword modifiers (pure, comptime, inline, unsafe, etc.)
+    /// These become AttributeSetTrue nodes wrapping the inner definition.
+    pub fn try_keyword_modified_definition(&mut self) -> ParseResult {
+        self.scoped(|p| {
+            let token = p.peek_next_token();
+            let _attr_name = match token.kind {
+                TokenKind::Pure => "flurry_kw_pure",
+                TokenKind::Comptime => "flurry_kw_comptime",
+                TokenKind::Inline => "flurry_kw_inline",
+                TokenKind::Unsafe => "flurry_kw_unsafe",
+                TokenKind::Spec => "flurry_kw_spec",
+                TokenKind::Verified => "flurry_kw_verified",
+                TokenKind::Atomic => "flurry_kw_atomic",
+                TokenKind::Extern => "flurry_kw_extern",
+                TokenKind::Async => "flurry_kw_async",
+                TokenKind::Private => "flurry_kw_private",
+                _ => return Ok(0),
+            };
+            p.eat_tokens(1);
+
+            // Create an Id node for the attribute name
+            let attr_id = NodeBuilder::new(NodeKind::Id, p.current_span()).build(&mut p.ast);
+
+            // Parse the inner definition or another keyword modifier
+            let inner = p.try_statement_or_definition()?;
+            if inner == 0 {
+                return Err(ParseError::invalid_syntax(
+                    format!("Expected a definition after `{}`", token.kind.lexme()),
+                    p.peek_next_token().kind,
+                    p.current_span(),
+                ));
+            }
+
+            Ok(
+                NodeBuilder::new(NodeKind::AttributeSetTrue, p.current_span())
+                    .add_single_child(attr_id)
+                    .add_single_child(inner)
+                    .build(&mut p.ast),
+            )
+        })
+    }
+
+    // return expr? (while expr)?
     pub fn try_return_statement(&mut self) -> ParseResult {
         self.scoped_with_expected_prefix(TokenKind::Return.as_ref(), |p| {
             p.eat_tokens(1);
             let expr = p.try_expr()?;
-
-            let guard = if p.eat_token(TokenKind::If) {
-                match p.try_expr() {
-                    Ok(0) => {
-                        return Err(ParseError::invalid_syntax(
-                            "Expected a condition expression after 'if'".to_string(),
-                            p.peek_next_token().kind,
-                            p.next_token_span(),
-                        ));
-                    }
-                    Ok(node) => node,
-                    Err(err) => {
-                        return Err(err);
-                    }
-                }
-            } else {
-                0
-            };
-
+            let guard = p.try_while_guard()?;
             Ok(
                 NodeBuilder::new(NodeKind::ReturnStatement, p.current_span())
                     .add_single_child(expr)
@@ -805,29 +864,12 @@ impl Parser<'_> {
         })
     }
 
+    // resume expr? (while expr)?
     pub fn try_resume_statement(&mut self) -> ParseResult {
         self.scoped_with_expected_prefix(TokenKind::Resume.as_ref(), |p| {
             p.eat_tokens(1);
             let expr = p.try_expr()?;
-
-            let guard = if p.eat_token(TokenKind::If) {
-                match p.try_expr() {
-                    Ok(0) => {
-                        return Err(ParseError::invalid_syntax(
-                            "Expected a condition expression after 'if'".to_string(),
-                            p.peek_next_token().kind,
-                            p.next_token_span(),
-                        ));
-                    }
-                    Ok(node) => node,
-                    Err(err) => {
-                        return Err(err);
-                    }
-                }
-            } else {
-                0
-            };
-
+            let guard = p.try_while_guard()?;
             Ok(
                 NodeBuilder::new(NodeKind::ResumeStatement, p.current_span())
                     .add_single_child(expr)
@@ -837,30 +879,12 @@ impl Parser<'_> {
         })
     }
 
+    // break id? (while expr)?
     pub fn try_break_statement(&mut self) -> ParseResult {
         self.scoped_with_expected_prefix(TokenKind::Break.as_ref(), |p| {
             p.eat_tokens(1);
-
             let label = p.try_id()?;
-
-            let guard = if p.eat_token(TokenKind::If) {
-                match p.try_expr() {
-                    Ok(0) => {
-                        return Err(ParseError::invalid_syntax(
-                            "Expected a condition expression after 'if'".to_string(),
-                            p.peek_next_token().kind,
-                            p.next_token_span(),
-                        ));
-                    }
-                    Ok(node) => node,
-                    Err(err) => {
-                        return Err(err);
-                    }
-                }
-            } else {
-                0
-            };
-
+            let guard = p.try_while_guard()?;
             Ok(NodeBuilder::new(NodeKind::BreakStatement, p.current_span())
                 .add_single_child(label)
                 .add_single_child(guard)
@@ -868,30 +892,12 @@ impl Parser<'_> {
         })
     }
 
+    // continue id? (while expr)?
     pub fn try_continue_statement(&mut self) -> ParseResult {
         self.scoped_with_expected_prefix(TokenKind::Continue.as_ref(), |p| {
             p.eat_tokens(1);
-
             let label = p.try_id()?;
-
-            let guard = if p.eat_token(TokenKind::If) {
-                match p.try_expr() {
-                    Ok(0) => {
-                        return Err(ParseError::invalid_syntax(
-                            "Expected a condition expression after 'if'".to_string(),
-                            p.peek_next_token().kind,
-                            p.next_token_span(),
-                        ));
-                    }
-                    Ok(node) => node,
-                    Err(err) => {
-                        return Err(err);
-                    }
-                }
-            } else {
-                0
-            };
-
+            let guard = p.try_while_guard()?;
             Ok(
                 NodeBuilder::new(NodeKind::ContinueStatement, p.current_span())
                     .add_single_child(label)
@@ -899,6 +905,23 @@ impl Parser<'_> {
                     .build(&mut p.ast),
             )
         })
+    }
+
+    /// Parse optional `while expr` guard
+    fn try_while_guard(&mut self) -> ParseResult {
+        if self.eat_token(TokenKind::While) {
+            let guard = self.try_expr()?;
+            if guard == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected a condition expression after `while`".to_string(),
+                    self.peek_next_token().kind,
+                    self.next_token_span(),
+                ));
+            }
+            Ok(guard)
+        } else {
+            Ok(0)
+        }
     }
 
     // expr

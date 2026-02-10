@@ -29,7 +29,7 @@ pub fn get_expr_op_info(token_kind: TokenKind) -> ExprOpInfo {
         TokenKind::LtEq => ExprOpInfo::new(40, NodeKind::BoolLtEq),    // <=
         TokenKind::SeparatedLt => ExprOpInfo::new(40, NodeKind::BoolLt), // " < "
 
-        // 类型相关操作符
+        // type-related operators
         TokenKind::Colon => ExprOpInfo::new(40, NodeKind::TypedWith), // :
         TokenKind::ColonMinus => ExprOpInfo::new(40, NodeKind::TraitBound), // :-
         TokenKind::Matches => ExprOpInfo::new(40, NodeKind::BoolMatches), // matches
@@ -52,18 +52,20 @@ pub fn get_expr_op_info(token_kind: TokenKind) -> ExprOpInfo {
         // 90级保留用于前缀表达式优先级
 
         // 调用操作符 (100级)
-        TokenKind::LParen => ExprOpInfo::new(100, NodeKind::Call), // (
-        TokenKind::LBracket => ExprOpInfo::new(100, NodeKind::IndexCall), // [
-        TokenKind::LBrace => ExprOpInfo::new(100, NodeKind::ObjectCall), // {
-        TokenKind::Lt => ExprOpInfo::new(100, NodeKind::DiamondCall), // <
+        TokenKind::LParen => ExprOpInfo::new(100, NodeKind::Application), // (
+        TokenKind::LBracket => ExprOpInfo::new(100, NodeKind::IndexApplication), // [
+        TokenKind::LBrace => ExprOpInfo::new(100, NodeKind::ExtendedApplication), // {
+        TokenKind::Lt => ExprOpInfo::new(100, NodeKind::NormalFormApplication), // <
         TokenKind::Hash => ExprOpInfo::new(100, NodeKind::EffectElimination), // #
         TokenKind::Bang => ExprOpInfo::new(100, NodeKind::ErrorElimination), // !
         TokenKind::Question => ExprOpInfo::new(100, NodeKind::OptionElimination), // ?
         TokenKind::Match => ExprOpInfo::new(100, NodeKind::PostMatch), // match
+        TokenKind::Do => ExprOpInfo::new(100, NodeKind::PostLambda),   // do
+        TokenKind::Matches => ExprOpInfo::new(100, NodeKind::BoolMatches), // matches
 
-        // 选择和图像操作符 (110级)
+        // projection and take_view (110)
         TokenKind::Dot => ExprOpInfo::new(110, NodeKind::Select), // .
-        TokenKind::Quote => ExprOpInfo::new(110, NodeKind::Image), // '
+        TokenKind::Quote => ExprOpInfo::new(110, NodeKind::TakeView), // '
 
         // 标识符 (120级)
         TokenKind::Id => ExprOpInfo::new(120, NodeKind::Id), // id
@@ -72,21 +74,27 @@ pub fn get_expr_op_info(token_kind: TokenKind) -> ExprOpInfo {
     }
 }
 
-/// 获取模式操作符信息
+/// Get pattern operator info for pratt parsing
 pub fn get_pattern_op_info(token_kind: TokenKind) -> ExprOpInfo {
     match token_kind {
-        // 模式相关操作符
-        TokenKind::If => ExprOpInfo::new(10, NodeKind::PatternIfGuard), // if
-        TokenKind::And => ExprOpInfo::new(10, NodeKind::PatternAndIs),  // and
-        TokenKind::As => ExprOpInfo::new(20, NodeKind::PatternAsBind),  // as
-        TokenKind::Or => ExprOpInfo::new(30, NodeKind::PatternOr),      // or
-        TokenKind::Question => ExprOpInfo::new(40, NodeKind::PatternOptionSome), // ?
-        TokenKind::Bang => ExprOpInfo::new(40, NodeKind::PatternErrorOk), // !
-        TokenKind::LParen => ExprOpInfo::new(80, NodeKind::PatternCall), // (
-        TokenKind::LBrace => ExprOpInfo::new(80, NodeKind::PatternObjectCall), // {
-        TokenKind::Lt => ExprOpInfo::new(80, NodeKind::PatternDiamondCall), // <
-        TokenKind::Dot => ExprOpInfo::new(90, NodeKind::Select),        // .
+        // pattern postfix operators (low precedence)
+        TokenKind::If => ExprOpInfo::new(10, NodeKind::IfGuardPattern), // if guard
+        TokenKind::And => ExprOpInfo::new(10, NodeKind::AndIsPattern),  // and ... is ...
+        TokenKind::As => ExprOpInfo::new(20, NodeKind::AsBindPattern),  // as bind
+        TokenKind::Or => ExprOpInfo::new(30, NodeKind::OrPattern),      // or
 
-        _ => ExprOpInfo::new(-1, NodeKind::Invalid), // 默认无效操作符
+        // propagation postfix (high precedence)
+        TokenKind::Question => ExprOpInfo::new(40, NodeKind::OptionSomePattern), // ?
+        TokenKind::Bang => ExprOpInfo::new(40, NodeKind::ErrorOkPattern), // !
+
+        // application postfix
+        TokenKind::LParen => ExprOpInfo::new(80, NodeKind::ApplicationPattern), // (
+        TokenKind::LBrace => ExprOpInfo::new(80, NodeKind::ExtendedApplicationPattern), // {
+        TokenKind::Lt => ExprOpInfo::new(80, NodeKind::NormalFormApplicationPattern), // <
+
+        // projection
+        TokenKind::Dot => ExprOpInfo::new(90, NodeKind::Select), // .
+
+        _ => ExprOpInfo::new(-1, NodeKind::Invalid),
     }
 }

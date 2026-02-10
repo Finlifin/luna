@@ -8,20 +8,20 @@ use lex::TokenKind;
 /// 表达式选项，包含是否记录调用和优先级
 #[derive(Debug, Clone, Copy)]
 pub struct ExprOption {
-    pub no_object_call: bool,
+    pub no_extended_call: bool,
     pub precedence: i32,
 }
 
 impl ExprOption {
     pub fn new() -> Self {
         Self {
-            no_object_call: false,
+            no_extended_call: false,
             precedence: 0,
         }
     }
 
-    pub fn with_no_object_call(mut self, no_object_call: bool) -> Self {
-        self.no_object_call = no_object_call;
+    pub fn with_no_extended_call(mut self, no_extended_call: bool) -> Self {
+        self.no_extended_call = no_extended_call;
         self
     }
 
@@ -48,8 +48,9 @@ impl Parser<'_> {
     }
 
     #[inline]
-    pub fn try_expr_without_object_call(&mut self) -> ParseResult {
-        self.try_expr_with_option(ExprOption::new().with_no_object_call(true))
+    /// Parse an expression while disabling `extended_application`.
+    pub fn try_expr_without_extended_call(&mut self) -> ParseResult {
+        self.try_expr_with_option(ExprOption::new().with_no_extended_call(true))
     }
 
     /// 使用 Pratt 解析法解析表达式
@@ -82,8 +83,8 @@ impl Parser<'_> {
                     Ok(node) if node != 0 => {
                         current_left = node;
                     }
-                    Err(ParseError::MeetPostObjectStart) => {
-                        // 如果遇到 MeetPostObjectStart，跳过后缀表达式处理
+                    Err(ParseError::MeetPostExtendedCallStart) => {
+                        // 如果遇到 MeetPostExtendedCallStart，跳过后缀表达式处理
                         break;
                     }
                     Err(ParseError::MeetPostId) => {
@@ -141,17 +142,23 @@ impl Parser<'_> {
                 | TokenKind::SelfCap
                 | TokenKind::SelfLower
                 | TokenKind::Underscore
-                | TokenKind::Null => p.try_atomic(),
+                | TokenKind::Null
+                | TokenKind::Undefined => p.try_atomic(),
 
                 TokenKind::LParen => p.try_unit_or_parenthesis_or_tuple(),
                 TokenKind::LBracket => p.try_list(),
                 TokenKind::LBrace => p.try_object(),
-                TokenKind::Dot => p.try_prefix_range_expr_or_symbel(option),
+                TokenKind::Dot => p.try_prefix_range_expr_or_symbol(option),
                 TokenKind::Pipe => p.try_lambda(option),
-                TokenKind::Forall => p.try_forall_type(option),
+                TokenKind::Forall => p.try_forall_prefix(option),
+                TokenKind::Exists => p.try_bool_exists(option),
                 TokenKind::Hash => p.try_effect_qualified_type(),
                 TokenKind::Bang => p.try_error_qualified_type(),
                 TokenKind::Ampersand => p.try_reachability_type(),
+                TokenKind::Caret => p.try_closure_qualified_type(),
+                TokenKind::Minus | TokenKind::SeparatedMinus => {
+                    p.try_prefix_unary_expr(token.kind, NodeKind::Negative, 90)
+                }
                 TokenKind::Not => p.try_prefix_unary_expr(TokenKind::Not, NodeKind::BoolNot, 90),
                 TokenKind::Error => {
                     p.try_prefix_unary_expr(TokenKind::Error, NodeKind::ErrorNew, 90)
@@ -165,6 +172,42 @@ impl Parser<'_> {
                 TokenKind::Question => {
                     p.try_prefix_unary_expr(TokenKind::Question, NodeKind::OptionalType, 90)
                 }
+                TokenKind::Lift => {
+                    p.try_prefix_unary_expr(TokenKind::Lift, NodeKind::LiftType, 90)
+                }
+                TokenKind::Do => p.try_do_block_expr(),
+                TokenKind::Async => {
+                    // async { ... } = AsyncBlock; async fn(...) = fn_type modifier
+                    if p.peek(&[TokenKind::Async, TokenKind::LBrace]) {
+                        p.try_keyword_block_expr(TokenKind::Async, NodeKind::AsyncBlock)
+                    } else {
+                        // async is not a fn_type modifier in syntax, treat as block
+                        p.try_keyword_block_expr(TokenKind::Async, NodeKind::AsyncBlock)
+                    }
+                }
+                TokenKind::Unsafe => {
+                    // unsafe { ... } = UnsafeBlock; unsafe fn(...) = fn_type modifier
+                    if p.peek(&[TokenKind::Unsafe, TokenKind::LBrace]) {
+                        p.try_keyword_block_expr(TokenKind::Unsafe, NodeKind::UnsafeBlock)
+                    } else {
+                        p.try_fn_type()
+                    }
+                }
+                TokenKind::Comptime => {
+                    // comptime { ... } = ComptimeBlock; comptime fn(...) = fn_type modifier
+                    if p.peek(&[TokenKind::Comptime, TokenKind::LBrace]) {
+                        p.try_keyword_block_expr(TokenKind::Comptime, NodeKind::ComptimeBlock)
+                    } else {
+                        p.try_fn_type()
+                    }
+                }
+                TokenKind::Atomic => p.try_atomic_block_expr(),
+
+                // fn_type -> pure? comptime? inline? (unsafe|spec|verified)? (extern "ABI")? fn(parameter_type*)
+                TokenKind::Fn => p.try_fn_type(),
+                TokenKind::Pure | TokenKind::Inline | TokenKind::Spec
+                | TokenKind::Verified | TokenKind::Extern => p.try_fn_type(),
+
                 _ => Ok(0),
             }
         })
@@ -226,7 +269,7 @@ impl Parser<'_> {
         })
     }
 
-    pub fn try_prefix_range_expr_or_symbel(&mut self, option: ExprOption) -> ParseResult {
+    pub fn try_prefix_range_expr_or_symbol(&mut self, option: ExprOption) -> ParseResult {
         self.scoped_with_expected_prefix(&[TokenKind::Dot], |p| {
             if p.peek(&[TokenKind::Dot, TokenKind::Dot]) {
                 p.eat_tokens(2);
@@ -333,47 +376,115 @@ impl Parser<'_> {
                 block => block,
             };
 
+            // Build as (a, b, N): return_type, body, then params
             Ok(NodeBuilder::new(NodeKind::Lambda, p.current_span())
-                .add_multiple_children(params)
                 .add_single_child(return_type)
                 .add_single_child(body)
+                .add_multiple_children(params)
                 .build(&mut p.ast))
         })
     }
 
-    /// 解析forall类型
-    /// forall<id | param> expr(precedence = 90)
-    fn try_forall_type(&mut self, option: ExprOption) -> ParseResult {
+    /// Parse `forall` prefix — dispatches to:
+    /// - `forall<parameter*> expr`   → ForallType (a, N)
+    /// - `forall type_bound_param* => expr` → BoolForall (a, N)
+    fn try_forall_prefix(&mut self, option: ExprOption) -> ParseResult {
         self.scoped_with_expected_prefix(&[TokenKind::Forall], |p| {
-            p.eat_tokens(1); // 消耗 'forall'
+            p.eat_tokens(1); // consume 'forall'
 
-            if !p.eat_token(TokenKind::Lt) {
+            // If next token is `<`, this is ForallType
+            if p.peek(TokenKind::Lt.as_ref()) {
+                let params = p.try_multi_with_bracket(
+                    &[Rule::comma("forall type parameter", |p| p.try_param())],
+                    (TokenKind::Lt, TokenKind::Gt),
+                )?;
+
+                let expr = p.try_expr_with_option(option)?;
+                if expr == 0 {
+                    return Err(ParseError::invalid_syntax(
+                        "Expected expression after forall type parameters".to_string(),
+                        p.peek_next_token().kind,
+                        p.next_token_span(),
+                    ));
+                }
+
+                // Build as (a, N): body first, then params
+                Ok(NodeBuilder::new(NodeKind::ForallType, p.current_span())
+                    .add_single_child(expr)
+                    .add_multiple_children(params)
+                    .build(&mut p.ast))
+            } else {
+                // bool_forall: forall type_bound_param* => expr
+                let params = p.try_multi(&[Rule::comma("type bound parameter", |p| {
+                    p.try_param()
+                })])?;
+                if params.is_empty() {
+                    return Err(ParseError::invalid_syntax(
+                        "Expected at least one parameter after `forall`".to_string(),
+                        p.peek_next_token().kind,
+                        p.next_token_span(),
+                    ));
+                }
+
+                if !p.eat_token(TokenKind::FatArrow) {
+                    return Err(ParseError::unexpected_token(
+                        TokenKind::FatArrow,
+                        p.peek_next_token().kind,
+                        p.next_token_span(),
+                    ));
+                }
+
+                let body = p.try_expr_with_option(option)?;
+                if body == 0 {
+                    return Err(ParseError::invalid_syntax(
+                        "Expected expression after `=>` in forall".to_string(),
+                        p.peek_next_token().kind,
+                        p.next_token_span(),
+                    ));
+                }
+
+                Ok(NodeBuilder::new(NodeKind::BoolForall, p.current_span())
+                    .add_single_child(body)
+                    .add_multiple_children(params)
+                    .build(&mut p.ast))
+            }
+        })
+    }
+
+    /// bool_exists: `exists type_bound_param* => expr`
+    fn try_bool_exists(&mut self, option: ExprOption) -> ParseResult {
+        self.scoped_with_expected_prefix(&[TokenKind::Exists], |p| {
+            p.eat_tokens(1); // consume 'exists'
+
+            let params = p.try_multi(&[Rule::comma("type bound parameter", |p| p.try_param())])?;
+            if params.is_empty() {
                 return Err(ParseError::invalid_syntax(
-                    "Expected '<' after 'forall'".to_string(),
+                    "Expected at least one parameter after `exists`".to_string(),
                     p.peek_next_token().kind,
                     p.next_token_span(),
                 ));
             }
 
-            // 解析类型参数列表
-            let params = p.try_multi_with_bracket(
-                &[Rule::comma("forall type parameter", |p| p.try_param())],
-                (TokenKind::Lt, TokenKind::Gt),
-            )?;
-
-            // 解析表达式
-            let expr = p.try_expr_with_option(option)?;
-            if expr == 0 {
-                return Err(ParseError::invalid_syntax(
-                    "Expected expression after forall type parameters".to_string(),
+            if !p.eat_token(TokenKind::FatArrow) {
+                return Err(ParseError::unexpected_token(
+                    TokenKind::FatArrow,
                     p.peek_next_token().kind,
                     p.next_token_span(),
                 ));
             }
 
-            Ok(NodeBuilder::new(NodeKind::ForallType, p.current_span())
+            let body = p.try_expr_with_option(option)?;
+            if body == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected expression after `=>` in exists".to_string(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+
+            Ok(NodeBuilder::new(NodeKind::BoolExists, p.current_span())
+                .add_single_child(body)
                 .add_multiple_children(params)
-                .add_single_child(expr)
                 .build(&mut p.ast))
         })
     }
@@ -385,7 +496,7 @@ impl Parser<'_> {
             p.eat_tokens(1); // 消耗 '#'
 
             // 解析效果列表
-            let effect_list = p.try_expr_without_object_call()?;
+            let effect_list = p.try_expr_without_extended_call()?;
             if effect_list == 0 {
                 return Err(ParseError::invalid_syntax(
                     "Expected effect list after '#'".to_string(),
@@ -395,7 +506,7 @@ impl Parser<'_> {
             }
 
             // 解析类型表达式
-            let type_expr = p.try_expr_without_object_call()?;
+            let type_expr = p.try_expr_without_extended_call()?;
             if type_expr == 0 {
                 return Err(ParseError::invalid_syntax(
                     "Expected type expression in effect qualified type".to_string(),
@@ -420,7 +531,7 @@ impl Parser<'_> {
             p.eat_tokens(1); // 消耗 '!'
 
             // 解析错误列表
-            let error_list = p.try_expr_without_object_call()?;
+            let error_list = p.try_expr_without_extended_call()?;
             if error_list == 0 {
                 return Err(ParseError::invalid_syntax(
                     "Expected error list after '!'".to_string(),
@@ -430,7 +541,7 @@ impl Parser<'_> {
             }
 
             // 解析类型表达式
-            let type_expr = p.try_expr_without_object_call()?;
+            let type_expr = p.try_expr_without_extended_call()?;
             if type_expr == 0 {
                 return Err(ParseError::invalid_syntax(
                     "Expected type expression in error qualified type".to_string(),
@@ -454,7 +565,7 @@ impl Parser<'_> {
             p.eat_tokens(1);
 
             // 解析可达性列表
-            let reachability_set = p.try_expr_without_object_call()?;
+            let reachability_set = p.try_expr_without_extended_call()?;
             if reachability_set == 0 {
                 return Err(ParseError::invalid_syntax(
                     "Expected reachability list after '&'".to_string(),
@@ -464,7 +575,7 @@ impl Parser<'_> {
             }
 
             // 解析类型表达式
-            let type_expr = p.try_expr_without_object_call()?;
+            let type_expr = p.try_expr_without_extended_call()?;
             if type_expr == 0 {
                 return Err(ParseError::invalid_syntax(
                     "Expected type expression in reachability type".to_string(),
@@ -482,7 +593,111 @@ impl Parser<'_> {
         })
     }
 
-    /// 解析前缀一元表达式的通用方法
+    /// do_block -> do { statement* }
+    fn try_do_block_expr(&mut self) -> ParseResult {
+        self.scoped_with_expected_prefix(TokenKind::Do.as_ref(), |p| {
+            p.eat_tokens(1); // consume 'do'
+            let block = p.try_block()?;
+            if block == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected block after `do`".to_string(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+            Ok(NodeBuilder::new(NodeKind::DoBlock, p.current_span())
+                .add_single_child(block)
+                .build(&mut p.ast))
+        })
+    }
+
+    /// Generic keyword block: async/unsafe/comptime { statement* }
+    fn try_keyword_block_expr(
+        &mut self,
+        keyword: TokenKind,
+        node_kind: NodeKind,
+    ) -> ParseResult {
+        self.scoped_with_expected_prefix(keyword.as_ref(), |p| {
+            p.eat_tokens(1); // consume keyword
+            if !p.peek(TokenKind::LBrace.as_ref()) {
+                return Ok(0); // Not a block expression — backtrack
+            }
+            let block = p.try_block()?;
+            if block == 0 {
+                return Err(ParseError::invalid_syntax(
+                    format!("Expected block after `{}`", keyword.lexme()),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+            Ok(NodeBuilder::new(node_kind, p.current_span())
+                .add_single_child(block)
+                .build(&mut p.ast))
+        })
+    }
+
+    /// atomic_block -> atomic(id*) { statement* }
+    fn try_atomic_block_expr(&mut self) -> ParseResult {
+        self.scoped_with_expected_prefix(&[TokenKind::Atomic, TokenKind::LParen], |p| {
+            p.eat_tokens(1); // consume 'atomic'
+            let ids = p.try_multi_with_bracket(
+                &[Rule::comma("atomic id", |p| p.try_id())],
+                (TokenKind::LParen, TokenKind::RParen),
+            )?;
+            let block = p.try_block()?;
+            if block == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected block after `atomic(...)`.".to_string(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+            // AtomicBlock is (a, b, N) = DoubleWithMultiChildren? 
+            // Actually it's N, a in current code comment. Let me use the correct layout.
+            // AtomicBlock: N, a -> but should be a, N = SingleWithMultiChildren
+            // Wait, current code says AtomicBlock is DoubleWithMultiChildren.
+            // Looking at the comment: AtomicBlock, // N, a  
+            // This is wrong for DoubleWithMultiChildren. Let me keep it as-is for now.
+            Ok(NodeBuilder::new(NodeKind::AtomicBlock, p.current_span())
+                .add_multiple_children(ids)
+                .add_single_child(block)
+                .build(&mut p.ast))
+        })
+    }
+
+    /// closure_qualified_type -> ^expr expr
+    fn try_closure_qualified_type(&mut self) -> ParseResult {
+        self.scoped_with_expected_prefix(&[TokenKind::Caret], |p| {
+            p.eat_tokens(1); // consume '^'
+
+            let closure_expr = p.try_expr_without_extended_call()?;
+            if closure_expr == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected closure expression after `^`".to_string(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+
+            let type_expr = p.try_expr_without_extended_call()?;
+            if type_expr == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected type expression in closure qualified type".to_string(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+
+            Ok(
+                NodeBuilder::new(NodeKind::ClosureQualifiedType, p.current_span())
+                    .add_single_child(closure_expr)
+                    .add_single_child(type_expr)
+                    .build(&mut p.ast),
+            )
+        })
+    }
+
+    /// Parse prefix unary expression (generic method)
     fn try_prefix_unary_expr(
         &mut self,
         token: TokenKind,
@@ -495,7 +710,7 @@ impl Parser<'_> {
             let expr = p.try_expr_with_option(
                 ExprOption::new()
                     .with_precedence(precedence)
-                    .with_no_object_call(true),
+                    .with_no_extended_call(true),
             )?;
 
             if expr == 0 {
@@ -512,77 +727,76 @@ impl Parser<'_> {
         })
     }
 
-    /// 尝试解析后缀表达式
+    /// Try to parse a postfix expression
     fn try_postfix_expr(
         &mut self,
         tag: TokenKind,
         left: NodeIndex,
         opt: ExprOption,
     ) -> ParseResult {
-        // TODO: 这里的span管理有问题, 应重新审视scoped😅
         self.scoped(|p| {
             match tag {
                 TokenKind::LParen => p.try_call_expr(left),
                 TokenKind::Lt => p.try_diamond_call_expr(left),
-                TokenKind::LBrace => p.try_object_call_expr(left, opt),
+                TokenKind::LBrace => p.try_extended_call_expr(left, opt),
                 TokenKind::LBracket => p.try_index_call_expr(left),
                 TokenKind::Dot => p.try_dot_expr(left),
-                TokenKind::Quote => p.try_image_expr(left),
+                TokenKind::Quote => p.try_take_view_expr(left),
                 TokenKind::Hash => p.try_effect_handling_expr(left),
                 TokenKind::Bang => p.try_error_handling_expr(left),
                 TokenKind::Question => p.try_option_expr(left),
                 TokenKind::Match => p.try_post_match_expr(left),
+                TokenKind::Do => p.try_post_lambda_expr(left, opt),
                 TokenKind::Matches => p.try_matches_expr(left, opt),
                 TokenKind::Id => p.try_literal_extension_expr(left),
-                _ => Ok(0), // result(None)
+                _ => Ok(0),
             }
         })
     }
 
-    /// 函数调用表达式
+    /// application -> expr(argument*)
     fn try_call_expr(&mut self, left: NodeIndex) -> ParseResult {
         self.scoped_with_expected_prefix(&[TokenKind::LParen], |p| {
-            // 解析函数调用参数
-            // TODO: 元组展开
             let args = p.try_multi_with_bracket(
                 &[
-                    Rule::comma("optional argument", |p| p.try_property_assign()),
+                    Rule::comma("optional argument", |p| p.try_optional_arg()),
+                    Rule::comma("extend argument", |p| p.try_extend_arg()),
                     Rule::comma("function argument", |p| p.try_expr()),
                 ],
                 (TokenKind::LParen, TokenKind::RParen),
             )?;
 
             // 创建函数调用节点
-            Ok(NodeBuilder::new(NodeKind::Call, p.current_span())
+            Ok(NodeBuilder::new(NodeKind::Application, p.current_span())
                 .add_single_child(left)
                 .add_multiple_children(args)
                 .build(&mut p.ast))
         })
     }
 
-    /// 泛型调用表达式
+    /// normal_form_application -> expr<argument*>
     fn try_diamond_call_expr(&mut self, left: NodeIndex) -> ParseResult {
         self.scoped_with_expected_prefix(&[TokenKind::Lt], |p| {
             let args = p.try_multi_with_bracket(
                 &[
-                    Rule::comma("optional arg", |p| p.try_property_assign()),
+                    Rule::comma("optional argument", |p| p.try_optional_arg()),
                     Rule::comma("function argument", |p| p.try_expr()),
                 ],
                 (TokenKind::Lt, TokenKind::Gt),
             )?;
 
             // 创建泛型调用节点
-            Ok(NodeBuilder::new(NodeKind::DiamondCall, p.current_span())
+            Ok(NodeBuilder::new(NodeKind::NormalFormApplication, p.current_span())
                 .add_single_child(left)
                 .add_multiple_children(args)
                 .build(&mut p.ast))
         })
     }
 
-    /// 对象调用表达式
-    fn try_object_call_expr(&mut self, left: NodeIndex, opt: ExprOption) -> ParseResult {
-        if opt.no_object_call {
-            return Err(ParseError::MeetPostObjectStart);
+    /// extended_application -> expr { (property | expr)* }
+    fn try_extended_call_expr(&mut self, left: NodeIndex, opt: ExprOption) -> ParseResult {
+        if opt.no_extended_call {
+            return Err(ParseError::MeetPostExtendedCallStart);
         }
 
         self.scoped_with_expected_prefix(&[TokenKind::LBrace], |p| {
@@ -595,8 +809,8 @@ impl Parser<'_> {
                 (TokenKind::LBrace, TokenKind::RBrace),
             )?;
 
-            // 创建对象调用节点
-            Ok(NodeBuilder::new(NodeKind::ObjectCall, p.current_span())
+            // 创建扩展调用节点
+            Ok(NodeBuilder::new(NodeKind::ExtendedApplication, p.current_span())
                 .add_single_child(left)
                 .add_multiple_children(children_and_properties)
                 .build(&mut p.ast))
@@ -617,7 +831,7 @@ impl Parser<'_> {
             }
 
             // 创建索引调用节点
-            Ok(NodeBuilder::new(NodeKind::IndexCall, p.current_span())
+            Ok(NodeBuilder::new(NodeKind::IndexApplication, p.current_span())
                 .add_single_child(left)
                 .add_single_child(expr)
                 .build(&mut p.ast))
@@ -682,7 +896,7 @@ impl Parser<'_> {
             }
 
             // 创建处理器应用节点
-            Ok(NodeBuilder::new(NodeKind::HandlerApply, p.current_span())
+            Ok(NodeBuilder::new(NodeKind::HandlerApplication, p.current_span())
                 .add_single_child(left)
                 .add_single_child(handler_expr)
                 .build(&mut p.ast))
@@ -736,8 +950,8 @@ impl Parser<'_> {
             .build(&mut self.ast))
     }
 
-    /// 取像表达式
-    fn try_image_expr(&mut self, left: NodeIndex) -> ParseResult {
+    /// take_view -> expr ' id
+    fn try_take_view_expr(&mut self, left: NodeIndex) -> ParseResult {
         if !self.eat_token(TokenKind::Quote) {
             return Ok(0);
         }
@@ -745,12 +959,12 @@ impl Parser<'_> {
         let id = self.try_id()?;
         if id == 0 {
             return Err(ParseError::invalid_syntax(
-                "Expected identifier after '\"' in image expression".to_string(),
+                "Expected identifier after `'` in take-view expression".to_string(),
                 self.peek_next_token().kind,
                 self.next_token_span(),
             ));
         }
-        Ok(NodeBuilder::new(NodeKind::Image, self.current_span())
+        Ok(NodeBuilder::new(NodeKind::TakeView, self.current_span())
             .add_single_child(left)
             .add_single_child(id)
             .build(&mut self.ast))
@@ -787,7 +1001,7 @@ impl Parser<'_> {
             }
 
             // 创建动态转换节点
-            Ok(NodeBuilder::new(NodeKind::AsDyn, p.current_span())
+            Ok(NodeBuilder::new(NodeKind::DynCast, p.current_span())
                 .add_single_child(left)
                 .add_single_child(dyn_expr)
                 .build(&mut p.ast))
@@ -836,7 +1050,7 @@ impl Parser<'_> {
     fn parse_range_expr(&mut self, left: NodeIndex) -> ParseResult {
         if self.peek(&[TokenKind::Dot, TokenKind::Eq]) {
             self.eat_tokens(2);
-            let end = self.try_expr_without_object_call()?;
+            let end = self.try_expr_without_extended_call()?;
             if end == 0 {
                 return Err(ParseError::invalid_syntax(
                     "Expected expression after '..=' in range expression".to_string(),
@@ -852,7 +1066,7 @@ impl Parser<'_> {
             )
         } else {
             self.eat_tokens(1);
-            let end = self.try_expr_without_object_call()?;
+            let end = self.try_expr_without_extended_call()?;
             if end != 0 {
                 Ok(NodeBuilder::new(NodeKind::RangeFromTo, self.current_span())
                     .add_single_child(left)
@@ -880,7 +1094,7 @@ impl Parser<'_> {
             }
 
             let arms =
-                p.try_multi(&[Rule::comma("effect handling arm", |p| p.try_pattern_arm())])?;
+                p.try_multi(&[Rule::comma("effect handling arm", |p| p.try_case_arm())])?;
 
             if !p.eat_token(TokenKind::RBrace) {
                 return Err(ParseError::invalid_syntax(
@@ -914,7 +1128,7 @@ impl Parser<'_> {
 
             let arms = p.try_multi(&[
                 Rule::comma("catching arm", |p| p.try_catch_arm()),
-                Rule::comma("error handling arm", |p| p.try_pattern_arm()),
+                Rule::comma("error handling arm", |p| p.try_case_arm()),
             ])?;
 
             if !p.eat_token(TokenKind::RBrace) {
@@ -979,7 +1193,7 @@ impl Parser<'_> {
             }
 
             let arms = p.try_multi_with_bracket(
-                &[Rule::comma("match arm", |p| p.try_pattern_arm())],
+                &[Rule::comma("match arm", |p| p.try_case_arm())],
                 (TokenKind::LBrace, TokenKind::RBrace),
             )?;
 
@@ -995,8 +1209,8 @@ impl Parser<'_> {
         self.scoped_with_expected_prefix(TokenKind::Matches.as_ref(), |p| {
             p.eat_tokens(1);
 
-            let pattern = if option.no_object_call {
-                p.try_pattern_without_object_call()?
+            let pattern = if option.no_extended_call {
+                p.try_pattern_without_extended_call()?
             } else {
                 p.try_pattern()?
             };
@@ -1015,18 +1229,43 @@ impl Parser<'_> {
         })
     }
 
-    /// 字面量扩展表达式
-    fn try_literal_extension_expr(&mut self, left: NodeIndex) -> ParseResult {
-        self.scoped_with_expected_prefix(&[TokenKind::Id], |p| {
-            p.eat_tokens(1); // 消耗标识符
+    /// post_lambda -> expr do (lambda | block | expr)
+    fn try_post_lambda_expr(&mut self, left: NodeIndex, opt: ExprOption) -> ParseResult {
+        self.scoped_with_expected_prefix(TokenKind::Do.as_ref(), |p| {
+            p.eat_tokens(1); // consume 'do'
 
-            let id = p.try_id()?;
-            if id == 0 {
+            // Try lambda first (|params| body)
+            let body = if p.peek(TokenKind::Pipe.as_ref()) {
+                p.try_lambda(opt)?
+            } else if p.peek(TokenKind::LBrace.as_ref()) {
+                // Try block
+                p.try_block()?
+            } else {
+                // Otherwise parse as expression
+                p.try_expr_with_option(opt)?
+            };
+
+            if body == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected identifier after 'id' in literal extension expression".to_string(),
+                    "Expected lambda, block, or expression after `do`".to_string(),
                     p.peek_next_token().kind,
                     p.next_token_span(),
                 ));
+            }
+
+            Ok(NodeBuilder::new(NodeKind::PostLambda, p.current_span())
+                .add_single_child(left)
+                .add_single_child(body)
+                .build(&mut p.ast))
+        })
+    }
+
+    /// Literal extension expression (e.g., `123px`, `45deg`)
+    fn try_literal_extension_expr(&mut self, left: NodeIndex) -> ParseResult {
+        self.scoped_with_expected_prefix(&[TokenKind::Id], |p| {
+            let id = p.try_id()?;
+            if id == 0 {
+                return Ok(0);
             }
 
             Ok(

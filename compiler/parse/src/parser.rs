@@ -223,6 +223,20 @@ impl Parser<'_> {
             0
         }
     }
+
+    /// Get the source text of a token.
+    pub fn token_text(&self, token: &Token) -> String {
+        let lo = self.start_pos + BytePos(token.from as u32);
+        let sf = self.source_map.lookup_source_file(lo);
+        match &sf.src {
+            Some(content) => {
+                let byte_start = (lo.0 - sf.start_pos.0) as usize;
+                let byte_end = byte_start + (token.to - token.from);
+                content[byte_start..byte_end].to_string()
+            }
+            None => String::new(),
+        }
+    }
 }
 
 pub type ParseResult = Result<NodeIndex, ParseError>;

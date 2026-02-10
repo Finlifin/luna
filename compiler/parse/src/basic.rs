@@ -85,6 +85,9 @@ impl Parser<'_> {
                     NodeBuilder::new(NodeKind::SelfLower, p.next_token_span()).build(&mut p.ast)
                 ),
                 Null => Ok(NodeBuilder::new(NodeKind::Null, p.next_token_span()).build(&mut p.ast)),
+                Undefined => Ok(
+                    NodeBuilder::new(NodeKind::Undefined, p.next_token_span()).build(&mut p.ast)
+                ),
 
                 _ => {
                     not_matched = true;
@@ -234,6 +237,7 @@ impl Parser<'_> {
         })
     }
 
+    /// property -> .id expr
     pub fn try_property(&mut self) -> ParseResult {
         self.scoped_with_expected_prefix(&[TokenKind::Dot, TokenKind::Id], |p| {
             p.eat_tokens(1); // 吃掉点号
@@ -248,7 +252,7 @@ impl Parser<'_> {
             let expr = p.try_expr()?;
             if expr == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected an expression after `.`".to_string(),
+                    "Expected an expression after property name in `.id expr`".to_string(),
                     p.peek_next_token().kind,
                     p.current_span(),
                 ));
@@ -261,7 +265,26 @@ impl Parser<'_> {
         })
     }
 
-    pub fn try_property_assign(&mut self) -> ParseResult {
+    /// extend_arg -> ... expr
+    pub fn try_extend_arg(&mut self) -> ParseResult {
+        self.scoped_with_expected_prefix(&[TokenKind::Dot, TokenKind::Dot, TokenKind::Dot], |p| {
+            p.eat_tokens(3); // consume '...'
+            let expr = p.try_expr()?;
+            if expr == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected an expression after `...`".to_string(),
+                    p.peek_next_token().kind,
+                    p.current_span(),
+                ));
+            }
+            Ok(NodeBuilder::new(NodeKind::ExtendArg, p.current_span())
+                .add_single_child(expr)
+                .build(&mut p.ast))
+        })
+    }
+
+    /// optional_arg -> .id = expr
+    pub fn try_optional_arg(&mut self) -> ParseResult {
         self.scoped_with_expected_prefix(&[TokenKind::Dot, TokenKind::Id, TokenKind::Eq], |p| {
             p.eat_tokens(1); // 吃掉点号
             let id = p.try_id()?;
@@ -288,12 +311,10 @@ impl Parser<'_> {
                 ));
             }
 
-            Ok(
-                NodeBuilder::new(NodeKind::PropertyAssignment, p.current_span())
-                    .add_single_child(id)
-                    .add_single_child(expr)
-                    .build(&mut p.ast),
-            )
+            Ok(NodeBuilder::new(NodeKind::OptionalArg, p.current_span())
+                .add_single_child(id)
+                .add_single_child(expr)
+                .build(&mut p.ast))
         })
     }
 }

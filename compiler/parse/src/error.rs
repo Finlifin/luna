@@ -18,7 +18,7 @@ pub enum ParseError {
     },
 
     // 这两个仅用于控制流, 非错误
-    MeetPostObjectStart,
+    MeetPostExtendedCallStart,
     MeetPostId,
 }
 
@@ -27,8 +27,8 @@ impl ParseError {
         match self {
             ParseError::UnexpectedToken { message, .. } => message,
             ParseError::InvalidSyntax { message, .. } => message,
-            ParseError::MeetPostObjectStart => {
-                "Received unexpected MeetPostObjectStart, this is a bug"
+            ParseError::MeetPostExtendedCallStart => {
+                "Received unexpected MeetPostExtendedCallStart, this is a bug"
             }
             ParseError::MeetPostId => "Received unexpected MeetPostId, this is a bug",
         }
@@ -55,7 +55,7 @@ impl ParseError {
         match self {
             ParseError::UnexpectedToken { span, .. } => span.clone(),
             ParseError::InvalidSyntax { span, .. } => span.clone(),
-            ParseError::MeetPostObjectStart => rustc_span::DUMMY_SP,
+            ParseError::MeetPostExtendedCallStart => rustc_span::DUMMY_SP,
             ParseError::MeetPostId => rustc_span::DUMMY_SP,
         }
     }
@@ -66,7 +66,7 @@ impl FlurryError for ParseError {
         match self {
             ParseError::UnexpectedToken { .. } => PARSE_ERROR_BASE + 1,
             ParseError::InvalidSyntax { .. } => PARSE_ERROR_BASE + 2,
-            ParseError::MeetPostObjectStart => PARSE_ERROR_BASE + 3,
+            ParseError::MeetPostExtendedCallStart => PARSE_ERROR_BASE + 3,
             ParseError::MeetPostId => PARSE_ERROR_BASE + 4,
         }
     }
@@ -86,7 +86,7 @@ impl FlurryError for ParseError {
         match self {
             ParseError::UnexpectedToken { .. } => "unexpected_token",
             ParseError::InvalidSyntax { .. } => "invalid_syntax",
-            ParseError::MeetPostObjectStart => "meet_post_object_start",
+            ParseError::MeetPostExtendedCallStart => "meet_post_extended_call_start",
             ParseError::MeetPostId => "meet_post_id",
         }
     }

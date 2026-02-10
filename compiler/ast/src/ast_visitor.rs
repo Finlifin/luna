@@ -1,4 +1,4 @@
-use super::{Ast, NodeIndex, NodeKind, NodeType};
+use super::{fn_mod_flags_to_string, Ast, NodeIndex, NodeKind, NodeType};
 use rustc_span::SourceMap;
 
 /// AST visitor trait，用于遍历 AST 并对每个节点执行操作
@@ -135,26 +135,13 @@ pub trait AstVisitor {
         source_map: &SourceMap,
     ) -> Self::Output;
 
-    /// 访问效果定义节点 (id, params, return_type, clauses)
+    /// 访问效果定义节点 (id, params, return_type, clauses, body)
     fn visit_effect_def(
         &mut self,
         ast: &Ast,
         node_index: NodeIndex,
         kind: NodeKind,
         id: NodeIndex,
-        params: &[NodeIndex],
-        return_type: NodeIndex,
-        clauses: &[NodeIndex],
-        source_map: &SourceMap,
-    ) -> Self::Output;
-
-    /// 访问处理器定义节点 (effect, params, return_type, clauses, body)
-    fn visit_handles_def(
-        &mut self,
-        ast: &Ast,
-        node_index: NodeIndex,
-        kind: NodeKind,
-        effect: NodeIndex,
         params: &[NodeIndex],
         return_type: NodeIndex,
         clauses: &[NodeIndex],
@@ -200,18 +187,6 @@ pub trait AstVisitor {
         source_map: &SourceMap,
     ) -> Self::Output;
 
-    /// 访问 derive 定义节点 (traits, type_expr, clauses)
-    fn visit_derive_def(
-        &mut self,
-        ast: &Ast,
-        node_index: NodeIndex,
-        kind: NodeKind,
-        traits: &[NodeIndex],
-        type_expr: NodeIndex,
-        clauses: &[NodeIndex],
-        source_map: &SourceMap,
-    ) -> Self::Output;
-
     /// 访问类型别名节点 (id, type_params, type_expr) - 用于 typealias/newtype
     fn visit_type_alias(
         &mut self,
@@ -221,6 +196,32 @@ pub trait AstVisitor {
         id: NodeIndex,
         type_params: &[NodeIndex],
         type_expr: NodeIndex,
+        source_map: &SourceMap,
+    ) -> Self::Output;
+
+    /// 访问 assoc 声明节点 (id, params, type_expr, default_expr, clauses)
+    fn visit_assoc_decl(
+        &mut self,
+        ast: &Ast,
+        node_index: NodeIndex,
+        kind: NodeKind,
+        id: NodeIndex,
+        params: &[NodeIndex],
+        type_expr: NodeIndex,
+        default_expr: NodeIndex,
+        clauses: &[NodeIndex],
+        source_map: &SourceMap,
+    ) -> Self::Output;
+
+    /// 访问 FnType 节点 (flags, abi_node, parameter_types)
+    fn visit_fn_type(
+        &mut self,
+        ast: &Ast,
+        node_index: NodeIndex,
+        kind: NodeKind,
+        flags: u32,
+        abi_node: NodeIndex,
+        params: &[NodeIndex],
         source_map: &SourceMap,
     ) -> Self::Output;
 
@@ -352,7 +353,7 @@ pub trait AstVisitor {
                     )
                 }
 
-                NodeType::DiamondFunctionDefChildren => {
+                NodeType::NormalFormDefChildren => {
                     let children = ast.get_children(node_index);
                     let id = children[0];
                     let type_params_node = children[1];
@@ -376,12 +377,13 @@ pub trait AstVisitor {
                     )
                 }
 
-                NodeType::EffectDefChildren => {
+                NodeType::AlgebraicEffectChildren => {
                     let children = ast.get_children(node_index);
                     let id = children[0];
                     let params_node = children[1];
                     let return_type = children[2];
                     let clauses_node = children[3];
+                    let body = children[4];
 
                     let params = ast.get_multi_child_slice(params_node).unwrap();
                     let clauses = ast.get_multi_child_slice(clauses_node).unwrap();
@@ -394,6 +396,7 @@ pub trait AstVisitor {
                         params,
                         return_type,
                         clauses,
+                        body,
                         source_map,
                     )
                 }
@@ -444,20 +447,6 @@ pub trait AstVisitor {
                     )
                 }
 
-                NodeType::DeriveDefChildren => {
-                    let children = ast.get_children(node_index);
-                    let traits_node = children[0];
-                    let type_expr = children[1];
-                    let clauses_node = children[2];
-
-                    let traits = ast.get_multi_child_slice(traits_node).unwrap();
-                    let clauses = ast.get_multi_child_slice(clauses_node).unwrap();
-
-                    self.visit_derive_def(
-                        ast, node_index, kind, traits, type_expr, clauses, source_map,
-                    )
-                }
-
                 NodeType::TypeAliasChildren => {
                     let children = ast.get_children(node_index);
                     let id = children[0];
@@ -473,6 +462,50 @@ pub trait AstVisitor {
                         id,
                         type_params,
                         type_expr,
+                        source_map,
+                    )
+                }
+
+                NodeType::AssocDeclChildren => {
+                    let children = ast.get_children(node_index);
+                    let id = children[0];
+                    let params_node = children[1];
+                    let type_expr = children[2];
+                    let default_expr = children[3];
+                    let clauses_node = children[4];
+
+                    let params = ast.get_multi_child_slice(params_node).unwrap();
+                    let clauses = ast.get_multi_child_slice(clauses_node).unwrap();
+
+                    self.visit_assoc_decl(
+                        ast,
+                        node_index,
+                        kind,
+                        id,
+                        params,
+                        type_expr,
+                        default_expr,
+                        clauses,
+                        source_map,
+                    )
+                }
+
+                NodeType::FnTypeChildren => {
+                    // flags_u32 (raw bitmask), abi_node, N(parameter_types)
+                    let children = ast.get_children(node_index);
+                    let _flags = children[0]; // raw u32, not a real node
+                    let abi_node = children[1];
+                    let params_node = children[2];
+
+                    let params = ast.get_multi_child_slice(params_node).unwrap();
+
+                    self.visit_fn_type(
+                        ast,
+                        node_index,
+                        kind,
+                        _flags,
+                        abi_node,
+                        params,
                         source_map,
                     )
                 }
@@ -761,38 +794,6 @@ impl AstVisitor for SExpressionVisitor {
         params: &[NodeIndex],
         return_type: NodeIndex,
         clauses: &[NodeIndex],
-        source_map: &SourceMap,
-    ) -> Self::Output {
-        let params_str = params
-            .iter()
-            .map(|&child_index| self.visit_node(ast, child_index, source_map))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let clauses_str = clauses
-            .iter()
-            .map(|&child_index| self.visit_node(ast, child_index, source_map))
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        format!(
-            "({} {} [{}] {} [{}])",
-            kind,
-            self.visit_node(ast, id, source_map),
-            params_str,
-            self.visit_node(ast, return_type, source_map),
-            clauses_str
-        )
-    }
-
-    fn visit_handles_def(
-        &mut self,
-        ast: &Ast,
-        _node_index: NodeIndex,
-        kind: NodeKind,
-        effect: NodeIndex,
-        params: &[NodeIndex],
-        return_type: NodeIndex,
-        clauses: &[NodeIndex],
         body: NodeIndex,
         source_map: &SourceMap,
     ) -> Self::Output {
@@ -810,7 +811,7 @@ impl AstVisitor for SExpressionVisitor {
         format!(
             "({} {} [{}] {} [{}] {})",
             kind,
-            self.visit_node(ast, effect, source_map),
+            self.visit_node(ast, id, source_map),
             params_str,
             self.visit_node(ast, return_type, source_map),
             clauses_str,
@@ -897,36 +898,6 @@ impl AstVisitor for SExpressionVisitor {
         )
     }
 
-    fn visit_derive_def(
-        &mut self,
-        ast: &Ast,
-        _node_index: NodeIndex,
-        kind: NodeKind,
-        traits: &[NodeIndex],
-        type_expr: NodeIndex,
-        clauses: &[NodeIndex],
-        source_map: &SourceMap,
-    ) -> Self::Output {
-        let traits_str = traits
-            .iter()
-            .map(|&child_index| self.visit_node(ast, child_index, source_map))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let clauses_str = clauses
-            .iter()
-            .map(|&child_index| self.visit_node(ast, child_index, source_map))
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        format!(
-            "({} [{}] {} [{}])",
-            kind,
-            traits_str,
-            self.visit_node(ast, type_expr, source_map),
-            clauses_str
-        )
-    }
-
     fn visit_type_alias(
         &mut self,
         ast: &Ast,
@@ -950,6 +921,67 @@ impl AstVisitor for SExpressionVisitor {
             type_params_str,
             self.visit_node(ast, type_expr, source_map)
         )
+    }
+
+    fn visit_assoc_decl(
+        &mut self,
+        ast: &Ast,
+        _node_index: NodeIndex,
+        kind: NodeKind,
+        id: NodeIndex,
+        params: &[NodeIndex],
+        type_expr: NodeIndex,
+        default_expr: NodeIndex,
+        clauses: &[NodeIndex],
+        source_map: &SourceMap,
+    ) -> Self::Output {
+        let params_str = params
+            .iter()
+            .map(|&child_index| self.visit_node(ast, child_index, source_map))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let clauses_str = clauses
+            .iter()
+            .map(|&child_index| self.visit_node(ast, child_index, source_map))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        format!(
+            "({} {} <{}> {} {} [{}])",
+            kind,
+            self.visit_node(ast, id, source_map),
+            params_str,
+            self.visit_node(ast, type_expr, source_map),
+            self.visit_node(ast, default_expr, source_map),
+            clauses_str
+        )
+    }
+
+    fn visit_fn_type(
+        &mut self,
+        ast: &Ast,
+        _node_index: NodeIndex,
+        _kind: NodeKind,
+        flags: u32,
+        abi_node: NodeIndex,
+        params: &[NodeIndex],
+        source_map: &SourceMap,
+    ) -> Self::Output {
+        let mods_str = fn_mod_flags_to_string(flags);
+        let params_str = params
+            .iter()
+            .map(|&child_index| self.visit_node(ast, child_index, source_map))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        if abi_node != 0 {
+            let abi = self.visit_node(ast, abi_node, source_map);
+            format!("(FnType [{}] {} [{}])", mods_str, abi, params_str)
+        } else if !mods_str.is_empty() {
+            format!("(FnType [{}] [{}])", mods_str, params_str)
+        } else {
+            format!("(FnType [{}])", params_str)
+        }
     }
 }
 
@@ -1172,31 +1204,10 @@ impl AstVisitor for NodeCountVisitor {
         params: &[NodeIndex],
         return_type: NodeIndex,
         clauses: &[NodeIndex],
-        source_map: &SourceMap,
-    ) -> Self::Output {
-        self.visit_node(ast, id, source_map);
-        for &param in params {
-            self.visit_node(ast, param, source_map);
-        }
-        self.visit_node(ast, return_type, source_map);
-        for &clause in clauses {
-            self.visit_node(ast, clause, source_map);
-        }
-    }
-
-    fn visit_handles_def(
-        &mut self,
-        ast: &Ast,
-        _node_index: NodeIndex,
-        _kind: NodeKind,
-        effect: NodeIndex,
-        params: &[NodeIndex],
-        return_type: NodeIndex,
-        clauses: &[NodeIndex],
         body: NodeIndex,
         source_map: &SourceMap,
     ) -> Self::Output {
-        self.visit_node(ast, effect, source_map);
+        self.visit_node(ast, id, source_map);
         for &param in params {
             self.visit_node(ast, param, source_map);
         }
@@ -1262,25 +1273,6 @@ impl AstVisitor for NodeCountVisitor {
         self.visit_node(ast, body, source_map);
     }
 
-    fn visit_derive_def(
-        &mut self,
-        ast: &Ast,
-        _node_index: NodeIndex,
-        _kind: NodeKind,
-        traits: &[NodeIndex],
-        type_expr: NodeIndex,
-        clauses: &[NodeIndex],
-        source_map: &SourceMap,
-    ) -> Self::Output {
-        for &trait_ref in traits {
-            self.visit_node(ast, trait_ref, source_map);
-        }
-        self.visit_node(ast, type_expr, source_map);
-        for &clause in clauses {
-            self.visit_node(ast, clause, source_map);
-        }
-    }
-
     fn visit_type_alias(
         &mut self,
         ast: &Ast,
@@ -1296,6 +1288,47 @@ impl AstVisitor for NodeCountVisitor {
             self.visit_node(ast, type_param, source_map);
         }
         self.visit_node(ast, type_expr, source_map);
+    }
+
+    fn visit_assoc_decl(
+        &mut self,
+        ast: &Ast,
+        _node_index: NodeIndex,
+        _kind: NodeKind,
+        id: NodeIndex,
+        params: &[NodeIndex],
+        type_expr: NodeIndex,
+        default_expr: NodeIndex,
+        clauses: &[NodeIndex],
+        source_map: &SourceMap,
+    ) -> Self::Output {
+        self.visit_node(ast, id, source_map);
+        for &param in params {
+            self.visit_node(ast, param, source_map);
+        }
+        self.visit_node(ast, type_expr, source_map);
+        self.visit_node(ast, default_expr, source_map);
+        for &clause in clauses {
+            self.visit_node(ast, clause, source_map);
+        }
+    }
+
+    fn visit_fn_type(
+        &mut self,
+        ast: &Ast,
+        _node_index: NodeIndex,
+        _kind: NodeKind,
+        _flags: u32,
+        abi_node: NodeIndex,
+        params: &[NodeIndex],
+        source_map: &SourceMap,
+    ) -> Self::Output {
+        if abi_node != 0 {
+            self.visit_node(ast, abi_node, source_map);
+        }
+        for &param in params {
+            self.visit_node(ast, param, source_map);
+        }
     }
 }
 

@@ -74,6 +74,7 @@ pub enum TokenKind {
     // keywords
     And,       // and
     As,        // as
+    Assoc,     // assoc
     Asserts,   // asserts
     Assumes,   // assumes
     Async,     // async
@@ -88,6 +89,7 @@ pub enum TokenKind {
     Const,     // const
     Continue,  // continue
     Decreases, // decreases
+    Default,   // default
     Define,    // define
     Derive,    // derive
     Do,        // do
@@ -108,6 +110,7 @@ pub enum TokenKind {
     Ghost,     // ghost
     Handles,   // handles
     If,        // if
+    Implicit,  // implicit
     Impl,      // impl
     In,        // in
     Inline,    // inline
@@ -149,7 +152,9 @@ pub enum TokenKind {
     Typealias, // typealias
     Union,     // union
     Unsafe,    // unsafe
+    Undefined, // undefined
     Use,       // use
+    Verified,  // verified
     When,      // when
     While,     // while
     Where,     // where
@@ -238,6 +243,7 @@ impl TokenKind {
             TokenKind::Underscore => "_",
             TokenKind::And => "and",
             TokenKind::As => "as",
+            TokenKind::Assoc => "assoc",
             TokenKind::Asserts => "asserts",
             TokenKind::Assumes => "assumes",
             TokenKind::Async => "async",
@@ -252,6 +258,7 @@ impl TokenKind {
             TokenKind::Const => "const",
             TokenKind::Continue => "continue",
             TokenKind::Decreases => "decreases",
+            TokenKind::Default => "default",
             TokenKind::Define => "define",
             TokenKind::Derive => "derive",
             TokenKind::Do => "do",
@@ -272,6 +279,7 @@ impl TokenKind {
             TokenKind::Ghost => "ghost",
             TokenKind::Handles => "handles",
             TokenKind::If => "if",
+            TokenKind::Implicit => "implicit",
             TokenKind::Impl => "impl",
             TokenKind::In => "in",
             TokenKind::Inline => "inline",
@@ -313,7 +321,9 @@ impl TokenKind {
             TokenKind::Typealias => "typealias",
             TokenKind::Union => "union",
             TokenKind::Unsafe => "unsafe",
+            TokenKind::Undefined => "undefined",
             TokenKind::Use => "use",
+            TokenKind::Verified => "verified",
             TokenKind::When => "when",
             TokenKind::While => "while",
             TokenKind::Where => "where",
@@ -344,6 +354,7 @@ impl Token {
         let mut map = HashMap::new();
         map.insert("and", TokenKind::And);
         map.insert("as", TokenKind::As);
+        map.insert("assoc", TokenKind::Assoc);
         map.insert("asserts", TokenKind::Asserts);
         map.insert("assumes", TokenKind::Assumes);
         map.insert("async", TokenKind::Async);
@@ -358,6 +369,7 @@ impl Token {
         map.insert("const", TokenKind::Const);
         map.insert("continue", TokenKind::Continue);
         map.insert("decreases", TokenKind::Decreases);
+        map.insert("default", TokenKind::Default);
         map.insert("define", TokenKind::Define);
         map.insert("derive", TokenKind::Derive);
         map.insert("do", TokenKind::Do);
@@ -378,6 +390,7 @@ impl Token {
         map.insert("ghost", TokenKind::Ghost);
         map.insert("handles", TokenKind::Handles);
         map.insert("if", TokenKind::If);
+        map.insert("implicit", TokenKind::Implicit);
         map.insert("impl", TokenKind::Impl);
         map.insert("in", TokenKind::In);
         map.insert("inline", TokenKind::Inline);
@@ -419,7 +432,9 @@ impl Token {
         map.insert("typealias", TokenKind::Typealias);
         map.insert("union", TokenKind::Union);
         map.insert("unsafe", TokenKind::Unsafe);
+        map.insert("undefined", TokenKind::Undefined);
         map.insert("use", TokenKind::Use);
+        map.insert("verified", TokenKind::Verified);
         map.insert("when", TokenKind::When);
         map.insert("while", TokenKind::While);
         map.insert("where", TokenKind::Where);
