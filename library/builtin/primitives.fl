@@ -1,0 +1,38 @@
+-- ==========================================================================
+-- builtin – the foundational Flurry package
+-- ==========================================================================
+--
+-- This package is the Flurry equivalent of Rust's `core` crate. It provides
+-- the most fundamental types and traits that every program needs. The
+-- compiler knows about these definitions through lang-item annotations.
+--
+-- Everything here is automatically available in every Flurry source file
+-- (implicit prelude).
+-- ==========================================================================
+
+-- ── Primitive type aliases ─────────────────────────────────────────────────
+--
+-- These re-export the compiler-intrinsic primitive types so that user code
+-- can refer to them by name.  The actual representation is handled by the
+-- compiler; these declarations merely give them a Flurry-level identity.
+
+-- #[lang = "int"]
+type Int = __intrinsic_int
+
+-- #[lang = "float"]
+type Float = __intrinsic_float
+
+-- #[lang = "bool"]
+type Bool = __intrinsic_bool
+
+-- #[lang = "char"]
+type Char = __intrinsic_char
+
+-- #[lang = "str"]
+type String = __intrinsic_string
+
+-- #[lang = "unit"]
+type Unit = ()
+
+-- #[lang = "never"]
+type Never = !

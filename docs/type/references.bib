@@ -1,0 +1,245 @@
+@inproceedings{2024-use_site_checking_considered_harmful,
+author = {Racordon, Dimi and Chung, Benjamin},
+title = {Use Site Checking Considered Harmful},
+year = {2024},
+isbn = {9798400712159},
+publisher = {Association for Computing Machinery},
+address = {New York, NY, USA},
+url = {https://doi.org/10.1145/3689492.3689814},
+doi = {10.1145/3689492.3689814},
+abstract = {Static type checking aims to detect nonsensical operations based on their domains at compile time. While its benefits no longer need to be argued, it comes with expressiveness limitations that can only be lifted at the expense of complexity. This problem is particularly antithetical to generic programming, where algorithms and data structures are designed in the most general setting possible. In response, some systems have adopted a form of static duck typing: generic definitions are written against assumed interfaces that are only type checked with concrete types at their ultimate use sites. This essay claims that such an approach, which we refer to as use site checking, is harmful to user experience. We study four main problems caused by use site checking and show how they relate to similar well-known issues in dynamically typed languages. We then look at existing language constructs to discuss how statically typed languages may address these shortcomings.},
+booktitle = {Proceedings of the 2024 ACM SIGPLAN International Symposium on New Ideas, New Paradigms, and Reflections on Programming and Software},
+pages = {275–287},
+numpages = {13},
+keywords = {dynamic typing, expression problem, generic programming, static typing, type checking, type safety},
+location = {Pasadena, CA, USA},
+series = {Onward! '24}
+}
+
+@article{2022-staged_compilation_with_two_level_type_theory,
+author = {Kov\'{a}cs, Andr\'{a}s},
+title = {Staged compilation with two-level type theory},
+year = {2022},
+issue_date = {August 2022},
+publisher = {Association for Computing Machinery},
+address = {New York, NY, USA},
+volume = {6},
+number = {ICFP},
+url = {https://doi.org/10.1145/3547641},
+doi = {10.1145/3547641},
+abstract = {The aim of staged compilation is to enable metaprogramming in a way such that we   have guarantees about the well-formedness of code output, and we can also mix   together object-level and meta-level code in a concise and convenient manner. In   this work, we observe that two-level type theory (2LTT), a system originally   devised for the purpose of developing synthetic homotopy theory, also serves as   a system for staged compilation with dependent types. 2LTT has numerous good   properties for this use case: it has a concise specification, well-behaved model   theory, and it supports a wide range of language features both at the object and   the meta level. First, we give an overview of 2LTT's features and applications   in staging. Then, we present a staging algorithm and prove its correctness. Our   algorithm is "staging-by-evaluation", analogously to the technique of   normalization-by-evaluation, in that staging is given by the evaluation of 2LTT   syntax in a semantic domain. The staging algorithm together with its correctness   constitutes a proof of strong conservativity of 2LLT over the object theory. To our  knowledge, this is the first description of staged compilation which supports   full dependent types and unrestricted staging for types.},
+journal = {Proc. ACM Program. Lang.},
+month = aug,
+articleno = {110},
+numpages = {30},
+keywords = {staged compilation, two-level type theory, type theory}
+}
+
+@article{2022-on_type_cases_union_elimination_and_occurrence_typing,
+author = {Castagna, Giuseppe and Laurent, Micka\"{e}l and Nguy\~{\^e}n, Kim and Lutze, Matthew},
+title = {On type-cases, union elimination, and occurrence typing},
+year = {2022},
+issue_date = {January 2022},
+publisher = {Association for Computing Machinery},
+address = {New York, NY, USA},
+volume = {6},
+number = {POPL},
+url = {https://doi.org/10.1145/3498674},
+doi = {10.1145/3498674},
+abstract = {We extend classic union and intersection type systems with a type-case construction and show that the combination of the union elimination rule of the former and the typing rules for type-cases of our extension encompasses occurrence typing. To apply this system in practice, we define a canonical form for the expressions of our extension, called MSC-form. We show that an expression of the extension is typable if and only if its MSC-form is, and reduce the problem of typing the latter to the one of reconstructing annotations for that term. We provide a sound algorithm that performs this reconstruction and a proof-of-concept implementation.},
+journal = {Proc. ACM Program. Lang.},
+month = jan,
+articleno = {13},
+numpages = {31},
+keywords = {dynamic languages, intersection types, subtyping, type systems, type-case, union types}
+}
+
+@InProceedings{2008-z3_an_efficient_smt_solver,
+author="de Moura, Leonardo
+and Bj{\o}rner, Nikolaj",
+editor="Ramakrishnan, C. R.
+and Rehof, Jakob",
+title="Z3: An Efficient SMT Solver",
+booktitle="Tools and Algorithms for the Construction and Analysis of Systems",
+year="2008",
+publisher="Springer Berlin Heidelberg",
+address="Berlin, Heidelberg",
+pages="337--340",
+abstract="Satisfiability Modulo Theories (SMT) problem is a decision problem for logical first order formulas with respect to combinations of background theories such as: arithmetic, bit-vectors, arrays, and uninterpreted functions. Z3 is a new and efficient SMT Solver freely available from Microsoft Research. It is used in various software verification and analysis applications.",
+isbn="978-3-540-78800-3"
+}
+
+@inproceedings{1993-query_evaluation_under_the_well_founded_semantics,
+author = {Chen, Weidong and Warren, David S.},
+title = {Query evaluation under the well-founded semantics},
+year = {1993},
+isbn = {0897915933},
+publisher = {Association for Computing Machinery},
+address = {New York, NY, USA},
+url = {https://doi.org/10.1145/153850.153865},
+doi = {10.1145/153850.153865},
+abstract = {SLD resolution with negation as finite failure (or SLDNF) reflects the procedural interpretation of Horn-clause predicate logic as a programming language and forms the computational basis for prolog systems. Despite its advantages in memory management, SLDNF is often not appropriate for query evaluation for three reasons; a) it may not terminate due to infinite positive recursion; b) it may not terminate due to infinite recursion through negation; and c) it may repeatedly evaluate the same clause body literal, leading to unacceptable performance.We address all three problems for goal-oriented query evaluation of arbitrary programs by presenting an extension of SLDNF, called SLG resolution, with the following distinctive features:Restricted forms of SLG resolution are identified for definite, locally stratified, and modularly stratified programs, thereby shedding light on the role each transformation plays. To provide answers to a query under different three-valued stable models, SLG resolution can be enhanced by further processing of the derived set of answer clauses.SLG resolution makes many more clausal specifications into effective programs. With simple (user or computer generated) annotations, SLDNF resolution and SLG resolution can be fully integrated. Thus a system including SLG resolution can be fully integrated. Thus a system including SLG resolution is naturally upward compatible with Prolog. For all these reasons we believe that SLG resolution will provide the computational basis for the next generation of logic programming systems.},
+booktitle = {Proceedings of the Twelfth ACM SIGACT-SIGMOD-SIGART Symposium on Principles of Database Systems},
+pages = {168–179},
+numpages = {12},
+location = {Washington, D.C., USA},
+series = {PODS '93}
+}
+
+@article{1995-intersection_and_union_types_syntax_and_semantics,
+title = {Intersection and Union Types: Syntax and Semantics},
+journal = {Information and Computation},
+volume = {119},
+number = {2},
+pages = {202-230},
+year = {1995},
+issn = {0890-5401},
+doi = {https://doi.org/10.1006/inco.1995.1086},
+url = {https://www.sciencedirect.com/science/article/pii/S0890540185710863},
+author = {F. Barbanera and M. Dezaniciancaglini and U. Deliguoro},
+abstract = {Type assignment systems with intersection and union types are introduced. Although the subject reduction property with respect to β-reduction does not hold for a natural deduction-like system, we manage to overcome this problem in two, different ways. The first is to adopt a notion of parallel reduction, which is a refinement of Gross-Knuth reduction. The second is to introduce type theories to refine the system, among which is the theory called Π that induces an assignment system preserving β-reduction. This type assignment system further clarifies the relation with the intersection discipline through the decomposition, first, of a disjunctive type into a set of conjunctive types and, second, of a derivation in the new type assignment system into a set of derivations in the intersection type assignment system. For this system we propose three semantics and prove soundness and completeness theorems.}
+}
+
+@online{2023-chalk_book,
+  title={Chalk Book},
+  author={Rust Team},
+  year={2023},
+  url={https://rust-lang.github.io/chalk/book/},
+}
+
+@article{1999-type_inference_with_constrained_types,
+author = {Odersky, Martin and Sulzmann, Martin and Wehr, Martin},
+title = {Type inference with constrained types},
+journal = {Theory and Practice of Object Systems},
+volume = {5},
+number = {1},
+pages = {35-55},
+doi = {https://doi.org/10.1002/(SICI)1096-9942(199901/03)5:1<35::AID-TAPO4>3.0.CO;2-4},
+url = {https://onlinelibrary.wiley.com/doi/abs/10.1002/%28SICI%291096-9942%28199901/03%295%3A1%3C35%3A%3AAID-TAPO4%3E3.0.CO%3B2-4},
+eprint = {https://onlinelibrary.wiley.com/doi/pdf/10.1002/%28SICI%291096-9942%28199901/03%295%3A1%3C35%3A%3AAID-TAPO4%3E3.0.CO%3B2-4},
+abstract = {Abstract We present a general framework HM(X) for type systems with constraints. The framework stays in the tradition of the Hindley/Milner type system. Its type system instances are sound under a standard untyped compositional semantics. We can give a generic type inference algorithm for HM(X) so that, under sufficient conditions on X, type inference will always compute the principal type of a term. We discuss instances of the framework that deal with polymorphic records, equational theories, and subtypes. © 1999 John Wiley \& Sons, Inc.},
+year = {1999}
+}
+
+
+@book{1999-type_constraint_solving_for_parametric_and_ad_hoc_polymorphism,
+title = "Type Constraint Solving for Parametric and Ad-hoc Polymorphism",
+author = "Bart Demoen and {Garcia De La Banda}, {Maria Jose} and Stuckey, {Peter J}",
+year = "1999",
+language = "English",
+publisher = "Monash University",
+address = "Australia",
+}
+
+@article{2019-quantitative_program_reasoning_with_graded_modal_types,
+author = {Orchard, Dominic and Liepelt, Vilem-Benjamin and Eades III, Harley},
+title = {Quantitative program reasoning with graded modal types},
+year = {2019},
+issue_date = {August 2019},
+publisher = {Association for Computing Machinery},
+address = {New York, NY, USA},
+volume = {3},
+number = {ICFP},
+url = {https://doi.org/10.1145/3341714},
+doi = {10.1145/3341714},
+abstract = {In programming, some data acts as a resource (e.g., file handles, channels) subject to usage constraints. This poses a challenge to software correctness as most languages are agnostic to constraints on data. The approach of linear types provides a partial remedy, delineating data into resources to be used but never copied or discarded, and unconstrained values. Bounded Linear Logic provides a more fine-grained approach, quantifying non-linear use via an indexed-family of modalities. Recent work on coeffect types generalises this idea to graded comonads, providing type systems which can capture various program properties. Here, we propose the umbrella notion of graded modal types, encompassing coeffect types and dual notions of type-based effect reasoning via graded monads. In combination with linear and indexed types, we show that graded modal types provide an expressive type theory for quantitative program reasoning, advancing the reach of type systems to capture and verify a broader set of program properties. We demonstrate this approach via a type system embodied in a fully-fledged functional language called Granule, exploring various examples.},
+journal = {Proc. ACM Program. Lang.},
+month = jul,
+articleno = {110},
+numpages = {30},
+keywords = {linear types, implementation, graded modal types, coeffects}
+}
+
+@article{10.1145/3450952,
+author = {Dunfield, Jana and Krishnaswami, Neel},
+title = {Bidirectional Typing},
+year = {2021},
+issue_date = {June 2022},
+publisher = {Association for Computing Machinery},
+address = {New York, NY, USA},
+volume = {54},
+number = {5},
+issn = {0360-0300},
+url = {https://doi.org/10.1145/3450952},
+doi = {10.1145/3450952},
+abstract = {Bidirectional typing combines two modes of typing: type checking, which checks that a program satisfies a known type, and type synthesis, which determines a type from the program. Using checking enables bidirectional typing to support features for which inference is undecidable; using synthesis enables bidirectional typing to avoid the large annotation burden of explicitly typed languages. In addition, bidirectional typing improves error locality. We highlight the design principles that underlie bidirectional type systems, survey the development of bidirectional typing from the prehistoric period before Pierce and Turner’s local type inference to the present day, and provide guidance for future investigations.},
+journal = {ACM Comput. Surv.},
+month = may,
+articleno = {98},
+numpages = {38},
+keywords = {type inference, Type checking}
+}
+
+@article{2024-contextual_typing,
+author = {Xue, Xu and Oliveira, Bruno C. d. S.},
+title = {Contextual Typing},
+year = {2024},
+issue_date = {August 2024},
+publisher = {Association for Computing Machinery},
+address = {New York, NY, USA},
+volume = {8},
+number = {ICFP},
+url = {https://doi.org/10.1145/3674655},
+doi = {10.1145/3674655},
+abstract = {Bidirectional typing is a simple, lightweight approach to type                    inference that propagates known type information during typing,                   and can scale up to many different type systems and features.                     It typically only requires a reasonable amount of                                annotations and eliminates the need for many obvious                                annotations. Nonetheless the power of inference is still                                 limited, and complications arise in the presence of more                                complex features.                                                                 In this paper we present a generalization of bidirectional typing                         called contextual typing. In contextual typing not only known                     type information is propagated during typing, but also other known information    about the surrounding context of a term. This information can                     be of various forms, such as other terms or record labels.                        Due to this richer notion of contextual                                information, less annotations are needed, while the approach                                remains lightweight and                                scalable. For type systems with subtyping, contextual                                typing subsumption is also more expressive than subsumption with                                bidirectional typing, since partially known                                contextual information can be exploited.     To aid                                specifying type systems with contextual typing, we introduce                                Quantitative Type Assignment Systems  (QTASs). A QTAS quantifies the amount of type information that a                  term needs in order to type check using counters. Thus, a counter in              a QTAS generalizes modes in traditional bidirectional typing, which can           only model an                                all (checking mode) or nothing (inference mode) approach.                                QTASs enable precise guidelines for annotatability of contextual type systems                                formalized as a theorem.                                We illustrate contextual typing first on a simply typed lambda                                calculus, and then on a richer calculus with subtyping, intersection                                types, records and overloading. All the metatheory is formalized in                              the Agda theorem prover.},
+journal = {Proc. ACM Program. Lang.},
+month = aug,
+articleno = {266},
+numpages = {29},
+keywords = {Bidirectional Typing, Type Inference}
+}
+
+@InProceedings{10.1007/978-3-319-96142-2_2,
+author="Hassan, Mostafa
+and Urban, Caterina
+and Eilers, Marco
+and M{\"u}ller, Peter",
+editor="Chockler, Hana
+and Weissenbacher, Georg",
+title="MaxSMT-Based Type Inference for Python 3",
+booktitle="Computer Aided Verification",
+year="2018",
+publisher="Springer International Publishing",
+address="Cham",
+pages="12--19",
+abstract="We present Typpete, a sound type inferencer that automatically infers Python 3 type annotations. Typpete encodes type constraints as a MaxSMT problem and uses optional constraints and specific quantifier instantiation patterns to make the constraint solving process efficient. Our experimental evaluation shows that Typpete scales to real world Python programs and outperforms state-of-the-art tools.",
+isbn="978-3-319-96142-2"
+}
+
+@article{10.1145/3632890,
+author = {Parreaux, Lionel and Boruch-Gruszecki, Aleksander and Fan, Andong and Chau, Chun Yin},
+title = {When Subtyping Constraints Liberate: A Novel Type Inference Approach for First-Class Polymorphism},
+year = {2024},
+issue_date = {January 2024},
+publisher = {Association for Computing Machinery},
+address = {New York, NY, USA},
+volume = {8},
+number = {POPL},
+url = {https://doi.org/10.1145/3632890},
+doi = {10.1145/3632890},
+abstract = {Type inference in the presence of first-class or “impredicative” second-order polymorphism \`{a} la System F has been an active research area for several decades, with original works dating back to the end of the 80s. Yet, until now many basic problems remain open, such as how to type check expressions like (λx.(x  123, x  True)) id reliably. We show that a type inference approach based on multi-bounded polymorphism, a form of implicit polymorphic subtyping with multiple lower and upper bounds, can help us resolve most of these problems in a uniquely simple and regular way. We define F≤, a declarative type system derived from the existing theory of implicit coercions by Cretin and R\'{e}my (LICS 2014), and we introduce SuperF, a novel algorithm to infer polymorphic multi-bounded F≤ types while checking user type annotations written in the syntax of System F. We use a recursion-avoiding heuristic to guarantee termination of type inference at the cost of rejecting some valid programs, which thankfully rarely triggers in practice. We show that SuperF is vastly more powerful than all first-class-polymorphic type inference systems proposed so far, significantly advancing the state of the art in type inference for general-purpose programming languages.},
+journal = {Proc. ACM Program. Lang.},
+month = jan,
+articleno = {48},
+numpages = {33},
+keywords = {type inference, first-class polymorphism, subtyping, constraint solving}
+}
+
+@article{10.1145/3729338,
+author = {Fan, Andong and Xu, Han and Xie, Ningning},
+title = {Practical Type Inference with Levels},
+year = {2025},
+issue_date = {June 2025},
+publisher = {Association for Computing Machinery},
+address = {New York, NY, USA},
+volume = {9},
+number = {PLDI},
+url = {https://doi.org/10.1145/3729338},
+doi = {10.1145/3729338},
+abstract = {Modern functional languages rely on sophisticated type inference algorithms. However, there often exists a gap between the theoretical presentation of these algorithms and their practical implementations. Specifically, implementations employ techniques not explicitly included in formal specifications, causing undesirable consequences. First, this leads to confusion and unforeseen challenges for developers adhering to the formal specification. Moreover, theoretical guarantees established for a formal presentation may not directly translate to the implementation. This paper focuses on formalizing one such technique, known as levels, which is widely used in practice but whose theoretical treatment remains largely understudied. We present the first comprehensive formalization of levels and demonstrate their applicability to type inference implementations.},
+journal = {Proc. ACM Program. Lang.},
+month = jun,
+articleno = {235},
+numpages = {24},
+keywords = {higher-rank polymorphism, levels, type inference, type regions}
+}

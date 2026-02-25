@@ -1,0 +1,43 @@
+-- ==========================================================================
+-- builtin/result – the Result type
+-- ==========================================================================
+
+-- #[lang = "result"]
+enum Result where T, E {
+    Ok(T),
+    Err(E),
+}
+
+impl Result where T, E {
+    fn is_ok(self) -> Bool = self match {
+        Ok(_)  => true,
+        Err(_) => false,
+    }
+
+    fn is_err(self) -> Bool = !self.is_ok()
+
+    fn unwrap(self) -> T = self match {
+        Ok(v)  => v,
+        Err(_) => panic("called Result.unwrap() on an Err value"),
+    }
+
+    fn unwrap_err(self) -> E = self match {
+        Ok(_)  => panic("called Result.unwrap_err() on an Ok value"),
+        Err(e) => e,
+    }
+
+    fn map(self, f: fn(T) -> U) -> Result<U, E> where U = self match {
+        Ok(v)  => Ok(f(v)),
+        Err(e) => Err(e),
+    }
+
+    fn map_err(self, f: fn(E) -> F) -> Result<T, F> where F = self match {
+        Ok(v)  => Ok(v),
+        Err(e) => Err(f(e)),
+    }
+
+    fn and_then(self, f: fn(T) -> Result<U, E>) -> Result<U, E> where U = self match {
+        Ok(v)  => f(v),
+        Err(e) => Err(e),
+    }
+}

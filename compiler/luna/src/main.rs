@@ -1,143 +1,88 @@
-// #![allow(unused)]
+use std::path::{Path, PathBuf};
 
-mod ast_lower;
-mod basic;
-mod comptime;
-mod context;
-mod hir;
-mod intrinsic;
-mod scan;
-mod typing;
-
-use std::path::Path;
-
-use diagnostic::FlurryError;
-use rustc_span::BytePos;
-
-use crate::{context::CompilerContext, hir::Hir, scan::ScanOrchestrator};
+use interface::{CompilerConfig, CompilerInstance, Session};
+use parse::parser::Parser;
+use std::mem;
 
 fn main() {
-    let hir = Hir::new();
-    let mut context = CompilerContext::new(&hir.source_map);
-    context.setup(&hir);
+    // ── Session ──────────────────────────────────────────────────────────
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let config = CompilerConfig::new("test", cwd);
+    let sess = Session::new(config);
 
-    let vfs = vfs::Vfs::build_from_path(
-        Path::new("test_project").to_path_buf(),
-        &[
-            ".git",
-            ".cache",
-            "target",
-            ".vscode",
-            ".idea",
-            ".metals",
-            ".scala-build",
-        ],
-        &hir.source_map,
+    // Report sysroot status.
+    if let Some(ref sr) = sess.sysroot {
+        println!("sysroot: {}", sr.root.display());
+    } else {
+        println!("warning: sysroot not found – builtin/std unavailable");
+    }
+
+    // ── Compiler instance ────────────────────────────────────────────────
+    let mut instance = CompilerInstance::new(&sess);
+
+    // Report sysroot packages loaded into VFS.
+    for (i, vfs) in instance.sysroot_vfs.iter().enumerate() {
+        println!(
+            "  sysroot[{}] \"{}\" – {} source file(s)",
+            i,
+            vfs.name,
+            vfs.file_count()
+        );
+    }
+
+    // ── Load source file ─────────────────────────────────────────────────
+    let file_path = Path::new("test.fl");
+    let source_file = sess
+        .source_map
+        .load_file(file_path)
+        .expect("failed to load test.fl");
+    let file_id = instance
+        .vfs_mut()
+        .add_file(file_path.to_path_buf(), source_file.clone());
+
+    // ── Lex & Parse ──────────────────────────────────────────────────────
+    let src = source_file.src.as_ref().expect("source text not available");
+    let (tokens, _lex_errors) = lex::lex(src, source_file.start_pos);
+
+    let mut parser = Parser::new(&sess.source_map, tokens, source_file.start_pos);
+    parser.parse(&instance.diag_ctx);
+    let ast = parser.finalize();
+
+    instance.vfs_mut().set_ast(file_id, ast);
+
+    // ── AST dump ─────────────────────────────────────────────────────────
+    let ast = instance.vfs.get_ast(file_id).expect("AST not found");
+    let lisp = ast.dump_to_s_expression(ast.root, &sess.source_map);
+    std::fs::write("ast.lisp", &lisp).expect("failed to write ast.lisp");
+    println!("ast dumped to ast.lisp ({} nodes)", ast.nodes.len());
+
+    // ── AST Lowering ─────────────────────────────────────────────────────
+    let mut package = interface::hir::Package::new();
+    ast_lowering::lower_to_hir(
+        ast,
+        &instance.hir_arena,
+        &sess.source_map,
+        &instance.diag_ctx,
+        &mut package,
     );
 
-    let mut vfs_scanner = ScanOrchestrator::new();
-    let unresolved_imports = match vfs_scanner.run(&vfs, &mut context, &hir) {
-        Ok(imports) => imports,
-        Err(e) => {
-            e.emit(&context.diag_ctx(), BytePos(0));
-            return;
-        }
-    };
-
-    let main_file_ast = vfs
-        .get_ast(vfs.resolve(&["src", "main.fl"]).unwrap())
-        .expect("Failed to get main file AST");
-    let _ = std::fs::write(
-        "ast.lisp",
-        main_file_ast.dump_to_s_expression(main_file_ast.root, &hir.source_map),
+    println!(
+        "HIR lowering complete: {} definition(s), {} body(ies)",
+        package.num_defs(),
+        package.num_bodies(),
     );
-
-    // let mut import_resolver = ImportResolver::new(&context, &hir, &vfs, unresolved_imports);
-    // if let Err(e) = import_resolver.resolve() {
-    //     e.emit(&context.diag_ctx(), BytePos(0));
-    // }
-    // let mut scope_visitor = ScopeSExpressionVisitor::new();
-    // let scope_s_expr = context.scope_manager.accept(&mut scope_visitor);
-    // std::fs::write("scope.lisp", &scope_s_expr).unwrap();
-    // let lowering_context = ast_lower::LoweringContext::new(&context, &hir, &vfs);
-    // if let Err(e) = lowering_context.lower() {
-    //     e.emit(context.diag_ctx(), BytePos(0));
-    //     return;
-    // }
-
-    // let main_package_scope = context
-    //     .scope_manager
-    //     .lookup_path(
-    //         &[hir.intern_str("test_project")],
-    //         context.scope_manager.root,
-    //     )
-    //     .unwrap();
-    // let hir_dump = hir.dump_to_s_expression(main_package_scope.hir_id, &context.scope_manager);
-    // std::fs::write("hir.lisp", &hir_dump).unwrap();
-
-    // let vfs_s_expr = dump_vfs_to_s_expression(&vfs, vfs.root);
-    // std::fs::write("vfs.lisp", &vfs_s_expr).unwrap();
-    // dbg!(
-    //     hir.get(
-    //         context
-    //             .scope_manager
-    //             .scope_hir_id(context.scope_manager.root)
-    //             .unwrap()
-    //     )
-    //     .unwrap()
-    // );
-
-    // // Demonstrate the query system with dependency tracking
-    // println!("\n=== Query System Demo with Dependency Tracking ===");
-    // let mut query_engine = QueryEngine::new();
-
-    // // Test HIR queries
-    // println!("HIR for file 1: {:?}", query_engine.hir(1));
-    // println!("HIR for file 2: {:?}", query_engine.hir(2));
-
-    // // Test type queries (these depend on HIR)
-    // println!("Type of node 42: {}", query_engine.type_of(42));
-    // println!("Type of node 100: {}", query_engine.type_of(100));
-
-    // // Test scope queries
-    // println!("Scope 1 contents: {:?}", query_engine.scope(1));
-    // println!("Scope 5 contents: {:?}", query_engine.scope(5));
-
-    // // Demonstrate dependency tracking
-    // println!("\n=== Dependency Tracking Demo ===");
-    // println!("Cache size: {}", query_engine.cache_len());
-
-    // // Show dependencies for type query
-    // use crate::query::{ErasedQueryKey, QueryDesc, TypeQuery};
-    // let type_query_key = ErasedQueryKey::new(&QueryDesc::new(TypeQuery { node_id: 42 }));
-    // let deps = query_engine.get_dependency_info(&type_query_key);
-    // println!("Dependencies for type query of node 42: {:?}", deps);
-
-    // // Test invalidation
-    // println!("\n=== Cache Invalidation Demo ===");
-    // println!(
-    //     "Cache size before invalidation: {}",
-    //     query_engine.cache_len()
-    // );
-
-    // use crate::query::HirQuery;
-    // let hir_query_key = ErasedQueryKey::new(&QueryDesc::new(HirQuery { file_id: 1 }));
-    // query_engine.invalidate_query(&hir_query_key);
-
-    // println!(
-    //     "Cache size after HIR invalidation: {}",
-    //     query_engine.cache_len()
-    // );
-
-    // // Re-run type query to see it gets recomputed
-    // println!(
-    //     "Re-running type query after HIR invalidation: {}",
-    //     query_engine.type_of(42)
-    // );
-    // println!(
-    //     "Cache size after recomputation: {}",
-    //     query_engine.cache_len()
-    // );
-
-    // println!("Enhanced query system demo completed!");
+    for (owner_id, info) in package.owners() {
+        println!("  owner {:?}: {:?}", owner_id, info.node);
+    {
+        let owner_str = format!("{:?}", owner_id);
+        let node_str = format!("{:#?}", info.node);
+        println!(
+            "  owner {:<6} size={:<3} align={:<2} node:\n{}",
+            owner_str,
+            mem::size_of_val(&info.node),
+            mem::align_of_val(&info.node),
+            node_str
+        );
+    }
+    }
 }

@@ -33,6 +33,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ast_lowering"
+version = "0.1.0"
+dependencies = [
+ "ast",
+ "diagnostic",
+ "hir",
+ "internment",
+ "rustc_span",
+ "vfs",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -242,6 +254,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
+name = "hir"
+version = "0.1.0"
+dependencies = [
+ "internment",
+ "rustc-arena-modified",
+ "rustc_data_structures",
+ "rustc_span",
+ "thin-vec",
+]
+
+[[package]]
 name = "indexmap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -253,12 +276,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "interface"
+version = "0.1.0"
+dependencies = [
+ "diagnostic",
+ "hir",
+ "intrinsic",
+ "query",
+ "rustc_span",
+ "ty",
+ "vfs",
+]
+
+[[package]]
 name = "internment"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "636d4b0f6a39fd684effe2a73f5310df16a3fa7954c26d36833e98f44d1977a2"
 dependencies = [
  "hashbrown 0.15.5",
+]
+
+[[package]]
+name = "intrinsic"
+version = "0.1.0"
+dependencies = [
+ "hir",
+ "rustc_data_structures",
+ "ty",
 ]
 
 [[package]]
@@ -328,16 +373,10 @@ checksum = "34080505efa8e45a4b816c349525ebe327ceaa8559756f0356cba97ef3bf7432"
 name = "luna"
 version = "0.1.0"
 dependencies = [
- "ariadne",
- "ast",
- "diagnostic",
- "internment",
+ "ast_lowering",
+ "interface",
  "lex",
- "once_cell",
  "parse",
- "rustc_data_structures",
- "rustc_span",
- "vfs",
 ]
 
 [[package]]
@@ -452,6 +491,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5407465600fb0548f1442edf71dd20683c6ed326200ace4b1ef0763521bb3b77"
 dependencies = [
  "bitflags 2.9.4",
+]
+
+[[package]]
+name = "resolve"
+version = "0.1.0"
+dependencies = [
+ "ast",
+ "diagnostic",
+ "lex",
+ "parse",
+ "rustc_data_structures",
+ "rustc_span",
+ "vfs",
+]
+
+[[package]]
+name = "rustc-arena-modified"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec6c2302b99e19a602578e01579ec1cec6ed62642f28499453a07cb803d59afe"
+dependencies = [
+ "smallvec",
 ]
 
 [[package]]
@@ -627,6 +688,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "thin-vec"
+version = "0.2.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "144f754d318415ac792f9d69fc87abbbfc043ce2ef041c60f16ad828f638717d"
+
+[[package]]
 name = "tracing"
 version = "0.1.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -658,6 +725,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ty"
+version = "0.1.0"
+dependencies = [
+ "hir",
+ "rustc-arena-modified",
+ "rustc_data_structures",
+]
+
+[[package]]
 name = "typenum"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -686,9 +762,6 @@ name = "vfs"
 version = "0.1.0"
 dependencies = [
  "ast",
- "diagnostic",
- "parse",
- "rustc_data_structures",
  "rustc_span",
 ]
 

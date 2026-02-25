@@ -1,0 +1,38 @@
+-- ==========================================================================
+-- builtin/option – the Option (?T) type
+-- ==========================================================================
+
+-- #[lang = "optional"]
+enum Option where T {
+    Some(T),
+    None,
+}
+
+impl Option where T {
+    fn is_some(self) -> Bool = self match {
+        Some(_) => true,
+        None    => false,
+    }
+
+    fn is_none(self) -> Bool = !self.is_some()
+
+    fn unwrap(self) -> T = self match {
+        Some(v) => v,
+        None    => panic("called Option.unwrap() on a None value"),
+    }
+
+    fn unwrap_or(self, default: T) -> T = self match {
+        Some(v) => v,
+        None    => default,
+    }
+
+    fn map(self, f: fn(T) -> U) -> ?U where U = self match {
+        Some(v) => Some(f(v)),
+        None    => None,
+    }
+
+    fn and_then(self, f: fn(T) -> ?U) -> ?U where U = self match {
+        Some(v) => f(v),
+        None    => None,
+    }
+}

@@ -1,0 +1,13 @@
+[package]
+name = "resolve"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ast = { path = "../ast" }
+vfs = { path = "../vfs" }
+lex = { path = "../lex" }
+parse = { path = "../parse" }
+diagnostic = { path = "../diagnostic" }
+rustc_span = { workspace = true }
+rustc_data_structures = { workspace = true }

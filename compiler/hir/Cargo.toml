@@ -1,0 +1,11 @@
+[package]
+name = "hir"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+internment = { workspace = true }
+rustc_span = { workspace = true }
+rustc_data_structures = { workspace = true }
+thin-vec = { workspace = true }
+rustc-arena-modified = { workspace = true }

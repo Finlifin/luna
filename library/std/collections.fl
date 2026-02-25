@@ -1,0 +1,138 @@
+-- ==========================================================================
+-- std/collections – standard collection types
+-- ==========================================================================
+
+-- ── Vec ────────────────────────────────────────────────────────────────────
+
+pub struct Vec where T {
+    -- Internal storage is managed by the runtime / compiler.
+    __data: *T,
+    __len: Int,
+    __cap: Int,
+}
+
+impl Vec where T {
+    pub fn new() -> Self {
+        Vec { .__data null, .__len 0, .__cap 0 }
+    }
+
+    pub fn with_capacity(cap: Int) -> Self {
+        Vec { .__data __builtin_alloc(cap), .__len 0, .__cap cap }
+    }
+
+    pub fn len(self) -> Int = self.__len
+
+    pub fn is_empty(self) -> Bool = self.__len == 0
+
+    pub fn push(*self, value: T) {
+        if self.__len == self.__cap {
+            self.__grow()
+        }
+        __builtin_vec_push(self, value)
+    }
+
+    pub fn pop(*self) -> ?T {
+        if self.__len == 0 {
+            None
+        } else {
+            Some(__builtin_vec_pop(self))
+        }
+    }
+
+    pub fn get(self, index: Int) -> ?*T {
+        if index >= 0 and index < self.__len {
+            Some(__builtin_vec_get(self, index))
+        } else {
+            None
+        }
+    }
+
+    fn __grow(*self) {
+        let new_cap = if self.__cap == 0 { 4 } else { self.__cap * 2 }
+        __builtin_vec_grow(self, new_cap)
+    }
+}
+
+impl Index<Int> for Vec where T {
+    type Output = T
+    fn index(self, idx: Int) -> *T {
+        self.get(idx).unwrap()
+    }
+}
+
+impl Iterator for Vec where T {
+    type Item = T
+    fn next(*self) -> ?T {
+        -- Vec iteration is handled by VecIter adapter in practice
+        todo()
+    }
+}
+
+impl FromIterator<T> for Vec where T {
+    fn from_iter(iter: I) -> Self where I requires Iterator<Item = T> {
+        let v = Vec.new()
+        iter.foreach(|item| v.push(item))
+        v
+    }
+}
+
+-- ── Map ────────────────────────────────────────────────────────────────────
+
+pub struct Map where K requires Hash + Eq, V {
+    __data: __intrinsic_map_storage<K, V>,
+    __len: Int,
+}
+
+impl Map where K requires Hash + Eq, V {
+    pub fn new() -> Self {
+        Map { .__data __builtin_map_new(), .__len 0 }
+    }
+
+    pub fn len(self) -> Int = self.__len
+
+    pub fn is_empty(self) -> Bool = self.__len == 0
+
+    pub fn get(self, key: *K) -> ?*V {
+        __builtin_map_get(self, key)
+    }
+
+    pub fn insert(*self, key: K, value: V) -> ?V {
+        __builtin_map_insert(self, key, value)
+    }
+
+    pub fn remove(*self, key: *K) -> ?V {
+        __builtin_map_remove(self, key)
+    }
+
+    pub fn contains_key(self, key: *K) -> Bool {
+        self.get(key).is_some()
+    }
+}
+
+-- ── Set ────────────────────────────────────────────────────────────────────
+
+pub struct Set where T requires Hash + Eq {
+    __map: Map<T, Unit>,
+}
+
+impl Set where T requires Hash + Eq {
+    pub fn new() -> Self {
+        Set { .__map Map.new() }
+    }
+
+    pub fn len(self) -> Int = self.__map.len()
+
+    pub fn is_empty(self) -> Bool = self.__map.is_empty()
+
+    pub fn insert(*self, value: T) -> Bool {
+        self.__map.insert(value, ()).is_none()
+    }
+
+    pub fn remove(*self, value: *T) -> Bool {
+        self.__map.remove(value).is_some()
+    }
+
+    pub fn contains(self, value: *T) -> Bool {
+        self.__map.contains_key(value)
+    }
+}

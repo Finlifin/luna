@@ -1,0 +1,9 @@
+[package]
+name = "ty"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+hir = { path = "../hir" }
+rustc_data_structures = { workspace = true }
+rustc-arena-modified = { workspace = true }

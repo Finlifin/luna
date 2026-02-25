@@ -1,0 +1,13 @@
+[package]
+name = "interface"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+diagnostic = { path = "../diagnostic" }
+intrinsic = { path = "../intrinsic" }
+vfs = { path = "../vfs" }
+query = { path = "../query" }
+hir = { path = "../hir" }
+ty = { path = "../ty" }
+rustc_span = { workspace = true }

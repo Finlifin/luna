@@ -472,7 +472,7 @@ fn add(x: T, y: T) -> T where T:- Add<T> {
 -- Comptime evaluation
 
 
-
+-- DEPRECATED
 {-
 考虑上下文链：
     ... -> C[n-1] -> C[n] -> C[n+1] -> ...
@@ -488,3 +488,47 @@ C[x]会储存该context内的所有变量、参数、子句参数、类型命题
 C[x]也是分不同种类的，例如，当我们开始解析一个函数时，会承担推理上下文的作用，在normalization的某些pass中，将进行约束收集、子句参数推导等等工作
 
 -}
+
+
+-- 重新回顾println的定义，其实多少有些问题
+fn println(comptime format: str, ...varargs: std.fmt.Parse(format)) { 
+    inline for (arg, i) in varargs'tuple_enumerate {
+        ...
+    }
+}
+-- flurry将调用处的变参收集进varargs元组，因此varargs的类型不写成std.fmt.Parse<format>，
+-- normalization后，Parse<format>并不会被计算，varargs'tuple_enumerate非法（只对元组类型有效）
+-- 实际上，只有format确定了之后，varargs的类型才能被计算出来，我们只能把varargs的类型延迟到instantiation时计算
+-- 因此上面的定义，也是非法的，flurry会尝试执行std.fmt.Parse(format)，但是format还没有传入
+-- 于是，引入 defer 表达式
+
+fn println(comptime format: str, ...varargs: defer std.fmt.Parse(format)) { 
+    inline for (arg, i) in varargs'tuple_enumerate {
+        const Arg = arg'type;
+        inline when {
+            Type.is_integer(Arg) => ...
+            Type.is_float(Arg) => ...
+            Type.is_str(Arg) => ...
+            Arg:- Display => ...
+            else => meta.compile_error("Unsupported argument type");
+        }
+    }
+}
+
+-- defer表达式，表示该表达式的计算，延迟到instantiation时进行
+-- 而有关varargs的所有操作，都延迟到instantiation时检查
+-- 另外，还期望inline控制流内还具有一定的检查能力
+
+-- 到了这里，还有一个问题需要解决： Parse(format)如何返回一个泛型类型呢？
+-- 比如我们期望Parse("{} {}")返回 forall<T1:- Display, T2:- Display> Tuple<T1, T2>，
+-- 而flurry的子句参数只能定义在where子句中，也就是说，Parse(...)只能返回一个具体的类型
+
+-- 此时需要refinement type，并且需要某种机制，来使得运行时参数的类型可以使用comptime参数中的Any（comptime的gradual dependent type中的渐进类型）
+
+-- refinement_type -> type_expr refines { predicate }
+-- 最高99级
+typealias Rank = usize refines { itself < 100 };
+
+-- parse可以返回一个refinement type，这样就可以对varargs进行类型检查了
+-- Parse("{} {}") evals to Tuple<Any refines { Itself:- Display }, Any refines { Itself:- Display }>
+

@@ -1,0 +1,456 @@
+-- expressions
+expr -> id
+    | prefix
+    | infix
+    | postfix
+    | type
+    | statement_expr
+
+literal -> integer
+    | float
+    | char
+    | str
+    | bool
+    | ()
+    | _
+    | null
+    | undefined
+    | self_cap
+    | self_lower
+
+prefix -> symbol
+    | list_of
+    | tuple
+    | object
+    | lambda
+    | bool_not
+    | error_new
+    | negative
+    | range_to
+    | range_to_inclusive
+    | atomic_block
+    | do_block
+    | async_block
+    | unsafe_block
+    | comptime_block
+    | range_all
+    | bool_forall
+    | bool_exists
+
+symbol -> .id
+list_of -> [expr*]
+tuple -> (expr, expr*)
+object -> { (property | expr)* }
+lambda -> |parameter*| (-> expr) expr
+bool_not -> not expr
+error_new -> error expr
+negative -> -expr
+range_to -> .. expr
+range_to_inclusive -> ..= expr
+atomic_block -> atomic(id*) { statement* }
+do_block -> do { statement* }
+async_block -> async { statement* }
+unsafe_block -> unsafe { statement* }
+comptime_block -> comptime { statement* }
+range_all -> ..
+bool_forall -> forall type_bound_param* => expr
+bool_exists -> exists type_bound_param* => expr
+
+
+infix -> expr + expr
+    | expr - expr
+    | expr * expr
+    | expr / expr
+    | expr % expr
+    | expr == expr
+    | expr != expr
+    | expr < expr
+    | expr > expr
+    | expr <= expr
+    | expr >= expr
+    | expr ++ expr
+    | expr ==> expr
+    | expr | expr
+    | expr |> expr
+    | expr -> expr
+    | expr : expr
+    | expr :- expr
+    | expr <: expr
+    | expr .. expr
+    | expr ..= expr
+
+postfix -> projection
+    | take_view
+    | range_from
+    | post_match
+    | post_lambda
+    | application
+    | normal_form_application
+    | extended_application
+    | index_application
+    | type_cast
+    | dyn_cast
+    | handler_application
+    | async_await
+    | bool_matches
+    | deref
+    | refer
+    | effect_elimination
+    | error_elimination
+    | option_propagation
+    | effect_propagation
+    | error_propagation
+
+projection -> expr . id
+take_view -> expr ' id
+range_from -> expr ..
+post_match -> expr match { case_arm* }
+post_lambda -> expr do (lambda | block | expr)
+application -> expr (argument*)
+normal_form_application -> expr<argument*>
+extended_application -> expr { (property | expr)* }
+index_application -> expr [expr]
+type_cast -> expr.as(expr)
+dyn_cast -> expr.dyn(expr)
+handler_application -> expr.use(expr)
+async_await -> expr.await
+bool_matches -> expr matches pattern
+deref -> expr.*
+refer -> expr.ref
+effect_elimination -> expr# { case_arm* }
+error_elimination -> expr! { case_arm* }
+option_propagation -> expr?
+effect_propagation -> expr#
+error_propagation -> expr!
+
+argument -> expr_arg
+    | extend_arg
+    | optional_arg
+
+expr_arg -> expr
+extend_arg -> ... expr
+optional_arg -> .id = expr
+
+
+type -> optional_type
+    | error_qualified_type
+    | effect_qualified_type
+    | reachability_qualified_type
+    | closure_qualified_type
+    | trait_object_type
+    | pointer_type
+    | fn_type
+    | forall_type
+    | for_type
+    | lift_type
+
+optional_type -> ?expr
+error_qualified_type -> !expr expr
+effect_qualified_type -> #expr expr
+-- 这两种日后需要拓展语法而不是直接用expr
+reachability_qualified_type -> &expr expr
+closure_qualified_type -> ^expr expr
+trait_object_type -> dyn trait_ref
+pointer_type -> *expr
+fn_type -> pure? comptime? inline? (unsafe | spec | verified)? (extern "ABI")? fn(parameter_type*)
+forall_type -> forall<parameter*> expr
+for_type -> for<parameter*> expr
+lift_type -> lift expr
+
+parameter_type -> trivial_param_type
+    | type_bound_param_type
+    | optional_param_type
+    | vararg_param_type
+    | itself_param_type
+    | itself_ref_param_type
+    | comptime_param_type
+    | error_param_type
+    | catch_param_type
+    | lambda_param_type
+    | implicit_param_type
+    | quote_param_type
+    | assoc_param_type
+
+type_param_type -> expr
+decl_param_type -> decl_clause
+optional_decl_param_type -> .decl_clause
+vararg_decl_param_type -> ...decl_clause
+itself_param_type -> itself
+itself_ref_param_type -> *itself
+comptime_param_type -> comptime parameter_type
+error_param_type -> error parameter_type
+catch_param_type -> catch parameter_type
+lambda_param_type -> lambda parameter_type
+implicit_param_type -> implicit parameter_type
+quote_param_type -> quote parameter_type
+assoc_param_type -> assoc parameter_type
+
+statement_expr -> return_statement
+    | resume_statement
+    | break_statement
+    | continue_statement
+    | if_statement
+    | when_statement
+    | if_is_match
+    | if_match
+    | inline_statement
+
+
+-- definitions
+parameter -> trivial_param
+    | type_bound_param
+    | optional_param
+    | vararg_param
+    | self_param
+    | self_ref_param
+    | comptime_param
+    | error_param
+    | catch_param
+    | lambda_param
+    | implicit_param
+    | quote_param
+    | attr_param
+
+trivial_param -> id
+type_bound_param -> id : expr
+optional_param -> .id : expr
+vararg_param -> ...id : expr
+self_param -> self
+self_ref_param -> *self
+comptime_param -> comptime parameter
+error_param -> error parameter
+catch_param -> catch parameter
+lambda_param -> lambda parameter
+implicit_param -> implicit parameter
+quote_param -> quote parameter
+attr_param -> ^expr parameter
+
+clauses -> where clause*
+claus -> decl_clause | verification_clause | outcome_clause
+decl_clause -> type_decl_clause
+    | trait_bound_decl_clause
+    | type_bound_decl_clause
+    | optional_decl_clause
+    | vararg_decl_clause
+    | quote_decl_clause
+    
+type_decl_clause -> id
+trait_bound_decl_clause -> id :- expr
+type_bound_decl_clause -> id : expr
+optional_decl_clause -> .id : expr = default_expr
+vararg_decl_clause -> ...id : expr
+quote_decl_clause -> quote decl_clause
+
+verification_clause -> requires_clause
+    | ensures_clause
+    | decreases_clause
+
+requires_clause -> requires expr
+ensures_clause -> ensures expr
+decreases_clause -> decreases expr
+
+outcome_clause -> TODO
+
+
+definition -> function
+    | normal_form_def
+    | algebraic_effect
+    | case_def
+    | const_def
+    | newtype_def
+    | typealias_def
+    | trait_def
+    | impl_def
+    | impl_trait_def
+    | extend_def
+    | extend_trait_def
+    | derive_def
+    | test_def
+    | module_def
+    | struct_def
+    | enum_def
+    | union_def
+    | attr_def
+    
+result -> (id :)? expr
+function -> pure? comptime? inline? (unsafe | spec | verified | atomic)? (extern "ABI")? fn id ( parameter* ) (-> result)? (handles(expr))? clauses? (block | (= expr))
+normal_form_def -> pure comptime fn id<parameter*> (-> result)? clauses? (block | (= expr))
+algebraic_effect -> async? effect id (parameter*) (-> result)? clauses? (block | (= expr))
+case_def -> case id (parameter*) (-> result)? clauses? block
+const_def -> const id (: expr)? = expr
+newtype_def -> newtype id(<parameter*>)? = expr
+typealias_def -> typealias id(<parameter*>)? = expr
+-- definition.function中，(block | (= expr))处的child可能为0, 即trait中只有函数签名没有函数体的情况
+trait_def -> trait id (:- expr)? clauses? { (assoc_decl | definition | statement)* }
+assoc_decl -> assoc id(<parameter*>)?: expr (= default)? clauses?
+impl_def -> impl expr clauses? { (definition | statement)* }
+impl_trait_def -> impl expr for expr clauses? { (assoc_decl | definition | statement)* }
+extend_def -> extend expr clauses? { (definition | statement)* }
+extend_trait_def -> extend expr for expr clauses? { (assoc_decl | definition | statement)* }
+derive_def -> derive expr for expr clauses? 
+test_def -> test id? block
+module_def -> mod id { (definition | statement)* }
+struct_def -> struct id clauses? { (property | struct_field | definition | statement)* }
+struct_field -> id : expr (= default_expr)?
+enum_def -> enum id clauses? { (property | enum_variant | definition | statement)* }
+enum_variant -> trivial_enum_variant
+    | tuple_enum_variant
+    | struct_enum_variant
+    | pattern_enum_variant
+    | expr_enum_variant
+    | sub_enum_enum_variant
+trivial_enum_variant -> id
+tuple_enum_variant -> id (expr*)
+struct_enum_variant -> id { struct_field* }
+pattern_enum_variant -> id: pattern
+expr_enum_variant -> id = expr
+sub_enum_enum_variant -> id.{ enum_variant* }
+union_def -> union id clauses? { (property | union_variant | definition | statement)* }
+union_variant -> id : expr
+
+attr_def -> ^expr definition
+
+
+statement -> expr_statement
+    | assignment
+    | add_assignment
+    | sub_assignment
+    | mul_assignment
+    | div_assignment
+    | let_decl
+    | const_decl
+    | while_statement
+    | while_is_match
+    | while_match
+    | for_statement
+    | return_statement
+    | resume_statement
+    | break_statement
+    | continue_statement
+    | if_statement
+    | when_statement
+    | if_is_match
+    | if_match
+    | inline_statement
+    | assert_statement
+    | axiom_statement
+    | asserts_statement
+    | assumes_statement
+    | invariant_statement
+    | decreases_statement
+    | use_statement
+
+for_statement -> for label? pattern in expr block
+while_statement -> while label? expr block
+while_is_match -> while label? expr is pattern do block
+while_match -> while label? expr is do { case_arm* }
+label -> : id
+return_statement -> return expr? (while expr)?
+resume_statement -> resume expr? (while expr)?
+break_statement -> break id? (while expr)?
+continue_statement -> continue id? (while expr)?
+if_statement -> if expr block (else (block | if_statement))?
+when_statement -> when { (condition_arm | else_arm)* }
+if_is_match -> if expr is pattern do block (else (block | if_is_match))?
+if_match -> if expr is do { case_arm* }
+inline_statement -> inline statement_expr
+
+case_arm -> pattern => (block | statement)
+condition_arm -> pattern => (block | statement)
+else_arm -> else => (block | statement)
+
+
+-- patterns
+pattern -> id
+    | literal_pattern
+    | prefix_pattern
+    | infix_pattern 
+    | postfix_pattern
+
+-- 直接跟表达式literal用一套吧，解析的时候再分开处理
+literal_pattern -> literal
+
+prefix_pattern -> symbol
+    | error_pattern
+    | not_pattern
+    | list_pattern
+    | tuple_pattern
+    | struct_pattern
+    | property_pattern
+    | range_all_pattern
+    | range_to_pattern
+    | range_to_inclusive_pattern
+    | ref_pattern
+    | async_pattern
+    | bit_vec_bin_pattern
+    | bit_vec_oct_pattern
+    | bit_vec_hex_pattern
+
+error_pattern -> error pattern
+not_pattern -> not pattern
+list_pattern -> [pattern*]
+list_rest_pattern -> ...id
+tuple_pattern -> (pattern, pattern*)
+struct_pattern -> { (property_pattern | pattern)* }
+property_pattern -> id : pattern
+range_all_pattern -> ..
+range_to_pattern -> .. pattern
+range_to_inclusive_pattern -> ..= pattern
+ref_pattern -> ref pattern
+async_pattern -> async pattern
+
+-- 比如0b1110(xs: BitVec<4>) 10(ys: BitVec<6>) 10(zs: BitVec<6>)
+bit_vec_bin_pattern -> 0b (integer | (id: expr) | <expr>)+
+bit_vec_oct_pattern -> 0o (integer | (id: expr) | <expr>)+
+bit_vec_hex_pattern -> 0x (integer | (id: expr) | <expr>)+
+
+infix_pattern -> or_pattern
+    | range_from_to_pattern
+    | range_from_to_inclusive_pattern
+
+or_pattern -> pattern or pattern
+range_from_to_pattern -> pattern .. pattern
+range_from_to_inclusive_pattern -> pattern ..= pattern
+
+postfix_pattern -> option_some_pattern
+    | error_ok_pattern
+    | if_guard_pattern
+    | and_is_pattern
+    | as_bind_pattern
+    | application_pattern
+    | normal_form_application_pattern
+    | extended_application_pattern
+
+option_some_pattern -> pattern?
+error_ok_pattern -> pattern!
+if_guard_pattern -> pattern if expr
+and_is_pattern -> pattern and expr is pattern
+as_bind_pattern -> pattern as id
+application_pattern -> pattern (pattern*)
+-- 注意这里是expr哦
+normal_form_application_pattern -> pattern<expr*>
+extended_application_pattern -> pattern { (property_pattern | pattern)* }
+
+-- use pathes
+mod_statement -> mod id
+use_statement -> use path
+
+path -> projection_path
+    | projection_multi_path
+    | projection_all_path
+    | super_path
+    | package_path
+    | path_as_bind
+
+projection_path -> path . id
+projection_multi_path -> path . { path* }
+projection_all_path -> path . *
+super_path -> . path
+package_path -> @ path
+path_as_bind -> path as id
+
+
+-- others
+property -> .id expr
+block -> { (definition | statement)* }
+filescope

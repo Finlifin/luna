@@ -1,0 +1,85 @@
+-- ==========================================================================
+-- builtin/traits – fundamental traits
+-- ==========================================================================
+--
+-- These traits form the core protocol system of Flurry. Many of them are
+-- lang items that the compiler desugars syntax into.
+
+-- ── Equality ───────────────────────────────────────────────────────────────
+
+-- #[lang = "eq"]
+trait Eq {
+    fn eq(self, other: Self) -> Bool
+    fn ne(self, other: Self) -> Bool = !self.eq(other)
+}
+
+-- ── Ordering ───────────────────────────────────────────────────────────────
+
+-- #[lang = "ord"]
+trait Ord requires Eq {
+    fn cmp(self, other: Self) -> Ordering
+    fn lt(self, other: Self) -> Bool = self.cmp(other) == Ordering.Less
+    fn le(self, other: Self) -> Bool = self.cmp(other) != Ordering.Greater
+    fn gt(self, other: Self) -> Bool = self.cmp(other) == Ordering.Greater
+    fn ge(self, other: Self) -> Bool = self.cmp(other) != Ordering.Less
+}
+
+enum Ordering {
+    Less,
+    Equal,
+    Greater,
+}
+
+-- ── Display / Debug ────────────────────────────────────────────────────────
+
+-- #[lang = "display"]
+trait Display {
+    fn fmt(self) -> String
+}
+
+-- #[lang = "debug"]
+trait Debug {
+    fn debug_fmt(self) -> String
+}
+
+-- ── Clone / Copy ───────────────────────────────────────────────────────────
+
+-- #[lang = "clone"]
+trait Clone {
+    fn clone(self) -> Self
+}
+
+-- #[lang = "copy"]
+trait Copy requires Clone {}
+
+-- ── Drop ───────────────────────────────────────────────────────────────────
+
+-- #[lang = "drop"]
+trait Drop {
+    fn drop(*self)
+}
+
+-- ── Hash ───────────────────────────────────────────────────────────────────
+
+-- #[lang = "hash"]
+trait Hash {
+    fn hash(self) -> Int
+}
+
+-- ── Conversion ─────────────────────────────────────────────────────────────
+
+-- #[lang = "into"]
+trait Into where Target {
+    fn into(self) -> Target
+}
+
+-- #[lang = "from"]
+trait From where Source {
+    fn from(source: Source) -> Self
+}
+
+-- ── Default ────────────────────────────────────────────────────────────────
+
+trait Default {
+    fn default() -> Self
+}

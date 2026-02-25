@@ -1,0 +1,33 @@
+-- ==========================================================================
+-- builtin – package root
+-- ==========================================================================
+--
+-- The `builtin` package is the implicit foundation of every Flurry program.
+-- It re-exports all fundamental types, traits, and protocols that the
+-- compiler and standard library depend on.
+--
+-- User code does NOT need to `use builtin` – its public items are injected
+-- into every module's scope automatically (the "prelude").
+
+-- Fundamental type definitions
+mod primitives
+-- Core traits (Eq, Ord, Display, Debug, Clone, Copy, Drop, Hash, Into, From)
+mod traits
+-- Option type (?T)
+mod option
+-- Result type
+mod result
+-- Iterator protocol
+mod iterator
+-- Operator traits (Add, Sub, Mul, …)
+mod ops
+
+-- ── Prelude re-exports ─────────────────────────────────────────────────────
+-- Everything below is auto-imported into every user module.
+
+pub use primitives.*
+pub use traits.*
+pub use option.{Option, Some, None}
+pub use result.{Result, Ok, Err}
+pub use iterator.{Iterator, FromIterator}
+pub use ops.*

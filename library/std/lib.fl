@@ -1,0 +1,22 @@
+-- ==========================================================================
+-- std – the Flurry standard library
+-- ==========================================================================
+--
+-- The `std` package builds on `builtin` to provide the full standard
+-- library: I/O, collections, formatting, concurrency primitives, etc.
+--
+-- Like `builtin`, a selected prelude from `std` is auto-imported into
+-- every user module.
+
+-- Re-export the entire builtin package so users only need `std`.
+pub use builtin.*
+
+-- Standard library modules
+mod io
+mod fmt
+mod collections
+
+-- ── Prelude re-exports ─────────────────────────────────────────────────────
+pub use io.{print, println}
+pub use fmt.{format}
+pub use collections.{Vec, Map, Set}
