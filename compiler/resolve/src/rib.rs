@@ -11,7 +11,6 @@ use std::collections::HashMap;
 
 use crate::binding::Binding;
 use crate::ids::ScopeId;
-use crate::namespace::Namespace;
 
 // ── RibKind ──────────────────────────────────────────────────────────────────
 
@@ -46,34 +45,9 @@ pub enum RibKind {
 pub struct Rib {
     pub kind: RibKind,
     /// Bindings introduced by this rib, keyed by name.
-    pub bindings: HashMap<String, PerNsRibEntry>,
+    pub bindings: HashMap<String, Binding>,
     /// The scope this rib is associated with.
     pub scope_id: ScopeId,
-}
-
-/// A rib entry: one binding per namespace.
-#[derive(Debug, Clone, Default)]
-pub struct PerNsRibEntry {
-    pub type_ns: Option<Binding>,
-    pub value_ns: Option<Binding>,
-}
-
-impl PerNsRibEntry {
-    pub fn get(&self, ns: Namespace) -> Option<&Binding> {
-        match ns {
-            Namespace::Type => self.type_ns.as_ref(),
-            Namespace::Value => self.value_ns.as_ref(),
-            Namespace::Macro => None, // macros are not in ribs
-        }
-    }
-
-    pub fn set(&mut self, ns: Namespace, binding: Binding) {
-        match ns {
-            Namespace::Type => self.type_ns = Some(binding),
-            Namespace::Value => self.value_ns = Some(binding),
-            Namespace::Macro => {} // ignored
-        }
-    }
 }
 
 impl Rib {
@@ -86,16 +60,13 @@ impl Rib {
     }
 
     /// Introduce a binding into this rib.
-    pub fn define(&mut self, name: String, ns: Namespace, binding: Binding) {
-        self.bindings
-            .entry(name)
-            .or_default()
-            .set(ns, binding);
+    pub fn define(&mut self, name: String, binding: Binding) {
+        self.bindings.insert(name, binding);
     }
 
     /// Look up a name in this rib only.
-    pub fn get(&self, name: &str, ns: Namespace) -> Option<&Binding> {
-        self.bindings.get(name).and_then(|e| e.get(ns))
+    pub fn get(&self, name: &str) -> Option<&Binding> {
+        self.bindings.get(name)
     }
 }
 
@@ -137,16 +108,16 @@ impl RibStack {
     }
 
     /// Introduce a binding into the current (top) rib.
-    pub fn define(&mut self, name: String, ns: Namespace, binding: Binding) {
+    pub fn define(&mut self, name: String, binding: Binding) {
         if let Some(rib) = self.current_mut() {
-            rib.define(name, ns, binding);
+            rib.define(name, binding);
         }
     }
 
     /// Look up a name by walking the rib stack top-to-bottom.
-    pub fn lookup(&self, name: &str, ns: Namespace) -> Option<&Binding> {
+    pub fn lookup(&self, name: &str) -> Option<&Binding> {
         for rib in self.ribs.iter().rev() {
-            if let Some(binding) = rib.get(name, ns) {
+            if let Some(binding) = rib.get(name) {
                 return Some(binding);
             }
         }

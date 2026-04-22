@@ -237,22 +237,22 @@ impl Parser<'_> {
         })
     }
 
-    /// property -> .id expr
+    /// property -> id: expr
     pub fn try_property(&mut self) -> ParseResult {
-        self.scoped_with_expected_prefix(&[TokenKind::Dot, TokenKind::Id], |p| {
-            p.eat_tokens(1); // 吃掉点号
+        self.scoped_with_expected_prefix(&[TokenKind::Id, TokenKind::Colon], |p| {
             let id = p.try_id()?;
             if id == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected an identifier after `.`".to_string(),
+                    "Expected an identifier before `:`".to_string(),
                     TokenKind::Id,
                     p.current_span(),
                 ));
             }
+            p.eat_tokens(1); // 吃掉冒号
             let expr = p.try_expr()?;
             if expr == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected an expression after property name in `.id expr`".to_string(),
+                    "Expected an expression after `:` in `id: expr`".to_string(),
                     p.peek_next_token().kind,
                     p.current_span(),
                 ));

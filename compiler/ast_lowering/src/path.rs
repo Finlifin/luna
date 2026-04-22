@@ -7,7 +7,7 @@ use rustc_span::Span;
 use crate::LoweringContext;
 
 impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
-    /// Lower an AST `Select` chain (a.b.c) into an HIR `Path`.
+    /// Lower an AST `Projection` chain (a.b.c) into an HIR `Path`.
     pub fn lower_path_from_select(&mut self, node: NodeIndex) -> Path<'hir> {
         let mut segments = Vec::new();
         self.collect_path_segments(node, &mut segments);
@@ -19,12 +19,8 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         }
     }
 
-    /// Recursively collect path segments from nested `Select` nodes.
-    fn collect_path_segments(
-        &mut self,
-        node: NodeIndex,
-        segments: &mut Vec<PathSegment<'hir>>,
-    ) {
+    /// Recursively collect path segments from nested `Projection` nodes.
+    fn collect_path_segments(&mut self, node: NodeIndex, segments: &mut Vec<PathSegment<'hir>>) {
         if node == 0 {
             return;
         }
@@ -33,7 +29,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         };
 
         match kind {
-            NodeKind::Select => {
+            NodeKind::Projection => {
                 let children = self.ast.get_children(node);
                 if children.len() >= 2 {
                     // Left side: deeper path or base identifier
@@ -41,10 +37,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     // Right side: the next segment
                     let rhs = children[1];
                     let ident = self.node_to_ident(rhs);
-                    segments.push(PathSegment {
-                        ident,
-                        args: &[],
-                    });
+                    segments.push(PathSegment { ident, args: &[] });
                 }
             }
 
@@ -53,11 +46,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                 let children = self.ast.get_children(node);
                 if !children.is_empty() {
                     let base = children[0];
-                    let multi_args_node = if children.len() > 1 {
-                        children[1]
-                    } else {
-                        0
-                    };
+                    let multi_args_node = if children.len() > 1 { children[1] } else { 0 };
 
                     // Collect the base path segments
                     self.collect_path_segments(base, segments);
@@ -78,10 +67,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
 
             NodeKind::Id | NodeKind::SelfLower | NodeKind::SelfCap => {
                 let ident = self.node_to_ident(node);
-                segments.push(PathSegment {
-                    ident,
-                    args: &[],
-                });
+                segments.push(PathSegment { ident, args: &[] });
             }
 
             NodeKind::SuperPath => {
@@ -92,10 +78,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                         Symbol::intern("super"),
                         self.ast.get_span(node).unwrap_or(Span::default()),
                     );
-                    segments.push(PathSegment {
-                        ident,
-                        args: &[],
-                    });
+                    segments.push(PathSegment { ident, args: &[] });
                     self.collect_path_segments(children[0], segments);
                 }
             }
@@ -108,10 +91,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                         Symbol::intern("@"),
                         self.ast.get_span(node).unwrap_or(Span::default()),
                     );
-                    segments.push(PathSegment {
-                        ident,
-                        args: &[],
-                    });
+                    segments.push(PathSegment { ident, args: &[] });
                     self.collect_path_segments(children[0], segments);
                 }
             }
@@ -121,10 +101,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                 let name = self.source_text(node);
                 let span = self.ast.get_span(node).unwrap_or(Span::default());
                 let ident = Ident::new(Symbol::intern(&name), span);
-                segments.push(PathSegment {
-                    ident,
-                    args: &[],
-                });
+                segments.push(PathSegment { ident, args: &[] });
             }
         }
     }
@@ -142,10 +119,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
             // Produce a single-segment path from source text
             let name = self.source_text(node);
             let ident = Ident::new(Symbol::intern(&name), span);
-            segments.push(PathSegment {
-                ident,
-                args: &[],
-            });
+            segments.push(PathSegment { ident, args: &[] });
         }
 
         let segments_slice = self.arena.alloc_path_segment_slice(segments);

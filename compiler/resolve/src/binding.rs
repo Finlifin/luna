@@ -1,7 +1,6 @@
 //! Bindings and Resolutions – what a name resolves to.
 
 use crate::ids::{AstNodeRef, DefId, ScopeId};
-use crate::namespace::Namespace;
 
 /// A single name-to-definition binding discovered during name resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,8 +13,6 @@ pub struct Binding {
     pub defined_in: ScopeId,
     /// An optional back-reference to the AST node that introduced the name.
     pub ast_ref: Option<AstNodeRef>,
-    /// The namespace this binding inhabits.
-    pub ns: Namespace,
     /// The visibility of this binding (public vs. private).
     pub vis: Visibility,
 }

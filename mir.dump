@@ -1,0 +1,20 @@
+fn main() -> () {
+    let _0: ();  // return place
+    let _1: Adt(LocalDefId(1)<i64>);  // node1
+    let _2: Adt(LocalDefId(1)<i64>);
+    let _3: Adt(LocalDefId(1)<i64>);  // node2
+    let _4: *const Adt(LocalDefId(1)<i64>);
+    let _5: Adt(LocalDefId(1)<i64>);
+
+    bb0: {
+        _2 = Adt(LocalDefId(1))(const 1_i64, const null);
+        _1 = copy _2;
+        _4 = &_1;
+        _5 = Adt(LocalDefId(1))(const 2_i64, copy _4);
+        _3 = copy _5;
+        _0 = const ();
+        return;
+    }
+
+}
+

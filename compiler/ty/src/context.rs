@@ -17,8 +17,18 @@ use crate::types::*;
 /// Pre-interned types that are used so frequently that caching them avoids
 /// repeated hash-set lookups.
 pub struct CommonTypes<'tcx> {
-    pub int: Ty<'tcx>,
-    pub float: Ty<'tcx>,
+    pub i8: Ty<'tcx>,
+    pub i16: Ty<'tcx>,
+    pub i32: Ty<'tcx>,
+    pub i64: Ty<'tcx>,
+    pub isize: Ty<'tcx>,
+    pub u8: Ty<'tcx>,
+    pub u16: Ty<'tcx>,
+    pub u32: Ty<'tcx>,
+    pub u64: Ty<'tcx>,
+    pub usize: Ty<'tcx>,
+    pub f32: Ty<'tcx>,
+    pub f64: Ty<'tcx>,
     pub bool_: Ty<'tcx>,
     pub char_: Ty<'tcx>,
     pub str_: Ty<'tcx>,
@@ -76,6 +86,9 @@ pub struct TyCtxt {
 
     /// Counter for fresh inference variables.
     next_infer_var: RefCell<u32>,
+
+    /// ADT definitions keyed by their [`AdtId`].
+    adt_defs: RefCell<FxHashMap<AdtId, AdtDef>>,
 }
 
 impl TyCtxt {
@@ -86,6 +99,7 @@ impl TyCtxt {
             def_types: RefCell::new(FxHashMap::default()),
             node_types: RefCell::new(FxHashMap::default()),
             next_infer_var: RefCell::new(0),
+            adt_defs: RefCell::new(FxHashMap::default()),
         }
     }
 
@@ -97,8 +111,18 @@ impl TyCtxt {
     /// would also work, but this avoids the hash-set probe.
     pub fn common<'tcx>(&'tcx self) -> CommonTypes<'tcx> {
         CommonTypes {
-            int: self.mk_primitive(PrimTy::Int),
-            float: self.mk_primitive(PrimTy::Float),
+            i8: self.mk_primitive(PrimTy::I8),
+            i16: self.mk_primitive(PrimTy::I16),
+            i32: self.mk_primitive(PrimTy::I32),
+            i64: self.mk_primitive(PrimTy::I64),
+            isize: self.mk_primitive(PrimTy::Isize),
+            u8: self.mk_primitive(PrimTy::U8),
+            u16: self.mk_primitive(PrimTy::U16),
+            u32: self.mk_primitive(PrimTy::U32),
+            u64: self.mk_primitive(PrimTy::U64),
+            usize: self.mk_primitive(PrimTy::Usize),
+            f32: self.mk_primitive(PrimTy::F32),
+            f64: self.mk_primitive(PrimTy::F64),
             bool_: self.mk_primitive(PrimTy::Bool),
             char_: self.mk_primitive(PrimTy::Char),
             str_: self.mk_primitive(PrimTy::Str),
@@ -260,6 +284,68 @@ impl TyCtxt {
         self.node_types.borrow().get(&hir_id).map(|&ty| unsafe {
             std::mem::transmute::<Ty<'static>, Ty<'tcx>>(ty)
         })
+    }
+
+    // ── ADT definition table ─────────────────────────────────────────────
+
+    /// Register an ADT definition (struct / enum).
+    pub fn register_adt_def(&self, adt_id: AdtId, def: AdtDef) {
+        self.adt_defs.borrow_mut().insert(adt_id, def);
+    }
+
+    /// Look up an ADT definition by id.
+    pub fn adt_def(&self, adt_id: AdtId) -> Option<AdtDef> {
+        self.adt_defs.borrow().get(&adt_id).cloned()
+    }
+
+    // ── Type substitution ────────────────────────────────────────────────
+
+    /// Substitute type parameters in `ty` using the given `substs` slice.
+    ///
+    /// `substs[i]` replaces `Param(ParamTy { index: i, .. })`.
+    pub fn subst<'tcx>(&'tcx self, ty: Ty<'tcx>, substs: &[Ty<'tcx>]) -> Ty<'tcx> {
+        if substs.is_empty() {
+            return ty;
+        }
+        match ty.kind() {
+            TyKind::Param(p) => {
+                substs.get(p.index as usize).copied().unwrap_or(ty)
+            }
+            TyKind::Ref(inner, m) => {
+                let new = self.subst(*inner, substs);
+                self.mk_ref(new, *m)
+            }
+            TyKind::Ptr(inner, m) => {
+                let new = self.subst(*inner, substs);
+                self.mk_ptr(new, *m)
+            }
+            TyKind::Optional(inner) => {
+                let new = self.subst(*inner, substs);
+                self.mk_optional(new)
+            }
+            TyKind::Adt(id, args) => {
+                let new_args: Vec<_> = args.iter().map(|a| self.subst(*a, substs)).collect();
+                self.mk_adt(*id, &new_args)
+            }
+            TyKind::Tuple(elems) => {
+                let new: Vec<_> = elems.iter().map(|e| self.subst(*e, substs)).collect();
+                self.mk_tuple(&new)
+            }
+            TyKind::Fn(params, ret) => {
+                let new_params: Vec<_> = params.iter().map(|p| self.subst(*p, substs)).collect();
+                let new_ret = self.subst(*ret, substs);
+                self.mk_fn(&new_params, new_ret)
+            }
+            TyKind::Array(elem, len) => {
+                let new = self.subst(*elem, substs);
+                self.mk_array(new, *len)
+            }
+            TyKind::Slice(elem) => {
+                let new = self.subst(*elem, substs);
+                self.mk_slice(new)
+            }
+            _ => ty,
+        }
     }
 }
 

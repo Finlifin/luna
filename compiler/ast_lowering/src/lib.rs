@@ -75,23 +75,18 @@ pub fn lower_to_hir<'hir>(
     ctx.lower_file_scope(ast.root);
 }
 
-// ── LoweringContext ──────────────────────────────────────────────────────────
-
 /// Mutable context threaded through all lowering functions.
 ///
 /// Owns the in-progress [`Package`] and maintains per-owner HirId
 /// allocation state.
 pub struct LoweringContext<'hir, 'ast> {
-    // ── Inputs ───────────────────────────────────────────────────────────
     pub(crate) ast: &'ast Ast,
     pub(crate) arena: &'hir HirArena,
     source_map: &'ast SourceMap,
     diag_ctx: &'ast DiagnosticContext<'ast>,
 
-    // ── Outputs ──────────────────────────────────────────────────────────
     pub(crate) package: &'ast mut Package<'hir>,
 
-    // ── Allocation state ─────────────────────────────────────────────────
     /// The current owner being lowered.
     pub(crate) current_owner: OwnerId,
     /// Next `ItemLocalId` within the current owner.

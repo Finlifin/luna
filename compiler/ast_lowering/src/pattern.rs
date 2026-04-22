@@ -110,14 +110,8 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                 let children = self.ast.get_children(node);
                 if !children.is_empty() {
                     let elems_node = children[0];
-                    let elem_nodes = self
-                        .ast
-                        .get_multi_child_slice(elems_node)
-                        .unwrap_or(&[]);
-                    let pats: Vec<_> = elem_nodes
-                        .iter()
-                        .map(|&n| self.lower_pattern(n))
-                        .collect();
+                    let elem_nodes = self.ast.get_multi_child_slice(elems_node).unwrap_or(&[]);
+                    let pats: Vec<_> = elem_nodes.iter().map(|&n| self.lower_pattern(n)).collect();
                     let pats_slice = self.arena.alloc_pattern_slice(pats);
                     Pattern {
                         hir_id: self.next_hir_id(),
@@ -134,14 +128,8 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                 let children = self.ast.get_children(node);
                 if !children.is_empty() {
                     let elems_node = children[0];
-                    let elem_nodes = self
-                        .ast
-                        .get_multi_child_slice(elems_node)
-                        .unwrap_or(&[]);
-                    let pats: Vec<_> = elem_nodes
-                        .iter()
-                        .map(|&n| self.lower_pattern(n))
-                        .collect();
+                    let elem_nodes = self.ast.get_multi_child_slice(elems_node).unwrap_or(&[]);
+                    let pats: Vec<_> = elem_nodes.iter().map(|&n| self.lower_pattern(n)).collect();
                     let pats_slice = self.arena.alloc_pattern_slice(pats);
                     Pattern {
                         hir_id: self.next_hir_id(),
@@ -162,14 +150,9 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     let callee_ref = self.arena.alloc_expr(callee_expr);
 
                     let args_node = children[1];
-                    let arg_nodes = self
-                        .ast
-                        .get_multi_child_slice(args_node)
-                        .unwrap_or(&[]);
-                    let sub_pats: Vec<_> = arg_nodes
-                        .iter()
-                        .map(|&n| self.lower_pattern(n))
-                        .collect();
+                    let arg_nodes = self.ast.get_multi_child_slice(args_node).unwrap_or(&[]);
+                    let sub_pats: Vec<_> =
+                        arg_nodes.iter().map(|&n| self.lower_pattern(n)).collect();
                     let sub_pats_slice = self.arena.alloc_pattern_slice(sub_pats);
 
                     Pattern {
@@ -190,10 +173,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     let path = self.lower_expr_as_path(callee);
 
                     let fields_node = children[1];
-                    let field_nodes = self
-                        .ast
-                        .get_multi_child_slice(fields_node)
-                        .unwrap_or(&[]);
+                    let field_nodes = self.ast.get_multi_child_slice(fields_node).unwrap_or(&[]);
                     let field_pats: Vec<_> = field_nodes
                         .iter()
                         .map(|&n| self.lower_field_pattern(n))
@@ -215,10 +195,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                 let children = self.ast.get_children(node);
                 if !children.is_empty() {
                     let fields_node = children[0];
-                    let field_nodes = self
-                        .ast
-                        .get_multi_child_slice(fields_node)
-                        .unwrap_or(&[]);
+                    let field_nodes = self.ast.get_multi_child_slice(fields_node).unwrap_or(&[]);
                     let field_pats: Vec<_> = field_nodes
                         .iter()
                         .map(|&n| self.lower_field_pattern(n))
@@ -316,8 +293,8 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                 }
             }
 
-            // Select-based path as pattern (e.g. Mod.Variant)
-            NodeKind::Select => {
+            // Projection-based path as pattern (e.g. Mod.Variant)
+            NodeKind::Projection => {
                 let path = self.lower_path_from_select(node);
                 Pattern {
                     hir_id: self.next_hir_id(),

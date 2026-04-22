@@ -1,0 +1,10 @@
+[package]
+name = "mir_build"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+hir = { path = "../hir" }
+mir = { path = "../mir" }
+ty = { path = "../ty" }
+rustc_data_structures = { workspace = true }

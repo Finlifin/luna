@@ -2,9 +2,9 @@
 
 use ast::{NodeIndex, NodeKind};
 use hir::{
+    body::Body,
     common::{BinOp, Ident, Lit, LitKind, Symbol, UnOp},
     expr::{Arg, Block, ClosureParam, Expr, ExprKind, FieldExpr, LetStmt, Stmt, StmtKind},
-    body::Body,
 };
 use rustc_span::Span;
 
@@ -82,12 +82,25 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     span,
                 }
             }
-            NodeKind::Select => {
-                let path = self.lower_path_from_select(node);
-                Expr {
-                    hir_id: self.next_hir_id(),
-                    kind: ExprKind::Path(path),
-                    span,
+            NodeKind::Projection => {
+                let children = self.ast.get_children(node);
+                if children.len() >= 2 {
+                    let base_expr = self.lower_expr(children[0]);
+                    let base_ref = self.arena.alloc_expr(base_expr);
+                    let field_ident = self.node_to_ident(children[1]);
+                    Expr {
+                        hir_id: self.next_hir_id(),
+                        kind: ExprKind::Field(base_ref, field_ident),
+                        span,
+                    }
+                } else {
+                    // Fallback: treat as a path
+                    let path = self.lower_path_from_select(node);
+                    Expr {
+                        hir_id: self.next_hir_id(),
+                        kind: ExprKind::Path(path),
+                        span,
+                    }
                 }
             }
 
@@ -99,9 +112,19 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
             },
 
             // ── Binary operators ─────────────────────────────────────────
-            NodeKind::Add | NodeKind::Sub | NodeKind::Mul | NodeKind::Div | NodeKind::Mod
-            | NodeKind::BoolEq | NodeKind::BoolNotEq | NodeKind::BoolAnd | NodeKind::BoolOr
-            | NodeKind::BoolGt | NodeKind::BoolGtEq | NodeKind::BoolLt | NodeKind::BoolLtEq => {
+            NodeKind::Add
+            | NodeKind::Sub
+            | NodeKind::Mul
+            | NodeKind::Div
+            | NodeKind::Mod
+            | NodeKind::BoolEq
+            | NodeKind::BoolNotEq
+            | NodeKind::BoolAnd
+            | NodeKind::BoolOr
+            | NodeKind::BoolGt
+            | NodeKind::BoolGtEq
+            | NodeKind::BoolLt
+            | NodeKind::BoolLtEq => {
                 let children = self.ast.get_children(node);
                 if children.len() >= 2 {
                     let op = self.lower_binop(kind);
@@ -202,10 +225,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     let callee = self.lower_expr(children[0]);
                     let callee_ref = self.arena.alloc_expr(callee);
                     let args_node = children[1];
-                    let arg_nodes = self
-                        .ast
-                        .get_multi_child_slice(args_node)
-                        .unwrap_or(&[]);
+                    let arg_nodes = self.ast.get_multi_child_slice(args_node).unwrap_or(&[]);
                     let args = self.lower_call_args(arg_nodes);
                     let args_slice = self.arena.alloc_expr_slice(args);
                     Expr {
@@ -229,10 +249,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     let callee = children[0];
                     let path = self.lower_expr_as_path(callee);
                     let fields_node = children[1];
-                    let field_nodes = self
-                        .ast
-                        .get_multi_child_slice(fields_node)
-                        .unwrap_or(&[]);
+                    let field_nodes = self.ast.get_multi_child_slice(fields_node).unwrap_or(&[]);
                     let fields = self.lower_field_exprs(field_nodes);
                     let fields_slice = self.arena.alloc_field_expr_slice(fields);
                     Expr {
@@ -278,14 +295,8 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                 let children = self.ast.get_children(node);
                 if !children.is_empty() {
                     let elems_node = children[0];
-                    let elem_nodes = self
-                        .ast
-                        .get_multi_child_slice(elems_node)
-                        .unwrap_or(&[]);
-                    let elems: Vec<_> = elem_nodes
-                        .iter()
-                        .map(|&n| self.lower_expr(n))
-                        .collect();
+                    let elem_nodes = self.ast.get_multi_child_slice(elems_node).unwrap_or(&[]);
+                    let elems: Vec<_> = elem_nodes.iter().map(|&n| self.lower_expr(n)).collect();
                     let elems_slice = self.arena.alloc_expr_slice(elems);
                     Expr {
                         hir_id: self.next_hir_id(),
@@ -306,14 +317,8 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                 let children = self.ast.get_children(node);
                 if !children.is_empty() {
                     let elems_node = children[0];
-                    let elem_nodes = self
-                        .ast
-                        .get_multi_child_slice(elems_node)
-                        .unwrap_or(&[]);
-                    let elems: Vec<_> = elem_nodes
-                        .iter()
-                        .map(|&n| self.lower_expr(n))
-                        .collect();
+                    let elem_nodes = self.ast.get_multi_child_slice(elems_node).unwrap_or(&[]);
+                    let elems: Vec<_> = elem_nodes.iter().map(|&n| self.lower_expr(n)).collect();
                     let elems_slice = self.arena.alloc_expr_slice(elems);
                     Expr {
                         hir_id: self.next_hir_id(),
@@ -330,8 +335,11 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
             }
 
             // ── Block ────────────────────────────────────────────────────
-            NodeKind::Block | NodeKind::DoBlock | NodeKind::UnsafeBlock
-            | NodeKind::AsyncBlock | NodeKind::ComptimeBlock => {
+            NodeKind::Block
+            | NodeKind::DoBlock
+            | NodeKind::UnsafeBlock
+            | NodeKind::AsyncBlock
+            | NodeKind::ComptimeBlock => {
                 let block = self.lower_block(node);
                 let block_ref = self.arena.alloc_block(block);
                 Expr {
@@ -372,14 +380,8 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     let scrutinee = self.lower_expr(children[0]);
                     let scrutinee_ref = self.arena.alloc_expr(scrutinee);
                     let arms_node = children[1];
-                    let arm_nodes = self
-                        .ast
-                        .get_multi_child_slice(arms_node)
-                        .unwrap_or(&[]);
-                    let arms: Vec<_> = arm_nodes
-                        .iter()
-                        .map(|&n| self.lower_match_arm(n))
-                        .collect();
+                    let arm_nodes = self.ast.get_multi_child_slice(arms_node).unwrap_or(&[]);
+                    let arms: Vec<_> = arm_nodes.iter().map(|&n| self.lower_match_arm(n)).collect();
                     let arms_slice = self.arena.alloc_arm_slice(arms);
                     Expr {
                         hir_id: self.next_hir_id(),
@@ -410,7 +412,9 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
             }
 
             // ── Compound assignment ──────────────────────────────────────
-            NodeKind::AddAssign | NodeKind::SubAssign | NodeKind::MulAssign
+            NodeKind::AddAssign
+            | NodeKind::SubAssign
+            | NodeKind::MulAssign
             | NodeKind::DivAssign => {
                 let children = self.ast.get_children(node);
                 if children.len() >= 2 {
@@ -496,9 +500,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
             }
 
             // ── Lambda ───────────────────────────────────────────────────
-            NodeKind::Lambda => {
-                self.lower_lambda_expr(node, span)
-            }
+            NodeKind::Lambda => self.lower_lambda_expr(node, span),
 
             // ── PostLambda (trailing closure) ────────────────────────────
             NodeKind::PostLambda => {
@@ -515,9 +517,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                         // We need to allocate Arg slices — for now, use a simple
                         // vec-to-slice through the expression arena pattern.
                         // TODO: add an Arg arena to HirArena
-                        std::mem::transmute::<&[Arg<'_>], &'hir [Arg<'hir>]>(
-                            Vec::leak(args)
-                        )
+                        std::mem::transmute::<&[Arg<'_>], &'hir [Arg<'hir>]>(Vec::leak(args))
                     };
                     Expr {
                         hir_id: self.next_hir_id(),
@@ -558,9 +558,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     self.make_invalid_expr(span)
                 }
             }
-            NodeKind::FnType => {
-                self.lower_fn_type_expr(node, span)
-            }
+            NodeKind::FnType => self.lower_fn_type_expr(node, span),
 
             // ── Arrow type (`A -> B`, used in type signatures) ───────────
             NodeKind::Arrow => {
@@ -609,7 +607,9 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         // the child is the actual Block node.
         let block_node = match kind {
             Some(
-                NodeKind::DoBlock | NodeKind::AsyncBlock | NodeKind::UnsafeBlock
+                NodeKind::DoBlock
+                | NodeKind::AsyncBlock
+                | NodeKind::UnsafeBlock
                 | NodeKind::ComptimeBlock,
             ) => {
                 let children = self.ast.get_children(node);
@@ -629,10 +629,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                 let children = self.ast.get_children(block_node);
                 if !children.is_empty() {
                     let elems_node = children[0];
-                    let elem_nodes = self
-                        .ast
-                        .get_multi_child_slice(elems_node)
-                        .unwrap_or(&[]);
+                    let elem_nodes = self.ast.get_multi_child_slice(elems_node).unwrap_or(&[]);
                     self.lower_stmts_to_block(elem_nodes, span)
                 } else {
                     Block {
@@ -658,11 +655,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
     }
 
     /// Lower a list of statement-level nodes into a Block.
-    fn lower_stmts_to_block(
-        &mut self,
-        stmt_nodes: &[NodeIndex],
-        span: Span,
-    ) -> Block<'hir> {
+    fn lower_stmts_to_block(&mut self, stmt_nodes: &[NodeIndex], span: Span) -> Block<'hir> {
         let mut stmts = Vec::new();
         let mut trailing_expr: Option<&'hir Expr<'hir>> = None;
 
@@ -912,10 +905,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         let body_node = children[1];
         let params_multi = children[2];
 
-        let param_nodes = self
-            .ast
-            .get_multi_child_slice(params_multi)
-            .unwrap_or(&[]);
+        let param_nodes = self.ast.get_multi_child_slice(params_multi).unwrap_or(&[]);
 
         let closure_params: Vec<ClosureParam<'hir>> = param_nodes
             .iter()
@@ -997,10 +987,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         let _abi_node = children[1];
         let params_multi = children[2];
 
-        let param_nodes = self
-            .ast
-            .get_multi_child_slice(params_multi)
-            .unwrap_or(&[]);
+        let param_nodes = self.ast.get_multi_child_slice(params_multi).unwrap_or(&[]);
 
         // The last parameter type is the return type (by convention in fn type)
         if param_nodes.is_empty() {
@@ -1033,24 +1020,16 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
 
     /// Lower call arguments (positional expressions).
     fn lower_call_args(&mut self, arg_nodes: &[NodeIndex]) -> Vec<Expr<'hir>> {
-        arg_nodes
-            .iter()
-            .map(|&n| self.lower_expr(n))
-            .collect()
+        arg_nodes.iter().map(|&n| self.lower_expr(n)).collect()
     }
 
     /// Wrap a slice of expressions as positional `Arg`s.
     ///
     /// This leaks the Vec into a `'hir` slice. TODO: add an Arg arena.
     fn positional_args(&self, exprs: &'hir [Expr<'hir>]) -> &'hir [Arg<'hir>] {
-        let args: Vec<Arg<'hir>> = exprs
-            .iter()
-            .map(|e| Arg::Positional(e))
-            .collect();
+        let args: Vec<Arg<'hir>> = exprs.iter().map(|e| Arg::Positional(e)).collect();
         // SAFETY: the arena outlives everything; we leak the vec for now.
-        unsafe {
-            std::mem::transmute::<&[Arg<'_>], &'hir [Arg<'hir>]>(Vec::leak(args))
-        }
+        unsafe { std::mem::transmute::<&[Arg<'_>], &'hir [Arg<'hir>]>(Vec::leak(args)) }
     }
 
     /// Lower field expressions (for struct literals).
@@ -1138,5 +1117,4 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
             span,
         }
     }
-
 }

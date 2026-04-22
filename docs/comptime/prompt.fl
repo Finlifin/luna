@@ -252,10 +252,10 @@ test {
     -- 需要在约束收集的时候就下点手脚
     -- 我们引入surrouding context的概念,
     -- 在collector遍历到`Vec.new()`时，这是一个application, 将ApplicationCaller([args ast])压入surrouding context stack
-    -- 然后遍历到`Vec.new`时，这是一个select, 将SelectBase("new")压入surrouding context stack
+    -- 然后遍历到`Vec.new`时，这是一个select, 将ProjectionBase("new")压入surrouding context stack
     -- 遍历到Vec时，这是一个良定义的、返回一个类型的范式，此时我们检查top of surrouding context stack
     --   - 如果是NormalFormApplication(...), 那么按正常、标准的方式处理
-    --   - 如果是SelectBase(...), 那么我们在InferCtxt中为Vec的子句参数创建变量，然后这些变量代回填到Vec的子句参数中，
+    --   - 如果是ProjectionBase(...), 那么我们在InferCtxt中为Vec的子句参数创建变量，然后这些变量代回填到Vec的子句参数中，
     --     这样，Vec.new就被解析为Vec<?T>.new,
     --   - 其余情况暂不考虑
     -- 处理完后Vec, 我们退回`Vec.new`，因为Vec是良定义的，我们实际上可以预测Vec<T>中有这么一个new，即使Vec<T>还没有被实例化

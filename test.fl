@@ -1,20 +1,9 @@
-
--- 递归求阶乘
-fn factorial(n: Integer) -> Integer {
-    if n == 0 {
-        1
-    } else {
-        n * factorial(n - 1)
-    }
+struct Node where T {
+    value: T,
+    next: *Node<T>,
 }
 
-
-
-
-
-
-
-
-
-
-
+fn main() {
+    let node1 = Node { value: 1, next: null };
+    let node2 = Node { value: 2, next: node1.ref };
+}

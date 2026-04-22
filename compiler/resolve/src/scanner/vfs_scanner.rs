@@ -15,7 +15,6 @@ use crate::binding::{BindingKind, Visibility};
 use crate::error::{ResolveError, ResolveResult};
 use crate::ids::{DefId, DefIdGen, ScopeId, ScopeIdGen};
 use crate::import::ImportDirective;
-use crate::namespace::Namespace;
 use crate::scope::{Scope, ScopeKind, ScopeTree};
 
 use super::ast_scanner::AstScanner;
@@ -64,10 +63,7 @@ impl<'a> VfsScanner<'a> {
     /// Scan the package rooted in the VFS.
     ///
     /// Returns the collected import directives; the scope tree is mutated in place.
-    pub fn scan_package(
-        &mut self,
-        root_scope: ScopeId,
-    ) -> ResolveResult<()> {
+    pub fn scan_package(&mut self, root_scope: ScopeId) -> ResolveResult<()> {
         let package_name = self.vfs.name.clone();
         let package_def = self.def_gen.next();
         let package_scope_id = self.scope_gen.next();
@@ -90,11 +86,10 @@ impl<'a> VfsScanner<'a> {
                 def_id: package_def,
                 defined_in: root_scope,
                 ast_ref: None,
-                ns: Namespace::Type,
                 vis: Visibility::Public,
             };
             if let Some(root) = self.scope_tree.get_mut(root_scope) {
-                let _ = root.items.define(package_name.clone(), Namespace::Type, binding);
+                let _ = root.items.define(package_name.clone(), binding);
             }
         }
 
@@ -122,7 +117,8 @@ impl<'a> VfsScanner<'a> {
         let source_file = entry.source_file.clone();
 
         // Determine module name from file path
-        let file_name = rel_path.file_name()
+        let file_name = rel_path
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("unknown");
 
@@ -162,11 +158,10 @@ impl<'a> VfsScanner<'a> {
                 def_id: mod_def,
                 defined_in: parent_scope,
                 ast_ref: None,
-                ns: Namespace::Type,
                 vis: Visibility::Public,
             };
             if let Some(ps) = self.scope_tree.get_mut(parent_scope) {
-                let _ = ps.items.define(mod_name.clone(), Namespace::Type, binding);
+                let _ = ps.items.define(mod_name.clone(), binding);
             }
             self.def_names.push((mod_def, mod_name.clone()));
 
@@ -176,7 +171,9 @@ impl<'a> VfsScanner<'a> {
         };
 
         // Scan the AST
-        let ast = self.vfs.get_ast(file_id)
+        let ast = self
+            .vfs
+            .get_ast(file_id)
             .ok_or_else(|| ResolveError::InternalError("AST not found after parsing".into()))?;
 
         // We need a temporary borrow workaround: collect data, then create scanner

@@ -15,9 +15,7 @@ pub enum ImportKind {
         name: String,
     },
     /// `use a.b.*`  – glob import of all public names.
-    Glob {
-        source_scope: Option<ScopeId>,
-    },
+    Glob { source_scope: Option<ScopeId> },
     /// `use a.b.{x, y, z}` – import a selected set of names.
     Multi {
         source_scope: Option<ScopeId>,
@@ -85,7 +83,7 @@ impl ImportDirective {
 #[derive(Debug, Clone)]
 pub enum ResolvedImport {
     /// Import all public names from a scope.
-    All(ScopeId),
+    Glob(ScopeId),
     /// Import selected names from a scope.
     Multi(ScopeId, Vec<String>),
     /// Import a single name from a scope.

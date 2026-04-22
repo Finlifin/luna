@@ -8,7 +8,6 @@ use std::collections::HashMap;
 
 use crate::binding::Binding;
 use crate::import::ResolvedImport;
-use crate::namespace::{Namespace, PerNs};
 
 // ── ItemScope ────────────────────────────────────────────────────────────────
 
@@ -19,7 +18,7 @@ use crate::namespace::{Namespace, PerNs};
 #[derive(Debug, Clone)]
 pub struct ItemScope {
     /// Locally defined names (direct definitions in this scope).
-    declarations: HashMap<String, PerNs>,
+    declarations: HashMap<String, Binding>,
     /// Resolved imports that bring names into this scope.
     imports: Vec<ResolvedImport>,
     /// Clauses (type parameters, bounds) associated with this scope's owner.
@@ -45,40 +44,34 @@ impl ItemScope {
     // ── Declarations ─────────────────────────────────────────────────────
 
     /// Define a name in this scope. Returns `Err` with the old binding if the
-    /// name already exists in the same namespace.
-    pub fn define(
-        &mut self,
-        name: String,
-        ns: Namespace,
-        binding: Binding,
-    ) -> Result<(), Binding> {
-        let per_ns = self.declarations.entry(name).or_default();
-        if per_ns.get(ns).is_some() {
-            return Err(binding);
+    /// name already exists.
+    pub fn define(&mut self, name: String, binding: Binding) -> Result<(), Binding> {
+        if self.declarations.contains_key(&name) {
+            return Err(self.declarations[&name].clone());
         }
-        per_ns.set(ns, binding);
+        self.declarations.insert(name, binding);
         Ok(())
     }
 
     /// Define a name, allowing shadowing (overwrites previous binding).
-    pub fn define_or_shadow(&mut self, name: String, ns: Namespace, binding: Binding) {
-        self.declarations.entry(name).or_default().set(ns, binding);
+    pub fn define_or_overwrites(&mut self, name: String, binding: Binding) {
+        self.declarations.insert(name, binding);
     }
 
     /// Look up a name among **direct** declarations only (no imports).
-    pub fn get_direct(&self, name: &str, ns: Namespace) -> Option<&Binding> {
-        self.declarations.get(name).and_then(|per_ns| per_ns.get(ns))
+    pub fn get_direct(&self, name: &str) -> Option<&Binding> {
+        self.declarations.get(name)
     }
 
     /// Look up a name including both direct declarations and clauses.
-    pub fn get_local(&self, name: &str, ns: Namespace) -> Option<&Binding> {
+    pub fn get_local(&self, name: &str) -> Option<&Binding> {
         // Direct declarations first
-        if let Some(b) = self.get_direct(name, ns) {
+        if let Some(b) = self.get_direct(name) {
             return Some(b);
         }
         // Then clauses
         self.clauses.iter().rev().find_map(|cb| {
-            if cb.name == name && cb.binding.ns == ns {
+            if cb.name == name {
                 Some(&cb.binding)
             } else {
                 None
@@ -87,7 +80,7 @@ impl ItemScope {
     }
 
     /// All direct declarations.
-    pub fn declarations(&self) -> &HashMap<String, PerNs> {
+    pub fn declarations(&self) -> &HashMap<String, Binding> {
         &self.declarations
     }
 

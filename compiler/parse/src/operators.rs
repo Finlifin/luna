@@ -64,7 +64,7 @@ pub fn get_expr_op_info(token_kind: TokenKind) -> ExprOpInfo {
         TokenKind::Matches => ExprOpInfo::new(100, NodeKind::BoolMatches), // matches
 
         // projection and take_view (110)
-        TokenKind::Dot => ExprOpInfo::new(110, NodeKind::Select), // .
+        TokenKind::Dot => ExprOpInfo::new(110, NodeKind::Projection), // .
         TokenKind::Quote => ExprOpInfo::new(110, NodeKind::TakeView), // '
 
         // 标识符 (120级)
@@ -93,7 +93,7 @@ pub fn get_pattern_op_info(token_kind: TokenKind) -> ExprOpInfo {
         TokenKind::Lt => ExprOpInfo::new(80, NodeKind::NormalFormApplicationPattern), // <
 
         // projection
-        TokenKind::Dot => ExprOpInfo::new(90, NodeKind::Select), // .
+        TokenKind::Dot => ExprOpInfo::new(90, NodeKind::Projection), // .
 
         _ => ExprOpInfo::new(-1, NodeKind::Invalid),
     }

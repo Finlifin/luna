@@ -58,7 +58,9 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
             match kind {
                 // bare type parameter: `T`
                 NodeKind::TypeDeclClause => {
-                    let name = self.node_to_ident(clause_idx);
+                    let children = self.ast.get_children(clause_idx);
+                    let name_node = children.first().copied().unwrap_or(clause_idx);
+                    let name = self.node_to_ident(name_node);
                     let hir_id = self.next_hir_id();
                     result.params.push(ClauseParam {
                         hir_id,
@@ -192,7 +194,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                 }]
             }
 
-            NodeKind::Select => {
+            NodeKind::Projection => {
                 let path = self.lower_path_from_select(node);
                 vec![TraitBound {
                     kind: TraitBoundKind::Trait(path),

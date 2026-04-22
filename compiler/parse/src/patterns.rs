@@ -338,7 +338,7 @@ impl Parser<'_> {
                                 p.current_span(),
                             ));
                         }
-                        Ok(NodeBuilder::new(NodeKind::Select, p.current_span())
+                        Ok(NodeBuilder::new(NodeKind::Projection, p.current_span())
                             .add_single_child(left)
                             .add_single_child(id)
                             .build(&mut p.ast))

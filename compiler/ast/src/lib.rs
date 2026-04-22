@@ -253,7 +253,7 @@ pub enum NodeKind {
     FieldMethodBound, // TODO
     DeclarationBound, // TODO
 
-    Select,      // a, b (expr . id)
+    Projection,  // a, b (expr . id)
     TakeView,    // a, b (expr ' id)
     Pipe,        // a, b
     PipePrepend, // a, b
@@ -524,7 +524,7 @@ pub enum NodeKind {
     Attribute, // a, b
     // keyword modifier -> AttributeSetTrue("flurry_kw_...", definition)
     AttributeSetTrue, // a, b
-    // property -> .id expr
+    // property -> id: expr
     Property, // a, b
     // optional_arg -> .id = expr
     OptionalArg, // a, b
@@ -704,7 +704,7 @@ impl NodeKind {
             | TypedWith
             | Subtype
             | TraitBound
-            | Select
+            | Projection
             | TypeBoundDeclClause
             | TakeView
             | Pipe

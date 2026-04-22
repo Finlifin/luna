@@ -5,6 +5,10 @@ edition = "2024"
 
 [dependencies]
 ast_lowering = { path = "../ast_lowering" }
+codegen = { path = "../codegen" }
 interface = { path = "../interface" }
 lex = { path = "../lex" }
+mir_build = { path = "../mir_build" }
 parse = { path = "../parse" }
+resolve = { path = "../resolve" }
+typeck = { path = "../typeck" }

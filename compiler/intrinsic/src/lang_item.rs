@@ -18,25 +18,41 @@ use std::fmt;
 
 use rustc_data_structures::fx::FxHashMap;
 
-// ── LangItem enum ────────────────────────────────────────────────────────────
-
 /// Well-known items the compiler must be able to locate by concept rather
 /// than by name alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LangItem {
-    // ── Primitive types ──────────────────────────────────────────────────
-    Int,
-    Float,
+    AnyType,
+    U8,
+    U16,
+    U32,
+    U64,
+    U128,
+    Usize,
+    I8,
+    I16,
+    I32,
+    I64,
+    I128,
+    Isize,
+    Integer,
+    F16,
+    F32,
+    F64,
+    Real,
     Bool,
     Char,
     Str,
-    Unit,
-    Never,
+    Void,
+    NoReturn,
+    Type,
 
-    // ── Built-in traits / protocols ──────────────────────────────────────
+    Undefined,
+    AnyValue,
+
     Copy,
     Clone,
-    Drop,
+    Finalze,
     Debug,
     Display,
     Eq,
@@ -45,96 +61,51 @@ pub enum LangItem {
     Iterator,
     Into,
     From,
-
-    // ── Effect / control-flow ────────────────────────────────────────────
-    /// The `Optional` (a.k.a. `?`) type.
-    Optional,
-    /// The `Result` type (if the language has one).
-    Result,
-    /// The `Future` / async trait.
-    Future,
 }
 
 impl LangItem {
     /// The canonical string key for this lang item (used in annotations).
     pub fn name(self) -> &'static str {
         match self {
-            LangItem::Int => "int",
-            LangItem::Float => "float",
+            LangItem::AnyType => "Any",
+            LangItem::U8 => "u8",
+            LangItem::U16 => "u16",
+            LangItem::U32 => "u32",
+            LangItem::U64 => "u64",
+            LangItem::U128 => "u128",
+            LangItem::Usize => "usize",
+            LangItem::I8 => "i8",
+            LangItem::I16 => "i16",
+            LangItem::I32 => "i32",
+            LangItem::I64 => "i64",
+            LangItem::I128 => "i128",
+            LangItem::Isize => "isize",
+            LangItem::Integer => "Integer",
+            LangItem::F16 => "f16",
+            LangItem::F32 => "f32",
+            LangItem::F64 => "f64",
+            LangItem::Real => "Real",
             LangItem::Bool => "bool",
             LangItem::Char => "char",
             LangItem::Str => "str",
-            LangItem::Unit => "unit",
-            LangItem::Never => "never",
-            LangItem::Copy => "copy",
-            LangItem::Clone => "clone",
-            LangItem::Drop => "drop",
-            LangItem::Debug => "debug",
-            LangItem::Display => "display",
-            LangItem::Eq => "eq",
-            LangItem::Ord => "ord",
-            LangItem::Hash => "hash",
-            LangItem::Iterator => "iterator",
-            LangItem::Into => "into",
-            LangItem::From => "from",
-            LangItem::Optional => "optional",
-            LangItem::Result => "result",
-            LangItem::Future => "future",
+            LangItem::Void => "void",
+            LangItem::NoReturn => "NoReturn",
+            LangItem::Type => "type",
+            LangItem::Undefined => "undefined",
+            LangItem::AnyValue => "any",
+            LangItem::Copy => "Copy",
+            LangItem::Clone => "Clone",
+            LangItem::Finalze => "Finalize",
+            LangItem::Debug => "Debug",
+            LangItem::Display => "Display",
+            LangItem::Eq => "Eq",
+            LangItem::Ord => "Ord",
+            LangItem::Hash => "Hash",
+            LangItem::Iterator => "Iterator",
+            LangItem::Into => "Into",
+            LangItem::From => "From",
         }
     }
-
-    /// Try to parse a lang-item key string back to the enum variant.
-    pub fn from_name(s: &str) -> Option<Self> {
-        Some(match s {
-            "int" => LangItem::Int,
-            "float" => LangItem::Float,
-            "bool" => LangItem::Bool,
-            "char" => LangItem::Char,
-            "str" => LangItem::Str,
-            "unit" => LangItem::Unit,
-            "never" => LangItem::Never,
-            "copy" => LangItem::Copy,
-            "clone" => LangItem::Clone,
-            "drop" => LangItem::Drop,
-            "debug" => LangItem::Debug,
-            "display" => LangItem::Display,
-            "eq" => LangItem::Eq,
-            "ord" => LangItem::Ord,
-            "hash" => LangItem::Hash,
-            "iterator" => LangItem::Iterator,
-            "into" => LangItem::Into,
-            "from" => LangItem::From,
-            "optional" => LangItem::Optional,
-            "result" => LangItem::Result,
-            "future" => LangItem::Future,
-            _ => return None,
-        })
-    }
-
-    /// All known lang items, for iteration.
-    pub const ALL: &'static [LangItem] = &[
-        LangItem::Int,
-        LangItem::Float,
-        LangItem::Bool,
-        LangItem::Char,
-        LangItem::Str,
-        LangItem::Unit,
-        LangItem::Never,
-        LangItem::Copy,
-        LangItem::Clone,
-        LangItem::Drop,
-        LangItem::Debug,
-        LangItem::Display,
-        LangItem::Eq,
-        LangItem::Ord,
-        LangItem::Hash,
-        LangItem::Iterator,
-        LangItem::Into,
-        LangItem::From,
-        LangItem::Optional,
-        LangItem::Result,
-        LangItem::Future,
-    ];
 }
 
 impl fmt::Display for LangItem {
@@ -142,8 +113,6 @@ impl fmt::Display for LangItem {
         f.write_str(self.name())
     }
 }
-
-// ── LangItems table ──────────────────────────────────────────────────────────
 
 /// A bidirectional mapping between [`LangItem`] concepts and their
 /// concrete definition IDs.
@@ -160,7 +129,7 @@ pub struct LangItems {
 pub enum LangItemDef {
     /// A compiler-synthesised built-in (no user-visible source location).
     Builtin,
-    /// A user-provided definition (tagged via `#[lang = "..."]`).
+    /// A user-provided definition
     UserDef(hir::hir_id::LocalDefId),
 }
 

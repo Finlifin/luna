@@ -211,23 +211,78 @@ impl fmt::Display for TyKind<'_> {
 // ── Primitive types ──────────────────────────────────────────────────────────
 
 /// Built-in primitive types.
+///
+/// Phase 1 focuses on concrete runtime types. Comptime types like
+/// `Integer`, `Object`, `Float` are resolved to their default runtime
+/// representations (e.g. `Integer` → `I64`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PrimTy {
-    Int,
-    Float,
+    // ── Signed integers ──────────────────────────────────────────────
+    I8,
+    I16,
+    I32,
+    I64,
+    Isize,
+    // ── Unsigned integers ────────────────────────────────────────────
+    U8,
+    U16,
+    U32,
+    U64,
+    Usize,
+    // ── Floating point ───────────────────────────────────────────────
+    F32,
+    F64,
+    // ── Other scalars ────────────────────────────────────────────────
     Bool,
     Char,
     Str,
 }
 
+impl PrimTy {
+    /// Returns `true` if this is a signed integer type.
+    pub fn is_signed_int(self) -> bool {
+        matches!(self, PrimTy::I8 | PrimTy::I16 | PrimTy::I32 | PrimTy::I64 | PrimTy::Isize)
+    }
+
+    /// Returns `true` if this is an unsigned integer type.
+    pub fn is_unsigned_int(self) -> bool {
+        matches!(self, PrimTy::U8 | PrimTy::U16 | PrimTy::U32 | PrimTy::U64 | PrimTy::Usize)
+    }
+
+    /// Returns `true` if this is any integer type.
+    pub fn is_int(self) -> bool {
+        self.is_signed_int() || self.is_unsigned_int()
+    }
+
+    /// Returns `true` if this is a floating point type.
+    pub fn is_float(self) -> bool {
+        matches!(self, PrimTy::F32 | PrimTy::F64)
+    }
+
+    /// Returns `true` if this is a numeric type.
+    pub fn is_numeric(self) -> bool {
+        self.is_int() || self.is_float()
+    }
+}
+
 impl fmt::Display for PrimTy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            PrimTy::Int => "Int",
-            PrimTy::Float => "Float",
-            PrimTy::Bool => "Bool",
-            PrimTy::Char => "Char",
-            PrimTy::Str => "String",
+            PrimTy::I8 => "i8",
+            PrimTy::I16 => "i16",
+            PrimTy::I32 => "i32",
+            PrimTy::I64 => "i64",
+            PrimTy::Isize => "isize",
+            PrimTy::U8 => "u8",
+            PrimTy::U16 => "u16",
+            PrimTy::U32 => "u32",
+            PrimTy::U64 => "u64",
+            PrimTy::Usize => "usize",
+            PrimTy::F32 => "f32",
+            PrimTy::F64 => "f64",
+            PrimTy::Bool => "bool",
+            PrimTy::Char => "char",
+            PrimTy::Str => "str",
         })
     }
 }
@@ -260,3 +315,46 @@ pub struct ParamTy {
 /// the current inference context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InferTy(pub u32);
+
+// ── ADT definition ──────────────────────────────────────────────────────────
+
+/// Describes a user-defined algebraic data type (struct / enum).
+///
+/// Stored in [`TyCtxt`] keyed by [`AdtId`]. Contains the information
+/// needed for type checking field access and struct literal construction.
+#[derive(Debug, Clone)]
+pub struct AdtDef {
+    /// The name of the type (for diagnostics / codegen).
+    pub name: String,
+    /// The kind of ADT (struct vs enum).
+    pub kind: AdtKind,
+    /// The fields, in declaration order.
+    pub fields: Vec<FieldDef>,
+    /// Type parameter names, in declaration order (e.g. `["T", "U"]`).
+    pub type_params: Vec<String>,
+}
+
+/// Whether an ADT is a struct or an enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdtKind {
+    Struct,
+    Enum,
+}
+
+/// A field within a struct / enum variant.
+#[derive(Debug, Clone)]
+pub struct FieldDef {
+    /// The field name.
+    pub name: String,
+    /// The index of this field in declaration order.
+    pub index: u32,
+    /// The type of this field (stored as `'static`; use with `TyCtxt`).
+    pub ty: Ty<'static>,
+}
+
+impl AdtDef {
+    /// Look up a field by name. Returns its index if found.
+    pub fn field_index(&self, name: &str) -> Option<u32> {
+        self.fields.iter().find(|f| f.name == name).map(|f| f.index)
+    }
+}

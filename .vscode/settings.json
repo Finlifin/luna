@@ -3,6 +3,15 @@
         "**/target": true
     },
     "chat.tools.terminal.autoApprove": {
-        "cargo check": true
+        "cargo check": true,
+        "cargo build": true,
+        "./output": true,
+        "llvm-config": true,
+        "llvm-config-18": true,
+        "llvm-config-17": true,
+        "and": true,
+        "or": true,
+        "cargo search": true,
+        "cargo add": true
     }
 }

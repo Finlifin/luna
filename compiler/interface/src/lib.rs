@@ -50,11 +50,39 @@ use std::ops::Deref;
 
 use diagnostic::DiagnosticContext;
 use hir::HirArena;
+use hir::hir_id::LocalDefId;
 use intrinsic::IntrinsicContext;
 use intrinsic::sysroot::PackageId;
-use query::QueryEngine;
-use ty::TyCtxt;
+use query::{QueryCache, QueryEngine};
+use ty::{AdtDef, AdtId, TyCtxt};
 use vfs::Vfs;
+
+// ── Queries ──────────────────────────────────────────────────────────────────
+
+/// Per-query-kind caches — one field per registered query.
+pub struct Queries {
+    /// `adt_def(AdtId) -> AdtDef` — look up an ADT definition.
+    pub adt_def: QueryCache<AdtId, Option<AdtDef>>,
+    /// `def_ty(LocalDefId) -> Option<Ty<'static>>` — look up a definition's
+    /// semantic type. Wrapped in a serialisable form because `Ty` is a
+    /// thin pointer. For now this is unused (types live in TyCtxt tables).
+    pub def_ty: QueryCache<LocalDefId, ()>,
+}
+
+impl Queries {
+    pub fn new() -> Self {
+        Queries {
+            adt_def: QueryCache::new(),
+            def_ty: QueryCache::new(),
+        }
+    }
+}
+
+impl Default for Queries {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 // ── CompilerInstance ─────────────────────────────────────────────────────────
 
@@ -79,6 +107,8 @@ pub struct CompilerInstance<'sess> {
     pub sysroot_vfs: Vec<Vfs>,
     /// The demand-driven query engine (memoization + cycle detection).
     pub query_engine: QueryEngine,
+    /// Per-query-kind caches.
+    pub queries: Queries,
     /// The HIR arena – backing memory for all `&'hir` HIR nodes.
     pub hir_arena: HirArena,
     /// The type context – interning arena and type tables for semantic types.
@@ -105,6 +135,7 @@ impl<'sess> CompilerInstance<'sess> {
             vfs: Vfs::new(&sess.config.name, sess.config.root.clone()),
             sysroot_vfs,
             query_engine: QueryEngine::new(),
+            queries: Queries::new(),
             hir_arena: HirArena::new(),
             ty_ctxt,
             intrinsic_ctx,
@@ -199,6 +230,19 @@ impl<'sess> CompilerInstance<'sess> {
 #[derive(Clone, Copy)]
 pub struct Compiler<'c> {
     instance: &'c CompilerInstance<'c>,
+}
+
+impl<'c> Compiler<'c> {
+    /// Query: look up an ADT definition by id (memoised).
+    pub fn adt_def(self, adt_id: AdtId) -> Option<AdtDef> {
+        self.query_engine.execute(
+            &self.queries.adt_def,
+            "adt_def",
+            &adt_id,
+            |k| format!("{:?}", k),
+            |k| self.ty_ctxt.adt_def(*k),
+        )
+    }
 }
 
 impl<'c> Deref for Compiler<'c> {

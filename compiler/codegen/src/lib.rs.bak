@@ -1,0 +1,491 @@
+//! C code generation from MIR.
+//!
+//! The simplest possible codegen backend: translates MIR to C99 code,
+//! which can then be compiled with any C compiler (gcc, clang, etc.).
+
+use std::fmt::Write;
+
+use hir::common::BinOp;
+use mir::*;
+use ty::{AdtId, PrimTy, TyCtxt, TyKind};
+
+/// Generate C source code from a collection of MIR bodies.
+pub fn codegen_c(bodies: &[mir::Body<'_>], tcx: &TyCtxt) -> String {
+    let mut out = String::new();
+
+    // ── Preamble ─────────────────────────────────────────────────────────
+    out.push_str("#include <stdint.h>\n");
+    out.push_str("#include <stdbool.h>\n");
+    out.push_str("#include <stdio.h>\n");
+    out.push_str("#include <stdlib.h>\n");
+    out.push_str("\n");
+    out.push_str("typedef int64_t Int;\n");
+    out.push_str("typedef double Float;\n");
+    out.push_str("typedef bool Bool;\n");
+    out.push_str("typedef char Char;\n");
+    out.push_str("typedef const char* String;\n");
+    out.push_str("\n");
+
+    // ── Struct definitions ───────────────────────────────────────────────
+    // Emit C struct typedefs for every ADT type used in the MIR.
+    write_struct_defs(&mut out, bodies, tcx);
+
+    // ── Forward declarations ─────────────────────────────────────────────
+    for body in bodies {
+        write_fn_decl(&mut out, body);
+        out.push_str(";\n");
+    }
+    out.push('\n');
+
+    // ── Function definitions ─────────────────────────────────────────────
+    for body in bodies {
+        write_fn_def(&mut out, body, tcx);
+        out.push('\n');
+    }
+
+    // ── Main wrapper ─────────────────────────────────────────────────────
+    // If there's a function called "main", generate a C main that calls it.
+    // Otherwise, generate a test main that exercises all functions.
+    let has_main = bodies.iter().any(|b| fn_name(b) == "main");
+    if !has_main {
+        out.push_str("int main(void) {\n");
+
+        for body in bodies {
+            let name = fn_name(body);
+            let ret_c = ty_to_c(&body.local_decls[0].ty);
+
+            if ret_c == "void" {
+                continue;
+            }
+
+            match body.arg_count {
+                0 => {
+                    write!(out, "    printf(\"{}() = %lld\\n\", (long long){}());\n", name, name).unwrap();
+                }
+                1 => {
+                    write!(out, "    printf(\"{}(10) = %lld\\n\", (long long){}(10));\n", name, name).unwrap();
+                }
+                2 => {
+                    write!(out, "    printf(\"{}(3, 4) = %lld\\n\", (long long){}(3, 4));\n", name, name).unwrap();
+                }
+                3 => {
+                    write!(out, "    printf(\"{}(1, 2, 3) = %lld\\n\", (long long){}(1, 2, 3));\n", name, name).unwrap();
+                }
+                4 => {
+                    write!(out, "    printf(\"{}(1, 5, 4, 2) = %lld\\n\", (long long){}(1, 5, 4, 2));\n", name, name).unwrap();
+                }
+                _ => {}
+            }
+        }
+
+        out.push_str("    return 0;\n");
+        out.push_str("}\n");
+    }
+
+    out
+}
+
+fn fn_name<'a>(body: &'a mir::Body<'a>) -> &'a str {
+    body.local_decls[0]
+        .name
+        .as_deref()
+        .unwrap_or("unknown")
+}
+
+fn ty_to_c(ty: &ty::Ty<'_>) -> String {
+    match ty.kind() {
+        TyKind::Primitive(prim) => match prim {
+            PrimTy::Int => "Int".to_string(),
+            PrimTy::Float => "Float".to_string(),
+            PrimTy::Bool => "Bool".to_string(),
+            PrimTy::Char => "Char".to_string(),
+            PrimTy::Str => "String".to_string(),
+        },
+        TyKind::Unit => "void".to_string(),
+        TyKind::Never => "void".to_string(),
+        TyKind::Ref(inner, _) | TyKind::Ptr(inner, _) => {
+            format!("{}*", ty_to_c(inner))
+        }
+        TyKind::Adt(adt_id, _) => {
+            // Use the ADT id as the C struct name — we'll resolve name later.
+            format!("Adt_{}", adt_id.0.index())
+        }
+        _ => "Int".to_string(), // fallback
+    }
+}
+
+/// Emit C struct type definitions.
+fn write_struct_defs(out: &mut String, bodies: &[mir::Body<'_>], tcx: &TyCtxt) {
+    // Collect all ADT types used across all bodies.
+    let mut seen = std::collections::HashSet::new();
+    for body in bodies {
+        for decl in &body.local_decls {
+            collect_adt_ids(decl.ty, &mut seen);
+        }
+    }
+
+    for adt_id in &seen {
+        if let Some(def) = tcx.adt_def(*adt_id) {
+            let c_name = format!("Adt_{}", adt_id.0.index());
+            write!(out, "typedef struct {{\n").unwrap();
+            for field in &def.fields {
+                let c_ty = ty_to_c(&field.ty);
+                write!(out, "    {} {};\n", c_ty, field.name).unwrap();
+            }
+            write!(out, "}} {};\n\n", c_name).unwrap();
+        }
+    }
+}
+
+fn collect_adt_ids(ty: ty::Ty<'_>, seen: &mut std::collections::HashSet<AdtId>) {
+    match ty.kind() {
+        TyKind::Adt(adt_id, args) => {
+            seen.insert(*adt_id);
+            for arg in args.iter() {
+                collect_adt_ids(*arg, seen);
+            }
+        }
+        TyKind::Ref(inner, _) | TyKind::Ptr(inner, _) | TyKind::Optional(inner) => {
+            collect_adt_ids(*inner, seen);
+        }
+        TyKind::Tuple(elems) | TyKind::Fn(elems, _) => {
+            for elem in elems.iter() {
+                collect_adt_ids(*elem, seen);
+            }
+        }
+        TyKind::Array(elem, _) | TyKind::Slice(elem) => {
+            collect_adt_ids(*elem, seen);
+        }
+        _ => {}
+    }
+}
+
+fn write_fn_decl(out: &mut String, body: &mir::Body<'_>) {
+    let name = fn_name(body);
+    let ret = ty_to_c(&body.local_decls[0].ty);
+
+    write!(out, "{} {}(", ret, name).unwrap();
+    for i in 1..=body.arg_count {
+        if i > 1 {
+            out.push_str(", ");
+        }
+        let decl = &body.local_decls[i];
+        let fallback = format!("_p{}", i);
+        let param_name = decl.name.as_deref().unwrap_or(&fallback);
+        write!(out, "{} {}", ty_to_c(&decl.ty), param_name).unwrap();
+    }
+    out.push(')');
+}
+
+fn write_fn_def(out: &mut String, body: &mir::Body<'_>, tcx: &TyCtxt) {
+    write_fn_decl(out, body);
+    out.push_str(" {\n");
+
+    // Declare all locals (except return place and params)
+    // _0 is return place
+    let ret_ty = ty_to_c(&body.local_decls[0].ty);
+    if ret_ty != "void" {
+        write!(out, "    {} _0;\n", ret_ty).unwrap();
+    }
+
+    for i in (body.arg_count + 1)..body.local_decls.len() {
+        let decl = &body.local_decls[i];
+        let c_ty = ty_to_c(&decl.ty);
+        // Skip void locals (unit type) — they don't need storage in C
+        if c_ty == "void" {
+            continue;
+        }
+        write!(out, "    {} _{};\n", c_ty, i).unwrap();
+    }
+    out.push('\n');
+
+    // Emit basic blocks
+    for (bb_idx, bb_data) in body.basic_blocks.iter().enumerate() {
+        write!(out, "bb{}:\n", bb_idx).unwrap();
+
+        for stmt in &bb_data.statements {
+            out.push_str("    ");
+            write_statement(out, stmt, body, tcx);
+            out.push_str(";\n");
+        }
+
+        if let Some(ref term) = bb_data.terminator {
+            out.push_str("    ");
+            write_terminator(out, term, body, tcx);
+            out.push('\n');
+        }
+    }
+
+    out.push_str("}\n");
+}
+
+fn write_statement(out: &mut String, stmt: &Statement<'_>, body: &mir::Body<'_>, tcx: &TyCtxt) {
+    match &stmt.kind {
+        StatementKind::Assign(place, rvalue) => {
+            // Skip assignments of unit values (void in C)
+            if let Rvalue::Use(Operand::Constant(Constant { kind: ConstKind::Unit, .. })) = rvalue {
+                out.push_str("/* unit */");
+                return;
+            }
+            write_place(out, place, body, tcx);
+            out.push_str(" = ");
+            write_rvalue(out, rvalue, body, tcx);
+        }
+        StatementKind::Nop => {
+            out.push_str("/* nop */");
+        }
+    }
+}
+
+fn write_terminator(out: &mut String, term: &Terminator<'_>, body: &mir::Body<'_>, tcx: &TyCtxt) {
+    match &term.kind {
+        TerminatorKind::Goto { target } => {
+            write!(out, "goto bb{};\n", target.0).unwrap();
+        }
+        TerminatorKind::Return => {
+            let ret_ty = ty_to_c(&body.local_decls[0].ty);
+            if ret_ty == "void" {
+                out.push_str("return;\n");
+            } else {
+                out.push_str("return _0;\n");
+            }
+        }
+        TerminatorKind::Unreachable => {
+            out.push_str("__builtin_unreachable();\n");
+        }
+        TerminatorKind::SwitchInt { discr, targets } => {
+            // For booleans with only two branches, emit if/else
+            if targets.values.len() == 1 {
+                out.push_str("if (");
+                write_operand(out, discr, body, tcx);
+                let (val, target) = &targets.values[0];
+                if *val == 1 {
+                    write!(out, ") goto bb{}; else goto bb{};\n", target.0, targets.otherwise.0).unwrap();
+                } else {
+                    write!(out, " == {}) goto bb{}; else goto bb{};\n", val, target.0, targets.otherwise.0).unwrap();
+                }
+            } else {
+                out.push_str("switch (");
+                write_operand(out, discr, body, tcx);
+                out.push_str(") {\n");
+                for (val, target) in &targets.values {
+                    write!(out, "        case {}: goto bb{};\n", val, target.0).unwrap();
+                }
+                write!(out, "        default: goto bb{};\n", targets.otherwise.0).unwrap();
+                out.push_str("    }\n");
+            }
+        }
+        TerminatorKind::Call {
+            func,
+            args,
+            destination,
+            target,
+        } => {
+            write_place(out, destination, body, tcx);
+            out.push_str(" = ");
+            write_operand_as_call(out, func, body, tcx);
+            out.push('(');
+            for (i, arg) in args.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                write_operand(out, arg, body, tcx);
+            }
+            out.push_str(");\n");
+            if let Some(target) = target {
+                write!(out, "    goto bb{};\n", target.0).unwrap();
+            }
+        }
+    }
+}
+
+fn write_place(out: &mut String, place: &Place, body: &mir::Body<'_>, tcx: &TyCtxt) {
+    let local = place.local;
+    // Use parameter name if available
+    let idx = local.index();
+    if idx > 0 && idx <= body.arg_count {
+        if let Some(ref name) = body.local_decls[idx].name {
+            out.push_str(name);
+        } else {
+            write!(out, "_{}", idx).unwrap();
+        }
+    } else {
+        write!(out, "_{}", idx).unwrap();
+    }
+
+    // Track the type through projections to resolve field names.
+    let mut cur_ty = body.local_decls.get(idx).map(|d| &d.ty);
+
+    for proj in &place.projection {
+        match proj {
+            PlaceElem::Field(field_idx) => {
+                // Try to resolve field name from the ADT definition.
+                let field_name = cur_ty
+                    .and_then(|ty| match ty.kind() {
+                        TyKind::Adt(adt_id, _) => tcx.adt_def(*adt_id),
+                        _ => None,
+                    })
+                    .and_then(|def| def.fields.get(*field_idx as usize).map(|f| f.name.clone()));
+
+                if let Some(name) = &field_name {
+                    write!(out, ".{}", name).unwrap();
+                } else {
+                    write!(out, ".f{}", field_idx).unwrap();
+                }
+
+                // Update cur_ty to the field's type for nested projections.
+                cur_ty = None; // TODO: track field type for nested access
+            }
+            PlaceElem::Deref => {
+                out.push('*');
+                cur_ty = None;
+            }
+            PlaceElem::Index(local) => {
+                write!(out, "[_{}]", local.0).unwrap();
+                cur_ty = None;
+            }
+        }
+    }
+}
+
+fn write_operand(out: &mut String, op: &Operand<'_>, body: &mir::Body<'_>, tcx: &TyCtxt) {
+    match op {
+        Operand::Copy(place) | Operand::Move(place) => {
+            write_place(out, place, body, tcx);
+        }
+        Operand::Constant(c) => {
+            write_constant(out, c);
+        }
+    }
+}
+
+/// Write an operand that's used as a function call target (use fn name).
+fn write_operand_as_call(out: &mut String, op: &Operand<'_>, body: &mir::Body<'_>, tcx: &TyCtxt) {
+    match op {
+        Operand::Constant(Constant { kind: ConstKind::FnName(name), .. }) => {
+            out.push_str(name);
+        }
+        Operand::Constant(Constant { kind: ConstKind::FnDef(_def_id), .. }) => {
+            write_operand(out, op, body, tcx);
+        }
+        Operand::Copy(place) | Operand::Move(place) => {
+            let idx = place.local.index();
+            if let Some(ref name) = body.local_decls.get(idx).and_then(|d| d.name.as_ref()) {
+                out.push_str(name);
+            } else {
+                write_place(out, place, body, tcx);
+            }
+        }
+        _ => {
+            write_operand(out, op, body, tcx);
+        }
+    }
+}
+
+fn write_rvalue(out: &mut String, rv: &Rvalue<'_>, body: &mir::Body<'_>, tcx: &TyCtxt) {
+    match rv {
+        Rvalue::Use(op) => write_operand(out, op, body, tcx),
+        Rvalue::BinaryOp(op, lhs, rhs) => {
+            let c_op = match op {
+                BinOp::Add => "+",
+                BinOp::Sub => "-",
+                BinOp::Mul => "*",
+                BinOp::Div => "/",
+                BinOp::Rem => "%",
+                BinOp::Eq => "==",
+                BinOp::Ne => "!=",
+                BinOp::Lt => "<",
+                BinOp::Gt => ">",
+                BinOp::Le => "<=",
+                BinOp::Ge => ">=",
+                BinOp::And => "&&",
+                BinOp::Or => "||",
+                BinOp::BitAnd => "&",
+                BinOp::BitOr => "|",
+                BinOp::BitXor => "^",
+                BinOp::Shl => "<<",
+                BinOp::Shr => ">>",
+            };
+            out.push('(');
+            write_operand(out, lhs, body, tcx);
+            write!(out, " {} ", c_op).unwrap();
+            write_operand(out, rhs, body, tcx);
+            out.push(')');
+        }
+        Rvalue::UnaryOp(op, operand) => {
+            let c_op = match op {
+                hir::common::UnOp::Neg => "-",
+                hir::common::UnOp::Not => "!",
+            };
+            out.push_str(c_op);
+            out.push('(');
+            write_operand(out, operand, body, tcx);
+            out.push(')');
+        }
+        Rvalue::Ref(place) => {
+            out.push('&');
+            write_place(out, place, body, tcx);
+        }
+        Rvalue::Aggregate(kind, ops) => {
+            match kind {
+                AggregateKind::Adt(def_id) => {
+                    let adt_id = AdtId(*def_id);
+                    let c_name = format!("Adt_{}", def_id.index());
+                    // Use C99 compound literal: (StructName){field1, field2, ...}
+                    write!(out, "({}){{", c_name).unwrap();
+                    if let Some(def) = tcx.adt_def(adt_id) {
+                        for (i, (op, field)) in ops.iter().zip(def.fields.iter()).enumerate() {
+                            if i > 0 {
+                                out.push_str(", ");
+                            }
+                            write!(out, ".{} = ", field.name).unwrap();
+                            write_operand(out, op, body, tcx);
+                        }
+                    } else {
+                        for (i, op) in ops.iter().enumerate() {
+                            if i > 0 {
+                                out.push_str(", ");
+                            }
+                            write_operand(out, op, body, tcx);
+                        }
+                    }
+                    out.push('}');
+                }
+                AggregateKind::Tuple => {
+                    out.push_str("/* tuple */ {");
+                    for (i, op) in ops.iter().enumerate() {
+                        if i > 0 {
+                            out.push_str(", ");
+                        }
+                        write_operand(out, op, body, tcx);
+                    }
+                    out.push('}');
+                }
+                AggregateKind::Array => {
+                    out.push('{');
+                    for (i, op) in ops.iter().enumerate() {
+                        if i > 0 {
+                            out.push_str(", ");
+                        }
+                        write_operand(out, op, body, tcx);
+                    }
+                    out.push('}');
+                }
+            }
+        }
+    }
+}
+
+fn write_constant(out: &mut String, c: &Constant<'_>) {
+    match &c.kind {
+        ConstKind::Int(v) => write!(out, "{}", v).unwrap(),
+        ConstKind::Float(v) => write!(out, "{}", v).unwrap(),
+        ConstKind::Bool(true) => out.push_str("true"),
+        ConstKind::Bool(false) => out.push_str("false"),
+        ConstKind::Char(c) => write!(out, "'{}'", c).unwrap(),
+        ConstKind::Str(s) => write!(out, "\"{}\"", s).unwrap(),
+        ConstKind::FnDef(_) => out.push_str("/* fn_def */"),
+        ConstKind::FnName(name) => out.push_str(name),
+        ConstKind::Unit => out.push_str("/* () */"),
+    }
+}
