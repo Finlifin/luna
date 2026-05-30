@@ -12,8 +12,6 @@ use std::collections::HashMap;
 use crate::binding::Binding;
 use crate::ids::ScopeId;
 
-// ── RibKind ──────────────────────────────────────────────────────────────────
-
 /// What syntactic construct pushed this rib.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RibKind {
@@ -34,8 +32,6 @@ pub enum RibKind {
     /// Type parameter scope (clause-level).
     TypeParam,
 }
-
-// ── Rib ──────────────────────────────────────────────────────────────────────
 
 /// A rib on the lexical resolution stack.
 ///
@@ -69,8 +65,6 @@ impl Rib {
         self.bindings.get(name)
     }
 }
-
-// ── RibStack ─────────────────────────────────────────────────────────────────
 
 /// A stack of ribs for lexical resolution inside ordered scopes
 /// (function bodies, blocks).

@@ -1,26 +1,26 @@
 //! Unified HIR node enum.
 
+use crate::ClauseParam;
 use crate::body::Param;
 use crate::clause::ClauseConstraint;
-use crate::expr::{Arm, Block, Expr, LetStmt, Stmt};
+use crate::decl::LetDecl;
+use crate::expr::{Block, Expr};
 use crate::item::{FieldDef, Item, Variant};
-use crate::pattern::Pattern;
-use crate::ty::ClauseParam;
+use crate::pattern::{Pattern, PatternArm};
 
 #[derive(Debug, Clone)]
 pub enum Node<'hir> {
     Item(&'hir Item<'hir>),
-    Expr(&'hir Expr<'hir>),
     Pattern(&'hir Pattern<'hir>),
-    Stmt(&'hir Stmt<'hir>),
+    Expr(&'hir Expr<'hir>),
     Block(&'hir Block<'hir>),
-    Arm(&'hir Arm<'hir>),
+    PatternArm(&'hir PatternArm<'hir>),
     FieldDef(&'hir FieldDef<'hir>),
     Variant(&'hir Variant<'hir>),
     ClauseConstraint(&'hir ClauseConstraint<'hir>),
     Param(&'hir Param<'hir>),
     ClauseParam(&'hir ClauseParam<'hir>),
-    LetStmt(&'hir LetStmt<'hir>),
+    LetDecl(&'hir LetDecl<'hir>),
 }
 
 impl Node<'_> {
@@ -29,15 +29,14 @@ impl Node<'_> {
             Node::Item(_) => "item",
             Node::Expr(_) => "expression",
             Node::Pattern(_) => "pattern",
-            Node::Stmt(_) => "statement",
             Node::Block(_) => "block",
-            Node::Arm(_) => "match arm",
+            Node::PatternArm(_) => "match arm",
             Node::FieldDef(_) => "field definition",
             Node::Variant(_) => "enum variant",
             Node::ClauseConstraint(_) => "clause constraint",
             Node::Param(_) => "parameter",
             Node::ClauseParam(_) => "clause parameter",
-            Node::LetStmt(_) => "let statement",
+            Node::LetDecl(_) => "let declaration",
         }
     }
 }

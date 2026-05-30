@@ -19,8 +19,6 @@ use std::fmt;
 
 use crate::idx::Idx;
 
-// ── LocalDefId ───────────────────────────────────────────────────────────────
-
 /// Index of a definition within a package's definition table.
 ///
 /// Every "owner" – function, struct, enum, module, impl, trait, closure, …
@@ -78,8 +76,6 @@ impl Idx for LocalDefId {
     }
 }
 
-// ── OwnerId ──────────────────────────────────────────────────────────────────
-
 /// Identifies a *definition owner* within a package.
 ///
 /// An "owner" is a definition that can contain other HIR nodes: functions,
@@ -126,8 +122,6 @@ impl fmt::Display for OwnerId {
         write!(f, "{}", self.def_id)
     }
 }
-
-// ── ItemLocalId ──────────────────────────────────────────────────────────────
 
 /// Index of an HIR node *within* its owner.
 ///
@@ -188,8 +182,6 @@ impl Idx for ItemLocalId {
     }
 }
 
-// ── HirId ────────────────────────────────────────────────────────────────────
-
 /// Uniquely identifies any HIR node within a package.
 ///
 /// Composed of:
@@ -243,8 +235,6 @@ impl fmt::Display for HirId {
         write!(f, "{}:{}", self.owner, self.local_id)
     }
 }
-
-// ── BodyId ───────────────────────────────────────────────────────────────────
 
 /// Identifies a [`Body`](super::body::Body) stored in the package's body table.
 ///

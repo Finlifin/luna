@@ -146,8 +146,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                 let children = self.ast.get_children(node);
                 if children.len() >= 2 {
                     let callee = children[0];
-                    let callee_expr = self.lower_expr(callee);
-                    let callee_ref = self.arena.alloc_expr(callee_expr);
+                    let callee_path = self.lower_expr_as_path(callee);
 
                     let args_node = children[1];
                     let arg_nodes = self.ast.get_multi_child_slice(args_node).unwrap_or(&[]);
@@ -157,7 +156,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
 
                     Pattern {
                         hir_id: self.next_hir_id(),
-                        kind: PatternKind::TupleStruct(callee_ref, sub_pats_slice),
+                        kind: PatternKind::AppTuple(callee_path, sub_pats_slice, hir::pattern::PathExaustiveness::NonExhaustive),
                         span,
                     }
                 } else {
@@ -228,7 +227,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     let hi_ref = self.arena.alloc_expr(hi);
                     Pattern {
                         hir_id: self.next_hir_id(),
-                        kind: PatternKind::Range(Some(lo_ref), Some(hi_ref)),
+                        kind: PatternKind::Range(Some(lo_ref), Some(hi_ref), hir::pattern::BoundType::Exclusive),
                         span,
                     }
                 } else {
@@ -243,7 +242,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     let lo_ref = self.arena.alloc_expr(lo);
                     Pattern {
                         hir_id: self.next_hir_id(),
-                        kind: PatternKind::Range(Some(lo_ref), None),
+                        kind: PatternKind::Range(Some(lo_ref), None, hir::pattern::BoundType::Exclusive),
                         span,
                     }
                 } else {
@@ -258,7 +257,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     let hi_ref = self.arena.alloc_expr(hi);
                     Pattern {
                         hir_id: self.next_hir_id(),
-                        kind: PatternKind::Range(None, Some(hi_ref)),
+                        kind: PatternKind::Range(None, Some(hi_ref), hir::pattern::BoundType::Exclusive),
                         span,
                     }
                 } else {
@@ -349,7 +348,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
     pub(crate) fn make_error_pattern(&mut self, span: Span) -> Pattern<'hir> {
         Pattern {
             hir_id: self.next_hir_id(),
-            kind: PatternKind::Err,
+            kind: PatternKind::Invalid,
             span,
         }
     }

@@ -6,8 +6,6 @@ use std::ops::Deref;
 use internment::Intern;
 use rustc_span::Span;
 
-// ── Symbol / Ident ───────────────────────────────────────────────────────────
-
 /// An interned string backed by [`internment::Intern`].
 ///
 /// * **`Copy`** – zero-cost to duplicate.
@@ -159,8 +157,6 @@ impl fmt::Display for Ident {
     }
 }
 
-// ── Path ─────────────────────────────────────────────────────────────────────
-
 /// A qualified path: `A.B.C<T>`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Path<'hir> {
@@ -195,8 +191,6 @@ pub enum GenericArg<'hir> {
     Optional(Ident, &'hir super::expr::Expr<'hir>),
 }
 
-// ── Lit ──────────────────────────────────────────────────────────────────────
-
 /// A literal value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Lit {
@@ -215,8 +209,6 @@ pub enum LitKind {
     Symbol(Symbol),
 }
 
-// ── Operators ────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BinOp {
     Add,
@@ -232,11 +224,6 @@ pub enum BinOp {
     Ge,
     And,
     Or,
-    BitAnd,
-    BitOr,
-    BitXor,
-    Shl,
-    Shr,
 }
 
 impl fmt::Display for BinOp {
@@ -253,13 +240,8 @@ impl fmt::Display for BinOp {
             BinOp::Gt => ">",
             BinOp::Le => "<=",
             BinOp::Ge => ">=",
-            BinOp::And => "&&",
-            BinOp::Or => "||",
-            BinOp::BitAnd => "&",
-            BinOp::BitOr => "|",
-            BinOp::BitXor => "^",
-            BinOp::Shl => "<<",
-            BinOp::Shr => ">>",
+            BinOp::And => "and",
+            BinOp::Or => "or",
         })
     }
 }
@@ -274,17 +256,9 @@ impl fmt::Display for UnOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             UnOp::Neg => "-",
-            UnOp::Not => "!",
+            UnOp::Not => "not",
         })
     }
-}
-
-// ── Mutability & Binding ─────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Mutability {
-    Mutable,
-    Immutable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

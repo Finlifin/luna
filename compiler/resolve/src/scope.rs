@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-use crate::ids::{DefId, ModuleId, ScopeId};
+use crate::ids::{DefId, ScopeId};
 use crate::item_scope::ItemScope;
 
 /// What syntactic construct created this scope.
@@ -42,8 +42,6 @@ pub struct Scope {
     pub name: Option<String>,
     /// The DefId of the item that opened this scope (e.g. the function, module, struct…).
     pub owner_def: DefId,
-    /// If this scope corresponds to a module, its ModuleId.
-    pub module_id: Option<ModuleId>,
     /// Whether this scope is *ordered* (i.e. names must be declared before use,
     /// like in a function body) or *unordered* (like in a module, where items
     /// can refer to each other regardless of textual order).
@@ -70,7 +68,6 @@ impl Scope {
             parent,
             name,
             owner_def,
-            module_id: None,
             ordered,
             items: ItemScope::new(),
             children: Vec::new(),
@@ -98,8 +95,6 @@ impl fmt::Debug for Scope {
             .finish()
     }
 }
-
-// ── ScopeTree ────────────────────────────────────────────────────────────────
 
 /// The complete scope tree for a compilation unit.
 ///
@@ -179,8 +174,6 @@ impl Default for ScopeTree {
         Self::new()
     }
 }
-
-// ── AncestorIter ─────────────────────────────────────────────────────────────
 
 pub struct AncestorIter<'a> {
     tree: &'a ScopeTree,

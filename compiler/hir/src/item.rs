@@ -9,8 +9,6 @@ use crate::expr::Expr;
 use crate::hir_id::{HirId, OwnerId};
 use crate::{ClauseParam, Pattern};
 
-// ── Item ─────────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct Item<'hir> {
     pub owner_id: OwnerId,
@@ -28,17 +26,15 @@ impl Item<'_> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ItemKind<'hir> {
     Fn(FnSig<'hir>, BodyId),
-    Struct(StructDef<'hir>, &'hir [ClauseConstraint<'hir>]),
-    Enum(EnumDef<'hir>, &'hir [ClauseConstraint<'hir>]),
+    Struct(StructDef<'hir>),
+    Enum(EnumDef<'hir>),
     Mod(ModDef),
     Impl(ImplDef<'hir>),
     Trait(TraitDef<'hir>),
-    TypeAlias(&'hir Expr<'hir>, &'hir [ClauseConstraint<'hir>]),
+    TypeAlias(&'hir Expr<'hir>),
     Use(UsePath<'hir>),
-    Err,
+    Invalid,
 }
-
-// ── Function ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnSig<'hir> {
@@ -86,14 +82,12 @@ pub struct FnModifiers {
     pub is_extern: bool,
 }
 
-// ── Struct ───────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct StructDef<'hir> {
     pub fields: &'hir [FieldDef<'hir>],
     pub clause_params: &'hir [ClauseParam<'hir>],
     pub clause_constraints: &'hir [ClauseConstraint<'hir>],
-    pub nested_items: &'hir [OwnerId],
+    pub nested_items: Vec<OwnerId>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -105,14 +99,12 @@ pub struct FieldDef<'hir> {
     pub span: Span,
 }
 
-// ── Enum ─────────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumDef<'hir> {
     pub variants: &'hir [Variant<'hir>],
     pub clause_params: &'hir [ClauseParam<'hir>],
     pub clause_constraints: &'hir [ClauseConstraint<'hir>],
-    pub nested_items: &'hir [OwnerId],
+    pub nested_items: Vec<OwnerId>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -133,14 +125,10 @@ pub enum VariantKind<'hir> {
     SubEnum(&'hir [Variant<'hir>]),
 }
 
-// ── Module ───────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModDef {
     pub items: Vec<OwnerId>,
 }
-
-// ── Impl / Trait ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImplDef<'hir> {
@@ -158,8 +146,6 @@ pub struct TraitDef<'hir> {
     pub items: Vec<OwnerId>,
 }
 
-// ── Use ──────────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsePath<'hir> {
     pub path: Path<'hir>,
@@ -175,8 +161,6 @@ pub enum UseKind<'hir> {
     Alias(Ident),
 }
 
-// ── DefKind ──────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DefKind {
     Fn,
@@ -187,6 +171,7 @@ pub enum DefKind {
     Trait,
     TypeAlias,
     Use,
+    Invalid,
 }
 
 impl DefKind {
@@ -200,7 +185,7 @@ impl DefKind {
             ItemKind::Trait(..) => DefKind::Trait,
             ItemKind::TypeAlias(..) => DefKind::TypeAlias,
             ItemKind::Use(..) => DefKind::Use,
-            ItemKind::Err => DefKind::Fn,
+            ItemKind::Invalid => DefKind::Invalid,
         }
     }
 }

@@ -9,8 +9,6 @@ use std::collections::HashMap;
 use crate::binding::Binding;
 use crate::import::ResolvedImport;
 
-// ── ItemScope ────────────────────────────────────────────────────────────────
-
 /// The names visible in a single scope.
 ///
 /// Each module / ADT body / impl block / trait owns an `ItemScope`.
@@ -19,8 +17,12 @@ use crate::import::ResolvedImport;
 pub struct ItemScope {
     /// Locally defined names (direct definitions in this scope).
     declarations: HashMap<String, Binding>,
-    /// Resolved imports that bring names into this scope.
+    /// Private imports (`use …`): bring names into this scope but are not
+    /// visible to the outside world.
     imports: Vec<ResolvedImport>,
+    /// Re-exported imports (`pub use …`): bring names into this scope *and*
+    /// expose them as part of this scope's public API.
+    reexports: Vec<ResolvedImport>,
     /// Clauses (type parameters, bounds) associated with this scope's owner.
     clauses: Vec<ClauseBinding>,
 }
@@ -37,11 +39,10 @@ impl ItemScope {
         Self {
             declarations: HashMap::new(),
             imports: Vec::new(),
+            reexports: Vec::new(),
             clauses: Vec::new(),
         }
     }
-
-    // ── Declarations ─────────────────────────────────────────────────────
 
     /// Define a name in this scope. Returns `Err` with the old binding if the
     /// name already exists.
@@ -89,19 +90,30 @@ impl ItemScope {
         self.declarations.len()
     }
 
-    // ── Imports ──────────────────────────────────────────────────────────
-
-    /// Record a resolved import.
+    /// Record a private resolved import (`use …`).
     pub fn add_import(&mut self, import: ResolvedImport) {
         self.imports.push(import);
     }
 
-    /// The list of resolved imports.
+    /// Record a re-exported resolved import (`pub use …`).
+    pub fn add_reexport(&mut self, import: ResolvedImport) {
+        self.reexports.push(import);
+    }
+
+    /// The list of private resolved imports.
     pub fn imports(&self) -> &[ResolvedImport] {
         &self.imports
     }
 
-    // ── Clauses ──────────────────────────────────────────────────────────
+    /// The list of re-exported resolved imports.
+    pub fn reexports(&self) -> &[ResolvedImport] {
+        &self.reexports
+    }
+
+    /// All resolved imports visible in this scope (private + re-exported).
+    pub fn all_imports(&self) -> impl Iterator<Item = &ResolvedImport> {
+        self.imports.iter().chain(self.reexports.iter())
+    }
 
     /// Add a clause-level binding (type parameter, bounded param, etc.).
     pub fn add_clause(&mut self, name: String, binding: Binding) {

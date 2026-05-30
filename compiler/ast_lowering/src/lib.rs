@@ -52,8 +52,6 @@ use hir::{
 };
 use rustc_span::{SourceMap, Span};
 
-// ── Public API ───────────────────────────────────────────────────────────────
-
 /// Lower a single file's AST into HIR, appending definitions to `package`.
 ///
 /// This is the main entry point for AST lowering. The caller provides:
@@ -112,8 +110,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         }
     }
 
-    // ── HirId allocation ─────────────────────────────────────────────────
-
     /// Allocate the next [`HirId`] within the current owner.
     pub(crate) fn next_hir_id(&mut self) -> HirId {
         let local = ItemLocalId::new(self.next_local_id);
@@ -126,8 +122,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         self.next_local_id = 0;
     }
 
-    // ── Body allocation ──────────────────────────────────────────────────
-
     /// Allocate a [`BodyId`] and insert the body into the package.
     ///
     /// `owner_hir_id` is the [`HirId`] of the node that *owns* the body
@@ -137,8 +131,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         self.package.insert_body(id, body);
         id
     }
-
-    // ── Source text helpers ───────────────────────────────────────────────
 
     /// Get the source text for an AST node's span.
     pub(crate) fn source_text(&self, node: NodeIndex) -> String {
@@ -157,8 +149,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         let text = self.source_text(node);
         Ident::new(Symbol::intern(&text), span)
     }
-
-    // ── Diagnostic helpers (delegate to DiagnosticContext) ────────────────
 
     pub(crate) fn emit_unsupported_node(&self, name: &str, span: Span) {
         let err = LoweringError::unsupported_node(name, span);

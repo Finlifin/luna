@@ -8,8 +8,6 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::ops::{Index, IndexMut};
 
-// ── Idx trait ────────────────────────────────────────────────────────────────
-
 /// A newtype index that can be used with [`IndexVec`].
 ///
 /// Implementors must be a thin wrapper around `u32` and provide
@@ -18,8 +16,6 @@ pub trait Idx: Copy + Eq + fmt::Debug {
     fn new(raw: u32) -> Self;
     fn index(self) -> usize;
 }
-
-// ── IndexVec ─────────────────────────────────────────────────────────────────
 
 /// A `Vec<T>` indexed by a typed index `I` rather than `usize`.
 ///

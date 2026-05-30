@@ -18,11 +18,10 @@ use rustc_span::SourceMap;
 use crate::binding::Binding;
 use crate::error::{ResolveError, ResolveResult};
 use crate::ids::{DefId, DefIdGen, ScopeId, ScopeIdGen};
-use crate::import::{ImportDirective, ImportKind, ResolvedImport};
+use crate::impl_directive::ImplDirective;
+use crate::import::{ImportDirective, ImportKind, PathSegment, ResolvedImport};
 use crate::scanner::VfsScanner;
 use crate::scope::{Scope, ScopeKind, ScopeTree};
-
-// ── ModuleTree ───────────────────────────────────────────────────────────────
 
 /// The product of the module-building phase: a fully constructed scope tree
 /// with all imports resolved.
@@ -36,11 +35,11 @@ pub struct ModuleTree {
     pub def_names: HashMap<DefId, String>,
     /// How many DefIds were allocated.
     pub def_count: u32,
+    /// All `impl` / `impl Trait for Type` blocks discovered during scanning.
+    pub impls: Vec<ImplDirective>,
     /// Errors collected (non-fatal) during the build phase.
     pub errors: Vec<ResolveError>,
 }
-
-// ── Public entry point ───────────────────────────────────────────────────────
 
 /// Build the module tree for a package.
 ///
@@ -60,8 +59,6 @@ pub fn build_module_tree(
     builder.build(vfs)
 }
 
-// ── ModuleBuilder (internal) ─────────────────────────────────────────────────
-
 /// Internal builder that owns mutable state while constructing a [`ModuleTree`].
 struct ModuleBuilder<'a> {
     source_map: &'a SourceMap,
@@ -73,10 +70,14 @@ struct ModuleBuilder<'a> {
     root_scope: ScopeId,
     /// Unresolved import directives.
     unresolved_imports: Vec<ImportDirective>,
+    /// Collected impl directives.
+    impls: Vec<ImplDirective>,
     /// Accumulated errors.
     errors: Vec<ResolveError>,
     /// DefId → name mapping.
     def_names: Vec<(DefId, String)>,
+    /// Index: DefId → ScopeId (built once after scan phase).
+    def_to_scope: HashMap<DefId, ScopeId>,
 }
 
 impl<'a> ModuleBuilder<'a> {
@@ -106,8 +107,10 @@ impl<'a> ModuleBuilder<'a> {
             scope_gen,
             root_scope: root_id,
             unresolved_imports: Vec::new(),
+            impls: Vec::new(),
             errors: Vec::new(),
             def_names: vec![(root_def, "<root>".into())],
+            def_to_scope: HashMap::new(),
         }
     }
 
@@ -118,6 +121,13 @@ impl<'a> ModuleBuilder<'a> {
             self.errors.push(e);
         }
 
+        // Build DefId→ScopeId index now that the scope tree is complete.
+        self.def_to_scope = self
+            .scope_tree
+            .iter()
+            .map(|s| (s.owner_def, s.id))
+            .collect();
+
         // Phase 2: fixpoint import resolution
         if let Err(e) = self.import_resolution_phase() {
             self.errors.push(e);
@@ -126,6 +136,7 @@ impl<'a> ModuleBuilder<'a> {
         // Produce the final artifact.
         let def_count = self.def_gen.count();
         let def_names = std::mem::take(&mut self.def_names).into_iter().collect();
+        let impls = std::mem::take(&mut self.impls);
         let errors = std::mem::take(&mut self.errors);
         let scope_tree = std::mem::replace(&mut self.scope_tree, ScopeTree::new());
 
@@ -133,11 +144,10 @@ impl<'a> ModuleBuilder<'a> {
             scope_tree,
             def_names,
             def_count,
+            impls,
             errors,
         }
     }
-
-    // ── Phase 1: VFS scanning ────────────────────────────────────────────
 
     fn scan_phase(&mut self, vfs: &mut vfs::Vfs) -> ResolveResult<()> {
         let mut scanner = VfsScanner::new(
@@ -151,14 +161,13 @@ impl<'a> ModuleBuilder<'a> {
 
         scanner.scan_package(self.root_scope)?;
 
-        let (imports, def_names) = scanner.into_results();
+        let (imports, impls, def_names) = scanner.into_results();
         self.unresolved_imports = imports;
+        self.impls = impls;
         self.def_names.extend(def_names);
 
         Ok(())
     }
-
-    // ── Phase 2: fixpoint import resolution ──────────────────────────────
 
     fn import_resolution_phase(&mut self) -> ResolveResult<()> {
         let mut remaining_count = self.unresolved_imports.len();
@@ -177,10 +186,15 @@ impl<'a> ModuleBuilder<'a> {
                     Ok(resolved) => {
                         self.unresolved_imports[i].resolved = true;
                         let owner_scope = self.unresolved_imports[i].owner_scope;
+                        let is_reexport = self.unresolved_imports[i].is_reexport;
 
                         // Apply the resolved import to the scope.
                         if let Some(scope) = self.scope_tree.get_mut(owner_scope) {
-                            scope.items.add_import(resolved);
+                            if is_reexport {
+                                scope.items.add_reexport(resolved);
+                            } else {
+                                scope.items.add_import(resolved);
+                            }
                         }
 
                         progress = true;
@@ -202,7 +216,12 @@ impl<'a> ModuleBuilder<'a> {
                 for imp in &self.unresolved_imports {
                     if !imp.resolved {
                         self.errors.push(ResolveError::UnresolvedImportSegment {
-                            segment: imp.path_segments.join("."),
+                            segment: imp
+                                .path_segments
+                                .iter()
+                                .map(|s| s.to_string())
+                                .collect::<Vec<_>>()
+                                .join("."),
                             span: imp.span,
                         });
                     }
@@ -215,8 +234,6 @@ impl<'a> ModuleBuilder<'a> {
 
         Ok(())
     }
-
-    // ── Import resolution helpers ────────────────────────────────────────
 
     /// Try to resolve a single import directive.
     fn try_resolve_import(&self, import_idx: usize) -> ResolveResult<ResolvedImport> {
@@ -254,39 +271,38 @@ impl<'a> ModuleBuilder<'a> {
     /// Walk a sequence of path segments to find the target scope.
     fn resolve_path_segments(
         &self,
-        segments: &[String],
+        segments: &[PathSegment],
         mut scope_id: ScopeId,
         span: rustc_span::Span,
     ) -> ResolveResult<ScopeId> {
         for segment in segments {
-            if segment == "super" {
-                let parent = self
-                    .scope_tree
-                    .get(scope_id)
-                    .and_then(|s| s.parent)
-                    .ok_or_else(|| ResolveError::UnresolvedImportSegment {
-                        segment: "super".into(),
-                        span,
+            match segment {
+                PathSegment::Super => {
+                    scope_id = self
+                        .scope_tree
+                        .get(scope_id)
+                        .and_then(|s| s.parent)
+                        .ok_or_else(|| ResolveError::UnresolvedImportSegment {
+                            segment: "super".into(),
+                            span,
+                        })?;
+                }
+                PathSegment::Name(name) => {
+                    let binding = self.lookup_in_scope(name, scope_id).ok_or_else(|| {
+                        ResolveError::UnresolvedImportSegment {
+                            segment: name.clone(),
+                            span,
+                        }
                     })?;
-                scope_id = parent;
-                continue;
+
+                    scope_id = self.find_scope_for_def(binding.def_id).ok_or_else(|| {
+                        ResolveError::UnresolvedImportSegment {
+                            segment: name.clone(),
+                            span,
+                        }
+                    })?;
+                }
             }
-
-            let binding = self.lookup_in_scope(segment, scope_id).ok_or_else(|| {
-                ResolveError::UnresolvedImportSegment {
-                    segment: segment.clone(),
-                    span,
-                }
-            })?;
-
-            let child_scope = self.find_scope_for_def(binding.def_id).ok_or_else(|| {
-                ResolveError::UnresolvedImportSegment {
-                    segment: segment.clone(),
-                    span,
-                }
-            })?;
-
-            scope_id = child_scope;
         }
 
         Ok(scope_id)
@@ -300,7 +316,7 @@ impl<'a> ModuleBuilder<'a> {
             return Some(b.clone());
         }
 
-        for import in scope.items.imports() {
+        for import in scope.items.all_imports() {
             match import {
                 ResolvedImport::Glob(source_scope) => {
                     if let Some(b) = self.lookup_direct_in_scope(name, *source_scope) {
@@ -362,16 +378,9 @@ impl<'a> ModuleBuilder<'a> {
 
     /// Find the ScopeId that a DefId owns.
     fn find_scope_for_def(&self, def_id: DefId) -> Option<ScopeId> {
-        for scope in self.scope_tree.iter() {
-            if scope.owner_def == def_id {
-                return Some(scope.id);
-            }
-        }
-        None
+        self.def_to_scope.get(&def_id).copied()
     }
 }
-
-// ── Dump ─────────────────────────────────────────────────────────────────────
 
 impl ModuleTree {
     /// Dump the scope tree as an S-expression string (for debugging).
@@ -414,7 +423,7 @@ impl ModuleTree {
             ));
         }
 
-        // Imports
+        // Private imports
         for import in scope.items.imports() {
             match import {
                 ResolvedImport::Glob(s) => {
@@ -433,6 +442,31 @@ impl ModuleTree {
                 } => {
                     out.push_str(&format!(
                         "{}  (import-alias {:?} \"{}\" as \"{}\")\n",
+                        pad, source_scope, original, alias
+                    ));
+                }
+            }
+        }
+
+        // Re-exported imports
+        for import in scope.items.reexports() {
+            match import {
+                ResolvedImport::Glob(s) => {
+                    out.push_str(&format!("{}  (reexport-all {:?})\n", pad, s));
+                }
+                ResolvedImport::Multi(s, names) => {
+                    out.push_str(&format!("{}  (reexport-multi {:?} {:?})\n", pad, s, names));
+                }
+                ResolvedImport::Single(s, n) => {
+                    out.push_str(&format!("{}  (reexport-single {:?} \"{}\")\n", pad, s, n));
+                }
+                ResolvedImport::Alias {
+                    source_scope,
+                    original,
+                    alias,
+                } => {
+                    out.push_str(&format!(
+                        "{}  (reexport-alias {:?} \"{}\" as \"{}\")\n",
                         pad, source_scope, original, alias
                     ));
                 }

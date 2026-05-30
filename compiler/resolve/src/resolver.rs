@@ -33,8 +33,6 @@ impl<'a> Resolver<'a> {
         }
     }
 
-    // ── High-level resolution API ────────────────────────────────────────
-
     /// Resolve a simple name starting from `scope_id`, walking up the scope
     /// chain.
     ///
@@ -153,8 +151,6 @@ impl<'a> Resolver<'a> {
         Ok(scope_id)
     }
 
-    // ── Rib management (for AST lowering) ────────────────────────────────
-
     /// Access the rib stack (e.g. to push / pop ribs during lowering).
     pub fn ribs(&self) -> &RibStack {
         &self.ribs
@@ -164,8 +160,6 @@ impl<'a> Resolver<'a> {
     pub fn ribs_mut(&mut self) -> &mut RibStack {
         &mut self.ribs
     }
-
-    // ── Low-level lookup helpers ─────────────────────────────────────────
 
     /// Look up a name by walking up the scope tree (no rib stack).
     /// Returns `None` if not found.
@@ -243,8 +237,6 @@ impl<'a> Resolver<'a> {
         }
         None
     }
-
-    // ── Accessors ────────────────────────────────────────────────────────
 
     /// The underlying scope tree.
     pub fn scope_tree(&self) -> &ScopeTree {

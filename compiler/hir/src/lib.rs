@@ -16,12 +16,11 @@
 
 use rustc_data_structures::fx::FxHashMap;
 
-// ── Modules ──────────────────────────────────────────────────────────────────
-
 pub mod arena;
 pub mod body;
 pub mod clause;
 pub mod common;
+pub mod decl;
 pub mod expr;
 pub mod hir_id;
 pub mod idx;
@@ -29,15 +28,13 @@ pub mod item;
 pub mod node;
 pub mod owner;
 pub mod pattern;
-pub mod ty;
-
-// ── Re-exports ───────────────────────────────────────────────────────────────
 
 pub use arena::HirArena;
 pub use body::{Body, Param};
-pub use clause::{ClauseConstraint, ClauseConstraintKind};
-pub use common::{BinOp, BindingMode, Ident, Lit, LitKind, Mutability, Path, Symbol, UnOp};
-pub use expr::{Arm, Block, Expr, ExprKind, FieldExpr, LetStmt, Stmt, StmtKind};
+pub use clause::{ClauseConstraint, ClauseConstraintKind, ClauseParam, ClauseParamKind};
+pub use common::{BinOp, BindingMode, Ident, Lit, LitKind, Path, Symbol, UnOp};
+pub use decl::LetDecl;
+pub use expr::{Block, CondictionArm, Expr, ExprKind, FieldExpr};
 pub use hir_id::{BodyId, HirId, ItemLocalId, LocalDefId, OwnerId};
 pub use idx::{Idx, IndexVec};
 pub use item::{
@@ -46,10 +43,7 @@ pub use item::{
 };
 pub use node::Node;
 pub use owner::{OwnerInfo, OwnerNode, OwnerNodes, ParentedNode};
-pub use pattern::{FieldPat, Pattern, PatternKind};
-pub use ty::{ClauseParam, TraitBound};
-
-// ── Package ──────────────────────────────────────────────────────────────────
+pub use pattern::{FieldPat, Pattern, PatternArm, PatternKind};
 
 /// The top-level HIR container for a single Flurry package.
 ///
@@ -69,8 +63,6 @@ impl<'hir> Package<'hir> {
             root_mod: OwnerId::INVALID,
         }
     }
-
-    // ── Definition allocation ────────────────────────────────────────────
 
     pub fn alloc_owner_id(&mut self) -> OwnerId {
         let id = self.owners.push(None);
@@ -101,8 +93,6 @@ impl<'hir> Package<'hir> {
         self.owners.len()
     }
 
-    // ── Body storage ─────────────────────────────────────────────────────
-
     pub fn insert_body(&mut self, body_id: BodyId, body: Body<'hir>) {
         self.bodies.insert(body_id, body);
     }
@@ -119,15 +109,11 @@ impl<'hir> Package<'hir> {
         self.bodies.len()
     }
 
-    // ── Node lookup ──────────────────────────────────────────────────────
-
     pub fn node(&self, hir_id: HirId) -> Option<&Node<'hir>> {
         let owner_info = self.owner(hir_id.owner)?;
         let parented = owner_info.nodes.get(hir_id.local_id)?;
         Some(&parented.node)
     }
-
-    // ── HirId allocation ─────────────────────────────────────────────────
 
     pub fn hir_id_allocator(&self, owner: OwnerId) -> HirIdAllocator {
         HirIdAllocator {
@@ -142,8 +128,6 @@ impl Default for Package<'_> {
         Self::new()
     }
 }
-
-// ── HirIdAllocator ───────────────────────────────────────────────────────────
 
 pub struct HirIdAllocator {
     owner: OwnerId,

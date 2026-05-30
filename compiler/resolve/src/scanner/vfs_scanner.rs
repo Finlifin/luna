@@ -14,6 +14,7 @@ use rustc_span::{SourceFile, SourceMap};
 use crate::binding::{BindingKind, Visibility};
 use crate::error::{ResolveError, ResolveResult};
 use crate::ids::{DefId, DefIdGen, ScopeId, ScopeIdGen};
+use crate::impl_directive::ImplDirective;
 use crate::import::ImportDirective;
 use crate::scope::{Scope, ScopeKind, ScopeTree};
 
@@ -35,6 +36,8 @@ pub struct VfsScanner<'a> {
     pub scope_gen: &'a mut ScopeIdGen,
     /// Collected import directives (to be resolved later).
     pub imports: Vec<ImportDirective>,
+    /// Collected impl directives.
+    pub impls: Vec<ImplDirective>,
     /// DefId → name mapping for diagnostics.
     pub def_names: Vec<(DefId, String)>,
 }
@@ -56,6 +59,7 @@ impl<'a> VfsScanner<'a> {
             def_gen,
             scope_gen,
             imports: Vec::new(),
+            impls: Vec::new(),
             def_names: Vec::new(),
         }
     }
@@ -186,6 +190,7 @@ impl<'a> VfsScanner<'a> {
             def_gen: self.def_gen,
             scope_gen: self.scope_gen,
             imports: &mut self.imports,
+            impls: &mut self.impls,
             def_names: &mut self.def_names,
         };
 
@@ -222,8 +227,14 @@ impl<'a> VfsScanner<'a> {
         Ok(())
     }
 
-    /// Consume the scanner and return the collected imports and def names.
-    pub fn into_results(self) -> (Vec<ImportDirective>, Vec<(DefId, String)>) {
-        (self.imports, self.def_names)
+    /// Consume the scanner and return the collected imports, impls, and def names.
+    pub fn into_results(
+        self,
+    ) -> (
+        Vec<ImportDirective>,
+        Vec<ImplDirective>,
+        Vec<(DefId, String)>,
+    ) {
+        (self.imports, self.impls, self.def_names)
     }
 }

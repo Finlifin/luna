@@ -2,9 +2,26 @@
 
 use rustc_span::Span;
 
+use crate::Expr;
 use crate::common::Ident;
 use crate::hir_id::HirId;
-use crate::ty::TraitBound;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClauseParam<'hir> {
+    pub hir_id: HirId,
+    pub name: Ident,
+    pub kind: ClauseParamKind<'hir>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClauseParamKind<'hir> {
+    Type(Ident),
+    Positional(Ident, &'hir Expr<'hir>),
+    Optional(Ident, &'hir Expr<'hir>),
+    Varadic(Ident, &'hir Expr<'hir>),
+    Quote(Ident, &'hir Expr<'hir>),
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClauseConstraint<'hir> {
@@ -15,7 +32,10 @@ pub struct ClauseConstraint<'hir> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClauseConstraintKind<'hir> {
-    Param(Ident),
-    Bound(Ident, &'hir [TraitBound<'hir>]),
-    Predicate(&'hir super::expr::Expr<'hir>),
+    Requires(&'hir Expr<'hir>),
+    Ensures(&'hir Expr<'hir>),
+    Decreases(&'hir Expr<'hir>),
+
+    /// TODO
+    Outcome,
 }

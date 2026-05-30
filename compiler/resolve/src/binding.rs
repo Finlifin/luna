@@ -34,19 +34,19 @@ pub enum BindingKind {
     TypeAlias,
     /// A trait definition.
     Trait,
-    /// An `impl` block (anonymous – usually not named).
-    Impl,
+    /// An `extend` block. An extension could be named and be referred to.
+    Extension,
     /// An enum variant.
     Variant,
     /// A struct field.
     Field,
-    /// A type parameter (`[T]` or `[T : Trait]`).
-    TypeParam,
+    /// A type parameter in a clause (e.g. `T` in `struct Foo where T { ... }`).
+    ClauseParam,
     /// A value parameter in a function / clause.
     Param,
     /// A local `let` / `const` binding.
     Local,
-    /// An imported name (re-export from another scope).
+    /// An imported name (re-export from another scope). Considered deprecated
     Import,
     /// A built-in / intrinsic definition.
     Builtin,
@@ -55,14 +55,14 @@ pub enum BindingKind {
 /// Visibility of a binding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Visibility {
-    /// Visible everywhere.
-    #[default]
+    /// Visible everywhere (explicit `pub`).
     Public,
+    /// Visible within the current package only (no keyword; the default).
+    #[default]
+    Package,
     /// Only visible within the defining module and its children.
     Private,
 }
-
-// ── Resolution ───────────────────────────────────────────────────────────────
 
 /// The result of resolving a single name.
 ///

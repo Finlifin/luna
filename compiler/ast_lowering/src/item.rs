@@ -30,8 +30,6 @@ use rustc_span::Span;
 use crate::LoweringContext;
 
 impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
-    // ── Public entry points ──────────────────────────────────────────────
-
     /// Lower a `FileScope` (the root AST node) into the HIR [`Package`].
     ///
     /// Every top-level statement/definition in the file becomes an item
@@ -51,10 +49,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         }
 
         let elems_node = children[0];
-        let elem_nodes = self
-            .ast
-            .get_multi_child_slice(elems_node)
-            .unwrap_or(&[]);
+        let elem_nodes = self.ast.get_multi_child_slice(elems_node).unwrap_or(&[]);
 
         // Allocate the root module owner.
         let root_owner_id = self.package.alloc_owner_id();
@@ -136,8 +131,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         self.lower_top_level_node(node)
     }
 
-    // ── Function ─────────────────────────────────────────────────────────
-
     /// Lower `Function`: a, N, b, c, N, d
     ///   (id, params, return_type, handles_effect, clauses, body)
     fn lower_function(&mut self, node: NodeIndex) -> OwnerId {
@@ -170,10 +163,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         let modifiers = FnModifiers::default();
 
         // Parameters
-        let param_nodes = self
-            .ast
-            .get_multi_child_slice(params_multi)
-            .unwrap_or(&[]);
+        let param_nodes = self.ast.get_multi_child_slice(params_multi).unwrap_or(&[]);
         let fn_params = self.lower_fn_params(param_nodes);
 
         // Return type
@@ -185,12 +175,9 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         };
 
         // Clauses → generic params + constraints
-        let clause_nodes = self
-            .ast
-            .get_multi_child_slice(clauses_multi)
-            .unwrap_or(&[]);
+        let clause_nodes = self.ast.get_multi_child_slice(clauses_multi).unwrap_or(&[]);
         let lowered = self.lower_clauses(clause_nodes);
-        let clause_params = self.arena.alloc_generic_param_slice(lowered.params);
+        let clause_params = self.arena.alloc_clause_param_slice(lowered.params);
         let clause_constraints = self.arena.alloc_clause_slice(lowered.constraints);
 
         // Build FnDecl and FnSig
@@ -245,8 +232,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         owner_id
     }
 
-    // ── NormalFormDef (comptime fn / case def) ───────────────────────────
-
     /// Lower `NormalFormDef`: a, N, b, N, c
     ///   (id, type_params, return_type, clauses, body)
     fn lower_normal_form_def(&mut self, node: NodeIndex) -> OwnerId {
@@ -275,16 +260,13 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
             .ast
             .get_multi_child_slice(type_params_multi)
             .unwrap_or(&[]);
-        let clause_nodes = self
-            .ast
-            .get_multi_child_slice(clauses_multi)
-            .unwrap_or(&[]);
+        let clause_nodes = self.ast.get_multi_child_slice(clauses_multi).unwrap_or(&[]);
 
         // Merge type params and clauses
         let mut all_clause_nodes = type_param_nodes.to_vec();
         all_clause_nodes.extend_from_slice(clause_nodes);
         let lowered = self.lower_clauses(&all_clause_nodes);
-        let clause_params = self.arena.alloc_generic_param_slice(lowered.params);
+        let clause_params = self.arena.alloc_clause_param_slice(lowered.params);
         let clause_constraints = self.arena.alloc_clause_slice(lowered.constraints);
 
         let output = if return_type_node != 0 {
@@ -339,8 +321,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         owner_id
     }
 
-    // ── Struct ───────────────────────────────────────────────────────────
-
     /// Lower `StructDef`: a, N, b  (id, clauses, body)
     fn lower_struct_def(&mut self, node: NodeIndex) -> OwnerId {
         let span = self.ast.get_span(node).unwrap_or(Span::default());
@@ -362,12 +342,9 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         let ident = self.node_to_ident(id_node);
 
         // Clauses (generic params)
-        let clause_nodes = self
-            .ast
-            .get_multi_child_slice(clauses_multi)
-            .unwrap_or(&[]);
+        let clause_nodes = self.ast.get_multi_child_slice(clauses_multi).unwrap_or(&[]);
         let lowered = self.lower_clauses(clause_nodes);
-        let clause_params = self.arena.alloc_generic_param_slice(lowered.params);
+        let clause_params = self.arena.alloc_clause_param_slice(lowered.params);
         let clause_constraints = self.arena.alloc_clause_slice(lowered.constraints);
 
         // Body: a Block containing struct fields and nested definitions
@@ -377,16 +354,14 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         let struct_def = StructDef {
             fields: fields_slice,
             clause_params,
-            clause_constraints: &[],
-            nested_items: unsafe {
-                std::mem::transmute::<&[OwnerId], &'hir [OwnerId]>(Vec::leak(nested_items))
-            },
+            clause_constraints,
+            nested_items,
         };
 
         let item = Item {
             owner_id,
             ident,
-            kind: ItemKind::Struct(struct_def, clause_constraints),
+            kind: ItemKind::Struct(struct_def),
             span,
         };
         let item_ref = self.arena.alloc_item(item);
@@ -403,10 +378,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
     }
 
     /// Lower the body of a struct definition.
-    fn lower_struct_body(
-        &mut self,
-        body_node: NodeIndex,
-    ) -> (Vec<FieldDef<'hir>>, Vec<OwnerId>) {
+    fn lower_struct_body(&mut self, body_node: NodeIndex) -> (Vec<FieldDef<'hir>>, Vec<OwnerId>) {
         let mut fields = Vec::new();
         let mut nested_items = Vec::new();
 
@@ -503,8 +475,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         })
     }
 
-    // ── Enum ─────────────────────────────────────────────────────────────
-
     /// Lower `EnumDef`: a, N, b  (id, clauses, body)
     fn lower_enum_def(&mut self, node: NodeIndex) -> OwnerId {
         let span = self.ast.get_span(node).unwrap_or(Span::default());
@@ -525,12 +495,9 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
 
         let ident = self.node_to_ident(id_node);
 
-        let clause_nodes = self
-            .ast
-            .get_multi_child_slice(clauses_multi)
-            .unwrap_or(&[]);
+        let clause_nodes = self.ast.get_multi_child_slice(clauses_multi).unwrap_or(&[]);
         let lowered = self.lower_clauses(clause_nodes);
-        let clause_params = self.arena.alloc_generic_param_slice(lowered.params);
+        let clause_params = self.arena.alloc_clause_param_slice(lowered.params);
         let clause_constraints = self.arena.alloc_clause_slice(lowered.constraints);
 
         let (variants, nested_items) = self.lower_enum_body(body_node);
@@ -539,16 +506,14 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         let enum_def = EnumDef {
             variants: variants_slice,
             clause_params,
-            clause_constraints: &[],
-            nested_items: unsafe {
-                std::mem::transmute::<&[OwnerId], &'hir [OwnerId]>(Vec::leak(nested_items))
-            },
+            clause_constraints,
+            nested_items,
         };
 
         let item = Item {
             owner_id,
             ident,
-            kind: ItemKind::Enum(enum_def, clause_constraints),
+            kind: ItemKind::Enum(enum_def),
             span,
         };
         let item_ref = self.arena.alloc_item(item);
@@ -564,10 +529,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         owner_id
     }
 
-    fn lower_enum_body(
-        &mut self,
-        body_node: NodeIndex,
-    ) -> (Vec<Variant<'hir>>, Vec<OwnerId>) {
+    fn lower_enum_body(&mut self, body_node: NodeIndex) -> (Vec<Variant<'hir>>, Vec<OwnerId>) {
         let mut variants = Vec::new();
         let mut nested_items = Vec::new();
 
@@ -614,9 +576,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                         span,
                     });
                 }
-                Some(
-                    NodeKind::Function | NodeKind::TypealiasDef | NodeKind::ConstDef,
-                ) => {
+                Some(NodeKind::Function | NodeKind::TypealiasDef | NodeKind::ConstDef) => {
                     let owner = self.lower_top_level_node(elem);
                     nested_items.push(owner);
                 }
@@ -667,14 +627,8 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                 if children.len() >= 2 {
                     let ident = self.node_to_ident(children[0]);
                     let multi = children[1];
-                    let elem_nodes = self
-                        .ast
-                        .get_multi_child_slice(multi)
-                        .unwrap_or(&[]);
-                    let exprs: Vec<_> = elem_nodes
-                        .iter()
-                        .map(|&n| self.lower_expr(n))
-                        .collect();
+                    let elem_nodes = self.ast.get_multi_child_slice(multi).unwrap_or(&[]);
+                    let exprs: Vec<_> = elem_nodes.iter().map(|&n| self.lower_expr(n)).collect();
                     let exprs_slice = self.arena.alloc_expr_slice(exprs);
                     Some(Variant {
                         hir_id: self.next_hir_id(),
@@ -690,10 +644,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                 if children.len() >= 2 {
                     let ident = self.node_to_ident(children[0]);
                     let multi = children[1];
-                    let field_nodes = self
-                        .ast
-                        .get_multi_child_slice(multi)
-                        .unwrap_or(&[]);
+                    let field_nodes = self.ast.get_multi_child_slice(multi).unwrap_or(&[]);
                     let fields: Vec<_> = field_nodes
                         .iter()
                         .filter_map(|&n| self.lower_struct_field(n))
@@ -713,10 +664,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                 if children.len() >= 2 {
                     let ident = self.node_to_ident(children[0]);
                     let multi = children[1];
-                    let sub_nodes = self
-                        .ast
-                        .get_multi_child_slice(multi)
-                        .unwrap_or(&[]);
+                    let sub_nodes = self.ast.get_multi_child_slice(multi).unwrap_or(&[]);
                     let sub_variants: Vec<_> = sub_nodes
                         .iter()
                         .filter_map(|&n| self.lower_enum_variant(n))
@@ -735,8 +683,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
             _ => None,
         }
     }
-
-    // ── Trait ────────────────────────────────────────────────────────────
 
     /// Lower `TraitDef`: a, b, N, c  (id, super_trait, clauses, body)
     fn lower_trait_def(&mut self, node: NodeIndex) -> OwnerId {
@@ -759,12 +705,9 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
 
         let ident = self.node_to_ident(id_node);
 
-        let clause_nodes = self
-            .ast
-            .get_multi_child_slice(clauses_multi)
-            .unwrap_or(&[]);
+        let clause_nodes = self.ast.get_multi_child_slice(clauses_multi).unwrap_or(&[]);
         let lowered = self.lower_clauses(clause_nodes);
-        let clause_params = self.arena.alloc_generic_param_slice(lowered.params);
+        let clause_params = self.arena.alloc_clause_param_slice(lowered.params);
         let clause_constraints = self.arena.alloc_clause_slice(lowered.constraints);
 
         // Lower body items
@@ -841,8 +784,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         items
     }
 
-    // ── Impl ─────────────────────────────────────────────────────────────
-
     /// Lower `ImplDef`: a, N, b  (type, clauses, body)
     fn lower_impl_def(&mut self, node: NodeIndex) -> OwnerId {
         let span = self.ast.get_span(node).unwrap_or(Span::default());
@@ -866,12 +807,9 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         let self_ty = self.lower_expr(type_node);
         let self_ty_ref = self.arena.alloc_expr(self_ty);
 
-        let clause_nodes = self
-            .ast
-            .get_multi_child_slice(clauses_multi)
-            .unwrap_or(&[]);
+        let clause_nodes = self.ast.get_multi_child_slice(clauses_multi).unwrap_or(&[]);
         let lowered = self.lower_clauses(clause_nodes);
-        let clause_params = self.arena.alloc_generic_param_slice(lowered.params);
+        let clause_params = self.arena.alloc_clause_param_slice(lowered.params);
         let clause_constraints = self.arena.alloc_clause_slice(lowered.constraints);
 
         let body_items = self.lower_impl_body(body_node);
@@ -928,12 +866,9 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         let self_ty = self.lower_expr(type_node);
         let self_ty_ref = self.arena.alloc_expr(self_ty);
 
-        let clause_nodes = self
-            .ast
-            .get_multi_child_slice(clauses_multi)
-            .unwrap_or(&[]);
+        let clause_nodes = self.ast.get_multi_child_slice(clauses_multi).unwrap_or(&[]);
         let lowered = self.lower_clauses(clause_nodes);
-        let clause_params = self.arena.alloc_generic_param_slice(lowered.params);
+        let clause_params = self.arena.alloc_clause_param_slice(lowered.params);
         let clause_constraints = self.arena.alloc_clause_slice(lowered.constraints);
 
         let body_items = self.lower_impl_body(body_node);
@@ -969,8 +904,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         self.lower_trait_body(body_node) // Same structure
     }
 
-    // ── TypeAlias ────────────────────────────────────────────────────────
-
     /// Lower `TypealiasDef`: a, N, b  (id, type_params, type_expr)
     fn lower_type_alias(&mut self, node: NodeIndex) -> OwnerId {
         let span = self.ast.get_span(node).unwrap_or(Span::default());
@@ -996,7 +929,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
             .get_multi_child_slice(type_params_multi)
             .unwrap_or(&[]);
         let lowered = self.lower_clauses(type_param_nodes);
-        let clause_constraints = self.arena.alloc_clause_slice(lowered.constraints);
+        let _clause_constraints = self.arena.alloc_clause_slice(lowered.constraints);
 
         let type_expr = self.lower_expr(type_expr_node);
         let type_expr_ref = self.arena.alloc_expr(type_expr);
@@ -1004,7 +937,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         let item = Item {
             owner_id,
             ident,
-            kind: ItemKind::TypeAlias(type_expr_ref, clause_constraints),
+            kind: ItemKind::TypeAlias(type_expr_ref),
             span,
         };
         let item_ref = self.arena.alloc_item(item);
@@ -1019,8 +952,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         self.current_owner = prev_owner;
         owner_id
     }
-
-    // ── Module ───────────────────────────────────────────────────────────
 
     /// Lower `ModuleDef`: a, b  (id, body)
     fn lower_module_def(&mut self, node: NodeIndex) -> OwnerId {
@@ -1085,8 +1016,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         owner_id
     }
 
-    // ── Use statement ────────────────────────────────────────────────────
-
     fn lower_use_statement(&mut self, node: NodeIndex) -> OwnerId {
         let span = self.ast.get_span(node).unwrap_or(Span::default());
         let children = self.ast.get_children(node);
@@ -1137,10 +1066,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         owner_id
     }
 
-    fn lower_use_path(
-        &mut self,
-        node: NodeIndex,
-    ) -> (hir::common::Path<'hir>, UseKind<'hir>) {
+    fn lower_use_path(&mut self, node: NodeIndex) -> (hir::common::Path<'hir>, UseKind<'hir>) {
         let kind = self.ast.get_node_kind(node);
         let span = self.ast.get_span(node).unwrap_or(Span::default());
 
@@ -1163,14 +1089,9 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                 if children.len() >= 2 {
                     let path = self.lower_expr_as_path(children[0]);
                     let multi = children[1];
-                    let name_nodes = self
-                        .ast
-                        .get_multi_child_slice(multi)
-                        .unwrap_or(&[]);
-                    let idents: Vec<Ident> = name_nodes
-                        .iter()
-                        .map(|&n| self.node_to_ident(n))
-                        .collect();
+                    let name_nodes = self.ast.get_multi_child_slice(multi).unwrap_or(&[]);
+                    let idents: Vec<Ident> =
+                        name_nodes.iter().map(|&n| self.node_to_ident(n)).collect();
                     let idents_slice: &'hir [Ident] = unsafe {
                         std::mem::transmute::<&[Ident], &'hir [Ident]>(Vec::leak(idents))
                     };
@@ -1200,8 +1121,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
             }
         }
     }
-
-    // ── Function parameters ──────────────────────────────────────────────
 
     fn lower_fn_params(&mut self, param_nodes: &[NodeIndex]) -> Vec<FnParamTy<'hir>> {
         let mut params = Vec::new();
@@ -1269,7 +1188,12 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     let ident = self.node_to_ident(children[0]);
                     let ty = self.lower_expr(children[1]);
                     let ty_ref = self.arena.alloc_expr(ty);
-                    Some(FnParamTy::Variadic(ident, ty_ref, span, FnParamKind::Common))
+                    Some(FnParamTy::Variadic(
+                        ident,
+                        ty_ref,
+                        span,
+                        FnParamKind::Common,
+                    ))
                 } else {
                     None
                 }
@@ -1429,8 +1353,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         }
     }
 
-    // ── Error recovery ───────────────────────────────────────────────────
-
     /// Create an error item (returns an OwnerId that maps to `ItemKind::Err`).
     fn make_error_item(&mut self, span: Span) -> OwnerId {
         let owner_id = self.package.alloc_owner_id();
@@ -1441,7 +1363,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         let item = Item {
             owner_id,
             ident: Ident::new(Symbol::intern("<error>"), span),
-            kind: ItemKind::Err,
+            kind: ItemKind::Invalid,
             span,
         };
         let item_ref = self.arena.alloc_item(item);
@@ -1457,8 +1379,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         owner_id
     }
 }
-
-// ── FnParamTy helper ─────────────────────────────────────────────────────────
 
 /// Replace the `FnParamKind` of a parameter (standalone fn because
 /// `FnParamTy` is defined in the `hir` crate).
@@ -1478,8 +1398,6 @@ fn fn_param_with_kind<'hir>(param: FnParamTy<'hir>, new_kind: FnParamKind) -> Fn
             span,
             kind: new_kind,
         },
-        FnParamTy::Variadic(ident, ty, span, _) => {
-            FnParamTy::Variadic(ident, ty, span, new_kind)
-        }
+        FnParamTy::Variadic(ident, ty, span, _) => FnParamTy::Variadic(ident, ty, span, new_kind),
     }
 }

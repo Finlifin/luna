@@ -7,23 +7,28 @@
 //! fn id<T, U : Show, V :- Iterator> ...
 //! ```
 //!
-//! produces three clause nodes in the AST:
+//! produces several clause nodes in the AST, which are mapped to HIR as:
 //!
-//! | AST `NodeKind`         | Meaning                        | HIR result         |
-//! |------------------------|--------------------------------|--------------------|
-//! | `TypeDeclClause`       | bare type parameter `T`        | `ClauseParam`      |
-//! | `TypeBoundDeclClause`  | type + bound `U : Show`        | `ClauseParam`      |
-//! | `TraitBoundDeclClause` | trait bound `V :- Iterator`    | `ClauseConstraint` |
-//! | `OptionalDeclClause`   | optional `.a : T = default`    | `ClauseConstraint` |
-//! | `VarargDeclClause`     | variadic `...a : T`            | `ClauseConstraint` |
-//! | `QuoteDeclClause`      | quoted clause                  | `ClauseConstraint` |
+//! | AST `NodeKind`         | Meaning                        | HIR result                             |
+//! |------------------------|--------------------------------|----------------------------------------|
+//! | `TypeDeclClause`       | bare type parameter `T`        | `ClauseParam(Type(T))`                 |
+//! | `TypeBoundDeclClause`  | `T : Show`                     | `ClauseParam(Positional(T, Show))`     |
+//! | `TraitBoundDeclClause` | `T :- Iterator`                | `ClauseConstraint(Requires(expr))`     |
+//! | `OptionalDeclClause`   | `.a : T = default`             | `ClauseParam(Optional(a, T))`          |
+//! | `VarargDeclClause`     | `...a : T`                     | `ClauseParam(Varadic(a, T))`           |
+//! | `QuoteDeclClause`      | quoted clause                  | `ClauseParam(Quote(name, expr))`       |
+//!
+//! **TODO / Ambiguities:**
+//! - `TypeBoundDeclClause` (`T : Show`): currently lowered to
+//!   `ClauseParamKind::Positional(T, bound_expr)`. Verify this is correct.
+//! - `TraitBoundDeclClause` (`T :- Iterator`): lowered as
+//!   `ClauseConstraintKind::Requires(bound_expr)`. May need a dedicated kind.
 
 use ast::{NodeIndex, NodeKind};
 use hir::{
-    ClauseParam, TraitBound,
-    clause::{ClauseConstraint, ClauseConstraintKind},
-    common::{Ident, Path, PathSegment, Symbol},
-    ty::TraitBoundKind,
+    ClauseParam,
+    clause::{ClauseConstraint, ClauseConstraintKind, ClauseParamKind},
+    common::{Ident, Symbol},
 };
 use rustc_span::Span;
 
@@ -56,21 +61,21 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
             let span = self.ast.get_span(clause_idx).unwrap_or(Span::default());
 
             match kind {
-                // bare type parameter: `T`
+                // bare type parameter: `T`  →  ClauseParamKind::Type(T)
                 NodeKind::TypeDeclClause => {
                     let children = self.ast.get_children(clause_idx);
                     let name_node = children.first().copied().unwrap_or(clause_idx);
                     let name = self.node_to_ident(name_node);
-                    let hir_id = self.next_hir_id();
                     result.params.push(ClauseParam {
-                        hir_id,
-                        ident: name,
-                        bounds: &[],
+                        hir_id: self.next_hir_id(),
+                        kind: ClauseParamKind::Type(name.clone()),
+                        name,
                         span,
                     });
                 }
 
-                // type + bound: `T : Show`  →  ClauseParam with bounds
+                // type with bound: `T : Show`  →  ClauseParamKind::Positional(T, bound_expr)
+                // NOTE: mapping to Positional is tentative; see module-level TODO.
                 NodeKind::TypeBoundDeclClause => {
                     let children = self.ast.get_children(clause_idx);
                     if children.len() < 2 {
@@ -78,80 +83,80 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                         continue;
                     }
                     let name = self.node_to_ident(children[0]);
-                    let bound_expr = children[1];
-
-                    let bounds = self.lower_trait_bound_expr(bound_expr);
-                    let bounds_slice = self.arena.alloc_type_bound_slice(bounds);
-
-                    let hir_id = self.next_hir_id();
+                    let bound_expr = self.lower_expr(children[1]);
+                    let bound_ref = self.arena.alloc_expr(bound_expr);
                     result.params.push(ClauseParam {
-                        hir_id,
-                        ident: name,
-                        bounds: bounds_slice,
+                        hir_id: self.next_hir_id(),
+                        kind: ClauseParamKind::Positional(name.clone(), bound_ref),
+                        name,
                         span,
                     });
                 }
 
-                // trait bound constraint: `T :- Iterator`  →  ClauseConstraint::Bound
+                // trait bound constraint: `T :- Iterator`  →  ClauseConstraint::Requires
+                // NOTE: using Requires as a placeholder; see module-level TODO.
                 NodeKind::TraitBoundDeclClause => {
                     let children = self.ast.get_children(clause_idx);
                     if children.len() < 2 {
                         self.emit_malformed("TraitBoundDeclClause: expected 2 children", span);
                         continue;
                     }
-                    let name = self.node_to_ident(children[0]);
-                    let bound_expr = children[1];
-
-                    let bounds = self.lower_trait_bound_expr(bound_expr);
-                    let bounds_slice = self.arena.alloc_type_bound_slice(bounds);
-
-                    let hir_id = self.next_hir_id();
+                    let bound_expr = self.lower_expr(children[1]);
+                    let bound_ref = self.arena.alloc_expr(bound_expr);
                     result.constraints.push(ClauseConstraint {
-                        hir_id,
-                        kind: ClauseConstraintKind::Bound(name, bounds_slice),
+                        hir_id: self.next_hir_id(),
+                        kind: ClauseConstraintKind::Requires(bound_ref),
                         span,
                     });
                 }
 
-                // optional clause: `.name : type = default`
-                // We treat it as a predicate constraint for now.
+                // optional clause: `.a : T = default`  →  ClauseParamKind::Optional(a, T)
                 NodeKind::OptionalDeclClause => {
-                    let hir_id = self.next_hir_id();
                     let children = self.ast.get_children(clause_idx);
                     if children.len() >= 2 {
                         let name = self.node_to_ident(children[0]);
-                        result.constraints.push(ClauseConstraint {
-                            hir_id,
-                            kind: ClauseConstraintKind::Param(name),
+                        let ty_expr = self.lower_expr(children[1]);
+                        let ty_ref = self.arena.alloc_expr(ty_expr);
+                        result.params.push(ClauseParam {
+                            hir_id: self.next_hir_id(),
+                            kind: ClauseParamKind::Optional(name.clone(), ty_ref),
+                            name,
                             span,
                         });
                     }
                 }
 
-                // variadic clause: `...name : type`
+                // variadic clause: `...a : T`  →  ClauseParamKind::Varadic(a, T)
                 NodeKind::VarargDeclClause => {
-                    let hir_id = self.next_hir_id();
                     let children = self.ast.get_children(clause_idx);
-                    if children.len() >= 1 {
+                    if children.len() >= 2 {
                         let name = self.node_to_ident(children[0]);
-                        result.constraints.push(ClauseConstraint {
-                            hir_id,
-                            kind: ClauseConstraintKind::Param(name),
+                        let ty_expr = self.lower_expr(children[1]);
+                        let ty_ref = self.arena.alloc_expr(ty_expr);
+                        result.params.push(ClauseParam {
+                            hir_id: self.next_hir_id(),
+                            kind: ClauseParamKind::Varadic(name.clone(), ty_ref),
+                            name,
                             span,
                         });
                     }
                 }
 
-                // quoted clause
+                // quoted clause  →  ClauseParamKind::Quote(name, expr)
                 NodeKind::QuoteDeclClause => {
-                    let hir_id = self.next_hir_id();
                     let children = self.ast.get_children(clause_idx);
-                    if children.len() >= 1 {
-                        let inner_expr = self.lower_expr(children[0]);
+                    if !children.is_empty() {
+                        let (name, expr_node) = if children.len() >= 2 {
+                            (self.node_to_ident(children[0]), children[1])
+                        } else {
+                            (Ident::new(Symbol::intern("_"), span), children[0])
+                        };
+                        let inner_expr = self.lower_expr(expr_node);
                         let inner_ref = self.arena.alloc_expr(inner_expr);
-                        result.constraints.push(ClauseConstraint {
-                            hir_id,
-                            kind: ClauseConstraintKind::Predicate(inner_ref),
+                        result.params.push(ClauseParam {
+                            hir_id: self.next_hir_id(),
+                            kind: ClauseParamKind::Quote(name.clone(), inner_ref),
+                            name,
                             span,
                         });
                     }
@@ -164,87 +169,5 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         }
 
         result
-    }
-
-    /// Lower a trait-bound expression (the RHS of `: Show` or `:- Iterator`)
-    /// into a list of `TraitBound`s.
-    ///
-    /// Currently handles simple identifiers and paths. Complex bounds can be
-    /// extended here later.
-    fn lower_trait_bound_expr(&mut self, node: NodeIndex) -> Vec<TraitBound<'hir>> {
-        if node == 0 {
-            return Vec::new();
-        }
-
-        let Some(kind) = self.ast.get_node_kind(node) else {
-            return Vec::new();
-        };
-        let span = self.ast.get_span(node).unwrap_or(Span::default());
-
-        match kind {
-            NodeKind::Id => {
-                let name = self.source_text(node);
-                let ident = Ident::new(Symbol::intern(&name), span);
-                let seg = PathSegment { ident, args: &[] };
-                let segments = self.arena.alloc_path_segment_slice(vec![seg]);
-                let path = Path { segments, span };
-                vec![TraitBound {
-                    kind: TraitBoundKind::Trait(path),
-                    span,
-                }]
-            }
-
-            NodeKind::Projection => {
-                let path = self.lower_path_from_select(node);
-                vec![TraitBound {
-                    kind: TraitBoundKind::Trait(path),
-                    span,
-                }]
-            }
-
-            NodeKind::NormalFormApplication => {
-                // e.g. `Iterator<Item = T>` — for now lower as a simple path
-                let children = self.ast.get_children(node);
-                if !children.is_empty() {
-                    let base = children[0];
-                    let path = self.lower_expr_as_path(base);
-                    vec![TraitBound {
-                        kind: TraitBoundKind::Trait(path),
-                        span,
-                    }]
-                } else {
-                    Vec::new()
-                }
-            }
-
-            // Trait intersection `A + B` lowered as multiple bounds
-            NodeKind::Add => {
-                let children = self.ast.get_children(node);
-                if children.len() >= 2 {
-                    let mut bounds = self.lower_trait_bound_expr(children[0]);
-                    bounds.extend(self.lower_trait_bound_expr(children[1]));
-                    bounds
-                } else {
-                    Vec::new()
-                }
-            }
-
-            _ => {
-                // Fallback: try to interpret as a single-segment path
-                let name = self.source_text(node);
-                if !name.is_empty() {
-                    let ident = Ident::new(Symbol::intern(&name), span);
-                    let seg = PathSegment { ident, args: &[] };
-                    let segments = self.arena.alloc_path_segment_slice(vec![seg]);
-                    let path = Path { segments, span };
-                    vec![TraitBound {
-                        kind: TraitBoundKind::Trait(path),
-                        span,
-                    }]
-                } else {
-                    Vec::new()
-                }
-            }
-        }
     }
 }

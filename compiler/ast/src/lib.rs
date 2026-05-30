@@ -520,6 +520,8 @@ pub enum NodeKind {
 
     // others
     FileScope, // N
+    // pub term
+    Pub, // a
     // ^expr definition
     Attribute, // a, b
     // keyword modifier -> AttributeSetTrue("flurry_kw_...", definition)
@@ -674,6 +676,7 @@ impl NodeKind {
             | ProjectionAllPath
             | SuperPath
             | PackagePath
+            | Pub
             | ExtendArg => NodeType::SingleChild,
 
             // Double children (a, b)

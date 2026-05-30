@@ -2,7 +2,26 @@
 
 use crate::ids::ScopeId;
 
-// ── ImportKind ───────────────────────────────────────────────────────────────
+/// A single segment in a `use` path prefix.
+///
+/// Using a typed enum instead of `String` avoids treating the keyword `super`
+/// as an opaque sentinel value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathSegment {
+    /// The `super` keyword — step up to the parent module.
+    Super,
+    /// An ordinary identifier segment.
+    Name(String),
+}
+
+impl std::fmt::Display for PathSegment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PathSegment::Super => f.write_str("super"),
+            PathSegment::Name(n) => f.write_str(n),
+        }
+    }
+}
 
 /// The shape of a `use` import.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,8 +48,6 @@ pub enum ImportKind {
     },
 }
 
-// ── ImportDirective ──────────────────────────────────────────────────────────
-
 /// A not-yet-resolved `use` statement.
 ///
 /// The scanner collects these; the resolver processes them in a fixpoint loop.
@@ -42,15 +59,18 @@ pub struct ImportDirective {
     pub kind: ImportKind,
     /// The full path segments leading to the imported item, *excluding* the
     /// final name / glob / multi selector.
-    /// e.g. for `use a.b.c`, this would be `["a", "b"]` and the name `"c"` is
-    /// in `kind`.
-    pub path_segments: Vec<String>,
+    /// e.g. for `use a.b.c`, this would be `[Name("a"), Name("b")]` and the
+    /// name `"c"` is in `kind`.
+    pub path_segments: Vec<PathSegment>,
     /// Source span for diagnostics.
     pub span: rustc_span::Span,
     /// The AST node index of the original `use` statement.
     pub ast_node: ast::NodeIndex,
     /// The VFS file that contains this import.
     pub file_id: vfs::FileId,
+    /// Whether this import is a re-export (`pub use …`); the name becomes part
+    /// of the owning scope's public API.
+    pub is_reexport: bool,
     /// Whether this import has been resolved.
     pub resolved: bool,
 }
@@ -59,10 +79,11 @@ impl ImportDirective {
     pub fn new(
         owner_scope: ScopeId,
         kind: ImportKind,
-        path_segments: Vec<String>,
+        path_segments: Vec<PathSegment>,
         span: rustc_span::Span,
         ast_node: ast::NodeIndex,
         file_id: vfs::FileId,
+        is_reexport: bool,
     ) -> Self {
         Self {
             owner_scope,
@@ -71,12 +92,11 @@ impl ImportDirective {
             span,
             ast_node,
             file_id,
+            is_reexport,
             resolved: false,
         }
     }
 }
-
-// ── ResolvedImport ───────────────────────────────────────────────────────────
 
 /// A fully resolved import, ready to be "linked" into the target scope's
 /// [`ItemScope`].

@@ -3,8 +3,12 @@
 use ast::{NodeIndex, NodeKind};
 use hir::{
     body::Body,
-    common::{BinOp, Ident, Lit, LitKind, Symbol, UnOp},
-    expr::{Arg, Block, ClosureParam, Expr, ExprKind, FieldExpr, LetStmt, Stmt, StmtKind},
+    common::{BinOp, Ident, Lit, LitKind, Path, PathSegment, Symbol, UnOp},
+    decl::LetDecl,
+    expr::{
+        Arg, Block, ClosureParam, CondictionArm, Expr, ExprKind, FieldExpr, TyParam, TyParamKind,
+    },
+    pattern::{PathExaustiveness, Pattern, PatternArm, PatternKind},
 };
 use rustc_span::Span;
 
@@ -23,7 +27,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         let span = self.ast.get_span(node).unwrap_or(Span::default());
 
         match kind {
-            // ── Literals ─────────────────────────────────────────────────
             NodeKind::Int => {
                 let text = self.source_text(node);
                 let val = text.replace("_", "").parse::<i64>().unwrap_or(0);
@@ -72,8 +75,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                 kind: ExprKind::Undefined,
                 span,
             },
-
-            // ── Identifiers / paths ──────────────────────────────────────
             NodeKind::Id | NodeKind::SelfLower | NodeKind::SelfCap => {
                 let path = self.lower_expr_as_path(node);
                 Expr {
@@ -90,7 +91,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     let field_ident = self.node_to_ident(children[1]);
                     Expr {
                         hir_id: self.next_hir_id(),
-                        kind: ExprKind::Field(base_ref, field_ident),
+                        kind: ExprKind::Projection(base_ref, field_ident),
                         span,
                     }
                 } else {
@@ -103,15 +104,11 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     }
                 }
             }
-
-            // ── Wildcard (type placeholder) ──────────────────────────────
             NodeKind::Wildcard => Expr {
                 hir_id: self.next_hir_id(),
                 kind: ExprKind::TyPlaceholder,
                 span,
             },
-
-            // ── Binary operators ─────────────────────────────────────────
             NodeKind::Add
             | NodeKind::Sub
             | NodeKind::Mul
@@ -141,8 +138,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     self.make_invalid_expr(span)
                 }
             }
-
-            // ── Unary operators ──────────────────────────────────────────
             NodeKind::Negative => {
                 let children = self.ast.get_children(node);
                 if !children.is_empty() {
@@ -171,8 +166,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     self.make_invalid_expr(span)
                 }
             }
-
-            // ── Refer / Deref ────────────────────────────────────────────
             NodeKind::Refer => {
                 let children = self.ast.get_children(node);
                 if !children.is_empty() {
@@ -201,8 +194,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     self.make_invalid_expr(span)
                 }
             }
-
-            // ── ErrorNew ─────────────────────────────────────────────────
             NodeKind::ErrorNew => {
                 let children = self.ast.get_children(node);
                 if !children.is_empty() {
@@ -217,8 +208,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     self.make_invalid_expr(span)
                 }
             }
-
-            // ── Application (function call) ──────────────────────────────
             NodeKind::Application => {
                 let children = self.ast.get_children(node);
                 if children.len() >= 2 {
@@ -226,43 +215,39 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     let callee_ref = self.arena.alloc_expr(callee);
                     let args_node = children[1];
                     let arg_nodes = self.ast.get_multi_child_slice(args_node).unwrap_or(&[]);
-                    let args = self.lower_call_args(arg_nodes);
-                    let args_slice = self.arena.alloc_expr_slice(args);
+                    let args: Vec<Arg<'hir>> = arg_nodes
+                        .iter()
+                        .map(|&n| {
+                            let e = self.lower_expr(n);
+                            Arg::Positional(self.arena.alloc_expr(e))
+                        })
+                        .collect();
+                    let args_slice = self.arena.alloc_arg_slice(args);
                     Expr {
                         hir_id: self.next_hir_id(),
-                        kind: ExprKind::Call(
-                            callee_ref,
-                            // Wrap positional args
-                            self.positional_args(args_slice),
-                        ),
+                        kind: ExprKind::Application(callee_ref, args_slice),
                         span,
                     }
                 } else {
                     self.make_invalid_expr(span)
                 }
             }
-
-            // ── Extended application (e.g. `Struct { ... }`) ─────────────
             NodeKind::ExtendedApplication => {
                 let children = self.ast.get_children(node);
                 if children.len() >= 2 {
-                    let callee = children[0];
-                    let path = self.lower_expr_as_path(callee);
                     let fields_node = children[1];
                     let field_nodes = self.ast.get_multi_child_slice(fields_node).unwrap_or(&[]);
                     let fields = self.lower_field_exprs(field_nodes);
                     let fields_slice = self.arena.alloc_field_expr_slice(fields);
                     Expr {
                         hir_id: self.next_hir_id(),
-                        kind: ExprKind::StructLit(path, fields_slice),
+                        kind: ExprKind::Object(fields_slice),
                         span,
                     }
                 } else {
                     self.make_invalid_expr(span)
                 }
             }
-
-            // ── NormalFormApplication (e.g. `f<T>(args)` → treat as path) ──
             NodeKind::NormalFormApplication => {
                 let path = self.lower_expr_as_path(node);
                 Expr {
@@ -271,8 +256,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     span,
                 }
             }
-
-            // ── Index application `expr[expr]` ──────────────────────────
             NodeKind::IndexApplication => {
                 let children = self.ast.get_children(node);
                 if children.len() >= 2 {
@@ -289,8 +272,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     self.make_invalid_expr(span)
                 }
             }
-
-            // ── Tuple ────────────────────────────────────────────────────
             NodeKind::Tuple => {
                 let children = self.ast.get_children(node);
                 if !children.is_empty() {
@@ -311,8 +292,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     }
                 }
             }
-
-            // ── ListOf (array literal) ───────────────────────────────────
             NodeKind::ListOf => {
                 let children = self.ast.get_children(node);
                 if !children.is_empty() {
@@ -322,19 +301,17 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     let elems_slice = self.arena.alloc_expr_slice(elems);
                     Expr {
                         hir_id: self.next_hir_id(),
-                        kind: ExprKind::Array(elems_slice),
+                        kind: ExprKind::List(elems_slice),
                         span,
                     }
                 } else {
                     Expr {
                         hir_id: self.next_hir_id(),
-                        kind: ExprKind::Array(&[]),
+                        kind: ExprKind::List(&[]),
                         span,
                     }
                 }
             }
-
-            // ── Block ────────────────────────────────────────────────────
             NodeKind::Block
             | NodeKind::DoBlock
             | NodeKind::UnsafeBlock
@@ -348,8 +325,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     span,
                 }
             }
-
-            // ── If statement / expression ────────────────────────────────
             NodeKind::IfStatement => {
                 let children = self.ast.get_children(node);
                 if children.len() >= 2 {
@@ -372,8 +347,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     self.make_invalid_expr(span)
                 }
             }
-
-            // ── Match expression ─────────────────────────────────────────
             NodeKind::PostMatch => {
                 let children = self.ast.get_children(node);
                 if children.len() >= 2 {
@@ -392,8 +365,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     self.make_invalid_expr(span)
                 }
             }
-
-            // ── Assign ──────────────────────────────────────────────────
             NodeKind::Assign => {
                 let children = self.ast.get_children(node);
                 if children.len() >= 2 {
@@ -410,8 +381,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     self.make_invalid_expr(span)
                 }
             }
-
-            // ── Compound assignment ──────────────────────────────────────
             NodeKind::AddAssign
             | NodeKind::SubAssign
             | NodeKind::MulAssign
@@ -438,8 +407,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     self.make_invalid_expr(span)
                 }
             }
-
-            // ── Return / Break / Continue ────────────────────────────────
             NodeKind::ReturnStatement => {
                 let children = self.ast.get_children(node);
                 let val = if !children.is_empty() && children[0] != 0 {
@@ -448,10 +415,35 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                 } else {
                     None
                 };
-                Expr {
+                let return_expr = Expr {
                     hir_id: self.next_hir_id(),
                     kind: ExprKind::Return(val),
                     span,
+                };
+                // while guard: `return val while guard`  →  `if guard { return val }`
+                if children.len() >= 2 && children[1] != 0 {
+                    self.wrap_with_guard(children[1], return_expr, span)
+                } else {
+                    return_expr
+                }
+            }
+            NodeKind::ResumeStatement => {
+                let children = self.ast.get_children(node);
+                let val = if !children.is_empty() && children[0] != 0 {
+                    let e = self.lower_expr(children[0]);
+                    Some(self.arena.alloc_expr(e) as &_)
+                } else {
+                    None
+                };
+                let resume_expr = Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Resume(val),
+                    span,
+                };
+                if children.len() >= 2 && children[1] != 0 {
+                    self.wrap_with_guard(children[1], resume_expr, span)
+                } else {
+                    resume_expr
                 }
             }
             NodeKind::BreakStatement => {
@@ -461,10 +453,16 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                 } else {
                     Ident::new(Symbol::intern(""), span)
                 };
-                Expr {
+                let break_expr = Expr {
                     hir_id: self.next_hir_id(),
                     kind: ExprKind::Break(label),
                     span,
+                };
+                // while guard: `break :l while guard`  →  `if guard { break :l }`
+                if children.len() >= 2 && children[1] != 0 {
+                    self.wrap_with_guard(children[1], break_expr, span)
+                } else {
+                    break_expr
                 }
             }
             NodeKind::ContinueStatement => {
@@ -474,14 +472,18 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                 } else {
                     Ident::new(Symbol::intern(""), span)
                 };
-                Expr {
+                let cont_expr = Expr {
                     hir_id: self.next_hir_id(),
                     kind: ExprKind::Continue(label),
                     span,
+                };
+                // while guard: `continue :l while guard`  →  `if guard { continue :l }`
+                if children.len() >= 2 && children[1] != 0 {
+                    self.wrap_with_guard(children[1], cont_expr, span)
+                } else {
+                    cont_expr
                 }
             }
-
-            // ── TypeCast `expr as type` ──────────────────────────────────
             NodeKind::TypeCast => {
                 let children = self.ast.get_children(node);
                 if children.len() >= 2 {
@@ -498,11 +500,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     self.make_invalid_expr(span)
                 }
             }
-
-            // ── Lambda ───────────────────────────────────────────────────
             NodeKind::Lambda => self.lower_lambda_expr(node, span),
-
-            // ── PostLambda (trailing closure) ────────────────────────────
             NodeKind::PostLambda => {
                 let children = self.ast.get_children(node);
                 if children.len() >= 2 {
@@ -512,24 +510,16 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     let callee_ref = self.arena.alloc_expr(callee);
                     let lambda_ref = self.arena.alloc_expr(lambda);
                     let arg = Arg::Positional(lambda_ref);
-                    let args = vec![arg];
-                    let args_slice: &[Arg<'hir>] = unsafe {
-                        // We need to allocate Arg slices — for now, use a simple
-                        // vec-to-slice through the expression arena pattern.
-                        // TODO: add an Arg arena to HirArena
-                        std::mem::transmute::<&[Arg<'_>], &'hir [Arg<'hir>]>(Vec::leak(args))
-                    };
+                    let args_slice = self.arena.alloc_arg_slice(vec![arg]);
                     Expr {
                         hir_id: self.next_hir_id(),
-                        kind: ExprKind::Call(callee_ref, args_slice),
+                        kind: ExprKind::Application(callee_ref, args_slice),
                         span,
                     }
                 } else {
                     self.make_invalid_expr(span)
                 }
             }
-
-            // ── Type expressions (types are first-class in Flurry) ───────
             NodeKind::PointerType => {
                 let children = self.ast.get_children(node);
                 if !children.is_empty() {
@@ -559,26 +549,22 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                 }
             }
             NodeKind::FnType => self.lower_fn_type_expr(node, span),
-
-            // ── Arrow type (`A -> B`, used in type signatures) ───────────
             NodeKind::Arrow => {
                 let children = self.ast.get_children(node);
                 if children.len() >= 2 {
                     let input = self.lower_expr(children[0]);
                     let output = self.lower_expr(children[1]);
-                    let inputs = self.arena.alloc_expr_slice(vec![input]);
+                    let input_ref = self.arena.alloc_expr(input);
                     let output_ref = self.arena.alloc_expr(output);
                     Expr {
                         hir_id: self.next_hir_id(),
-                        kind: ExprKind::TyFn(inputs, output_ref),
+                        kind: ExprKind::TyFnArrow(input_ref, output_ref),
                         span,
                     }
                 } else {
                     self.make_invalid_expr(span)
                 }
             }
-
-            // ── Fallback for expression-statements ───────────────────────
             NodeKind::ExprStatement | NodeKind::InlineStatement => {
                 let children = self.ast.get_children(node);
                 if !children.is_empty() {
@@ -588,15 +574,498 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                 }
             }
 
-            // ── Anything else: emit an error and produce an invalid node ─
+            // ── Desugaring: bool matches ─────────────────────────────────
+            // `a matches b`  →  `match a { b => true, _ => false }`
+            NodeKind::BoolMatches => {
+                let children = self.ast.get_children(node);
+                if children.len() < 2 {
+                    return self.make_invalid_expr(span);
+                }
+                let scrutinee = self.lower_expr(children[0]);
+                let scrutinee_ref = self.arena.alloc_expr(scrutinee);
+                let pat = self.lower_pattern(children[1]);
+
+                let true_expr = self.make_lit_expr(LitKind::Bool(true), span);
+                let true_ref = self.arena.alloc_expr(true_expr);
+                let arm_true = PatternArm {
+                    hir_id: self.next_hir_id(),
+                    pat,
+                    body: true_ref,
+                    span,
+                };
+
+                let false_expr = self.make_lit_expr(LitKind::Bool(false), span);
+                let false_ref = self.arena.alloc_expr(false_expr);
+                let wild_pat = self.make_wild_pattern(span);
+                let arm_false = PatternArm {
+                    hir_id: self.next_hir_id(),
+                    pat: wild_pat,
+                    body: false_ref,
+                    span,
+                };
+
+                let arms_slice = self.arena.alloc_arm_slice([arm_true, arm_false]);
+                Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Match(scrutinee_ref, arms_slice),
+                    span,
+                }
+            }
+
+            // ── Desugaring: if-is-match ──────────────────────────────────
+            // `if a is b { c } else { d }`  →  `match a { b => c, _ => d }`
+            NodeKind::IfIsMatch => {
+                let children = self.ast.get_children(node);
+                if children.len() < 3 {
+                    return self.make_invalid_expr(span);
+                }
+                let scrutinee = self.lower_expr(children[0]);
+                let scrutinee_ref = self.arena.alloc_expr(scrutinee);
+                let pat = self.lower_pattern(children[1]);
+
+                let then_expr = self.lower_expr(children[2]);
+                let then_ref = self.arena.alloc_expr(then_expr);
+                let arm_then = PatternArm {
+                    hir_id: self.next_hir_id(),
+                    pat,
+                    body: then_ref,
+                    span,
+                };
+
+                let else_expr = if children.len() >= 4 && children[3] != 0 {
+                    self.lower_expr(children[3])
+                } else {
+                    Expr {
+                        hir_id: self.next_hir_id(),
+                        kind: ExprKind::Tuple(&[]),
+                        span,
+                    }
+                };
+                let else_ref = self.arena.alloc_expr(else_expr);
+                let wild_pat = self.make_wild_pattern(span);
+                let arm_else = PatternArm {
+                    hir_id: self.next_hir_id(),
+                    pat: wild_pat,
+                    body: else_ref,
+                    span,
+                };
+
+                let arms_slice = self.arena.alloc_arm_slice([arm_then, arm_else]);
+                Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Match(scrutinee_ref, arms_slice),
+                    span,
+                }
+            }
+
+            // ── Desugaring: if-match (same as post-match) ────────────────
+            // `if a match { b => c, … }`  →  `match a { b => c, … }`
+            NodeKind::IfMatch => {
+                let children = self.ast.get_children(node);
+                if children.len() < 2 {
+                    return self.make_invalid_expr(span);
+                }
+                let scrutinee = self.lower_expr(children[0]);
+                let scrutinee_ref = self.arena.alloc_expr(scrutinee);
+                let arm_nodes = self.ast.get_multi_child_slice(children[1]).unwrap_or(&[]);
+                let arms: Vec<_> = arm_nodes.iter().map(|&n| self.lower_match_arm(n)).collect();
+                let arms_slice = self.arena.alloc_arm_slice(arms);
+                Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Match(scrutinee_ref, arms_slice),
+                    span,
+                }
+            }
+
+            // ── WhenStatement ────────────────────────────────────────────
+            // `when { cond1 => body1, cond2 => body2, … }`
+            NodeKind::WhenStatement => {
+                let children = self.ast.get_children(node);
+                let arm_nodes: &[NodeIndex] = if children.is_empty() {
+                    &[]
+                } else {
+                    self.ast.get_multi_child_slice(children[0]).unwrap_or(&[])
+                };
+                let cond_arms: Vec<CondictionArm<'hir>> = arm_nodes
+                    .iter()
+                    .map(|&n| {
+                        let arm_span = self.ast.get_span(n).unwrap_or(span);
+                        let ac = self.ast.get_children(n);
+                        if ac.len() >= 2 {
+                            let cond = self.lower_expr(ac[0]);
+                            let body = self.lower_expr(ac[1]);
+                            let cond_ref = self.arena.alloc_expr(cond);
+                            let body_ref = self.arena.alloc_expr(body);
+                            CondictionArm {
+                                hir_id: self.next_hir_id(),
+                                cond: cond_ref,
+                                body: body_ref,
+                                span: arm_span,
+                            }
+                        } else {
+                            let inv1 = self.make_invalid_expr(arm_span);
+                            let inv2 = self.make_invalid_expr(arm_span);
+                            let r1 = self.arena.alloc_expr(inv1);
+                            let r2 = self.arena.alloc_expr(inv2);
+                            CondictionArm {
+                                hir_id: self.next_hir_id(),
+                                cond: r1,
+                                body: r2,
+                                span: arm_span,
+                            }
+                        }
+                    })
+                    .collect();
+                let arms_slice = self.arena.alloc_cond_arm_slice(cond_arms);
+                Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::When(arms_slice),
+                    span,
+                }
+            }
+
+            // ── Desugaring: while ────────────────────────────────────────
+            // `while :label? cond { body }`
+            //   →  `loop { if !cond { break :label }; body }`
+            NodeKind::WhileStatement => {
+                let children = self.ast.get_children(node);
+                if children.len() < 3 {
+                    return self.make_invalid_expr(span);
+                }
+                let label = if children[0] != 0 {
+                    self.node_to_ident(children[0])
+                } else {
+                    Ident::new(Symbol::intern(""), span)
+                };
+
+                // if !cond { break :label }
+                let cond = self.lower_expr(children[1]);
+                let cond_ref = self.arena.alloc_expr(cond);
+                let not_cond = Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Unary(UnOp::Not, cond_ref),
+                    span,
+                };
+                let not_cond_ref = self.arena.alloc_expr(not_cond);
+                let break_expr = Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Break(label),
+                    span,
+                };
+                let break_ref = self.arena.alloc_expr(break_expr);
+                let guard_then = Block {
+                    hir_id: self.next_hir_id(),
+                    stmts: &[],
+                    expr: Some(break_ref),
+                    span,
+                };
+                let guard_then_ref = self.arena.alloc_block(guard_then);
+                let guard_if = Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::If(not_cond_ref, guard_then_ref, None),
+                    span,
+                };
+                let guard_if_ref = self.arena.alloc_expr(guard_if);
+                let guard_semi = Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Semi(guard_if_ref),
+                    span,
+                };
+
+                // body
+                let body_block = self.lower_block(children[2]);
+                let body_block_ref = self.arena.alloc_block(body_block);
+                let body_expr = Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Block(body_block_ref),
+                    span,
+                };
+                let body_expr_ref = self.arena.alloc_expr(body_expr);
+
+                let loop_stmts = self.arena.alloc_expr_slice([guard_semi]);
+                let loop_block = Block {
+                    hir_id: self.next_hir_id(),
+                    stmts: loop_stmts,
+                    expr: Some(body_expr_ref),
+                    span,
+                };
+                let loop_block_ref = self.arena.alloc_block(loop_block);
+                Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Loop(loop_block_ref),
+                    span,
+                }
+            }
+
+            // ── Desugaring: while-is-match ───────────────────────────────
+            // `while :label? scrutinee is pat { body }`
+            //   →  `loop { match scrutinee { pat => body, _ => break :label } }`
+            NodeKind::WhileIsMatch => {
+                let children = self.ast.get_children(node);
+                if children.len() < 4 {
+                    return self.make_invalid_expr(span);
+                }
+                let label = if children[0] != 0 {
+                    self.node_to_ident(children[0])
+                } else {
+                    Ident::new(Symbol::intern(""), span)
+                };
+
+                let scrutinee = self.lower_expr(children[1]);
+                let scrutinee_ref = self.arena.alloc_expr(scrutinee);
+                let pat = self.lower_pattern(children[2]);
+
+                let body_expr = self.lower_expr(children[3]);
+                let body_ref = self.arena.alloc_expr(body_expr);
+                let arm_body = PatternArm {
+                    hir_id: self.next_hir_id(),
+                    pat,
+                    body: body_ref,
+                    span,
+                };
+
+                let break_expr = Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Break(label),
+                    span,
+                };
+                let break_ref = self.arena.alloc_expr(break_expr);
+                let wild_pat = self.make_wild_pattern(span);
+                let arm_break = PatternArm {
+                    hir_id: self.next_hir_id(),
+                    pat: wild_pat,
+                    body: break_ref,
+                    span,
+                };
+
+                let arms_slice = self.arena.alloc_arm_slice([arm_body, arm_break]);
+                let match_expr = Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Match(scrutinee_ref, arms_slice),
+                    span,
+                };
+                let match_ref = self.arena.alloc_expr(match_expr);
+                let loop_block = Block {
+                    hir_id: self.next_hir_id(),
+                    stmts: &[],
+                    expr: Some(match_ref),
+                    span,
+                };
+                let loop_block_ref = self.arena.alloc_block(loop_block);
+                Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Loop(loop_block_ref),
+                    span,
+                }
+            }
+
+            // ── Desugaring: while-match ──────────────────────────────────
+            // `while :label? scrutinee match { arms… }`
+            //   →  `loop { match scrutinee { arms… } }`
+            NodeKind::WhileMatch => {
+                let children = self.ast.get_children(node);
+                if children.len() < 3 {
+                    return self.make_invalid_expr(span);
+                }
+                let scrutinee = self.lower_expr(children[1]);
+                let scrutinee_ref = self.arena.alloc_expr(scrutinee);
+                let arm_nodes = self.ast.get_multi_child_slice(children[2]).unwrap_or(&[]);
+                let arms: Vec<_> = arm_nodes.iter().map(|&n| self.lower_match_arm(n)).collect();
+                let arms_slice = self.arena.alloc_arm_slice(arms);
+                let match_expr = Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Match(scrutinee_ref, arms_slice),
+                    span,
+                };
+                let match_ref = self.arena.alloc_expr(match_expr);
+                let loop_block = Block {
+                    hir_id: self.next_hir_id(),
+                    stmts: &[],
+                    expr: Some(match_ref),
+                    span,
+                };
+                let loop_block_ref = self.arena.alloc_block(loop_block);
+                Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Loop(loop_block_ref),
+                    span,
+                }
+            }
+
+            // ── Desugaring: for ──────────────────────────────────────────
+            // `for :label? pat in iterable { body }`
+            //   →  `{ let __iter__ = iterable.__into_iter__(); loop { match __iter__.__next__() { Some(pat) => body, None => break :label } } }`
+            // Note: `__into_iter__` and `__next__` are placeholder method names.
+            NodeKind::ForStatement => {
+                let children = self.ast.get_children(node);
+                if children.len() < 4 {
+                    return self.make_invalid_expr(span);
+                }
+                let label = if children[0] != 0 {
+                    self.node_to_ident(children[0])
+                } else {
+                    Ident::new(Symbol::intern(""), span)
+                };
+                let pat_node = children[1];
+                let iter_node = children[2];
+                let body_node = children[3];
+
+                // iterable.__into_iter__()
+                let iterable = self.lower_expr(iter_node);
+                let iterable_ref = self.arena.alloc_expr(iterable);
+                let into_iter_ident = Ident::new(Symbol::intern("__into_iter__"), span);
+                let proj = Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Projection(iterable_ref, into_iter_ident),
+                    span,
+                };
+                let proj_ref = self.arena.alloc_expr(proj);
+                let no_args = self.arena.alloc_arg_slice([]);
+                let into_iter_call = Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Application(proj_ref, no_args),
+                    span,
+                };
+                let into_iter_ref = self.arena.alloc_expr(into_iter_call);
+
+                // let __iter__ = iterable.__into_iter__()
+                let iter_ident = Ident::new(Symbol::intern("__iter__"), span);
+                let iter_let = LetDecl {
+                    hir_id: self.next_hir_id(),
+                    name: iter_ident.clone(),
+                    ty: None,
+                    init: Some(into_iter_ref),
+                    span,
+                };
+                let iter_let_ref = self.arena.alloc_let_decl(iter_let);
+                let let_expr = Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Let(iter_let_ref),
+                    span,
+                };
+
+                // __iter__.__next__()
+                let iter_seg = PathSegment {
+                    ident: iter_ident,
+                    args: &[],
+                };
+                let iter_segs = self.arena.alloc_path_segment_slice([iter_seg]);
+                let iter_path = Path {
+                    segments: iter_segs,
+                    span,
+                };
+                let iter_path_expr = Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Path(iter_path),
+                    span,
+                };
+                let iter_path_ref = self.arena.alloc_expr(iter_path_expr);
+                let next_ident = Ident::new(Symbol::intern("__next__"), span);
+                let proj_next = Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Projection(iter_path_ref, next_ident),
+                    span,
+                };
+                let proj_next_ref = self.arena.alloc_expr(proj_next);
+                let no_args2 = self.arena.alloc_arg_slice([]);
+                let next_call = Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Application(proj_next_ref, no_args2),
+                    span,
+                };
+                let next_call_ref = self.arena.alloc_expr(next_call);
+
+                // Some(pat) => body
+                let loop_pat = self.lower_pattern(pat_node);
+                let some_path = self.make_single_segment_path("Some", span);
+                let pat_slice = self.arena.alloc_pattern_slice([loop_pat]);
+                let some_pat = Pattern {
+                    hir_id: self.next_hir_id(),
+                    kind: PatternKind::AppTuple(
+                        some_path,
+                        pat_slice,
+                        PathExaustiveness::NonExhaustive,
+                    ),
+                    span,
+                };
+                let body_block = self.lower_block(body_node);
+                let body_block_ref = self.arena.alloc_block(body_block);
+                let body_block_expr = Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Block(body_block_ref),
+                    span,
+                };
+                let body_expr_ref = self.arena.alloc_expr(body_block_expr);
+                let arm_some = PatternArm {
+                    hir_id: self.next_hir_id(),
+                    pat: some_pat,
+                    body: body_expr_ref,
+                    span,
+                };
+
+                // None => break :label
+                let none_path = self.make_single_segment_path("None", span);
+                let none_pat = Pattern {
+                    hir_id: self.next_hir_id(),
+                    kind: PatternKind::Path(none_path),
+                    span,
+                };
+                let break_expr = Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Break(label),
+                    span,
+                };
+                let break_ref = self.arena.alloc_expr(break_expr);
+                let arm_none = PatternArm {
+                    hir_id: self.next_hir_id(),
+                    pat: none_pat,
+                    body: break_ref,
+                    span,
+                };
+
+                let arms_slice = self.arena.alloc_arm_slice([arm_some, arm_none]);
+                let match_expr = Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Match(next_call_ref, arms_slice),
+                    span,
+                };
+                let match_ref = self.arena.alloc_expr(match_expr);
+                let loop_block = Block {
+                    hir_id: self.next_hir_id(),
+                    stmts: &[],
+                    expr: Some(match_ref),
+                    span,
+                };
+                let loop_block_ref = self.arena.alloc_block(loop_block);
+                let loop_expr = Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Loop(loop_block_ref),
+                    span,
+                };
+                let loop_ref = self.arena.alloc_expr(loop_expr);
+
+                // Outer block: { let __iter__ = …; loop { … } }
+                let let_stmts = self.arena.alloc_expr_slice([let_expr]);
+                let outer_block = Block {
+                    hir_id: self.next_hir_id(),
+                    stmts: let_stmts,
+                    expr: Some(loop_ref),
+                    span,
+                };
+                let outer_block_ref = self.arena.alloc_block(outer_block);
+                Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::Block(outer_block_ref),
+                    span,
+                }
+            }
+
             other => {
                 self.emit_unsupported_node(&format!("{:?}", other), span);
                 self.make_invalid_expr(span)
             }
         }
     }
-
-    // ── Block lowering ───────────────────────────────────────────────────────
 
     /// Lower an AST block (or block-like) node into an HIR [`Block`].
     pub fn lower_block(&mut self, node: NodeIndex) -> Block<'hir> {
@@ -656,7 +1125,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
 
     /// Lower a list of statement-level nodes into a Block.
     fn lower_stmts_to_block(&mut self, stmt_nodes: &[NodeIndex], span: Span) -> Block<'hir> {
-        let mut stmts = Vec::new();
+        let mut stmts: Vec<Expr<'hir>> = Vec::new();
         let mut trailing_expr: Option<&'hir Expr<'hir>> = None;
 
         for (i, &stmt_node) in stmt_nodes.iter().enumerate() {
@@ -667,7 +1136,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
             let kind = self.ast.get_node_kind(stmt_node);
 
             match kind {
-                // Item definitions → StmtKind::Item
+                // Item definitions → ExprKind::Item
                 Some(
                     NodeKind::Function
                     | NodeKind::StructDef
@@ -689,61 +1158,55 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                 ) => {
                     let owner_id = self.lower_item_in_block(stmt_node);
                     let stmt_span = self.ast.get_span(stmt_node).unwrap_or(span);
-                    let stmt = Stmt {
+                    stmts.push(Expr {
                         hir_id: self.next_hir_id(),
-                        kind: StmtKind::Item(owner_id),
+                        kind: ExprKind::Item(owner_id),
                         span: stmt_span,
-                    };
-                    stmts.push(stmt);
+                    });
                 }
 
-                // Let / Const declarations → StmtKind::Let
+                // Let / Const declarations → ExprKind::Let
                 Some(NodeKind::LetDecl | NodeKind::ConstDecl) => {
-                    let let_stmt = self.lower_let_stmt(stmt_node);
-                    let let_ref = self.arena.alloc_let_stmt(let_stmt);
+                    let let_decl = self.lower_let_decl(stmt_node);
+                    let let_ref = self.arena.alloc_let_decl(let_decl);
                     let stmt_span = self.ast.get_span(stmt_node).unwrap_or(span);
-                    let stmt = Stmt {
+                    stmts.push(Expr {
                         hir_id: self.next_hir_id(),
-                        kind: StmtKind::Let(let_ref),
+                        kind: ExprKind::Let(let_ref),
                         span: stmt_span,
-                    };
-                    stmts.push(stmt);
+                    });
                 }
 
-                // Use/mod statements → StmtKind::Item (simplified)
+                // Use/mod statements → ExprKind::Item
                 Some(NodeKind::UseStatement | NodeKind::ModStatement) => {
                     let owner_id = self.lower_item_in_block(stmt_node);
                     let stmt_span = self.ast.get_span(stmt_node).unwrap_or(span);
-                    let stmt = Stmt {
+                    stmts.push(Expr {
                         hir_id: self.next_hir_id(),
-                        kind: StmtKind::Item(owner_id),
+                        kind: ExprKind::Item(owner_id),
                         span: stmt_span,
-                    };
-                    stmts.push(stmt);
+                    });
                 }
 
-                // Expression statements
+                // Expression statements → ExprKind::Semi
                 Some(NodeKind::ExprStatement) => {
                     let children = self.ast.get_children(stmt_node);
                     if !children.is_empty() {
                         let expr = self.lower_expr(children[0]);
                         let expr_ref = self.arena.alloc_expr(expr);
                         let stmt_span = self.ast.get_span(stmt_node).unwrap_or(span);
-                        let stmt = Stmt {
+                        stmts.push(Expr {
                             hir_id: self.next_hir_id(),
-                            kind: StmtKind::Semi(expr_ref),
+                            kind: ExprKind::Semi(expr_ref),
                             span: stmt_span,
-                        };
-                        stmts.push(stmt);
+                        });
                     }
                 }
 
                 // Attributes wrapping definitions
                 Some(NodeKind::Attribute | NodeKind::AttributeSetTrue) => {
-                    // Lower the inner definition
                     let children = self.ast.get_children(stmt_node);
                     if children.len() >= 2 {
-                        // children[0] = attribute expr, children[1] = definition
                         let def_node = children[1];
                         let def_kind = self.ast.get_node_kind(def_node);
                         if matches!(
@@ -760,22 +1223,20 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                         ) {
                             let owner_id = self.lower_item_in_block(def_node);
                             let stmt_span = self.ast.get_span(stmt_node).unwrap_or(span);
-                            let stmt = Stmt {
+                            stmts.push(Expr {
                                 hir_id: self.next_hir_id(),
-                                kind: StmtKind::Item(owner_id),
+                                kind: ExprKind::Item(owner_id),
                                 span: stmt_span,
-                            };
-                            stmts.push(stmt);
+                            });
                         } else {
                             let expr = self.lower_expr(def_node);
                             let expr_ref = self.arena.alloc_expr(expr);
                             let stmt_span = self.ast.get_span(stmt_node).unwrap_or(span);
-                            let stmt = Stmt {
+                            stmts.push(Expr {
                                 hir_id: self.next_hir_id(),
-                                kind: StmtKind::Semi(expr_ref),
+                                kind: ExprKind::Semi(expr_ref),
                                 span: stmt_span,
-                            };
-                            stmts.push(stmt);
+                            });
                         }
                     }
                 }
@@ -792,17 +1253,16 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                     let expr = self.lower_expr(stmt_node);
                     let expr_ref = self.arena.alloc_expr(expr);
                     let stmt_span = self.ast.get_span(stmt_node).unwrap_or(span);
-                    let stmt = Stmt {
+                    stmts.push(Expr {
                         hir_id: self.next_hir_id(),
-                        kind: StmtKind::Semi(expr_ref),
+                        kind: ExprKind::Semi(expr_ref),
                         span: stmt_span,
-                    };
-                    stmts.push(stmt);
+                    });
                 }
             }
         }
 
-        let stmts_slice = self.arena.alloc_stmt_slice(stmts);
+        let stmts_slice = self.arena.alloc_expr_slice(stmts);
         Block {
             hir_id: self.next_hir_id(),
             stmts: stmts_slice,
@@ -811,17 +1271,17 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         }
     }
 
-    // ── Let statement ────────────────────────────────────────────────────────
-
-    fn lower_let_stmt(&mut self, node: NodeIndex) -> LetStmt<'hir> {
+    fn lower_let_decl(&mut self, node: NodeIndex) -> LetDecl<'hir> {
         let span = self.ast.get_span(node).unwrap_or(Span::default());
         let children = self.ast.get_children(node);
 
-        // LetDecl / ConstDecl: a, b, c  (pattern, type, init)
-        let pat = if !children.is_empty() && children[0] != 0 {
-            self.lower_pattern(children[0])
+        // LetDecl / ConstDecl: a, b, c  (pattern/name, type, init)
+        // LetDecl.name: Ident — for simple name bindings; complex patterns
+        // are not yet representable in LetDecl (see ambiguities table).
+        let name = if !children.is_empty() && children[0] != 0 {
+            self.node_to_ident(children[0])
         } else {
-            self.make_error_pattern(span)
+            Ident::new(Symbol::intern("_"), span)
         };
 
         let ty = if children.len() > 1 && children[1] != 0 {
@@ -838,61 +1298,50 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
             None
         };
 
-        LetStmt {
+        LetDecl {
             hir_id: self.next_hir_id(),
-            pat,
+            name,
             ty,
             init,
             span,
         }
     }
 
-    // ── Match arm ────────────────────────────────────────────────────────────
-
-    fn lower_match_arm(&mut self, node: NodeIndex) -> hir::expr::Arm<'hir> {
+    fn lower_match_arm(&mut self, node: NodeIndex) -> PatternArm<'hir> {
         let span = self.ast.get_span(node).unwrap_or(Span::default());
         let children = self.ast.get_children(node);
 
         // CaseArm: a, b  (pattern, body)
-        let (pat, guard, body) = if children.len() >= 2 {
-            let pat = self.lower_pattern(children[0]);
-
-            // Check if pattern has an IfGuard
-            let (final_pat, guard) =
-                if self.ast.get_node_kind(children[0]) == Some(NodeKind::IfGuardPattern) {
-                    let guard_children = self.ast.get_children(children[0]);
-                    if guard_children.len() >= 2 {
-                        let inner_pat = self.lower_pattern(guard_children[0]);
-                        let guard_expr = self.lower_expr(guard_children[1]);
-                        let guard_ref = self.arena.alloc_expr(guard_expr);
-                        (inner_pat, Some(guard_ref as &_))
-                    } else {
-                        (pat, None)
-                    }
+        let (pat, body) = if children.len() >= 2 {
+            // Strip IfGuard wrapper — guards not yet representable in PatternArm
+            let pat_node = children[0];
+            let pat = if self.ast.get_node_kind(pat_node) == Some(NodeKind::IfGuardPattern) {
+                let guard_children = self.ast.get_children(pat_node);
+                if !guard_children.is_empty() {
+                    self.lower_pattern(guard_children[0])
                 } else {
-                    (pat, None)
-                };
-
+                    self.lower_pattern(pat_node)
+                }
+            } else {
+                self.lower_pattern(pat_node)
+            };
             let body = self.lower_expr(children[1]);
             let body_ref = self.arena.alloc_expr(body);
-            (final_pat, guard, body_ref)
+            (pat, body_ref)
         } else {
             let pat = self.make_error_pattern(span);
             let body = self.make_invalid_expr(span);
             let body_ref = self.arena.alloc_expr(body);
-            (pat, None, body_ref as &_)
+            (pat, body_ref as &_)
         };
 
-        hir::expr::Arm {
+        PatternArm {
             hir_id: self.next_hir_id(),
             pat,
-            guard,
             body,
             span,
         }
     }
-
-    // ── Lambda ───────────────────────────────────────────────────────────────
 
     fn lower_lambda_expr(&mut self, node: NodeIndex, span: Span) -> Expr<'hir> {
         // Lambda: a, b, N  (return_type, body, params)
@@ -974,8 +1423,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         }
     }
 
-    // ── FnType expression ────────────────────────────────────────────────────
-
     fn lower_fn_type_expr(&mut self, node: NodeIndex, span: Span) -> Expr<'hir> {
         // FnType: flags_u32, abi_node, N  (modifier_flags, abi_str_node, parameter_types)
         let children = self.ast.get_children(node);
@@ -989,47 +1436,23 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
 
         let param_nodes = self.ast.get_multi_child_slice(params_multi).unwrap_or(&[]);
 
-        // The last parameter type is the return type (by convention in fn type)
-        if param_nodes.is_empty() {
-            return Expr {
-                hir_id: self.next_hir_id(),
-                kind: ExprKind::TyFn(&[], self.arena.alloc_expr(self.make_invalid_expr(span))),
-                span,
-            };
-        }
+        // Lower each parameter type (including return type as the last entry)
+        // as a `TyParamKind::Positional`. By convention, the last TyParam is the return type.
+        let ty_params: Vec<TyParam<'hir>> = param_nodes
+            .iter()
+            .map(|&n| {
+                let ty_expr = self.lower_expr(n);
+                let ty_ref = self.arena.alloc_expr(ty_expr);
+                TyParam::new(self.next_hir_id(), TyParamKind::Positional(ty_ref), span)
+            })
+            .collect();
 
-        let (param_types, ret_node) = param_nodes.split_at(param_nodes.len().saturating_sub(1));
-        let inputs: Vec<_> = param_types.iter().map(|&n| self.lower_expr(n)).collect();
-        let inputs_slice = self.arena.alloc_expr_slice(inputs);
-
-        let output = if !ret_node.is_empty() {
-            self.lower_expr(ret_node[0])
-        } else {
-            self.make_invalid_expr(span)
-        };
-        let output_ref = self.arena.alloc_expr(output);
-
+        let params_slice = self.arena.alloc_ty_param_slice(ty_params);
         Expr {
             hir_id: self.next_hir_id(),
-            kind: ExprKind::TyFn(inputs_slice, output_ref),
+            kind: ExprKind::TyFn(params_slice),
             span,
         }
-    }
-
-    // ── Helpers ──────────────────────────────────────────────────────────────
-
-    /// Lower call arguments (positional expressions).
-    fn lower_call_args(&mut self, arg_nodes: &[NodeIndex]) -> Vec<Expr<'hir>> {
-        arg_nodes.iter().map(|&n| self.lower_expr(n)).collect()
-    }
-
-    /// Wrap a slice of expressions as positional `Arg`s.
-    ///
-    /// This leaks the Vec into a `'hir` slice. TODO: add an Arg arena.
-    fn positional_args(&self, exprs: &'hir [Expr<'hir>]) -> &'hir [Arg<'hir>] {
-        let args: Vec<Arg<'hir>> = exprs.iter().map(|e| Arg::Positional(e)).collect();
-        // SAFETY: the arena outlives everything; we leak the vec for now.
-        unsafe { std::mem::transmute::<&[Arg<'_>], &'hir [Arg<'hir>]>(Vec::leak(args)) }
     }
 
     /// Lower field expressions (for struct literals).
@@ -1114,6 +1537,50 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         Expr {
             hir_id: self.next_hir_id(),
             kind: ExprKind::Lit(Lit { kind, span }),
+            span,
+        }
+    }
+
+    /// Create a wildcard pattern `_`.
+    fn make_wild_pattern(&mut self, span: Span) -> Pattern<'hir> {
+        Pattern {
+            hir_id: self.next_hir_id(),
+            kind: PatternKind::Wild,
+            span,
+        }
+    }
+
+    /// Create a single-segment [`Path`] from a bare name string.
+    fn make_single_segment_path(&mut self, name: &str, span: Span) -> Path<'hir> {
+        let ident = Ident::new(Symbol::intern(name), span);
+        let seg = PathSegment { ident, args: &[] };
+        let segs = self.arena.alloc_path_segment_slice([seg]);
+        Path {
+            segments: segs,
+            span,
+        }
+    }
+
+    /// Wrap `inner` in `if guard { inner }` (no else branch).
+    fn wrap_with_guard(
+        &mut self,
+        guard_node: NodeIndex,
+        inner: Expr<'hir>,
+        span: Span,
+    ) -> Expr<'hir> {
+        let guard = self.lower_expr(guard_node);
+        let guard_ref = self.arena.alloc_expr(guard);
+        let inner_ref = self.arena.alloc_expr(inner);
+        let then_block = Block {
+            hir_id: self.next_hir_id(),
+            stmts: &[],
+            expr: Some(inner_ref),
+            span,
+        };
+        let then_ref = self.arena.alloc_block(then_block);
+        Expr {
+            hir_id: self.next_hir_id(),
+            kind: ExprKind::If(guard_ref, then_ref, None),
             span,
         }
     }

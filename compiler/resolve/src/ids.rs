@@ -6,8 +6,6 @@
 
 use std::fmt;
 
-// ── DefId ────────────────────────────────────────────────────────────────────
-
 /// A definition ID – uniquely identifies a name-binding site within a package.
 ///
 /// Every item (function, struct, enum, module, type alias, …), every type
@@ -55,8 +53,6 @@ impl fmt::Display for DefId {
     }
 }
 
-// ── ScopeId ──────────────────────────────────────────────────────────────────
-
 /// Identifies a scope (lexical block) in the scope tree.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ScopeId(u32);
@@ -102,45 +98,6 @@ impl fmt::Display for ScopeId {
     }
 }
 
-// ── ModuleId ─────────────────────────────────────────────────────────────────
-
-/// Identifies a module (file-scope, directory-module, or inline `mod`).
-/// A module always has a corresponding `ScopeId` but the reverse is not true
-/// (e.g. function bodies create scopes but not modules).
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ModuleId(u32);
-
-impl ModuleId {
-    pub const INVALID: ModuleId = ModuleId(u32::MAX);
-
-    #[inline]
-    pub fn new(raw: u32) -> Self {
-        ModuleId(raw)
-    }
-
-    #[inline]
-    pub fn raw(self) -> u32 {
-        self.0
-    }
-
-    #[inline]
-    pub fn index(self) -> usize {
-        self.0 as usize
-    }
-}
-
-impl fmt::Debug for ModuleId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if *self == Self::INVALID {
-            write!(f, "ModuleId(INVALID)")
-        } else {
-            write!(f, "ModuleId({})", self.0)
-        }
-    }
-}
-
-// ── AstNodeRef ───────────────────────────────────────────────────────────────
-
 /// A lightweight reference back to an AST node, so we can connect resolve-time
 /// definitions to their source locations without depending on heavy HIR types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -156,8 +113,6 @@ impl AstNodeRef {
         Self { file, node }
     }
 }
-
-// ── DefIdGen ─────────────────────────────────────────────────────────────────
 
 /// Monotonic allocator for [`DefId`]s.
 pub struct DefIdGen {
@@ -186,8 +141,6 @@ impl Default for DefIdGen {
         Self::new()
     }
 }
-
-// ── ScopeIdGen ───────────────────────────────────────────────────────────────
 
 /// Monotonic allocator for [`ScopeId`]s.
 pub struct ScopeIdGen {

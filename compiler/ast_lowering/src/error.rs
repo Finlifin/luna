@@ -6,8 +6,6 @@
 use diagnostic::{DiagnosticBuilder, DiagnosticContext, FlurryError};
 use rustc_span::{BytePos, Span};
 
-// ── Error codes ──────────────────────────────────────────────────────────────
-//
 // Lowering errors use the E2xxx range:
 //   E2001  – unsupported AST node during lowering
 //   E2002  – invalid AST structure (missing expected children)
