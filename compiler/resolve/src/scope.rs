@@ -6,6 +6,8 @@
 
 use std::fmt;
 
+use symbol::Symbol;
+
 use crate::ids::{DefId, ScopeId};
 use crate::item_scope::ItemScope;
 
@@ -39,7 +41,7 @@ pub struct Scope {
     /// Parent scope (`None` only for the root).
     pub parent: Option<ScopeId>,
     /// Human-readable name (e.g. module name). `None` for anonymous scopes.
-    pub name: Option<String>,
+    pub name: Option<Symbol>,
     /// The DefId of the item that opened this scope (e.g. the function, module, struct…).
     pub owner_def: DefId,
     /// Whether this scope is *ordered* (i.e. names must be declared before use,
@@ -58,7 +60,7 @@ impl Scope {
         id: ScopeId,
         kind: ScopeKind,
         parent: Option<ScopeId>,
-        name: Option<String>,
+        name: Option<Symbol>,
         owner_def: DefId,
         ordered: bool,
     ) -> Self {

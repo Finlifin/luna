@@ -71,7 +71,9 @@ impl Ast {
         node_index
     }
 
-    /// 获取节点的子节点
+    /// 获取节点的子节点，切片的长度不代表子节点的数量，子节点的真正数量由节点类型决定，
+    /// 检查children长度的行为没有意义。
+    /// 子节点位于切片的前 N 个元素
     pub fn get_children(&self, node_index: NodeIndex) -> &[NodeIndex] {
         if node_index == 0 || node_index > self.nodes.len() as NodeIndex {
             return &[];
@@ -522,6 +524,8 @@ pub enum NodeKind {
     FileScope, // N
     // pub term
     Pub, // a
+    // private term
+    Private, // a
     // ^expr definition
     Attribute, // a, b
     // keyword modifier -> AttributeSetTrue("flurry_kw_...", definition)
@@ -531,7 +535,7 @@ pub enum NodeKind {
     // optional_arg -> .id = expr
     OptionalArg, // a, b
     // extend_arg -> ... expr
-    ExtendArg, // a
+    ExpandArg, // a
 }
 
 // FnType modifier flags (packed into a u32 stored as children[0]).
@@ -677,7 +681,8 @@ impl NodeKind {
             | SuperPath
             | PackagePath
             | Pub
-            | ExtendArg => NodeType::SingleChild,
+            | Private
+            | ExpandArg => NodeType::SingleChild,
 
             // Double children (a, b)
             LiteralExtension

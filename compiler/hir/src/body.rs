@@ -6,9 +6,9 @@
 
 use rustc_span::Span;
 
+use crate::Ident;
 pub use crate::hir_id::BodyId;
 use crate::hir_id::HirId;
-use crate::pattern::Pattern;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Body<'hir> {
@@ -19,7 +19,7 @@ pub struct Body<'hir> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Param<'hir> {
     pub hir_id: HirId,
-    pub pat: Pattern<'hir>,
+    pub name: Ident,
     pub ty: Option<&'hir super::expr::Expr<'hir>>,
     pub span: Span,
 }

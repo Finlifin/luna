@@ -3,12 +3,15 @@ use rustc_span::BytePos;
 use super::error::*;
 use ast::*;
 use diagnostic::{DiagnosticContext, FlurryError};
-use lex::{Token, TokenKind};
+use lex::{Symbol, Token, TokenKind};
 
 // hand-write peg parser
 pub struct Parser<'a> {
     pub(crate) source_map: &'a rustc_span::SourceMap,
     pub(crate) tokens: Vec<Token>,
+    /// Map from token index to interned [`Symbol`]; only identifier tokens
+    /// have entries.
+    pub(crate) symbols: std::collections::HashMap<usize, Symbol>,
     pub(crate) ast: Ast,
     pub(crate) cursor: usize,
     pub(crate) cursor_stack: Vec<usize>,
@@ -17,15 +20,17 @@ pub struct Parser<'a> {
     errors: Vec<ParseError>,
 }
 
-impl Parser<'_> {
+impl<'a> Parser<'a> {
     pub fn new(
-        source_map: &rustc_span::SourceMap,
+        source_map: &'a rustc_span::SourceMap,
         tokens: Vec<Token>,
+        symbols: std::collections::HashMap<usize, Symbol>,
         start_pos: BytePos,
-    ) -> Parser {
+    ) -> Parser<'a> {
         let mut result = Parser {
             source_map,
             tokens,
+            symbols,
             cursor: 0,
             cursor_stack: Vec::new(),
             errors: Vec::new(),
@@ -214,6 +219,17 @@ impl Parser<'_> {
         } else {
             rustc_span::DUMMY_SP
         }
+    }
+
+    /// Return the pre-interned [`Symbol`] for the next token.
+    ///
+    /// Meaningful only when the next token has kind [`lex::TokenKind::Id`];
+    /// returns the empty-string symbol for non-identifier tokens.
+    pub fn next_token_symbol(&self) -> Symbol {
+        self.symbols
+            .get(&(self.cursor + 1))
+            .copied()
+            .unwrap_or_else(|| Symbol::invalid())
     }
 
     pub fn current_degree(&self) -> usize {

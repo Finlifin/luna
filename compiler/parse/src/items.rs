@@ -5,7 +5,6 @@ use ast::*;
 use lex::TokenKind;
 
 impl Parser<'_> {
-    // ── Shared declarative-form helpers ──────────────────────────────────
     // These are used by both `try_param`, `try_clause`, and `try_param_type`.
 
     /// Parse `...id : type` and build a node of `kind` (a, b).
@@ -142,8 +141,6 @@ impl Parser<'_> {
                 .build(&mut p.ast))
         })
     }
-
-    // ── Parameter parsers ────────────────────────────────────────────────
 
     /// parameter -> trivial_param | type_bound_param | optional_param | vararg_param
     ///            | self_param | self_ref_param | comptime_param | error_param

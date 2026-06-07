@@ -5,12 +5,13 @@
 
 use ast::{Ast, NodeIndex, NodeKind};
 use rustc_span::SourceMap;
+use symbol::{PathAnchor, Symbol};
 
 use crate::binding::{Binding, BindingKind, Visibility};
 use crate::error::{ResolveError, ResolveResult};
 use crate::ids::{AstNodeRef, DefId, DefIdGen, ScopeId, ScopeIdGen};
 use crate::impl_directive::{ImplDirective, ImplKind};
-use crate::import::{ImportDirective, ImportKind, PathSegment};
+use crate::import::{ImportDirective, ImportKind};
 use crate::scope::{Scope, ScopeKind, ScopeTree};
 
 /// Context carried through an AST scan of one file.
@@ -32,7 +33,7 @@ pub struct AstScanner<'a> {
     /// Collected impl directives.
     pub impls: &'a mut Vec<ImplDirective>,
     /// Mapping from DefId → name (for debug / dump).
-    pub def_names: &'a mut Vec<(DefId, String)>,
+    pub def_names: &'a mut Vec<(DefId, Symbol)>,
 }
 
 impl<'a> AstScanner<'a> {
@@ -113,9 +114,7 @@ impl<'a> AstScanner<'a> {
     fn strip_pub_wrapper(&self, item: NodeIndex) -> (NodeIndex, Visibility) {
         if self.ast.get_node_kind(item) == Some(NodeKind::Pub) {
             let children = self.ast.get_children(item);
-            if !children.is_empty() {
-                return (children[0], Visibility::Public);
-            }
+            return (children[0], Visibility::Public);
         }
         (item, Visibility::Package)
     }
@@ -135,7 +134,7 @@ impl<'a> AstScanner<'a> {
             scope_id,
             ScopeKind::Module,
             Some(parent_scope),
-            Some(name.clone()),
+            Some(name),
             def_id,
             false, // unordered
         );
@@ -145,7 +144,7 @@ impl<'a> AstScanner<'a> {
         // Register the module name in the parent scope
         self.define_in_scope(
             parent_scope,
-            &name,
+            name,
             def_id,
             BindingKind::Module,
             Some(item),
@@ -182,14 +181,14 @@ impl<'a> AstScanner<'a> {
             scope_id,
             scope_kind,
             Some(parent_scope),
-            Some(name.clone()),
+            Some(name),
             def_id,
             false,
         );
         self.scope_tree.add_scope(scope);
         self.scope_tree.add_child(parent_scope, scope_id);
 
-        self.define_in_scope(parent_scope, &name, def_id, kind, Some(item), vis)?;
+        self.define_in_scope(parent_scope, name, def_id, kind, Some(item), vis)?;
         self.def_names.push((def_id, name));
 
         // Scan clauses
@@ -230,7 +229,7 @@ impl<'a> AstScanner<'a> {
         // Register the function name in the parent scope
         self.define_in_scope(
             parent_scope,
-            &name,
+            name,
             def_id,
             BindingKind::Function,
             Some(item),
@@ -339,7 +338,7 @@ impl<'a> AstScanner<'a> {
                         vis: Visibility::Private,
                     };
                     if let Some(scope) = self.scope_tree.get_mut(scope_id) {
-                        scope.items.add_clause(name.clone(), binding);
+                        scope.items.add_clause(name, binding);
                     }
                     self.def_names.push((clause_def, name));
                 }
@@ -354,7 +353,7 @@ impl<'a> AstScanner<'a> {
                         vis: Visibility::Private,
                     };
                     if let Some(scope) = self.scope_tree.get_mut(scope_id) {
-                        scope.items.add_clause(name.clone(), binding);
+                        scope.items.add_clause(name, binding);
                     }
                     self.def_names.push((clause_def, name));
                 }
@@ -369,7 +368,7 @@ impl<'a> AstScanner<'a> {
                         vis: Visibility::Private,
                     };
                     if let Some(scope) = self.scope_tree.get_mut(scope_id) {
-                        scope.items.add_clause(name.clone(), binding);
+                        scope.items.add_clause(name, binding);
                     }
                     self.def_names.push((clause_def, name));
                 }
@@ -394,10 +393,11 @@ impl<'a> AstScanner<'a> {
         let span = self.ast.get_span(item).unwrap_or_default();
         let path_node = self.ast.get_children(item)[0];
 
-        let (path_segments, kind) = self.extract_import_path(path_node)?;
+        let (anchor, path_segments, kind) = self.extract_import_path(path_node)?;
 
         self.imports.push(ImportDirective::new(
             parent_scope,
+            anchor,
             kind,
             path_segments,
             span,
@@ -409,20 +409,57 @@ impl<'a> AstScanner<'a> {
         Ok(())
     }
 
-    /// Recursively extract path segments and the import kind from a use-path AST node.
+    /// Strip leading `SuperPath` / `PackagePath` nodes and return the anchor
+    /// plus the innermost path node.
+    ///
+    /// `..a.b` → `(Super(2), projection_path(a, b))`
+    /// `@a.b`  → `(Package,  projection_path(a, b))`
+    /// `a.b`   → `(Local,    projection_path(a, b))`
+    fn extract_path_anchor(&self, node: NodeIndex) -> ResolveResult<(PathAnchor, NodeIndex)> {
+        let Some((kind, _span, children)) = self.ast.get_node(node) else {
+            return Err(ResolveError::InternalError("Invalid path node".into()));
+        };
+
+        match kind {
+            NodeKind::SuperPath => {
+                let (inner_anchor, inner_node) = self.extract_path_anchor(children[0])?;
+                let depth = match inner_anchor {
+                    PathAnchor::Local => 1,
+                    PathAnchor::Super(n) => n + 1,
+                    PathAnchor::Package => {
+                        return Err(ResolveError::InvalidNodeType {
+                            message: "Cannot nest `@` inside `.` path prefix".into(),
+                            span: self.ast.get_span(node).unwrap_or_default(),
+                        });
+                    }
+                };
+                Ok((PathAnchor::Super(depth), inner_node))
+            }
+            NodeKind::PackagePath => Ok((PathAnchor::Package, children[0])),
+            _ => Ok((PathAnchor::Local, node)),
+        }
+    }
+
+    /// Recursively extract path anchor, prefix segments, and import kind from
+    /// a use-path AST node.
     fn extract_import_path(
         &self,
         path_node: NodeIndex,
-    ) -> ResolveResult<(Vec<PathSegment>, ImportKind)> {
+    ) -> ResolveResult<(PathAnchor, Vec<Symbol>, ImportKind)> {
+        // Step 1: strip Super / Package anchor from the outermost node.
+        let (anchor, inner_node) = self.extract_path_anchor(path_node)?;
+
         let kind = self
             .ast
-            .get_node_kind(path_node)
+            .get_node_kind(inner_node)
             .ok_or_else(|| ResolveError::InternalError("Invalid path node".into()))?;
 
+        // Step 2: extract prefix segments and import kind from the inner path.
         match kind {
             NodeKind::Id => {
-                let name = self.source_text(path_node)?;
+                let name = self.extract_name(inner_node)?;
                 Ok((
+                    anchor,
                     vec![],
                     ImportKind::Single {
                         source_scope: None,
@@ -431,11 +468,12 @@ impl<'a> AstScanner<'a> {
                 ))
             }
             NodeKind::ProjectionPath => {
-                let children = self.ast.get_children(path_node);
-                let right_name = self.source_text(children[1])?;
-                let left_segments = self.collect_path_segments(children[0])?;
+                let children = self.ast.get_children(inner_node);
+                let right_name = self.extract_name(children[1])?;
+                let left_segs = self.collect_prefix_segments(children[0])?;
                 Ok((
-                    left_segments,
+                    anchor,
+                    left_segs,
                     ImportKind::Single {
                         source_scope: None,
                         name: right_name,
@@ -443,62 +481,79 @@ impl<'a> AstScanner<'a> {
                 ))
             }
             NodeKind::ProjectionAllPath => {
-                let children = self.ast.get_children(path_node);
-                let segments = self.collect_path_segments(children[0])?;
-                Ok((segments, ImportKind::Glob { source_scope: None }))
+                let children = self.ast.get_children(inner_node);
+                let segs = self.collect_prefix_segments(children[0])?;
+                Ok((anchor, segs, ImportKind::Glob { source_scope: None }))
             }
             NodeKind::ProjectionMultiPath => {
-                let children = self.ast.get_children(path_node);
-                let segments = self.collect_path_segments(children[0])?;
+                let children = self.ast.get_children(inner_node);
+                let segs = self.collect_prefix_segments(children[0])?;
                 let names_slice = self.ast.get_multi_child_slice(children[1]).ok_or_else(|| {
                     ResolveError::InternalError("Invalid multi-import names".into())
                 })?;
                 let mut names = Vec::new();
                 for &name_node in names_slice {
-                    names.push(self.source_text(name_node)?);
+                    names.push(self.extract_name(name_node)?);
                 }
                 Ok((
-                    segments,
+                    anchor,
+                    segs,
                     ImportKind::Multi {
                         source_scope: None,
                         names,
                     },
                 ))
             }
-            NodeKind::SuperPath => {
-                let children = self.ast.get_children(path_node);
-                let mut segments = vec![PathSegment::Super];
-                let inner_segments = self.collect_path_segments(children[0])?;
-                segments.extend(inner_segments);
-                Ok((segments, ImportKind::Glob { source_scope: None }))
+            NodeKind::PathAsBind => {
+                let children = self.ast.get_children(inner_node);
+                let alias = self.extract_name(children[1])?;
+                // Inner path must resolve to a single name.
+                let (original, left_segs) = match self.ast.get_node_kind(children[0]) {
+                    Some(NodeKind::Id) => (self.extract_name(children[0])?, vec![]),
+                    Some(NodeKind::ProjectionPath) => {
+                        let ic = self.ast.get_children(children[0]);
+                        (
+                            self.extract_name(ic[1])?,
+                            self.collect_prefix_segments(ic[0])?,
+                        )
+                    }
+                    _ => {
+                        return Err(ResolveError::InvalidNodeType {
+                            message: "Expected simple path inside `as` bind".into(),
+                            span: self.ast.get_span(inner_node).unwrap_or_default(),
+                        });
+                    }
+                };
+                Ok((
+                    anchor,
+                    left_segs,
+                    ImportKind::Alias {
+                        source_scope: None,
+                        original,
+                        alias,
+                    },
+                ))
             }
             _ => Err(ResolveError::InvalidNodeType {
                 message: format!("Unexpected node kind in use path: {:?}", kind),
-                span: self.ast.get_span(path_node).unwrap_or_default(),
+                span: self.ast.get_span(inner_node).unwrap_or_default(),
             }),
         }
     }
 
-    /// Collect all path segments from a path node into a flat `Vec<PathSegment>`.
-    fn collect_path_segments(&self, node: NodeIndex) -> ResolveResult<Vec<PathSegment>> {
-        let kind = self
-            .ast
-            .get_node_kind(node)
-            .ok_or_else(|| ResolveError::InternalError("Invalid path node".into()))?;
+    /// Collect flat name segments from a prefix path node (`Id` or chained
+    /// `ProjectionPath`).  No anchors allowed here — they are stripped by
+    /// `extract_path_anchor` before this is called.
+    fn collect_prefix_segments(&self, node: NodeIndex) -> ResolveResult<Vec<Symbol>> {
+        let Some((kind, _span, children)) = self.ast.get_node(node) else {
+            return Err(ResolveError::InternalError("Invalid path node".into()));
+        };
 
         match kind {
-            NodeKind::Id => Ok(vec![PathSegment::Name(self.source_text(node)?)]),
+            NodeKind::Id => Ok(vec![self.extract_name(node)?]),
             NodeKind::ProjectionPath => {
-                let children = self.ast.get_children(node);
-                let mut result = self.collect_path_segments(children[0])?;
-                result.push(PathSegment::Name(self.source_text(children[1])?));
-                Ok(result)
-            }
-            NodeKind::SuperPath => {
-                let children = self.ast.get_children(node);
-                let mut result = vec![PathSegment::Super];
-                let rest = self.collect_path_segments(children[0])?;
-                result.extend(rest);
+                let mut result = self.collect_prefix_segments(children[0])?;
+                result.push(self.extract_name(children[1])?);
                 Ok(result)
             }
             _ => Err(ResolveError::InvalidNodeType {
@@ -508,11 +563,17 @@ impl<'a> AstScanner<'a> {
         }
     }
 
-    fn extract_name(&self, id_node: NodeIndex) -> ResolveResult<String> {
-        self.source_text(id_node)
+    fn extract_name(&self, id_node: NodeIndex) -> ResolveResult<Symbol> {
+        let children = self.ast.get_children(id_node);
+        // SAFETY: hi/lo produced by Symbol::to_raw_parts() in the parser.
+        Ok(unsafe { Symbol::from_raw_parts(children[0], children[1]) })
     }
 
     fn source_text(&self, node: NodeIndex) -> ResolveResult<String> {
+        self.source_text_raw(node)
+    }
+
+    fn source_text_raw(&self, node: NodeIndex) -> ResolveResult<String> {
         self.ast
             .source_content(node, self.source_map)
             .ok_or_else(|| {
@@ -526,7 +587,7 @@ impl<'a> AstScanner<'a> {
     fn define_in_scope(
         &mut self,
         scope_id: ScopeId,
-        name: &str,
+        name: Symbol,
         def_id: DefId,
         kind: BindingKind,
         ast_node: Option<NodeIndex>,
@@ -541,11 +602,11 @@ impl<'a> AstScanner<'a> {
         };
 
         if let Some(scope) = self.scope_tree.get_mut(scope_id) {
-            if let Err(_old) = scope.items.define(name.to_string(), binding) {
+            if let Err(_old) = scope.items.define(name, binding) {
                 // In an unordered scope, duplicate is an error
                 if !scope.ordered {
                     return Err(ResolveError::DuplicateDefinition {
-                        name: name.to_string(),
+                        name: name.as_str().to_string(),
                         first_span: rustc_span::DUMMY_SP,
                         second_span: ast_node
                             .and_then(|n| self.ast.get_span(n))

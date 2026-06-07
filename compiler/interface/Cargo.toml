@@ -8,6 +8,6 @@ diagnostic = { path = "../diagnostic" }
 intrinsic = { path = "../intrinsic" }
 vfs = { path = "../vfs" }
 query = { path = "../query" }
+middle = { path = "../middle" }
 hir = { path = "../hir" }
-ty = { path = "../ty" }
 rustc_span = { workspace = true }

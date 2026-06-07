@@ -40,7 +40,7 @@ pub mod sysroot;
 pub use lang_item::{LangItem, LangItemDef, LangItems};
 pub use sysroot::{PackageId, Sysroot, SysrootPackage};
 
-use ty::TyCtxt;
+use middle::TyCtxt;
 
 /// Owns all intrinsic / built-in state for a single compilation.
 ///

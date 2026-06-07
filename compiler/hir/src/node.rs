@@ -1,4 +1,8 @@
 //! Unified HIR node enum.
+//!
+//! [`Node`] is a tagged reference to any arena-allocated HIR node.  It is
+//! used as the element type in the per-owner [`OwnerNodes`](crate::owner::OwnerNodes)
+//! table, which is the primary way to look up a node by [`HirId`].
 
 use crate::ClauseParam;
 use crate::body::Param;

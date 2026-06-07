@@ -13,44 +13,49 @@ pub struct Pattern<'hir> {
     pub span: Span,
 }
 
-/// 带控制流的模式语法，比如`and_is`和`if_guard`，会被去糖为多层的模式匹配表达式
+/// All pattern kinds in the Flurry HIR.
+///
+/// Control-flow pattern syntax such as `and_is` and `if_guard` is desugared
+/// into nested match expressions before reaching this representation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PatternKind<'hir> {
     Wild,
 
+    Projection(&'hir Pattern<'hir>, Ident),
+
     Binding(BindingMode, Ident, Option<&'hir Pattern<'hir>>),
 
     Const(&'hir Expr<'hir>),
-    // `<comptime_expr>`，在最后会被编译器求值为一个常量值
+    /// A comptime expression `<comptime_expr>` that is evaluated at compile
+    /// time to produce a constant value used as a match discriminant.
     Comptime(&'hir Expr<'hir>),
 
-    // `(pat1, pat2, …)`
+    /// Tuple pattern: `(pat1, pat2, …)`.
     Tuple(&'hir [Pattern<'hir>]),
-    // 这里指的是完全没有限定类型的结构体模式，需要类型推导来确定匹配的结构体类型
-    // `{ field1, field2, field3: pat3, .. }`
-    // 如果 field没有指定模式，则默认使用 `field: _` 来匹配
-    Struct(Path<'hir>, &'hir [FieldPat<'hir>], bool),
-    // 用于匹配数组、切片、迭代器等类型的模式
+    /// Struct pattern without a leading path; the concrete struct type is
+    /// inferred.  Syntax: `{ field1, field2, field3: pat3, .. }`.
+    /// Fields without an explicit sub-pattern are matched with `field: _`.
+    Struct(&'hir Pattern<'hir>, &'hir [FieldPat<'hir>], bool),
+    /// List / slice / iterator pattern: `[pat1, pat2, rest..]`.
     List(&'hir [Pattern<'hir>], Option<&'hir Pattern<'hir>>),
 
-    // `.NetErr.Timeout(...)`
-    AppTuple(Path<'hir>, &'hir [Pattern<'hir>], PathExaustiveness),
-    // `.NetErr.Timeout { ... }`
-    AppStruct(Path<'hir>, &'hir [FieldPat<'hir>], PathExaustiveness),
+    /// Tuple-like enum variant pattern: `.NetErr.Timeout(pat1, pat2)`.
+    AppTuple(&'hir Pattern<'hir>, &'hir [Pattern<'hir>]),
+    /// Struct-like enum variant pattern: `.NetErr.Timeout { field: pat }`.
+    AppStruct(&'hir Pattern<'hir>, &'hir [FieldPat<'hir>]),
 
-    // `some_value?`
+    /// Matches the `Some` side of an optional value: `some_value?`.
     OptionSome(&'hir Pattern<'hir>),
-    // `null`
+    /// Matches the `None`/null side of an optional value: `null`.
     OptionNull,
 
-    // `ok_result!`
+    /// Matches the `Ok` side of a result/error value: `ok_result!`.
     ErrorOk(&'hir Pattern<'hir>),
-    // `error err_pattern`
+    /// Matches the `Err` side of a result/error value: `error err_pattern`.
     ErrorErr(&'hir Pattern<'hir>),
 
     Or(&'hir [Pattern<'hir>]),
     Ref(&'hir Pattern<'hir>),
-    Path(Path<'hir>),
     Range(
         Option<&'hir super::expr::Expr<'hir>>,
         Option<&'hir super::expr::Expr<'hir>>,
@@ -70,12 +75,6 @@ pub struct PatternArm<'hir> {
     pub pat: Pattern<'hir>,
     pub body: &'hir Expr<'hir>,
     pub span: Span,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum PathExaustiveness {
-    NonExhaustive,
-    Exhaustive,
 }
 
 #[derive(Debug, Clone, PartialEq)]

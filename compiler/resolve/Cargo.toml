@@ -7,6 +7,7 @@ edition = "2024"
 ast = { path = "../ast" }
 vfs = { path = "../vfs" }
 lex = { path = "../lex" }
+symbol = { workspace = true }
 parse = { path = "../parse" }
 diagnostic = { path = "../diagnostic" }
 rustc_span = { workspace = true }

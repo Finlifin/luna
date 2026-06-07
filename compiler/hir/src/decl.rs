@@ -1,8 +1,10 @@
+//! HIR let-declaration node.
+
 use crate::common::Ident;
 use crate::{Expr, HirId};
 use rustc_span::Span;
 
-/// 由 let 语句或模式解构声明的变量。
+/// A variable binding introduced by a `let` statement or destructuring pattern.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LetDecl<'hir> {
     pub hir_id: HirId,

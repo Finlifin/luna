@@ -30,8 +30,6 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-// ── PackageId ────────────────────────────────────────────────────────────────
-
 /// Identifies a package in the compilation graph.
 ///
 /// The sysroot packages use well-known fixed IDs; user packages get
@@ -78,8 +76,6 @@ impl fmt::Display for PackageId {
     }
 }
 
-// ── SysrootPackage ───────────────────────────────────────────────────────────
-
 /// Metadata for a single sysroot package.
 #[derive(Debug, Clone)]
 pub struct SysrootPackage {
@@ -92,8 +88,6 @@ pub struct SysrootPackage {
     /// Package IDs this package depends on (in link order).
     pub deps: Vec<PackageId>,
 }
-
-// ── Sysroot ──────────────────────────────────────────────────────────────────
 
 /// The resolved sysroot: paths to the `builtin` and `std` packages.
 ///

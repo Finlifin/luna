@@ -9,6 +9,8 @@
 
 use std::collections::HashMap;
 
+use symbol::Symbol;
+
 use crate::binding::Binding;
 use crate::ids::ScopeId;
 
@@ -41,7 +43,7 @@ pub enum RibKind {
 pub struct Rib {
     pub kind: RibKind,
     /// Bindings introduced by this rib, keyed by name.
-    pub bindings: HashMap<String, Binding>,
+    pub bindings: HashMap<Symbol, Binding>,
     /// The scope this rib is associated with.
     pub scope_id: ScopeId,
 }
@@ -56,13 +58,13 @@ impl Rib {
     }
 
     /// Introduce a binding into this rib.
-    pub fn define(&mut self, name: String, binding: Binding) {
+    pub fn define(&mut self, name: Symbol, binding: Binding) {
         self.bindings.insert(name, binding);
     }
 
     /// Look up a name in this rib only.
     pub fn get(&self, name: &str) -> Option<&Binding> {
-        self.bindings.get(name)
+        self.bindings.get(&Symbol::intern(name))
     }
 }
 
@@ -102,7 +104,7 @@ impl RibStack {
     }
 
     /// Introduce a binding into the current (top) rib.
-    pub fn define(&mut self, name: String, binding: Binding) {
+    pub fn define(&mut self, name: Symbol, binding: Binding) {
         if let Some(rib) = self.current_mut() {
             rib.define(name, binding);
         }

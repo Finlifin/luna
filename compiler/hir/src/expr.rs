@@ -7,9 +7,10 @@
 //! (`TyFn`, `TyPtr`, `TyOptional`, …).
 
 use rustc_span::Span;
+use symbol::Symbol;
 
 use crate::body::BodyId;
-use crate::common::{BinOp, Ident, Lit, Path, UnOp};
+use crate::common::{Arg, BinOp, Ident, Lit, Path, TyParam, UnOp};
 use crate::decl::LetDecl;
 use crate::hir_id::{HirId, OwnerId};
 use crate::pattern::{Pattern, PatternArm};
@@ -26,6 +27,7 @@ pub enum ExprKind<'hir> {
     Lit(Lit),
     Path(Path<'hir>),
 
+    Ident(Symbol),
     SelfValue,
 
     Index(&'hir Expr<'hir>, &'hir Expr<'hir>),
@@ -56,7 +58,7 @@ pub enum ExprKind<'hir> {
 
     Tuple(&'hir [Expr<'hir>]),
     List(&'hir [Expr<'hir>]),
-    Object(&'hir [FieldExpr<'hir>]),
+    Object(&'hir [Expr<'hir>], &'hir [FieldExpr<'hir>]),
 
     Ref(&'hir Expr<'hir>),
     Deref(&'hir Expr<'hir>),
@@ -73,6 +75,7 @@ pub enum ExprKind<'hir> {
 
     Undefined,
     Null,
+    Unit,
 
     /// TODO: inline control flow expressions
     InlineIf {
@@ -129,100 +132,6 @@ pub enum ExprKind<'hir> {
     Exist,
 
     Invalid,
-}
-
-pub const TPARAM_IMPLICIT: u32 = 1 << 0;
-pub const TPARAM_COMPTIME: u32 = 1 << 1;
-pub const TPARAM_QUOTE: u32 = 1 << 2;
-pub const TPARAM_ERROR: u32 = 1 << 3;
-pub const TPARAM_LAMBDA: u32 = 1 << 4;
-pub const TPARAM_ASSOC: u32 = 1 << 5;
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct TyParam<'hir> {
-    pub hir_id: HirId,
-    pub kind: TyParamKind<'hir>,
-    pub flags: u32,
-    pub span: Span,
-}
-
-impl TyParam<'_> {
-    pub fn is_implicit(&self) -> bool {
-        self.flags & TPARAM_IMPLICIT != 0
-    }
-    pub fn is_comptime(&self) -> bool {
-        self.flags & TPARAM_COMPTIME != 0
-    }
-    pub fn is_quote(&self) -> bool {
-        self.flags & TPARAM_QUOTE != 0
-    }
-    pub fn is_error(&self) -> bool {
-        self.flags & TPARAM_ERROR != 0
-    }
-    pub fn is_lambda(&self) -> bool {
-        self.flags & TPARAM_LAMBDA != 0
-    }
-    pub fn is_assoc(&self) -> bool {
-        self.flags & TPARAM_ASSOC != 0
-    }
-}
-
-impl<'hir> TyParam<'hir> {
-    pub fn new(hir_id: HirId, kind: TyParamKind<'hir>, span: Span) -> Self {
-        Self {
-            hir_id,
-            kind,
-            flags: 0,
-            span,
-        }
-    }
-
-    pub fn with_implicit(mut self) -> Self {
-        self.flags |= TPARAM_IMPLICIT;
-        self
-    }
-    pub fn with_comptime(mut self) -> Self {
-        self.flags |= TPARAM_COMPTIME;
-        self
-    }
-    pub fn with_quote(mut self) -> Self {
-        self.flags |= TPARAM_QUOTE;
-        self
-    }
-    pub fn with_error(mut self) -> Self {
-        self.flags |= TPARAM_ERROR;
-        self
-    }
-    pub fn with_lambda(mut self) -> Self {
-        self.flags |= TPARAM_LAMBDA;
-        self
-    }
-    pub fn with_assoc(mut self) -> Self {
-        self.flags |= TPARAM_ASSOC;
-        self
-    }
-    pub fn with_flags(mut self, flags: u32) -> Self {
-        self.flags |= flags;
-        self
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum TyParamKind<'hir> {
-    // 比如`fn<T, a: T>`则`T`的`is_dependently_catch`为`true`
-    PositionalDependencyCatched(Ident, &'hir Expr<'hir>),
-    Positional(&'hir Expr<'hir>),
-    Optional(Ident, &'hir Expr<'hir>),
-    Varadic(Ident, &'hir Expr<'hir>),
-    Itself { is_ref: bool },
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Arg<'hir> {
-    Positional(&'hir Expr<'hir>),
-    Named(Ident, &'hir Expr<'hir>),
-    Expand(&'hir Expr<'hir>),
-    Implicit(&'hir Expr<'hir>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

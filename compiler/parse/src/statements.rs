@@ -24,6 +24,20 @@ impl Parser<'_> {
                 TokenKind::LBrace => p.try_block(),
                 TokenKind::Inline => p.try_inline_statement(),
 
+                TokenKind::Pub => {
+                    p.eat_tokens(1);
+                    Ok(NodeBuilder::new(NodeKind::Pub, p.current_span())
+                        .add_single_child(p.try_statement_or_definition()?)
+                        .build(&mut p.ast))
+                }
+
+                TokenKind::Private => {
+                    p.eat_tokens(1);
+                    Ok(NodeBuilder::new(NodeKind::Private, p.current_span())
+                        .add_single_child(p.try_statement_or_definition()?)
+                        .build(&mut p.ast))
+                }
+
                 // Async/Unsafe: if followed by '{', it's a block expression;
                 // otherwise it's a keyword modifier on a definition.
                 TokenKind::Unsafe | TokenKind::Async => {
@@ -51,9 +65,12 @@ impl Parser<'_> {
                 TokenKind::Test => p.try_test(),
 
                 // keyword-modifier definitions (these start definitions)
-                TokenKind::Pure | TokenKind::Comptime | TokenKind::Spec
-                | TokenKind::Verified | TokenKind::Atomic | TokenKind::Extern
-                | TokenKind::Private => p.try_keyword_modified_definition(),
+                TokenKind::Pure
+                | TokenKind::Comptime
+                | TokenKind::Spec
+                | TokenKind::Verified
+                | TokenKind::Atomic
+                | TokenKind::Extern => p.try_keyword_modified_definition(),
 
                 // verification statements
                 TokenKind::Axiom => p.try_unary(
@@ -116,9 +133,11 @@ impl Parser<'_> {
                     p.next_token_span(),
                 ));
             }
-            Ok(NodeBuilder::new(NodeKind::InlineStatement, p.current_span())
-                .add_single_child(inner)
-                .build(&mut p.ast))
+            Ok(
+                NodeBuilder::new(NodeKind::InlineStatement, p.current_span())
+                    .add_single_child(inner)
+                    .build(&mut p.ast),
+            )
         })
     }
 
@@ -812,23 +831,27 @@ impl Parser<'_> {
     pub fn try_keyword_modified_definition(&mut self) -> ParseResult {
         self.scoped(|p| {
             let token = p.peek_next_token();
-            let _attr_name = match token.kind {
-                TokenKind::Pure => "flurry_kw_pure",
-                TokenKind::Comptime => "flurry_kw_comptime",
-                TokenKind::Inline => "flurry_kw_inline",
-                TokenKind::Unsafe => "flurry_kw_unsafe",
-                TokenKind::Spec => "flurry_kw_spec",
-                TokenKind::Verified => "flurry_kw_verified",
-                TokenKind::Atomic => "flurry_kw_atomic",
-                TokenKind::Extern => "flurry_kw_extern",
-                TokenKind::Async => "flurry_kw_async",
-                TokenKind::Private => "flurry_kw_private",
+            let attr_name = match token.kind {
+                TokenKind::Pure => "__flurry_kw_pure",
+                TokenKind::Comptime => "__flurry_kw_comptime",
+                TokenKind::Inline => "__flurry_kw_inline",
+                TokenKind::Unsafe => "__flurry_kw_unsafe",
+                TokenKind::Spec => "__flurry_kw_spec",
+                TokenKind::Verified => "__flurry_kw_verified",
+                TokenKind::Atomic => "__flurry_kw_atomic",
+                TokenKind::Extern => "__flurry_kw_extern",
+                TokenKind::Async => "__flurry_kw_async",
                 _ => return Ok(0),
             };
             p.eat_tokens(1);
 
-            // Create an Id node for the attribute name
-            let attr_id = NodeBuilder::new(NodeKind::Id, p.current_span()).build(&mut p.ast);
+            // Create a synthetic Id node carrying the pre-interned attribute name.
+            let sym = lex::Symbol::intern(attr_name);
+            let (hi, lo) = sym.to_raw_parts();
+            let attr_id = NodeBuilder::new(NodeKind::Id, p.current_span())
+                .add_single_child(hi)
+                .add_single_child(lo)
+                .build(&mut p.ast);
 
             // Parse the inner definition or another keyword modifier
             let inner = p.try_statement_or_definition()?;

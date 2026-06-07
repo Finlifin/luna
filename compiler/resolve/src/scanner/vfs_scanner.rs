@@ -3,10 +3,12 @@
 //!
 //! Migrated and refactored from `luna/src/scan/vfs_scanner.rs`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use ast::Ast;
 use diagnostic::{DiagnosticContext, FlurryError};
+use symbol::Symbol;
 use lex::lex;
 use parse::parser::Parser;
 use rustc_span::{SourceFile, SourceMap};
@@ -39,7 +41,9 @@ pub struct VfsScanner<'a> {
     /// Collected impl directives.
     pub impls: Vec<ImplDirective>,
     /// DefId → name mapping for diagnostics.
-    pub def_names: Vec<(DefId, String)>,
+    pub def_names: Vec<(DefId, Symbol)>,
+    /// VFS FileId → the scope that owns that file's top-level definitions.
+    pub file_scopes: HashMap<vfs::FileId, ScopeId>,
 }
 
 impl<'a> VfsScanner<'a> {
@@ -61,6 +65,7 @@ impl<'a> VfsScanner<'a> {
             imports: Vec::new(),
             impls: Vec::new(),
             def_names: Vec::new(),
+            file_scopes: HashMap::new(),
         }
     }
 
@@ -68,7 +73,7 @@ impl<'a> VfsScanner<'a> {
     ///
     /// Returns the collected import directives; the scope tree is mutated in place.
     pub fn scan_package(&mut self, root_scope: ScopeId) -> ResolveResult<()> {
-        let package_name = self.vfs.name.clone();
+        let package_name = Symbol::intern(&self.vfs.name);
         let package_def = self.def_gen.next();
         let package_scope_id = self.scope_gen.next();
 
@@ -76,7 +81,7 @@ impl<'a> VfsScanner<'a> {
             package_scope_id,
             ScopeKind::Package,
             Some(root_scope),
-            Some(package_name.clone()),
+            Some(package_name),
             package_def,
             false,
         );
@@ -93,7 +98,7 @@ impl<'a> VfsScanner<'a> {
                 vis: Visibility::Public,
             };
             if let Some(root) = self.scope_tree.get_mut(root_scope) {
-                let _ = root.items.define(package_name.clone(), binding);
+                let _ = root.items.define(package_name, binding);
             }
         }
 
@@ -127,12 +132,12 @@ impl<'a> VfsScanner<'a> {
             .unwrap_or("unknown");
 
         let is_entry = file_name == "main.fl" || file_name == "lib.fl";
-        let module_name = if is_entry {
+        let module_name: Option<Symbol> = if is_entry {
             None // Entry files merge into parent scope
         } else if file_name.ends_with(".fl") {
-            Some(file_name[..file_name.len() - 3].to_string())
+            Some(Symbol::intern(&file_name[..file_name.len() - 3]))
         } else {
-            Some(file_name.to_string())
+            Some(Symbol::intern(file_name))
         };
 
         // Parse the file if not already parsed
@@ -141,7 +146,7 @@ impl<'a> VfsScanner<'a> {
         }
 
         // Determine the scope to scan into
-        let scan_scope = if let Some(ref mod_name) = module_name {
+        let scan_scope = if let Some(mod_name) = module_name {
             let mod_def = self.def_gen.next();
             let mod_scope_id = self.scope_gen.next();
 
@@ -149,7 +154,7 @@ impl<'a> VfsScanner<'a> {
                 mod_scope_id,
                 ScopeKind::Module,
                 Some(parent_scope),
-                Some(mod_name.clone()),
+                Some(mod_name),
                 mod_def,
                 false,
             );
@@ -165,9 +170,9 @@ impl<'a> VfsScanner<'a> {
                 vis: Visibility::Public,
             };
             if let Some(ps) = self.scope_tree.get_mut(parent_scope) {
-                let _ = ps.items.define(mod_name.clone(), binding);
+                let _ = ps.items.define(mod_name, binding);
             }
-            self.def_names.push((mod_def, mod_name.clone()));
+            self.def_names.push((mod_def, mod_name));
 
             mod_scope_id
         } else {
@@ -196,6 +201,9 @@ impl<'a> VfsScanner<'a> {
 
         scanner.scan_file_items(scan_scope)?;
 
+        // Record the mapping from FileId to the scope that holds its definitions.
+        self.file_scopes.insert(file_id, scan_scope);
+
         Ok(())
     }
 
@@ -213,13 +221,13 @@ impl<'a> VfsScanner<'a> {
                 span: rustc_span::DUMMY_SP,
             })?;
 
-        let (tokens, lex_errors) = lex(content, source_file.start_pos);
+        let (tokens, symbols, lex_errors) = lex(content, source_file.start_pos);
 
         for err in lex_errors {
             err.emit(self.diag_ctx, source_file.start_pos);
         }
 
-        let mut parser = Parser::new(self.source_map, tokens, source_file.start_pos);
+        let mut parser = Parser::new(self.source_map, tokens, symbols, source_file.start_pos);
         parser.parse(self.diag_ctx);
         let ast = parser.finalize();
         self.vfs.set_ast(file_id, ast);
@@ -227,14 +235,15 @@ impl<'a> VfsScanner<'a> {
         Ok(())
     }
 
-    /// Consume the scanner and return the collected imports, impls, and def names.
+    /// Consume the scanner and return collected imports, impls, def names, and file scopes.
     pub fn into_results(
         self,
     ) -> (
         Vec<ImportDirective>,
         Vec<ImplDirective>,
-        Vec<(DefId, String)>,
+        Vec<(DefId, Symbol)>,
+        HashMap<vfs::FileId, ScopeId>,
     ) {
-        (self.imports, self.impls, self.def_names)
+        (self.imports, self.impls, self.def_names, self.file_scopes)
     }
 }

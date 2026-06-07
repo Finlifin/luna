@@ -12,8 +12,6 @@ use ty::{AdtId, PrimTy, TyCtxt, TyKind};
 /// Generate C source code from a collection of MIR bodies.
 pub fn codegen_c(bodies: &[mir::Body<'_>], tcx: &TyCtxt) -> String {
     let mut out = String::new();
-
-    // ── Preamble ─────────────────────────────────────────────────────────
     out.push_str("#include <stdint.h>\n");
     out.push_str("#include <stdbool.h>\n");
     out.push_str("#include <stdio.h>\n");
@@ -25,25 +23,17 @@ pub fn codegen_c(bodies: &[mir::Body<'_>], tcx: &TyCtxt) -> String {
     out.push_str("typedef char Char;\n");
     out.push_str("typedef const char* String;\n");
     out.push_str("\n");
-
-    // ── Struct definitions ───────────────────────────────────────────────
     // Emit C struct typedefs for every ADT type used in the MIR.
     write_struct_defs(&mut out, bodies, tcx);
-
-    // ── Forward declarations ─────────────────────────────────────────────
     for body in bodies {
         write_fn_decl(&mut out, body);
         out.push_str(";\n");
     }
     out.push('\n');
-
-    // ── Function definitions ─────────────────────────────────────────────
     for body in bodies {
         write_fn_def(&mut out, body, tcx);
         out.push('\n');
     }
-
-    // ── Main wrapper ─────────────────────────────────────────────────────
     // If there's a function called "main", generate a C main that calls it.
     // Otherwise, generate a test main that exercises all functions.
     let has_main = bodies.iter().any(|b| fn_name(b) == "main");

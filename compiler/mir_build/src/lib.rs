@@ -9,7 +9,7 @@ use hir::expr::{Arg, ExprKind, StmtKind};
 use hir::item::{FnParamTy, ItemKind};
 use hir::{Expr, Package};
 use mir::*;
-use ty::{AdtId, PrimTy, Ty, TyCtxt, TyKind};
+use ty::{NFId, PrimTy, Ty, TyCtxt, TyKind};
 
 /// Lower all function bodies in the HIR package to MIR.
 ///
@@ -200,7 +200,6 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
     /// Lower an HIR expression, returning an `Operand` representing the value.
     fn lower_expr(&mut self, expr: &Expr<'_>) -> Operand<'tcx> {
         match &expr.kind {
-            // ── Literals ─────────────────────────────────────────────
             ExprKind::Lit(lit) => {
                 let (ty, kind) = match &lit.kind {
                     LitKind::Integer(v) => (self.tcx.mk_primitive(PrimTy::I64), ConstKind::Int(*v)),
@@ -219,7 +218,6 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 Operand::Constant(Constant { ty, kind })
             }
 
-            // ── Path (variable reference) ────────────────────────────
             ExprKind::Path(path) => {
                 if path.segments.len() == 1 {
                     let name = &*path.segments[0].ident.name;
@@ -238,7 +236,6 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 })
             }
 
-            // ── Binary operation ─────────────────────────────────────
             ExprKind::Binary(op, lhs, rhs) => {
                 let lhs_op = self.lower_expr(lhs);
                 let rhs_op = self.lower_expr(rhs);
@@ -254,7 +251,6 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 Operand::Copy(Place::local(tmp))
             }
 
-            // ── Unary operation ──────────────────────────────────────
             ExprKind::Unary(op, operand) => {
                 let operand = self.lower_expr(operand);
                 let result_ty = self
@@ -269,7 +265,6 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 Operand::Copy(Place::local(tmp))
             }
 
-            // ── Call ─────────────────────────────────────────────────
             ExprKind::Call(callee, args) => {
                 // Special-case: if callee is a path, treat it as a function name.
                 let func = if let ExprKind::Path(path) = &callee.kind {
@@ -319,7 +314,6 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 Operand::Copy(Place::local(dest))
             }
 
-            // ── If expression ────────────────────────────────────────
             ExprKind::If(cond, then_block, else_expr) => {
                 let cond_op = self.lower_expr(cond);
 
@@ -345,7 +339,6 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     },
                 });
 
-                // ── Then block ───────────────────────────────
                 self.current_block = then_bb;
                 let then_val = self.lower_block(then_block);
                 self.push_stmt(StatementKind::Assign(
@@ -354,7 +347,6 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 ));
                 self.terminate(TerminatorKind::Goto { target: join_bb });
 
-                // ── Else block ───────────────────────────────
                 self.current_block = else_bb;
                 if let Some(else_e) = else_expr {
                     let else_val = self.lower_expr(else_e);
@@ -378,10 +370,8 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 Operand::Copy(Place::local(result_local))
             }
 
-            // ── Block expression ─────────────────────────────────────
             ExprKind::Block(block) => self.lower_block(block),
 
-            // ── Return ───────────────────────────────────────────────
             ExprKind::Return(val) => {
                 let operand = if let Some(e) = val {
                     self.lower_expr(e)
@@ -405,7 +395,6 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 })
             }
 
-            // ── Assign ───────────────────────────────────────────────
             ExprKind::Assign(lhs, rhs) => {
                 let rhs_op = self.lower_expr(rhs);
                 let place = self.lower_place(lhs);
@@ -416,7 +405,6 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 })
             }
 
-            // ── Tuple ────────────────────────────────────────────────
             ExprKind::Tuple(elems) => {
                 let ops: Vec<_> = elems.iter().map(|e| self.lower_expr(e)).collect();
                 let ty = self
@@ -431,7 +419,6 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 Operand::Copy(Place::local(tmp))
             }
 
-            // ── Array ────────────────────────────────────────────────
             ExprKind::Array(elems) => {
                 let ops: Vec<_> = elems.iter().map(|e| self.lower_expr(e)).collect();
                 let ty = self
@@ -446,7 +433,6 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 Operand::Copy(Place::local(tmp))
             }
 
-            // ── Ref ──────────────────────────────────────────────────
             ExprKind::Ref(inner) => {
                 let place = self.lower_place(inner);
                 let ty = self
@@ -458,7 +444,6 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 Operand::Copy(Place::local(tmp))
             }
 
-            // ── Field access ─────────────────────────────────────────
             ExprKind::Field(base, ident) => {
                 let base_op = self.lower_expr(base);
                 // We need the base in a place; if it's a Copy of a place, use that.
@@ -494,7 +479,6 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 Operand::Copy(Place::local(tmp))
             }
 
-            // ── Struct literal ────────────────────────────────────────
             ExprKind::StructLit(path, fields) => {
                 let ty = self
                     .tcx
@@ -526,7 +510,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 };
 
                 // Order field operands according to the AdtDef field order.
-                let adt_def = self.tcx.adt_def(AdtId(def_id));
+                let adt_def = self.tcx.adt_def(NFId(def_id));
                 let mut ops = Vec::new();
                 if let Some(ref def) = adt_def {
                     for field_def in &def.fields {
@@ -558,22 +542,17 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 Operand::Copy(Place::local(tmp))
             }
 
-            // ── Null literal ──────────────────────────────────────────
             ExprKind::Null => {
-                let ty = self
-                    .tcx
-                    .node_ty(expr.hir_id)
-                    .unwrap_or_else(|| {
-                        let inner = self.tcx.mk_infer();
-                        self.tcx.mk_ptr(inner, hir::common::Mutability::Immutable)
-                    });
+                let ty = self.tcx.node_ty(expr.hir_id).unwrap_or_else(|| {
+                    let inner = self.tcx.mk_infer();
+                    self.tcx.mk_ptr(inner, hir::common::Mutability::Immutable)
+                });
                 Operand::Constant(Constant {
                     ty,
                     kind: ConstKind::Null,
                 })
             }
 
-            // ── Everything else: produce a placeholder ───────────────
             _ => {
                 let ty = self
                     .tcx

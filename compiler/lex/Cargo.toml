@@ -10,3 +10,4 @@ path = "src/lib.rs"
 [dependencies]
 rustc_span = { workspace = true }
 diagnostic = { path = "../diagnostic" }
+symbol = { workspace = true }

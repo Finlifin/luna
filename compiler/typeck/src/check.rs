@@ -5,7 +5,7 @@ use hir::common::{BinOp, LitKind, UnOp};
 use hir::expr::{Arg, ExprKind, StmtKind};
 use hir::item::{FnParamTy, ItemKind};
 use hir::{Expr, Package};
-use ty::{AdtDef, AdtId, AdtKind, FieldDef, PrimTy, Ty, TyCtxt, TyKind};
+use ty::{AdtDef, AdtKind, FieldDef, NFId, PrimTy, Ty, TyCtxt, TyKind};
 
 use crate::resolve_ty::{TyResolutionCtx, resolve_ty_expr, resolve_ty_expr_in};
 
@@ -83,7 +83,7 @@ pub fn typeck_package<'hir>(package: &Package<'hir>, tcx: &TyCtxt) {
                     });
                 }
 
-                let adt_id = AdtId(owner_id.def_id);
+                let adt_id = NFId(owner_id.def_id);
                 let adt_def = AdtDef {
                     name: item.ident.to_string(),
                     kind: AdtKind::Struct,
@@ -146,7 +146,6 @@ impl<'a, 'tcx> FnChecker<'a, 'tcx> {
 
     fn infer_expr(&mut self, expr: &Expr<'_>) -> Ty<'tcx> {
         match &expr.kind {
-            // ── Literals ─────────────────────────────────────────────────
             ExprKind::Lit(lit) => match &lit.kind {
                 LitKind::Integer(_) => self.tcx.mk_primitive(PrimTy::I64),
                 LitKind::Float(_) => self.tcx.mk_primitive(PrimTy::F64),
@@ -156,7 +155,6 @@ impl<'a, 'tcx> FnChecker<'a, 'tcx> {
                 LitKind::Symbol(_) => self.tcx.mk_primitive(PrimTy::Str),
             },
 
-            // ── Path (variable / function reference) ─────────────────────
             ExprKind::Path(path) => {
                 if path.segments.len() == 1 {
                     let name = path.segments[0].ident.name.as_str();
@@ -179,7 +177,6 @@ impl<'a, 'tcx> FnChecker<'a, 'tcx> {
                 self.tcx.mk_infer()
             }
 
-            // ── Binary operations ────────────────────────────────────────
             ExprKind::Binary(op, lhs, rhs) => {
                 let lhs_ty = self.check_expr(lhs);
                 let rhs_ty = self.check_expr(rhs);
@@ -200,7 +197,6 @@ impl<'a, 'tcx> FnChecker<'a, 'tcx> {
                 }
             }
 
-            // ── Unary operations ─────────────────────────────────────────
             ExprKind::Unary(op, operand) => {
                 let operand_ty = self.check_expr(operand);
                 match op {
@@ -209,7 +205,6 @@ impl<'a, 'tcx> FnChecker<'a, 'tcx> {
                 }
             }
 
-            // ── Call ─────────────────────────────────────────────────────
             ExprKind::Call(callee, args) => {
                 let callee_ty = self.check_expr(callee);
                 for arg in args.iter() {
@@ -232,7 +227,6 @@ impl<'a, 'tcx> FnChecker<'a, 'tcx> {
                 }
             }
 
-            // ── If expression ────────────────────────────────────────────
             ExprKind::If(cond, then_block, else_expr) => {
                 self.check_expr(cond);
                 let then_ty = self.check_block(then_block);
@@ -245,10 +239,8 @@ impl<'a, 'tcx> FnChecker<'a, 'tcx> {
                 }
             }
 
-            // ── Block ────────────────────────────────────────────────────
             ExprKind::Block(block) => self.check_block(block),
 
-            // ── Return ───────────────────────────────────────────────────
             ExprKind::Return(val) => {
                 if let Some(e) = val {
                     self.check_expr(e);
@@ -256,20 +248,17 @@ impl<'a, 'tcx> FnChecker<'a, 'tcx> {
                 self.tcx.mk_never()
             }
 
-            // ── Assign ───────────────────────────────────────────────────
             ExprKind::Assign(lhs, rhs) => {
                 self.check_expr(lhs);
                 self.check_expr(rhs);
                 self.tcx.mk_unit()
             }
 
-            // ── Tuple ────────────────────────────────────────────────────
             ExprKind::Tuple(elems) => {
                 let tys: Vec<_> = elems.iter().map(|e| self.check_expr(e)).collect();
                 self.tcx.mk_tuple(&tys)
             }
 
-            // ── Field access ─────────────────────────────────────────────
             ExprKind::Field(base, field_ident) => {
                 let base_ty = self.check_expr(base);
                 // If base is an ADT, look up the field type from its definition.
@@ -294,7 +283,6 @@ impl<'a, 'tcx> FnChecker<'a, 'tcx> {
                 self.tcx.mk_infer()
             }
 
-            // ── Ref / Deref ──────────────────────────────────────────────
             ExprKind::Ref(inner) => {
                 let inner_ty = self.check_expr(inner);
                 // Produce a pointer type (matches `*T` field declarations).
@@ -308,7 +296,6 @@ impl<'a, 'tcx> FnChecker<'a, 'tcx> {
                 }
             }
 
-            // ── Match ────────────────────────────────────────────────────
             ExprKind::Match(scrutinee, arms) => {
                 self.check_expr(scrutinee);
                 let mut result_ty = self.tcx.mk_infer();
@@ -321,7 +308,6 @@ impl<'a, 'tcx> FnChecker<'a, 'tcx> {
                 result_ty
             }
 
-            // ── Struct literal ───────────────────────────────────────────
             ExprKind::StructLit(path, fields) => {
                 // Check all field expressions first.
                 let field_tys: Vec<_> = fields
@@ -338,7 +324,7 @@ impl<'a, 'tcx> FnChecker<'a, 'tcx> {
                 for (owner_id, info) in self.package.owners() {
                     let it = info.node.expect_item();
                     if matches!(it.kind, ItemKind::Struct(..)) && it.ident.name.as_str() == name {
-                        let adt_id = AdtId(owner_id.def_id);
+                        let adt_id = NFId(owner_id.def_id);
                         if let Some(def) = self.tcx.adt_def(adt_id) {
                             if def.type_params.is_empty() {
                                 return self.tcx.mk_adt(adt_id, &[]);
@@ -361,7 +347,6 @@ impl<'a, 'tcx> FnChecker<'a, 'tcx> {
                 self.tcx.mk_infer()
             }
 
-            // ── Array ────────────────────────────────────────────────────
             ExprKind::Array(elems) => {
                 let mut elem_ty = self.tcx.mk_infer();
                 for e in elems.iter() {
@@ -374,7 +359,6 @@ impl<'a, 'tcx> FnChecker<'a, 'tcx> {
                 self.tcx.mk_array(elem_ty, len)
             }
 
-            // ── Null / Undefined ─────────────────────────────────────────
             ExprKind::Null => {
                 // null is a null pointer — `*const _`
                 let inner = self.tcx.mk_infer();
@@ -382,10 +366,8 @@ impl<'a, 'tcx> FnChecker<'a, 'tcx> {
             }
             ExprKind::Undefined => self.tcx.mk_infer(),
 
-            // ── Cast ─────────────────────────────────────────────────────
             ExprKind::Cast(_expr, ty_expr) => resolve_ty_expr(self.tcx, ty_expr),
 
-            // ── Type expressions (when used as values) ───────────────────
             ExprKind::TyPtr(_)
             | ExprKind::TyOptional(_)
             | ExprKind::TyFn(_, _)

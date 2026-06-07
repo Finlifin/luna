@@ -6,8 +6,6 @@ use std::path::PathBuf;
 use intrinsic::sysroot::Sysroot;
 use rustc_span::source_map::{FilePathMapping, SourceMap};
 
-// ── Configuration ────────────────────────────────────────────────────────────
-
 /// Compiler configuration, typically derived from CLI flags or a project manifest.
 pub struct CompilerConfig {
     /// Project / package name.
@@ -37,8 +35,6 @@ impl CompilerConfig {
         }
     }
 }
-
-// ── Session ──────────────────────────────────────────────────────────────────
 
 /// The compiler session.
 ///

@@ -72,7 +72,14 @@ impl Parser<'_> {
                 Real => Ok(NodeBuilder::new(NodeKind::Real, p.next_token_span()).build(&mut p.ast)),
                 Str => Ok(NodeBuilder::new(NodeKind::Str, p.next_token_span()).build(&mut p.ast)),
                 Char => Ok(NodeBuilder::new(NodeKind::Char, p.next_token_span()).build(&mut p.ast)),
-                Id => Ok(NodeBuilder::new(NodeKind::Id, p.next_token_span()).build(&mut p.ast)),
+                Id => {
+                    let sym = p.next_token_symbol();
+                    let (hi, lo) = sym.to_raw_parts();
+                    Ok(NodeBuilder::new(NodeKind::Id, p.next_token_span())
+                        .add_single_child(hi)
+                        .add_single_child(lo)
+                        .build(&mut p.ast))
+                }
                 False => {
                     Ok(NodeBuilder::new(NodeKind::Bool, p.next_token_span()).build(&mut p.ast))
                 }
@@ -103,7 +110,12 @@ impl Parser<'_> {
 
     pub fn try_id(&mut self) -> ParseResult {
         self.scoped_with_expected_prefix(TokenKind::Id.as_ref(), |p| {
-            let result = Ok(NodeBuilder::new(NodeKind::Id, p.next_token_span()).build(&mut p.ast));
+            let sym = p.next_token_symbol();
+            let (hi, lo) = sym.to_raw_parts();
+            let result = Ok(NodeBuilder::new(NodeKind::Id, p.next_token_span())
+                .add_single_child(hi)
+                .add_single_child(lo)
+                .build(&mut p.ast));
             p.eat_tokens(1);
             result
         })
@@ -277,7 +289,7 @@ impl Parser<'_> {
                     p.current_span(),
                 ));
             }
-            Ok(NodeBuilder::new(NodeKind::ExtendArg, p.current_span())
+            Ok(NodeBuilder::new(NodeKind::ExpandArg, p.current_span())
                 .add_single_child(expr)
                 .build(&mut p.ast))
         })

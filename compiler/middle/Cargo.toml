@@ -1,0 +1,15 @@
+[package]
+name = "middle"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+hir = { path = "../hir" }
+query = { path = "../query" }
+salsa = { workspace = true }
+rustc_data_structures = { workspace = true }
+rustc-arena-modified = { workspace = true }
+ast = { path = "../ast" }
+resolve = { path = "../resolve" }
+diagnostic = { path = "../diagnostic" }
+rustc_span = { workspace = true }

@@ -6,6 +6,8 @@
 
 use std::collections::HashMap;
 
+use symbol::Symbol;
+
 use crate::binding::Binding;
 use crate::import::ResolvedImport;
 
@@ -16,7 +18,7 @@ use crate::import::ResolvedImport;
 #[derive(Debug, Clone)]
 pub struct ItemScope {
     /// Locally defined names (direct definitions in this scope).
-    declarations: HashMap<String, Binding>,
+    declarations: HashMap<Symbol, Binding>,
     /// Private imports (`use …`): bring names into this scope but are not
     /// visible to the outside world.
     imports: Vec<ResolvedImport>,
@@ -30,7 +32,7 @@ pub struct ItemScope {
 /// A clause-level binding (type parameter / bounded type param / value param).
 #[derive(Debug, Clone)]
 pub struct ClauseBinding {
-    pub name: String,
+    pub name: Symbol,
     pub binding: Binding,
 }
 
@@ -46,7 +48,7 @@ impl ItemScope {
 
     /// Define a name in this scope. Returns `Err` with the old binding if the
     /// name already exists.
-    pub fn define(&mut self, name: String, binding: Binding) -> Result<(), Binding> {
+    pub fn define(&mut self, name: Symbol, binding: Binding) -> Result<(), Binding> {
         if self.declarations.contains_key(&name) {
             return Err(self.declarations[&name].clone());
         }
@@ -55,13 +57,13 @@ impl ItemScope {
     }
 
     /// Define a name, allowing shadowing (overwrites previous binding).
-    pub fn define_or_overwrites(&mut self, name: String, binding: Binding) {
+    pub fn define_or_overwrites(&mut self, name: Symbol, binding: Binding) {
         self.declarations.insert(name, binding);
     }
 
     /// Look up a name among **direct** declarations only (no imports).
     pub fn get_direct(&self, name: &str) -> Option<&Binding> {
-        self.declarations.get(name)
+        self.declarations.get(&Symbol::intern(name))
     }
 
     /// Look up a name including both direct declarations and clauses.
@@ -81,7 +83,7 @@ impl ItemScope {
     }
 
     /// All direct declarations.
-    pub fn declarations(&self) -> &HashMap<String, Binding> {
+    pub fn declarations(&self) -> &HashMap<Symbol, Binding> {
         &self.declarations
     }
 
@@ -116,7 +118,7 @@ impl ItemScope {
     }
 
     /// Add a clause-level binding (type parameter, bounded param, etc.).
-    pub fn add_clause(&mut self, name: String, binding: Binding) {
+    pub fn add_clause(&mut self, name: Symbol, binding: Binding) {
         self.clauses.push(ClauseBinding { name, binding });
     }
 

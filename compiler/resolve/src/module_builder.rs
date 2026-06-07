@@ -14,12 +14,13 @@ use std::collections::HashMap;
 
 use diagnostic::DiagnosticContext;
 use rustc_span::SourceMap;
+use symbol::{PathAnchor, Symbol};
 
 use crate::binding::Binding;
 use crate::error::{ResolveError, ResolveResult};
 use crate::ids::{DefId, DefIdGen, ScopeId, ScopeIdGen};
 use crate::impl_directive::ImplDirective;
-use crate::import::{ImportDirective, ImportKind, PathSegment, ResolvedImport};
+use crate::import::{ImportDirective, ImportKind, ResolvedImport};
 use crate::scanner::VfsScanner;
 use crate::scope::{Scope, ScopeKind, ScopeTree};
 
@@ -32,13 +33,18 @@ pub struct ModuleTree {
     /// The fully constructed scope tree.
     pub scope_tree: ScopeTree,
     /// DefId → human-readable name.
-    pub def_names: HashMap<DefId, String>,
+    pub def_names: HashMap<DefId, Symbol>,
     /// How many DefIds were allocated.
     pub def_count: u32,
     /// All `impl` / `impl Trait for Type` blocks discovered during scanning.
     pub impls: Vec<ImplDirective>,
     /// Errors collected (non-fatal) during the build phase.
     pub errors: Vec<ResolveError>,
+    /// VFS FileId → the scope that owns the top-level definitions of that file.
+    ///
+    /// For entry files (`main.fl` / `lib.fl`) this is the package scope;
+    /// for named files it is the file-level module scope.
+    pub file_scopes: HashMap<vfs::FileId, ScopeId>,
 }
 
 /// Build the module tree for a package.
@@ -75,15 +81,17 @@ struct ModuleBuilder<'a> {
     /// Accumulated errors.
     errors: Vec<ResolveError>,
     /// DefId → name mapping.
-    def_names: Vec<(DefId, String)>,
+    def_names: Vec<(DefId, Symbol)>,
     /// Index: DefId → ScopeId (built once after scan phase).
     def_to_scope: HashMap<DefId, ScopeId>,
+    /// VFS FileId → the scope that owns the file's top-level definitions.
+    file_scopes: HashMap<vfs::FileId, ScopeId>,
 }
 
 impl<'a> ModuleBuilder<'a> {
     fn new(source_map: &'a SourceMap, diag_ctx: &'a DiagnosticContext<'a>) -> Self {
         let mut scope_gen = ScopeIdGen::new();
-        let mut def_gen = DefIdGen::new();
+        let mut def_gen = DefIdGen::new(0); // pkg=0 is the local package
         let mut scope_tree = ScopeTree::new();
 
         // Create the synthetic root scope.
@@ -93,7 +101,7 @@ impl<'a> ModuleBuilder<'a> {
             root_id,
             ScopeKind::Root,
             None,
-            Some("<root>".into()),
+            Some(Symbol::intern("<root>")),
             root_def,
             false,
         );
@@ -109,8 +117,9 @@ impl<'a> ModuleBuilder<'a> {
             unresolved_imports: Vec::new(),
             impls: Vec::new(),
             errors: Vec::new(),
-            def_names: vec![(root_def, "<root>".into())],
+            def_names: vec![(root_def, Symbol::intern("<root>"))],
             def_to_scope: HashMap::new(),
+            file_scopes: HashMap::new(),
         }
     }
 
@@ -139,6 +148,7 @@ impl<'a> ModuleBuilder<'a> {
         let impls = std::mem::take(&mut self.impls);
         let errors = std::mem::take(&mut self.errors);
         let scope_tree = std::mem::replace(&mut self.scope_tree, ScopeTree::new());
+        let file_scopes = std::mem::take(&mut self.file_scopes);
 
         ModuleTree {
             scope_tree,
@@ -146,6 +156,7 @@ impl<'a> ModuleBuilder<'a> {
             def_count,
             impls,
             errors,
+            file_scopes,
         }
     }
 
@@ -161,10 +172,11 @@ impl<'a> ModuleBuilder<'a> {
 
         scanner.scan_package(self.root_scope)?;
 
-        let (imports, impls, def_names) = scanner.into_results();
+        let (imports, impls, def_names, file_scopes) = scanner.into_results();
         self.unresolved_imports = imports;
         self.impls = impls;
         self.def_names.extend(def_names);
+        self.file_scopes = file_scopes;
 
         Ok(())
     }
@@ -215,13 +227,19 @@ impl<'a> ModuleBuilder<'a> {
                 // No progress – remaining imports are unresolvable.
                 for imp in &self.unresolved_imports {
                     if !imp.resolved {
+                        let anchor_prefix = match imp.anchor {
+                            PathAnchor::Local => String::new(),
+                            PathAnchor::Super(n) => ".".repeat(n as usize),
+                            PathAnchor::Package => "@".to_string(),
+                        };
+                        let segs = imp
+                            .path_segments
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(".");
                         self.errors.push(ResolveError::UnresolvedImportSegment {
-                            segment: imp
-                                .path_segments
-                                .iter()
-                                .map(|s| s.to_string())
-                                .collect::<Vec<_>>()
-                                .join("."),
+                            segment: format!("{}{}", anchor_prefix, segs),
                             span: imp.span,
                         });
                     }
@@ -240,69 +258,81 @@ impl<'a> ModuleBuilder<'a> {
         let directive = &self.unresolved_imports[import_idx];
         let starting_scope = directive.owner_scope;
 
-        let target_scope =
-            self.resolve_path_segments(&directive.path_segments, starting_scope, directive.span)?;
+        let target_scope = self.resolve_path_segments(
+            directive.anchor,
+            &directive.path_segments,
+            starting_scope,
+            directive.span,
+        )?;
 
         match &directive.kind {
             ImportKind::Single { name, .. } => {
-                self.verify_name_in_scope(name, target_scope, directive.span)?;
-                Ok(ResolvedImport::Single(target_scope, name.clone()))
+                self.verify_name_in_scope(name.as_str(), target_scope, directive.span)?;
+                Ok(ResolvedImport::Single(target_scope, *name))
             }
             ImportKind::Glob { .. } => Ok(ResolvedImport::Glob(target_scope)),
             ImportKind::Multi { names, .. } => {
                 for name in names {
-                    self.verify_name_in_scope(name, target_scope, directive.span)?;
+                    self.verify_name_in_scope(name.as_str(), target_scope, directive.span)?;
                 }
                 Ok(ResolvedImport::Multi(target_scope, names.clone()))
             }
             ImportKind::Alias {
                 original, alias, ..
             } => {
-                self.verify_name_in_scope(original, target_scope, directive.span)?;
+                self.verify_name_in_scope(original.as_str(), target_scope, directive.span)?;
                 Ok(ResolvedImport::Alias {
                     source_scope: target_scope,
-                    original: original.clone(),
-                    alias: alias.clone(),
+                    original: *original,
+                    alias: *alias,
                 })
             }
         }
     }
 
-    /// Walk a sequence of path segments to find the target scope.
+    /// Walk a path anchor + name segments to find the target scope.
     fn resolve_path_segments(
         &self,
-        segments: &[PathSegment],
-        mut scope_id: ScopeId,
+        anchor: PathAnchor,
+        segments: &[Symbol],
+        scope_id: ScopeId,
         span: rustc_span::Span,
     ) -> ResolveResult<ScopeId> {
-        for segment in segments {
-            match segment {
-                PathSegment::Super => {
-                    scope_id = self
+        // Apply anchor first.
+        let mut scope_id = match anchor {
+            PathAnchor::Local => scope_id,
+            PathAnchor::Super(n) => {
+                let mut sid = scope_id;
+                for _ in 0..n {
+                    sid = self
                         .scope_tree
-                        .get(scope_id)
+                        .get(sid)
                         .and_then(|s| s.parent)
                         .ok_or_else(|| ResolveError::UnresolvedImportSegment {
-                            segment: "super".into(),
+                            segment: ".".to_string(),
                             span,
                         })?;
                 }
-                PathSegment::Name(name) => {
-                    let binding = self.lookup_in_scope(name, scope_id).ok_or_else(|| {
-                        ResolveError::UnresolvedImportSegment {
-                            segment: name.clone(),
-                            span,
-                        }
-                    })?;
-
-                    scope_id = self.find_scope_for_def(binding.def_id).ok_or_else(|| {
-                        ResolveError::UnresolvedImportSegment {
-                            segment: name.clone(),
-                            span,
-                        }
-                    })?;
-                }
+                sid
             }
+            PathAnchor::Package => self.root_scope,
+        };
+
+        // Walk name segments.
+        for name in segments {
+            let binding = self
+                .lookup_in_scope(name.as_str(), scope_id)
+                .ok_or_else(|| ResolveError::UnresolvedImportSegment {
+                    segment: name.as_str().to_owned(),
+                    span,
+                })?;
+
+            scope_id = self.find_scope_for_def(binding.def_id).ok_or_else(|| {
+                ResolveError::UnresolvedImportSegment {
+                    segment: name.as_str().to_owned(),
+                    span,
+                }
+            })?;
         }
 
         Ok(scope_id)
@@ -343,7 +373,9 @@ impl<'a> ModuleBuilder<'a> {
                     alias,
                 } => {
                     if alias == name {
-                        if let Some(b) = self.lookup_direct_in_scope(original, *source_scope) {
+                        if let Some(b) =
+                            self.lookup_direct_in_scope(original.as_str(), *source_scope)
+                        {
                             return Some(b);
                         }
                     }

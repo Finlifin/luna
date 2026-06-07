@@ -1,6 +1,8 @@
+use symbol::{DefId, PathAnchor, Symbol};
+
 use crate::binding::{Binding, Resolution};
 use crate::error::{ResolveError, ResolveResult};
-use crate::ids::{DefId, ScopeId};
+use crate::ids::ScopeId;
 use crate::import::ResolvedImport;
 use crate::module_builder::ModuleTree;
 use crate::rib::RibStack;
@@ -210,7 +212,7 @@ impl<'a> Resolver<'a> {
                     alias,
                 } => {
                     if alias == name {
-                        if let Some(b) = self.lookup_direct(original, *source_scope) {
+                        if let Some(b) = self.lookup_direct(original.as_str(), *source_scope) {
                             return Some(b);
                         }
                     }
@@ -251,5 +253,56 @@ impl<'a> Resolver<'a> {
     /// Look up the human-readable name for a DefId.
     pub fn def_name(&self, def_id: DefId) -> Option<&str> {
         self.tree.def_names.get(&def_id).map(|s| s.as_str())
+    }
+
+    /// Resolve a Flurry HIR path (anchor + symbol segments) to a [`DefId`].
+    ///
+    /// This is the primary entry point for AST lowering to perform early name
+    /// resolution on path nodes.  Returns `None` when the path cannot be
+    /// resolved (the caller should then emit an unresolved-name diagnostic).
+    ///
+    /// # Anchor semantics
+    /// - `PathAnchor::Local`     – start from `scope_id`, walk up as needed
+    /// - `PathAnchor::Super(n)`  – step up `n` levels before resolving
+    /// - `PathAnchor::Package`   – start from the package-root scope
+    pub fn resolve_hir_path(
+        &self,
+        anchor: PathAnchor,
+        segments: &[Symbol],
+        scope_id: ScopeId,
+        span: rustc_span::Span,
+    ) -> Option<DefId> {
+        if segments.is_empty() {
+            return None;
+        }
+
+        // Determine the starting scope based on the anchor.
+        let starting_scope = match anchor {
+            PathAnchor::Local => scope_id,
+            PathAnchor::Super(n) => {
+                let mut sid = scope_id;
+                for _ in 0..n {
+                    sid = self.scope_tree().get(sid).and_then(|s| s.parent)?;
+                }
+                sid
+            }
+            PathAnchor::Package => {
+                // Walk up to the package scope.
+                let mut sid = scope_id;
+                loop {
+                    let s = self.scope_tree().get(sid)?;
+                    if matches!(s.kind, crate::scope::ScopeKind::Package) {
+                        break sid;
+                    }
+                    sid = s.parent?;
+                }
+            }
+        };
+
+        // Build a Vec<String> for the existing resolve_path helper.
+        let seg_strings: Vec<String> = segments.iter().map(|s| s.as_str().to_owned()).collect();
+        self.resolve_path(&seg_strings, starting_scope, span)
+            .ok()
+            .map(|res| res.def_id)
     }
 }

@@ -38,8 +38,8 @@ pub use expr::{Block, CondictionArm, Expr, ExprKind, FieldExpr};
 pub use hir_id::{BodyId, HirId, ItemLocalId, LocalDefId, OwnerId};
 pub use idx::{Idx, IndexVec};
 pub use item::{
-    DefKind, EnumDef, FieldDef, FnDecl, FnSig, ImplDef, Item, ItemKind, ModDef, StructDef,
-    TraitDef, Variant, VariantKind,
+    DefKind, EnumDef, FieldDef, FnSig, ImplDef, Item, ItemKind, ModDef, NFSig, StructDef, TraitDef,
+    Variant, VariantKind,
 };
 pub use node::Node;
 pub use owner::{OwnerInfo, OwnerNode, OwnerNodes, ParentedNode};
@@ -126,6 +126,104 @@ impl<'hir> Package<'hir> {
 impl Default for Package<'_> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<'hir> Package<'hir> {
+    /// Serialize the HIR package as a Lisp-style s-expression string.
+    ///
+    /// Outputs one line per top-level item showing its kind and name.
+    /// Function items also list their parameters (name: type) and
+    /// their return type if present.  Bodies are printed on subsequent
+    /// indented lines.
+    ///
+    /// # Format
+    /// ```text
+    /// (hir-package
+    ///   (fn add (params (a _) (b _)) (ret _) (body <id>))
+    ///   (struct Point (fields x y))
+    ///   (mod some_module))
+    /// ```
+    pub fn dump_to_lisp(&self) -> String {
+        use item::ItemKind;
+        use std::fmt::Write as _;
+
+        let mut out = String::new();
+        writeln!(out, "(hir-package").unwrap();
+
+        for (owner_id, _info) in self.owners() {
+            let Some(item) = self.item(owner_id) else {
+                continue;
+            };
+            match &item.kind {
+                ItemKind::Fn(sig, body_id) => {
+                    write!(out, "  (fn {}", item.ident.name).unwrap();
+                    // Parameters
+                    write!(out, " (params").unwrap();
+                    for (ident, _tp) in sig.params {
+                        write!(out, " {}", ident.name).unwrap();
+                    }
+                    write!(out, ")").unwrap();
+                    // Return type placeholder
+                    if sig.return_ty.is_some() {
+                        write!(out, " (ret ...)").unwrap();
+                    }
+                    write!(out, " (body {})", body_id.hir_id.local_id.raw()).unwrap();
+
+                    // Params from body, if available
+                    if let Some(body) = self.body(*body_id) {
+                        if !body.params.is_empty() {
+                            write!(out, "\n    (body-params").unwrap();
+                            for p in body.params {
+                                write!(out, " {}", p.name.name).unwrap();
+                            }
+                            write!(out, ")").unwrap();
+                        }
+                    }
+                    writeln!(out, ")").unwrap();
+                }
+                ItemKind::Struct(def) => {
+                    write!(out, "  (struct {}", item.ident.name).unwrap();
+                    write!(out, " (fields").unwrap();
+                    for f in def.fields {
+                        write!(out, " {}", f.ident.name).unwrap();
+                    }
+                    writeln!(out, "))").unwrap();
+                }
+                ItemKind::Enum(def) => {
+                    write!(out, "  (enum {}", item.ident.name).unwrap();
+                    write!(out, " (variants").unwrap();
+                    for v in def.variants {
+                        write!(out, " {}", v.ident.name).unwrap();
+                    }
+                    writeln!(out, "))").unwrap();
+                }
+                ItemKind::Mod(_) => {
+                    writeln!(out, "  (mod {})", item.ident.name).unwrap();
+                }
+                ItemKind::Trait(_) => {
+                    writeln!(out, "  (trait {})", item.ident.name).unwrap();
+                }
+                ItemKind::Impl(_) => {
+                    writeln!(out, "  (impl {})", item.ident.name).unwrap();
+                }
+                ItemKind::TypeAlias(_) => {
+                    writeln!(out, "  (type-alias {})", item.ident.name).unwrap();
+                }
+                ItemKind::Use(_) => {
+                    writeln!(out, "  (use {})", item.ident.name).unwrap();
+                }
+                ItemKind::Const(_, _) => {
+                    writeln!(out, "  (const {})", item.ident.name).unwrap();
+                }
+                ItemKind::Invalid => {
+                    writeln!(out, "  (invalid {}))", item.ident.name).unwrap();
+                }
+            }
+        }
+
+        out.push(')');
+        out
     }
 }
 

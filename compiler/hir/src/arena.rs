@@ -15,9 +15,9 @@ use rustc_arena_modified::typed_arena::TypedArena;
 
 use crate::body::Param;
 use crate::clause::{ClauseConstraint, ClauseParam};
-use crate::common::{GenericArg, PathSegment};
+use crate::common::{Arg, FnSigParam, Ident, PathSegment, TyParam};
 use crate::decl::LetDecl;
-use crate::expr::{Arg, Block, ClosureParam, CondictionArm, Expr, FieldExpr, TyParam};
+use crate::expr::{Block, ClosureParam, CondictionArm, Expr, FieldExpr};
 use crate::item::{FieldDef, Item, Variant};
 use crate::pattern::{FieldPat, Pattern, PatternArm};
 
@@ -41,9 +41,9 @@ pub struct HirArena {
     field_pats: TypedArena<FieldPat<'static>>,
     clause_params: TypedArena<ClauseParam<'static>>,
     path_segments: TypedArena<PathSegment<'static>>,
-    generic_args: TypedArena<GenericArg<'static>>,
     args: TypedArena<Arg<'static>>,
     ty_params: TypedArena<TyParam<'static>>,
+    fn_params: TypedArena<FnSigParam<'static>>,
     cond_arms: TypedArena<CondictionArm<'static>>,
 }
 
@@ -71,9 +71,9 @@ impl HirArena {
             field_pats: TypedArena::new(),
             clause_params: TypedArena::new(),
             path_segments: TypedArena::new(),
-            generic_args: TypedArena::new(),
             args: TypedArena::new(),
             ty_params: TypedArena::new(),
+            fn_params: TypedArena::new(),
             cond_arms: TypedArena::new(),
         }
     }
@@ -155,18 +155,14 @@ impl HirArena {
         path_segments,
         PathSegment
     );
-    impl_arena_alloc!(
-        alloc_generic_arg,
-        alloc_generic_arg_slice,
-        generic_args,
-        GenericArg
-    );
     impl_arena_alloc!(alloc_arg, alloc_arg_slice, args, Arg);
     impl_arena_alloc!(alloc_ty_param, alloc_ty_param_slice, ty_params, TyParam);
+    impl_arena_alloc!(alloc_fn_param, alloc_fn_param_slice, fn_params, FnSigParam);
     impl_arena_alloc!(
         alloc_cond_arm,
         alloc_cond_arm_slice,
         cond_arms,
         CondictionArm
     );
+
 }

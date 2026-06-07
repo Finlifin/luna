@@ -28,7 +28,6 @@ use ast::{NodeIndex, NodeKind};
 use hir::{
     ClauseParam,
     clause::{ClauseConstraint, ClauseConstraintKind, ClauseParamKind},
-    common::{Ident, Symbol},
 };
 use rustc_span::Span;
 
@@ -78,10 +77,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                 // NOTE: mapping to Positional is tentative; see module-level TODO.
                 NodeKind::TypeBoundDeclClause => {
                     let children = self.ast.get_children(clause_idx);
-                    if children.len() < 2 {
-                        self.emit_malformed("TypeBoundDeclClause: expected 2 children", span);
-                        continue;
-                    }
                     let name = self.node_to_ident(children[0]);
                     let bound_expr = self.lower_expr(children[1]);
                     let bound_ref = self.arena.alloc_expr(bound_expr);
@@ -97,10 +92,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                 // NOTE: using Requires as a placeholder; see module-level TODO.
                 NodeKind::TraitBoundDeclClause => {
                     let children = self.ast.get_children(clause_idx);
-                    if children.len() < 2 {
-                        self.emit_malformed("TraitBoundDeclClause: expected 2 children", span);
-                        continue;
-                    }
+
                     let bound_expr = self.lower_expr(children[1]);
                     let bound_ref = self.arena.alloc_expr(bound_expr);
                     result.constraints.push(ClauseConstraint {
@@ -113,53 +105,43 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                 // optional clause: `.a : T = default`  →  ClauseParamKind::Optional(a, T)
                 NodeKind::OptionalDeclClause => {
                     let children = self.ast.get_children(clause_idx);
-                    if children.len() >= 2 {
-                        let name = self.node_to_ident(children[0]);
-                        let ty_expr = self.lower_expr(children[1]);
-                        let ty_ref = self.arena.alloc_expr(ty_expr);
-                        result.params.push(ClauseParam {
-                            hir_id: self.next_hir_id(),
-                            kind: ClauseParamKind::Optional(name.clone(), ty_ref),
-                            name,
-                            span,
-                        });
-                    }
+                    let name = self.node_to_ident(children[0]);
+                    let ty_expr = self.lower_expr(children[1]);
+                    let ty_ref = self.arena.alloc_expr(ty_expr);
+                    result.params.push(ClauseParam {
+                        hir_id: self.next_hir_id(),
+                        kind: ClauseParamKind::Optional(name.clone(), ty_ref),
+                        name,
+                        span,
+                    });
                 }
 
                 // variadic clause: `...a : T`  →  ClauseParamKind::Varadic(a, T)
                 NodeKind::VarargDeclClause => {
                     let children = self.ast.get_children(clause_idx);
-                    if children.len() >= 2 {
-                        let name = self.node_to_ident(children[0]);
-                        let ty_expr = self.lower_expr(children[1]);
-                        let ty_ref = self.arena.alloc_expr(ty_expr);
-                        result.params.push(ClauseParam {
-                            hir_id: self.next_hir_id(),
-                            kind: ClauseParamKind::Varadic(name.clone(), ty_ref),
-                            name,
-                            span,
-                        });
-                    }
+                    let name = self.node_to_ident(children[0]);
+                    let ty_expr = self.lower_expr(children[1]);
+                    let ty_ref = self.arena.alloc_expr(ty_expr);
+                    result.params.push(ClauseParam {
+                        hir_id: self.next_hir_id(),
+                        kind: ClauseParamKind::Varadic(name.clone(), ty_ref),
+                        name,
+                        span,
+                    });
                 }
 
                 // quoted clause  →  ClauseParamKind::Quote(name, expr)
                 NodeKind::QuoteDeclClause => {
                     let children = self.ast.get_children(clause_idx);
-                    if !children.is_empty() {
-                        let (name, expr_node) = if children.len() >= 2 {
-                            (self.node_to_ident(children[0]), children[1])
-                        } else {
-                            (Ident::new(Symbol::intern("_"), span), children[0])
-                        };
-                        let inner_expr = self.lower_expr(expr_node);
-                        let inner_ref = self.arena.alloc_expr(inner_expr);
-                        result.params.push(ClauseParam {
-                            hir_id: self.next_hir_id(),
-                            kind: ClauseParamKind::Quote(name.clone(), inner_ref),
-                            name,
-                            span,
-                        });
-                    }
+                    let (name, expr_node) = (self.node_to_ident(children[0]), children[1]);
+                    let inner_expr = self.lower_expr(expr_node);
+                    let inner_ref = self.arena.alloc_expr(inner_expr);
+                    result.params.push(ClauseParam {
+                        hir_id: self.next_hir_id(),
+                        kind: ClauseParamKind::Quote(name.clone(), inner_ref),
+                        name,
+                        span,
+                    });
                 }
 
                 other => {

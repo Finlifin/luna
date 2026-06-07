@@ -14,8 +14,6 @@ use hir::common::{BinOp, UnOp};
 use hir::hir_id::LocalDefId;
 use ty::Ty;
 
-// ── Index types ──────────────────────────────────────────────────────────────
-
 /// Index of a local variable / temporary in a MIR body.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Local(pub u32);
@@ -73,8 +71,6 @@ impl fmt::Display for BasicBlock {
     }
 }
 
-// ── Body ─────────────────────────────────────────────────────────────────────
-
 /// A single MIR function body.
 pub struct Body<'tcx> {
     /// The definition this body belongs to.
@@ -125,8 +121,6 @@ pub struct LocalDecl<'tcx> {
     pub name: Option<String>,
 }
 
-// ── BasicBlockData ───────────────────────────────────────────────────────────
-
 /// A basic block: a sequence of statements followed by a terminator.
 pub struct BasicBlockData<'tcx> {
     pub statements: Vec<Statement<'tcx>>,
@@ -142,8 +136,6 @@ impl<'tcx> BasicBlockData<'tcx> {
     }
 }
 
-// ── Statement ────────────────────────────────────────────────────────────────
-
 pub struct Statement<'tcx> {
     pub kind: StatementKind<'tcx>,
 }
@@ -154,8 +146,6 @@ pub enum StatementKind<'tcx> {
     /// No-op (placeholder).
     Nop,
 }
-
-// ── Terminator ───────────────────────────────────────────────────────────────
 
 pub struct Terminator<'tcx> {
     pub kind: TerminatorKind<'tcx>,
@@ -199,8 +189,6 @@ pub struct SwitchTargets {
     pub otherwise: BasicBlock,
 }
 
-// ── Place ────────────────────────────────────────────────────────────────────
-
 /// A memory location: a local variable potentially followed by
 /// projections (field access, deref, index).
 #[derive(Clone, Debug)]
@@ -234,8 +222,6 @@ pub enum PlaceElem {
     Index(Local),
 }
 
-// ── Operand ──────────────────────────────────────────────────────────────────
-
 /// An operand in an rvalue or terminator.
 pub enum Operand<'tcx> {
     /// Copy the value from a place (for Copy types).
@@ -245,8 +231,6 @@ pub enum Operand<'tcx> {
     /// An inline constant.
     Constant(Constant<'tcx>),
 }
-
-// ── Rvalue ───────────────────────────────────────────────────────────────────
 
 /// A right-hand-side value in an assignment.
 pub enum Rvalue<'tcx> {
@@ -268,8 +252,6 @@ pub enum AggregateKind {
     Array,
     Adt(LocalDefId),
 }
-
-// ── Constant ─────────────────────────────────────────────────────────────────
 
 /// An embedded constant value.
 pub struct Constant<'tcx> {

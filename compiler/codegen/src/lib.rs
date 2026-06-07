@@ -7,25 +7,21 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::ptr;
 
+use llvm_sys::LLVMIntPredicate;
+use llvm_sys::LLVMRealPredicate;
 #[allow(deprecated)] // LLVMBuildGlobalStringPtr → LLVMBuildGlobalString TBD
 use llvm_sys::core::*;
 use llvm_sys::prelude::*;
 use llvm_sys::target::*;
 use llvm_sys::target_machine::*;
-use llvm_sys::LLVMIntPredicate;
-use llvm_sys::LLVMRealPredicate;
 
 use hir::common::BinOp;
 use mir::*;
-use ty::{AdtId, PrimTy, TyCtxt, TyKind};
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
+use ty::{NFId, PrimTy, TyCtxt, TyKind};
 
 fn c_str(s: &str) -> CString {
     CString::new(s).expect("CString::new failed")
 }
-
-// ── Public API ───────────────────────────────────────────────────────────────
 
 /// Result of LLVM codegen – owns the LLVM module and can write it.
 pub struct CodegenResult {
@@ -124,8 +120,6 @@ impl Drop for CodegenResult {
     }
 }
 
-// ── Codegen context ──────────────────────────────────────────────────────────
-
 struct CodegenCtx<'a> {
     context: LLVMContextRef,
     module: LLVMModuleRef,
@@ -135,7 +129,7 @@ struct CodegenCtx<'a> {
     /// Map from function name → LLVM function value.
     functions: HashMap<String, LLVMValueRef>,
     /// Map from ADT id → LLVM struct type.
-    struct_types: HashMap<AdtId, LLVMTypeRef>,
+    struct_types: HashMap<NFId, LLVMTypeRef>,
 }
 
 impl<'a> CodegenCtx<'a> {
@@ -157,17 +151,13 @@ impl<'a> CodegenCtx<'a> {
         }
     }
 
-    // ── LLVM type mapping ────────────────────────────────────────────────
-
     fn llvm_ty(&self, ty: &ty::Ty<'_>) -> LLVMTypeRef {
         unsafe {
             match ty.kind() {
                 TyKind::Primitive(prim) => self.llvm_prim_ty(*prim),
-                TyKind::Unit => LLVMVoidTypeInContext(self.context),
-                TyKind::Never => LLVMVoidTypeInContext(self.context),
-                TyKind::Ref(_, _) | TyKind::Ptr(_, _) => {
-                    LLVMPointerTypeInContext(self.context, 0)
-                }
+                TyKind::Void => LLVMVoidTypeInContext(self.context),
+                TyKind::NoReturn => LLVMVoidTypeInContext(self.context),
+                TyKind::Ref(_, _) | TyKind::Ptr(_, _) => LLVMPointerTypeInContext(self.context, 0),
                 TyKind::Adt(adt_id, _) => {
                     if let Some(&sty) = self.struct_types.get(adt_id) {
                         sty
@@ -214,14 +204,12 @@ impl<'a> CodegenCtx<'a> {
     }
 
     fn is_void_ty(&self, ty: &ty::Ty<'_>) -> bool {
-        matches!(ty.kind(), TyKind::Unit | TyKind::Never)
+        matches!(ty.kind(), TyKind::Void | TyKind::NoReturn)
     }
-
-    // ── Struct type definitions ──────────────────────────────────────────
 
     fn define_struct_types(&mut self, bodies: &[mir::Body<'_>]) {
         // Collect (AdtId → first concrete generic args seen).
-        let mut adt_args: HashMap<AdtId, Vec<ty::Ty<'_>>> = HashMap::new();
+        let mut adt_args: HashMap<NFId, Vec<ty::Ty<'_>>> = HashMap::new();
         for body in bodies {
             for decl in &body.local_decls {
                 self.collect_adt_args(&decl.ty, &mut adt_args);
@@ -247,23 +235,14 @@ impl<'a> CodegenCtx<'a> {
                             }
                         })
                         .collect();
-                    LLVMStructSetBody(
-                        sty,
-                        field_tys.as_mut_ptr(),
-                        field_tys.len() as u32,
-                        0,
-                    );
+                    LLVMStructSetBody(sty, field_tys.as_mut_ptr(), field_tys.len() as u32, 0);
                     self.struct_types.insert(*adt_id, sty);
                 }
             }
         }
     }
 
-    fn collect_adt_args<'b>(
-        &self,
-        ty: &ty::Ty<'b>,
-        seen: &mut HashMap<AdtId, Vec<ty::Ty<'b>>>,
-    ) {
+    fn collect_adt_args<'b>(&self, ty: &ty::Ty<'b>, seen: &mut HashMap<NFId, Vec<ty::Ty<'b>>>) {
         match ty.kind() {
             TyKind::Adt(adt_id, args) => {
                 seen.entry(*adt_id).or_insert_with(|| args.to_vec());
@@ -292,8 +271,6 @@ impl<'a> CodegenCtx<'a> {
         }
     }
 
-    // ── Declare printf ───────────────────────────────────────────────────
-
     fn declare_printf(&mut self) {
         unsafe {
             let name = c_str("printf");
@@ -305,13 +282,8 @@ impl<'a> CodegenCtx<'a> {
         }
     }
 
-    // ── Function codegen ─────────────────────────────────────────────────
-
     fn codegen_function(&mut self, body: &mir::Body<'_>) {
-        let fn_name = body.local_decls[0]
-            .name
-            .as_deref()
-            .unwrap_or("unknown");
+        let fn_name = body.local_decls[0].name.as_deref().unwrap_or("unknown");
 
         let ret_ty = &body.local_decls[0].ty;
         let is_void = self.is_void_ty(ret_ty);
@@ -327,7 +299,12 @@ impl<'a> CodegenCtx<'a> {
             .collect();
 
         let fn_ty = unsafe {
-            LLVMFunctionType(llvm_ret_ty, param_tys.as_mut_ptr(), param_tys.len() as u32, 0)
+            LLVMFunctionType(
+                llvm_ret_ty,
+                param_tys.as_mut_ptr(),
+                param_tys.len() as u32,
+                0,
+            )
         };
 
         let c_name = c_str(fn_name);
@@ -336,10 +313,7 @@ impl<'a> CodegenCtx<'a> {
     }
 
     fn codegen_function_body(&mut self, body: &mir::Body<'_>) {
-        let fn_name = body.local_decls[0]
-            .name
-            .as_deref()
-            .unwrap_or("unknown");
+        let fn_name = body.local_decls[0].name.as_deref().unwrap_or("unknown");
 
         let function = self.functions[fn_name];
         let ret_ty = &body.local_decls[0].ty;
@@ -354,9 +328,8 @@ impl<'a> CodegenCtx<'a> {
         let mut bb_map: Vec<LLVMBasicBlockRef> = Vec::new();
         for i in 0..body.basic_blocks.len() {
             let name = c_str(&format!("bb{}", i));
-            let bb = unsafe {
-                LLVMAppendBasicBlockInContext(self.context, function, name.as_ptr())
-            };
+            let bb =
+                unsafe { LLVMAppendBasicBlockInContext(self.context, function, name.as_ptr()) };
             bb_map.push(bb);
         }
 
@@ -395,9 +368,8 @@ impl<'a> CodegenCtx<'a> {
                 locals.push(ptr::null_mut());
             } else {
                 let name = c_str(&format!("_{}", i));
-                let alloca = unsafe {
-                    LLVMBuildAlloca(self.builder, self.llvm_ty(&decl.ty), name.as_ptr())
-                };
+                let alloca =
+                    unsafe { LLVMBuildAlloca(self.builder, self.llvm_ty(&decl.ty), name.as_ptr()) };
                 locals.push(alloca);
             }
         }
@@ -491,9 +463,7 @@ impl<'a> CodegenCtx<'a> {
                         // boolean true check — cond is already i1
                         cond
                     } else {
-                        let const_val = unsafe {
-                            LLVMConstInt(LLVMTypeOf(cond), *val as u64, 0)
-                        };
+                        let const_val = unsafe { LLVMConstInt(LLVMTypeOf(cond), *val as u64, 0) };
                         unsafe {
                             LLVMBuildICmp(
                                 self.builder,
@@ -522,9 +492,7 @@ impl<'a> CodegenCtx<'a> {
                         )
                     };
                     for (val, target) in &targets.values {
-                        let const_val = unsafe {
-                            LLVMConstInt(LLVMTypeOf(cond), *val as u64, 0)
-                        };
+                        let const_val = unsafe { LLVMConstInt(LLVMTypeOf(cond), *val as u64, 0) };
                         unsafe {
                             LLVMAddCase(switch, const_val, bb_map[target.index()]);
                         }
@@ -627,8 +595,6 @@ impl<'a> CodegenCtx<'a> {
         }
     }
 
-    // ── Operand / Rvalue codegen ─────────────────────────────────────────
-
     fn codegen_operand(
         &self,
         op: &Operand<'_>,
@@ -671,9 +637,7 @@ impl<'a> CodegenCtx<'a> {
                         LLVMConstInt(LLVMInt64TypeInContext(self.context), 0, 0)
                     }
                 }
-                ConstKind::FnDef(_) => {
-                    LLVMConstInt(LLVMInt64TypeInContext(self.context), 0, 0)
-                }
+                ConstKind::FnDef(_) => LLVMConstInt(LLVMInt64TypeInContext(self.context), 0, 0),
                 ConstKind::Unit => LLVMGetUndef(LLVMInt1TypeInContext(self.context)),
                 ConstKind::Null => {
                     let ptr_ty = LLVMPointerTypeInContext(self.context, 0);
@@ -727,7 +691,7 @@ impl<'a> CodegenCtx<'a> {
 
                 match kind {
                     AggregateKind::Adt(def_id) => {
-                        let adt_id = AdtId(*def_id);
+                        let adt_id = NFId(*def_id);
                         if let Some(&sty) = self.struct_types.get(&adt_id) {
                             let mut agg = unsafe { LLVMGetUndef(sty) };
                             for (i, val) in operands.iter().enumerate() {
@@ -748,14 +712,10 @@ impl<'a> CodegenCtx<'a> {
                     }
                     AggregateKind::Tuple | AggregateKind::Array => {
                         if operands.is_empty() {
-                            return unsafe {
-                                LLVMGetUndef(LLVMInt1TypeInContext(self.context))
-                            };
+                            return unsafe { LLVMGetUndef(LLVMInt1TypeInContext(self.context)) };
                         }
-                        let mut tys: Vec<LLVMTypeRef> = operands
-                            .iter()
-                            .map(|v| unsafe { LLVMTypeOf(*v) })
-                            .collect();
+                        let mut tys: Vec<LLVMTypeRef> =
+                            operands.iter().map(|v| unsafe { LLVMTypeOf(*v) }).collect();
                         let sty = unsafe {
                             LLVMStructTypeInContext(
                                 self.context,
@@ -799,12 +759,48 @@ impl<'a> CodegenCtx<'a> {
                     BinOp::Mul => LLVMBuildFMul(self.builder, lhs, rhs, c_str("fmul").as_ptr()),
                     BinOp::Div => LLVMBuildFDiv(self.builder, lhs, rhs, c_str("fdiv").as_ptr()),
                     BinOp::Rem => LLVMBuildFRem(self.builder, lhs, rhs, c_str("frem").as_ptr()),
-                    BinOp::Eq => LLVMBuildFCmp(self.builder, LLVMRealPredicate::LLVMRealOEQ, lhs, rhs, c_str("feq").as_ptr()),
-                    BinOp::Ne => LLVMBuildFCmp(self.builder, LLVMRealPredicate::LLVMRealONE, lhs, rhs, c_str("fne").as_ptr()),
-                    BinOp::Lt => LLVMBuildFCmp(self.builder, LLVMRealPredicate::LLVMRealOLT, lhs, rhs, c_str("flt").as_ptr()),
-                    BinOp::Gt => LLVMBuildFCmp(self.builder, LLVMRealPredicate::LLVMRealOGT, lhs, rhs, c_str("fgt").as_ptr()),
-                    BinOp::Le => LLVMBuildFCmp(self.builder, LLVMRealPredicate::LLVMRealOLE, lhs, rhs, c_str("fle").as_ptr()),
-                    BinOp::Ge => LLVMBuildFCmp(self.builder, LLVMRealPredicate::LLVMRealOGE, lhs, rhs, c_str("fge").as_ptr()),
+                    BinOp::Eq => LLVMBuildFCmp(
+                        self.builder,
+                        LLVMRealPredicate::LLVMRealOEQ,
+                        lhs,
+                        rhs,
+                        c_str("feq").as_ptr(),
+                    ),
+                    BinOp::Ne => LLVMBuildFCmp(
+                        self.builder,
+                        LLVMRealPredicate::LLVMRealONE,
+                        lhs,
+                        rhs,
+                        c_str("fne").as_ptr(),
+                    ),
+                    BinOp::Lt => LLVMBuildFCmp(
+                        self.builder,
+                        LLVMRealPredicate::LLVMRealOLT,
+                        lhs,
+                        rhs,
+                        c_str("flt").as_ptr(),
+                    ),
+                    BinOp::Gt => LLVMBuildFCmp(
+                        self.builder,
+                        LLVMRealPredicate::LLVMRealOGT,
+                        lhs,
+                        rhs,
+                        c_str("fgt").as_ptr(),
+                    ),
+                    BinOp::Le => LLVMBuildFCmp(
+                        self.builder,
+                        LLVMRealPredicate::LLVMRealOLE,
+                        lhs,
+                        rhs,
+                        c_str("fle").as_ptr(),
+                    ),
+                    BinOp::Ge => LLVMBuildFCmp(
+                        self.builder,
+                        LLVMRealPredicate::LLVMRealOGE,
+                        lhs,
+                        rhs,
+                        c_str("fge").as_ptr(),
+                    ),
                     _ => LLVMGetUndef(LLVMTypeOf(lhs)),
                 }
             } else {
@@ -812,34 +808,98 @@ impl<'a> CodegenCtx<'a> {
                     BinOp::Add => LLVMBuildAdd(self.builder, lhs, rhs, c_str("add").as_ptr()),
                     BinOp::Sub => LLVMBuildSub(self.builder, lhs, rhs, c_str("sub").as_ptr()),
                     BinOp::Mul => LLVMBuildMul(self.builder, lhs, rhs, c_str("mul").as_ptr()),
-                    BinOp::Div if is_signed => LLVMBuildSDiv(self.builder, lhs, rhs, c_str("sdiv").as_ptr()),
+                    BinOp::Div if is_signed => {
+                        LLVMBuildSDiv(self.builder, lhs, rhs, c_str("sdiv").as_ptr())
+                    }
                     BinOp::Div => LLVMBuildUDiv(self.builder, lhs, rhs, c_str("udiv").as_ptr()),
-                    BinOp::Rem if is_signed => LLVMBuildSRem(self.builder, lhs, rhs, c_str("srem").as_ptr()),
+                    BinOp::Rem if is_signed => {
+                        LLVMBuildSRem(self.builder, lhs, rhs, c_str("srem").as_ptr())
+                    }
                     BinOp::Rem => LLVMBuildURem(self.builder, lhs, rhs, c_str("urem").as_ptr()),
-                    BinOp::Eq => LLVMBuildICmp(self.builder, LLVMIntPredicate::LLVMIntEQ, lhs, rhs, c_str("eq").as_ptr()),
-                    BinOp::Ne => LLVMBuildICmp(self.builder, LLVMIntPredicate::LLVMIntNE, lhs, rhs, c_str("ne").as_ptr()),
-                    BinOp::Lt if is_signed => LLVMBuildICmp(self.builder, LLVMIntPredicate::LLVMIntSLT, lhs, rhs, c_str("slt").as_ptr()),
-                    BinOp::Lt => LLVMBuildICmp(self.builder, LLVMIntPredicate::LLVMIntULT, lhs, rhs, c_str("ult").as_ptr()),
-                    BinOp::Gt if is_signed => LLVMBuildICmp(self.builder, LLVMIntPredicate::LLVMIntSGT, lhs, rhs, c_str("sgt").as_ptr()),
-                    BinOp::Gt => LLVMBuildICmp(self.builder, LLVMIntPredicate::LLVMIntUGT, lhs, rhs, c_str("ugt").as_ptr()),
-                    BinOp::Le if is_signed => LLVMBuildICmp(self.builder, LLVMIntPredicate::LLVMIntSLE, lhs, rhs, c_str("sle").as_ptr()),
-                    BinOp::Le => LLVMBuildICmp(self.builder, LLVMIntPredicate::LLVMIntULE, lhs, rhs, c_str("ule").as_ptr()),
-                    BinOp::Ge if is_signed => LLVMBuildICmp(self.builder, LLVMIntPredicate::LLVMIntSGE, lhs, rhs, c_str("sge").as_ptr()),
-                    BinOp::Ge => LLVMBuildICmp(self.builder, LLVMIntPredicate::LLVMIntUGE, lhs, rhs, c_str("uge").as_ptr()),
+                    BinOp::Eq => LLVMBuildICmp(
+                        self.builder,
+                        LLVMIntPredicate::LLVMIntEQ,
+                        lhs,
+                        rhs,
+                        c_str("eq").as_ptr(),
+                    ),
+                    BinOp::Ne => LLVMBuildICmp(
+                        self.builder,
+                        LLVMIntPredicate::LLVMIntNE,
+                        lhs,
+                        rhs,
+                        c_str("ne").as_ptr(),
+                    ),
+                    BinOp::Lt if is_signed => LLVMBuildICmp(
+                        self.builder,
+                        LLVMIntPredicate::LLVMIntSLT,
+                        lhs,
+                        rhs,
+                        c_str("slt").as_ptr(),
+                    ),
+                    BinOp::Lt => LLVMBuildICmp(
+                        self.builder,
+                        LLVMIntPredicate::LLVMIntULT,
+                        lhs,
+                        rhs,
+                        c_str("ult").as_ptr(),
+                    ),
+                    BinOp::Gt if is_signed => LLVMBuildICmp(
+                        self.builder,
+                        LLVMIntPredicate::LLVMIntSGT,
+                        lhs,
+                        rhs,
+                        c_str("sgt").as_ptr(),
+                    ),
+                    BinOp::Gt => LLVMBuildICmp(
+                        self.builder,
+                        LLVMIntPredicate::LLVMIntUGT,
+                        lhs,
+                        rhs,
+                        c_str("ugt").as_ptr(),
+                    ),
+                    BinOp::Le if is_signed => LLVMBuildICmp(
+                        self.builder,
+                        LLVMIntPredicate::LLVMIntSLE,
+                        lhs,
+                        rhs,
+                        c_str("sle").as_ptr(),
+                    ),
+                    BinOp::Le => LLVMBuildICmp(
+                        self.builder,
+                        LLVMIntPredicate::LLVMIntULE,
+                        lhs,
+                        rhs,
+                        c_str("ule").as_ptr(),
+                    ),
+                    BinOp::Ge if is_signed => LLVMBuildICmp(
+                        self.builder,
+                        LLVMIntPredicate::LLVMIntSGE,
+                        lhs,
+                        rhs,
+                        c_str("sge").as_ptr(),
+                    ),
+                    BinOp::Ge => LLVMBuildICmp(
+                        self.builder,
+                        LLVMIntPredicate::LLVMIntUGE,
+                        lhs,
+                        rhs,
+                        c_str("uge").as_ptr(),
+                    ),
                     BinOp::And => LLVMBuildAnd(self.builder, lhs, rhs, c_str("and").as_ptr()),
                     BinOp::Or => LLVMBuildOr(self.builder, lhs, rhs, c_str("or").as_ptr()),
                     BinOp::BitAnd => LLVMBuildAnd(self.builder, lhs, rhs, c_str("band").as_ptr()),
                     BinOp::BitOr => LLVMBuildOr(self.builder, lhs, rhs, c_str("bor").as_ptr()),
                     BinOp::BitXor => LLVMBuildXor(self.builder, lhs, rhs, c_str("bxor").as_ptr()),
                     BinOp::Shl => LLVMBuildShl(self.builder, lhs, rhs, c_str("shl").as_ptr()),
-                    BinOp::Shr if is_signed => LLVMBuildAShr(self.builder, lhs, rhs, c_str("ashr").as_ptr()),
+                    BinOp::Shr if is_signed => {
+                        LLVMBuildAShr(self.builder, lhs, rhs, c_str("ashr").as_ptr())
+                    }
                     BinOp::Shr => LLVMBuildLShr(self.builder, lhs, rhs, c_str("lshr").as_ptr()),
                 }
             }
         }
     }
-
-    // ── Place codegen ────────────────────────────────────────────────────
 
     /// Get a pointer (alloca) to a Place, following projections with GEP.
     fn codegen_place_ptr(
@@ -880,10 +940,8 @@ impl<'a> CodegenCtx<'a> {
                         };
                         // Update type to field type
                         cur_ty = match ty.kind() {
-                            TyKind::Adt(adt_id, args) => self
-                                .tcx
-                                .adt_def(*adt_id)
-                                .and_then(|def| {
+                            TyKind::Adt(adt_id, args) => {
+                                self.tcx.adt_def(*adt_id).and_then(|def| {
                                     def.fields.get(*field_idx as usize).map(|f| {
                                         if args.is_empty() {
                                             f.ty
@@ -891,10 +949,9 @@ impl<'a> CodegenCtx<'a> {
                                             self.tcx.subst(f.ty, args)
                                         }
                                     })
-                                }),
-                            TyKind::Tuple(elems) => {
-                                elems.get(*field_idx as usize).copied()
+                                })
                             }
+                            TyKind::Tuple(elems) => elems.get(*field_idx as usize).copied(),
                             _ => None,
                         };
                     }
@@ -926,9 +983,8 @@ impl<'a> CodegenCtx<'a> {
                                 c_str("idx").as_ptr(),
                             )
                         };
-                        let zero = unsafe {
-                            LLVMConstInt(LLVMInt64TypeInContext(self.context), 0, 0)
-                        };
+                        let zero =
+                            unsafe { LLVMConstInt(LLVMInt64TypeInContext(self.context), 0, 0) };
                         let arr_ty = self.llvm_ty(&ty);
                         let mut indices = [zero, index_val];
                         current_ptr = unsafe {
@@ -980,9 +1036,7 @@ impl<'a> CodegenCtx<'a> {
             body.local_decls[idx].ty
         } else {
             return unsafe {
-                std::mem::transmute::<ty::Ty<'_>, ty::Ty<'b>>(
-                    self.tcx.mk_primitive(PrimTy::I64),
-                )
+                std::mem::transmute::<ty::Ty<'_>, ty::Ty<'b>>(self.tcx.mk_primitive(PrimTy::I64))
             };
         };
 
@@ -994,18 +1048,14 @@ impl<'a> CodegenCtx<'a> {
                             if let Some(def) = self.tcx.adt_def(*adt_id) {
                                 if let Some(field) = def.fields.get(*field_idx as usize) {
                                     let raw_ty = unsafe {
-                                        std::mem::transmute::<ty::Ty<'static>, ty::Ty<'b>>(
-                                            field.ty,
-                                        )
+                                        std::mem::transmute::<ty::Ty<'static>, ty::Ty<'b>>(field.ty)
                                     };
                                     if args.is_empty() {
                                         raw_ty
                                     } else {
                                         let substed = self.tcx.subst(raw_ty, args);
                                         unsafe {
-                                            std::mem::transmute::<ty::Ty<'_>, ty::Ty<'b>>(
-                                                substed,
-                                            )
+                                            std::mem::transmute::<ty::Ty<'_>, ty::Ty<'b>>(substed)
                                         }
                                     }
                                 } else {
@@ -1043,8 +1093,6 @@ impl<'a> CodegenCtx<'a> {
         ty
     }
 
-    // ── Type queries on operands ─────────────────────────────────────────
-
     fn operand_is_float(&self, op: &Operand<'_>, body: &mir::Body<'_>) -> bool {
         match op {
             Operand::Copy(place) | Operand::Move(place) => {
@@ -1068,8 +1116,6 @@ impl<'a> CodegenCtx<'a> {
         }
     }
 
-    // ── Test main ────────────────────────────────────────────────────────
-
     fn codegen_test_main(&mut self, bodies: &[mir::Body<'_>]) {
         let has_main = bodies.iter().any(|b| {
             b.local_decls[0]
@@ -1083,9 +1129,7 @@ impl<'a> CodegenCtx<'a> {
 
         let i32_ty = unsafe { LLVMInt32TypeInContext(self.context) };
         let main_ty = unsafe { LLVMFunctionType(i32_ty, ptr::null_mut(), 0, 0) };
-        let main_fn = unsafe {
-            LLVMAddFunction(self.module, c_str("main").as_ptr(), main_ty)
-        };
+        let main_fn = unsafe { LLVMAddFunction(self.module, c_str("main").as_ptr(), main_ty) };
 
         let entry = unsafe {
             LLVMAppendBasicBlockInContext(self.context, main_fn, c_str("entry").as_ptr())
@@ -1095,10 +1139,7 @@ impl<'a> CodegenCtx<'a> {
         let printf_fn = self.functions["printf"];
 
         for body in bodies {
-            let name = body.local_decls[0]
-                .name
-                .as_deref()
-                .unwrap_or("unknown");
+            let name = body.local_decls[0].name.as_deref().unwrap_or("unknown");
 
             let ret_ty = &body.local_decls[0].ty;
             if self.is_void_ty(ret_ty) {
@@ -1208,8 +1249,6 @@ impl Drop for CodegenCtx<'_> {
         }
     }
 }
-
-// ── Public entry point ───────────────────────────────────────────────────────
 
 /// Generate LLVM IR from MIR bodies. Returns a `CodegenResult` that can
 /// be used to emit IR, object files, or link.

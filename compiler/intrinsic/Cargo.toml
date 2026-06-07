@@ -5,5 +5,5 @@ edition = "2024"
 
 [dependencies]
 hir = { path = "../hir" }
-ty = { path = "../ty" }
+middle = { path = "../middle" }
 rustc_data_structures = { workspace = true }

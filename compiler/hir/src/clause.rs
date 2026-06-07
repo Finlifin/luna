@@ -23,6 +23,10 @@ pub enum ClauseParamKind<'hir> {
     Quote(Ident, &'hir Expr<'hir>),
 }
 
+/// A where-clause constraint on a definition.
+///
+/// Analogous to rustc's `WherePredicate`, but also covers Flurry-specific
+/// contract clauses (`requires`, `ensures`, `decreases`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClauseConstraint<'hir> {
     pub hir_id: HirId,
@@ -30,10 +34,14 @@ pub struct ClauseConstraint<'hir> {
     pub span: Span,
 }
 
+/// The specific form of a [`ClauseConstraint`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClauseConstraintKind<'hir> {
+    /// Pre-condition (assertion that must hold on entry).
     Requires(&'hir Expr<'hir>),
+    /// Post-condition (assertion that must hold on exit).
     Ensures(&'hir Expr<'hir>),
+    /// Termination metric for recursive functions.
     Decreases(&'hir Expr<'hir>),
 
     /// TODO

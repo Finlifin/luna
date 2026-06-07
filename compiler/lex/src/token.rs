@@ -134,6 +134,7 @@ pub enum TokenKind {
     Outcomes,  // outcome
     Predicate, // predicate
     Private,   // private
+    Pub,       // pub
     Pure,      // pure
     KwQuote,   // quote
     Ref,       // ref
@@ -304,6 +305,7 @@ impl TokenKind {
             TokenKind::Predicate => "predicate",
             TokenKind::Private => "private",
             TokenKind::Pure => "pure",
+            TokenKind::Pub => "pub",
             TokenKind::KwQuote => "quote",
             TokenKind::Ref => "ref",
             TokenKind::Refines => "refines",
@@ -414,6 +416,7 @@ impl Token {
         map.insert("outcomes", TokenKind::Outcomes);
         map.insert("predicate", TokenKind::Predicate);
         map.insert("private", TokenKind::Private);
+        map.insert("pub", TokenKind::Pub);
         map.insert("pure", TokenKind::Pure);
         map.insert("quote", TokenKind::KwQuote);
         map.insert("ref", TokenKind::Ref);

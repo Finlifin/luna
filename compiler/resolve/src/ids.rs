@@ -6,52 +6,9 @@
 
 use std::fmt;
 
-/// A definition ID – uniquely identifies a name-binding site within a package.
-///
-/// Every item (function, struct, enum, module, type alias, …), every type
-/// parameter, and every local variable that introduces a name gets a `DefId`.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct DefId(u32);
-
-impl DefId {
-    pub const INVALID: DefId = DefId(u32::MAX);
-
-    #[inline]
-    pub fn new(raw: u32) -> Self {
-        DefId(raw)
-    }
-
-    #[inline]
-    pub fn raw(self) -> u32 {
-        self.0
-    }
-
-    #[inline]
-    pub fn index(self) -> usize {
-        self.0 as usize
-    }
-
-    #[inline]
-    pub fn is_valid(self) -> bool {
-        self != Self::INVALID
-    }
-}
-
-impl fmt::Debug for DefId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if *self == Self::INVALID {
-            write!(f, "DefId(INVALID)")
-        } else {
-            write!(f, "DefId({})", self.0)
-        }
-    }
-}
-
-impl fmt::Display for DefId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "d{}", self.0)
-    }
-}
+// `DefId` lives in the `symbol` crate so that `hir` can also store it in
+// `Path::res` without creating a `hir → resolve` dependency cycle.
+pub use symbol::DefId;
 
 /// Identifies a scope (lexical block) in the scope tree.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -116,16 +73,17 @@ impl AstNodeRef {
 
 /// Monotonic allocator for [`DefId`]s.
 pub struct DefIdGen {
+    pkg: u32,
     next: u32,
 }
 
 impl DefIdGen {
-    pub fn new() -> Self {
-        Self { next: 0 }
+    pub fn new(pkg: u32) -> Self {
+        Self { pkg, next: 0 }
     }
 
     pub fn next(&mut self) -> DefId {
-        let id = DefId::new(self.next);
+        let id = DefId::new(self.pkg, self.next);
         self.next += 1;
         id
     }
@@ -138,7 +96,7 @@ impl DefIdGen {
 
 impl Default for DefIdGen {
     fn default() -> Self {
-        Self::new()
+        Self::new(0)
     }
 }
 

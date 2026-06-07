@@ -19,12 +19,17 @@
 use ast::{NodeIndex, NodeKind};
 use hir::{
     body::{Body, Param},
-    common::{Ident, Symbol},
+    common::{
+        Ident, Symbol, TPARAM_COMPTIME, TPARAM_ERROR, TPARAM_IMPLICIT, TPARAM_LAMBDA, TPARAM_QUOTE,
+        TyParam, TyParamKind,
+    },
     expr::{Expr, ExprKind},
     hir_id::{HirId, ItemLocalId, OwnerId},
     item::*,
+    node,
     owner::{OwnerInfo, OwnerNode, OwnerNodes},
 };
+use middle::ty;
 use rustc_span::Span;
 
 use crate::LoweringContext;
@@ -35,15 +40,18 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
     /// Every top-level statement/definition in the file becomes an item
     /// (or statement) inside the root module.
     pub fn lower_file_scope(&mut self, root_node: NodeIndex) {
-        let span = self.ast.get_span(root_node).unwrap_or(Span::default());
-        let kind = self.ast.get_node_kind(root_node);
+        let Some((kind, span, children)) = self.ast.get_node(root_node) else {
+            unreachable!(
+                "expected FileScope as root node, but no such node index {:?}",
+                root_node
+            );
+        };
 
-        if kind != Some(NodeKind::FileScope) {
+        if kind != NodeKind::FileScope {
             self.emit_malformed("expected FileScope as root node", span);
             return;
         }
 
-        let children = self.ast.get_children(root_node);
         if children.is_empty() {
             return;
         }
@@ -64,6 +72,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
             if elem == 0 {
                 continue;
             }
+
             let owner = self.lower_top_level_node(elem);
             item_ids.push(owner);
         }
@@ -91,37 +100,43 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
     /// Lower a single top-level AST node (definition or statement) into an
     /// HIR item and return its [`OwnerId`].
     fn lower_top_level_node(&mut self, node: NodeIndex) -> OwnerId {
-        let kind = self.ast.get_node_kind(node);
-        let span = self.ast.get_span(node).unwrap_or(Span::default());
+        println!(
+            "lowering top-level node: {}",
+            self.ast.dump_to_s_expression(node, self.source_map)
+        );
+        let Some((kind, span, children)) = self.ast.get_node(node) else {
+            unreachable!("invalid top-level node: no such node index {:?}", node);
+        };
 
         match kind {
-            Some(NodeKind::Function) => self.lower_function(node),
-            Some(NodeKind::NormalFormDef) => self.lower_normal_form_def(node),
-            Some(NodeKind::StructDef) => self.lower_struct_def(node),
-            Some(NodeKind::EnumDef) => self.lower_enum_def(node),
-            Some(NodeKind::TraitDef) => self.lower_trait_def(node),
-            Some(NodeKind::ImplDef) => self.lower_impl_def(node),
-            Some(NodeKind::ImplTraitDef) => self.lower_impl_trait_def(node),
-            Some(NodeKind::TypealiasDef) => self.lower_type_alias(node),
-            Some(NodeKind::ModuleDef) => self.lower_module_def(node),
-            Some(NodeKind::UseStatement) => self.lower_use_statement(node),
+            NodeKind::Function => self.lower_function(node),
+            NodeKind::NormalFormDef => self.lower_normal_form_def(node),
+            NodeKind::StructDef => self.lower_struct_def(node),
+            NodeKind::EnumDef => self.lower_enum_def(node),
+            NodeKind::TraitDef => self.lower_trait_def(node),
+            NodeKind::ImplDef => self.lower_impl_def(node),
+            NodeKind::ImplTraitDef => self.lower_impl_trait_def(node),
+            NodeKind::TypealiasDef => self.lower_type_alias(node),
+            NodeKind::ModuleDef => self.lower_module_def(node),
+            // NodeKind::UseStatement => self.lower_use_statement(node),
 
             // Attribute-wrapped definitions
-            Some(NodeKind::Attribute | NodeKind::AttributeSetTrue) => {
-                let children = self.ast.get_children(node);
-                if children.len() >= 2 {
-                    self.lower_top_level_node(children[1])
-                } else {
-                    self.make_error_item(span)
-                }
+            NodeKind::Attribute | NodeKind::AttributeSetTrue => {
+                self.lower_top_level_node(children[1])
             }
 
-            other => {
-                if let Some(k) = other {
-                    self.emit_invalid_item(&format!("{:?} at top level", k), span);
-                }
-                self.make_error_item(span)
-            }
+            NodeKind::ConstDef => self.lower_const_def(node),
+            // TODO: parser还不是能很好地区分ConstDef和ConstDecl，先将两者都当成ConstDef来处理，后续再完善parser以区分两者
+            NodeKind::ConstDecl => self.lower_const_def(node),
+
+            // Visibility modified definitions, TODO: handle the visibility modifier properly instead of just skipping it
+            NodeKind::Pub | NodeKind::Private => self.lower_top_level_node(children[0]),
+
+            other => unreachable!(
+                "unexpected top-level node kind {} at {:?}",
+                self.ast.dump_to_s_expression(node, self.source_map),
+                span
+            ),
         }
     }
 
@@ -134,12 +149,9 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
     /// Lower `Function`: a, N, b, c, N, d
     ///   (id, params, return_type, handles_effect, clauses, body)
     fn lower_function(&mut self, node: NodeIndex) -> OwnerId {
-        let span = self.ast.get_span(node).unwrap_or(Span::default());
-        let children = self.ast.get_children(node);
-        if children.len() < 6 {
-            self.emit_malformed("Function: expected 6 children", span);
-            return self.make_error_item(span);
-        }
+        let Some((NodeKind::Function, span, children)) = self.ast.get_node(node) else {
+            unreachable!("invalid function node or no such node index {:?}", node);
+        };
 
         let id_node = children[0];
         let params_multi = children[1];
@@ -167,7 +179,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         let fn_params = self.lower_fn_params(param_nodes);
 
         // Return type
-        let output = if return_type_node != 0 {
+        let return_ty = if return_type_node != 0 {
             let ty_expr = self.lower_expr(return_type_node);
             Some(self.arena.alloc_expr(ty_expr) as &_)
         } else {
@@ -180,17 +192,12 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         let clause_params = self.arena.alloc_clause_param_slice(lowered.params);
         let clause_constraints = self.arena.alloc_clause_slice(lowered.constraints);
 
-        // Build FnDecl and FnSig
-        let fn_params_slice: &'hir [FnParamTy<'hir>] = unsafe {
-            std::mem::transmute::<&[FnParamTy<'_>], &'hir [FnParamTy<'hir>]>(Vec::leak(fn_params))
-        };
-
-        let fn_decl = FnDecl {
-            inputs: fn_params_slice,
-            output,
-        };
+        // Build FnSig
+        let params_slice = self.arena.alloc_fn_param_slice(fn_params);
         let fn_sig = FnSig {
-            decl: fn_decl,
+            params: params_slice,
+            return_ty,
+            return_bind: None,
             modifiers,
             clause_params,
             clause_constraints,
@@ -235,12 +242,12 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
     /// Lower `NormalFormDef`: a, N, b, N, c
     ///   (id, type_params, return_type, clauses, body)
     fn lower_normal_form_def(&mut self, node: NodeIndex) -> OwnerId {
-        let span = self.ast.get_span(node).unwrap_or(Span::default());
-        let children = self.ast.get_children(node);
-        if children.len() < 5 {
-            self.emit_malformed("NormalFormDef: expected 5 children", span);
-            return self.make_error_item(span);
-        }
+        let Some((NodeKind::NormalFormDef, span, children)) = self.ast.get_node(node) else {
+            unreachable!(
+                "not a valid normal form def node or no such node index {:?}",
+                node
+            );
+        };
 
         let id_node = children[0];
         let type_params_multi = children[1];
@@ -269,7 +276,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         let clause_params = self.arena.alloc_clause_param_slice(lowered.params);
         let clause_constraints = self.arena.alloc_clause_slice(lowered.constraints);
 
-        let output = if return_type_node != 0 {
+        let return_ty = if return_type_node != 0 {
             let ty_expr = self.lower_expr(return_type_node);
             Some(self.arena.alloc_expr(ty_expr) as &_)
         } else {
@@ -281,12 +288,10 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
             ..Default::default()
         };
 
-        let fn_decl = FnDecl {
-            inputs: &[],
-            output,
-        };
         let fn_sig = FnSig {
-            decl: fn_decl,
+            params: &[],
+            return_ty,
+            return_bind: None,
             modifiers,
             clause_params,
             clause_constraints,
@@ -323,12 +328,12 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
 
     /// Lower `StructDef`: a, N, b  (id, clauses, body)
     fn lower_struct_def(&mut self, node: NodeIndex) -> OwnerId {
-        let span = self.ast.get_span(node).unwrap_or(Span::default());
-        let children = self.ast.get_children(node);
-        if children.len() < 3 {
-            self.emit_malformed("StructDef: expected 3 children", span);
-            return self.make_error_item(span);
-        }
+        let Some((NodeKind::StructDef, span, children)) = self.ast.get_node(node) else {
+            unreachable!(
+                "not a valid struct def node or no such node index {:?}",
+                node
+            );
+        };
 
         let id_node = children[0];
         let clauses_multi = children[1];
@@ -386,14 +391,10 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         let elem_nodes = match block_kind {
             Some(NodeKind::Block) => {
                 let children = self.ast.get_children(body_node);
-                if !children.is_empty() {
-                    self.ast
-                        .get_multi_child_slice(children[0])
-                        .unwrap_or(&[])
-                        .to_vec()
-                } else {
-                    vec![]
-                }
+                self.ast
+                    .get_multi_child_slice(children[0])
+                    .unwrap_or(&[])
+                    .to_vec()
             }
             _ => vec![],
         };
@@ -443,8 +444,13 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
 
     /// Lower a single struct field: `id : type (= default)?`
     fn lower_struct_field(&mut self, node: NodeIndex) -> Option<FieldDef<'hir>> {
-        let span = self.ast.get_span(node).unwrap_or(Span::default());
-        let children = self.ast.get_children(node);
+        let Some((NodeKind::StructField, span, children)) = self.ast.get_node(node) else {
+            unreachable!(
+                "not a valid struct field node or no such node index {:?}",
+                node
+            );
+        };
+
         // StructField: a, b, c  (id, type, default)
         if children.is_empty() {
             self.emit_invalid_struct_field("missing children", span);
@@ -452,14 +458,14 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         }
 
         let ident = self.node_to_ident(children[0]);
-        let ty = if children.len() > 1 && children[1] != 0 {
+        let ty = if children[1] != 0 {
             let ty_expr = self.lower_expr(children[1]);
             self.arena.alloc_expr(ty_expr)
         } else {
             self.arena.alloc_expr(self.make_invalid_expr(span))
         };
 
-        let default = if children.len() > 2 && children[2] != 0 {
+        let default = if children[2] != 0 {
             let def_expr = self.lower_expr(children[2]);
             Some(self.arena.alloc_expr(def_expr) as &_)
         } else {
@@ -477,12 +483,9 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
 
     /// Lower `EnumDef`: a, N, b  (id, clauses, body)
     fn lower_enum_def(&mut self, node: NodeIndex) -> OwnerId {
-        let span = self.ast.get_span(node).unwrap_or(Span::default());
-        let children = self.ast.get_children(node);
-        if children.len() < 3 {
-            self.emit_malformed("EnumDef: expected 3 children", span);
-            return self.make_error_item(span);
-        }
+        let Some((NodeKind::EnumDef, span, children)) = self.ast.get_node(node) else {
+            unreachable!("not a valid enum def node or no such node index {:?}", node);
+        };
 
         let id_node = children[0];
         let clauses_multi = children[1];
@@ -536,14 +539,10 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         let elem_nodes = match self.ast.get_node_kind(body_node) {
             Some(NodeKind::Block) => {
                 let children = self.ast.get_children(body_node);
-                if !children.is_empty() {
-                    self.ast
-                        .get_multi_child_slice(children[0])
-                        .unwrap_or(&[])
-                        .to_vec()
-                } else {
-                    vec![]
-                }
+                self.ast
+                    .get_multi_child_slice(children[0])
+                    .unwrap_or(&[])
+                    .to_vec()
             }
             _ => vec![],
         };
@@ -588,97 +587,77 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
     }
 
     fn lower_enum_variant(&mut self, node: NodeIndex) -> Option<Variant<'hir>> {
-        let span = self.ast.get_span(node).unwrap_or(Span::default());
-        let kind = self.ast.get_node_kind(node)?;
-        let children = self.ast.get_children(node);
+        let Some((kind, span, children)) = self.ast.get_node(node) else {
+            unreachable!("invalid enum variant node: no such node index {:?}", node);
+        };
 
         match kind {
             NodeKind::PatternEnumVariant => {
-                if children.len() >= 2 {
-                    let ident = self.node_to_ident(children[0]);
-                    let pat = self.lower_pattern(children[1]);
-                    let pat_ref = self.arena.alloc_pattern(pat);
-                    Some(Variant {
-                        hir_id: self.next_hir_id(),
-                        ident,
-                        kind: VariantKind::Pattern(pat_ref),
-                        span,
-                    })
-                } else {
-                    None
-                }
+                let ident = self.node_to_ident(children[0]);
+                let pat = self.lower_pattern(children[1]);
+                let pat_ref = self.arena.alloc_pattern(pat);
+                Some(Variant {
+                    hir_id: self.next_hir_id(),
+                    ident,
+                    kind: VariantKind::Pattern(pat_ref),
+                    span,
+                })
             }
             NodeKind::ExprEnumVariant => {
-                if children.len() >= 2 {
-                    let ident = self.node_to_ident(children[0]);
-                    let expr = self.lower_expr(children[1]);
-                    let expr_ref = self.arena.alloc_expr(expr);
-                    Some(Variant {
-                        hir_id: self.next_hir_id(),
-                        ident,
-                        kind: VariantKind::Const(expr_ref),
-                        span,
-                    })
-                } else {
-                    None
-                }
+                let ident = self.node_to_ident(children[0]);
+                let expr = self.lower_expr(children[1]);
+                let expr_ref = self.arena.alloc_expr(expr);
+                Some(Variant {
+                    hir_id: self.next_hir_id(),
+                    ident,
+                    kind: VariantKind::Const(expr_ref),
+                    span,
+                })
             }
             NodeKind::TupleEnumVariant => {
-                if children.len() >= 2 {
-                    let ident = self.node_to_ident(children[0]);
-                    let multi = children[1];
-                    let elem_nodes = self.ast.get_multi_child_slice(multi).unwrap_or(&[]);
-                    let exprs: Vec<_> = elem_nodes.iter().map(|&n| self.lower_expr(n)).collect();
-                    let exprs_slice = self.arena.alloc_expr_slice(exprs);
-                    Some(Variant {
-                        hir_id: self.next_hir_id(),
-                        ident,
-                        kind: VariantKind::Tuple(exprs_slice),
-                        span,
-                    })
-                } else {
-                    None
-                }
+                let ident = self.node_to_ident(children[0]);
+                let multi = children[1];
+                let elem_nodes = self.ast.get_multi_child_slice(multi).unwrap_or(&[]);
+                let exprs: Vec<_> = elem_nodes.iter().map(|&n| self.lower_expr(n)).collect();
+                let exprs_slice = self.arena.alloc_expr_slice(exprs);
+                Some(Variant {
+                    hir_id: self.next_hir_id(),
+                    ident,
+                    kind: VariantKind::Tuple(exprs_slice),
+                    span,
+                })
             }
             NodeKind::StructEnumVariant => {
-                if children.len() >= 2 {
-                    let ident = self.node_to_ident(children[0]);
-                    let multi = children[1];
-                    let field_nodes = self.ast.get_multi_child_slice(multi).unwrap_or(&[]);
-                    let fields: Vec<_> = field_nodes
-                        .iter()
-                        .filter_map(|&n| self.lower_struct_field(n))
-                        .collect();
-                    let fields_slice = self.arena.alloc_field_def_slice(fields);
-                    Some(Variant {
-                        hir_id: self.next_hir_id(),
-                        ident,
-                        kind: VariantKind::Struct(fields_slice),
-                        span,
-                    })
-                } else {
-                    None
-                }
+                let ident = self.node_to_ident(children[0]);
+                let multi = children[1];
+                let field_nodes = self.ast.get_multi_child_slice(multi).unwrap_or(&[]);
+                let fields: Vec<_> = field_nodes
+                    .iter()
+                    .filter_map(|&n| self.lower_struct_field(n))
+                    .collect();
+                let fields_slice = self.arena.alloc_field_def_slice(fields);
+                Some(Variant {
+                    hir_id: self.next_hir_id(),
+                    ident,
+                    kind: VariantKind::Struct(fields_slice),
+                    span,
+                })
             }
             NodeKind::SubEnumEnumVariant => {
-                if children.len() >= 2 {
-                    let ident = self.node_to_ident(children[0]);
-                    let multi = children[1];
-                    let sub_nodes = self.ast.get_multi_child_slice(multi).unwrap_or(&[]);
-                    let sub_variants: Vec<_> = sub_nodes
-                        .iter()
-                        .filter_map(|&n| self.lower_enum_variant(n))
-                        .collect();
-                    let sub_slice = self.arena.alloc_variant_slice(sub_variants);
-                    Some(Variant {
-                        hir_id: self.next_hir_id(),
-                        ident,
-                        kind: VariantKind::SubEnum(sub_slice),
-                        span,
-                    })
-                } else {
-                    None
-                }
+                let ident = self.node_to_ident(children[0]);
+                let multi = children[1];
+                let sub_nodes = self.ast.get_multi_child_slice(multi).unwrap_or(&[]);
+                let sub_variants: Vec<_> = sub_nodes
+                    .iter()
+                    .filter_map(|&n| self.lower_enum_variant(n))
+                    .collect();
+                let sub_slice = self.arena.alloc_variant_slice(sub_variants);
+                Some(Variant {
+                    hir_id: self.next_hir_id(),
+                    ident,
+                    kind: VariantKind::SubEnum(sub_slice),
+                    span,
+                })
             }
             _ => None,
         }
@@ -686,12 +665,12 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
 
     /// Lower `TraitDef`: a, b, N, c  (id, super_trait, clauses, body)
     fn lower_trait_def(&mut self, node: NodeIndex) -> OwnerId {
-        let span = self.ast.get_span(node).unwrap_or(Span::default());
-        let children = self.ast.get_children(node);
-        if children.len() < 4 {
-            self.emit_malformed("TraitDef: expected 4 children", span);
-            return self.make_error_item(span);
-        }
+        let Some((NodeKind::TraitDef, span, children)) = self.ast.get_node(node) else {
+            unreachable!(
+                "not a valid trait def node or no such node index {:?}",
+                node
+            );
+        };
 
         let id_node = children[0];
         let _super_trait_node = children[1];
@@ -743,14 +722,10 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         let elem_nodes = match self.ast.get_node_kind(body_node) {
             Some(NodeKind::Block) => {
                 let children = self.ast.get_children(body_node);
-                if !children.is_empty() {
-                    self.ast
-                        .get_multi_child_slice(children[0])
-                        .unwrap_or(&[])
-                        .to_vec()
-                } else {
-                    vec![]
-                }
+                self.ast
+                    .get_multi_child_slice(children[0])
+                    .unwrap_or(&[])
+                    .to_vec()
             }
             _ => vec![],
         };
@@ -786,12 +761,9 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
 
     /// Lower `ImplDef`: a, N, b  (type, clauses, body)
     fn lower_impl_def(&mut self, node: NodeIndex) -> OwnerId {
-        let span = self.ast.get_span(node).unwrap_or(Span::default());
-        let children = self.ast.get_children(node);
-        if children.len() < 3 {
-            self.emit_malformed("ImplDef: expected 3 children", span);
-            return self.make_error_item(span);
-        }
+        let Some((NodeKind::ImplDef, span, children)) = self.ast.get_node(node) else {
+            unreachable!("invalid impl def node or no such node index {:?}", node);
+        };
 
         let type_node = children[0];
         let clauses_multi = children[1];
@@ -843,12 +815,12 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
 
     /// Lower `ImplTraitDef`: a, b, N, c  (trait, type, clauses, body)
     fn lower_impl_trait_def(&mut self, node: NodeIndex) -> OwnerId {
-        let span = self.ast.get_span(node).unwrap_or(Span::default());
-        let children = self.ast.get_children(node);
-        if children.len() < 4 {
-            self.emit_malformed("ImplTraitDef: expected 4 children", span);
-            return self.make_error_item(span);
-        }
+        let Some((NodeKind::ImplTraitDef, span, children)) = self.ast.get_node(node) else {
+            unreachable!(
+                "invalid impl trait def node or no such node index {:?}",
+                node
+            );
+        };
 
         let trait_node = children[0];
         let type_node = children[1];
@@ -862,7 +834,8 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
 
         let ident = Ident::new(Symbol::intern("<impl>"), span);
 
-        let trait_path = self.lower_expr_as_path(trait_node);
+        let trait_ = self.lower_expr(trait_node);
+        let trait_ref = self.arena.alloc_expr(trait_);
         let self_ty = self.lower_expr(type_node);
         let self_ty_ref = self.arena.alloc_expr(self_ty);
 
@@ -875,7 +848,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
 
         let impl_def = ImplDef {
             self_ty: self_ty_ref,
-            trait_ref: Some(trait_path),
+            trait_ref: Some(trait_ref),
             clause_params,
             clause_constraints,
             items: body_items,
@@ -906,12 +879,9 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
 
     /// Lower `TypealiasDef`: a, N, b  (id, type_params, type_expr)
     fn lower_type_alias(&mut self, node: NodeIndex) -> OwnerId {
-        let span = self.ast.get_span(node).unwrap_or(Span::default());
-        let children = self.ast.get_children(node);
-        if children.len() < 3 {
-            self.emit_malformed("TypealiasDef: expected 3 children", span);
-            return self.make_error_item(span);
-        }
+        let Some((NodeKind::TypealiasDef, span, children)) = self.ast.get_node(node) else {
+            unreachable!("invalid type alias node or no such node index {:?}", node);
+        };
 
         let id_node = children[0];
         let type_params_multi = children[1];
@@ -955,12 +925,9 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
 
     /// Lower `ModuleDef`: a, b  (id, body)
     fn lower_module_def(&mut self, node: NodeIndex) -> OwnerId {
-        let span = self.ast.get_span(node).unwrap_or(Span::default());
-        let children = self.ast.get_children(node);
-        if children.len() < 2 {
-            self.emit_malformed("ModuleDef: expected 2 children", span);
-            return self.make_error_item(span);
-        }
+        let Some((NodeKind::ModuleDef, span, children)) = self.ast.get_node(node) else {
+            unreachable!("invalid module def node or no such node index {:?}", node);
+        };
 
         let id_node = children[0];
         let body_node = children[1];
@@ -1016,41 +983,216 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         owner_id
     }
 
-    fn lower_use_statement(&mut self, node: NodeIndex) -> OwnerId {
-        let span = self.ast.get_span(node).unwrap_or(Span::default());
-        let children = self.ast.get_children(node);
+    fn lower_fn_params(&mut self, param_nodes: &[NodeIndex]) -> Vec<(Ident, TyParam<'hir>)> {
+        let mut params = Vec::new();
+        for &p in param_nodes {
+            if p == 0 {
+                continue;
+            }
+            if let Some(param) = self.lower_fn_param(p) {
+                params.push(param);
+            }
+        }
+        params
+    }
+
+    fn lower_fn_param(&mut self, node: NodeIndex) -> Option<(Ident, TyParam<'hir>)> {
+        let Some((kind, span, children)) = self.ast.get_node(node) else {
+            unreachable!(
+                "invalid function parameter node: no such node index {:?}",
+                node
+            );
+        };
+
+        match kind {
+            NodeKind::TypeBoundParam => {
+                // id : type
+                let ident = self.node_to_ident(children[0]);
+                let ty = self.lower_expr(children[1]);
+                let ty_ref = self.arena.alloc_expr(ty);
+                let tp = TyParam::new(self.next_hir_id(), TyParamKind::Positional(ty_ref), span);
+                Some((ident, tp))
+            }
+            NodeKind::TraitBoundParam => {
+                // id :- type
+                let ident = self.node_to_ident(children[0]);
+                let ty = self.lower_expr(children[1]);
+                let ty_ref = self.arena.alloc_expr(ty);
+                let tp = TyParam::new(self.next_hir_id(), TyParamKind::Positional(ty_ref), span);
+                Some((ident, tp))
+            }
+            NodeKind::OptionalParam => {
+                // .id : type = default
+                let ident = self.node_to_ident(children[0]);
+                let ty = self.lower_expr(children[1]);
+                let ty_ref = self.arena.alloc_expr(ty);
+                let default = self.lower_expr(children[2]);
+                let default_ref = self.arena.alloc_expr(default);
+                let tp = TyParam::new(
+                    self.next_hir_id(),
+                    TyParamKind::Optional(ident.clone(), ty_ref, default_ref),
+                    span,
+                );
+                Some((ident, tp))
+            }
+            NodeKind::VarargParam => {
+                // ...id : type
+                let ident = self.node_to_ident(children[0]);
+                let ty = self.lower_expr(children[1]);
+                let ty_ref = self.arena.alloc_expr(ty);
+                let tp = TyParam::new(
+                    self.next_hir_id(),
+                    TyParamKind::Varadic(ident.clone(), ty_ref),
+                    span,
+                );
+                Some((ident, tp))
+            }
+            NodeKind::SelfParam => {
+                let ident = Ident::new(Symbol::intern("self"), span);
+                let tp = TyParam::new(
+                    self.next_hir_id(),
+                    TyParamKind::Itself { is_ref: false },
+                    span,
+                );
+                Some((ident, tp))
+            }
+            NodeKind::SelfRefParam => {
+                let ident = Ident::new(Symbol::intern("self"), span);
+                let tp = TyParam::new(
+                    self.next_hir_id(),
+                    TyParamKind::Itself { is_ref: true },
+                    span,
+                );
+                Some((ident, tp))
+            }
+            NodeKind::ComptimeParam => self.lower_fn_param(children[0]).map(|(i, mut tp)| {
+                tp.flags |= TPARAM_COMPTIME;
+                (i, tp)
+            }),
+            NodeKind::ImplicitParam => self.lower_fn_param(children[0]).map(|(i, mut tp)| {
+                tp.flags |= TPARAM_IMPLICIT;
+                (i, tp)
+            }),
+            NodeKind::LambdaParam => self.lower_fn_param(children[0]).map(|(i, mut tp)| {
+                tp.flags |= TPARAM_LAMBDA;
+                (i, tp)
+            }),
+            NodeKind::ErrorParam => self.lower_fn_param(children[0]).map(|(i, mut tp)| {
+                tp.flags |= TPARAM_ERROR;
+                (i, tp)
+            }),
+            NodeKind::CatchParam => {
+                // No dedicated TPARAM flag yet; lower the inner param unchanged.
+                self.lower_fn_param(children[0])
+            }
+            NodeKind::QuoteParam => self.lower_fn_param(children[0]).map(|(i, mut tp)| {
+                tp.flags |= TPARAM_QUOTE;
+                (i, tp)
+            }),
+            NodeKind::Id => {
+                // Bare identifier param (no type annotation)
+                let ident = self.node_to_ident(node);
+                let ty_expr = Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::TyPlaceholder,
+                    span,
+                };
+                let ty_ref = self.arena.alloc_expr(ty_expr);
+                let tp = TyParam::new(self.next_hir_id(), TyParamKind::Positional(ty_ref), span);
+                Some((ident, tp))
+            }
+            _ => {
+                self.emit_invalid_parameter(&format!("{:?}", kind), span);
+                None
+            }
+        }
+    }
+
+    /// Lower an AST parameter node into a Body [`Param`].
+    fn lower_body_param(&mut self, node: NodeIndex) -> Param<'hir> {
+        let Some((kind, span, children)) = self.ast.get_node(node) else {
+            unreachable!(
+                "invalid function parameter node: no such node index {:?}",
+                node
+            );
+        };
+
+        let (name, ty) = match kind {
+            NodeKind::TypeBoundParam | NodeKind::TraitBoundParam => {
+                let name = self.node_to_ident(children[0]);
+                let ty = if children[1] != 0 {
+                    let ty_expr = self.lower_expr(children[1]);
+                    Some(self.arena.alloc_expr(ty_expr) as &_)
+                } else {
+                    None
+                };
+                (name, ty)
+            }
+            NodeKind::SelfParam | NodeKind::SelfRefParam => {
+                (Ident::new(Symbol::intern("self"), span), None)
+            }
+            NodeKind::ComptimeParam
+            | NodeKind::ImplicitParam
+            | NodeKind::LambdaParam
+            | NodeKind::ErrorParam
+            | NodeKind::CatchParam
+            | NodeKind::QuoteParam => (Ident::new(Symbol::intern("_"), span), None),
+            NodeKind::OptionalParam => {
+                let name = self.node_to_ident(children[0]);
+                let ty = if children[1] != 0 {
+                    let ty_expr = self.lower_expr(children[1]);
+                    Some(self.arena.alloc_expr(ty_expr) as &_)
+                } else {
+                    None
+                };
+                (name, ty)
+            }
+            _ => {
+                // Bare identifier or other — use source text as name.
+                (self.node_to_ident(node), None)
+            }
+        };
+
+        Param {
+            hir_id: self.next_hir_id(),
+            name,
+            ty,
+            span,
+        }
+    }
+
+    fn lower_const_def(&mut self, node: NodeIndex) -> OwnerId {
+        let Some((NodeKind::ConstDef | NodeKind::ConstDecl, span, children)) =
+            self.ast.get_node(node)
+        else {
+            unreachable!("invalid const def node or no such node index {:?}", node);
+        };
+
+        let id_node = children[0];
+        let type_node = children[1];
+        let value_node = children[2];
 
         let owner_id = self.package.alloc_owner_id();
         let prev_owner = self.current_owner;
         self.current_owner = owner_id;
         self.reset_hir_id_counter();
 
-        let (path, use_kind) = if !children.is_empty() {
-            self.lower_use_path(children[0])
+        let ident = self.node_to_ident(id_node);
+        let type_expr = if type_node != 0 {
+            self.arena.alloc_expr(self.lower_expr(type_node))
         } else {
-            let path = hir::common::Path {
-                segments: &[],
+            self.arena.alloc_expr(Expr {
+                hir_id: self.next_hir_id(),
+                kind: ExprKind::TyPlaceholder,
                 span,
-            };
-            (path, UseKind::Simple)
+            })
         };
-
-        let ident = if let Some(last) = path.segments.last() {
-            last.ident.clone()
-        } else {
-            Ident::new(Symbol::intern("<use>"), span)
-        };
-
-        let use_path = UsePath {
-            path,
-            kind: use_kind,
-            span,
-        };
+        let value_expr = self.arena.alloc_expr(self.lower_expr(value_node));
 
         let item = Item {
             owner_id,
             ident,
-            kind: ItemKind::Use(use_path),
+            kind: ItemKind::Const(type_expr, value_expr),
             span,
         };
         let item_ref = self.arena.alloc_item(item);
@@ -1064,293 +1206,6 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
 
         self.current_owner = prev_owner;
         owner_id
-    }
-
-    fn lower_use_path(&mut self, node: NodeIndex) -> (hir::common::Path<'hir>, UseKind<'hir>) {
-        let kind = self.ast.get_node_kind(node);
-        let span = self.ast.get_span(node).unwrap_or(Span::default());
-
-        match kind {
-            Some(NodeKind::ProjectionAllPath) => {
-                let children = self.ast.get_children(node);
-                if !children.is_empty() {
-                    let path = self.lower_expr_as_path(children[0]);
-                    (path, UseKind::Glob)
-                } else {
-                    let path = hir::common::Path {
-                        segments: &[],
-                        span,
-                    };
-                    (path, UseKind::Glob)
-                }
-            }
-            Some(NodeKind::ProjectionMultiPath) => {
-                let children = self.ast.get_children(node);
-                if children.len() >= 2 {
-                    let path = self.lower_expr_as_path(children[0]);
-                    let multi = children[1];
-                    let name_nodes = self.ast.get_multi_child_slice(multi).unwrap_or(&[]);
-                    let idents: Vec<Ident> =
-                        name_nodes.iter().map(|&n| self.node_to_ident(n)).collect();
-                    let idents_slice: &'hir [Ident] = unsafe {
-                        std::mem::transmute::<&[Ident], &'hir [Ident]>(Vec::leak(idents))
-                    };
-                    (path, UseKind::Multi(idents_slice))
-                } else {
-                    let path = hir::common::Path {
-                        segments: &[],
-                        span,
-                    };
-                    (path, UseKind::Simple)
-                }
-            }
-            Some(NodeKind::PathAsBind) => {
-                let children = self.ast.get_children(node);
-                if children.len() >= 2 {
-                    let path = self.lower_expr_as_path(children[0]);
-                    let alias = self.node_to_ident(children[1]);
-                    (path, UseKind::Alias(alias))
-                } else {
-                    let path = self.lower_expr_as_path(node);
-                    (path, UseKind::Simple)
-                }
-            }
-            _ => {
-                let path = self.lower_expr_as_path(node);
-                (path, UseKind::Simple)
-            }
-        }
-    }
-
-    fn lower_fn_params(&mut self, param_nodes: &[NodeIndex]) -> Vec<FnParamTy<'hir>> {
-        let mut params = Vec::new();
-        for &p in param_nodes {
-            if p == 0 {
-                continue;
-            }
-            if let Some(param) = self.lower_fn_param(p) {
-                params.push(param);
-            }
-        }
-        params
-    }
-
-    fn lower_fn_param(&mut self, node: NodeIndex) -> Option<FnParamTy<'hir>> {
-        let kind = self.ast.get_node_kind(node)?;
-        let span = self.ast.get_span(node).unwrap_or(Span::default());
-        let children = self.ast.get_children(node);
-
-        match kind {
-            NodeKind::TypeBoundParam => {
-                // id : type
-                if children.len() >= 2 {
-                    let ident = self.node_to_ident(children[0]);
-                    let ty = self.lower_expr(children[1]);
-                    let ty_ref = self.arena.alloc_expr(ty);
-                    Some(FnParamTy::Typed(ident, ty_ref, span, FnParamKind::Common))
-                } else {
-                    None
-                }
-            }
-            NodeKind::TraitBoundParam => {
-                // id :- type (trait-bound param)
-                if children.len() >= 2 {
-                    let ident = self.node_to_ident(children[0]);
-                    let ty = self.lower_expr(children[1]);
-                    let ty_ref = self.arena.alloc_expr(ty);
-                    Some(FnParamTy::Typed(ident, ty_ref, span, FnParamKind::Common))
-                } else {
-                    None
-                }
-            }
-            NodeKind::OptionalParam => {
-                // .id : type = default
-                if children.len() >= 3 {
-                    let ident = self.node_to_ident(children[0]);
-                    let ty = self.lower_expr(children[1]);
-                    let ty_ref = self.arena.alloc_expr(ty);
-                    let default = self.lower_expr(children[2]);
-                    let default_ref = self.arena.alloc_expr(default);
-                    Some(FnParamTy::Optional {
-                        ident,
-                        ty: ty_ref,
-                        default: default_ref,
-                        span,
-                        kind: FnParamKind::Common,
-                    })
-                } else {
-                    None
-                }
-            }
-            NodeKind::VarargParam => {
-                // ...id : type
-                if children.len() >= 2 {
-                    let ident = self.node_to_ident(children[0]);
-                    let ty = self.lower_expr(children[1]);
-                    let ty_ref = self.arena.alloc_expr(ty);
-                    Some(FnParamTy::Variadic(
-                        ident,
-                        ty_ref,
-                        span,
-                        FnParamKind::Common,
-                    ))
-                } else {
-                    None
-                }
-            }
-            NodeKind::SelfParam | NodeKind::SelfRefParam => {
-                let ident = Ident::new(Symbol::intern("self"), span);
-                let ty_expr = Expr {
-                    hir_id: self.next_hir_id(),
-                    kind: ExprKind::TyPlaceholder,
-                    span,
-                };
-                let ty_ref = self.arena.alloc_expr(ty_expr);
-                Some(FnParamTy::Typed(ident, ty_ref, span, FnParamKind::Common))
-            }
-            NodeKind::ComptimeParam => {
-                if !children.is_empty() {
-                    if let Some(inner) = self.lower_fn_param(children[0]) {
-                        Some(fn_param_with_kind(inner, FnParamKind::Comptime))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-            NodeKind::ImplicitParam => {
-                if !children.is_empty() {
-                    if let Some(inner) = self.lower_fn_param(children[0]) {
-                        Some(fn_param_with_kind(inner, FnParamKind::Implicit))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-            NodeKind::LambdaParam => {
-                if !children.is_empty() {
-                    if let Some(inner) = self.lower_fn_param(children[0]) {
-                        Some(fn_param_with_kind(inner, FnParamKind::Lambda))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-            NodeKind::ErrorParam => {
-                if !children.is_empty() {
-                    if let Some(inner) = self.lower_fn_param(children[0]) {
-                        Some(fn_param_with_kind(inner, FnParamKind::Error))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-            NodeKind::CatchParam => {
-                if !children.is_empty() {
-                    if let Some(inner) = self.lower_fn_param(children[0]) {
-                        Some(fn_param_with_kind(inner, FnParamKind::Catch))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-            NodeKind::QuoteParam => {
-                if !children.is_empty() {
-                    if let Some(inner) = self.lower_fn_param(children[0]) {
-                        Some(fn_param_with_kind(inner, FnParamKind::Quote))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-            NodeKind::Id => {
-                // Bare identifier param (no type annotation)
-                let ident = self.node_to_ident(node);
-                let ty_expr = Expr {
-                    hir_id: self.next_hir_id(),
-                    kind: ExprKind::TyPlaceholder,
-                    span,
-                };
-                let ty_ref = self.arena.alloc_expr(ty_expr);
-                Some(FnParamTy::Typed(ident, ty_ref, span, FnParamKind::Common))
-            }
-            _ => {
-                self.emit_invalid_parameter(&format!("{:?}", kind), span);
-                None
-            }
-        }
-    }
-
-    /// Lower an AST parameter node into a Body `Param`.
-    fn lower_body_param(&mut self, node: NodeIndex) -> Param<'hir> {
-        let span = self.ast.get_span(node).unwrap_or(Span::default());
-        let kind = self.ast.get_node_kind(node);
-        let children = self.ast.get_children(node);
-
-        let (pat, ty) = match kind {
-            Some(NodeKind::TypeBoundParam | NodeKind::TraitBoundParam) => {
-                let pat = if !children.is_empty() {
-                    self.lower_pattern(children[0])
-                } else {
-                    self.make_error_pattern(span)
-                };
-                let ty = if children.len() > 1 && children[1] != 0 {
-                    let ty_expr = self.lower_expr(children[1]);
-                    Some(self.arena.alloc_expr(ty_expr) as &_)
-                } else {
-                    None
-                };
-                (pat, ty)
-            }
-            Some(NodeKind::SelfParam | NodeKind::SelfRefParam) => {
-                let ident = Ident::new(Symbol::intern("self"), span);
-                let pat = hir::pattern::Pattern {
-                    hir_id: self.next_hir_id(),
-                    kind: hir::pattern::PatternKind::Binding(
-                        hir::common::BindingMode::ByValue,
-                        ident,
-                        None,
-                    ),
-                    span,
-                };
-                (pat, None)
-            }
-            Some(
-                NodeKind::ComptimeParam
-                | NodeKind::ImplicitParam
-                | NodeKind::LambdaParam
-                | NodeKind::ErrorParam
-                | NodeKind::CatchParam
-                | NodeKind::QuoteParam,
-            ) => {
-                if !children.is_empty() {
-                    return self.lower_body_param(children[0]);
-                }
-                (self.make_error_pattern(span), None)
-            }
-            _ => {
-                let pat = self.lower_pattern(node);
-                (pat, None)
-            }
-        };
-
-        Param {
-            hir_id: self.next_hir_id(),
-            pat,
-            ty,
-            span,
-        }
     }
 
     /// Create an error item (returns an OwnerId that maps to `ItemKind::Err`).
@@ -1377,27 +1232,5 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
 
         self.current_owner = prev_owner;
         owner_id
-    }
-}
-
-/// Replace the `FnParamKind` of a parameter (standalone fn because
-/// `FnParamTy` is defined in the `hir` crate).
-fn fn_param_with_kind<'hir>(param: FnParamTy<'hir>, new_kind: FnParamKind) -> FnParamTy<'hir> {
-    match param {
-        FnParamTy::Typed(ident, ty, span, _) => FnParamTy::Typed(ident, ty, span, new_kind),
-        FnParamTy::Optional {
-            ident,
-            ty,
-            default,
-            span,
-            ..
-        } => FnParamTy::Optional {
-            ident,
-            ty,
-            default,
-            span,
-            kind: new_kind,
-        },
-        FnParamTy::Variadic(ident, ty, span, _) => FnParamTy::Variadic(ident, ty, span, new_kind),
     }
 }

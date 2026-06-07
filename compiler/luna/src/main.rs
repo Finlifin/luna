@@ -1,25 +1,34 @@
+//! Luna compiler driver.
+//!
+//! Orchestrates the compilation pipeline:
+//!
+//! ```text
+//!   source file
+//!     → lex  → parse  → resolve          (standalone phases)
+//!     → hir_package query                 (dispatches ast_lowering provider)
+//!     → [typeck / mir / codegen — TODO]
+//! ```
+
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use interface::{CompilerConfig, CompilerInstance, Session};
 use parse::parser::Parser;
 
 fn main() {
-    // ── Session ──────────────────────────────────────────────────────────
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let config = CompilerConfig::new("test", cwd);
     let sess = Session::new(config);
 
-    // Report sysroot status.
+    // ── Sysroot ──────────────────────────────────────────────────────────────
     if let Some(ref sr) = sess.sysroot {
         println!("sysroot: {}", sr.root.display());
     } else {
         println!("warning: sysroot not found – builtin/std unavailable");
     }
 
-    // ── Compiler instance ────────────────────────────────────────────────
     let mut instance = CompilerInstance::new(&sess);
 
-    // Report sysroot packages loaded into VFS.
     for (i, vfs) in instance.sysroot_vfs.iter().enumerate() {
         println!(
             "  sysroot[{}] \"{}\" – {} source file(s)",
@@ -29,7 +38,7 @@ fn main() {
         );
     }
 
-    // ── Load source file ─────────────────────────────────────────────────
+    // ── Load & lex ──────────────────────────────────────────────────────────
     let file_path = Path::new("test.fl");
     let source_file = sess
         .source_map
@@ -39,17 +48,15 @@ fn main() {
         .vfs_mut()
         .add_file(file_path.to_path_buf(), source_file.clone());
 
-    // ── Lex & Parse ──────────────────────────────────────────────────────
     let src = source_file.src.as_ref().expect("source text not available");
-    let (tokens, _lex_errors) = lex::lex(src, source_file.start_pos);
+    let (tokens, symbols, _lex_errors) = lex::lex(src, source_file.start_pos);
 
-    let mut parser = Parser::new(&sess.source_map, tokens, source_file.start_pos);
+    // ── Parse ────────────────────────────────────────────────────────────────
+    let mut parser = Parser::new(&sess.source_map, tokens, symbols, source_file.start_pos);
     parser.parse(&instance.diag_ctx);
     let ast = parser.finalize();
-
     instance.vfs_mut().set_ast(file_id, ast);
 
-    // ── AST dump ─────────────────────────────────────────────────────────
     {
         let ast = instance.vfs.get_ast(file_id).expect("AST not found");
         let lisp = ast.dump_to_s_expression(ast.root, &sess.source_map);
@@ -57,7 +64,7 @@ fn main() {
         println!("ast dumped to ast.lisp ({} nodes)", ast.nodes.len());
     }
 
-    // ── Name Resolution ──────────────────────────────────────────────────
+    // ── Name resolution ──────────────────────────────────────────────────────
     let module_tree =
         resolve::build_module_tree(&sess.source_map, &instance.diag_ctx, &mut instance.vfs);
     if !module_tree.errors.is_empty() {
@@ -71,90 +78,55 @@ fn main() {
         module_tree.def_count,
         module_tree.scope_tree.len(),
     );
-    let _resolver = resolve::Resolver::new(&module_tree);
 
-    // ── AST Lowering ─────────────────────────────────────────────────────
-    let ast = instance.vfs.get_ast(file_id).expect("AST not found");
-    let mut package = interface::hir::Package::new();
-    ast_lowering::lower_to_hir(
-        ast,
-        &instance.hir_arena,
-        &sess.source_map,
-        &instance.diag_ctx,
-        &mut package,
-    );
+    let file_scope = module_tree
+        .file_scopes
+        .get(&file_id)
+        .copied()
+        .unwrap_or(resolve::ScopeId::ROOT);
 
+    // ── Register providers ────────────────────────────────────────────────────
+    //
+    // Each compiler-pass crate registers its function-pointer implementations
+    // into the Providers dispatch table.  Must happen before any HIR queries.
+    ast_lowering::set_providers(&mut instance.db.providers);
+
+    // ── Set query inputs ──────────────────────────────────────────────────────
+    //
+    // Bundle all data needed by ast_lowering::lower_to_hir into HirQueryInput.
+    // SourceMap and DiagnosticContext are borrowed by raw pointer; they live at
+    // least as long as the `hir_package()` call below.
+    {
+        let hir_input = Arc::new(middle::HirQueryInput::new(
+            Arc::new(
+                instance
+                    .vfs
+                    .get_ast(file_id)
+                    .expect("AST not found")
+                    .clone(),
+            ),
+            Arc::new(module_tree),
+            file_scope,
+            &sess.source_map as *const rustc_span::SourceMap,
+            &instance.diag_ctx as *const diagnostic::DiagnosticContext<'_>
+                as *const diagnostic::DiagnosticContext<'static>,
+        ));
+        instance.set_hir_input(hir_input);
+    }
+
+    // ── Issue hir_package query ───────────────────────────────────────────────
+    let pkg_box = instance.enter(|compiler| compiler.hir_package());
+
+    let pkg = pkg_box.package();
     println!(
-        "HIR lowering complete: {} definition(s), {} body(ies)",
-        package.num_defs(),
-        package.num_bodies(),
+        "hir_package query complete: {} definition(s), {} body(ies)",
+        pkg.num_defs(),
+        pkg.num_bodies(),
     );
 
-    // ── Type Checking ────────────────────────────────────────────────────
-    typeck::typeck_package(&package, &instance.ty_ctxt);
-
-    // Report types.
-    for (owner_id, _info) in package.owners() {
-        if let Some(ty) = instance.ty_ctxt.def_ty(owner_id.def_id) {
-            let item = package.item(owner_id).unwrap();
-            println!("  type {:?} : {}", item.ident, ty);
-        }
-    }
-    println!("type checking complete");
-
-    // ── MIR Lowering ─────────────────────────────────────────────────────
-    let mir_bodies = mir_build::build_mir(&package, &instance.ty_ctxt);
-    println!("MIR lowering complete: {} body(ies)", mir_bodies.len(),);
-
-    // Dump MIR for inspection.
-    let mut mir_dump = String::new();
-    for body in &mir_bodies {
-        mir_dump.push_str(&body.dump());
-        mir_dump.push('\n');
-    }
-    std::fs::write("mir.dump", &mir_dump).expect("failed to write mir.dump");
-    println!("MIR dumped to mir.dump");
-
-    // ── LLVM Codegen ───────────────────────────────────────────────────
-    let codegen_result = codegen::codegen_llvm(&mir_bodies, &instance.ty_ctxt);
-
-    // Dump LLVM IR for inspection.
-    codegen_result
-        .write_ir("output.ll")
-        .expect("failed to write output.ll");
-    println!("LLVM IR written to output.ll");
-
-    // Emit object file and link with libc.
-    match codegen_result.write_object("output.o") {
-        Ok(()) => {
-            println!("object file written to output.o");
-
-            // Link with cc (uses C ABI / libc).
-            let link_status = std::process::Command::new("cc")
-                .args(["-o", "output", "output.o", "-lm"])
-                .status();
-            match link_status {
-                Ok(status) if status.success() => {
-                    println!("linked output.o -> output");
-                    let run_result = std::process::Command::new("./output").output();
-                    match run_result {
-                        Ok(output) => {
-                            let stdout = String::from_utf8_lossy(&output.stdout);
-                            if !stdout.is_empty() {
-                                print!("{}", stdout);
-                            }
-                            let stderr = String::from_utf8_lossy(&output.stderr);
-                            if !stderr.is_empty() {
-                                eprint!("{}", stderr);
-                            }
-                        }
-                        Err(e) => println!("failed to run ./output: {}", e),
-                    }
-                }
-                Ok(status) => println!("linker failed with: {}", status),
-                Err(e) => println!("cc not available: {} (skipping link)", e),
-            }
-        }
-        Err(e) => println!("failed to emit object file: {}", e),
-    }
+    // ── HIR serialization ─────────────────────────────────────────────────────
+    let hir_lisp = pkg.dump_to_lisp();
+    std::fs::write("hir.lisp", &hir_lisp).expect("failed to write hir.lisp");
+    println!("HIR dumped to hir.lisp");
+    println!("{}", hir_lisp);
 }

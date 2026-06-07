@@ -13,8 +13,6 @@ use rustc_span::{SourceFile, SourceMap};
 
 use ast::{Ast, NodeIndex};
 
-// ── Identifiers ──────────────────────────────────────────────────────────────
-
 /// Identifies a source file within a package's [`Vfs`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FileId(u32);
@@ -62,10 +60,7 @@ impl AstNodeId {
 
     #[inline]
     pub fn new(file: FileId, node: NodeIndex) -> Self {
-        AstNodeId {
-            file: file.0,
-            node,
-        }
+        AstNodeId { file: file.0, node }
     }
 
     #[inline]
@@ -84,8 +79,6 @@ impl AstNodeId {
     }
 }
 
-// ── Source entry ─────────────────────────────────────────────────────────────
-
 /// A source file entry stored in the VFS.
 pub struct SourceEntry {
     /// Relative path from the package root (e.g. `src/main.fl`).
@@ -93,8 +86,6 @@ pub struct SourceEntry {
     /// The `rustc_span` source file handle (source text + byte positions).
     pub source_file: Arc<SourceFile>,
 }
-
-// ── VFS ──────────────────────────────────────────────────────────────────────
 
 /// Virtual File System for a single package.
 ///
@@ -121,8 +112,6 @@ impl Vfs {
             asts: Vec::new(),
         }
     }
-
-    // ── File management ──────────────────────────────────────────────────
 
     /// Add a source file and return its [`FileId`].
     pub fn add_file(&mut self, rel_path: PathBuf, source_file: Arc<SourceFile>) -> FileId {
@@ -163,8 +152,6 @@ impl Vfs {
             .map(|(i, entry)| (FileId(i as u32), entry))
     }
 
-    // ── AST management ───────────────────────────────────────────────────
-
     /// Store a parsed AST for a file. Replaces any previous AST.
     pub fn set_ast(&mut self, id: FileId, ast: Ast) {
         self.asts[id.index()] = Some(ast);
@@ -182,8 +169,6 @@ impl Vfs {
         self.asts.get_mut(id.index())?.as_mut()
     }
 
-    // ── AstNodeId helpers ────────────────────────────────────────────────
-
     /// Build an [`AstNodeId`] from a file and node index.
     #[inline]
     pub fn node_id(&self, file: FileId, node: NodeIndex) -> AstNodeId {
@@ -195,8 +180,6 @@ impl Vfs {
         let ast = self.get_ast(id.file_id())?;
         Some((ast, id.node_index()))
     }
-
-    // ── Directory scanning ───────────────────────────────────────────────
 
     /// Scan a package directory and populate the VFS with all `.fl` source
     /// files found recursively.
@@ -213,13 +196,7 @@ impl Vfs {
         vfs
     }
 
-    fn scan_dir(
-        &mut self,
-        source_map: &SourceMap,
-        base: &Path,
-        dir: &Path,
-        ignores: &[&str],
-    ) {
+    fn scan_dir(&mut self, source_map: &SourceMap, base: &Path, dir: &Path, ignores: &[&str]) {
         let entries = match fs::read_dir(dir) {
             Ok(e) => e,
             Err(e) => {

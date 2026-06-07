@@ -5,10 +5,11 @@ edition = "2024"
 
 [dependencies]
 ast_lowering = { path = "../ast_lowering" }
-codegen = { path = "../codegen" }
+diagnostic = { path = "../diagnostic" }
 interface = { path = "../interface" }
+middle = { path = "../middle" }
 lex = { path = "../lex" }
-mir_build = { path = "../mir_build" }
 parse = { path = "../parse" }
 resolve = { path = "../resolve" }
-typeck = { path = "../typeck" }
+hir = { path = "../hir" }
+rustc_span = { workspace = true }

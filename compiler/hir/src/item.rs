@@ -1,14 +1,20 @@
 //! HIR items – top-level definition descriptors.
+//!
+//! An [`Item`] is the HIR representation of any top-level definition:
+//! functions, structs, enums, modules, impls, traits, type aliases, and
+//! use-imports.  Each item is identified by an [`OwnerId`] and stored in the
+//! [`Package`](crate::Package) owner table.
 
 use rustc_span::Span;
 
 use crate::body::BodyId;
 use crate::clause::ClauseConstraint;
-use crate::common::{Ident, Path};
+use crate::common::{FnSigParam, Ident, Path};
 use crate::expr::Expr;
 use crate::hir_id::{HirId, OwnerId};
 use crate::{ClauseParam, Pattern};
 
+/// A single top-level HIR item (function, struct, enum, …).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Item<'hir> {
     pub owner_id: OwnerId,
@@ -23,6 +29,7 @@ impl Item<'_> {
     }
 }
 
+/// Discriminates the concrete form of a top-level [`Item`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum ItemKind<'hir> {
     Fn(FnSig<'hir>, BodyId),
@@ -33,48 +40,23 @@ pub enum ItemKind<'hir> {
     Trait(TraitDef<'hir>),
     TypeAlias(&'hir Expr<'hir>),
     Use(UsePath<'hir>),
+    Const(&'hir Expr<'hir>, &'hir Expr<'hir>),
     Invalid,
 }
 
+/// Full function signature: declaration + modifiers + clause parameters.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnSig<'hir> {
-    pub decl: FnDecl<'hir>,
+    pub params: &'hir [FnSigParam<'hir>],
+    pub return_ty: Option<&'hir Expr<'hir>>,
+    pub return_bind: Option<Ident>,
     pub modifiers: FnModifiers,
     pub clause_params: &'hir [ClauseParam<'hir>],
     pub clause_constraints: &'hir [ClauseConstraint<'hir>],
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct FnDecl<'hir> {
-    pub inputs: &'hir [FnParamTy<'hir>],
-    pub output: Option<&'hir Expr<'hir>>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum FnParamTy<'hir> {
-    Typed(Ident, &'hir Expr<'hir>, Span, FnParamKind),
-    Optional {
-        ident: Ident,
-        ty: &'hir Expr<'hir>,
-        default: &'hir Expr<'hir>,
-        span: Span,
-        kind: FnParamKind,
-    },
-    Variadic(Ident, &'hir Expr<'hir>, Span, FnParamKind),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum FnParamKind {
-    Common,
-    Comptime,
-    Implicit,
-    Lambda,
-    Quote,
-    Error,
-    Catch,
-}
-
+/// Modifier flags on a function definition (`pure`, `comptime`, `extern`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FnModifiers {
     pub is_pure: bool,
@@ -83,6 +65,17 @@ pub struct FnModifiers {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct NFSig<'hir> {
+    pub params: &'hir [FnSigParam<'hir>],
+    pub return_ty: Option<&'hir Expr<'hir>>,
+    pub return_bind: Option<Ident>,
+    pub clause_params: &'hir [ClauseParam<'hir>],
+    pub clause_constraints: &'hir [ClauseConstraint<'hir>],
+    pub span: Span,
+}
+
+/// Definition body of a `struct` item.
+#[derive(Debug, Clone, PartialEq)]
 pub struct StructDef<'hir> {
     pub fields: &'hir [FieldDef<'hir>],
     pub clause_params: &'hir [ClauseParam<'hir>],
@@ -90,6 +83,7 @@ pub struct StructDef<'hir> {
     pub nested_items: Vec<OwnerId>,
 }
 
+/// A single field inside a struct or enum variant.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FieldDef<'hir> {
     pub hir_id: HirId,
@@ -99,6 +93,7 @@ pub struct FieldDef<'hir> {
     pub span: Span,
 }
 
+/// Definition body of an `enum` item.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumDef<'hir> {
     pub variants: &'hir [Variant<'hir>],
@@ -107,6 +102,7 @@ pub struct EnumDef<'hir> {
     pub nested_items: Vec<OwnerId>,
 }
 
+/// A single variant of an enum.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Variant<'hir> {
     pub hir_id: HirId,
@@ -115,6 +111,7 @@ pub struct Variant<'hir> {
     pub span: Span,
 }
 
+/// Shape of an enum variant's payload.
 #[derive(Debug, Clone, PartialEq)]
 pub enum VariantKind<'hir> {
     Unit,
@@ -125,20 +122,23 @@ pub enum VariantKind<'hir> {
     SubEnum(&'hir [Variant<'hir>]),
 }
 
+/// Definition body of a `mod` item — simply a list of child owners.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModDef {
     pub items: Vec<OwnerId>,
 }
 
+/// Definition body of an `impl` block (inherent or trait implementation).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImplDef<'hir> {
     pub self_ty: &'hir Expr<'hir>,
-    pub trait_ref: Option<Path<'hir>>,
+    pub trait_ref: Option<&'hir Expr<'hir>>,
     pub clause_params: &'hir [ClauseParam<'hir>],
     pub clause_constraints: &'hir [ClauseConstraint<'hir>],
     pub items: Vec<OwnerId>,
 }
 
+/// Definition body of a `trait` item.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraitDef<'hir> {
     pub clause_params: &'hir [ClauseParam<'hir>],
@@ -146,6 +146,7 @@ pub struct TraitDef<'hir> {
     pub items: Vec<OwnerId>,
 }
 
+/// The path and import style of a `use` item.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsePath<'hir> {
     pub path: Path<'hir>,
@@ -153,6 +154,7 @@ pub struct UsePath<'hir> {
     pub span: Span,
 }
 
+/// Import style of a `use` item.
 #[derive(Debug, Clone, PartialEq)]
 pub enum UseKind<'hir> {
     Simple,
@@ -161,6 +163,9 @@ pub enum UseKind<'hir> {
     Alias(Ident),
 }
 
+/// The kind of a definition — a coarser classification than [`ItemKind`]
+/// that is useful when all you need to know is *what sort* of item a
+/// [`LocalDefId`](crate::hir_id::LocalDefId) refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DefKind {
     Fn,
@@ -171,6 +176,7 @@ pub enum DefKind {
     Trait,
     TypeAlias,
     Use,
+    Const,
     Invalid,
 }
 
@@ -185,6 +191,7 @@ impl DefKind {
             ItemKind::Trait(..) => DefKind::Trait,
             ItemKind::TypeAlias(..) => DefKind::TypeAlias,
             ItemKind::Use(..) => DefKind::Use,
+            ItemKind::Const(..) => DefKind::Const,
             ItemKind::Invalid => DefKind::Invalid,
         }
     }

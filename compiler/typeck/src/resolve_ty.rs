@@ -7,7 +7,7 @@
 use hir::Package;
 use hir::expr::{Expr, ExprKind};
 use hir::item::ItemKind;
-use ty::{AdtId, PrimTy, Ty, TyCtxt};
+use ty::{NFId, PrimTy, Ty, TyCtxt};
 
 /// Context for resolving type expressions, carrying type parameter scope
 /// and access to the package for user-defined type lookup.
@@ -61,7 +61,7 @@ pub fn resolve_ty_expr_in<'tcx>(
                         let item = info.node.expect_item();
                         if item.ident.name.as_str() == name {
                             if matches!(item.kind, ItemKind::Struct(..) | ItemKind::Enum(..)) {
-                                let adt_id = AdtId(owner_id.def_id);
+                                let adt_id = NFId(owner_id.def_id);
                                 // Resolve generic args if present
                                 let args: Vec<Ty<'tcx>> = seg
                                     .args

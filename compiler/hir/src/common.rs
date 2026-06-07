@@ -1,91 +1,13 @@
 //! Common types shared across HIR nodes.
 
 use std::fmt;
-use std::ops::Deref;
 
-use internment::Intern;
+use crate::expr::Expr;
+use crate::hir_id::HirId;
 use rustc_span::Span;
-
-/// An interned string backed by [`internment::Intern`].
-///
-/// * **`Copy`** – zero-cost to duplicate.
-/// * **O(1) `Eq` / `Hash`** – pointer comparison.
-/// * **`Deref<Target = str>`** – use anywhere a `&str` is expected.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Symbol(Intern<String>);
-
-impl Symbol {
-    /// Intern a string slice, returning the canonical [`Symbol`].
-    #[inline]
-    pub fn intern(s: &str) -> Self {
-        Symbol(Intern::new(s.to_owned()))
-    }
-
-    /// View the underlying string slice.
-    #[inline]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Debug for Symbol {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(self.as_str(), f)
-    }
-}
-
-impl fmt::Display for Symbol {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl Deref for Symbol {
-    type Target = str;
-    #[inline]
-    fn deref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl AsRef<str> for Symbol {
-    #[inline]
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl PartialEq<str> for Symbol {
-    fn eq(&self, other: &str) -> bool {
-        self.as_str() == other
-    }
-}
-
-impl PartialEq<&str> for Symbol {
-    fn eq(&self, other: &&str) -> bool {
-        self.as_str() == *other
-    }
-}
-
-impl PartialEq<Symbol> for str {
-    fn eq(&self, other: &Symbol) -> bool {
-        self == other.as_str()
-    }
-}
-
-impl From<&str> for Symbol {
-    #[inline]
-    fn from(s: &str) -> Self {
-        Symbol::intern(s)
-    }
-}
-
-impl From<String> for Symbol {
-    #[inline]
-    fn from(s: String) -> Self {
-        Symbol(Intern::new(s))
-    }
-}
+pub use symbol::DefId;
+pub use symbol::PathAnchor;
+pub use symbol::Symbol;
 
 /// Convenience macro – intern a string expression as a [`Symbol`].
 ///
@@ -160,12 +82,27 @@ impl fmt::Display for Ident {
 /// A qualified path: `A.B.C<T>`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Path<'hir> {
+    /// Where the path starts resolving from.
+    pub anchor: PathAnchor,
     pub segments: &'hir [PathSegment<'hir>],
     pub span: Span,
+    /// The definition this path was resolved to during early name resolution,
+    /// if resolution succeeded.  `None` for paths that are not yet resolved or
+    /// that could not be resolved (unresolved names are reported separately).
+    pub res: Option<symbol::DefId>,
 }
 
 impl<'hir> fmt::Display for Path<'hir> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.anchor {
+            PathAnchor::Local => {}
+            PathAnchor::Super(n) => {
+                for _ in 0..n {
+                    f.write_str(".")?;
+                }
+            }
+            PathAnchor::Package => f.write_str("@")?,
+        }
         for (i, seg) in self.segments.iter().enumerate() {
             if i > 0 {
                 write!(f, ".")?;
@@ -180,17 +117,16 @@ impl<'hir> fmt::Display for Path<'hir> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PathSegment<'hir> {
     pub ident: Ident,
-    pub args: &'hir [GenericArg<'hir>],
+    pub args: &'hir [Arg<'hir>],
 }
 
-/// A generic argument in a path segment.
 #[derive(Debug, Clone, PartialEq)]
-pub enum GenericArg<'hir> {
-    /// A common argument, e.g. `T` in `Vec<T>`.
-    Expr(&'hir super::expr::Expr<'hir>),
-    Optional(Ident, &'hir super::expr::Expr<'hir>),
+pub enum Arg<'hir> {
+    Positional(&'hir Expr<'hir>),
+    Named(Ident, &'hir Expr<'hir>),
+    Expand(&'hir Expr<'hir>),
+    Implicit(&'hir Expr<'hir>),
 }
-
 /// A literal value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Lit {
@@ -265,4 +201,94 @@ impl fmt::Display for UnOp {
 pub enum BindingMode {
     ByValue,
     ByRef,
+}
+
+pub const TPARAM_IMPLICIT: u32 = 1 << 0;
+pub const TPARAM_COMPTIME: u32 = 1 << 1;
+pub const TPARAM_QUOTE: u32 = 1 << 2;
+pub const TPARAM_ERROR: u32 = 1 << 3;
+pub const TPARAM_LAMBDA: u32 = 1 << 4;
+pub const TPARAM_ASSOC: u32 = 1 << 5;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TyParam<'hir> {
+    pub hir_id: HirId,
+    pub kind: TyParamKind<'hir>,
+    pub flags: u32,
+    pub span: Span,
+}
+
+impl TyParam<'_> {
+    pub fn is_implicit(&self) -> bool {
+        self.flags & TPARAM_IMPLICIT != 0
+    }
+    pub fn is_comptime(&self) -> bool {
+        self.flags & TPARAM_COMPTIME != 0
+    }
+    pub fn is_quote(&self) -> bool {
+        self.flags & TPARAM_QUOTE != 0
+    }
+    pub fn is_error(&self) -> bool {
+        self.flags & TPARAM_ERROR != 0
+    }
+    pub fn is_lambda(&self) -> bool {
+        self.flags & TPARAM_LAMBDA != 0
+    }
+    pub fn is_assoc(&self) -> bool {
+        self.flags & TPARAM_ASSOC != 0
+    }
+}
+
+impl<'hir> TyParam<'hir> {
+    pub fn new(hir_id: HirId, kind: TyParamKind<'hir>, span: Span) -> Self {
+        Self {
+            hir_id,
+            kind,
+            flags: 0,
+            span,
+        }
+    }
+
+    pub fn with_implicit(mut self) -> Self {
+        self.flags |= TPARAM_IMPLICIT;
+        self
+    }
+    pub fn with_comptime(mut self) -> Self {
+        self.flags |= TPARAM_COMPTIME;
+        self
+    }
+    pub fn with_quote(mut self) -> Self {
+        self.flags |= TPARAM_QUOTE;
+        self
+    }
+    pub fn with_error(mut self) -> Self {
+        self.flags |= TPARAM_ERROR;
+        self
+    }
+    pub fn with_lambda(mut self) -> Self {
+        self.flags |= TPARAM_LAMBDA;
+        self
+    }
+    pub fn with_assoc(mut self) -> Self {
+        self.flags |= TPARAM_ASSOC;
+        self
+    }
+    pub fn with_flags(mut self, flags: u32) -> Self {
+        self.flags |= flags;
+        self
+    }
+}
+
+/// Type alias for one entry in `FnSig::params` — lets the arena macro work
+/// with this tuple type via a plain identifier.
+pub type FnSigParam<'hir> = (Ident, TyParam<'hir>);
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TyParamKind<'hir> {
+    // 比如`fn<T, a: T>`则`T`的`is_dependently_catch`为`true`
+    PositionalDependencyCatched(Ident, &'hir Expr<'hir>),
+    Positional(&'hir Expr<'hir>),
+    Optional(Ident, &'hir Expr<'hir>, &'hir Expr<'hir>),
+    Varadic(Ident, &'hir Expr<'hir>),
+    Itself { is_ref: bool },
 }

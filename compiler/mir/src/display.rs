@@ -35,7 +35,10 @@ impl<'tcx> Body<'tcx> {
             let local = Local::new(i as u32);
             let comment = decl.name.as_deref().unwrap_or("");
             if i == 0 {
-                out.push_str(&format!("    let {}: {};  // return place\n", local, decl.ty));
+                out.push_str(&format!(
+                    "    let {}: {};  // return place\n",
+                    local, decl.ty
+                ));
             } else if i <= self.arg_count {
                 continue; // already shown in signature
             } else {
@@ -67,8 +70,6 @@ impl<'tcx> Body<'tcx> {
         out
     }
 }
-
-// ── Display impls ────────────────────────────────────────────────────────────
 
 impl fmt::Display for Statement<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
