@@ -85,7 +85,6 @@ requires S == String or
 ---------------------
 -- 实际上这部分我还没设计好
 -- 显式依赖类型
--- 目前只有Array支持，这也是最实用的
 struct Continuation {
     .dynamic_sized_type .dependent_type,
     -- 此动态类型有两个动态数组
@@ -93,17 +92,13 @@ struct Continuation {
     pc: usize,
     saved_stack_size: usize,
     saved_prompt_stack_size: usize,
-    saved_stack: Array<u8, quote self.saved_stack_size>,
-    saved_prompt_stack: Array<PromptEntry, quote self.saved_prompt_stack_size>,
+    saved_stack: Array<u8, self.saved_stack_size>,
+    saved_prompt_stack: Array<PromptEntry, self.saved_prompt_stack_size>,
 }
 
 ----------------------------
--- Traits, implementations
+-- Traits, implementations, derivations and extensions
 ----------------------------
-
----------------------
--- Extensions
----------------------
 
 ---------------------
 -- Option, Errors, Effects
@@ -216,14 +211,6 @@ struct RetryHandler {
 fn retry(.limit: u32 = 5) -> RetryHandler {
     RetryHandler.new(limit)
 }
-
----------------------
--- Polymorphic type
----------------------
--- 通常指forall type, (flurry中还没有exist type)
--- 比如forall<T> Vec<T>
--- 这是真正的泛型类型，而不是for<T> Type, 那是pure comptime fn<T> -> Type的语法糖
--- 目前出现于类型系统的形式化描述中
 
 ---------------------
 -- Type predicates

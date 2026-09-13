@@ -85,7 +85,7 @@ postfix -> projection
     | post_match
     | post_lambda
     | application
-    | normal_form_application
+    | normal_form_head_application
     | extended_application
     | index_application
     | type_cast
@@ -107,7 +107,7 @@ range_from -> expr ..
 post_match -> expr match { case_arm* }
 post_lambda -> expr do (lambda | block | expr)
 application -> expr (argument*)
-normal_form_application -> expr<argument*>
+normal_form_head_application -> expr<argument*>
 extended_application -> expr { (property | expr)* }
 index_application -> expr [expr]
 type_cast -> expr.as(expr)
@@ -226,7 +226,7 @@ quote_param -> quote parameter
 attr_param -> ^expr parameter
 
 clauses -> where clause*
-claus -> decl_clause | verification_clause | outcome_clause
+clause -> decl_clause | verification_clause | outcome_clause
 decl_clause -> type_decl_clause
     | trait_bound_decl_clause
     | type_bound_decl_clause
@@ -253,7 +253,7 @@ outcome_clause -> TODO
 
 
 definition -> function
-    | normal_form_def
+    | normal_form_head_def
     | algebraic_effect
     | case_def
     | const_def
@@ -274,9 +274,9 @@ definition -> function
     
 result -> (id :)? expr
 function -> pure? comptime? inline? (unsafe | spec | verified | atomic)? (extern "ABI")? fn id ( parameter* ) (-> result)? (handles(expr))? clauses? (block | (= expr))
-normal_form_def -> pure comptime fn id<parameter*> (-> result)? clauses? (block | (= expr))
+normal_form_head_def -> pure comptime fn id<parameter*> (-> result)? clauses? (block | (= expr))
 algebraic_effect -> async? effect id (parameter*) (-> result)? clauses? (block | (= expr))
-case_def -> case id (parameter*) (-> result)? clauses? block
+case_def -> case id (parameter*) -> result clauses? block
 const_def -> const id (: expr)? = expr
 newtype_def -> newtype id(<parameter*>)? = expr
 typealias_def -> typealias id(<parameter*>)? = expr
@@ -290,9 +290,9 @@ extend_trait_def -> extend expr for expr clauses? { (assoc_decl | definition | s
 derive_def -> derive expr for expr clauses? 
 test_def -> test id? block
 module_def -> mod id { (definition | statement)* }
-struct_def -> struct id clauses? { (property | struct_field | definition | statement)* }
+struct_def -> struct id clauses? { (configuration | struct_field | definition | statement)* }
 struct_field -> id : expr (= default_expr)?
-enum_def -> enum id clauses? { (property | enum_variant | definition | statement)* }
+enum_def -> enum id clauses? { (configuration | enum_variant | definition | statement)* }
 enum_variant -> trivial_enum_variant
     | tuple_enum_variant
     | struct_enum_variant
@@ -305,7 +305,7 @@ struct_enum_variant -> id { struct_field* }
 pattern_enum_variant -> id: pattern
 expr_enum_variant -> id = expr
 sub_enum_enum_variant -> id.{ enum_variant* }
-union_def -> union id clauses? { (property | union_variant | definition | statement)* }
+union_def -> union id clauses? { (configuration | union_variant | definition | statement)* }
 union_variant -> id : expr
 
 attr_def -> ^expr definition
@@ -318,6 +318,7 @@ statement -> expr_statement
     | mul_assignment
     | div_assignment
     | let_decl
+    | var_decl
     | const_decl
     | while_statement
     | while_is_match
@@ -345,6 +346,8 @@ while_statement -> while label? expr block
 while_is_match -> while label? expr is pattern do block
 while_match -> while label? expr is do { case_arm* }
 label -> : id
+let_decl -> let pattern (: expr)? = expr (else block)?
+var_decl -> var pattern (: expr)? = expr (else block)?
 return_statement -> return expr? (while expr)?
 resume_statement -> resume expr? (while expr)?
 break_statement -> break id? (while expr)?
@@ -356,7 +359,7 @@ if_match -> if expr is do { case_arm* }
 inline_statement -> inline statement_expr
 
 case_arm -> pattern => (block | statement)
-condition_arm -> pattern => (block | statement)
+condition_arm -> expr => (block | statement)
 else_arm -> else => (block | statement)
 
 
@@ -400,9 +403,14 @@ ref_pattern -> ref pattern
 async_pattern -> async pattern
 
 -- 比如0b1110(xs: BitVec<4>) 10(ys: BitVec<6>) 10(zs: BitVec<6>)
-bit_vec_bin_pattern -> 0b (integer | (id: expr) | <expr>)+
-bit_vec_oct_pattern -> 0o (integer | (id: expr) | <expr>)+
-bit_vec_hex_pattern -> 0x (integer | (id: expr) | <expr>)+
+-- segment 中 id/integer：分析阶段溯源回源码字形，再按前缀进制解释
+bit_vec_bin_pattern -> 0b segment+
+bit_vec_oct_pattern -> 0o segment+
+bit_vec_hex_pattern -> 0x segment+
+segment -> id
+    | integer
+    | <expr>
+    | (pattern : expr)
 
 infix_pattern -> or_pattern
     | range_from_to_pattern
@@ -418,7 +426,7 @@ postfix_pattern -> option_some_pattern
     | and_is_pattern
     | as_bind_pattern
     | application_pattern
-    | normal_form_application_pattern
+    | normal_form_head_application_pattern
     | extended_application_pattern
 
 option_some_pattern -> pattern?
@@ -428,7 +436,7 @@ and_is_pattern -> pattern and expr is pattern
 as_bind_pattern -> pattern as id
 application_pattern -> pattern (pattern*)
 -- 注意这里是expr哦
-normal_form_application_pattern -> pattern<expr*>
+normal_form_head_application_pattern -> pattern<expr*>
 extended_application_pattern -> pattern { (property_pattern | pattern)* }
 
 -- use pathes
@@ -451,6 +459,7 @@ path_as_bind -> path as id
 
 
 -- others
-property -> .id expr
+property -> id: expr
+configuration -> .id expr
 block -> { (definition | statement)* }
 filescope

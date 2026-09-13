@@ -114,10 +114,10 @@ test {
 -- dynamic sized occurrence type
 enum Utf8CodePoint {
     -- 基底类型决定了这个类型的大小、对齐
-    .basic_type u8,
+    .base_type u8,
     .pattern_view_defined true,
     .discrete_tag true,
-    -- 一个数据实例可能占用多个基底类型的内存空间
+    -- 一个数据实例可以占用多个基底类型的内存空间
     .dst true,
     
     -- single byte
