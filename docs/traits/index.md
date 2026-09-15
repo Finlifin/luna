@@ -26,12 +26,12 @@ struct Rectangle { width: f64, height: f64 }
 
 impl Area for Circle {
     fn area(*self) -> f64 {
-        3.1415926535 * self.radius * self.radius
+        3.1415926535 * self.radius.* * self.radius.*
     }
 }
 
 impl Area for Rectangle {
-    fn area(*self) -> f64 { self.width * self.height }
+    fn area(*self) -> f64 { self.width.* * self.height.* }
 }
 ```
 
@@ -64,43 +64,9 @@ fn print_area(shape: T) where T:- Area {
 struct Point { x: i32, y: i32 }
 derive Debug, Clone, Copy for Point;
 
-let p1 = Point { .x 1, .y 2 }
+let p1 = Point { x: 1, y: 2 }
 let p2 = p1.clone();
 println("{debug}", p2);
-```
-
-## `extend`：作用域扩展
-
-`extend` 允许在任何词法作用域内为类型添加 Trait 实现，**绕过孤儿原则**，但实现仅在该作用域内有效：
-
-```flurry
--- 为外部类型临时添加外部 Trait 实现
-extend Printer for ExternalData {
-    fn print_info(*self) {
-        println("value = {}", self.value);
-    }
-}
-```
-
-`extend` 可以命名并通过 `use` 导入到其他模块：
-
-```flurry
-pub const PrettyPrint = extend Display for MyType {
-    fn fmt(*self) -> String { ... }
-}
-
--- 其他模块：
-use my_module.PrettyPrint;  -- 显式引入该扩展
-```
-
-**字面量拓展**：为 `Integer`、`Float`、`str` 等字面量类型 `extend` 后，可写后缀；`100px` 即 `Integer.px(100)`（详见[字面量](../basics/literals.md)）：
-
-```flurry
-extend Integer {
-    comptime fn px(self) -> Pixel = Pixel { .value self };
-}
-
-let w = 100px;
 ```
 
 ## 动态多态

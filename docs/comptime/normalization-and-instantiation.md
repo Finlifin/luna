@@ -82,7 +82,7 @@ refinement 的可提取命题可以用于当前检查，相关约束在 instanti
 
 ### 开放定义
 
-loose 环境内的 implementation、extension、derivation 按线性可见性使用。该环境整体实例化时，生成的定义与相关静态作用域中已经完成检查的定义一起接受 coherence 检查；失败则该实例化不成立。
+loose 环境内的 implementation、derivation 按线性可见性使用。该环境整体实例化时，生成的定义与相关静态作用域中已经完成检查的定义一起接受 coherence 检查；失败则该实例化不成立。
 
 loose 中不允许声明自身带子句参数的开放分散定义。静态作用域提供名称解析的起点，来自满足无子句限制的 `mod`、`struct`、`enum`、`union` 定义。模块的完整可见性规则由模块系统规定。
 

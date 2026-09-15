@@ -36,7 +36,7 @@
 
 ## 指针类型
 
-`*T`：指向类型 `T` 的原始指针。直接解引用和算术操作属于 `unsafe` 范畴；在 `normal` 代码中，指针通过可达性分析确保有效性。详见 [memory-management/pointers.md](../memory-management/pointers.md)。
+`*T` 指向类型 `T` 的值，位宽与 `usize` 相同。取址、解引用和字段指针传播见[指针](../resource-management/pointers.md)与[接收者适配](../type/receiver-adaptation.md)；实际操作还须满足相应程序契约。
 
 ## 宇宙、代理与 splice
 

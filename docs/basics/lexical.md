@@ -20,7 +20,7 @@ fn _internal_helper() { ... }
 
 关键字是保留给语言本身的标识符，不可用作普通名称。常见关键字包括：
 
-`fn` `let` `const` `struct` `enum` `impl` `trait` `if` `else` `when` `for` `while` `return` `break` `continue` `use` `mod` `pub` `comptime` `inline` `unsafe` `verified` `effect` `handles` `extend` `using` `where` `requires` `derive`
+`fn` `let` `const` `struct` `enum` `impl` `trait` `if` `else` `when` `for` `while` `return` `break` `continue` `use` `mod` `pub` `comptime` `inline` `unsafe` `verified` `effect` `handles` `using` `where` `requires` `derive`
 
 完整列表见 [grammar/syntax](../grammar/syntax)。
 

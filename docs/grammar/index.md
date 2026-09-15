@@ -62,9 +62,9 @@ const SomeType: Type = some_val'type;
 |------|------|
 | `?T` | option type |
 | `!Errors T` | error qualified type |
-| `#Effect` | effect qualified type |
+| `#Effects T` | effect qualified type |
 | `dyn TraitExpr` | trait object type |
-| `^Psi F` | closure type |
+| `%C T` | closure type |
 | `*T` | pointer type |
 | `&ReachabilitySet T` | reachability type |
 
@@ -109,10 +109,12 @@ let kind = age match {
 
 ## 中缀运算符与空白
 
-`-`、`+`、`<`、`>` 等字符是否作为**中缀运算符**，由两侧空白决定：
+`+`、`-`、`*`、`/`、`<`、`>`、`<=`、`>=` 是否作为**中缀运算符**，由两侧空白决定：
 
 - **作中缀**：两侧都必须是空白（空格、制表、换行等），例如 `a - b`、`a < b`
 - **不作中缀**：至少一侧紧贴非空白，例如 `Vec<usize>`、`-23`
+
+范围等其他运算符按各自产生式处理，例如 `0..10`。
 
 这把泛型尖括号、一元负号与比较/算术运算符区分开，而不再依赖额外的消歧规则。
 

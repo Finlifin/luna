@@ -6,7 +6,7 @@
 
 每种字面量都有对应类型（如整数 → `Integer`，字符串 → `str`）。类型如何处在编译期 / 运行时宇宙、以及如何 **splice**，是语言的通用规则，见 [基本数据类型](./primitives.md)。无后缀时，整数 / 浮点在推导失败时按 `i32` / `f64` 处理。
 
-数字与字符串字面量后可跟标识符后缀，例如 `23u32`、`"msg"c`。语义上等价于对该类型的调用：`Integer.u32(23)`、`str.c("msg")`。可用 `extend` 为这些类型增加自己的后缀。
+数字与字符串字面量后可跟标识符后缀，例如 `23u32`、`"msg"c`。语义上等价于对该类型的调用：`Integer.u32(23)`、`str.c("msg")`。后缀目标遵循对应类型的成员规则。
 
 `null`、`()`、`_`、`undefined` 见 [unit-null-undefined.md](./unit-null-undefined.md)。
 
@@ -76,7 +76,7 @@ raw_str -> @builtin.str.raw { raw_source }
 - `lit id` 等价于 `Type.id(lit)`，`Type` 为该字面量的类型（如 `Integer`、`str`）。
 - 后缀必须能解析到对应定义，否则为错误。
 - 只能加一次后缀：`100u32px` 中的 `u32px` 是一个标识符，不是两层后缀。
-- 自定义后缀写在对应类型的 `extend` 上（例如 `extend Integer { … }`）。
+- 自定义后缀由对应类型的可用成员提供。
 
 ### 字符与字符串
 
@@ -163,11 +163,7 @@ false;
 .ok;
 .error;
 
-extend Integer {
-    comptime fn px(self) -> Pixel = Pixel.from_integer(self);
-}
 
-const WIDTH = 100px;
 ```
 
 ---
@@ -177,7 +173,7 @@ const WIDTH = 100px;
 | 点 | Flurry |
 |----|--------|
 | 数值字面量 | 类型为 `Integer` / `Float`；进入运行时走通用 splice（见 primitives） |
-| 后缀 | 可 `extend`；`23u32` 即 `Integer.u32(23)` |
+| 后缀 | 按类型成员解析；`23u32` 即 `Integer.u32(23)` |
 | 浮点写法 | 必须完整小数；`1e6` 不合法，须 `1.0e6` |
 | 进制前缀 | 仅小写 `0b` / `0o` / `0x`；hex 字母大小写不得混用 |
 | 字符串字面量 | 类型 `str`；插值只在 comptime |

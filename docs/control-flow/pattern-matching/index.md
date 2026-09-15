@@ -19,7 +19,6 @@ case_arm      -> pattern => (block | statement)
 
 let_decl      -> let pattern (: type_expr)? = expr (else block)?
 var_decl      -> var pattern (: type_expr)? = expr (else block)?
-```
 
 -- 模式（局部；与 grammar 对齐的增量以确认后的为准）
 pattern -> ... | pattern? | pattern! | error pattern
@@ -31,7 +30,7 @@ pattern -> ... | pattern? | pattern! | error pattern
          | pattern { ... }
          | list / range / bitvec / symbol / literal / id / _
 
--- case 定义（常见于 struct / extend 体内）
+-- case 定义（常见于 struct / impl 体内）
 case_def -> pub? case id (parameter*) -> expr clauses* block
 ```
 
@@ -95,7 +94,7 @@ var { name, age } = student;
 
 ### `case` 定义的自定义模式
 
-在类型或 `extend` 体中声明：
+在类型或 `impl` 体中声明：
 
 ```text
 case name(self_or_ref_self, ...) -> ReturnType
@@ -243,25 +242,7 @@ fn greet(student: Student) {
     }
 }
 
-extend f64 {
-    pub case not_a_number(*self) -> ?Tuple<> {
-        let bits = self'bitvec;
-        if math.bit_and(bits, 0x7FF0_0000_0000_0000) == 0x7FF0_0000_0000_0000
-            and math.bit_and(bits, 0x000F_FFFF_FFFF_FFFF) != 0
-        {
-            ()
-        } else {
-            null
-        }
-    }
-}
 
-fn describe_float(x: f64) -> str {
-    x match {
-        .not_a_number => "nan",
-        n => "number",
-    }
-}
 ```
 
 （`Status` / `Msg` / `Point` / `Student` 等为示意；`?Tuple<>` 表示无元素载荷的 option，若标准库写法不同以库为准。谓词型 `case` 是否改用 `-> bool` 仍可选待定。）

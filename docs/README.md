@@ -15,13 +15,13 @@ Flurry 是一门面向系统级编程的语言，在正确性、性能、抽象�
 | [单元 / null / undefined](basics/unit-null-undefined.md) | `()`、`null`、`_`、`undefined`（非字面量） |
 | [基本数据类型](basics/primitives.md) | 整数、浮点、bool、char、void、指针、编译期类型 |
 | [符号](basics/symbols.md) | 入口重定向 → 字面量章「符号」 |
-| [变量绑定](memory-management/bindings.md) | `let`、`const`、作用域与遮蔽 |
+| [变量绑定](resource-management/bindings.md) | `let`、`const`、作用域与遮蔽 |
 | [控制流](control-flow/index.md) | 总览：基本控制流与模式匹配 |
 | [基本控制流](control-flow/basic.md) | `if`/`when`、`for`/`while`、标签、`break`/`continue`/`return` |
 | [模式匹配](control-flow/pattern-matching/index.md) | 模式语法、`match`/`if is`/`while is`、穷尽性 |
 | [位向量模式](control-flow/pattern-matching/bitvec.md) | `BitVec` 分段匹配、base type、跨元素 |
 | [函数](functions/index.md) | 定义、方法、各种参数种类、返回值、错误处理（`!`） |
-| [Trait 系统](traits/index.md) | `trait`、`impl`、`derive`、`extend`、动态多态、`using` |
+| [Trait 系统](traits/index.md) | `trait`、`impl`、`derive` 与动态接口 |
 
 ---
 
@@ -45,15 +45,18 @@ Flurry 是一门面向系统级编程的语言，在正确性、性能、抽象�
 
 ### 2. 类型系统
 
-类型可以参与编译时计算；子句参数、操作契约和类型约束支持定义端检查。
+类型值、操作依据、数据表示与运行时依赖分别解释；从[类型系统总览](type/index.md)进入完整阅读路线。
 
 | 文档 | 内容 |
 |------|------|
-| [编译时计算与类型](type/boostrap.md) | 类型主题与 comptime 各章的阅读入口 |
-| [精化类型](type/refined-type.md) | 带谓词约束的类型 |
-| [闭包类型](type/qualified-types/closure-type.md) | 闭包与限定类型 |
-
-→ [type/](type/)（含设计备忘 `prompt.fl`）
+| [类型值与身份](type/type-identity.md) | 两层、声明身份、工厂与类型关系 |
+| [参数化与 Any](type/comptime-gradual-dependent-type.md) | 上下文检查、分支汇合与实例交付 |
+| [PTC](type/propositional-constraints/index.md) | 19 类原子、11 个求解模块、组合与诊断 |
+| [成员与适配](type/receiver-adaptation.md) | 投影来源、接收者与隐式转换 |
+| [数据声明](data-structures/index.md) | struct、enum、union、newtype 与 alias |
+| [错误与效应行](type/rows.md) | 唯一标签、scoped labels、统一与路由 |
+| [Handler](type/handlers.md) | 错误处理、直接返回、deep 恢复与转发 |
+| [依赖与环境](type/runtime-dependent-type.md) | NodeIndex、共享环境、闭包限定 |
 
 ### 3. 性能与零开销抽象
 
@@ -61,9 +64,9 @@ Flurry 是一门面向系统级编程的语言，在正确性、性能、抽象�
 
 | 文档 | 内容 |
 |------|------|
-| [Once / Clone / Copy](memory-management/once-clone-copy.md) | 仿射类型、移动语义、复制语义 |
-| [指针与引用](memory-management/pointers.md) | `*T`、`Slice<T>`、可达性安全 |
-| [Drop 精化](memory-management/drop-elaboration.md) | RAII、自动资源释放、Drop Trait |
+| [Once / Clone / Copy](resource-management/once-clone-copy.md) | 仿射类型、移动语义、复制语义 |
+| [指针](resource-management/pointers.md) | `*T`、`Slice<T>`、可达性安全 |
+| [Drop 精化](resource-management/drop-elaboration.md) | RAII、自动资源释放、Drop Trait |
 
 ### 4. 元编程
 
@@ -89,7 +92,7 @@ Flurry 是一门面向系统级编程的语言，在正确性、性能、抽象�
 
 | 文档 | 内容 |
 |------|------|
-| [安全等级](safety/index.md) | 三个等级的语义、调用规则、安全哲学 |
+| [安全等级](program-verification/safety.md) | 三个等级的语义、调用规则、安全哲学 |
 
 ### 7. 流水线映射
 

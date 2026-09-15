@@ -140,7 +140,7 @@ type -> optional_type
     | trait_object_type
     | pointer_type
     | fn_type
-    | forall_type
+    | refinement_type
     | for_type
     | lift_type
 
@@ -149,11 +149,11 @@ error_qualified_type -> !expr expr
 effect_qualified_type -> #expr expr
 -- 这两种日后需要拓展语法而不是直接用expr
 reachability_qualified_type -> &expr expr
-closure_qualified_type -> ^expr expr
+closure_qualified_type -> %expr expr
 trait_object_type -> dyn trait_ref
 pointer_type -> *expr
-fn_type -> pure? comptime? inline? (unsafe | spec | verified)? (extern "ABI")? fn(parameter_type*)
-forall_type -> forall<parameter*> expr
+fn_type -> pure? comptime? inline? (unsafe | spec | verified)? (extern "ABI")? fn(parameter_type*) (-> expr)?
+refinement_type -> refines { expr } expr
 for_type -> for<parameter*> expr
 lift_type -> lift expr
 
@@ -262,8 +262,6 @@ definition -> function
     | trait_def
     | impl_def
     | impl_trait_def
-    | extend_def
-    | extend_trait_def
     | derive_def
     | test_def
     | module_def
@@ -285,8 +283,6 @@ trait_def -> trait id (:- expr)? clauses? { (assoc_decl | definition | statement
 assoc_decl -> assoc id(<parameter*>)?: expr (= default)? clauses?
 impl_def -> impl expr clauses? { (definition | statement)* }
 impl_trait_def -> impl expr for expr clauses? { (assoc_decl | definition | statement)* }
-extend_def -> extend expr clauses? { (definition | statement)* }
-extend_trait_def -> extend expr for expr clauses? { (assoc_decl | definition | statement)* }
 derive_def -> derive expr for expr clauses? 
 test_def -> test id? block
 module_def -> mod id { (definition | statement)* }
@@ -436,7 +432,11 @@ and_is_pattern -> pattern and expr is pattern
 as_bind_pattern -> pattern as id
 application_pattern -> pattern (pattern*)
 -- 注意这里是expr哦
-normal_form_head_application_pattern -> pattern<expr*>
+normal_form_head_application_pattern -> expr<type_pattern_argument*>
+type_pattern_argument -> id: pattern
+    | type_pattern_expression
+    | pattern
+type_pattern_expression -> 'id
 extended_application_pattern -> pattern { (property_pattern | pattern)* }
 
 -- use pathes
