@@ -2,7 +2,7 @@
 
 ## Intro
 
-错误限定类型说明一次计算可能交付成功值，也可能交付某个错误分支。错误行列出分支身份，成功主体说明正常结果是什么。
+错误限定类型说明一次计算交付成功值或某个错误分支。错误行列出分支身份，成功主体说明正常结果是什么。与异常机制不同，错误限定将错误分支编码在类型中，使编译器能静态检查错误是否被处理，同时避免隐式控制流跳转。
 
 处理错误可以改变允许返回的分支，但必须保留未处理错误的身份与载荷。
 
@@ -10,7 +10,9 @@
 
 ~~~text
 error_type -> !expr expr
-error_handle -> expr! { case_arm* }
+error_handle -> expr! { error_arm* }
+error_arm -> case_arm | catch_arm
+catch_arm -> catch pattern => (block | statement)
 propagate_error -> expr!
 ~~~
 
@@ -24,6 +26,8 @@ propagate_error -> expr!
 
 消去某个输入错误后，输入余行不含该标签；输出行却可以再次包含它，因为处理分支可以返回同一种错误。输入余行与输出行不能强制相同。
 
+错误消去支持前置和后置 catch，二者只在错误路径执行，并取得完整错误限定值。具有后置 catch 时，普通 arm 完成后继续后置路径；完整顺序与重试例子见[错误处理](../../algebraic-effect-and-delimited-continuation/error-handling.md)。
+
 错误本身不附带恢复失败位置之后计算的 continuation。处理分支发出的 effect 在自己的允许效应环境中检查，不变成 error 标签。
 
 ## 常见示例
@@ -31,19 +35,19 @@ propagate_error -> expr!
 下面把“超过允许数量”作为带载荷的错误。成功分支直接交付数值；失败分支保留被拒绝的输入：
 
 ~~~flurry
-enum LimitError {
-    too_large(u32),
+enum LimitErr {
+    TooLarge(u32),
 }
 
-fn checked_count(count: u32) -> ![LimitError] u32 {
+fn checked_count(count: u32) -> ![LimitErr] u32 {
     if count <= 8 {
         count
     } else {
-        error LimitError.too_large(count)
+        error LimitErr.TooLarge(count)
     }
 }
 
-fn doubled_count(count: u32) -> ![LimitError] u32 {
+fn doubled_count(count: u32) -> ![LimitErr] u32 {
     let accepted = checked_count(count)!;
     accepted * 2
 }
@@ -51,7 +55,7 @@ fn doubled_count(count: u32) -> ![LimitError] u32 {
 fn show_count(count: u32) {
     doubled_count(count) match {
         value! => println("doubled: {}", value),
-        error .too_large(rejected) => println("rejected: {}", rejected),
+        error .TooLarge(rejected) => println("rejected: {}", rejected),
     }
 }
 
@@ -68,13 +72,13 @@ test {
 ~~~flurry
 fn count_or_zero(count: u32) -> u32 {
     checked_count(count)! {
-        .too_large(_) => 0,
+        .TooLarge(_) => 0,
     }
 }
 
-fn retry_with_smaller_count(count: u32) -> ![LimitError] u32 {
+fn retry_with_smaller_count(count: u32) -> ![LimitErr] u32 {
     checked_count(count)! {
-        .too_large(rejected) => checked_count(rejected / 2),
+        .TooLarge(rejected) => checked_count(rejected / 2),
     }
 }
 
@@ -83,12 +87,12 @@ test {
 
     retry_with_smaller_count(20) match {
         value! => println("accepted: {}", value),
-        error .too_large(rejected) => println("still rejected: {}", rejected),
+        error .TooLarge(rejected) => println("still rejected: {}", rejected),
     }
 }
 ~~~
 
-输出为 `fallback: 0`、`still rejected: 10`。第二个 handler 已处理输入错误，但分支中新调用仍可能失败，因此输出类型继续包含 `LimitError`。错误分支处理的是载荷模式；普通 `match` 则显式区分成功模式和 `error` 模式。
+输出为 `fallback: 0`、`still rejected: 10`。第二个 handler 已处理输入错误，但分支中新调用仍可能失败，因此输出类型继续包含 `LimitErr`。错误分支处理的是载荷模式；普通 `match` 则显式区分成功模式和 `error` 模式。
 
 ## 与 Rust / Zig / C / C++ 的关键差异
 
@@ -102,7 +106,7 @@ Rust Result 和 Zig error union 是直接的结果表达手段；C 错误码常�
 
 ## 编译器实现引导
 
-1. 规范化唯一错误行，证明严格扩展的 lacks。
+1. 编译器规范化唯一错误行，并证明严格扩展的 lacks。
 2. 检查成功注入或错误嵌入所需证据。
 3. handler 拆出目标标签，保留输入余行。
 4. 独立检查输出行与各分支结果。

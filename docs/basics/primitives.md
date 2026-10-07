@@ -59,7 +59,7 @@ Flurry 区分编译期宇宙与运行时宇宙（见 [跨阶段值传递](../com
 
 无后缀数值字面量在推导失败时按 `i32` / `f64` 处理；也可用后缀转到其它定宽类型。见 [字面量](./literals.md)。
 
-上述名字一般经 `std.prelude.*` 直接可见，也可写完整模块路径。
+`builtin.prelude` 默认导入其他包；`std.prelude` 需要显式 `use std.prelude.*;`。短名是否可用由相应 prelude 的成员与普通名称解析决定，也可使用完整模块路径。见[内置包与名称入口](../code-organization/builtin-packages.md)。
 
 ## 类型推断
 

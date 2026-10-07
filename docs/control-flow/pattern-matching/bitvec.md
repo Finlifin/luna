@@ -2,7 +2,7 @@
 
 ## Intro
 
-位向量模式按固定进制把一段连续比特拆成若干段：数字字面段、comptime 段，或「子模式 : 宽度类型」。它只匹配 `BitVec`。跨元素匹配允许一个逻辑值占用多个 base 元素；未启用时，pattern 总宽度必须等于单个 base 的宽度。`BitVec` 上的连接、按位运算等不属于本章。
+位向量模式按固定进制把一段连续比特拆成若干段：数字字面段、comptime 段，或「子模式 : 宽度类型」。它只匹配 `BitVec`。每一段都占据自己的宽度，绑定段不会为前一段重新命名。
 
 ## 语法
 
@@ -33,7 +33,7 @@ segment -> id
 2. **`<expr>`**：编译期求出的固定段约束；须能确定本段宽度与比较值。
 3. **`(pattern : expr)`**：按类型表达式给出的宽度切出一段，再对切出的值匹配内层 `pattern`（常见为绑定名）。该类型须有确定大小。
 
-整条 pattern 的总宽度为各段宽度之和。
+整条 pattern 的总宽度为各段宽度之和，文本从最高位写到最低位。要同时绑定并约束一段，应在该绑定上使用内层模式或 guard，而不是再并置一份同宽字面段。位序、宽度与存储字节序的关系见[BitVec 代数](../../program-synthesis/bitvec-algebra.md#宽度顺序与表示)。
 
 ### Base type 与宽度
 
@@ -45,28 +45,37 @@ segment -> id
 
 ### 与运算的边界
 
-本章只定义 **pattern**。对 `BitVec` 值做连接、按位与/或/非、宽度转换等，见类型与运算相关文档。
+本章定义分段匹配。值的连接、逐位组合、切片、回写与转换见[BitVec 代数与程序合成](../../program-synthesis/bitvec-algebra.md)。跨元素匹配允许一个逻辑值占用多个 base 元素，消费该类型提供的布局与读取契约。
 
 ## 常见示例
 
 ```flurry
+use std.prelude.*;
+
 test {
     let num: f32 = 13.625;
-    if num'bitvec is 0b(sign: u1) 10000010(exponent: u8) 10110100000000000000000(mantissa: BitVec<23>) {
-        println("sign: {}, exponent: {}, mantissa: {}", sign, exponent, mantissa);
+    if num'bitvec matches 0b(sign: u1) (exponent: u8) (mantissa: BitVec<23>)
+        if exponent == 130 and mantissa == 0b10110100000000000000000 {
+        println("sign: {}, exponent: {}, mantissa: {}",
+            sign'bitvec.as(u8), exponent, mantissa.as(u32));
     }
 
-    if num'bitvec is do {
-        0b(sign: u1) 11111111(exponent: u8) (mantissa: BitVec<23>) if mantissa != 0 => println("NaN"),
-        0b(sign: u1) 11111111(exponent: u8) 00000000000000000000000(mantissa: BitVec<23>) => println("Infinity"),
-        _ => (),
+    num'bitvec match {
+        0b(_: u1) 11111111 (mantissa: BitVec<23>)
+            if mantissa != 0 => println("NaN"),
+        0b(_: u1) 11111111 00000000000000000000000 => println("Infinity"),
+        _ => println("finite"),
     }
 }
 ```
 
+输出 `sign: 0, exponent: 130, mantissa: 5898240`，随后输出 finite。每个模式的宽度都是 1+8+23=32。第一个模式绑定三个字段，再由 guard 检查其值；分类模式直接固定八位指数，不再重复添加指数绑定段。
+
 跨元素（base / DST 等用配置属性声明；变体右侧为 bitvec pattern）：
 
 ```flurry
+use std.prelude.*;
+
 enum Utf8CodePoint {
     .base_type u8,
     .discrete_tag true,
@@ -82,7 +91,7 @@ enum Utf8CodePoint {
 
 ## 与 Rust / Zig / C / C++ 的关键差异
 
-C / C++ / Rust / Zig **都没有**与「`0b`/`0o`/`0x` + 多段并置、按宽度切开并绑定」对等的一等模式语法。常见做法是：
+C / C++ / Rust / Zig 没有与「`0b`/`0o`/`0x` + 多段并置、按宽度切开并绑定」直接对应的模式语法。常见做法是：
 
 | 语言侧常见手段 | 与 Flurry 的对照 |
 |----------------|------------------|
@@ -96,7 +105,7 @@ Flurry 把分段约束写在 **pattern** 里（字面段、`<expr>`、`(pattern 
 
 1. **输入**：`BitVec` 值、分段 pattern、由属性得到的 base 宽度与是否跨元素。
 2. **静态前置**：总宽度相对对齐约束合法；每段宽度可确定；普通值主语为 `BitVec`，enum 表示模式满足其 base type 规则。不满足则不得生成匹配代码。
-3. **匹配步骤**：按文档锁定的比特序（须与类型布局一致）依次切段；字面/`<expr>` 段做相等比较；`(pattern : expr)` 段将切片交给内层模式。
+3. **匹配步骤**：从高位向低位依次切段；字面/`<expr>` 段做相等比较；`(pattern : expr)` 段将切片交给内层模式。取得某类型值时还须满足它的表示与构造契约，不能凭宽度相同绕过合法编码检查。
 4. **跨元素**：按 base 元素序列构成逻辑比特流后再切，或生成等价的多元素决策树；语义以逻辑比特布局为准。
 5. **失败**：宽度不对齐、普通值主语非 `BitVec`、段宽无法确定 → 编译期拒绝。
 

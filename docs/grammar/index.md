@@ -52,6 +52,8 @@ const SomeType: Type = some_val'type;
 
 已有多种 view kind，例如 `bitvec`、`tuple_enumerate`、`multi_deref`、`old`（用于编写 specification）等，扩展空间很大。
 
+目标操作使用 `expr'intrinsic(argument*)`。紧接这种调用的 `.as(T)` 指定操作的输出类型，省略时按 void 处理；这里的 as 不先取得 void 再转换。具体写法与目标检查见 [Intrinsic 与输出类型](../pipeline-projection/intrinsics.md)。
+
 ---
 
 ## 类型表达式：偏前缀
@@ -78,6 +80,8 @@ const SomeType: Type = some_val'type;
 ---
 
 ## 分隔符
+
+以 multi 规则解析的语法元素列表允许在每个元素前递归添加属性前缀；属性修饰该元素，分隔符仍由元素本身决定。该规则不把原始 token 列表或任意内部操作数位置改成属性入口。具体边界与示例见[源码解析](../compilation/syntax-and-hir.md)。
 
 对象或扩展调用中的命名项使用 **property** 形式 `id: expr`。定义作用域中的 **configuration** 使用 `.id expr`，为所属定义编码属性，例如结构体中的 `.packed true`。二者的语义目标不同，见[属性系统](../comptime/attribute.md)。
 
@@ -107,6 +111,10 @@ let kind = age match {
 
 ---
 
+## 上下文与范围
+
+表达式和模式还受所在构造的外层边界约束：if 等构造的主体花括号不能被当前条件吞成后缀扩展应用。这一边界也通过 matches 传给模式；括号可为内部扩展应用划出完整范围。它与运算符空白规则分别处理，见[表达式与模式的外层边界](../compilation/syntax-and-hir.md#表达式与模式的外层边界)。
+
 ## 中缀运算符与空白
 
 `+`、`-`、`*`、`/`、`<`、`>`、`<=`、`>=` 是否作为**中缀运算符**，由两侧空白决定：
@@ -128,10 +136,10 @@ let kind = age match {
 not ready or (a and b)
 ```
 
-语言**不提供位运算符**。需要位运算时：
+语言不提供独立的传统位运算符。`and`、`or`、`not` 在 BitVec 上分别表示逐位与、或、非；其中二元操作求值两侧，各一次，不沿用 bool 的短路语义。需要位运算时：
 
 1. 使用 `math` 库中的函数，例如 `math.bit_and`、`math.bit_or`、`math.bit_xor`；或
-2. 更推荐依赖 **bitvec** 等 view / 抽象，由编译器降级为高效位运算。
+2. 使用 [BitVec 代数](../program-synthesis/bitvec-algebra.md)，通过 `'bitvec`、切片、拼接及逐位组合描述映射，由编译器生成并优化位操作。
 
 ---
 
@@ -139,8 +147,10 @@ not ready or (a and b)
 
 | 类别 | 风格 |
 |------|------|
-| 函数、变量、模块、包、宏、枚举变体、非类型参数、handler、effect、自定义 case、predicate、lemma、axiom、invariant、outcome | `snake_case` |
+| 函数、变量、模块、包、宏、普通枚举变体、非类型参数、handler、effect、自定义 case、predicate、lemma、axiom、invariant、outcome | `snake_case` |
 | 常量、全局变量 | `SCREAMING_SNAKE_CASE` |
-| 类型名、用于编码错误的枚举名、trait 名 | `PascalCase` |
+| 类型名、trait 名 | `PascalCase` |
+| 错误类型名 | `PascalCase`，以 `Err` 结尾 |
+| 错误枚举变体 | `PascalCase` |
 
 标识符由一个或两个单词构成时，建议写出完整单词，不使用缩写；已经约定俗成、接近独立词语的形式可以保留，例如 `vec`。例如，类型名使用 `StructDefinition`，而不是 `StructDef`。

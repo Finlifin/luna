@@ -2,6 +2,8 @@
 
 ## Intro
 
+编译时和运行时是两个独立的执行环境，它们的值表示、地址空间和类型系统并不天然兼容。因此，编译时得到的结果要进入运行时程序，需要一个明确的转换协议。
+
 编译时得到的结果，可以决定生成的程序使用什么值。这个过程既要确定目标类型，也要保留构造该目标值所需的操作。
 
 有些结果可以直接表示为常量，有些需要运行时转换。知道输入来自编译时，并不足以判断转换是否有运行时代价。
@@ -60,7 +62,7 @@ Splice 使用显式 trait。struct、enum、union、closure 等指定类型可�
 
 运行时的实际值不能在编译时被读取。quote 看似引用运行时内容，操作的却是可在编译时持有的符号或代码表示，而不是未来运行时内存中的数据。
 
-lift 将相应运行时类型的表示带入编译时类型操作。代码引用还有 contextual modal 类型所约束的 quote/splice；代码值本身属于 comptime 值，但其代码拼接规则与普通数据转换不同。
+lift 将相应运行时类型的表示带入编译时类型操作。代码引用还有 [CMTT](../cmtt/index.md) 类型所约束的 quote/splice；代码值本身属于 comptime 值，但其代码拼接规则与普通数据转换不同。参数化代码的 [quote fn](../functions/inline-and-quote.md) 保证接入，contextual 输入使用 implicit quote；[template](../functions/templates.md) 可以复用签名或在明确上下文下接入正文。quote fn 不因代码描述属于 comptime 就成为 comptime fn。
 
 这一区分不改变单向的数据边界：持有运行时代码的表示，不等于已经执行了该代码。
 

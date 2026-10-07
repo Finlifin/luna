@@ -6,7 +6,7 @@
 
 每种字面量都有对应类型（如整数 → `Integer`，字符串 → `str`）。类型如何处在编译期 / 运行时宇宙、以及如何 **splice**，是语言的通用规则，见 [基本数据类型](./primitives.md)。无后缀时，整数 / 浮点在推导失败时按 `i32` / `f64` 处理。
 
-数字与字符串字面量后可跟标识符后缀，例如 `23u32`、`"msg"c`。语义上等价于对该类型的调用：`Integer.u32(23)`、`str.c("msg")`。后缀目标遵循对应类型的成员规则。
+整数、浮点、字符和字符串字面量后可跟标识符后缀，例如 `23u32`、`"msg"c`。后缀通过 `LiteralInto<suffix, Result>` 选择转换实现；结果类型由上下文与候选共同推断，见[语法协议](../traits/protocols.md#字面量转换)。
 
 `null`、`()`、`_`、`undefined` 见 [unit-null-undefined.md](./unit-null-undefined.md)。
 
@@ -33,7 +33,7 @@ str  -> " str_body "
 bool -> true | false
 symbol -> . id
 
-literal_suffix -> (integer | float | str) id
+literal_suffix -> (integer | float | char | str) id
 
 raw_str -> @builtin.str.raw { raw_source }
 ```
@@ -55,7 +55,7 @@ raw_str -> @builtin.str.raw { raw_source }
 | `true` / `false` | `bool` |
 | `.id` | `Symbol` |
 
-宇宙归属与 splice 见 [基本数据类型](./primitives.md)。这些名字通常可直接使用；需要时也可写完整模块路径。
+宇宙归属与 splice 见 [基本数据类型](./primitives.md)。名称通过相应包与 prelude 提供；自动与显式导入的范围见[内置包](../code-organization/builtin-packages.md)。
 
 ### 整数
 
@@ -72,11 +72,11 @@ raw_str -> @builtin.str.raw { raw_source }
 
 ### 后缀
 
-- 仅用于整数、浮点、字符串字面量。
-- `lit id` 等价于 `Type.id(lit)`，`Type` 为该字面量的类型（如 `Integer`、`str`）。
-- 后缀必须能解析到对应定义，否则为错误。
+- 用于整数、浮点、字符和字符串字面量。
+- `lit id` 以字面量类型 S 为主体，查询 `LiteralInto<.id, R> for S`，再调用所选 literal_into。
+- R 由目标上下文与候选推断；没有唯一合法解时报告歧义，未决候选不能当作不存在。
 - 只能加一次后缀：`100u32px` 中的 `u32px` 是一个标识符，不是两层后缀。
-- 自定义后缀由对应类型的可用成员提供。
+- 自定义后缀由相应 LiteralInto 实现提供；多个结果类型按不同完整接口实例区分。
 
 ### 字符与字符串
 
@@ -170,18 +170,12 @@ false;
 
 ## 与 Rust / Zig / C / C++ 的关键差异
 
-| 点 | Flurry |
-|----|--------|
-| 数值字面量 | 类型为 `Integer` / `Float`；进入运行时走通用 splice（见 primitives） |
-| 后缀 | 按类型成员解析；`23u32` 即 `Integer.u32(23)` |
-| 浮点写法 | 必须完整小数；`1e6` 不合法，须 `1.0e6` |
-| 进制前缀 | 仅小写 `0b` / `0o` / `0x`；hex 字母大小写不得混用 |
-| 字符串字面量 | 类型 `str`；插值只在 comptime |
-| 原始字符串 | `@builtin.str.raw { … }` |
-| 符号 | `.id`，类型 `Symbol` |
-| `null` | 见 [unit-null-undefined.md](./unit-null-undefined.md)，不是本章的字面量 |
-
-（上表右侧只锚定 Flurry 已确认行为；其它语言仅作读者背景，不作承诺。）
+| 语言 | 真实对应物与差异 |
+|---|---|
+| Rust | 数值后缀指定内建数值类型；普通字符和字符串字面量不能带自定义转换后缀。Flurry 通过 LiteralInto 选择完整转换实例。[Rust literals](https://doc.rust-lang.org/reference/expressions/literal-expr.html) |
+| Zig | comptime 数值和显式类型转换可承担类型选择；无对等的 LiteralInto 后缀接口。[Zig](https://ziglang.org/documentation/master/) |
+| C | 内建整数、浮点后缀选择对应数值类型；自定义构造可用函数或宏表达，没有 trait 后缀查询。[C11 §6.4.4](https://www.open-std.org/jtc1/sc22/wg14/www/docs/n1570.pdf) |
+| C++ | 用户定义字面量调用 literal operator；Flurry 的转换通过 LiteralInto 的主体、后缀和结果类型共同解析。[C++ literal operators](https://eel.is/c++draft/over.literal) |
 
 ---
 
@@ -197,7 +191,7 @@ false;
 ## 编译器实现引导
 
 1. **词法**：按本章规则识别整数（含进制与 `_`）、浮点（含科学计数法）、字符/字符串（含转义与 `$` 插值分段）、布尔关键字、符号的 `.` 与 `id`。
-2. **语法**：字面量；`literal_suffix` 将「数值或字符串字面量 + 标识符」改写为 `Type.id(lit)`；失败则诊断。相邻字符串字面量做合并展开；含插值者改写为 `std.fmt.comptime_format`。`@builtin.str.raw` 按构造宏规则扩展。
+2. **语法与协议**：`literal_suffix` 保留字面量及后缀身份，为 LiteralInto 建立结果推断变量；候选试探相互隔离，唯一选定后生成对应转换调用。相邻字符串字面量做合并展开；含插值者改写为 `std.fmt.comptime_format`。`@builtin.str.raw` 按构造宏规则扩展。
 3. **类型与 splice**：字面量带上表类型；进入运行时上下文时按该类型适用的通用 splice 规则处理（推导失败时无后缀数值按 `i32` / `f64`）。
 4. **不变式**：字面量后缀语法不可叠两次；符号同名同值。
 
@@ -220,7 +214,7 @@ exp   -> (e | E) (+ | -)? digits
 bool -> true | false
 symbol -> . id
 
-literal_suffix -> (integer | float | str) id
+literal_suffix -> (integer | float | char | str) id
 
 escape -> \\ | \' | \" | \n | \r | \t | \0 | \$ | \x{ hexdigit+ }
 

@@ -4,7 +4,7 @@
 
 模式描述如何拆开、识别一个值。
 
-若干模式与表达式形态成对出现：`pat?` 对偶于 option 的消除/传播，`pat!` 对偶于错误成功值一侧，`error pat` 对偶于 `error expr` 构造。多臂匹配须穷尽（或用 `_`）；单臂 `is` 不强制穷尽。自定义匹配视图用 **`case`**；控制流形态见 [基本控制流](../basic.md)。
+若干模式与表达式形态成对出现：`pat?` 对偶于 option 的消除/传播，`pat!` 对偶于错误成功值一侧，`error pat` 对偶于 `error expr` 构造。多臂匹配须穷尽（或用 `_`）；单臂 `is` 不强制穷尽。自定义匹配视图通过 **`case`** 声明；控制流形态见 [基本控制流](../basic.md)。
 
 ## 语法
 
@@ -21,7 +21,7 @@ let_decl      -> let pattern (: type_expr)? = expr (else block)?
 var_decl      -> var pattern (: type_expr)? = expr (else block)?
 
 -- 模式（局部；与 grammar 对齐的增量以确认后的为准）
-pattern -> ... | pattern? | pattern! | error pattern
+pattern -> ... | (pattern) | pattern? | pattern! | error pattern
          | pattern or pattern
          | pattern and expr is pattern
          | pattern as id
@@ -57,7 +57,7 @@ let (x, y) = position;
 var { name, age } = student;
 ```
 
-当模式**可能失败**（可反驳）时，可在末尾接 `else` 块，规则**类比 Rust 的 `let … else`**（非 Flurry 对 Rust 的承诺，仅锚定行为）：
+当模式**可能失败**（可反驳）时，可在末尾接 `else` 块，规则**类比 Rust 的 `let … else`**（此处引用 Rust 仅为锚定行为描述，不构成对 Rust 语义的承诺）：
 
 - 写法：`let pattern = expr else block` / `var pattern = expr else block`
 - 模式匹配成功：绑定引入后方作用域，继续执行。
@@ -79,6 +79,36 @@ var { name, age } = student;
 - **`and is`**：`pat and expr is pat`（可连锁）；先完整匹配左侧，再对 `expr` 继续匹配。
 - **`as`**：`pat as name`，匹配 `pat` 同时把整体绑到 `name`。
 - **守卫**：`pat if cond`；`cond` 为真才成功（模式层用 `if`，与语句守卫 `while` 不同）。
+
+### 模式优先级与括号
+
+优先级决定模式的组合范围，不决定 match 各个 arm 的尝试顺序。下表由紧到松排列；同一层连续出现时按从左到右接合，括号先建立一个完整子模式。
+
+| 结合层次 | 形式 | 组合方式 |
+|---|---|---|
+| 名称投影 | E.variant | 先确定完整模式头 |
+| 应用 | P(...)、P{...}、E<...> | 先组成载荷或类型模式 |
+| 成功包装 | p?、p! | 作用于左侧已形成的模式 |
+| 选择 | p or q | 两侧分别检查，成功绑定须对应 |
+| 整体绑定 | p as name | 绑定左侧整个模式匹配的值 |
+| 守卫与顺序匹配 | p if expr、p and expr is q | 接在已经形成的左侧模式之后 |
+
+因此 1 or 2 as value 解释为 (1 or 2) as value；n? as whole 中 n 接收内部值，whole 接收整个成功的 option。守卫后面的 expr 按表达式规则解析，不能把其中的 and、or 当成模式选择。
+
+前缀 not、error、ref、async 取得当前范围内其后的完整模式。范围端点同样按当前语法边界读取；范围与其他组合相接时，用括号明确完整范围，例如 (10..20) as value、(10..20) or 30。前缀或范围不能仅凭“看起来像表达式运算符”套用表达式的结合方式。
+
+括号划定模式的范围，与表达式分组作用相同。它不新增解构层：
+
+| 形式 | 含义 |
+|---|---|
+| (p) | 以 p 匹配原值 |
+| (p,) | 单元素元组模式 |
+| (p, q) | 两元素元组模式 |
+| () | unit 模式 |
+
+例如 (1 or 2)? 将选择放在 option 内部；1? or 2? 分别匹配两个存在分支。not (1 or 2) 否定整组选择，而 (not 1) or 2 把否定限制在第一支。
+
+括号只改变分组，不能使原本不合法的模式绑定变合法。例如 or 的两支导出不兼容绑定时，加括号仍然拒绝。
 
 ### 与表达式对偶的模式
 
@@ -106,7 +136,7 @@ where ...
 - **返回类型写在签名上**；解构类 case 一般为 **option 包一层元组**（如 `?Tuple<...>`）：`null` 表示「本 case 不匹配」，有值则载荷供匹配臂绑定。
 - 匹配侧写作 `.name` 或 `.name(pat*)`，与符号 / 变体风格一致。
 - 未在模式中用到的字段，实现不必强制读取——这是用 `case` 做视图、而不是普通函数强行返回完整元组的原因之一。
-- **纯度**与**可分析性**各有分级：本章**留空待定**（纯度细节见内存管理相关章；可分析性另订）。
+- **纯度**与**可分析性**各有分级，但本章不定义具体分级表（纯度细节见内存管理相关章节；可分析性的分级规则另行制订）。
 
 ## 常见示例
 
@@ -187,7 +217,7 @@ fn from_option(opt: ?i32) -> i32 {
     }
 }
 
-fn from_result(result: !IoError i32) -> i32 {
+fn from_result(result: !IoErr i32) -> i32 {
     if result is v! do {
         v
     } else if result is error e do {
@@ -207,10 +237,10 @@ fn unpack_pair(pair: Tuple<i32, i32>) -> i32 {
 fn require_adult(student: ?Student) -> str {
     let s? = student else {
         return "missing";
-    };
+    }
     let .adult(display, _) = s else {
         return "minor";
-    };
+    }
     display
 }
 
@@ -247,6 +277,37 @@ fn greet(student: Student) {
 
 （`Status` / `Msg` / `Point` / `Student` 等为示意；`?Tuple<>` 表示无元素载荷的 option，若标准库写法不同以库为准。谓词型 `case` 是否改用 `-> bool` 仍可选待定。）
 
+### 用括号控制匹配范围
+
+~~~flurry
+fn selected(value: ?u32) -> bool {
+    value match {
+        (1u32 or 2u32)? => true,
+        _ => false,
+    }
+}
+
+fn selected_number(value: u32) -> u32 {
+    value match {
+        ((10u32..20u32) or 30u32) as number => number,
+        _ => 0u32,
+    }
+}
+
+fn grouped_value(value: u32) -> u32 {
+    let (number) = value;
+    number
+}
+
+test {
+    println("{} {}", selected(2u32), selected(null));
+    println("{} {}", selected_number(15u32), selected_number(25u32));
+    println("{}", grouped_value(9u32));
+}
+~~~
+
+依次输出 true false、15 0、9。最后一个 let 对 u32 使用分组，不要求输入是单元素元组。
+
 ## 与 Rust / Zig / C / C++ 的关键差异
 
 | 点 | Flurry |
@@ -267,7 +328,7 @@ fn greet(student: Student) {
 
 ## 编译器实现引导
 
-1. 模式 AST 与 grammar 前缀/中缀/后缀分层一致；确认后回灌 `docs/grammar/syntax`（含 `case_def`）。
+1. 按优先级建立模式树；分组括号先递归解析完整子模式，再参与外层后缀或中缀组合。区分 (p)、(p,) 与 ()，保留 guard 的表达式边界以及前缀和范围的读取范围。
 2. `if is do` / `match` 共享臂类型检查与穷尽性分析。
 3. `case`：解析签名上的返回类型与子句；按 option+元组约定检查体；匹配侧 `.name` 解析到 case 声明。
 4. 与效应 / 纯度 / 可分析性分级的接口预留；**分级表本章不写**（待定）。

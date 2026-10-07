@@ -12,6 +12,8 @@
 
 ```text
 attribute -> ^expr
+multi_element -> base_element
+    | ^expr multi_element
 attributed_definition -> ^expr definition
 attributed_statement -> ^expr statement
 attributed_parameter -> ^expr parameter
@@ -23,6 +25,8 @@ configuration -> .id expr
 
 属性表达式可使用对象表达式，例如 `^{ some_attr: 1 }`。多个前缀属性依次写在被修饰的元素之前。
 
+multi_element 是语法元素列表的通用元记号，base_element 为该列表原本允许的元素。前缀可递归嵌套；这不为任意内部操作数或原始 token 序列增加属性语法。
+
 `property` 是对象或扩展调用中的命名项。`configuration` 写在定义作用域内部，为所属定义编码属性，例如结构体中的 `.packed true`。字段、参数和一般项之间的逗号，遵循[语法风格](../grammar/index.md#分隔符)。
 
 ## 正式定义
@@ -32,6 +36,10 @@ configuration -> .id expr
 `^` 后的表达式在 comptime 求值，结果必须为 `Object`。对象中的键和值构成附着到目标代码元素的属性；不能以运行时才取得的值代替所需的编译时结果。
 
 属性可以修饰定义、语句、参数和分支等代码元素。前缀属性属于被修饰的元素；configuration 属于容纳它的定义，不属于紧随其后的字段或成员。
+
+以 multi 规则解析的列表在每个元素前接受属性链，嵌套列表独立应用此规则；没有固定的属性前缀层数上限。每层仍修饰同一个紧随元素，而非整份列表。具体解析边界和实参示例见[源码准备、解析与 HIR](../compilation/syntax-and-hir.md)。
+
+属性表达式遵循[普通名称解析](../code-organization/scope-and-paths.md)。attrs 提供语言的属性构造接口，可以写完整路径或经 use 引入名字；属性位置不额外优先搜索 attrs。
 
 属性值的结构与属性键的含义分开：生成一个具有某个键的 Object，不会自行赋予该键布局或代码变换能力。键的接受位置、值类型和作用由相应功能的契约规定。
 
@@ -45,6 +53,8 @@ configuration -> .id expr
 
 configuration 通过键名和编译时值给所属定义提供属性。结构体中的 `.packed true` 将 `packed` 的值编码为 `true`；它本身不是一个运行时数据字段。
 
+模块主体与文件作用域也可以包含 configuration：文件中的配置附着到文件模块，目录 mod.fl 中的配置附着到目录模块。见[模块属性](../code-organization/modules-and-sources.md#模块的属性)。
+
 同一目标同时具有 configuration 和前缀属性时，先应用 configuration，再按从内到外的顺序应用前缀属性。因此，前缀属性可以覆盖内部 configuration 提供的同名键。
 
 `meta.attrs_of` 读取目标的属性 Object。读取某个键后如何解释其值，属于该键的使用者；通用属性机制不替代相应功能对值的检查。
@@ -52,6 +62,17 @@ configuration 通过键名和编译时值给所属定义提供属性。结构体
 与数据定义一起执行的 comptime 代码遵循 [normalization 与 instantiation](./normalization-and-instantiation.md) 的规则。属性计算、读取与其他编译时操作不能绕过已有的依赖和阶段约束。
 
 ## 常见示例
+
+### 指定函数 ABI
+
+```flurry
+^attrs.abi(.c)
+fn identity(value: u32) -> u32 {
+    value
+}
+```
+
+`attrs.abi(.c)` 提供函数的 C ABI 属性。函数声明和调用见[定义、调用与返回](../functions/calls-and-returns.md#函数-abi)。
 
 ### 直接提供元数据
 

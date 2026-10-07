@@ -2,9 +2,11 @@
 
 ## Intro
 
+传统编译时计算（如 C 的预处理器宏或 C++ 的 constexpr）在表达能力和类型安全之间存在取舍。Flurry 将编译时计算设计为语言的一等公民：编译时函数使用与运行时相同的语法和类型系统，同时通过执行阶段标记区分两者的边界。
+
 Flurry 程序中的一部分计算由编译器执行，其余计算留给生成的程序。编译器先处理已知的信息，让程序保留需要运行时数据的工作。
 
-输入尚未确定时，编译器仍能利用操作的契约检查代码。知道一个结果满足什么条件，往往已经足以检查后面的操作，不必先把这个结果完整算出来。
+输入尚未确定时，编译器仍能利用操作的契约检查代码。知道一个结果满足什么条件，往往已经足以检查后面的操作，而不必先把这个结果完整算出来。
 
 ## 语法
 
@@ -13,7 +15,7 @@ Flurry 程序中的一部分计算由编译器执行，其余计算留给生成�
 ```text
 comptime_function -> pure? comptime fn id(parameter*) (-> result)? clauses? block
 comptime_parameter -> comptime parameter
-comptime_block -> comptime { statement* }
+comptime_block -> comptime { (definition | statement)* }
 inline_if -> inline if expr block (else block)?
 defer_expr -> defer expr
 ```
@@ -116,3 +118,5 @@ fn select_value(comptime first: bool, left: i32, right: i32) -> i32 {
 4. 实例化时提供输入，继续计算和检查，输出完整的 runtime 实例或 comptime 结果。
 
 检查通过不等于操作已经执行；一个具体值未知也不等于所有下游检查都必须等待。详细的 query 算法与失败处理见[两阶段检查的编译器引导](./normalization-and-instantiation.md#编译器实现引导)。
+
+代码值的完整规则见 [CMTT](../cmtt/index.md)：代码引用与普通值的 Splice 分别检查，quoted expr、pattern 和 arm 保留各自上下文及接入契约。

@@ -1,58 +1,160 @@
 # Once、Clone、Copy
 
-Flurry 的资源管理建立在对类型"可以如何被使用"的精确描述上。所有类型都处于一个能力层次中：
+## Intro
 
-## 三个层次
+消耗一个值，意味着把它交出去，或结束它承担的责任。非 Copy 值交出后，原位置不能再交付同一个值。
 
-### `Once`（基础）
+如果需要保留原值，可以显式调用 Clone；如果类型允许按位复制，则由 Copy 提供隐式复制。只想读取或修改现有数据时，可以使用[指针](pointers.md)。
 
-所有类型都隐式具备 `Once` 能力，表示该类型的值可以被**至多使用一次**（被消耗或销毁）。这是仿射类型系统的基础：对于没有实现 `Copy` 的类型，值的所有权在任意时刻只能存在于一处。
+## 语法
 
-### `Clone`（可克隆）
+~~~text
+trait_bound_decl_clause -> id :- expr
+impl_trait_def -> impl expr for expr clauses? { (assoc_decl | definition | statement)* }
+derive_def -> derive expr for expr clauses?
+clone_call -> expr.clone()
+~~~
 
-实现了 `Clone` 的类型可以创建值的**深拷贝**——一个完全独立的、拥有自己资源的新副本。调用 `.clone()` 是显式操作：
+正向 trait 约束可以使用 `A + B`。impl 与 derive 的完整规则见[Trait](../traits/index.md)。
 
-```flurry
-let s1 = String.from("hello");
-let s2 = s1.clone();  -- 创建独立副本
--- s1 和 s2 各自拥有独立的堆内存
-```
+## 正式定义
 
-### `Copy`（可按位复制）
+### Once 与按值交付
 
-`Copy` 是 `Clone` 的特殊子集：复制操作仅是**按位复制**，且复制后原始值依然有效（即类型不持有需要特殊释放的资源）。
+运行时值默认遵循 Once 的仿射使用边界：值至多被消耗一次，不要求每个值都由用户显式消耗。这一设计借鉴了仿射类型理论——通过限制每个值的消耗次数，编译器可以在静态分析阶段确定每份资源的唯一归属，从而在不依赖垃圾回收的前提下防止重复释放和悬垂引用。当值离开清理范围时，自动清理兑现仍然存在的责任。
 
-`Copy` 类型的赋值、参数传递、函数返回会**自动隐式复制**，无需 `.clone()`：
+对于非 Copy 值，初始化另一个按值绑定、按值传参和返回，均转移该值及其可转移责任，并且源位置成为已移出状态。读取已移出的值、再次移出或再次销毁同一责任均非法。
 
-```flurry
-let a: i32 = 42;
-let b = a;      -- 隐式按位复制
-println("{}", a); -- a 仍然有效
-println("{}", b);
-```
+Once 的一次限制针对消耗，不限制消耗前满足契约的观察次数。通过指针观察不会凭空产生另一份 owner，而修改也仍需满足对象及方法契约。
 
-**常见 `Copy` 类型**：`i32`、`f64`、`bool`、`char`、`usize` 等所有基本数值类型；只包含 `Copy` 字段的结构体；原始指针 `*T`（指针本身被复制，不复制指向的数据）。
+### Clone
 
-## 移动语义
+Clone 显式产生另一个合法值，同时保留合法源值。两值之间的共享关系、分配、效果和结果依赖由具体实现契约规定。
 
-对于**没有实现 `Copy`** 的类型（称为"移动类型"），赋值、函数传参、函数返回会将所有权**移动**到新的绑定，原绑定失效：
+克隆可以复制指针，也可以分配独立缓冲区，或通过共享管理协议增加持有责任。因此不能由 Clone 推出"所有可达资源互不相干"。
 
-```flurry
-let s1 = String.from("hello");
-let s2 = s1;             -- 所有权从 s1 移动到 s2
--- println("{}", s1);    -- 编译错误：s1 不再拥有值
-println("{}", s2);       -- OK
-```
+对于含内部依赖的聚合，克隆 owner 后还必须检查视图指向哪里。逐字段克隆不会自动把一个旧指针重写成指向新缓冲区的指针，因此具体实现需要重建该关系，或交付真实的共享依赖。
 
-移动语义确保了：
-- 每个非 `Copy` 值在任意时刻只有一个所有者
-- 所有者负责在适当时机释放资源（通过 `drop`）
-- 根本上防止了**二次释放（double free）**
+### Copy
 
-## `derive` 自动实现
+Copy 提供合法的表示复制。当初始化、赋值、按值参数和返回值需要交付 Copy 值时，编译器复制其表示而保留源值，不隐式调用任意用户 clone 方法。
 
-对于字段全部是 `Copy` 的结构体，可以通过 `derive` 自动获得 `Copy` 和 `Clone`：
+`Copy :- Clone :- Once` 描述能力关系；不过复制动作仍有独立于显式 clone 调用的契约。
 
-```flurry
-derive Copy, Clone for Point;
-```
+内建数值类型与普通指针按各自定义提供 Copy。用户名义类型必须显式 impl 或 derive；字段都可 Copy 是派生的检查条件，不是自动取得能力的声明。
+
+复制不得重复独占终结责任。仅有一个可复制的指针字段，不足以证明拥有该分配的包装也可 Copy。复制视图保留真实目标依赖，不取得目标的释放权，也不保证目标内容不变。
+
+### 三种动作的区别
+
+| 动作 | 源位置 | 目标及责任 | 对外效果 |
+|---|---|---|---|
+| 非 Copy 交付 | 已移出 | 取得原值与可转移责任 | 按真实操作记录，不自动释放目标资源 |
+| Copy | 保持可用 | 合法表示副本，保留依赖 | 不隐式执行用户克隆算法 |
+| Clone | 按实现契约保持合法 | 新值及其实际共享或独立责任 | 按实现计入读取、分配和管理状态变化 |
+
+## 常见示例
+
+### 交付之后不能再读取
+
+~~~flurry
+struct Ticket {
+    number: u32,
+}
+
+fn finish(ticket: Ticket) {
+    println("{}", ticket.number);
+}
+
+test {
+    let ticket = Ticket { number: 7 }
+    finish(ticket);
+    -- 再次执行 finish(ticket) 会重复交付已移出的值。
+}
+~~~
+
+Ticket 没有声明 Copy，即使唯一字段是 u32，编译器也按移动规则交付。
+
+### 显式取得 Copy
+
+~~~flurry
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+derive Clone for Point;
+derive Copy for Point;
+
+test {
+    let first = Point { x: 3, y: 4 }
+    let second = first;
+    println("{} {}", first.x, second.x);
+}
+~~~
+
+两个 Point 有独立的内联字段。派生检查仍须确认字段复制和整个类型的资源契约相容。
+
+### Clone 可以保留共享目标
+
+~~~flurry
+struct NumberView {
+    pointer: *i32,
+
+    fn read(*self) -> i32 {
+        self.*.pointer.*
+    }
+}
+
+impl Clone for NumberView {
+    fn clone(*self) -> Self {
+        Self { pointer: self.pointer.* }
+    }
+}
+
+test {
+    var number = 3i32;
+    let first = NumberView { pointer: number.ref }
+    let second = first.clone();
+    number = 4i32;
+    println("{} {}", first.read(), second.read());
+}
+~~~
+
+输出 `4 4`。两个包装都依赖 number，而不互相依赖对方的局部槽位。
+
+### 泛型重复交付需要能力依据
+
+~~~flurry
+fn duplicate(value: T) -> Tuple<T, T>
+where T :- Copy
+{
+    (value, value)
+}
+~~~
+
+若没有 Copy 依据，第二次按值交付不能成立。编译器不能因为尚未找到 Copy 实现，就在开放约束中自动证明其否定。
+
+## 与 Rust / Zig / C / C++ 的关键差异
+
+Rust 的 Copy 同样是隐式表示复制，Clone 则允许自定义行为及共享；名称相近不应被解释为"Clone 必须深复制"。[Rust Copy](https://doc.rust-lang.org/std/marker/trait.Copy.html)、[Rust Clone](https://doc.rust-lang.org/std/clone/trait.Clone.html)
+
+C 的结构赋值复制字段表示，不为拥有资源的指针自动转移释放责任。C++ 的复制和移动构造由相应函数实现；而 Flurry 的普通非 Copy 交付直接改变源位置的可用状态。Zig 的普通值复制不提供这套仿射交付保证，因此需要库协议管理拥有资源的值。
+
+## 运行时实现设计引导
+
+Copy 可降为寄存器复制或按布局复制；move 可采用同样的物理传输，但在语义上责任只保留在目标。运行时无需为了表示"已移出"而擦除原内存字节。
+
+Clone 按已选择实现正常调用。分配失败、引用计数变化、捕获环境和清理都按该调用的实际契约执行，因此不能将 clone 当作可任意合并的无副作用复制。
+
+## 编译器实现引导
+
+对每个按值交付操作：
+
+1. 验证源位置在当前路径上持有合法值。
+2. 根据已成立的 Copy 证据选择表示复制，否则应用仿射交付。
+3. 复制保留源状态；移动把相应位置置为已移出。
+4. 在目标安装实际依赖和可转移责任，保持来源区域身份。
+5. 更新后续自动清理，只清理仍持有的责任。
+
+派生按字段收集能力和资源条件，再核验整体不变量。当字段有交叉依赖时，逐字段成功不代表整个产物成立。检查失败时，编译器应指出重复责任、未重建的目标或缺失的能力，而不只报告"不能复制"。

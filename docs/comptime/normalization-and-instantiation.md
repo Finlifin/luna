@@ -2,6 +2,8 @@
 
 ## Intro
 
+泛型代码的检查策略通常在两个极端之间选择：完全延迟到实例化（如 C++ 模板），或要求定义端提供所有约束（如 Rust 的 trait bound）。Flurry 采用折中方案：在定义端利用操作契约完成能做的检查，只把确实需要具体输入的计算留给实例化。
+
 一个函数可以在还不知道具体输入时接受检查。编译器依靠参数和操作的契约，判断函数中的使用是否合法；只有确实需要具体输入的计算，才等待实例化。
 
 因此，延迟一个结果的计算，不意味着放弃对后续代码的检查。
@@ -11,7 +13,7 @@
 以下是本章涉及的局部形式。`expr`、`parameter`、`decl_clause`、`block` 等复用[全局语法](../grammar/syntax)。
 
 ```text
-comptime_block -> comptime { statement* }
+comptime_block -> comptime { (definition | statement)* }
 defer_expr -> defer expr
 requires_clause -> requires expr
 ensures_clause -> ensures expr
@@ -169,6 +171,8 @@ fn show_name(name: str) {
 
 normalization 的结果包含 query 计算图：节点表示检查或计算，边表示依赖。comptime 求值可以触发 query，query 也可以触发 comptime 求值。
 
+持久产物保留稳定绑定、契约和语言允许的残余计算；本次推断的可变状态、等待登记与 continuation 不直接进入缓存。实例化从冻结结果建立自己的局部状态。具体表示与交付见[两阶段计算与冻结](../compilation/staging-and-freezing.md)。
+
 实现应区分两种依赖：需要前置节点的具体结果，或只需要其可用结果契约。对一个节点至少保存其输入依赖、当前结果或契约、检查要求以及诊断来源。
 
 以下是实现用状态，不是语言关键字：等待输入、可处理、已完成、失败。合法性检查与具体求值分别记录状态；前者完成不代表后者完成。
@@ -178,7 +182,7 @@ normalization 的结果包含 query 计算图：节点表示检查或计算，�
 1. 在 HIR 上按构造标记 ordinary/loose；类型推导进展不得静默改变该分类。
 2. 建立参数、绑定、路径事实与操作契约的环境。
 3. 遇到 ordinary 操作，求解其 requirement。成功后使适用的结果命题可供后续节点使用；必检义务失败则报错。
-4. 遇到可执行的 comptime 计算，按实际控制依赖及输入就绪情况执行；不能因正在检查分支而提前执行分支副作用。
+4. 区分普通 comptime 调用与范式应用。对可执行的计算，按实际控制依赖及输入就绪情况执行；对范式应用保留头与实参，不展开头的函数体。不能因正在检查分支而提前执行分支副作用。
 5. 对合法延迟的位置保存求值节点。后续只需契约的节点继续处理；需要具体结果的节点等待相应输入。
 6. 遇到 PTC assumes，将命题纳入适用的检查上下文，并保留该语句的实例化执行。
 7. 处理嵌套定义时重新依据其构造确定检查强度，不把父 loose 强度传播给 runtime 函数。
@@ -193,6 +197,8 @@ normalization 的结果包含 query 计算图：节点表示检查或计算，�
 5. 对 loose 生成的开放定义执行相应 coherence 检查。
 6. 只有实例所需计算与检查全部完成后，才输出 runtime 实例或 comptime 调用结果。
 
+具体实例的 IIR 已完成类型中的 comptime 部分，但仍可以保留 runtime 依赖和高级控制结构，无需先成为 SSA。合法范式头的保留不等于尚欠普通求值，见[IIR 与代码交付](../compilation/iir-and-codegen.md)。
+
 在控制依赖尚未确定前，不因参数替换而执行所有分支。实际执行过程中发现的新依赖应由同一机制调度；不能以一个未计算节点的占位结果代替真实结果。
 
 ### 两种执行载体
@@ -200,7 +206,7 @@ normalization 的结果包含 query 计算图：节点表示检查或计算，�
 | 载体 | 职责 |
 |---|---|
 | comptime interpretation | 在 runtime 定义等混合场景中就地解释相关 IR |
-| comptime execution | 将独立 comptime 函数编译为 engine 字节码，在调用时执行 |
+| comptime invocation | 将独立 comptime 函数编译为 engine 字节码，在调用时执行 |
 
 两者遵守相同的求值、类型与副作用语义，可以使用不同资源预算。预算不同时，某次求值可能只在其中一个预算下完成；不能据此把两者描述为不同语言子集。
 

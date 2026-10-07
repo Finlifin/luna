@@ -2,7 +2,7 @@
 
 ## Intro
 
-模板宏把一段 token 替换为另一段 token。参数捕获的是源码片段；替换本身不执行其中的表达式。
+构造宏提供结构化的代码生成能力，但对于简单的重复模式，它的定义开销过大。模板宏提供更轻量的替代：把一段 token 替换为另一段 token。参数捕获的是源码片段；替换本身不执行其中的表达式。
 
 读懂一个模板宏，可以先把参数代入替换体，再按展开后的程序理解它。需要按语法结构处理输入时，使用[构造宏](./construction-macro.md)。
 
@@ -11,13 +11,13 @@
 以下是模板宏的局部表面语法。`token*` 表示源码 token 序列，不是 Flurry 表达式列表。
 
 ```text
-template_definition -> define id integer { token* }
+template_macro_definition -> define id integer { token* }
     | define id integer ... { token* }
     | define id(id*) { token* }
 fixed_template_call -> $id token*
 repeated_template_call -> $id token* $
 named_template_call -> $id(token*)
-template_parameter -> $integer
+template_macro_parameter -> $integer
     | $id
 ```
 

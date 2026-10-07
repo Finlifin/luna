@@ -2,7 +2,7 @@
 
 ## Intro
 
-类型决定一个值可以怎样使用，也决定程序需要准备怎样的表示。Flurry 允许程序在编译时计算类型；检查一段程序时，编译器还可以使用关于类型的已知事实，而不必先把每个类型参数算成具体结果。
+类型决定一个值可以怎样使用，也决定程序需要准备怎样的表示。Flurry 允许程序在编译时计算类型；检查一段程序时，编译器还能使用关于类型的已知事实，而不必先把每个类型参数算成具体结果。
 
 从 C 迁移时，可以先分清三个问题：这是不是同一个类型，这个值能否交给某个操作，这个值需要怎样的存储。三个问题有关联，却没有同一个答案。两个大小相同的结构体仍可以是不同类型；一个指针的大小已经确定时，其指向对象的大小仍可以依赖运行时信息。
 
@@ -36,6 +36,7 @@ refinement_type -> refines { expr } expr
 | 字段、大小与表示怎样查询？ | [反射与布局](reflection-and-layout.md) |
 | 成员从哪里来，三个反身代词指什么？ | [成员投影](member-projection.md)、[Self / Itself / itself](self-reference.md) |
 | 为什么有些调用会自动取址或转换？ | [接收者适配与隐式转换](receiver-adaptation.md) |
+| 实现参数如何恢复，运行时依赖如何交付？ | [替换与依赖交付](substitution-inference.md)、[Trait 总览](../traits/index.md) |
 | 怎样定义数据？ | [struct](user-defined-types/structs.md)、[enum](user-defined-types/enums.md)、[union](user-defined-types/unions.md)、[newtype 与 alias](user-defined-types/newtype-and-typealias.md) |
 | 缺失、失败与效应怎样进入类型？ | [optional](qualified-types/optional-type.md)、[error](qualified-types/error-type.md)、[effect](qualified-types/effect-type.md)、[两类行](rows.md)、[handler 类型契约](handlers.md) |
 | 值依赖运行时对象时怎样传递？ | [运行时依赖](runtime-dependent-type.md)、[闭包环境](qualified-types/closure-type.md) |

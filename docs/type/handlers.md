@@ -2,14 +2,14 @@
 
 ## Intro
 
-handler 规定计算产生错误或请求效应时怎样继续。要读懂它的类型，需要区分操作返回值、主体正常结果，以及整个处理结果。
+handler 规定计算产生错误或请求效应时怎样继续。这一机制源自代数效应（algebraic effects）理论，将副作用的描述与处理解耦，使程序获得结构化的控制流抽象能力。要读懂 handler 的类型，需要区分操作返回值、主体正常结果，以及整个处理结果。
 
-错误分支处理、普通效应的直接返回和可恢复处理各有不同的控制流，不能都解释成“从行中删掉一个名字”。
+错误分支处理、普通效应的直接返回和可恢复处理各有不同的控制流，因此不能都解释成“从行中删掉一个名字”。
 
 ## 语法
 
 ~~~text
-error_handle -> expr! { case_arm* }
+error_handle -> expr! { error_arm* }
 effect_handle -> expr# { case_arm* }
 case_arm -> pattern => (block | statement)
 ~~~
@@ -17,6 +17,8 @@ case_arm -> pattern => (block | statement)
 下面的 k、Comp、Error、Return、Request 和 Handle 为内部类型/执行记号，不定义源码 continuation API 或新的正常完成分支语法。
 
 ## 正式定义
+
+处理能力由 [trait 协议配合 elaboration](../traits/protocols.md#处理能力) 提供。下面的类型关系约束接入后的处理行为，包括结果交付、行消去与恢复路径。
 
 ### 三个结果
 
@@ -60,7 +62,9 @@ result      : Comp(ε,B)
 
 分支位于当前边界外；恢复主体时重新安装当前 handler。ε 可以含 a，不要求 Lacks(ε,a)。所选的一层被处理后，外层同名层仍然存在。
 
-恢复能力以单次、不可逃逸为基线。放弃恢复必须有已定义清理依据；不能从允许单次恢复推导任意复制、多次调用或无条件丢弃。具体资源责任由对应控制与资源契约约束。
+恢复权单次使用，不可复制；每次重新挂起产生新的 continuation。能否逃逸由实际可达依赖决定，可以越过原安装位置，但所需栈与环境必须保持有效。恢复重新安装内部处理关系，并从恢复点供应外层效应入口；已保存的普通局部值和固定对象身份保持不变。
+
+放弃通过隐藏中止通道执行尚存责任的清理，该通道独立于用户错误结果 ABI。resume 保证尾恢复；显式非尾恢复保留等待 B 的后继。builtin.Continuation 不带公开类型参数，原始显式操作履行其 unsafe 契约，不能据统一类型名推导任意载荷都可恢复。完整行为见[限定 continuation](../algebraic-effect-and-delimited-continuation/multi-prompt-delimited-continuation.md)。
 
 ### 部分处理与转发
 
@@ -121,19 +125,19 @@ accepted: true
 对比错误 handler：失败后直接进入处理分支，函数内失败点后面的语句不继续执行：
 
 ~~~flurry
-enum InputError {
-    missing,
+enum InputErr {
+    Missing,
 }
 
-fn require_input(present: bool) -> ![InputError] u32 {
+fn require_input(present: bool) -> ![InputErr] u32 {
     if present {
         5
     } else {
-        error InputError.missing
+        error InputErr.Missing
     }
 }
 
-fn process_input(present: bool) -> ![InputError] u32 {
+fn process_input(present: bool) -> ![InputErr] u32 {
     let value = require_input(present)!;
     println("after input");
     value * 2
@@ -141,7 +145,7 @@ fn process_input(present: bool) -> ![InputError] u32 {
 
 test {
     let value = process_input(false)! {
-        .missing => 0,
+        .Missing => 0,
     }
     println("result: {}", value);
 }
@@ -149,7 +153,7 @@ test {
 
 这里只输出 `result: 0`。handler 的 `0` 是整个失败计算的替代结果，不是交回 `require_input` 调用点继续执行的 Y。
 
-上述效应例子使用直接返回分支，无需显式恢复参数。涉及单次恢复能力的内部规则见后文运行时引导；不能从这些直接返回分支推出可复制或可逃逸的 continuation。
+上述效应例子使用直接返回分支，无需显式恢复参数。涉及单次恢复能力的内部规则见后文运行时引导；continuation 的转交与逃逸另按实际依赖检查，不从这些直接返回分支推导。
 
 ## 与 Rust / Zig / C / C++ 的关键差异
 
@@ -172,7 +176,7 @@ Handle(H, Request(b,x,k)) forwarded outward:
 
 最后一条也适用于同名但路由指向更外层的请求。不能仅用 b 是否等于 a 判断是否由 H 接收。
 
-直接处理可降低为环境参数和普通函数调用。可恢复处理需建立限定边界，并确保恢复 token 最多使用一次、不逃出合法范围；释放或放弃路径必须按资源契约执行。
+直接处理可降低为环境参数和普通函数调用。可恢复处理需建立限定边界，并确保恢复 token 最多使用一次、满足实际可达依赖；释放或放弃路径必须按资源契约执行。
 
 错误 handler 可降低为分支判别和载荷映射。未处理错误的转发路径也必须产生合法输出表示，不能留下遗漏分支。
 
@@ -184,7 +188,7 @@ Handle(H, Request(b,x,k)) forwarded outward:
 4. 验证正常完成路径；缺少显式结果转换时保持 A。
 5. 检查所有分支行为、未覆盖输入和向外路由。
 6. 为恢复及转发生成重新安装边界的包装。
-7. 验证单次使用、不可逃逸与清理义务。
+7. 验证单次使用、实际逃逸依赖、恢复点外层供应与清理义务。
 8. 交付输出行、结果表示和入口映射。
 
 测试应分别覆盖正常返回、直接处理、同名向外请求、不同标签转发、恢复后的第二次请求、guard 未覆盖、结果 A→B 转换以及非法重复恢复。只验证最终行少了一个标签不足以证明实现正确。

@@ -55,7 +55,7 @@ continue_stmt -> continue id? (while expr)?
 - `for pattern in expr block`：迭代 `expr`；每次将当前元素匹配到 `pattern`。容器可实现 `IntoIterator` 以提供默认迭代方式；迭代器实现 `Iter`。
 - `while expr block`：条件为真则重复执行块。
 - 二者为**语句**。
-- **标签**：`for:name` / `while:name`。`break name` / `continue name` 作用到该标签；无标签则作用到最内层循环。
+- **标签**：`for:name` / `while:name`。`break name` / `continue name` 作用到该标签；无标签则作用到最内层循环。label 与普通名称共用[命名空间](../code-organization/scope-and-paths.md)，同名局部绑定可以遮蔽它；选中非标签绑定时静态拒绝，不跳过该绑定重新寻找标签。
 
 ### `while … is … do`
 
@@ -66,7 +66,7 @@ continue_stmt -> continue id? (while expr)?
 
 - `if expr is pattern do block`：单模式；可接 `else`。
 - `if expr is do { case_arm* }`：多臂；其前可加 `inline`（见 comptime 章）。也可退化成在 `do` 前只写一个 `pattern`。
-- `expr match { case_arm* }`：同一套多臂匹配的后缀写法，图书写方便。
+- `expr match { case_arm* }`：同一套多臂匹配的后缀写法，方便链式书写。
 - 穷尽性与其它模式规则见 [模式匹配](./pattern-matching/index.md)。
 
 ### `return` / `break` / `continue`
@@ -205,6 +205,6 @@ fn dispatch(shape: Shape) {
 
 1. 按上节产生式解析；`when` 臂为 `expr =>`；守卫为 `while`；`is` 后须有 `do`；列表按项类插入 `,` 或 `;`。
 2. `if` / `when` 走表达式类型检查；`while` / `for` 走语句。
-3. 标签分辨到包围循环；解析 `break` / `continue` 目标。
+3. 对具名 `break` / `continue` 按统一名称规则解析，再检查选中项是可用的包围循环标签；无标签时选择最内层循环。
 4. `if is do` 与 `match` 共享 case 臂与穷尽性检查入口（与模式匹配章衔接）。
 5. 与 [`docs/grammar/syntax`](../grammar/syntax) 不一致处，以本章已确认规则为准并回灌 grammar。

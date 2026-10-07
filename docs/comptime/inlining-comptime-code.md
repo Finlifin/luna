@@ -11,7 +11,7 @@ comptime 块则直接执行块内的编译时计算。块放在 runtime 函数�
 `expr`、`pattern`、`label`、`block`、`case_arm` 复用[全局语法](../grammar/syntax)。本节只列相关控制流形式。
 
 ```text
-comptime_block -> comptime { statement* }
+comptime_block -> comptime { (definition | statement)* }
 inline_if -> inline if expr block (else block)?
 inline_when -> inline when { condition_arm* else_arm? }
 inline_if_is -> inline if expr is pattern do block (else block)?
