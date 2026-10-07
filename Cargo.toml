@@ -16,6 +16,7 @@ members = [
     "compiler/interface",
     "compiler/intrinsic",
     "compiler/luna",
+    "compiler/nir",
     # Disabled until upstream crates are updated to use middle:: instead of ty:::
     # "compiler/ty",
     # "compiler/codegen",
