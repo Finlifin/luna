@@ -1,0 +1,16 @@
+typealias Type = .Type'builtin;
+typealias F64 = .f64'builtin;
+
+fn defaulted(comptime T: Type, comptime value: T,
+             comptime .copy: T = value + 1.0) -> T
+where requires T == F64 {
+    copy
+}
+
+fn forward(comptime value: F64) -> F64 {
+    defaulted(F64, value)
+}
+
+fn run() -> (F64, F64, F64) {
+    (forward(2.0), forward(2.0), defaulted(F64, 2.0, .copy = 7.0))
+}

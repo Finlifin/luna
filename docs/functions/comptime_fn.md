@@ -59,6 +59,68 @@ derive fn 的参数遵循 comptime fn 的参数规则。派生器在编译时生
 
 返回 MemoryEffect 的 predicate 中，裸参数 id 简写 `quote id: lift Any`。普通 predicate 默认返回 bool，不因此自动 quote 所有参数。
 
+### 子句位置输入的展开
+
+类型子句实参可通过 `...packet` 展开一个 Type 值元组。位置输入跳过 optional 槽位；`.name = value` 显式覆盖对应可选项。先按源码次序求显式输入，再按声明次序补默认值，空包的生产表达式也必须执行。
+
+~~~flurry
+typealias Type = .Type'builtin;
+
+struct Pair where A, .B: Type = A {
+    first: A,
+    second: B,
+}
+
+comptime fn packet(T: Type) -> (Type,) { (T,) }
+
+comptime fn Build(T: Type) -> Type {
+    Pair<...packet(T)>
+}
+
+typealias Flags = Build(bool);
+
+fn run() -> bool {
+    let pair: Flags = Pair<...(bool,)> { first: true, second: false };
+    pair.first and not pair.second
+}
+~~~
+
+`packet(T)` 只调用一次；`B` 复用已取得的 A。类型别名、struct／enum、trait 实参及泛型函数／方法实例使用相同的位置路由。展开到范式头时仍保留原头，不执行其函数体。此处的 Type 值元组与 `Tuple` 头收集使用的 `meta.List<Type>` 是不同的值；编译器当前接通的是元组展开路径，自定义展开协议须另行接入。
+
+混合 Type／值参数的范式头也支持字面元组展开。先展开位置，再由前面的类型输入为后面的字面量提供上下文：
+
+~~~flurry
+pure comptime fn Tagged<T, value: T> -> Type { T }
+typealias Seven = Tagged<...(.u8'builtin, 7)>;
+~~~
+
+这里的 `7` 按 `.u8'builtin` 检查；不会先把整个包的数字都默认为 Integer。展开后仍检查值域、依赖类型、参数个数和声明要求。带副作用的元素只求值一次，提前退出会跳过后续元素和默认值。
+
+固定参数的混合头也可以展开计算所得元组：
+
+~~~flurry
+typealias Byte = .u8'builtin;
+comptime fn packet() -> (Type, Byte) { (Byte, 7) }
+comptime fn BuildTag() -> Type { Tagged<...packet()> }
+~~~
+
+该包已经具有 `(Type, Byte)` 类型，其值按位置交付；取得第一个 Type 值后，仍须检查第二个值是否符合依赖参数 `value: T`。包中的 Byte 不会为了适应另一个 T 而被悄悄重新解释。输入计划保留包生产、解构与每项交付的次序；命名参数可以在包前后求值，尾随空包也不能被删除。默认值只复用已取得的绑定，循环中每次执行都重新建立并清理这组绑定。
+
+普通值的跨阶段 Splice 协议不承担这些子句位置路由。即使已绑定 Splice，类型注解中的包仍在 comptime 求值，不请求 runtime 转换。
+
+包的位置数能够确定时，目标参数类型也会传入包生产表达式。例如，下面两个分支中的数字都取得 Byte 上下文：
+
+~~~flurry
+pure comptime fn PairTag<first: Byte, second: Byte> -> Type { bool }
+comptime fn Choose(flag: bool) -> Type {
+    PairTag<...if flag { (7, 8) } else { (9, 10) }>
+}
+~~~
+
+block、match 和可从结果上下文推导的泛型包生产函数遵循相同规则。某个字段仍依赖未知 Type 时，该字段保持未决，其他已确定字段的上下文继续传递；这不构成对未决依赖的证明。多个包的位置数都未知时不能任意划分目标槽位，调用者可以通过生产函数签名或元素类型补足信息。已确定为 Integer 的包也不会被重新解释为 Byte 包。
+
+纯类型参数入口同样提供结果上下文。例如 `Pair<...packet()>` 可以为泛型 `packet` 提供 `(Type, Type)` 的目标，从而确定其返回类型。struct、enum、typealias、trait 和函数／方法实例使用同一规则；optional 参数不占位置槽，方法已有的接收者类型实参也不挤占方法自己的展开槽。包依然只求值一次，类型上下文不代替对生产函数要求的检查。
+
 ### Quote 输入
 
 quote 保留 runtime 符号及其绑定。输入给编译时操作的是代码或绑定描述，不是通过符号偷读运行时内存。它可用于 comptime fn 和子句，也支持 optional；quote fn 的 contextual 输入通过 implicit quote 表示。
@@ -345,5 +407,77 @@ normalized IR 保留范式应用的头与实参。即使头的函数体只返回
 quote 输入登记它指称的符号和上下文身份，不能只存一个同名字符串。通过 Any 恢复代码接口时，必须检查实际代码种类与所需上下文；查询结果未知不等于开放任意 splice。
 
 实例缓存的键覆盖定义、语义参数、相关环境依赖和实现来源。阶段失败、编译时诊断或执行预算耗尽不应成为合法实例。运行时不保留一个补做失败 comptime 求值的回退路径。
+
+当前实现也支持把闭合的 struct／enum 值传给普通函数的 comptime 参数，包括嵌套载荷、泛型 nominal 实例和默认参数转发：
+
+~~~flurry
+struct Settings { enabled: bool }
+enum Mode where T { disabled, configured(T), }
+
+fn enabled(comptime mode: Mode<Settings>) -> bool {
+    mode match {
+        .disabled => false,
+        .configured(settings) => settings.enabled,
+    }
+}
+
+fn example() -> bool {
+    enabled(Mode<Settings>.configured(Settings { enabled: true }))
+        and not enabled(Mode<Settings>.disabled)
+}
+~~~
+
+冻结表示保留完整 nominal 类型、struct／enum 的区别、变体索引与字段值。不同类型、变体或载荷不会因外观相似而共用同一个实例身份；重建时按声明实例化字段类型，拒绝错误变体、字段数量和字段类型。字段须属于已支持的闭合值表示；指针、活动环境等仍不能借包装进 struct 或 enum 绕过阶段边界。
+
+已取得的 struct 参数可以提供字段默认值，也可经局部绑定或记录模式解构后转发：
+
+~~~flurry
+fn choose(comptime flag: bool) -> bool { flag }
+
+fn configured(comptime settings: Settings,
+              comptime .flag: bool = settings.enabled) -> bool {
+    flag
+}
+
+fn forward(comptime settings: Settings) -> bool {
+    let { enabled } = settings;
+    choose(enabled)
+}
+~~~
+
+连续字段投影沿用完整 nominal 类型身份；局部别名不重新调用配置值的生产函数。字段发生 runtime 写入或其根对象地址逃逸后，不能继续把之前的字段值当作已确定的 comptime 输入。普通 runtime 局部也不会只因为具有相同结构就自动成为 comptime 参数。
+
+已确定的 enum 配置也可通过匹配产生后续阶段输入：
+
+~~~flurry
+fn configured_mode(comptime mode: Mode<Settings>,
+                   comptime .flag: bool = mode match {
+                       .configured({ enabled }) if enabled => true,
+                       _ => false,
+                   }) -> bool {
+    flag
+}
+~~~
+
+当前阶段匹配支持 tuple、struct、enum 及结构记录，保留候选顺序、守卫、析取绑定重命名和 `and … is …` 顺序计算。失败候选的绑定不泄漏到下一候选；没有匹配成功时不求值其守卫，选定分支后也不求值其他主体。匹配产生的闭合值可以先绑定到局部，再传给另一个 comptime 参数。这里使用已支持的不可变表达式折叠；任意调用、副作用和所有高级模式尚未因此获得阶段折叠支持。
+
+这种闭合值也可作为 normal-form 头的值实参。参数域可以依赖前面的 Type 参数；检查时先代入这些类型，再按真实声明检查变体与字段：
+
+~~~flurry
+pure comptime fn Configured<T, mode: Mode<T>> -> Type { bool }
+typealias Enabled = Configured<Settings,
+    Mode<Settings>.configured(Settings { enabled: true })>;
+
+comptime fn is_enabled(ty: Type) -> bool {
+    ty match {
+        Configured<'Settings, .configured({ enabled: true })> => true,
+        _ => false,
+    }
+}
+~~~
+
+`'Settings` 是常量模式，它成功后才为后续载荷提供具体类型。范式模式恢复的是保存的实参，`Configured` 的函数体没有因此执行，`Enabled` 也不会因为函数体返回 bool 就成为 bool。没有声明元数据时不接纳 nominal 值；错误类型、变体、字段数量与字段类型都会拒绝。通用值模式依赖一个尚未确定的前置类型绑定时，仍受上下文模式 elaboration 的现有实现限制。
+
+实现对一组范式输入共享检查预算，计入类型替换和 nominal 布局展开。检查 enum 值只实例化所选变体的载荷，不展开其他变体；无载荷的变体仍检查完整的类型实参。预算不足不会发布一个未检查完的范式或重建值，随后提供充足预算可以重新检查。
 
 按声明次序建立依赖图：先登记子句绑定，再登记形参类型及其供应表达式，最后登记结果和结果契约。对每条边记录需要的是具体值、类型事实还是 runtime 符号；只有第一类要求当场完成对应计算。由此可区分缺少 comptime 值、缺少操作依据和缺少代码上下文三种错误。

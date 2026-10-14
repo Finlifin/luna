@@ -1,0 +1,57 @@
+-- Mutable comptime closures freeze their current state and internal sharing.
+typealias Int = .Integer'builtin;
+typealias Counter = %{value: Int} comptime fn() -> Int;
+comptime fn counter() -> Counter {
+    var value: Int = 0;
+    || { value = value + 1; value }
+}
+const SNAPSHOT = do { let next = counter(); next(); next(); next };
+const SHARED = do {
+    let next = counter();
+    let left = next;
+    let right = next;
+    || (left(), right())
+};
+const DISTINCT = do {
+    let left = counter();
+    let right = counter();
+    || (left(), right())
+};
+const NESTED = do {
+    let next = counter();
+    let left = || next();
+    let right = || next();
+    || (left(), right())
+};
+const REPLACED = do {
+    var inner = || true;
+    let replace = || { inner = || false; inner() };
+    replace();
+    replace
+};
+const WIDTH = SNAPSHOT();
+typealias Bits = .BitVec'builtin<WIDTH>;
+comptime fn run() -> (Int, Int, Int) {
+    let next = SNAPSHOT;
+    let first = next();
+    let second = next();
+    let fresh = SNAPSHOT;
+    (first, second, fresh())
+}
+comptime fn shared() -> (Int, Int) { SHARED() }
+comptime fn distinct() -> (Int, Int) { DISTINCT() }
+comptime fn nested() -> (Int, Int) { NESTED() }
+comptime fn replaced() -> bool { REPLACED() }
+fn width(value: Bits) -> Bits {value}
+comptime fn defaulted(.next: Counter = SNAPSHOT) -> (Int, Int) {
+    (next(), next())
+}
+struct State { value: Int, }
+const RECORD = do {
+    let state = State {value: 2};
+    let next = || {state.value = state.value + 1; state.value};
+    next();
+    next
+};
+comptime fn record() -> Int { RECORD() }
+comptime fn with_default() -> (Int, Int) { defaulted() }

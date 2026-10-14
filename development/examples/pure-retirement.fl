@@ -1,0 +1,17 @@
+trait Copy {}
+trait Drop { fn drop(*self); }
+
+struct Owned { value: bool }
+struct Pair { first: Owned, second: Owned }
+enum Choice { some(Owned) }
+
+pure fn first(value: Pair) -> bool {
+    value.first.value
+}
+pure fn unwrap(value: Choice) -> Owned {
+    value match { .some(inner) => inner }
+}
+fn run() -> bool {
+    first(Pair { first: Owned { value: true }, second: Owned { value: false } })
+        and unwrap(Choice.some(Owned { value: true })).value
+}

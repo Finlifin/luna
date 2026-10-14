@@ -16,7 +16,7 @@ implicit_param -> implicit parameter
 comptime_param -> comptime parameter
 named_arg -> .id = expr
 extend_arg -> ...expr
-extended_application -> expr { (property | expr)* }
+extended_application -> expr { (property | extend_arg | expr)* }
 property -> id : expr
 ~~~
 
@@ -64,6 +64,27 @@ runtime 默认计算必须达到 **P3 稳定观测，并在合法入口下有限
 稳定性只在取得依据的范围内成立。同一个指针在两次调用中的内容可能不同，默认值不能只以指针位值为键永久缓存。默认值的纯度也不准许复制非 Copy 责任。
 
 运行检查失败是调用准备的失败路径；总性不能作为删除前提检查的依据。comptime 与子句默认值遵守[编译时求值政策](../comptime/purity-and-normal-form.md)，不套用 runtime P3 的限制。
+
+默认值也可以调用满足上述要求的普通辅助函数。供应仍发生在 runtime；显式覆盖会跳过相应默认表达式，后续默认值读取覆盖后的参数。
+
+~~~flurry
+fn opposite(value: bool) -> bool { not value }
+
+fn choose(
+    first: bool,
+    .second: bool = opposite(first),
+    .third: bool = opposite(second),
+) -> (bool, bool) {
+    (second, third)
+}
+
+test {
+    let (second, third) = choose(true, .second = true);
+    println("{} {}", second, third);
+}
+~~~
+
+输出 `true false`，只运行一次 opposite。默认值求值在被调函数的前置条件检查之前，因此不能用尚未建立的函数前置条件来证明默认表达式中的另一次调用合法；需要在该表达式内先建立条件。
 
 ### 收集
 
@@ -228,6 +249,31 @@ test {
 ~~~
 
 输出 `8 true worker`。位置收集的顺序槽和属性收集的命名字段不是同一个数据形态；读取接口要遵循实际取得的类型。
+
+### 位置展开与属性交错
+
+`...expr` 在扩展调用中仍供应位置输入。展开的元组只求值一次，其各项按元组次序交付；属性继续由属性收集入口处理，不把元组改解释为属性包。
+
+~~~flurry
+fn collect(...items: (u32, bool), ...properties: T) -> ((u32, bool), T)
+where T
+{
+    (items, properties)
+}
+
+fn inputs() -> (u32, bool) { (7u32, true) }
+
+test {
+    let ((count, ready), options) = collect {
+        label: "worker",
+        ...inputs(),
+        enabled: true,
+    };
+    println("{} {} {} {}", count, ready, options.label, options.enabled);
+}
+~~~
+
+此处先取得 label 的值，再调用 inputs，最后取得 enabled 的值。空元组的生产表达式也必须执行；若任一生产表达式提前退出，则后续实参、默认值和被调函数都不执行。收集与展开仍遵循实际元素的移动和复制能力。
 
 ### 拒绝重复或不存在的命名输入
 

@@ -1,0 +1,34 @@
+typealias Int = .Integer'builtin;
+
+comptime fn AdderType() -> .Type'builtin {
+    let offset: Int = 0;
+    (|value: Int| value + offset)'type
+}
+typealias Adder = AdderType();
+
+comptime fn make_adder(offset: Int) -> Adder {
+    |value: Int| value + offset
+}
+comptime fn apply_twice(callback: Adder, value: Int) -> Int {
+    callback(callback(value))
+}
+comptime fn map_value(callback: comptime fn(T) -> T, value: T) -> T where T {
+    callback(value)
+}
+
+const PLUS_TWO = make_adder(2);
+const PLUS_THREE = make_adder(3);
+const WIDTH = apply_twice(PLUS_THREE, 2);
+typealias Byte = .BitVec'builtin<WIDTH>;
+
+comptime fn run() -> (Int, Int, Int) {
+    var offset: Int = 10;
+    let snapshot = |value: Int| value + offset;
+    offset = 20;
+    let local: comptime fn(Int) -> Int = |value| value + 1;
+    (
+        apply_twice(PLUS_TWO, 4),
+        snapshot(local(1)),
+        map_value(|value| value + 1, 7),
+    )
+}

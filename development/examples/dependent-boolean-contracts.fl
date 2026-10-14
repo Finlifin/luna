@@ -1,0 +1,22 @@
+typealias Type = .Type'builtin;
+
+-- Type equality supplies a Boolean domain; the separate value premise
+-- supplies truth. The declared parameter and result types remain T.
+fn keep(comptime T: Type, value: T) -> result: T
+where requires T == bool, requires value, ensures result {
+    value
+}
+
+fn forward(comptime X: Type, value: X) -> result: X
+where requires X == bool, requires value, ensures result {
+    keep(X, value)
+}
+
+-- When truth is not statically available, the check remains executable.
+fn checked(comptime T: Type, value: T) -> result: T
+where requires T == bool, ensures result {
+    assumes value;
+    value
+}
+
+fn run() -> bool { forward(bool, checked(bool, true)) }

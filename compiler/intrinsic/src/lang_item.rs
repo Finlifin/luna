@@ -6,13 +6,9 @@
 //! connect these abstract compiler concepts to concrete user-visible
 //! definitions.
 //!
-//! # How it works
-//!
-//! Each [`LangItem`] variant names a concept. During initialisation the
-//! intrinsic crate registers placeholder `DefId`s for the built-in ones.
-//! User code can also be tagged (e.g. via `#[lang = "..."]` annotations)
-//! to provide the actual implementation; the resolver then calls
-//! [`LangItems::set`] to record the mapping.
+//! Primitive entries are installed at bootstrap. Source protocol declarations
+//! are registered by their package-qualified semantic identity; absence remains
+//! absence until a trusted language-item binding supplies the declaration.
 
 use std::fmt;
 
@@ -46,13 +42,16 @@ pub enum LangItem {
     Void,
     NoReturn,
     Type,
+    /// Source-defined pure comptime normal-form head; not a primitive Type.
+    Tuple,
 
     Undefined,
     AnyValue,
 
+    Once,
     Copy,
     Clone,
-    Finalze,
+    Drop,
     Debug,
     Display,
     Eq,
@@ -61,6 +60,7 @@ pub enum LangItem {
     Iterator,
     Into,
     From,
+    Splice,
 }
 
 impl LangItem {
@@ -91,11 +91,13 @@ impl LangItem {
             LangItem::Void => "void",
             LangItem::NoReturn => "NoReturn",
             LangItem::Type => "type",
+            LangItem::Tuple => "Tuple",
             LangItem::Undefined => "undefined",
             LangItem::AnyValue => "any",
+            LangItem::Once => "Once",
             LangItem::Copy => "Copy",
             LangItem::Clone => "Clone",
-            LangItem::Finalze => "Finalize",
+            LangItem::Drop => "Drop",
             LangItem::Debug => "Debug",
             LangItem::Display => "Display",
             LangItem::Eq => "Eq",
@@ -104,6 +106,7 @@ impl LangItem {
             LangItem::Iterator => "Iterator",
             LangItem::Into => "Into",
             LangItem::From => "From",
+            LangItem::Splice => "Splice",
         }
     }
 }
@@ -114,23 +117,23 @@ impl fmt::Display for LangItem {
     }
 }
 
-/// A bidirectional mapping between [`LangItem`] concepts and their
+/// A mapping between [`LangItem`] concepts and their
 /// concrete definition IDs.
 ///
-/// Populated during intrinsic initialisation (for primitives) and later
-/// during name resolution (for user-defined lang items).
-#[derive(Debug, Default)]
+/// Populated during intrinsic initialisation (for primitives), then through
+/// explicit driver bindings against elaborated source declarations.
+#[derive(Debug, Default, Clone)]
 pub struct LangItems {
     items: FxHashMap<LangItem, LangItemDef>,
 }
 
 /// What a lang item resolves to.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LangItemDef {
     /// A compiler-synthesised built-in (no user-visible source location).
     Builtin,
     /// A user-provided definition
-    UserDef(hir::hir_id::LocalDefId),
+    UserDef(nir::DeclarationId),
 }
 
 impl LangItems {
@@ -138,9 +141,97 @@ impl LangItems {
         Self::default()
     }
 
-    /// Register or overwrite a lang item mapping.
-    pub fn set(&mut self, item: LangItem, def: LangItemDef) {
+    /// Bind source trait identities supplied by the trusted compilation driver.
+    /// Names, imports and aliases never implicitly designate language items.
+    /// Validate the entire batch before publishing any registration. This checks
+    /// identity/kind only; protocol-specific method and resource contracts must
+    /// still be checked by each consuming pass.
+    pub fn bind_source_traits(
+        &mut self,
+        package: &nir::program::Package,
+        bindings: &[(LangItem, nir::DeclarationId)],
+    ) -> Result<(), SourceBindingError> {
+        let mut staged = self.clone();
+        for &(item, declaration) in bindings {
+            if !matches!(
+                item,
+                LangItem::Once
+                    | LangItem::Clone
+                    | LangItem::Copy
+                    | LangItem::Drop
+                    | LangItem::Debug
+                    | LangItem::Display
+                    | LangItem::Eq
+                    | LangItem::Ord
+                    | LangItem::Hash
+                    | LangItem::Iterator
+                    | LangItem::Into
+                    | LangItem::From
+                    | LangItem::Splice
+            ) {
+                return Err(SourceBindingError::NotTraitItem(item));
+            }
+            let count = package
+                .traits
+                .iter()
+                .filter(|t| t.declaration == declaration)
+                .count();
+            if count != 1 {
+                return Err(SourceBindingError::InvalidTraitIdentity { item, declaration });
+            }
+            staged
+                .set(item, LangItemDef::UserDef(declaration))
+                .map_err(SourceBindingError::Conflict)?;
+        }
+        *self = staged;
+        Ok(())
+    }
+
+    /// Bind opaque source heads without inspecting their bodies or using names.
+    /// This validates declaration kind and purity only. Consumers must validate
+    /// the particular head's input telescope and collection protocol separately.
+    /// External head metadata is allowed without transporting executable bodies.
+    pub fn bind_source_normal_form_heads(
+        &mut self,
+        package: &nir::program::Package,
+        bindings: &[(LangItem, nir::DeclarationId)],
+    ) -> Result<(), SourceBindingError> {
+        let mut staged = self.clone();
+        for &(item, declaration) in bindings {
+            if item != LangItem::Tuple {
+                return Err(SourceBindingError::NotNormalFormItem(item));
+            }
+            let count = package.normal_forms.iter()
+                .filter(|head| head.declaration == declaration).count();
+            let functions: Vec<_> = package.functions.iter()
+                .filter(|function| function.declaration == declaration).collect();
+            if count != 1 || functions.len() > 1 || functions.first().is_some_and(|function| {
+                function.phase != nir::program::FunctionPhase::NormalForm || !function.pure
+            }) {
+                return Err(SourceBindingError::InvalidNormalFormIdentity { item, declaration });
+            }
+            staged.set(item, LangItemDef::UserDef(declaration))
+                .map_err(SourceBindingError::Conflict)?;
+        }
+        *self = staged;
+        Ok(())
+    }
+
+    /// Register one identity. Re-registering the same binding is idempotent;
+    /// conflicting bindings never replace a previously accepted declaration.
+    pub fn set(&mut self, item: LangItem, def: LangItemDef) -> Result<(), RegistrationConflict> {
+        if let Some(previous) = self.items.get(&item) {
+            if *previous != def {
+                return Err(RegistrationConflict {
+                    item,
+                    previous: *previous,
+                    attempted: def,
+                });
+            }
+            return Ok(());
+        }
         self.items.insert(item, def);
+        Ok(())
     }
 
     /// Look up the definition of a lang item, if registered.
@@ -155,7 +246,9 @@ impl LangItems {
 
     /// Iterate over all registered lang items.
     pub fn iter(&self) -> impl Iterator<Item = (LangItem, LangItemDef)> + '_ {
-        self.items.iter().map(|(&k, &v)| (k, v))
+        let mut entries: Vec<_> = self.items.iter().map(|(&k, &v)| (k, v)).collect();
+        entries.sort_by_key(|(item, _)| item.name());
+        entries.into_iter()
     }
 
     /// Number of registered lang items.
@@ -168,3 +261,67 @@ impl LangItems {
         self.items.is_empty()
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RegistrationConflict {
+    pub item: LangItem,
+    pub previous: LangItemDef,
+    pub attempted: LangItemDef,
+}
+impl fmt::Display for LangItemDef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Builtin => f.write_str("builtin"),
+            Self::UserDef(id) => write!(f, "(definition {id})"),
+        }
+    }
+}
+impl fmt::Display for LangItems {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("(language-items")?;
+        for (item, definition) in self.iter() {
+            write!(f, " ({} {})", item.name(), definition)?;
+        }
+        f.write_str(")")
+    }
+}
+impl fmt::Display for RegistrationConflict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "conflicting language item {}: existing {}, attempted {}",
+            self.item, self.previous, self.attempted
+        )
+    }
+}
+impl std::error::Error for RegistrationConflict {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceBindingError {
+    NotTraitItem(LangItem),
+    NotNormalFormItem(LangItem),
+    InvalidNormalFormIdentity { item: LangItem, declaration: nir::DeclarationId },
+    InvalidTraitIdentity {
+        item: LangItem,
+        declaration: nir::DeclarationId,
+    },
+    Conflict(RegistrationConflict),
+}
+impl fmt::Display for SourceBindingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotNormalFormItem(item) => write!(f, "language item {item} is not a source normal-form item"),
+            Self::InvalidNormalFormIdentity { item, declaration } => write!(f,
+                "language item {item} requires exactly one pure normal-form head at {declaration}"),
+            Self::NotTraitItem(item) => {
+                write!(f, "language item {item} is not a source trait item")
+            }
+            Self::InvalidTraitIdentity { item, declaration } => write!(
+                f,
+                "language item {item} requires exactly one declared trait at {declaration}"
+            ),
+            Self::Conflict(error) => error.fmt(f),
+        }
+    }
+}
+impl std::error::Error for SourceBindingError {}

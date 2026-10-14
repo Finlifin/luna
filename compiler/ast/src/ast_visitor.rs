@@ -1,4 +1,4 @@
-use super::{fn_mod_flags_to_string, Ast, NodeIndex, NodeKind, NodeType};
+use super::{Ast, NodeIndex, NodeKind, NodeType, fn_mod_flags_to_string};
 use rustc_span::SourceMap;
 
 /// AST visitor trait，用于遍历 AST 并对每个节点执行操作
@@ -353,7 +353,7 @@ pub trait AstVisitor {
                     )
                 }
 
-                NodeType::NormalFormDefChildren => {
+                NodeType::NormalFormHeadDefChildren => {
                     let children = ast.get_children(node_index);
                     let id = children[0];
                     let type_params_node = children[1];
@@ -499,15 +499,7 @@ pub trait AstVisitor {
 
                     let params = ast.get_multi_child_slice(params_node).unwrap();
 
-                    self.visit_fn_type(
-                        ast,
-                        node_index,
-                        kind,
-                        _flags,
-                        abi_node,
-                        params,
-                        source_map,
-                    )
+                    self.visit_fn_type(ast, node_index, kind, _flags, abi_node, params, source_map)
                 }
             }
         } else {

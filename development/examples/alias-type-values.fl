@@ -1,0 +1,23 @@
+typealias Type = .Type'builtin;
+typealias Bool = true'type;
+typealias Pair<T> = (T, T);
+typealias Ignore<T> = Bool;
+typealias Reader<T> = %{saved: T} fn() -> T;
+typealias Mapper<T> = comptime fn(T) -> T;
+typealias Pointer<T> = *T;
+struct Box where T { value: T }
+typealias Boxed<T> = Box<T>;
+typealias Nested<T> = Pair<Boxed<T>>;
+comptime fn InputType() -> Type { Bool }
+comptime fn PairType(value: Type) -> Type { Pair<value> }
+comptime fn ReaderType(value: Type) -> Type { Reader<value> }
+comptime fn MapperType(value: Type) -> Type { Mapper<value> }
+comptime fn PointerType(value: Type) -> Type { Pointer<value> }
+comptime fn NestedType(value: Type) -> Type { Nested<value> }
+comptime fn Twice() -> Type { Pair<InputType()> }
+comptime fn Ignored() -> Type { Ignore<InputType()> }
+typealias ConcretePair = PairType(Bool);
+fn run(value: ConcretePair) -> (Bool, Bool) { value }
+
+typealias Captured<T> = (|| T)();
+comptime fn CapturedType(value: Type) -> Type { Captured<value> }

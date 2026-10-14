@@ -1,0 +1,24 @@
+typealias Type = .Type'builtin;
+pure comptime fn Tagged<T: Type, value: T> -> Type { T }
+pure comptime fn Pair<A: Type, a: A, B: Type, b: B> -> Type { (A, B) }
+comptime fn Number(ty: Type) -> Type { Tagged<ty, 255> }
+comptime fn Negative(ty: Type) -> Type { Tagged<ty, -128> }
+comptime fn Pass(ty: Type, value: .u8'builtin) -> Type { Tagged<ty, value> }
+comptime fn Truth(ty: Type, flag: true'type) -> Type { Tagged<ty, flag> }
+comptime fn TypeInput(ty: Type, value: Type) -> Type { Tagged<ty, value> }
+comptime fn Interleaved(first: Type, last: Type) -> Type { Pair<first, 1, last, -2> }
+comptime fn Early(ty: Type) -> Type { Tagged<ty, do { return .u16'builtin; }> }
+typealias Byte = Number(.u8'builtin);
+typealias SameByte = Tagged<.u8'builtin, 255>;
+fn same(value: Byte) -> SameByte { value }
+typealias SignedByte = Negative(.i8'builtin);
+typealias Flags = Truth(true'type, true);
+typealias TypeTag = TypeInput(Type, .u8'builtin);
+pure comptime fn OnlyByte<T: Type, value: T> -> Type where requires T == .u8'builtin { T }
+comptime fn Checked(ty: Type) -> Type { OnlyByte<ty, 255> }
+typealias CheckedByte = Checked(.u8'builtin);
+comptime fn Ordered() -> Type {
+    var chosen = false;
+    Pair<do { chosen = true; .u8'builtin }, 1,
+         do { if chosen { .i8'builtin } else { .u8'builtin } }, -2>
+}

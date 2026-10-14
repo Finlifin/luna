@@ -1,0 +1,25 @@
+typealias Type = .Type'builtin;
+typealias Char = 'x''type;
+
+comptime fn Choose(T: Type) -> Type {
+    if T == bool { bool } else { Char }
+}
+
+fn pair(comptime .T: Type = Choose(G), value: T, other: G) -> (T, G) where G {
+    (value, other)
+}
+
+fn run() -> ((bool, bool), (Char, .u8'builtin)) {
+    -- The other argument determines G before Choose(G) runs.
+    -- In the second call, the result type supplies the integer context.
+    (pair(true, false), pair('x', 9))
+}
+
+fn identity(value: G) -> G where G { value }
+
+fn inferred() -> bool {
+    -- No result annotation supplies the integer type here. Numeric defaulting
+    -- settles G before the nested pair call computes Choose(G).
+    let (value, number) = identity(pair('x', 9));
+    value == 'x' and number == 9
+}

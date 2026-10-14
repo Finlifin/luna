@@ -1,0 +1,24 @@
+trait Read {
+    fn read(self) -> true'type;
+}
+trait Left :- Read {}
+trait Right :- Read {}
+trait Child :- Left + Right {
+    -- Source is fixed by Child's inherited capability, not by later members.
+    fn inspect(self) -> true'type { self.read() }
+}
+
+struct Flag {}
+impl Child for Flag {}
+impl Left for Flag {}
+impl Right for Flag {}
+impl Read for Flag {
+    fn read(self) -> true'type { true }
+}
+impl Flag {
+    fn read(self) -> true'type { false }
+}
+
+fn run() -> (true'type, true'type, true'type) {
+    (Flag {}.as(Child).read(), Flag {}.as(Child).inspect(), Flag {}.read())
+}

@@ -1,0 +1,55 @@
+typealias Byte = .u8'builtin;
+typealias Signed = .i8'builtin;
+typealias Bool = true'type;
+struct Triple { first: Byte, middle: Byte, last: Byte }
+fn transitive(a: Byte, b: Byte, c: Byte) -> Byte {
+    assumes a <= b and b <= c;
+    c - a
+}
+fn strict(a: Byte, b: Byte, c: Byte) -> Byte {
+    assumes a < b and b < c;
+    c - a - 2
+}
+fn field_chain(value: Triple) -> Byte {
+    assumes value.first <= value.middle and value.middle <= value.last;
+    value.last - value.first
+}
+fn branches(a: Byte, b: Byte, c: Byte, d: Byte, flag: Bool) -> Byte {
+    if flag { assumes a <= b and b <= c; }
+    else { assumes a <= d and d <= c; }
+    c - a
+}
+fn alternatives(a: Byte, b: Byte, c: Byte, d: Byte) -> Byte {
+    assumes (a <= b and b <= c) or (a <= d and d <= c);
+    c - a
+}
+fn negative_floor(x: Signed) -> Signed {
+    assumes x >= -20 and x <= 20;
+    assumes 3 * x <= -7;
+    x + 127
+}
+fn positive_ceiling(x: Signed) -> Signed {
+    assumes x >= -20 and x <= 20;
+    assumes -3 * x <= -7;
+    x - 127
+}
+fn variable_coefficient_bound(x: Byte, limit: Byte) -> Byte {
+    assumes x <= 100;
+    assumes 2 * x <= limit;
+    assumes limit <= 101;
+    x + 205
+}
+fn closure_parameter() -> Byte {
+    let difference = |a: Byte, b: Byte, c: Byte| {
+        assumes a <= b and b <= c;
+        c - a
+    };
+    difference(0,127,255)
+}
+comptime fn run() -> Byte {
+    let a: Byte = 0;
+    let b: Byte = 127;
+    let c: Byte = 255;
+    assumes a < b and b < c;
+    c - a - 2
+}

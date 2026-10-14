@@ -1,0 +1,27 @@
+trait Mapper where T {
+    fn keep(value: T) -> T;
+}
+trait Child :- Mapper<T> where T {}
+struct Holder where T {}
+impl Mapper<T> for Holder<T> where T {
+    fn keep(value: T) -> T { value }
+}
+impl Child<T> for Holder<T> where T {}
+
+-- The value retains Mapper<bool> as its origin, even through a child view.
+comptime fn choose() -> fn(bool) -> bool {
+    Holder<bool>.as(Child<bool>).keep
+}
+comptime fn forward(callback: fn(bool) -> bool) -> fn(bool) -> bool {
+    callback
+}
+
+trait Action {
+    assoc apply: fn(bool) -> bool = forward(choose());
+}
+struct Client {}
+impl Action for Client {}
+
+fn entry() -> bool {
+    Client.as(Action).apply(true)
+}

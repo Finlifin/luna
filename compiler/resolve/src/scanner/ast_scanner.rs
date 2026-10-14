@@ -62,34 +62,32 @@ impl<'a> AstScanner<'a> {
                 NodeKind::ModuleDef => {
                     self.scan_module_def(parent_scope, inner, vis)?;
                 }
-                NodeKind::StructDef => {
-                    self.scan_adt_def(
-                        parent_scope,
-                        inner,
-                        BindingKind::Struct,
-                        ScopeKind::AdtBody,
-                        vis,
-                    )?;
+                NodeKind::TraitDef => {
+                    self.scan_adt_def(parent_scope, inner, ScopeKind::TraitBody, vis)?;
                 }
-                NodeKind::EnumDef => {
-                    self.scan_adt_def(
-                        parent_scope,
-                        inner,
-                        BindingKind::Enum,
-                        ScopeKind::AdtBody,
-                        vis,
-                    )?;
+                NodeKind::StructDef => {
+                    self.scan_adt_def(parent_scope, inner, ScopeKind::AdtBody, vis)?;
+                }
+                NodeKind::EnumDef | NodeKind::EffectEnumDef => {
+                    self.scan_adt_def(parent_scope, inner, ScopeKind::AdtBody, vis)?;
                 }
                 NodeKind::UnionDef => {
-                    self.scan_adt_def(
+                    self.scan_adt_def(parent_scope, inner, ScopeKind::AdtBody, vis)?;
+                }
+                NodeKind::TypealiasDef => self.scan_type_alias(parent_scope, inner, vis)?,
+                NodeKind::ConstDef | NodeKind::ConstDecl => {
+                    let name = self.extract_name(self.ast.get_children(inner)[0])?;
+                    let def_id = self.def_gen.next();
+                    self.define_in_scope(
+                        name,
+                        BindingKind::Definition(def_id, parent_scope),
+                        Some(inner),
                         parent_scope,
-                        inner,
-                        BindingKind::Union,
-                        ScopeKind::AdtBody,
                         vis,
                     )?;
+                    self.def_names.push((def_id, name));
                 }
-                NodeKind::Function => {
+                NodeKind::Function | NodeKind::AssocDecl | NodeKind::NormalFormHeadDef | NodeKind::AlgebraicEffect => {
                     self.scan_function_def(parent_scope, inner, vis)?;
                 }
                 NodeKind::ImplDef => {
@@ -99,7 +97,7 @@ impl<'a> AstScanner<'a> {
                     self.scan_impl_def(parent_scope, inner, ImplKind::TraitImpl)?;
                 }
                 NodeKind::UseStatement => {
-                    self.collect_import(parent_scope, inner, vis == Visibility::Public)?;
+                    self.collect_import(parent_scope, inner, vis)?;
                 }
                 _ => {
                     // Other node kinds are ignored during the scan pass.
@@ -109,14 +107,26 @@ impl<'a> AstScanner<'a> {
         Ok(())
     }
 
-    /// Returns `(inner_node, visibility)`, stripping a `Pub` wrapper if present.
-    /// Unwrapped items default to [`Visibility::Package`].
-    fn strip_pub_wrapper(&self, item: NodeIndex) -> (NodeIndex, Visibility) {
-        if self.ast.get_node_kind(item) == Some(NodeKind::Pub) {
-            let children = self.ast.get_children(item);
-            return (children[0], Visibility::Public);
+    /// Attributes/modifiers preserve declaration identity. Semantic processing
+    /// remains in lowering; scanning only exposes the wrapped declaration.
+    fn strip_pub_wrapper(&self, mut item: NodeIndex) -> (NodeIndex, Visibility) {
+        let mut visibility = Visibility::Package;
+        loop {
+            match self.ast.get_node_kind(item) {
+                Some(NodeKind::Pub) => {
+                    visibility = Visibility::Public;
+                    item = self.ast.get_children(item)[0];
+                }
+                Some(NodeKind::Private) => {
+                    visibility = Visibility::Private;
+                    item = self.ast.get_children(item)[0];
+                }
+                Some(NodeKind::Attribute | NodeKind::AttributeSetTrue) => {
+                    item = self.ast.get_children(item)[1]
+                }
+                _ => return (item, visibility),
+            }
         }
-        (item, Visibility::Package)
     }
 
     fn scan_module_def(
@@ -143,20 +153,16 @@ impl<'a> AstScanner<'a> {
 
         // Register the module name in the parent scope
         self.define_in_scope(
-            parent_scope,
             name,
-            def_id,
-            BindingKind::Module,
+            BindingKind::Definition(def_id, parent_scope),
             Some(item),
+            parent_scope,
             vis,
         )?;
         self.def_names.push((def_id, name));
 
-        // Scan clauses
-        self.scan_clauses(scope_id, def_id, item, 1)?;
-
-        // Scan the module body (child[2] = block, block child[0] = items)
-        let block_index = self.ast.get_children(item)[2];
+        // ModuleDef has two children: name and body.
+        let block_index = self.ast.get_children(item)[1];
         let block_items_index = self.ast.get_children(block_index)[0];
         if let Some(block_items) = self.ast.get_multi_child_slice(block_items_index) {
             self.scan_items(scope_id, block_items)?;
@@ -169,7 +175,6 @@ impl<'a> AstScanner<'a> {
         &mut self,
         parent_scope: ScopeId,
         item: NodeIndex,
-        kind: BindingKind,
         scope_kind: ScopeKind,
         vis: Visibility,
     ) -> ResolveResult<()> {
@@ -188,20 +193,60 @@ impl<'a> AstScanner<'a> {
         self.scope_tree.add_scope(scope);
         self.scope_tree.add_child(parent_scope, scope_id);
 
-        self.define_in_scope(parent_scope, name, def_id, kind, Some(item), vis)?;
+        self.define_in_scope(
+            name,
+            BindingKind::Definition(def_id, parent_scope),
+            Some(item),
+            parent_scope,
+            vis,
+        )?;
         self.def_names.push((def_id, name));
 
         // Scan clauses
-        self.scan_clauses(scope_id, def_id, item, 1)?;
+        let clause_index = if scope_kind == ScopeKind::TraitBody {
+            2
+        } else {
+            1
+        };
+        self.scan_clauses(scope_id, def_id, item, clause_index)?;
 
         // Scan body items (child[2] = body block, child[0] = items list)
-        let body_index = self.ast.get_children(item)[2];
+        let body_index = self.ast.get_children(item)[clause_index + 1];
         let body_items_index = self.ast.get_children(body_index)[0];
         if let Some(body_items) = self.ast.get_multi_child_slice(body_items_index) {
             self.scan_items(scope_id, body_items)?;
         }
 
         Ok(())
+    }
+
+    fn scan_type_alias(
+        &mut self,
+        parent: ScopeId,
+        item: NodeIndex,
+        vis: Visibility,
+    ) -> ResolveResult<()> {
+        let name = self.extract_name(self.ast.get_children(item)[0])?;
+        let definition = self.def_gen.next();
+        let scope = self.scope_gen.next();
+        self.scope_tree.add_scope(Scope::new(
+            scope,
+            ScopeKind::TypeAlias,
+            Some(parent),
+            None,
+            definition,
+            true,
+        ));
+        self.scope_tree.add_child(parent, scope);
+        self.define_in_scope(
+            name,
+            BindingKind::Definition(definition, parent),
+            Some(item),
+            parent,
+            vis,
+        )?;
+        self.def_names.push((definition, name));
+        self.scan_clauses(scope, definition, item, 1)
     }
 
     fn scan_function_def(
@@ -228,17 +273,23 @@ impl<'a> AstScanner<'a> {
 
         // Register the function name in the parent scope
         self.define_in_scope(
-            parent_scope,
             name,
-            def_id,
-            BindingKind::Function,
+            BindingKind::Definition(def_id, parent_scope),
             Some(item),
+            parent_scope,
             vis,
         )?;
         self.def_names.push((def_id, name));
 
         // Scan clauses (child[4] in the old AST layout)
-        self.scan_clauses(scope_id, def_id, item, 4)?;
+        if self.ast.get_node_kind(item) == Some(NodeKind::NormalFormHeadDef) {
+            self.scan_clauses(scope_id, def_id, item, 1)?;
+            self.scan_clauses(scope_id, def_id, item, 3)?;
+        } else if self.ast.get_node_kind(item) == Some(NodeKind::AlgebraicEffect) {
+            self.scan_clauses(scope_id, def_id, item, 3)?;
+        } else {
+            self.scan_clauses(scope_id, def_id, item, 4)?;
+        }
 
         Ok(())
     }
@@ -321,63 +372,51 @@ impl<'a> AstScanner<'a> {
             None => return Ok(()),
         };
 
-        for &clause in clauses {
-            let Some((kind, _span, _)) = self.ast.get_node(clause) else {
+        let mut seen = std::collections::HashSet::new();
+        for &outer in clauses {
+            let mut clause = outer;
+            while self.ast.get_node_kind(clause) == Some(NodeKind::QuoteDeclClause) {
+                clause = self.ast.get_children(clause)[0];
+            }
+            let Some(kind) = self.ast.get_node_kind(clause) else {
                 continue;
             };
-
-            match kind {
-                NodeKind::TypeDeclClause => {
-                    let name = self.extract_name(self.ast.get_children(clause)[0])?;
-                    let clause_def = self.def_gen.next();
-                    let binding = Binding {
-                        kind: BindingKind::ClauseParam,
-                        def_id: clause_def,
-                        defined_in: scope_id,
-                        ast_ref: Some(AstNodeRef::new(self.file_id, clause)),
-                        vis: Visibility::Private,
-                    };
-                    if let Some(scope) = self.scope_tree.get_mut(scope_id) {
-                        scope.items.add_clause(name, binding);
-                    }
-                    self.def_names.push((clause_def, name));
+            if matches!(
+                kind,
+                NodeKind::Id
+                    | NodeKind::TypeBoundParam
+                    | NodeKind::TraitBoundParam
+                    | NodeKind::TypeDeclClause
+                    | NodeKind::TypeBoundDeclClause
+                    | NodeKind::TraitBoundDeclClause
+                    | NodeKind::OptionalParam
+                    | NodeKind::OptionalDeclClause
+                    | NodeKind::VarargDeclClause
+            ) {
+                let name = self.extract_name(if kind == NodeKind::Id {
+                    clause
+                } else {
+                    self.ast.get_children(clause)[0]
+                })?;
+                if !seen.insert(name) {
+                    return Err(ResolveError::InvalidNodeType {
+                        message: format!("duplicate clause parameter {name}"),
+                        span: self.ast.get_span(clause).unwrap_or_default(),
+                    });
                 }
-                NodeKind::TypeBoundDeclClause => {
-                    let name = self.extract_name(self.ast.get_children(clause)[0])?;
-                    let clause_def = self.def_gen.next();
-                    let binding = Binding {
-                        kind: BindingKind::ClauseParam,
-                        def_id: clause_def,
-                        defined_in: scope_id,
-                        ast_ref: Some(AstNodeRef::new(self.file_id, clause)),
-                        vis: Visibility::Private,
-                    };
-                    if let Some(scope) = self.scope_tree.get_mut(scope_id) {
-                        scope.items.add_clause(name, binding);
-                    }
-                    self.def_names.push((clause_def, name));
+                let clause_def = self.def_gen.next();
+                let binding = Binding {
+                    entry: None,
+                    kind: BindingKind::ClauseParam(
+                        clause_def,
+                        AstNodeRef::new(self.file_id, clause),
+                    ),
+                    vis: Visibility::Private,
+                };
+                if let Some(scope) = self.scope_tree.get_mut(scope_id) {
+                    scope.items.add_clause(name, binding);
                 }
-                NodeKind::OptionalDeclClause => {
-                    let name = self.extract_name(self.ast.get_children(clause)[0])?;
-                    let clause_def = self.def_gen.next();
-                    let binding = Binding {
-                        kind: BindingKind::Param,
-                        def_id: clause_def,
-                        defined_in: scope_id,
-                        ast_ref: Some(AstNodeRef::new(self.file_id, clause)),
-                        vis: Visibility::Private,
-                    };
-                    if let Some(scope) = self.scope_tree.get_mut(scope_id) {
-                        scope.items.add_clause(name, binding);
-                    }
-                    self.def_names.push((clause_def, name));
-                }
-                NodeKind::Requires | NodeKind::Ensures | NodeKind::Decreases => {
-                    // Contract clauses – nothing to define
-                }
-                _ => {
-                    // Unknown clause kind – skip
-                }
+                self.def_names.push((clause_def, name));
             }
         }
 
@@ -388,24 +427,66 @@ impl<'a> AstScanner<'a> {
         &mut self,
         parent_scope: ScopeId,
         item: NodeIndex,
-        is_reexport: bool,
+        visibility: Visibility,
     ) -> ResolveResult<()> {
-        let span = self.ast.get_span(item).unwrap_or_default();
         let path_node = self.ast.get_children(item)[0];
 
-        let (anchor, path_segments, kind) = self.extract_import_path(path_node)?;
-
-        self.imports.push(ImportDirective::new(
+        self.expand_import(
             parent_scope,
-            anchor,
-            kind,
-            path_segments,
-            span,
             item,
-            self.file_id,
-            is_reexport,
-        ));
+            path_node,
+            PathAnchor::Local,
+            Vec::new(),
+            visibility,
+        )
+    }
 
+    fn expand_import(
+        &mut self,
+        owner: ScopeId,
+        item: NodeIndex,
+        node: NodeIndex,
+        inherited: PathAnchor,
+        mut prefix: Vec<Symbol>,
+        visibility: Visibility,
+    ) -> ResolveResult<()> {
+        let (anchor, inner) = self.extract_path_anchor(node)?;
+        let anchor = if anchor == PathAnchor::Local {
+            inherited
+        } else {
+            if !prefix.is_empty() {
+                return Err(ResolveError::InvalidNodeType {
+                    message: "anchored path inside a grouped prefix is not implemented".into(),
+                    span: self.ast.get_span(node).unwrap_or_default(),
+                });
+            }
+            anchor
+        };
+        if self.ast.get_node_kind(inner) == Some(NodeKind::ProjectionMultiPath) {
+            let children = self.ast.get_children(inner);
+            prefix.extend(self.collect_prefix_segments(children[0])?);
+            let members = self
+                .ast
+                .get_multi_child_slice(children[1])
+                .unwrap_or(&[])
+                .to_vec();
+            for child in members {
+                self.expand_import(owner, item, child, anchor, prefix.clone(), visibility)?;
+            }
+        } else {
+            let (_, suffix, kind) = self.extract_import_path(inner)?;
+            prefix.extend(suffix);
+            self.imports.push(ImportDirective::new(
+                owner,
+                anchor,
+                kind,
+                prefix,
+                self.ast.get_span(node).unwrap_or_default(),
+                item,
+                self.file_id,
+                visibility,
+            ));
+        }
         Ok(())
     }
 
@@ -586,19 +667,16 @@ impl<'a> AstScanner<'a> {
 
     fn define_in_scope(
         &mut self,
-        scope_id: ScopeId,
         name: Symbol,
-        def_id: DefId,
         kind: BindingKind,
         ast_node: Option<NodeIndex>,
+        scope_id: ScopeId,
         vis: Visibility,
     ) -> ResolveResult<()> {
         let binding = Binding {
             kind,
-            def_id,
-            defined_in: scope_id,
-            ast_ref: ast_node.map(|n| AstNodeRef::new(self.file_id, n)),
             vis,
+            entry: None,
         };
 
         if let Some(scope) = self.scope_tree.get_mut(scope_id) {

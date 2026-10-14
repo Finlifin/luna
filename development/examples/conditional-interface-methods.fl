@@ -1,0 +1,21 @@
+trait Source { assoc Item: .Type'builtin; }
+trait Service {
+    fn basic() -> bool;
+    fn echo(value: Self.as(Source).Item) -> Self.as(Source).Item
+    where requires Self :- Source
+    {
+        value
+    }
+    comptime fn ready() -> bool { true }
+}
+
+-- bool 可以使用 basic/ready；echo 的额外前提并未成立。
+impl Service for bool { fn basic() -> bool { true } }
+
+impl Source for 'x''type { assoc Item: .Type'builtin = 'x''type; }
+impl Service for 'x''type { fn basic() -> bool { false } }
+
+fn entry() -> bool {
+    bool.as(Service).basic() and 'x''type.as(Service).echo('x') == 'x'
+}
+comptime fn invoke() -> bool { bool.as(Service).ready() }

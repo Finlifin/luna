@@ -31,6 +31,8 @@ quote fn 不属于 comptime fn。所有 quoted code 是 comptime 值，描述的
 
 `inline if` 等控制流构造还承担实例化时选择代码的工作。一个普通 fn 可以含 inline if，却仍保留普通调用；一个 quote fn 也可以接入包含普通 runtime if 的代码，其分支要等 runtime 条件。函数展开、编译时分支选择和运行时求值是三件事。
 
+当前实现已将 `inline fn` 的声明意向从解析、HIR 保留到 NIR 和具体 IIR 实例，dump 中以 `(inline true)` 表示。泛型实例、带 comptime 实参的实例、延迟签名实例和已选择的 trait 方法保留各自定义的意向；`pure` 和 comptime 阶段仍分别检查。默认执行路径保留普通调用。显式 NIR 优化入口 `elaboration::program::inlining::expand` 可展开普通 runtime 直接调用，复用卫生重命名、默认参数、契约和返回边界降码；一次 pass 只遍历原调用点，递归主体中的新调用保留。候选展开失败会撤销该候选的代码与元数据修改，保留普通调用。调用者在转换之后重新运行资源验证与清理计划发布。命令行可用 `--interpret entry --inline-functions --copy-protocol Copy --drop-protocol Drop` 显式启用此转换，其中协议名按源程序定义指定。驱动先展开，再检查资源并发布清理计划，最后执行；准备失败在执行前报告，runtime 失败不重跑原程序。此选项不用于无资源检查的解释执行。带 comptime 实参的调用等待输入完成，间接调用与 trait 方法选择暂不由此入口展开。handler 自身的局部控制流变换尚未接通，callee 与 handler 联合展开仍未完成。
+
 ### 实参只执行一次
 
 普通 runtime 实参遵守调用顺序，各求值一次，并建立新鲜形参绑定。主体多次引用形参不重算实参；主体不引用某个形参也不自动省掉该实参的效果。

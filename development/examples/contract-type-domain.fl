@@ -1,0 +1,16 @@
+typealias Type = .Type'builtin;
+
+-- The contract establishes that T is itself a type before checking value: T.
+comptime fn keep(comptime kind: Type, comptime T: kind, value: T) -> T
+where requires kind == Type {
+    value
+}
+
+comptime fn forward(comptime kind: Type, comptime T: kind, value: T) -> T
+where requires Type == kind {
+    keep(kind, T, value)
+}
+
+comptime fn entry() -> bool {
+    forward(Type, bool, true)
+}

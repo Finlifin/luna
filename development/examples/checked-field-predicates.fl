@@ -1,0 +1,91 @@
+typealias Byte = .u8'builtin;
+typealias Bool = true'type;
+struct Pair { left: Byte, right: Byte }
+struct Outer { inner: Pair, tail: Byte }
+struct Box where T { value: T }
+fn direct(pair: Pair) -> Byte {
+    assumes pair.left < 255;
+    pair.left + 1
+}
+fn nested(outer: Outer) -> Byte {
+    assumes outer.inner.left < 255;
+    outer.inner.left + 1
+}
+fn generic(box: Box<Byte>) -> Byte {
+    assumes box.value < 255;
+    box.value + 1
+}
+fn sibling(pair: Pair, flag: Bool) -> Byte {
+    var copy = pair;
+    assumes copy.left < 255;
+    if flag { copy.right = 100; } else { copy.right = 200; }
+    copy.left + 1
+}
+fn nested_sibling(outer: Outer) -> Byte {
+    var copy = outer;
+    assumes copy.inner.left < 255;
+    copy.inner.right = 255;
+    copy.tail = 255;
+    copy.inner.left + 1
+}
+fn conjunction(pair: Pair) -> Byte {
+    assumes pair.left < 100 and pair.right < 100;
+    pair.left + pair.right
+}
+fn disjunction(pair: Pair) -> Byte {
+    assumes pair.left < 10 or pair.left < 100;
+    pair.left + 1
+}
+fn guarded(pair: Pair) -> Byte {
+    if pair.left < 255 { pair.left + 1 } else { 255 }
+}
+fn copies(pair: Pair) -> Byte {
+    var current = pair;
+    assumes current.left < 255;
+    let old = current;
+    current.left = 255;
+    old.left + 1
+}
+fn capture(pair: Pair) -> Byte {
+    var current = pair;
+    assumes current.left < 255;
+    let callback = || current.left + 1;
+    current.left = 255;
+    callback()
+}
+fn closure_parameter() -> Byte {
+    let callback = |pair: Pair| { assumes pair.left < 255; pair.left + 1 };
+    callback(Pair { left: 254, right: 255 })
+}
+comptime fn run() -> Byte {
+    let pair = Pair { left: 254, right: 255 };
+    assumes pair.left < 255;
+    pair.left + 1
+}
+fn both_branches(pair: Pair, flag: Bool) -> Byte {
+    if flag { assumes pair.left < 100; } else { assumes pair.left < 200; }
+    pair.left + 1
+}
+fn both_replaced(pair: Pair, flag: Bool) -> Byte {
+    var copy = pair;
+    if flag { copy.left = 100; assumes copy.left < 200; }
+    else { copy.left = 200; assumes copy.left < 255; }
+    copy.left + 1
+}
+fn block_condition(pair: Pair) -> Byte {
+    assumes pair.left < 100 and do { pair.right < 100 };
+    pair.left + pair.right
+}
+fn match_scope(pair: Pair, flag: Bool) -> Byte {
+    assumes pair.left < 255;
+    flag match {
+        true => { let value = pair; assumes value.left < 255; },
+        false => {},
+    };
+    pair.left + 1
+}
+fn nested_capture(outer: Outer) -> Byte {
+    assumes outer.inner.left < 255;
+    let callback = || outer.inner.left + 1;
+    callback()
+}

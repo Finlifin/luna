@@ -1,0 +1,28 @@
+-- This helper executes only after a concrete instance supplies flag.
+comptime fn invert(flag: bool) -> bool {
+    not flag
+}
+
+fn choose(
+    comptime .first_selected: bool = true,
+    comptime .second_selected: bool = not first_selected,
+    first: T,
+    second: T,
+) -> T
+where T
+{
+    if second_selected { second } else { first }
+}
+
+fn opposite(comptime flag: bool, first: T, second: T) -> T
+where T
+{
+    -- The default reads the completed result of invert(flag); it does not repeat it.
+    choose(first, second, .first_selected = invert(flag))
+}
+
+typealias Byte = .u8'builtin;
+
+fn run() -> (Byte, Byte) {
+    (opposite(true, 3, 8), opposite(false, 3, 8))
+}

@@ -1,0 +1,30 @@
+trait Source { assoc Item: .Type'builtin; }
+impl Source for bool { assoc Item: .Type'builtin = bool; }
+impl Source for 'x''type { assoc Item: .Type'builtin = 'x''type; }
+
+trait Flag where A { assoc value: bool; }
+impl Flag<bool> for bool { assoc value: bool = true; }
+impl Flag<'x''type> for bool { assoc value: bool = false; }
+
+-- 完整接口实参必须参与查找；同一个主体可以交付不同的关联值。
+fn read() -> bool
+where T :- Source, U :- Flag<T.as(Source).Item>
+{
+    U.as(Flag<T.as(Source).Item>).value
+}
+
+comptime fn compute() -> bool
+where T :- Source, U :- Flag<T.as(Source).Item>
+{
+    U.as(Flag<T.as(Source).Item>).value
+}
+
+trait Result { assoc value: bool = compute<bool, bool>(); }
+impl Result for bool {}
+
+fn entry() -> bool {
+    read<bool, bool>() and not read<'x''type, bool>() and bool.as(Result).value
+}
+comptime fn invoke() -> bool {
+    compute<bool, bool>() and not compute<'x''type, bool>()
+}

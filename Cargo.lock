@@ -91,6 +91,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "comptime_compiler"
+version = "0.1.0"
+
+[[package]]
+name = "comptime_executor"
+version = "0.1.0"
+
+[[package]]
+name = "comptime_interpretor"
+version = "0.1.0"
+dependencies = [
+ "comptime_runtime",
+ "iir",
+ "nir",
+]
+
+[[package]]
+name = "comptime_runtime"
+version = "0.1.0"
+
+[[package]]
 name = "concolor"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -200,6 +221,18 @@ name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
+
+[[package]]
+name = "elaboration"
+version = "0.1.0"
+dependencies = [
+ "comptime_interpretor",
+ "comptime_runtime",
+ "hir",
+ "iir",
+ "nir",
+ "rustc_span",
+]
 
 [[package]]
 name = "ena"
@@ -322,6 +355,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "iir"
+version = "0.1.0"
+dependencies = [
+ "comptime_runtime",
+ "nir",
+]
+
+[[package]]
 name = "indexmap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -370,6 +411,7 @@ version = "0.1.0"
 dependencies = [
  "hir",
  "middle",
+ "nir",
  "rustc_data_structures",
 ]
 
@@ -442,14 +484,22 @@ name = "luna"
 version = "0.1.0"
 dependencies = [
  "ast_lowering",
+ "comptime_executor",
+ "comptime_interpretor",
+ "comptime_runtime",
  "diagnostic",
+ "elaboration",
  "hir",
+ "iir",
  "interface",
+ "intrinsic",
  "lex",
  "middle",
+ "nir",
  "parse",
  "resolve",
  "rustc_span",
+ "vfs",
 ]
 
 [[package]]
@@ -484,11 +534,15 @@ dependencies = [
  "rustc_data_structures",
  "rustc_span",
  "salsa",
+ "vfs",
 ]
 
 [[package]]
 name = "nir"
 version = "0.1.0"
+dependencies = [
+ "comptime_runtime",
+]
 
 [[package]]
 name = "num_cpus"

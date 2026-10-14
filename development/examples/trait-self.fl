@@ -1,0 +1,22 @@
+-- Self is abstract in the default body and concrete in each selected instance.
+trait Keep {
+    fn keep(value: Self) -> Self { value }
+    fn apply(value: Self, f: fn(Self) -> Self) -> Self { f(value) }
+}
+
+struct Flag { value: true'type, }
+struct Other { value: true'type, }
+
+impl Keep for Flag {}
+impl Keep for Other {}
+
+impl Flag {
+    fn create(value: true'type) -> Self { Self { value: value } }
+}
+
+fn run() -> (true'type, true'type) {
+    let keep = Other.as(Keep).keep;
+    let first = Flag.as(Keep).apply(Flag.create(false), |flag| Flag { value: not flag.value });
+    let second = keep(Other { value: false });
+    (first.value, second.value)
+}

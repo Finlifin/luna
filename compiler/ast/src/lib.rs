@@ -1,7 +1,7 @@
 use std::fmt::Display;
 
 pub mod ast_visitor;
-use rustc_span::{SourceMap, Span};
+use rustc_span::{BytePos, SourceMap, Span};
 
 /// Node index type, for future extensibility
 pub type NodeIndex = u32;
@@ -22,16 +22,19 @@ pub struct Ast {
     pub children: Vec<NodeIndex>,
 
     pub root: NodeIndex, // 根节点索引
+
+    pub file_byte_pos: BytePos,
 }
 
 impl Ast {
-    pub fn new() -> Self {
+    pub fn new(file_byte_pos: BytePos) -> Self {
         let mut result = Ast {
             nodes: Vec::new(),
             spans: Vec::new(),
             children_start: Vec::new(),
             children: Vec::new(),
             root: 0,
+            file_byte_pos,
         };
 
         result.nodes.push(NodeKind::Invalid);
@@ -179,16 +182,27 @@ pub enum NodeKind {
 
     Id,
     Str,
+    /// Adjacent string leaves separated only by source whitespace.
+    StringConcat,
     Int,
     Real,
     Char,
     Bool,
+    /// The reserved bool type expression, distinct from true/false literals.
+    BoolType,
     Unit,
     Symbol,
     Wildcard, // _
 
     // exprs
     LiteralExtension, // a, b
+    Defer, // a: expression retained for instantiation
+    RefinedType, // a: requirement, b: base type
+    QuoteExpr, // a: runtime body, N: context substitutions
+    SpliceExpr, // a: comptime operand, N: context substitutions
+    CodeSubstitution, // a: interface name, b: source binding name
+    ContextualExprType, // a: result type, N: ordered runtime bindings
+    CodeContextBinding, // a: name, b: type
 
     ListOf,
     Tuple,
@@ -208,7 +222,9 @@ pub enum NodeKind {
     EffectQualifiedType,       // a, b
     ErrorQualifiedType,        // a, b
     ReachabilityQualifiedType, // a, b
-    ClosureQualifiedType,      // a, b (^closure_expr type_expr)
+    ClosureQualifiedType,      // a, b (%context body_type)
+    ClosureEnvironment,        // N environment bindings
+    ClosureEnvironmentBinding, // name, type, optional source
     OptionalType,              // a
     TraitObjectType,           // a
     PointerType,               // a
@@ -274,10 +290,10 @@ pub enum NodeKind {
     ErrorPropagation,  // a
     OptionPropagation, // a
 
-    Application,           // application -> expr(argument*), a, N
-    IndexApplication,      // index_application -> expr[expr], a, b
-    ExtendedApplication,   // extended_application -> expr{(property|expr)*}, a, N
-    NormalFormApplication, // normal_form_application -> expr<argument*>, a, N
+    Application,               // application -> expr(argument*), a, N
+    IndexApplication,          // index_application -> expr[expr], a, b
+    ExtendedApplication,       // extended_application -> expr{(property|expr)*}, a, N
+    NormalFormHeadApplication, // normal_form_head_application -> expr<argument*>, a, N
 
     PostMatch,    // a, N (expr match { case_arm* })
     PostLambda,   // a, b (expr do (lambda | block | expr))
@@ -300,10 +316,12 @@ pub enum NodeKind {
     MulAssign, // a, b
     // expr /= expr
     DivAssign, // a, b
+    RemAssign, // a, b
     // const pattern (: type)? = expr
     ConstDecl, // a, b, c
     // let pattern (: type)? = expr
-    LetDecl, // a, b, c
+    VarDecl, // pattern, type, init, else
+    LetDecl, // pattern, type, init, else
     // return expr? (while expr)?
     ReturnStatement, // a, b
     // resume expr? (while expr)?
@@ -330,43 +348,45 @@ pub enum NodeKind {
     ForStatement, // a, b, c, d
 
     // patterns
-    IfGuardPattern,               // a, b
-    AndIsPattern,                 // a, b, c
-    AsBindPattern,                // a, b
-    OrPattern,                    // a, b
-    OptionSomePattern,            // a
-    ErrorOkPattern,               // a
-    ErrorPattern,                 // a
-    RefPattern,                   // a (ref pattern)
-    ApplicationPattern,           // application_pattern -> pattern(pattern*), a, N
-    ExtendedApplicationPattern,   // extended_application_pattern -> pattern{...}, a, N
-    NormalFormApplicationPattern, // normal_form_application_pattern -> pattern<expr*>, a, N
-    ExprAsPattern,                // a (< expr >)
-    RangeToPattern,               // a
-    RangeToInclusivePattern,      // a
-    RangeFromPattern,             // a
-    RangeFromToPattern,           // a, b
-    RangeFromToInclusivePattern,  // a, b
-    PropertyPattern,              // a, b (id: pattern)
-    ListRestPattern,              // a (...id)
-    StructPattern,                // N
-    ListPattern,                  // N
-    TuplePattern,                 // N
-    BitVecBinPattern,             // TODO
-    BitVecOctPattern,             // TODO
-    BitVecHexPattern,             // TODO
-    AsyncPattern,                 // a
-    NotPattern,                   // a
-    TypeBindPattern,              // a
+    IfGuardPattern,                   // a, b
+    AndIsPattern,                     // a, b, c
+    AsBindPattern,                    // a, b
+    OrPattern,                        // a, b
+    OptionSomePattern,                // a
+    ErrorOkPattern,                   // a
+    ErrorPattern,                     // a
+    RefPattern,                       // a (ref pattern)
+    ApplicationPattern,               // application_pattern -> pattern(pattern*), a, N
+    ExtendedApplicationPattern,       // extended_application_pattern -> pattern{...}, a, N
+    NormalFormHeadApplicationPattern, // normal_form_head_application_pattern -> expr<type_pattern_argument*>, a, N
+    ExprAsPattern,                    // a (< expr >)
+    RangeToPattern,                   // a
+    RangeToInclusivePattern,          // a
+    RangeFromPattern,                 // a
+    RangeFromToPattern,               // a, b
+    RangeFromToInclusivePattern,      // a, b
+    PropertyPattern,                  // a, b (id: pattern)
+    ListRestPattern,                  // a (...id)
+    StructPattern,                    // N
+    ListPattern,                      // N
+    TuplePattern,                     // N
+    BitVecBinPattern,                 // N, segment...
+    BitVecOctPattern,                 // N, segment...
+    BitVecHexPattern,                 // N, segment...
+    AsyncPattern,                     // a
+    NotPattern,                       // a
+    TypeBindPattern,                  // a
 
     // items
     // pure? comptime? inline? (unsafe|spec|verified|atomic)? (extern "ABI")?
     //   fn id? ( params ) (-> return_type)? (handles eff)? clauses? (block | = expr)
     Function, // a, N, b, c, N, d
     // pure comptime fn id<params> (-> return_type)? clauses? (block | = expr)
-    NormalFormDef, // a, N, b, N, c
-    // async? effect id (params) (-> return_type)? clauses? (block | = expr)
-    AlgebraicEffect, // a, N, b, N, c
+    NormalFormHeadDef, // a, N, b, N, c
+    // async? inline? effect id (params) (-> return_type)? clauses?;
+    AlgebraicEffect, // a, N, b, N, c (reserved body is always absent)
+    // effect enum id clauses? { operation_signature* }
+    EffectEnumDef, // a, N, b
     // (id :)? type_expr
     ResultWithId, // a, b
 
@@ -477,7 +497,7 @@ pub enum NodeKind {
     OptionalParam, // a, b, c
     // id : expr
     TypeBoundParam, // a, b
-    // id :- expr
+    // id :- expr, gonna be deprecated
     TraitBoundParam, // a, b
     // self
     SelfParam,
@@ -532,6 +552,8 @@ pub enum NodeKind {
     AttributeSetTrue, // a, b
     // property -> id: expr
     Property, // a, b
+    // configuration -> .id expr (metadata of the containing definition)
+    Configuration, // a, b
     // optional_arg -> .id = expr
     OptionalArg, // a, b
     // extend_arg -> ... expr
@@ -602,7 +624,7 @@ pub enum NodeType {
     // Function definitions: a, N, b, c, N, d (id, params, return_type, handles_effect, clauses, body)
     FunctionDefChildren,
     // Normal form / Case definitions: a, N, b, N, c (id, params, return_type, clauses, body)
-    NormalFormDefChildren,
+    NormalFormHeadDefChildren,
     // Effect definitions: a, N, b, N, c (id, params, return_type, clauses, body)
     AlgebraicEffectChildren,
     // Struct/Enum/Union definitions: a, N, b (id, clauses, body)
@@ -628,12 +650,14 @@ impl NodeKind {
 
         match self {
             // No children
-            Invalid | Id | Str | Int | Real | Char | Bool | Unit | Symbol | Wildcard
+            Invalid | Id | Str | Int | Real | Char | Bool | BoolType | Unit | Symbol | Wildcard
             | SelfLower | SelfCap | Null | Undefined | SelfParam | SelfRefParam | ItselfParam
-            | ItselfRefParam | TypeDeclClause | RangeFull => NodeType::NoChild,
+            | ItselfRefParam | RangeFull => NodeType::NoChild,
 
             // Single child (a)
-            BoolNot
+            TypeDeclClause
+            | Defer
+            | BoolNot
             | Negative
             | ErrorNew
             | OptionalType
@@ -686,6 +710,8 @@ impl NodeKind {
 
             // Double children (a, b)
             LiteralExtension
+            | CodeSubstitution
+            | CodeContextBinding
             | EffectQualifiedType
             | ErrorQualifiedType
             | ReachabilityQualifiedType
@@ -719,6 +745,7 @@ impl NodeKind {
             | PipePrepend
             | HandlerApplication
             | TypeCast
+            | RefinedType
             | DynCast
             | OptionElimination
             | PostLambda
@@ -727,6 +754,7 @@ impl NodeKind {
             | SubAssign
             | MulAssign
             | DivAssign
+            | RemAssign
             | IndexApplication
             | CaseArm
             | ConditionArm
@@ -747,6 +775,7 @@ impl NodeKind {
             | VarargParam
             | AttrParam
             | Property
+            | Configuration
             | OptionalArg
             | ModuleDef
             | TestDef
@@ -766,18 +795,27 @@ impl NodeKind {
             | Ensures => NodeType::DoubleChildren,
 
             // Triple children (a, b, c)
-            ConstDecl | ConstDef | LetDecl | IfStatement | WhileStatement | IfGuardPattern
-            | AndIsPattern | AsBindPattern | OptionalDeclClause | OptionalParam | StructField => {
-                NodeType::TripleChildren
-            }
+            ConstDecl
+            | ConstDef
+            | IfStatement
+            | WhileStatement
+            | IfGuardPattern
+            | AndIsPattern
+            | AsBindPattern
+            | OptionalDeclClause
+            | OptionalParam
+            | StructField
+            | ClosureEnvironmentBinding => NodeType::TripleChildren,
 
             // Quadruple children (a, b, c, d)
-            IfIsMatch | WhileIsMatch | ForStatement => NodeType::QuadrupleChildren,
+            LetDecl | VarDecl | IfIsMatch | WhileIsMatch | ForStatement => {
+                NodeType::QuadrupleChildren
+            }
 
             // Multi children (N)
-            ListOf | Tuple | Object | Block | StructPattern | ListPattern | TuplePattern
-            | WhenStatement | BitVecBinPattern | BitVecOctPattern | BitVecHexPattern
-            | FileScope => NodeType::MultiChildren,
+            StringConcat | ListOf | Tuple | Object | ClosureEnvironment | Block | StructPattern
+            | ListPattern | TuplePattern | WhenStatement | BitVecBinPattern | BitVecOctPattern
+            | BitVecHexPattern | FileScope => NodeType::MultiChildren,
 
             // Single with multi children (a, N)
             ForallType
@@ -788,11 +826,11 @@ impl NodeKind {
             | ErrorElimination
             | Application
             | ExtendedApplication
-            | NormalFormApplication
+            | NormalFormHeadApplication
             | PostMatch
             | ApplicationPattern
             | ExtendedApplicationPattern
-            | NormalFormApplicationPattern
+            | NormalFormHeadApplicationPattern
             | IfMatch
             | TupleEnumVariant
             | StructEnumVariant
@@ -803,9 +841,9 @@ impl NodeKind {
 
             // Complex children patterns
             Function => NodeType::FunctionDefChildren, // a, N, b, c, N, d
-            NormalFormDef | CaseDef => NodeType::NormalFormDefChildren, // a, N, b, N, c
+            NormalFormHeadDef | CaseDef => NodeType::NormalFormHeadDefChildren, // a, N, b, N, c
             AlgebraicEffect => NodeType::AlgebraicEffectChildren, // a, N, b, N, c
-            StructDef | EnumDef | UnionDef | ImplDef | ExtendDef => NodeType::TypeDefChildren, // a, N, b
+            StructDef | EnumDef | EffectEnumDef | UnionDef | ImplDef | ExtendDef => NodeType::TypeDefChildren, // a, N, b
             TraitDef => NodeType::TraitDefChildren, // a, b, N, c
             ImplTraitDef => NodeType::ImplTraitDefChildren, // a, b, N, c
             ExtendTraitDef => NodeType::ExtendTraitDefChildren, // a, b, N, c
@@ -813,7 +851,7 @@ impl NodeKind {
             TypealiasDef | NewtypeDef => NodeType::TypeAliasChildren, // a, N, b
             AssocDecl => NodeType::AssocDeclChildren, // a, N, b, c, N
             FnType => NodeType::FnTypeChildren,     // flags_u32, abi_node, N
-            ProjectionMultiPath => NodeType::SingleWithMultiChildren, // a, N
+            ProjectionMultiPath | QuoteExpr | SpliceExpr | ContextualExprType => NodeType::SingleWithMultiChildren, // a, N
 
             // TODO items
             FieldMethodBound | DeclarationBound | Outcomes => NodeType::SingleChild,
@@ -1027,7 +1065,7 @@ impl Ast {
                     )
                 }
 
-                NodeType::NormalFormDefChildren => {
+                NodeType::NormalFormHeadDefChildren => {
                     // a, N, b, N, c (id, type_params, return_type, clauses, body)
                     let children = self.get_children(node_index);
                     let id = children[0];

@@ -117,6 +117,36 @@ raw_str -> @builtin.str.raw { raw_source }
 
 常见用途包括枚举无数据变体、属性键、对象键、轻量标签。
 
+```flurry
+fn is_ready(tag: Symbol) -> bool {
+    tag match {
+        .ready => true,
+        _ => false,
+    }
+}
+
+comptime fn selected() -> Symbol { .ready }
+
+test {
+    let tag = .ready;
+    assumes is_ready(tag);
+    assumes tag != .waiting;
+}
+```
+
+Symbol 已有独立的类型和值表示，可用于 runtime／comptime 调用、常量、模式和 normal-form 值参数。它可以复制并经指针读取；同名字符串仍不是同类型的值，也没有因引入 Symbol 而增加符号的大小次序。模式中的有限符号列表不能覆盖所有符号，通常需要 `_` 分支。
+
+若调用、运算协议或其他输入能提供 enum 目标，编译器先取得该上下文，再解释 `.name`；上下文仍未决定时延迟字面量默认选择。最终没有 enum 目标时得到 Symbol。这保留了 `dispatch(.quit)` 等已有用法，而不把所有符号固化成某个 enum。normal-form 中的 Symbol 保留为值参数，不展开头，也不引入头的单射性。
+
+`'tag_name` 视图也已接通：取得 Symbol 对应的 `str`，不会把符号本身变成字符串类型。操作数只求值一次；调用或提前退出仍按普通表达式次序执行。
+
+```flurry
+fn describe(tag: Symbol) -> str { tag'tag_name }
+const ready_name: str = .ready'tag_name;
+```
+
+这个视图可用于两阶段调用、常量、normal-form 的字符串参数和 staged 参数计算。所得字符串不依赖承载 Symbol 的局部对象继续存活。enum 值也支持名称视图：结果是声明中的变体名，分组变体包含组路径，与底层编码独立，具体见 [enum 表示](../type/user-defined-types/enums.md)。
+
 ---
 
 ## 常见示例

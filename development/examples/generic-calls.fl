@@ -1,0 +1,40 @@
+-- Type-parameter definitions are checked before any concrete call.
+fn keep(value: T) -> T where T { value }
+
+fn apply(value: T, transform: fn(T) -> T) -> T where T {
+    transform(value)
+}
+
+fn recur(value: T, again: true'type) -> T where T {
+    if again {
+        recur(value, false)
+    } else {
+        let capture = || value;
+        capture()
+    }
+}
+
+fn negate(value: true'type) -> true'type { not value }
+
+fn run() -> (true'type, 'x''type) {
+    (apply(keep(false), negate), recur('x', true))
+}
+
+fn explicit_and_contextual() -> true'type {
+    let explicit = keep<true'type>;
+    let contextual: fn(true'type) -> true'type = keep;
+    explicit(true) and contextual(true) and apply<true'type>(true, |value| value)
+}
+
+fn inferred_callbacks() -> true'type {
+    apply(true, |value| value) and apply(true, keep)
+}
+
+fn configured(value: T, .first: true'type = false, .second: true'type = first)
+    -> (T, true'type) where T {
+    (value, second)
+}
+
+fn configured_example() -> ('x''type, true'type) {
+    configured('x', .first = true)
+}

@@ -1,0 +1,19 @@
+typealias Type = .Type'builtin;
+typealias Text = ""'type;
+typealias Char = 'x''type;
+pure comptime fn Named<Name: Text> -> Type { .u8'builtin }
+pure comptime fn Symbol<C: Char> -> Type { .u8'builtin }
+pure comptime fn Tagged<T: Type, value: T> -> Type { T }
+pure comptime fn Checked<T: Type, Name: Text> -> Type where requires T == Named<Name> { T }
+comptime fn Build(name: Text) -> Type { Named<name> }
+comptime fn Character(value: Char) -> Type { Symbol<value> }
+comptime fn Typed(ty: Type, name: Text) -> Type { Tagged<ty, name> }
+comptime fn Verified(name: Text) -> Type { Checked<Named<name>, name> }
+comptime fn IdentityType(ty: Type) -> Type { ty }
+comptime fn Escaped() -> Type { Named<"a\"\\\n\tλ"> }
+typealias First = Named<"flurry">;
+typealias Second = Build("flurry");
+fn same(value: First) -> Second { value }
+typealias Rune = Symbol<'λ'>;
+typealias CheckedName = Verified("flurry");
+typealias TextTag = Typed(Text, "flurry");

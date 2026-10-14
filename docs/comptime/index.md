@@ -8,6 +8,62 @@ Flurry 程序中的一部分计算由编译器执行，其余计算留给生成�
 
 输入尚未确定时，编译器仍能利用操作的契约检查代码。知道一个结果满足什么条件，往往已经足以检查后面的操作，而不必先把这个结果完整算出来。
 
+## 当前局部 const 实现
+
+runtime 正文中的局部 `const` 已支持编译时求值的标量、Type、元组及名义聚合数据，并可作不可反驳的解构绑定。后续使用取得完成的数据，不留下 runtime initializer；编译时初始化不能读取 runtime 参数或局部状态，也不能调用 runtime 函数。
+
+~~~flurry
+pure comptime fn invert(value: bool) -> bool {
+    const result = not value;
+    result
+}
+
+fn configured() -> bool {
+    const Flag = bool;
+    const (enabled, disabled): (Flag, Flag) = (invert(false), invert(true));
+    const code = '(enabled and not disabled);
+    ~<code>
+}
+~~~
+
+comptime 函数中的数据 const 按每次 invocation 的输入建立绑定，不要求在检查函数定义时提前知道实参。runtime 函数中的 Type 常量可以保留当前泛型参数；normal-form 的头保持不透明，局部别名不会使 Identity<T> 等于 T。quoted code 仍走独立的代码值路径，普通数据与代码别名可组合使用。
+
+局部 const 也可保存 runtime 函数声明身份、固定的泛型函数实例，以及包含函数值的元组／记录；保存身份本身不调用该函数。闭包拥有的捕获环境可按当前值重建，包含调用后已更新的环境字段。图内同一闭包的多个引用及嵌套共享引用保持共享；分别构造的按值捕获闭包仍有独立环境。每次常量物化重新分配内部局部身份，并建立独立的环境快照。const initializer 中创建的闭包仍属于 comptime，后续 const 可调用它，但不能直接在 runtime 调用。外部活跃指针捕获与循环闭包对象图仍被拒绝。runtime 正文中的 const guard／else 仍未接通。这些是实现边界，不缩减后文的完整阶段契约。
+
+~~~flurry
+fn invert_runtime(value: bool) -> bool { not value }
+
+fn selected_callback() -> bool {
+    const action = invert_runtime;
+    action(false)
+}
+
+fn computed_with_closure() -> bool {
+    const action = do { let enabled = true; |value: bool| enabled and value };
+    const result = action(true);
+    result
+}
+~~~
+
+同一快照内的闭包状态更新可观察，而不会串到另一份快照：
+
+~~~flurry
+fn toggled_twice() -> bool {
+    const actions = do {
+        var flag = false;
+        let toggle = || { flag = not flag; flag };
+        (toggle, toggle)
+    };
+    const result = do {
+        let (first, second) = actions;
+        first() and not second()
+    };
+    result
+}
+~~~
+
+两次调用操作同一闭包环境，所以结果为 true。若分别写两个 lambda，各自按值捕获 flag，它们不会因此共享 flag 的存储。通过外部指针建立共享状态属于另一种依赖，不能用上述快照替代。
+
 ## 语法
 
 本节列出阅读入口；`expr`、`parameter`、`result`、`clauses`、`statement` 和 `block` 复用[全局语法](../grammar/syntax)。

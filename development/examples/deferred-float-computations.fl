@@ -1,0 +1,13 @@
+typealias Integer = .Integer'builtin;
+
+fn choose(comptime flag: bool) -> bool { flag }
+
+fn forward(comptime mode: Integer) -> (bool, bool, bool) {
+    (
+        choose(if mode == 3 { (1.0 + 1.0) == 2.0 } else { false }),
+        choose(if mode == 3 { (0.0 / 0.0) != 0.0 } else { false }),
+        choose(if mode == 3 { (1.0 / -0.0) < 0.0 } else { false })
+    )
+}
+
+fn run() -> (bool, bool, bool) { forward(3) }

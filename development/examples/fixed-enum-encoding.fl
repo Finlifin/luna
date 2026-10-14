@@ -1,0 +1,37 @@
+-- Fixed-mask representation exercised by the source execution test.
+-- Registers deliberately use BitVec<5>; arbitrary-width integer u5 remains
+-- a separate compiler/library prerequisite of the full documentation example.
+typealias Word = .u32'builtin;
+typealias RegisterBits = .BitVec'builtin<5>;
+
+enum ArithmeticInstruction {
+    .base_type Word,
+    .width 32,
+    .discrete_tag true,
+
+    add: 0b0000000 (rs2: RegisterBits) (rs1: RegisterBits) 000 (rd: RegisterBits) 0110011,
+    sub: 0b0100000 (rs2: RegisterBits) (rs1: RegisterBits) 000 (rd: RegisterBits) 0110011,
+}
+
+fn destination(instruction: ArithmeticInstruction) -> Word {
+    instruction match {
+        .add { rd: rd } => rd.as(Word),
+        .sub { rd: rd } => rd.as(Word),
+    }
+}
+
+fn add_word() -> Word {
+    let instruction = ArithmeticInstruction.add { rd: 1, rs1: 2, rs2: 3 };
+    (instruction'bitvec).as(Word)
+}
+
+fn sub_word() -> Word {
+    let instruction = ArithmeticInstruction.sub { rs2: 3, rd: 1, rs1: 2 };
+    (instruction'bitvec).as(Word)
+}
+
+fn run() -> bool {
+    add_word() == 0x003100b3
+        and sub_word() == 0x403100b3
+        and destination(ArithmeticInstruction.add { rd: 7, rs1: 2, rs2: 3 }) == 7
+}

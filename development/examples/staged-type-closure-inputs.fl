@@ -1,0 +1,29 @@
+typealias Type = .Type'builtin;
+
+fn identity(comptime T: Type, value: T) -> T { value }
+
+fn apply(comptime T: Type, value: T) -> T {
+    -- T is supplied at staging; the runtime lambda needs no Type capture cell.
+    let call = |item: T| identity(T, item);
+    call(value)
+}
+
+fn captured(comptime T: Type, value: T) -> T {
+    -- Each runtime closure captures value, while T remains a symbolic type.
+    let outer = || {
+        let inner = || identity(T, value);
+        inner()
+    };
+    outer()
+}
+
+comptime fn Choose(comptime T: Type) -> Type {
+    -- This closure executes at comptime and may capture a Type value.
+    let call = || T;
+    call()
+}
+
+typealias Flag = Choose(bool);
+fn run() -> (Flag, 'x''type) {
+    (apply(bool, true), captured('x''type, 'x'))
+}

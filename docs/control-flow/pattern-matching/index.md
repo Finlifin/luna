@@ -80,6 +80,198 @@ var { name, age } = student;
 - **`as`**：`pat as name`，匹配 `pat` 同时把整体绑到 `name`。
 - **守卫**：`pat if cond`；`cond` 为真才成功（模式层用 `if`，与语句守卫 `while` 不同）。
 
+### 观察模式与整体绑定的所有权
+
+模式只检查字面量、变体或不绑定的字段时，不会凭空取得字段的第二份所有权。`as` 可以在检查成功后交付整个仿射值：
+
+~~~flurry
+struct Packet where T {
+    ready: bool,
+    payload: T,
+}
+
+fn retain(packet: Packet<T>) -> Packet<T> where T {
+    packet match {
+        {ready: true} as whole => whole,
+        whole => whole,
+    }
+}
+~~~
+
+第一个候选只观察 `ready`，没有绑定 `payload`。成功时移动整个 Packet；失败时下一个候选仍接收完整 Packet。带外层守卫的候选同样只在守卫成功后提交交付。若整个值未交付而需要清理，仍保留父对象及实际载荷的清理责任。
+
+这也适用于没有内部绑定的 `or`，例如 `(.one(true, _) or .two {flag: true}) as whole`。相反，`{payload: item} as whole` 同时要求内部载荷与完整对象，必须另外证明允许重叠交付，不能由 `as` 自动获得 Copy。
+
+当额外绑定的字段具有 Copy 能力时，可以复制该字段，同时移动整个仿射对象：
+
+~~~flurry
+fn inspect_ready(packet: Packet<T>) -> (bool, Packet<T>) where T {
+    let {ready} as whole = packet;
+    (ready, whole)
+}
+~~~
+
+这里只要求 `ready` 的 bool 值可以复制，不要求 `T` 或整个 Packet 可以复制。Packet 的字段没有被移出，父对象的析构函数仍可读取原来的字段；复制指针也保留对其所指对象的依赖。嵌套 `as` 中，每个额外取得的值分别检查 Copy；仿射载荷不能借多层绑定绕过此要求。当前所有权实现已接通这种额外复制与整体交付，并在外层守卫失败时保留原主语的责任。
+
+带绑定的 `or` 在每个候选中分别检查模式，再将成功候选的名字对应到同一组导出绑定。例如：
+
+~~~flurry
+fn unpack(packet: Packet<T>) -> T where T {
+    packet match {
+        {ready: true, payload: item}
+            or {payload: item, ready: false} => item,
+    }
+}
+~~~
+
+两个候选的字段书写次序不同，但 `item` 都来自同一个 `payload` 位置。前一候选失败不会移动该载荷；后一候选成功后只交付一次。外层守卫失败时，同样不提交这组绑定。
+
+当前所有权实现也支持在同一分解布局中选择不同字段的仿射交付，例如：
+
+~~~flurry
+struct Ticket {}
+
+fn take(value: Ticket) {}
+
+fn choose(flag: bool) {
+    let pair = (flag, Ticket {}, Ticket {});
+    pair match {
+        (true, item, _) or (false, _, item) => take(item),
+    };
+}
+~~~
+
+成功候选记录 `item` 实际来自哪个字段，守卫成功后才提交移动。剩余主语按实际初始化状态清理；不会把未选中的 Ticket 一起移走，也不会重复清理交付给 `take` 的 Ticket。具名字段、嵌套结构、嵌套 `or` 和 `let … else` 使用同一机制。失败候选撤销绑定及其字段来源，外层守卫失败时仍可用完整主语尝试下一 arm。
+
+不同枚举变体也可以交付同一个仿射绑定，即使载荷布局不同：
+
+~~~flurry
+struct Ticket {}
+
+enum Packet {
+    pair(Ticket, Ticket),
+    tagged(bool, Ticket, Ticket),
+}
+
+fn take(value: Ticket) {}
+
+fn choose(value: Packet) {
+    value match {
+        .pair(item, _) or .tagged(_, _, item) => take(item),
+    };
+}
+~~~
+
+`.pair` 移走第一个 Ticket，`.tagged` 移走最后一个 Ticket。两种剩余布局分别通过所有权和 Drop 契约检查，执行时按实际标签选中唯一清理计划。父对象先清理，再按该布局清理剩余字段；交付出去的 `item` 由其新所有者负责。嵌套枚举从外层标签开始检查，未选中变体中的字段路径不会被访问。同一标签内部还可以继续使用按初始化状态判断的条件清理。
+
+`(.one(_) as whole) or (.two {} as whole)` 交付的都是整体，可以继续共享计划。不能由互斥标签区分的不同残余布局，以及一般副作用候选计算和具有独立资源的顺序匹配结果仍需进一步实现；这些是实现边界，不是对 `or` 语言语义的新限制。条件结构分析有候选数量与燃料预算，运行时仍执行原始模式，不重放观察表达式。
+
+候选也可以按不同次序引入同一组仿射绑定：
+
+~~~flurry
+fn inspect(value: (bool, Ticket, Ticket)) {
+    value match {
+        (true, first, second) or (false, second, first) => (),
+    };
+}
+~~~
+
+第一候选成功时，退出 arm 先清理 `second`，再清理 `first`；第二候选成功时则先清理 `first`，再清理 `second`。名字对应到共同绑定，不会把成功候选的声明次序也改成第一候选的次序。已经移动的绑定跳过，覆盖赋值保留该绑定原有的清理位置；其他词法绑定与残余主语的清理位置不变。
+
+所有可能的清理次序都必须满足内存依赖。若 `second` 的析构要访问 `first`，却存在先清理 `first` 的成功候选，编译器不能靠交换析构来使程序通过。解释执行记录成功候选的绑定次序；失败候选及失败守卫不安装这份记录，调用和循环分别保持各自的有效记录。
+
+守卫可以调用函数来判断尚未提交的绑定中的标量字段：
+
+```flurry
+fn accept(ready: bool) -> bool { ready }
+
+fn inspect(packet: Packet<T>) -> bool where T {
+    packet match {
+        item if accept(item.ready) => true,
+        _ => false,
+    }
+}
+```
+
+这里沿用前文具有 `ready: bool` 字段的 Packet。`accept` 的实参只复制字段，返回 false 时原 Packet 仍由后续候选接收；调用不会重放，短路表达式仍保持短路。callee 自己创建的资源按正常调用规则清理。当前实现支持直接函数及已实例化函数、显式标量实参和标量结果，也支持嵌套调用；调用仍经过普通调用检查。传递仿射值或指针、默认实参、间接调用以及可能发生契约拒绝的调用尚需完整的候选失败路径资源事务，当前明确拒绝。这是实现范围，不是语言对守卫表达式的永久限制。
+
+只观察绑定的守卫也可位于 `or` 的内部或单个字段上。括号明确划定候选范围：
+
+```flurry
+fn inspect_packets(value: (Packet<T>, Packet<T>)) -> bool where T {
+    value match {
+        ((first, second) if accept(first.ready)) or
+        ((second, first) if accept(first.ready)) => first.ready,
+        _ => false,
+    }
+}
+```
+
+第一候选的守卫失败后，撤销它的绑定及来源，再按第二候选自己的名字环境求值。这里第二次 `first` 来自原 tuple 的第二个位置；统一候选绑定名字不能改变该读取。成功后仍按实际绑定取得次序逆序清理。字段守卫、`as whole` 内部的 Copy 观察和 `let-else` 复用此规则；守卫中的仿射消费仍不能绕过失败路径检查。
+
+顺序匹配可以使用前一步的绑定计算新的标量，并继续解构或检验该结果：
+
+```flurry
+fn flip(value: bool) -> bool { not value }
+
+fn inspect_computed(packet: Packet<T>) -> bool where T {
+    let item and flip(item.ready) is inverted
+        and flip(inverted) is restored = packet;
+    restored and not inverted
+}
+```
+
+`item` 接收原 Packet；`inverted`、`restored` 来自各自的计算结果，不是 Packet 中被移出的字段。只有左侧匹配成功后才执行下一段计算；右侧匹配失败时撤销整个候选的绑定，下一个候选仍接收原主语。链式计算、`or` 内的顺序匹配和 `let-else` 已接入资源检查；运行时保持原始模式树与单次求值。当前中间结果限于内建标量，计算遵循上述观察表达式规则。带资源、指针或副作用的中间结果仍需独立的失败路径清理与来源运输，当前明确拒绝。
+
+候选计算也可以用块组织局部步骤：
+
+```flurry
+fn inspect_block(packet: Packet<T>) -> bool where T {
+    let item and do {
+        let original = item.ready;
+        var result = not original;
+        result = not result;
+        accept(result)
+    } is true = packet else { return false; };
+    item.ready
+}
+```
+
+块中的标量绑定只在块内有效；块结束后，中间值由后续模式接收。局部声明、嵌套块、分支、标量调用和当前块局部变量的赋值已接通。失败候选不会留下这些局部变量；后续候选执行自己的计算，不会为了构造清理计划而重放前一候选的步骤。当前不允许这种观察块写入外部变量、创建资源或指针绑定、消费候选所有者或向外层 return；这些操作需要一般候选事务承担失败路径责任。
+
+所有导出绑定均可 Copy 时，普通 `or` 的候选也可以从不同位置复制，不要求外层 `as`：
+
+~~~flurry
+enum Signal where T {
+    left(bool, T),
+    right(T, bool),
+}
+
+fn enabled(value: Signal<T>) -> bool where T {
+    value match {
+        .left(flag, _) or .right(_, flag) => flag,
+    }
+}
+~~~
+
+这里两个 `flag` 的位置不同，但各自都是 bool 副本。当前实现分别检查候选，按对应绑定合并指针来源、回调信息及可用性；不会把一个候选的来源当成所有候选的来源。主语的实际变体及完整载荷保留到对应清理边界，因此不需要把父对象拆成两种残余布局。需要把整个主语另行交付时，仍可在外层加 `as whole`。仿射载荷使用前述条件移动与残余清理计划；不会沿用 Copy 路径来免除移动责任。
+
+### 匿名结构体的字段模式
+
+属性收集产生的匿名结构体也可以按字段名解构。模式中的字段顺序不必与构造顺序相同，省略字段不参与匹配；字段交付与剩余资源清理仍遵循普通移动规则。
+
+~~~flurry
+fn build(...properties: T) -> T where T { properties }
+
+fn read() -> bool {
+    let options = build {enabled: true, nested: build {value: false}};
+    let {nested: {value}, enabled} = options;
+    enabled and not value
+}
+~~~
+
+嵌套字段可以继续使用字面量、绑定或其他模式。未知字段、重复字段以及未覆盖全部可能输入的 match 都会被拒绝。
+
 ### 模式优先级与括号
 
 优先级决定模式的组合范围，不决定 match 各个 arm 的尝试顺序。下表由紧到松排列；同一层连续出现时按从左到右接合，括号先建立一个完整子模式。
@@ -333,6 +525,8 @@ test {
 3. `case`：解析签名上的返回类型与子句；按 option+元组约定检查体；匹配侧 `.name` 解析到 case 声明。
 4. 与效应 / 纯度 / 可分析性分级的接口预留；**分级表本章不写**（待定）。
 5. `let` / `var`：复用同一模式检查器；可反驳模式的 `else` 须检查发散。
+
+降低 `or` 候选时，绑定对应使用同时重命名：所有来源先从本候选成功导出的绑定中取得，再发布目标。环境中原有的同号局部、前一失败候选撤销后恢复的局部，都不能充当本候选的来源。来源和目标各自唯一，也不能覆盖本候选中未参与重命名的另一个导出绑定。解释执行与编译期折叠遵循同一规则；守卫失败或求值预算耗尽时，撤销候选中新建及改名的绑定。
 
 ---
 

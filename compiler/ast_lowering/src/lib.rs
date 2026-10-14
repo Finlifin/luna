@@ -40,6 +40,8 @@ mod item;
 mod pattern;
 pub mod providers;
 
+use std::collections::HashMap;
+
 pub use error::{LoweringError, LoweringErrorKind};
 pub use providers::set_providers;
 
@@ -51,7 +53,10 @@ use hir::{
     common::{Ident, Symbol},
     hir_id::{BodyId, HirId, ItemLocalId, OwnerId},
 };
-use resolve::{Resolver, ScopeId};
+use resolve::{
+    Binding, BindingKind, Resolution, ResolveError, ResolveResult, Resolver, Rib, RibKind, ScopeId,
+    binding::Visibility::Private, ids::AstNodeRef,
+};
 use rustc_span::{SourceMap, Span};
 
 /// Lower a single file's AST into HIR, appending definitions to `package`.
@@ -67,17 +72,18 @@ use rustc_span::{SourceMap, Span};
 /// - `resolver`     – the early name resolver built from the module tree.
 /// - `file_scope`   – the scope that owns the top-level definitions of this
 ///                    file (used as the starting point for name resolution).
-pub fn lower_to_hir<'hir>(
-    ast: &Ast,
+pub fn lower_to_hir<'hir, 'ast, 'resolver: 'ast>(
+    ast: &'ast Ast,
+    file_id: vfs::FileId,
     arena: &'hir HirArena,
-    source_map: &SourceMap,
-    diag_ctx: &DiagnosticContext<'_>,
-    package: &mut Package<'hir>,
-    resolver: &Resolver<'_>,
+    source_map: &'ast SourceMap,
+    diag_ctx: &'ast DiagnosticContext<'ast>,
+    package: &'ast mut Package<'hir>,
+    resolver: &'resolver mut Resolver<'resolver>,
     file_scope: ScopeId,
 ) {
     let mut ctx = LoweringContext::new(
-        ast, arena, source_map, diag_ctx, package, resolver, file_scope,
+        ast, file_id, arena, source_map, diag_ctx, package, resolver, file_scope,
     );
     ctx.lower_file_scope(ast.root);
 }
@@ -86,9 +92,10 @@ pub fn lower_to_hir<'hir>(
 ///
 /// Owns the in-progress [`Package`] and maintains per-owner HirId
 /// allocation state.
-pub struct LoweringContext<'hir, 'ast> {
+pub struct LoweringContext<'hir, 'ast, 'resolver> {
     pub(crate) ast: &'ast Ast,
     pub(crate) arena: &'hir HirArena,
+    file_id: vfs::FileId,
     source_map: &'ast SourceMap,
     diag_ctx: &'ast DiagnosticContext<'ast>,
 
@@ -100,25 +107,29 @@ pub struct LoweringContext<'hir, 'ast> {
     next_local_id: u32,
 
     /// Early name resolver – performs module-level name lookup.
-    pub(crate) resolver: &'ast Resolver<'ast>,
+    pub(crate) resolver: &'resolver mut Resolver<'resolver>,
+    pub(crate) ast_ref_to_hir_id: HashMap<AstNodeRef, HirId>,
     /// The scope that owns the top-level names of the file being lowered.
     pub(crate) file_scope: ScopeId,
 
     pub(crate) surrouding_ctx: Vec<SurroundingContext>,
+    pub(crate) refinement_depth: usize,
 }
 
-impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
+impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
     fn new(
         ast: &'ast Ast,
+        file_id: vfs::FileId,
         arena: &'hir HirArena,
         source_map: &'ast SourceMap,
         diag_ctx: &'ast DiagnosticContext<'ast>,
         package: &'ast mut Package<'hir>,
-        resolver: &'ast Resolver<'ast>,
+        resolver: &'resolver mut Resolver<'resolver>,
         file_scope: ScopeId,
     ) -> Self {
         LoweringContext {
             ast,
+            file_id,
             arena,
             source_map,
             diag_ctx,
@@ -127,7 +138,9 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
             next_local_id: 0,
             resolver,
             file_scope,
+            ast_ref_to_hir_id: HashMap::default(),
             surrouding_ctx: Vec::new(),
+            refinement_depth: 0,
         }
     }
 
@@ -136,6 +149,71 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         let local = ItemLocalId::new(self.next_local_id);
         self.next_local_id += 1;
         HirId::new(self.current_owner, local)
+    }
+
+    pub(crate) fn ast_node_ref(&self, node: NodeIndex) -> AstNodeRef {
+        AstNodeRef::new(self.file_id, node)
+    }
+
+    pub(crate) fn local_enter(&mut self, rib_kind: RibKind) -> usize {
+        self.resolver
+            .ribs_mut()
+            .push(Rib::new(rib_kind, ScopeId::INVALID));
+        self.resolver.ribs().depth() - 1
+    }
+
+    pub(crate) fn local_exit(&mut self, expected_rib_index: usize) {
+        while self.resolver.ribs().depth() > expected_rib_index {
+            self.resolver.ribs_mut().pop();
+        }
+    }
+
+    pub(crate) fn resolve(&mut self, id: Ident) -> ResolveResult<Resolution> {
+        self.resolver
+            .resolve_name(id.name, self.file_scope, id.span)
+    }
+
+    pub(crate) fn define_symbol(&mut self, name: Ident, binding_kind: BindingKind) {
+        self.resolver
+            .ribs_mut()
+            .current_mut()
+            .expect("define_symbol called with no current rib")
+            .define(
+                name.name,
+                Binding {
+                    entry: None,
+                    kind: binding_kind,
+                    vis: Private,
+                },
+            );
+    }
+
+    pub(crate) fn define_local(
+        &mut self,
+        name: Ident,
+        ast_node: ast::NodeIndex,
+        corrresponding_hir_id: HirId,
+    ) {
+        let ast_node_ref = self.ast_node_ref(ast_node);
+        self.define_symbol(name, BindingKind::Local(ast_node_ref));
+        self.record_hir_id(ast_node_ref, corrresponding_hir_id);
+    }
+
+    pub(crate) fn define_fn_param(&mut self, name: Ident, ast_node: ast::NodeIndex, hir_id: HirId) {
+        let ast_node_ref = self.ast_node_ref(ast_node);
+        self.define_symbol(name, BindingKind::FnParam(ast_node_ref));
+        self.record_hir_id(ast_node_ref, hir_id);
+    }
+
+    pub(crate) fn define_loop_label(
+        &mut self,
+        name: Ident,
+        ast_node: ast::NodeIndex,
+        hir_id: HirId,
+    ) {
+        let ast_node_ref = self.ast_node_ref(ast_node);
+        self.define_symbol(name, BindingKind::LoopLabel(ast_node_ref));
+        self.record_hir_id(ast_node_ref, hir_id);
     }
 
     /// Reset the local id counter (called when switching owners).
@@ -189,44 +267,52 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         self.surrouding_ctx.pop();
     }
 
+    pub(crate) fn record_hir_id(&mut self, ast_node: AstNodeRef, hir_id: HirId) {
+        self.ast_ref_to_hir_id.insert(ast_node, hir_id);
+    }
+
+    pub(crate) fn emit_resolve_error(&self, err: ResolveError) {
+        err.emit(self.diag_ctx, self.ast.file_byte_pos);
+    }
+
     pub(crate) fn emit_unsupported_node(&self, name: &str, span: Span) {
         let err = LoweringError::unsupported_node(name, span);
-        err.emit(self.diag_ctx, rustc_span::BytePos(0));
+        err.emit(self.diag_ctx, self.ast.file_byte_pos);
     }
 
     pub(crate) fn emit_malformed(&self, msg: &str, span: Span) {
         let err = LoweringError::malformed_ast(msg, span);
-        err.emit(self.diag_ctx, rustc_span::BytePos(0));
+        err.emit(self.diag_ctx, self.ast.file_byte_pos);
     }
 
     pub(crate) fn emit_unsupported_clause(&self, msg: &str, span: Span) {
         let err = LoweringError::unsupported_clause(msg, span);
-        err.emit(self.diag_ctx, rustc_span::BytePos(0));
+        err.emit(self.diag_ctx, self.ast.file_byte_pos);
     }
 
     pub(crate) fn emit_invalid_parameter(&self, msg: &str, span: Span) {
         let err = LoweringError::invalid_parameter(msg, span);
-        err.emit(self.diag_ctx, rustc_span::BytePos(0));
+        err.emit(self.diag_ctx, self.ast.file_byte_pos);
     }
 
     pub(crate) fn emit_invalid_pattern(&self, msg: &str, span: Span) {
         let err = LoweringError::invalid_pattern(msg, span);
-        err.emit(self.diag_ctx, rustc_span::BytePos(0));
+        err.emit(self.diag_ctx, self.ast.file_byte_pos);
     }
 
     pub(crate) fn emit_invalid_item(&self, msg: &str, span: Span) {
         let err = LoweringError::invalid_item(msg, span);
-        err.emit(self.diag_ctx, rustc_span::BytePos(0));
+        err.emit(self.diag_ctx, self.ast.file_byte_pos);
     }
 
     pub(crate) fn emit_invalid_enum_variant(&self, msg: &str, span: Span) {
         let err = LoweringError::invalid_enum_variant(msg, span);
-        err.emit(self.diag_ctx, rustc_span::BytePos(0));
+        err.emit(self.diag_ctx, self.ast.file_byte_pos);
     }
 
     pub(crate) fn emit_invalid_struct_field(&self, msg: &str, span: Span) {
         let err = LoweringError::invalid_struct_field(msg, span);
-        err.emit(self.diag_ctx, rustc_span::BytePos(0));
+        err.emit(self.diag_ctx, self.ast.file_byte_pos);
     }
 }
 

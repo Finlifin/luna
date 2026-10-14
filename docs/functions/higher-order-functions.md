@@ -19,6 +19,10 @@ lambda_param -> lambda parameter
 
 环境参数使用 `C: Type.vars.Closure`。
 
+函数返回类型中的 `->` 向右结合：`fn() -> fn() -> bool` 表示返回一个
+`fn() -> bool` 函数值的无参函数，即 `fn() -> (fn() -> bool)`。
+`comptime fn` 使用相同的分组规则；括号可以显式划定类型表达式的范围。
+
 ## 正式定义
 
 ### 普通函数值

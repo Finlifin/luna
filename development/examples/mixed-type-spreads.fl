@@ -1,0 +1,12 @@
+typealias Type = .Type'builtin;
+typealias Byte = .u8'builtin;
+
+pure comptime fn Tagged<T, value: T> -> Type { T }
+
+comptime fn packet() -> (Type, Byte) { (Byte, 7) }
+
+typealias Chosen = Tagged<...packet()>;
+
+comptime fn Run() -> Type {
+    Tagged<...packet()>
+}

@@ -1,0 +1,1051 @@
+//! Source -> concrete high-level instance graph, without interpreting templates.
+use luna::{
+    cli::{Emit, Options},
+    frontend::{self, Artifact},
+};
+use std::sync::atomic::{AtomicU64, Ordering};
+static NEXT: AtomicU64 = AtomicU64::new(0);
+fn compile(source: &str) -> nir::program::Package {
+    compile_in(source, 0)
+}
+fn compile_in(source: &str, identity: u64) -> nir::program::Package {
+    let path = std::env::temp_dir().join(format!(
+        "luna-iir-{}-{}.fl",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&path, source).unwrap();
+    let artifact = frontend::compile_in_package(
+        &Options {
+            input: path.clone(),
+            emit: Emit::Nir,
+            output: None,
+            sysroot: None,
+            splice_protocol: None,
+            meta_list_type: None,
+            index_protocol: None, arithmetic_protocols:Default::default(), tuple_type: None, optional_type: None,
+        },
+        identity,
+    );
+    std::fs::remove_file(path).unwrap();
+    let Artifact::Nir(package) = artifact.unwrap() else {
+        panic!("expected NIR")
+    };
+    package
+}
+#[test]
+fn instances_close_recursive_generic_closure_and_dispatch_dependencies() {
+    let source = compile(include_str!(
+        "../../../development/examples/instantiated-functions.fl"
+    ));
+    let before = source.to_string();
+    let output = luna::instantiation::instantiate(&source, "entry", 100_000).unwrap();
+    output.validate(&mut 100_000).unwrap();
+    assert_eq!(source.to_string(), before);
+    let identities: Vec<_> = output
+        .functions
+        .iter()
+        .filter(|f| f.function.name == "identity")
+        .collect();
+    assert_eq!(identities.len(), 3);
+    assert!(
+        identities
+            .iter()
+            .all(|f| f.function.type_parameters.is_empty())
+    );
+    assert_eq!(
+        output
+            .functions
+            .iter()
+            .filter(|f| f.function.name == "recurse")
+            .count(),
+        1
+    );
+    assert!(
+        !output
+            .functions
+            .iter()
+            .any(|f| f.function.name == "unreachable")
+    );
+    assert_eq!(output.dispatch.len(), 1);
+    let again = luna::instantiation::instantiate(&source, "entry", 100_000).unwrap();
+    assert_eq!(output.to_string(), again.to_string());
+    assert!(output.to_string().contains("(closure"));
+    std::fs::write("/tmp/luna-instantiated-functions.lisp", output.to_string()).unwrap();
+    let mut damaged = output.clone();
+    let dependency = damaged
+        .functions
+        .iter()
+        .position(|f| f.function.name == "identity")
+        .unwrap();
+    damaged.functions.remove(dependency);
+    assert!(
+        damaged
+            .validate(&mut 100_000)
+            .unwrap_err()
+            .contains("dangling")
+    );
+    let mut missing_type = output.clone();
+    missing_type.nominals.clear();
+    assert!(
+        missing_type
+            .validate(&mut 100_000)
+            .unwrap_err()
+            .contains("nominal reference is dangling")
+    );
+    assert!(luna::instantiation::instantiate(&source, "entry", 1).is_err());
+    assert_eq!(
+        luna::instantiation::instantiate(&source, "entry", 100_000).unwrap(),
+        output
+    );
+}
+
+#[test]
+fn instance_obligations_fail_without_poisoning_other_requests() {
+    let source = compile(
+        "typealias Bool=true'type; fn constrained(value:T)->T where T, requires T == Bool { value } fn identity(value:T)->T where T { value } struct Checked where T, requires T == Bool { value:T }",
+    );
+    let constrained = source
+        .functions
+        .iter()
+        .find(|f| f.name == "constrained")
+        .unwrap()
+        .declaration;
+    let request = |argument| iir::InstanceKey {
+        declaration: constrained,
+        arguments: vec![argument],
+    };
+    let rejected = elaboration::materialization::instantiate(
+        &source,
+        &[request(nir::Term::Primitive(nir::Primitive::U8))],
+        Default::default(),
+        Default::default(),
+    )
+    .unwrap_err();
+    assert!(rejected.contains("function type requirement"), "{rejected}");
+    let accepted = elaboration::materialization::instantiate(
+        &source,
+        &[request(nir::Term::Primitive(nir::Primitive::Bool))],
+        Default::default(),
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(accepted.functions.len(), 1);
+    let identity = source
+        .functions
+        .iter()
+        .find(|f| f.name == "identity")
+        .unwrap()
+        .declaration;
+    let checked = source
+        .structs
+        .iter()
+        .find(|s| s.name == "Checked")
+        .unwrap()
+        .declaration;
+    let malformed = iir::InstanceKey {
+        declaration: identity,
+        arguments: vec![nir::Term::Nominal {
+            declaration: checked,
+            arguments: vec![nir::Term::Primitive(nir::Primitive::U8)],
+        }],
+    };
+    let error = elaboration::materialization::instantiate(
+        &source,
+        &[malformed],
+        Default::default(),
+        Default::default(),
+    )
+    .unwrap_err();
+    assert!(error.contains("type formation requirement"), "{error}");
+    assert!(
+        luna::instantiation::instantiate(&source, "constrained", 100_000)
+            .unwrap_err()
+            .contains("nongeneric wrapper")
+    );
+}
+
+#[test]
+fn instances_preserve_normal_form_heads_without_invoking_their_bodies() {
+    let source = compile(include_str!(
+        "../../../development/examples/normal-form-text.fl"
+    ));
+    let output = luna::instantiation::instantiate(&source, "same", 100_000).unwrap();
+    assert_eq!(output.functions.len(), 1);
+    assert!(!output.normal_forms.is_empty());
+    let nir::Term::Function { parameters, result } = &output.functions[0].function.signature else {
+        panic!("signature")
+    };
+    assert!(matches!(&parameters[0].ty, nir::Term::NormalForm { .. }));
+    assert_eq!(&parameters[0].ty, result.as_ref());
+    let head = source
+        .functions
+        .iter()
+        .find(|f| f.name == "Named")
+        .unwrap()
+        .declaration;
+    assert!(
+        elaboration::materialization::instantiate(
+            &source,
+            &[iir::InstanceKey {
+                declaration: head,
+                arguments: vec![]
+            }],
+            Default::default(),
+            Default::default()
+        )
+        .unwrap_err()
+        .contains("normal-form heads")
+    );
+}
+
+#[test]
+fn instantiation_does_not_demand_unused_conditional_interface_members() {
+    let source = compile(
+        "trait Read where T { fn read() -> true'type; fn restricted() -> true'type where requires T == true'type; } struct S {} impl Read<'x''type> for S { fn read() -> true'type { true } fn restricted() -> true'type where requires 'x''type == true'type { false } } fn entry()->true'type { S.as(Read<'x''type>).read() }",
+    );
+    let output = luna::instantiation::instantiate(&source, "entry", 100_000).unwrap();
+    assert!(
+        !output
+            .functions
+            .iter()
+            .any(|f| f.function.name == "restricted")
+    );
+    assert_eq!(output.dispatch[0].methods.len(), 1);
+    output.validate(&mut 100_000).unwrap();
+}
+
+#[test]
+fn unused_interface_signatures_retain_their_nominal_dependencies() {
+    let source = compile(
+        "struct Item {} trait API { fn used()->true'type; fn unused()->Item; } struct S {} impl API for S { fn used()->true'type {true} fn unused()->Item {Item {}} } fn entry()->true'type {S.as(API).used()}",
+    );
+    let output = luna::instantiation::instantiate(&source, "entry", 100_000).unwrap();
+    assert!(!output.functions.iter().any(|f| f.function.name == "unused"));
+    assert!(
+        output.nominals.iter().any(
+            |n| matches!(&n.definition, iir::NominalDefinition::Struct(s) if s.name == "Item")
+        )
+    );
+    output.validate(&mut 100_000).unwrap();
+}
+
+#[test]
+fn concrete_graph_executes_without_source_templates() {
+    use comptime_interpretor::{Budget, Event, Interpreter, Value};
+    let source = compile(include_str!(
+        "../../../development/examples/instantiated-functions.fl"
+    ));
+    let output = luna::instantiation::instantiate(&source, "entry", 100_000).unwrap();
+    drop(source);
+    let mut interpreter = Interpreter::from_iir(&output, Budget::default()).unwrap();
+    assert_eq!(
+        interpreter
+            .invoke_instance(&output.roots[0], vec![])
+            .unwrap(),
+        Value::UnsignedInteger(41)
+    );
+    let recursive = &output
+        .functions
+        .iter()
+        .find(|f| f.function.name == "recurse")
+        .unwrap()
+        .key;
+    assert_eq!(
+        interpreter
+            .invoke_instance(recursive, vec![Value::UnsignedInteger(20)])
+            .unwrap(),
+        Value::UnsignedInteger(0)
+    );
+    for instance in output
+        .functions
+        .iter()
+        .filter(|f| f.function.name == "identity")
+    {
+        let value = match &instance.key.arguments[0] {
+            nir::Term::Primitive(nir::Primitive::Bool) => Value::Bool(false),
+            nir::Term::Primitive(nir::Primitive::U8) => Value::UnsignedInteger(7),
+            nir::Term::Nominal {
+                declaration,
+                arguments,
+            } => Value::Record {
+                declaration: *declaration,
+                arguments: arguments.clone(),
+                fields: vec![Value::UnsignedInteger(9)],
+            },
+            _ => panic!("unexpected identity argument"),
+        };
+        assert_eq!(
+            interpreter
+                .invoke_instance(&instance.key, vec![value.clone()])
+                .unwrap(),
+            value
+        );
+    }
+    assert!(
+        !interpreter
+            .events()
+            .iter()
+            .any(|e| matches!(e, Event::InstantiateFunction { .. }))
+    );
+    assert!(
+        interpreter
+            .invoke_instance(recursive, vec![Value::Bool(true)])
+            .is_err()
+    );
+    assert_eq!(
+        interpreter
+            .invoke_instance(&output.roots[0], vec![])
+            .unwrap(),
+        Value::UnsignedInteger(41)
+    );
+}
+
+#[test]
+fn concrete_contract_execution_matches_normalized_execution() {
+    use comptime_interpretor::{Budget, Interpreter, Value};
+    let source = compile(include_str!(
+        "../../../development/examples/trait-program-contracts.fl"
+    ));
+    let names = [
+        "call",
+        "call_twice",
+        "generic_call",
+        "wide",
+        "inherent",
+        "generic_implementation",
+        "receiver",
+        "default_argument",
+        "match_call",
+        "return_call",
+        "parent_call",
+        "interface_argument",
+    ];
+    for name in names {
+        let graph = luna::instantiation::instantiate(&source, name, 100_000).unwrap();
+        let mut concrete = Interpreter::from_iir(
+            &graph,
+            Budget {
+                steps: 10_000_000,
+                ..Budget::default()
+            },
+        )
+        .unwrap();
+        let mut normalized = Interpreter::new(
+            &source,
+            Budget {
+                steps: 10_000_000,
+                ..Budget::default()
+            },
+        )
+        .unwrap();
+        for input in 0..=255 {
+            let args = vec![Value::UnsignedInteger(input)];
+            let actual = concrete.invoke_instance(&graph.roots[0], args.clone());
+            let expected = normalized.invoke(graph.roots[0].declaration, args);
+            if input < 99 {
+                assert!(expected.is_ok(), "{name}({input}): {expected:?}");
+            }
+            assert_eq!(actual, expected, "{name}({input})");
+        }
+    }
+}
+
+#[test]
+fn concrete_execution_rechecks_results_and_rejects_dangling_graphs() {
+    use comptime_interpretor::{Budget, Interpreter, Value};
+    let source = compile(
+        "typealias Byte=.u8'builtin; fn identity(value:Byte, marker:T)->result:Byte where T, ensures result == value'old {value} fn entry(value:Byte)->Byte {identity(value, true)}",
+    );
+    let mut graph = luna::instantiation::instantiate(&source, "entry", 100_000).unwrap();
+    let identity = graph
+        .functions
+        .iter_mut()
+        .find(|f| f.function.name == "identity")
+        .unwrap();
+    identity.function.body.kind =
+        nir::program::ExprKind::Literal(nir::program::Literal::UnsignedInteger(0));
+    let mut interpreter = Interpreter::from_iir(&graph, Budget::default()).unwrap();
+    assert_eq!(
+        interpreter
+            .invoke_instance(&graph.roots[0], vec![Value::UnsignedInteger(9)])
+            .unwrap_err()
+            .kind,
+        comptime_interpretor::ErrorKind::ProgramContractRejected
+    );
+    assert_eq!(
+        interpreter
+            .invoke_instance(&graph.roots[0], vec![Value::UnsignedInteger(0)])
+            .unwrap(),
+        Value::UnsignedInteger(0)
+    );
+    drop(interpreter);
+    graph.functions.retain(|f| f.function.name != "identity");
+    assert!(Interpreter::from_iir(&graph, Budget::default()).is_err());
+}
+
+#[test]
+fn concrete_enum_instances_execute_patterns_and_field_defaults() {
+    use comptime_interpretor::{Budget, Interpreter, Value};
+    let source = compile(include_str!(
+        "../../../development/examples/generic-enums.fl"
+    ));
+    let graph = luna::instantiation::instantiate(&source, "run", 100_000).unwrap();
+    drop(source);
+    let mut interpreter = Interpreter::from_iir(&graph, Budget::default()).unwrap();
+    assert_eq!(
+        interpreter
+            .invoke_instance(&graph.roots[0], vec![])
+            .unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn retained_definition_integrity_is_checked_before_execution() {
+    let source = compile(include_str!(
+        "../../../development/examples/instantiated-functions.fl"
+    ));
+    let graph = luna::instantiation::instantiate(&source, "entry", 100_000).unwrap();
+    let reject = |mutate: fn(&mut iir::Package), expected: &str| {
+        let mut damaged = graph.clone();
+        mutate(&mut damaged);
+        let error = damaged.validate(&mut 100_000).unwrap_err();
+        assert!(error.contains(expected), "expected {expected}, got {error}");
+        assert!(comptime_interpretor::Interpreter::from_iir(&damaged, Default::default()).is_err());
+    };
+    reject(
+        |p| p.nominals.push(p.nominals[0].clone()),
+        "duplicate IIR nominal",
+    );
+    reject(
+        |p| p.nominals[0].ty = nir::Term::Primitive(nir::Primitive::Bool),
+        "non-nominal key",
+    );
+    reject(
+        |p| match &mut p.nominals[0].definition {
+            iir::NominalDefinition::Struct(s) => s.declaration.local += 1000,
+            iir::NominalDefinition::Enum(e) => e.declaration.local += 1000,
+        },
+        "disagrees with its instance key",
+    );
+    reject(
+        |p| p.interfaces.push(p.interfaces[0].clone()),
+        "duplicate IIR interface contract",
+    );
+    reject(|p| p.interfaces.clear(), "no interface contract");
+    reject(
+        |p| {
+            let duplicate = p.interfaces[0].methods[0].clone();
+            p.interfaces[0].methods.push(duplicate);
+        },
+        "duplicate IIR interface member",
+    );
+    reject(
+        |p| p.interfaces[0].methods[0].parameter_bindings.clear(),
+        "parameter bindings",
+    );
+    reject(
+        |p| p.interfaces[0].methods[0].default = Some(p.dispatch[0].methods[0].body),
+        "unselected default",
+    );
+    reject(
+        |p| p.dispatch.push(p.dispatch[0].clone()),
+        "duplicate IIR dispatch selection",
+    );
+    reject(|p| p.dispatch.clear(), "no dispatch selection");
+    reject(
+        |p| {
+            let duplicate = p.dispatch[0].methods[0].clone();
+            p.dispatch[0].methods.push(duplicate);
+        },
+        "duplicate IIR dispatch member",
+    );
+    reject(
+        |p| p.dispatch[0].methods[0].member.local += 1000,
+        "absent from its interface",
+    );
+    reject(
+        |p| {
+            let body = p.dispatch[0].methods[0].body;
+            p.functions
+                .iter_mut()
+                .find(|f| f.key.declaration == body)
+                .unwrap()
+                .function
+                .phase = nir::program::FunctionPhase::Comptime;
+        },
+        "calling convention",
+    );
+    reject(
+        |p| {
+            p.functions
+                .iter_mut()
+                .find(|f| f.function.name == "identity")
+                .unwrap()
+                .function
+                .parameters
+                .clear();
+        },
+        "parameter bindings",
+    );
+    graph.validate(&mut 100_000).unwrap();
+}
+
+#[test]
+fn copy_protocol_selection_uses_identity_and_explicit_declarations() {
+    use elaboration::{
+        capabilities::World,
+        implementation::{ImplementationHead, Index},
+        ptc::{Budget, Context},
+        verification::copy::{Classification, classify},
+    };
+    let package = compile(
+        "trait Reproduce {} trait Copy {} struct Owned {flag:true'type} struct Shared {flag:true'type} struct Pretender {} struct Box where T {value:T} impl Reproduce for Shared {} impl Copy for Pretender {} impl Reproduce for Box<T> where T, requires T == true'type {} fn transfer(value:Owned)->Owned {value} fn duplicate(value:Owned) {let first=value; let second=value;} fn copy_shared(value:Shared)->Shared {value}",
+    );
+    let protocol = package
+        .traits
+        .iter()
+        .find(|t| t.name == "Reproduce")
+        .unwrap()
+        .declaration;
+    let mut items = intrinsic::LangItems::new();
+    items
+        .bind_source_traits(&package, &[(intrinsic::LangItem::Copy, protocol)])
+        .unwrap();
+    let context = Context::from_package(&package).unwrap();
+    let mut index = Index::default();
+    for implementation in &package.implementations {
+        index
+            .insert(
+                ImplementationHead {
+                    declaration: implementation.declaration,
+                    interface: implementation.interface,
+                    interface_arguments: implementation.interface_arguments.clone(),
+                    subject: implementation.subject.clone(),
+                    type_parameters: implementation.type_parameters.clone(),
+                    requirements: implementation.requirements.clone(),
+                },
+                Budget::default(),
+            )
+            .unwrap();
+    }
+    let world = World {
+        index: &index,
+        implementations: &package.implementations,
+        traits: &package.traits,
+        assumptions: &[],
+        context: &context,
+    };
+    assert!(
+        luna::protocols::classify_copy(
+            &world,
+            &intrinsic::LangItems::new(),
+            &nir::Term::Primitive(nir::Primitive::Bool),
+            Budget::default()
+        )
+        .is_err()
+    );
+    assert!(matches!(
+        luna::protocols::classify_copy(
+            &world,
+            &items,
+            &nir::Term::Primitive(nir::Primitive::Bool),
+            Budget::default()
+        )
+        .unwrap(),
+        Classification::Intrinsic
+    ));
+    let mut invalid_items = intrinsic::LangItems::new();
+    invalid_items
+        .set(intrinsic::LangItem::Copy, intrinsic::LangItemDef::Builtin)
+        .unwrap();
+    assert!(
+        luna::protocols::classify_copy(
+            &world,
+            &invalid_items,
+            &nir::Term::Primitive(nir::Primitive::Bool),
+            Budget::default()
+        )
+        .is_err()
+    );
+    let mut stale_items = intrinsic::LangItems::new();
+    stale_items
+        .set(
+            intrinsic::LangItem::Copy,
+            intrinsic::LangItemDef::UserDef(nir::DeclarationId {
+                package: protocol.package + 1,
+                ..protocol
+            }),
+        )
+        .unwrap();
+    assert!(
+        luna::protocols::classify_copy(
+            &world,
+            &stale_items,
+            &nir::Term::Primitive(nir::Primitive::Bool),
+            Budget::default()
+        )
+        .is_err()
+    );
+    for (name, expected_error) in [
+        ("transfer", None),
+        ("duplicate", Some("unavailable")),
+        ("copy_shared", Some("resource legality")),
+    ] {
+        let function = package.functions.iter().find(|f| f.name == name).unwrap();
+        let result = luna::protocols::analyze_moves(
+            &package,
+            &world,
+            &items,
+            function,
+            10000,
+            Budget::default(),
+        );
+        match expected_error {
+            Some(message) => assert!(result.unwrap_err().reason.contains(message)),
+            None => assert!(result.is_ok(), "{result:?}"),
+        }
+    }
+    let nominal = |name: &str, arguments| nir::Term::Nominal {
+        declaration: package
+            .structs
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap()
+            .declaration,
+        arguments,
+    };
+    assert!(matches!(
+        luna::protocols::classify_copy(
+            &world,
+            &items,
+            &nominal("Shared", vec![]),
+            Budget::default()
+        )
+        .unwrap(),
+        Classification::Declared { .. }
+    ));
+    for name in ["Owned", "Pretender"] {
+        assert_eq!(
+            classify(&world, protocol, &nominal(name, vec![]), Budget::default()).unwrap(),
+            Classification::Affine
+        );
+    }
+    let boolean = nir::Term::Primitive(nir::Primitive::Bool);
+    assert!(matches!(
+        classify(
+            &world,
+            protocol,
+            &nominal("Box", vec![boolean.clone()]),
+            Budget::default()
+        )
+        .unwrap(),
+        Classification::Declared { .. }
+    ));
+    assert_eq!(
+        classify(
+            &world,
+            protocol,
+            &nominal("Box", vec![nir::Term::Primitive(nir::Primitive::U8)]),
+            Budget::default()
+        )
+        .unwrap(),
+        Classification::Affine
+    );
+    assert_eq!(
+        classify(&world, protocol, &boolean, Budget::default()).unwrap(),
+        Classification::Intrinsic
+    );
+    assert!(matches!(
+        classify(
+            &world,
+            protocol,
+            &boolean,
+            Budget {
+                steps: 0,
+                ..Budget::default()
+            }
+        )
+        .unwrap(),
+        Classification::Pending(_)
+    ));
+    let assumption = nir::program::TraitRequirement {
+        interface: protocol,
+        interface_arguments: vec![],
+        subject: nominal("Owned", vec![]),
+    };
+    let assumed = World {
+        assumptions: std::slice::from_ref(&assumption),
+        ..world
+    };
+    assert!(matches!(
+        classify(&assumed, protocol, &assumption.subject, Budget::default()).unwrap(),
+        Classification::Assumed(_)
+    ));
+}
+
+#[test]
+fn source_package_identity_survives_generic_contract_and_instance_elaboration() {
+    use comptime_interpretor::{Budget, Interpreter, Value};
+    for identity in [17, 1234567890123] {
+        let source = compile_in(
+            include_str!("../../../development/examples/instantiated-functions.fl"),
+            identity,
+        );
+        assert!(
+            source
+                .functions
+                .iter()
+                .all(|f| f.declaration.package == identity)
+        );
+        assert!(
+            source
+                .structs
+                .iter()
+                .all(|s| s.declaration.package == identity)
+        );
+        assert!(
+            source
+                .traits
+                .iter()
+                .all(|t| t.declaration.package == identity)
+        );
+        assert!(
+            source
+                .implementations
+                .iter()
+                .all(|i| i.declaration.package == identity)
+        );
+        assert!(!source.to_string().contains("(package 0)"));
+        let graph = luna::instantiation::instantiate(&source, "entry", 100_000).unwrap();
+        assert_eq!(
+            Interpreter::from_iir(&graph, Budget::default())
+                .unwrap()
+                .invoke_instance(&graph.roots[0], vec![])
+                .unwrap(),
+            Value::UnsignedInteger(41)
+        );
+        let contracts = compile_in(
+            include_str!("../../../development/examples/trait-program-contracts.fl"),
+            identity,
+        );
+        let graph = luna::instantiation::instantiate(&contracts, "generic_call", 100_000).unwrap();
+        assert_eq!(
+            Interpreter::from_iir(&graph, Budget::default())
+                .unwrap()
+                .invoke_instance(&graph.roots[0], vec![Value::UnsignedInteger(41)])
+                .unwrap(),
+            Value::UnsignedInteger(42)
+        );
+    }
+}
+
+#[test]
+fn equal_source_names_in_distinct_packages_do_not_share_nominal_or_opaque_identity() {
+    let text = include_str!("../../../development/examples/normal-form-text.fl");
+    let first = compile_in(text, 41);
+    let second = compile_in(text, 42);
+    let signature = |p: &nir::program::Package| {
+        p.functions
+            .iter()
+            .find(|f| f.name == "same")
+            .unwrap()
+            .signature
+            .clone()
+    };
+    assert_ne!(signature(&first), signature(&second));
+    assert_ne!(
+        first.normal_forms[0].declaration,
+        second.normal_forms[0].declaration
+    );
+    let first = compile_in("struct Item {} fn entry()->Item {Item {}}", 41);
+    let second = compile_in("struct Item {} fn entry()->Item {Item {}}", 42);
+    assert_eq!(
+        first.structs[0].declaration.local,
+        second.structs[0].declaration.local
+    );
+    assert_ne!(first.structs[0].declaration, second.structs[0].declaration);
+    let first_graph = luna::instantiation::instantiate(&first, "entry", 100_000).unwrap();
+    let second_graph = luna::instantiation::instantiate(&second, "entry", 100_000).unwrap();
+    let mut merged = first_graph.clone();
+    merged.roots.extend(second_graph.roots.clone());
+    merged.functions.extend(second_graph.functions.clone());
+    merged.nominals.extend(second_graph.nominals.clone());
+    merged.validate(&mut 100_000).unwrap();
+    let mut interpreter =
+        comptime_interpretor::Interpreter::from_iir(&merged, Default::default()).unwrap();
+    let a = interpreter
+        .invoke_instance(&merged.roots[0], vec![])
+        .unwrap();
+    let b = interpreter
+        .invoke_instance(&merged.roots[1], vec![])
+        .unwrap();
+    assert_ne!(a, b);
+}
+
+#[test]
+fn abstract_associated_values_select_defaults_and_overrides_at_instantiation() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(include_str!(
+        "../../../development/examples/associated-values.fl"
+    ));
+    let before = package.to_string();
+    assert!(before.contains("(associated-value "));
+    let graph = luna::instantiation::instantiate(&package, "entry", 100000).unwrap();
+    assert!(!graph.to_string().contains("(associated-value "));
+    assert_eq!(package.to_string(), before);
+    let mut vm = Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert!(luna::instantiation::instantiate(&package, "entry", 1).is_err());
+    assert_eq!(
+        luna::instantiation::instantiate(&package, "entry", 100000).unwrap(),
+        graph
+    );
+    println!("ASSOCIATED_VALUE_NIR_DUMP={package}");
+    println!("ASSOCIATED_VALUE_IIR_DUMP={graph}");
+}
+
+#[test]
+fn associated_value_origins_keep_inherited_interface_arguments_distinct() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(
+        "trait Flag where A {assoc enabled:bool=true;fn flag()->bool {enabled}} trait Child :- Flag<A> where A {} struct Host {} impl Flag<bool> for Host {assoc enabled:bool=false;} impl Flag<'x''type> for Host {} impl Child<bool> for Host {} impl Child<'x''type> for Host {} fn query(value:T,marker:A)->bool where A,T :- Child<A> {T.as(Child<A>).enabled} fn entry()->bool {not query(Host {},true) and query(Host {},'x') and not Host.as(Flag<bool>).flag() and Host.as(Flag<'x''type>).flag()}",
+    );
+    let graph = luna::instantiation::instantiate(&package, "entry", 100000).unwrap();
+    let mut vm = Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn associated_values_use_selected_member_types_and_aggregate_values() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(
+        "trait Source {assoc Item:.Type'builtin;assoc initial:Item;fn make()->Item {initial}} impl Source for bool {assoc Item:.Type'builtin=bool;assoc initial:bool=true;} impl Source for 'x''type {assoc Item:.Type'builtin='x''type;assoc initial:'x''type='x';} fn query()->T.as(Source).Item where T :- Source {T.as(Source).initial} fn entry()->(bool,'x''type) {(bool.as(Source).make(),query<'x''type>())}",
+    );
+    let graph = luna::instantiation::instantiate(&package, "entry", 100000).unwrap();
+    let mut vm = Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Tuple(vec![Value::Bool(true), Value::Char('x')])
+    );
+    let package = compile(
+        "trait Pair {assoc values:(bool,bool)=(true,false);fn get()->(bool,bool) {values}} impl Pair for bool {} fn entry()->(bool,bool) {bool.as(Pair).get()}",
+    );
+    let graph = luna::instantiation::instantiate(&package, "entry", 100000).unwrap();
+    let mut vm = Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Tuple(vec![Value::Bool(true), Value::Bool(false)])
+    );
+}
+
+#[test]
+fn associated_scalar_values_supply_declaration_ordered_parameter_defaults() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(
+        "trait Flag {assoc enabled:bool=true;} impl Flag for bool {assoc enabled:bool=false;} impl Flag for 'x''type {} fn query(value:T,.selected:bool=T.as(Flag).enabled)->bool where T :- Flag {selected} fn entry()->bool {not query(true) and query('x') and query(true,.selected=true)}",
+    );
+    let graph = luna::instantiation::instantiate(&package, "entry", 100000).unwrap();
+    let mut vm = Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn associated_value_nodes_validate_member_identity_type_and_selection() {
+    use nir::program::ExprKind as K;
+    let package = compile(
+        "trait Flag {assoc enabled:bool=true;} impl Flag for bool {} fn query(value:T)->bool where T :- Flag {T.as(Flag).enabled} fn entry()->bool {query(true)}",
+    );
+    for mutation in 0..4 {
+        let mut damaged = package.clone();
+        let owner = damaged
+            .functions
+            .iter_mut()
+            .find(|f| f.name == "query")
+            .unwrap();
+        iir::visit::expression_mut(&mut owner.body, &mut 100000, |expr, _| {
+            if let K::AssociatedValue {
+                interface, member, ..
+            } = &mut expr.kind
+            {
+                match mutation {
+                    0 => expr.ty = nir::Term::Primitive(nir::Primitive::Char),
+                    1 => *member = interface.declaration,
+                    2 => interface
+                        .arguments
+                        .push(nir::Term::Primitive(nir::Primitive::Bool)),
+                    _ => {}
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+        if mutation == 3 {
+            damaged.implementations.clear();
+        }
+        assert!(
+            luna::instantiation::instantiate(&damaged, "entry", 100000).is_err(),
+            "mutation {mutation}"
+        );
+    }
+    let mut graph = luna::instantiation::instantiate(&package, "entry", 100000).unwrap();
+    let template = &package
+        .functions
+        .iter()
+        .find(|f| f.name == "query")
+        .unwrap()
+        .body;
+    let function = graph
+        .functions
+        .iter_mut()
+        .find(|f| f.function.name == "query")
+        .unwrap();
+    function.function.body = template.clone();
+    assert!(
+        graph
+            .validate(&mut 100000)
+            .unwrap_err()
+            .contains("associated value selection")
+    );
+}
+
+#[test]
+fn inline_function_intent_survives_generic_and_staged_instantiation() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package=compile("inline fn identity(value:T)->T where T {value}
+        inline fn select(comptime choose:bool,value:bool)->bool {if choose {value} else {not value}}
+        fn entry()->bool {select(true,identity(true))}");
+    for name in ["identity","select"] {
+        let function=package.functions.iter().find(|f|f.name==name).unwrap();
+        assert!(function.inline);
+        assert_eq!(function.phase,nir::program::FunctionPhase::Runtime);
+        assert!(!function.pure);
+        assert!(function.to_string().contains("(inline true)"));
+    }
+    assert!(!package.functions.iter().find(|f|f.name=="entry").unwrap().inline);
+    let graph=luna::instantiation::instantiate(&package,"entry",100_000).unwrap();
+    for name in ["identity","select"] {
+        let instances:Vec<_>=graph.functions.iter().filter(|f|f.function.name==name).collect();
+        assert!(!instances.is_empty(),"{name}");
+        assert!(instances.iter().all(|f|f.function.inline),"{name}");
+    }
+    let mut vm=Interpreter::from_iir(&graph,Default::default()).unwrap();
+    assert_eq!(vm.invoke_instance(&graph.roots[0],vec![]).unwrap(),Value::Bool(true));
+}
+
+#[test]
+fn inline_function_calls_preserve_argument_order_and_effects() {
+    use comptime_interpretor::{Interpreter,Value};
+    let package=compile("struct Counter {value:.u8'builtin}
+        fn tick(counter:*Counter)->.u8'builtin {assumes counter.*.value < 255;counter.*.value = counter.*.value + 1;counter.*.value}
+        inline fn use_twice(.left:.u8'builtin=0,.right:.u8'builtin=0)->bool {left == 2 and right == 1 and left == 2}
+        fn entry()->bool {let counter=Counter {value:0};use_twice(.right=tick(counter.ref),.left=tick(counter.ref)) and counter.value == 2}");
+    let graph=luna::instantiation::instantiate(&package,"entry",100_000).unwrap();
+    let mut vm=Interpreter::from_iir(&graph,Default::default()).unwrap();
+    assert_eq!(vm.invoke_instance(&graph.roots[0],vec![]).unwrap(),Value::Bool(true));
+}
+
+#[test]
+fn inline_function_deferred_signature_preserves_intent() {
+    let package=compile("typealias Type=.Type'builtin;
+        comptime fn Pick(flag:bool)->Type {if flag {bool} else {.u8'builtin}}
+        inline fn identity(comptime flag:bool,value:defer Pick(flag))->defer Pick(flag) {value}
+        fn entry()->bool {identity(true,true)}");
+    let graph=luna::instantiation::instantiate(&package,"entry",100_000).unwrap();
+    assert!(graph.functions.iter().any(|f|f.function.name=="identity" && f.function.inline));
+    assert_eq!(luna::execution::interpret(&package,"entry",100_000).unwrap(),comptime_interpretor::Value::Bool(true));
+}
+
+#[test]
+fn inline_function_preserves_phase_purity_and_selected_methods() {
+    use comptime_interpretor::Value;
+    let package=compile("comptime inline fn invert(value:bool)->bool {not value}
+        pure inline fn stable(value:bool)->bool {value}
+        trait Read {fn read(self)->bool;}
+        struct Reader {}
+        impl Read for Reader {inline fn read(self)->bool {true}}
+        const FLAG=invert(false);
+        fn entry()->bool {stable(true) and Reader {}.as(Read).read()}");
+    let invert=package.functions.iter().find(|f|f.name=="invert").unwrap();
+    assert!(invert.inline);
+    assert_eq!(invert.phase,nir::program::FunctionPhase::Comptime);
+    let stable=package.functions.iter().find(|f|f.name=="stable").unwrap();
+    assert!(stable.inline && stable.pure);
+    let graph=luna::instantiation::instantiate(&package,"entry",100_000).unwrap();
+    assert!(graph.functions.iter().any(|f|f.function.name=="read" && f.function.inline));
+    assert_eq!(luna::execution::interpret(&package,"entry",100_000).unwrap(),Value::Bool(true));
+}
+
+#[test]
+fn optional_inline_pass_expands_calls_with_hygienic_returns_and_defaults() {
+    use comptime_interpretor::{Interpreter,Value};
+    let mut package=compile("inline fn identity(value:T)->T where T {return value;}
+        inline fn pick(value:bool,.fallback:bool=not value)->bool {
+            if value {return identity(value);}fallback
+        }
+        fn entry()->bool {pick(true) and pick(false)}");
+    let report=elaboration::program::inlining::expand(&mut package,&mut 100_000).unwrap();
+    assert!(report.expanded>=3,"{report}");
+    assert!(report.to_string().starts_with("(inline-report "));
+    assert!(!package.internal_return_packets.is_empty());
+    let graph=luna::instantiation::instantiate(&package,"entry",100_000).unwrap();
+    let mut vm=Interpreter::from_iir(&graph,Default::default()).unwrap();
+    assert_eq!(vm.invoke_instance(&graph.roots[0],vec![]).unwrap(),Value::Bool(true));
+}
+
+#[test]
+fn optional_inline_pass_retains_recursive_and_indirect_calls() {
+    use comptime_interpretor::{Interpreter,Value};
+    let mut package=compile("inline fn recur(stop:bool)->bool {if stop {true} else {recur(true)}}
+        fn entry()->bool {let callback=recur;callback(false) and recur(false)}");
+    let report=elaboration::program::inlining::expand(&mut package,&mut 100_000).unwrap();
+    assert!(report.expanded>0);
+    let graph=luna::instantiation::instantiate(&package,"entry",100_000).unwrap();
+    let mut vm=Interpreter::from_iir(&graph,Default::default()).unwrap();
+    assert_eq!(vm.invoke_instance(&graph.roots[0],vec![]).unwrap(),Value::Bool(true));
+}
+
+#[test]
+fn optional_inline_pass_small_budget_keeps_original_program_usable() {
+    let original=compile("inline fn invert(value:bool)->bool {not value}
+        fn entry()->bool {invert(false)}");
+    for budget in [0,1,10,30,60,100] {
+        let mut package=original.clone();
+        let report=elaboration::program::inlining::expand(&mut package,&mut {budget});
+        if !matches!(report,Ok(report) if report.expanded>0) {
+            assert_eq!(package.expansion_sources,original.expansion_sources);
+            assert_eq!(package.enums,original.enums);
+            assert_eq!(package.internal_return_packets,original.internal_return_packets);
+            assert_eq!(package.internal_return_empty_replacements,original.internal_return_empty_replacements);
+            assert_eq!(package.quote_identity_cursor,original.quote_identity_cursor);
+        }
+        // Regardless of whether preparation or a candidate ran out of budget,
+        // no half-expanded call or leaked private packet may escape.
+        assert_eq!(luna::execution::interpret(&package,"entry",100_000).unwrap(),comptime_interpretor::Value::Bool(true),"{budget}");
+    }
+}
+
+#[test]
+fn optional_inline_pass_evaluates_even_unused_inputs_once() {
+    use comptime_interpretor::{Interpreter,Value,Event};
+    let mut package=compile("fn mark(slot:*bool)->bool {slot.* = not slot.*;slot.*}
+        inline fn twice(value:bool,.fallback:bool=not value)->bool {value == value and fallback}
+        inline fn ignore(value:bool)->bool {true}
+        fn entry()->bool {var flag=false;let first=twice(mark(flag.ref));let second=ignore(mark(flag.ref));not first and second and not flag}");
+    elaboration::program::inlining::expand(&mut package,&mut 100_000).unwrap();
+    let graph=luna::instantiation::instantiate(&package,"entry",100_000).unwrap();
+    let mut vm=Interpreter::from_iir(&graph,Default::default()).unwrap();
+    assert_eq!(vm.invoke_instance(&graph.roots[0],vec![]).unwrap(),Value::Bool(true));
+    let mark=package.functions.iter().find(|f|f.name=="mark").unwrap().declaration;
+    assert_eq!(vm.events().iter().filter(|event|matches!(event,Event::EnterFunction(id) if *id==mark)).count(),2);
+}

@@ -1,0 +1,57 @@
+struct Box where X {
+    value: X,
+}
+
+enum Maybe where X {
+    none,
+    some(X),
+}
+
+trait Source {
+    assoc Item: .Type'builtin;
+}
+impl Source for bool {
+    assoc Item: .Type'builtin = bool;
+}
+impl Source for 'x''type {
+    assoc Item: .Type'builtin = 'x''type;
+}
+
+-- Each selected Item is retained in the resulting nominal value's arguments.
+comptime fn replace(first: T.as(Source).Item, second: T.as(Source).Item)
+    -> Box<T.as(Source).Item> where T :- Source
+{
+    var boxed = Box<T.as(Source).Item> {value: first};
+    boxed.value = second;
+    boxed
+}
+
+comptime fn wrap(value: T.as(Source).Item)
+    -> Maybe<Box<T.as(Source).Item>> where T :- Source
+{
+    Maybe<Box<T.as(Source).Item>>.some(Box<T.as(Source).Item> {value: value})
+}
+
+comptime fn read(value: Maybe<Box<T.as(Source).Item>>, fallback: T.as(Source).Item)
+    -> T.as(Source).Item where T :- Source
+{
+    value match {
+        .some(boxed) => boxed.value,
+        .none => fallback,
+    }
+}
+
+trait Results {
+    assoc flag: Box<bool> = replace<bool>(false, true);
+    assoc letter: Box<'x''type> = replace<'x''type>('a', 'x');
+    assoc present: bool = read<bool>(wrap<bool>(true), false);
+    assoc absent: bool = read<bool>(Maybe<Box<bool>>.none, true);
+}
+impl Results for bool {}
+
+fn entry() -> bool {
+    bool.as(Results).flag.value
+        and bool.as(Results).letter.value == 'x'
+        and bool.as(Results).present
+        and bool.as(Results).absent
+}

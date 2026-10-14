@@ -1,0 +1,79 @@
+typealias Byte = .u8'builtin;
+struct Pair { start: Byte, end: Byte }
+struct Outer { pair: Pair, tag: Byte }
+enum Choice { empty, pair(Byte, Byte), tuple((Byte, Byte)) }
+fn tuple_if(a: Byte, b: Byte) -> Byte {
+    let value = if a <= b { (a, b) } else { (b, a) };
+    let (start, end) = value;
+    end - start
+}
+fn record_if(a: Byte, b: Byte) -> Byte {
+    let value = if a <= b { Pair { start: a, end: b } }
+        else { Pair { start: b, end: a } };
+    value.end - value.start
+}
+fn nested_if(a: Byte, b: Byte) -> Byte {
+    let value = if a <= b {
+        Outer { pair: Pair { start: a, end: b }, tag: 0 }
+    } else {
+        Outer { pair: Pair { start: b, end: a }, tag: 1 }
+    };
+    value.pair.end - value.pair.start
+}
+fn variant_if(a: Byte, b: Byte) -> Byte {
+    let value = if a <= b { Choice.pair(a, b) } else { Choice.pair(b, a) };
+    value match { .pair(start, end) => end - start, _ => 0 }
+}
+fn matched(a: Byte, b: Byte) -> Byte {
+    let value = (a, b) match {
+        (start, end) if start <= end => (start, end),
+        (end, start) => (start, end),
+    };
+    let (start, end) = value;
+    end - start
+}
+fn captured(a: Byte, b: Byte) -> Byte {
+    var value = if a <= b { (a, b) } else { (b, a) };
+    let callback = || { let (start, end) = value; end - start };
+    value = (255, 0);
+    callback()
+}
+fn early_return(a: Byte, b: Byte) -> Byte {
+    let value = if a <= b { (a, b) } else { return 0; };
+    let (start, end) = value;
+    end - start
+}
+fn match_return(a: Byte, b: Byte) -> Byte {
+    let value = (a, b) match {
+        (start, end) if start <= end => Pair { start: start, end: end },
+        _ => { return 0; },
+    };
+    value.end - value.start
+}
+comptime fn run() -> Byte {
+    let a: Byte = 255;
+    let b: Byte = 100;
+    let pair = if a <= b { (a, b) } else { (b, a) };
+    let (start, end) = pair;
+    end - start
+}
+fn literal_pairs(flag: true'type) -> Byte {
+    let value: (Byte, Byte) = if flag { (1, 2) } else { (100, 101) };
+    let (start, end) = value;
+    end - start
+}
+fn literal_match(flag: true'type) -> Byte {
+    let value: (Byte, Byte) = flag match { true => (1, 2), false => (100, 101) };
+    let (start, end) = value;
+    end - start
+}
+fn scalar_result(a: Byte, b: Byte, flag: true'type) -> Byte {
+    assumes a <= b;
+    let selected = if flag { a } else { b };
+    b - selected
+}
+fn scalar_match(a: Byte, b: Byte, flag: true'type) -> Byte {
+    assumes a <= b;
+    let selected = flag match { true => a, false => b };
+    b - selected
+}

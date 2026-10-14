@@ -1,0 +1,7799 @@
+//! HIR to typed NIR with a first-order function-phase boundary.
+//! Unsupported semantic protocols fail explicitly. Bound Splice calls preserve
+//! the boundary between comptime producers and runtime conversion instances.
+//! Resource/effect verification remains a separate obligation;
+//! this is a type-elaboration output, not permission to generate executable code.
+mod arguments;
+mod control;
+pub mod inlining;
+mod tactics;
+mod spreads;
+mod extended;
+mod effects;
+use arguments::route_arguments;
+mod constants;
+mod splicing;
+mod defaults;
+mod purity;
+mod dependent_inputs;
+mod type_defaults;
+mod interfaces;
+mod nominal;
+mod enum_groups;
+mod nominal_encoding;
+mod normal;
+mod places;
+mod projections;
+mod operators;
+mod bit_indices;
+mod required;
+mod open_functions;
+mod refinements;
+mod cmtt;
+pub(crate) use cmtt::{expand_materialized_quotes,expand_bound_quote};
+use hir::common::{Arg, BinOp, TyParamKind, UnOp};
+use hir::{Expr, ExprKind as H, ItemKind, OwnerId};
+use nir::program::{self as n, ExprKind as K};
+use nir::{DeclarationId, Parameter, Primitive as P, Sort, Term};
+use rustc_span::Span;
+use std::collections::{BTreeMap, BTreeSet};
+
+#[derive(Debug)]
+pub struct Error {
+    pub source: n::SourceRange,
+    pub message: String,
+    needs_context: bool,
+    needs_tactic: bool,
+    needs_capability: bool,
+    incompatible_context: bool,
+}
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}..{}: {}",
+            self.source.start, self.source.end, self.message
+        )
+    }
+}
+impl std::error::Error for Error {}
+fn source(span: Span) -> n::SourceRange {
+    n::SourceRange {
+        start: span.lo().0,
+        end: span.hi().0,
+    }
+}
+fn error(span: Span, message: impl Into<String>) -> Error {
+    Error {
+        source: source(span),
+        message: message.into(),
+        needs_context: false,
+        needs_tactic: false,
+        needs_capability: false,
+        incompatible_context: false,
+    }
+}
+// Only missing inference inputs are resumable. Semantic errors and solver
+// exhaustion remain errors, never alternative evidence for another candidate.
+fn context_error(span: Span, message: impl Into<String>) -> Error {
+    Error {
+        needs_context: true,
+        ..error(span, message)
+    }
+}
+// A known expression shape cannot inhabit the supplied context. This is
+// distinct from missing inference inputs and from semantic/budget failures.
+fn incompatible_context(span: Span, message: impl Into<String>) -> Error {
+    Error { incompatible_context: true, ..error(span, message) }
+}
+fn call_inference_error(span: Span, cause: crate::calls::Error) -> Error {
+    let pending = matches!(
+        cause,
+        crate::calls::Error::NeedsContext
+            | crate::calls::Error::Obligations(crate::obligations::Error::Inference(
+                crate::InferenceError::Unresolved(_)
+            ))
+    );
+    Error {
+        needs_context: pending,
+        ..error(span, format!("generic call inference failed: {cause:?}"))
+    }
+}
+fn p(value: P) -> Term {
+    Term::Primitive(value)
+}
+fn local(id: hir::HirId) -> n::LocalId {
+    n::LocalId {
+        owner: id.owner.def_id.raw(),
+        index: id.local_id.raw(),
+    }
+}
+fn semantic_package(identities: &BTreeMap<u32, u64>, source: u32) -> u64 {
+    identities
+        .get(&source)
+        .copied()
+        .unwrap_or(u64::from(source))
+}
+fn declaration(
+    package: &hir::Package<'_>,
+    identities: &BTreeMap<u32, u64>,
+    owner: OwnerId,
+) -> DeclarationId {
+    let definition = package.owner_definition(owner);
+    DeclarationId {
+        package: semantic_package(identities, definition.map_or(0, |id| id.pkg)),
+        // Clause parameters already use resolver identities. Keep declarations
+        // in that same namespace; dense HIR owners can collide with parameters.
+        local: definition.map_or(owner.def_id.raw(), |id| id.index),
+    }
+}
+fn is_never(ty: &Term) -> bool {
+    *ty == p(P::Never)
+}
+fn discard_result(value: n::Expr) -> n::Expr {
+    if is_never(&value.ty) || value.ty == p(P::Void) {
+        return value;
+    }
+    n::Expr {
+        ty: p(P::Void),
+        source: value.source,
+        kind: K::Discard(Box::new(value)),
+    }
+}
+
+pub fn elaborate(package: &hir::Package<'_>) -> Result<n::Package, Error> {
+    elaborate_in_package(package, 0)
+}
+
+/// The driver supplies a stable build/package identity. HIR owner IDs remain
+/// local; semantic declarations and rigids carry this identity from creation.
+pub fn elaborate_in_package(
+    package: &hir::Package<'_>,
+    package_identity: u64,
+) -> Result<n::Package, Error> {
+    elaborate_packages(package, &BTreeMap::from([(0, package_identity)]))
+}
+
+/// Elaborate a combined HIR collection while preserving each owner's package.
+pub fn elaborate_packages(
+    package: &hir::Package<'_>,
+    package_identities: &BTreeMap<u32, u64>,
+) -> Result<n::Package, Error> {
+    elaborate_packages_with_protocols(package, package_identities, &Protocols::default())
+}
+
+/// Trusted, package-qualified language-item identities supplied by the driver.
+/// Source names never designate these protocols implicitly.
+#[derive(Clone, Debug, Default)]
+pub struct Protocols {
+    pub copy: Option<DeclarationId>,
+    pub drop: Option<DeclarationId>,
+    pub index: Option<DeclarationId>,
+    pub arithmetic: [Option<DeclarationId>;7],
+    pub splice: Option<DeclarationId>,
+    pub meta_list: Option<DeclarationId>,
+    pub tuple: Option<DeclarationId>,
+    pub optional: Option<DeclarationId>,
+}
+
+pub fn elaborate_packages_with_protocols(
+    package: &hir::Package<'_>,
+    package_identities: &BTreeMap<u32, u64>,
+    protocols: &Protocols,
+) -> Result<n::Package, Error> {
+    if let Some((span, feature)) = package.pending_semantics.first() {
+        return Err(error(
+            *span,
+            format!("elaboration is not implemented for {feature}"),
+        ));
+    }
+    let mut checker = Checker {
+        protocols: protocols.clone(),
+        comptime_callee_result: None,
+        structural_result_context: None,
+        package_identities: package_identities.clone(),
+        package,
+        effect_parents: package.owners().flat_map(|(owner, info)| {
+            match &info.node.expect_item().kind {
+                ItemKind::EffectGroup(group) => group.operations.iter().map(|operation| (*operation, owner)).collect::<Vec<_>>(),
+                _ => Vec::new(),
+            }
+        }).collect(),
+        signatures: BTreeMap::new(),
+        open_functions: BTreeMap::new(),
+        active_open_definitions: BTreeSet::new(),
+        open_instances: std::collections::HashMap::new(),
+        next_open_instance: 0,
+        open_instantiation_depth: 0,
+        generated_functions: Vec::new(),
+        pending_default_stability: Vec::new(),
+        specialization_inputs: Vec::new(),
+        active_signatures: BTreeSet::new(),
+        refinement_subjects: Vec::new(),
+        pending_refinements: Vec::new(),
+        executable_refinement_owner: None,
+        interface_signatures: BTreeMap::new(),
+        self_types: BTreeMap::new(),
+        self_containers: BTreeMap::new(),
+        interfaces_ready: false,
+        checked_traits: Vec::new(),
+        checked_implementations: Vec::new(),
+        associated_initializers: BTreeMap::new(),
+        active_associated_values: BTreeSet::new(),
+        selected_associated_implementation: None,
+        active_associated_signatures: BTreeSet::new(),
+        declaration_projection_depth: 0,
+        associated_definition_equations: BTreeMap::new(),
+        associated_signature_values: BTreeMap::new(),
+        implementation_index: crate::implementation::Index::default(),
+        inherent_index: crate::implementation::InherentIndex::default(),
+        type_parameters: BTreeMap::new(),
+        normal_parameters: BTreeMap::new(),
+        type_input_bindings: BTreeMap::new(),
+        value_input_bindings: BTreeMap::new(),
+        derived_staged_bindings: BTreeSet::new(),
+        signature_prefixes: BTreeMap::new(),
+        default_input_scope: None,
+        requirements: BTreeMap::new(),
+        program_requirements: BTreeMap::new(),
+        program_postconditions: BTreeMap::new(),
+        old_scope: None,
+        tactic_frame: None,
+        capabilities: BTreeMap::new(),
+        pending_type_uses: Some(Vec::new()),
+        signature_type_uses: Vec::new(),
+        checking_contract: false,
+        numeric_defaults: true,
+        signature_owner: None,
+        context: crate::ptc::Context::default(),
+        defaults: BTreeMap::new(),
+        locals: BTreeMap::new(),
+        code_values: BTreeMap::new(),
+        code_generators: BTreeMap::new(),
+        code_packet_nominals: BTreeSet::new(),
+        generator_data: BTreeMap::new(),
+        checking_code_generator: false,
+        abstract_code_dependencies: BTreeMap::new(),
+        in_code_body: false,
+        quote_holes:BTreeSet::new(),
+        code_construction_depth: 0,
+        expansion_sources: Vec::new(),
+        aliases: BTreeSet::new(),
+        completed_aliases: std::collections::HashMap::new(),
+        checked_alias_definitions: BTreeSet::new(),
+        alias_substitution: BTreeMap::new(),
+        alias_value_bindings: BTreeMap::new(),
+        normal_default_bindings: BTreeMap::new(),
+        forbidden_default_inputs: BTreeSet::new(),
+        next_temporary_binding: 0,
+        alias_expression_budget: 16_384,
+        alias_scopes: BTreeMap::new(),
+        constants: BTreeMap::new(),
+        active_constants: BTreeSet::new(),
+        active_nominals: BTreeSet::new(),
+        active_required: BTreeSet::new(),
+        active_contracts: BTreeSet::new(),
+        active_function_defaults: BTreeSet::new(),
+        active_type_defaults: BTreeSet::new(),
+        default_uses: BTreeMap::new(),
+        contract_uses: BTreeMap::new(),
+        required_steps: 1_000_000,
+        in_required_comptime: false,
+        in_staged_input: false,
+        preparing_spread: None,
+        pending_spread_inputs: BTreeMap::new(),
+        observing_type: false,
+        result: None,
+        partial_return_context: None,
+        pending_optional_returns: BTreeMap::new(),
+        optional_branch_probe_budget: 100_000,
+        probing_optional_branch: false,
+        optional_target_probe: None,
+        effect_environment: None,
+        effect_resume_result: None,
+        preserve_effect_value: false,
+        captures: Vec::new(),
+        return_observations: None,
+        loops: Vec::new(),
+        structs: BTreeMap::new(),
+        enums: BTreeMap::new(),
+        enum_sources: BTreeMap::new(),
+        field_defaults: BTreeMap::new(),
+        active_defaults: BTreeSet::new(),
+        immutable: BTreeSet::new(),
+    };
+    // Register all declaration telescopes before interpreting interface arguments.
+    for (owner, info) in package.owners() {
+        let clauses = match &info.node.expect_item().kind {
+            ItemKind::TypeAlias(_, parameters, _) => *parameters,
+            ItemKind::Struct(def) => def.clause_params,
+            ItemKind::Enum(def) => def.clause_params,
+            ItemKind::Impl(def) => def.clause_params,
+            ItemKind::Trait(def) => def.clause_params,
+            ItemKind::Associated(def) => def.clause_params,
+            ItemKind::Effect(sig, _) => sig.clause_params,
+            ItemKind::EffectGroup(group) => group.clause_params,
+            ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) => sig.clause_params,
+            _ => continue,
+        };
+        let parameters = clauses
+            .iter()
+            .filter_map(|p| match p.kind {
+                hir::clause::ClauseParamKind::Type(_)
+                | hir::clause::ClauseParamKind::TraitBound(..)
+                | hir::clause::ClauseParamKind::Optional(..) => {
+                    p.definition.map(|id| DeclarationId {
+                        package: semantic_package(package_identities, id.pkg),
+                        local: id.index,
+                    })
+                }
+                hir::clause::ClauseParamKind::Positional(..)
+                    if matches!(info.node.expect_item().kind,
+                        ItemKind::TypeAlias(..) | ItemKind::Struct(_) | ItemKind::Enum(_)
+                        | ItemKind::Impl(_) | ItemKind::Trait(_) | ItemKind::EffectGroup(_)) =>
+                {
+                    p.definition.map(|id| DeclarationId {
+                        package: semantic_package(package_identities, id.pkg),
+                        local: id.index,
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+        checker.type_parameters.insert(owner, parameters);
+    }
+    checker.prepare_self_types()?;
+    // Collect every signature before bodies: ordinary recursion does not wait
+    // for a body result and declaration order does not change lookup.
+    // Register generic nominal telescopes before reading any signature or field,
+    // so forward references use the same rigid declaration identities.
+    for (owner, info) in package.owners() {
+        checker.signature_owner = Some(owner);
+        let clauses = match &info.node.expect_item().kind {
+            ItemKind::TypeAlias(_, parameters, _) => Some(*parameters),
+            ItemKind::Struct(def) => Some(def.clause_params),
+            ItemKind::Enum(def) => Some(def.clause_params),
+            ItemKind::Impl(def) => Some(def.clause_params),
+            ItemKind::Trait(def) => Some(def.clause_params),
+            ItemKind::EffectGroup(group) => Some(group.clause_params),
+            _ => None,
+        };
+        if let Some(clauses) = clauses {
+            let mut parameters = Vec::new();
+            checker.prepare_parameter_capabilities(owner, clauses)?;
+            let capabilities = checker.capabilities.get(&owner).cloned().unwrap_or_default();
+            for parameter in clauses {
+                let optional_type_parameter = if let hir::clause::ClauseParamKind::Optional(_, ty, _) = parameter.kind {
+                    matches!(info.node.expect_item().kind, ItemKind::Trait(_) | ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::TypeAlias(..)) && checker.type_expr(ty)? == p(P::Type)
+                } else { false };
+                let explicit_type_parameter =
+                    if let hir::clause::ClauseParamKind::Positional(_, ty) = parameter.kind {
+                        checker.type_expr(ty)? == p(P::Type)
+                    } else {
+                        false
+                    };
+                if !explicit_type_parameter && !optional_type_parameter
+                    && !matches!(
+                        parameter.kind,
+                        hir::clause::ClauseParamKind::Type(_)
+                            | hir::clause::ClauseParamKind::TraitBound(..)
+                    )
+                {
+                    return Err(error(
+                        parameter.span,
+                        "nominal type clause kind is not implemented",
+                    ));
+                }
+                let id = parameter
+                    .definition
+                    .ok_or_else(|| error(parameter.span, "missing clause parameter identity"))?;
+                parameters.push(DeclarationId {
+                    package: semantic_package(package_identities, id.pkg),
+                    local: id.index,
+                });
+            }
+            checker.type_parameters.insert(owner, parameters);
+            checker.capabilities.insert(owner, capabilities);
+            // An earlier required computation may already have requested the
+            // layout while clause registration was still in progress.
+            if let Some(definition) =
+                checker
+                    .structs
+                    .get_mut(&declaration(package, package_identities, owner))
+            {
+                definition.capabilities = checker.capabilities[&owner].clone();
+            }
+            if let Some(definition) =
+                checker
+                    .enums
+                    .get_mut(&declaration(package, package_identities, owner))
+            {
+                definition.capabilities = checker.capabilities[&owner].clone();
+            }
+            if matches!(
+                info.node.expect_item().kind,
+                ItemKind::Struct(_) | ItemKind::Enum(_)
+            ) {
+                checker.context.admit_nominal_constructor(declaration(
+                    package,
+                    package_identities,
+                    owner,
+                ));
+            }
+        }
+    }
+    // Interface selection must not wait for unrelated aliases or ordinary
+    // signatures that themselves invoke an interface. Prepare just the world
+    // declarations and their method contracts; their nominal/head dependencies
+    // are demanded through the existing ensure_* queries.
+    for (owner, info) in package.owners() {
+        if checker.self_types.contains_key(&owner) || checker.self_containers.contains_key(&owner) {
+            if matches!(
+                info.node.expect_item().kind,
+                ItemKind::Fn(..) | ItemKind::FnDeclaration(_)
+            ) {
+                checker.ensure_signature(owner, info.node.expect_item().span)?;
+            }
+        }
+    }
+    for (owner, info) in package.owners() {
+        if matches!(
+            info.node.expect_item().kind,
+            ItemKind::Trait(_) | ItemKind::Impl(_)
+        ) || checker.self_types.contains_key(&owner)
+            || checker.self_containers.contains_key(&owner)
+        {
+            checker.ensure_contract(owner, info.node.expect_item().span)?;
+        }
+    }
+    checker.signature_owner = None;
+    checker.context = checker.nominal_context();
+    let (traits, implementations) = checker.check_interfaces()?;
+    checker.checked_traits = traits.clone();
+    checker.checked_implementations = implementations.clone();
+    for (&member, &parent) in &checker.self_containers {
+        let inherited = checker.requirements[&parent].clone();
+        checker
+            .requirements
+            .entry(member)
+            .or_default()
+            .extend(inherited);
+    }
+    for interface in &checker.checked_traits {
+        for method in &interface.methods {
+            if let Some((member, _)) = package.owners().find(|(owner, _)| {
+                declaration(package, package_identities, *owner) == method.declaration
+            }) {
+                checker
+                    .requirements
+                    .entry(member)
+                    .or_default()
+                    .extend(interface.requirements.clone());
+            }
+        }
+    }
+    if let Some(id) = checker.protocols.splice {
+        let span = package.owners().find_map(|(owner, info)| {
+            (declaration(package, package_identities, owner) == id)
+                .then_some(info.node.expect_item().span)
+        }).unwrap_or(rustc_span::DUMMY_SP);
+        crate::splice::protocol(&checker.checked_traits, id)
+            .map_err(|reason| error(span, reason))?;
+    }
+    checker.interfaces_ready = true;
+    for operator in crate::arithmetic::Operator::ALL {
+        if let Some(id)=checker.protocols.arithmetic[operator as usize] {
+            crate::arithmetic::protocol(&checker.checked_traits,id,operator)
+                .map_err(|reason|error(rustc_span::DUMMY_SP,reason))?;
+        }
+    }
+    if let Some(id) = checker.protocols.index {
+        crate::indexing::protocol(&checker.checked_traits, id)
+            .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
+    }
+    checker.finish_signature_refinements()?;
+    checker.associated_signature_values.clear();
+    checker.complete_associated_values()?;
+    for (owner, info) in package.owners() {
+        if matches!(info.node.expect_item().kind, ItemKind::Trait(_) | ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::TypeAlias(..)) {
+            checker.check_type_defaults(owner)?;
+        }
+    }
+    let traits = checker.checked_traits.clone();
+    let implementations = checker.checked_implementations.clone();
+    let mut functions = Vec::new();
+    for (owner, info) in package.owners() {
+        let item = info.node.expect_item();
+        checker.signature_owner = Some(owner);
+        match &item.kind {
+            ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) => {
+                if checker.is_code_generator(owner) {
+                    checker.ensure_code_generator(owner, item.span)?;
+                    continue;
+                }
+                if sig.modifiers.is_pure && !sig.modifiers.is_comptime
+                    && matches!(item.kind, ItemKind::FnDeclaration(_))
+                    && !checker.checked_traits.iter().flat_map(|interface| &interface.methods)
+                        .any(|method| method.declaration == declaration(package, package_identities, owner)) {
+                    return Err(error(item.span, "runtime pure declaration outside a trait requires an external behavior contract"));
+                }
+                checker.ensure_signature(owner, item.span)?;
+                checker.check_type_defaults(owner)?;
+                if let ItemKind::Fn(_, body) = item.kind {
+                    functions.push((owner, item, sig, body));
+                }
+            }
+            ItemKind::Effect(_, _) => checker.ensure_signature(owner, item.span)?,
+            ItemKind::EffectGroup(_) => {},
+            ItemKind::Struct(_) | ItemKind::Enum(_) => checker.ensure_nominal(owner, item.span)?,
+            ItemKind::Mod(_) | ItemKind::Use(_) | ItemKind::Trait(_) | ItemKind::Impl(_) => {}
+            ItemKind::TypeAlias(value, ..) => {
+                if checker.type_parameters[&owner].is_empty() {
+                    checker.alias_type(owner, value, &[], item.span)?;
+                } else {
+                    checker.check_alias_definition(owner, value, item.span)?;
+                }
+            }
+            ItemKind::Const(..) => {
+                checker.constant_value(owner, item.span)?;
+            }
+            ItemKind::Associated(_) => {}
+            _ => {
+                return Err(error(
+                    item.span,
+                    "this declaration requires elaboration not yet implemented",
+                ));
+            }
+        }
+    }
+    // Finish contracts not already requested by required comptime computations.
+    // Formation obligations are delayed, not assumed: declarations may refer
+    // forward to other constrained types. Contract operands themselves must be
+    // well formed without assuming the contract they are defining.
+    checker.signature_owner = None;
+    checker.checking_contract = true;
+    for (owner, info) in package.owners() {
+        checker.signature_owner = Some(owner);
+        if checker.is_code_generator(owner) { continue; }
+        if !matches!(
+            info.node.expect_item().kind,
+            ItemKind::Fn(..)
+                | ItemKind::TypeAlias(..)
+                | ItemKind::FnDeclaration(_)
+                | ItemKind::Effect(..)
+                | ItemKind::EffectGroup(_)
+                | ItemKind::Struct(_)
+                | ItemKind::Enum(_)
+                | ItemKind::Impl(_)
+                | ItemKind::Trait(_)
+        ) {
+            continue;
+        }
+        checker.ensure_contract(owner, info.node.expect_item().span)?;
+        let requirements = checker.requirements[&owner].clone();
+        if let Some(def) = checker
+            .structs
+            .get_mut(&declaration(package, package_identities, owner))
+        {
+            def.requirements = requirements.clone();
+        }
+        if let Some(def) = checker
+            .enums
+            .get_mut(&declaration(package, package_identities, owner))
+        {
+            def.requirements = requirements.clone();
+        }
+        checker.requirements.insert(owner, requirements);
+    }
+    checker.checking_contract = false;
+    checker.signature_owner = None;
+    checker.context = checker.nominal_context();
+    checker.check_struct_cycles()?;
+    // Resolve formation only after the complete concrete implementation world
+    // exists. Contract operands may use binder capabilities, not their own
+    // unproved requires predicates.
+    for (scope, assume_requirements, target, arguments, span) in checker
+        .pending_type_uses
+        .take()
+        .unwrap()
+        .into_iter()
+        .chain(std::mem::take(&mut checker.signature_type_uses))
+    {
+        checker.signature_owner = scope;
+        checker.context = match scope {
+            Some(owner) if assume_requirements => checker.definition_context(owner),
+            Some(owner) => checker.binder_context(owner),
+            None => checker.nominal_context(),
+        };
+        checker.check_formation_requirements(target, &arguments, span)?;
+    }
+    checker.context = checker.nominal_context();
+    checker.signature_owner = None;
+    // Definition-scope default checking precedes body checking. Only earlier
+    // parameters are available; no caller-local lookup or evaluation occurs.
+    for (owner, info) in package.owners() {
+        if checker.is_code_generator(owner) { continue; }
+        if !matches!(
+            info.node.expect_item().kind,
+            ItemKind::Fn(..) | ItemKind::FnDeclaration(_)
+        ) {
+            continue;
+        }
+        checker.ensure_defaults(owner, info.node.expect_item().span)?;
+    }
+    for (owner, info) in package.owners() {
+        if let ItemKind::Struct(def) = &info.node.expect_item().kind {
+            for (index, field) in def.fields.iter().enumerate() {
+                if field.default.is_some() {
+                    checker.field_default(owner, None, index)?;
+                }
+            }
+        }
+    }
+    for (owner, info) in package.owners() {
+        if let ItemKind::Enum(def) = &info.node.expect_item().kind {
+            let (leaves,_) = nominal::enum_leaves(def.variants)?;
+            for (v, (variant,_)) in leaves.iter().enumerate() {
+                if let hir::item::VariantKind::Struct(fields) = &variant.kind {
+                    for (index, field) in fields.iter().enumerate() {
+                        if field.default.is_some() {
+                            checker.field_default(owner, Some(v), index)?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut output = n::Package::default();
+    output.normal_forms = checker.normal_form_metadata();
+    for (owner, info) in package.owners() {
+        let item = info.node.expect_item();
+        if let ItemKind::Effect(_, modifiers) = &item.kind {
+            output.effects.push(nir::effects::Declaration {
+                declaration: declaration(package, package_identities, owner),
+                group: checker.effect_parents.get(&owner).map(|group| declaration(package, package_identities, *group)),
+                name: item.ident.name.as_str().into(),
+                type_parameters: checker.type_parameters[&owner].clone(),
+                signature: checker.signatures[&owner].clone(),
+                abi: if modifiers.is_direct_passing { nir::effects::Abi::DirectPassing } else if modifiers.is_async { nir::effects::Abi::Async } else { nir::effects::Abi::Direct },
+                inline: modifiers.is_inline,
+                requirements: checker.definition_requirements(owner),
+                capabilities: checker.capabilities.get(&owner).cloned().unwrap_or_default(),
+            });
+        }
+    }
+    output.traits = traits;
+    output.implementations = implementations;
+    output.structs = checker.structs.values().cloned().collect();
+    output.enums = checker.enums.values().cloned().collect();
+    for owner in checker.open_functions.keys().copied().collect::<Vec<_>>() {
+        checker.check_open_definition(owner)?;
+    }
+    for owner in checker.code_generators.keys().copied().collect::<Vec<_>>() {
+        checker.check_code_generator(owner)?;
+    }
+    for (owner, item, sig, body_id) in functions {
+        if checker.open_functions.contains_key(&owner) { continue; }
+        checker.signature_owner = Some(owner);
+        checker.context = checker.definition_context(owner);
+        checker.locals.clear();
+        let signature = checker.signatures[&owner].clone();
+        let Term::Function { parameters, result } = &signature else {
+            unreachable!()
+        };
+        for (param, ty) in sig.params.iter().zip(parameters) {
+            checker.locals.insert(local(param.hir_id), ty.ty.clone());
+        }
+        if let Some(parameters) = checker.normal_parameters.get(&owner) {
+            for (_, binding, ty) in parameters.iter().filter(|(_, _, ty)| *ty != p(P::Type)) {
+                checker.locals.insert(*binding, ty.clone());
+            }
+        }
+        checker.result = Some((**result).clone());
+        let body = package
+            .body(body_id)
+            .ok_or_else(|| error(item.span, "missing function body"))?;
+        let preconditions = checker.program_preconditions(owner)?;
+        let result_binding = sig.return_binding.map(local);
+        let (postconditions, entry_snapshots) =
+            checker.program_postconditions(owner, result_binding, result)?;
+        let previous_code=checker.in_code_body;
+        let previous_holes=std::mem::take(&mut checker.quote_holes);
+        checker.in_code_body=sig.modifiers.is_quote;
+        let value=checker.computation_body(body.value,Some(result));
+        checker.in_code_body=previous_code;
+        checker.quote_holes=previous_holes;
+        let value=value?;
+        output.functions.push(n::Function {
+            phase: if sig.modifiers.is_normal_form_head {
+                n::FunctionPhase::NormalForm
+            } else if sig.modifiers.is_comptime {
+                n::FunctionPhase::Comptime
+            } else {
+                n::FunctionPhase::Runtime
+            },
+            inline: sig.modifiers.is_inline, pure: sig.modifiers.is_pure,
+            preconditions,
+            postconditions,
+            entry_snapshots,
+            result_binding,
+            capabilities: checker
+                .capabilities
+                .get(&owner)
+                .cloned()
+                .unwrap_or_default(),
+            requirements: checker.definition_requirements(owner),
+            type_parameters: checker.type_parameters[&owner].clone(),
+            declaration: declaration(package, package_identities, owner),
+            name: item.ident.name.as_str().into(),
+            signature,
+            parameters: if sig.modifiers.is_normal_form_head {
+                checker.normal_parameters[&owner]
+                    .iter()
+                    .filter(|(_, _, ty)| *ty != p(P::Type))
+                    .map(|(_, binding, _)| *binding)
+                    .collect()
+            } else {
+                sig.params.iter().map(|x| local(x.hir_id)).collect()
+            },
+            body: value,
+            defaults: checker.defaults[&owner]
+                .iter()
+                .enumerate()
+                .filter_map(|(i, value)| value.clone().map(|value| (i, value)))
+                .collect(),
+        });
+    }
+    output.functions.append(&mut checker.generated_functions);
+    output.expansion_sources = checker.expansion_sources;
+    crate::verification::contracts::inherit(&mut output, &mut checker.next_temporary_binding)
+        .map_err(|failure| Error {
+            source: failure.source,
+            message: failure.to_string(),
+            needs_context: false,
+            needs_tactic: false,
+            needs_capability: false,
+            incompatible_context: false,
+        })?;
+    purity::validate_defaults(&output, &checker.pending_default_stability)?;
+    cmtt::expand_quote_functions(&mut output,package,package_identities,&checker.protocols,&mut checker.next_temporary_binding,&mut checker.required_steps)?;
+    output.quote_identity_cursor = checker.next_temporary_binding;
+    if output
+        .implementations
+        .iter()
+        .any(|i| !i.type_parameters.is_empty() || !i.requirements.is_empty())
+    {
+        output.dispatch_instances =
+            crate::materialization::dispatch_instances(&output, crate::ptc::Budget::default())
+                .map_err(|message| error(Span::default(), message))?;
+    }
+    purity::validate_runtime_promises(&output, &checker.protocols)?;
+    crate::verification::flow::validate_machine_operations(&output).map_err(|failure| Error {
+        source: failure.source,
+        message: failure.to_string(),
+        needs_context: false,
+        needs_tactic: false,
+        needs_capability: false,
+        incompatible_context: false,
+    })?;
+    Ok(output)
+}
+#[derive(Clone)]
+struct CaptureFrame {
+    comptime: bool,
+    outer: BTreeSet<n::LocalId>,
+    values: Vec<n::Capture>,
+}
+#[derive(Clone, Debug)]
+struct FormationInputs {
+    terms: Vec<Term>,
+    // Executable type constructors retain deferred contracts for invocation.
+    deferred: BTreeSet<DeclarationId>,
+}
+impl FormationInputs {
+    fn ready(terms: &[Term]) -> Self {
+        Self {
+            terms: terms.to_vec(),
+            deferred: BTreeSet::new(),
+        }
+    }
+}
+
+struct OldScope {
+    owner: OwnerId,
+    active: bool,
+    bindings: BTreeMap<n::LocalId, n::LocalId>,
+}
+struct Checker<'a, 'h> {
+    protocols: Protocols,
+    /// Only this expression's result is being used as a callee. Argument and
+    /// callback expressions keep their own phase and conversion boundaries.
+    comptime_callee_result: Option<hir::HirId>,
+    /// Partial result information belongs only to this exact call expression.
+    structural_result_context: Option<(hir::HirId, crate::calls::InputContext)>,
+    package_identities: BTreeMap<u32, u64>,
+    package: &'a hir::Package<'h>,
+    effect_parents: BTreeMap<OwnerId, OwnerId>,
+    signatures: BTreeMap<OwnerId, Term>,
+    open_functions: BTreeMap<OwnerId, open_functions::Definition>,
+    active_open_definitions: BTreeSet<OwnerId>,
+    open_instances: std::collections::HashMap<(OwnerId, Vec<Term>), DeclarationId>,
+    next_open_instance: u32,
+    open_instantiation_depth: usize,
+    generated_functions: Vec<n::Function>,
+    pending_default_stability: Vec<(n::Expr, Span)>,
+    specialization_inputs: Vec<(n::LocalId, Term, Term)>,
+    active_signatures: BTreeSet<OwnerId>,
+    refinement_subjects: Vec<Term>,
+    pending_refinements: Vec<refinements::Pending>,
+    executable_refinement_owner: Option<OwnerId>,
+    interface_signatures: BTreeMap<OwnerId, Term>,
+    self_types: BTreeMap<OwnerId, Term>,
+    self_containers: BTreeMap<OwnerId, OwnerId>,
+    interfaces_ready: bool,
+    checked_traits: Vec<n::Trait>,
+    checked_implementations: Vec<n::Implementation>,
+    associated_initializers: BTreeMap<(DeclarationId, DeclarationId), (OwnerId, Vec<DeclarationId>, Vec<Term>)>,
+    active_associated_values: BTreeSet<(DeclarationId, DeclarationId)>,
+    selected_associated_implementation: Option<DeclarationId>,
+    active_associated_signatures: BTreeSet<OwnerId>,
+    declaration_projection_depth: usize,
+    associated_definition_equations: BTreeMap<DeclarationId, Vec<(Term, Term)>>,
+    associated_signature_values: BTreeMap<OwnerId, n::Expr>,
+    implementation_index: crate::implementation::Index,
+    inherent_index: crate::implementation::InherentIndex,
+    type_parameters: BTreeMap<OwnerId, Vec<DeclarationId>>,
+    normal_parameters: BTreeMap<OwnerId, Vec<(DeclarationId, n::LocalId, Term)>>,
+    // Ordinary Type inputs live in the function telescope, independently of
+    // declaration-level generic parameters and their nominal identities.
+    type_input_bindings: BTreeMap<n::LocalId, Term>,
+    // Ordinary comptime values retain both their bound identity and domain.
+    // Runtime parameters are never registered as static normal-form inputs.
+    value_input_bindings: BTreeMap<n::LocalId, (Term,Term)>,
+    derived_staged_bindings: BTreeSet<n::LocalId>,
+    signature_prefixes: BTreeMap<OwnerId,Vec<Parameter>>,
+    default_input_scope: Option<Vec<Parameter>>,
+    requirements: BTreeMap<OwnerId, Vec<n::TypePredicate>>,
+    program_requirements: BTreeMap<OwnerId, Vec<&'h Expr<'h>>>,
+    program_postconditions: BTreeMap<OwnerId, Vec<&'h Expr<'h>>>,
+    old_scope: Option<OldScope>,
+    tactic_frame: Option<(n::SourceRange, Vec<hir::HirId>, bool)>,
+    capabilities: BTreeMap<OwnerId, Vec<n::TraitRequirement>>,
+    pending_type_uses: Option<Vec<(Option<OwnerId>, bool, OwnerId, FormationInputs, Span)>>,
+    signature_type_uses: Vec<(Option<OwnerId>, bool, OwnerId, FormationInputs, Span)>,
+    checking_contract: bool,
+    // Final literal defaulting also settles an otherwise unconstrained Symbol;
+    // speculative attempts must leave room for a later enum target.
+    numeric_defaults: bool,
+    signature_owner: Option<OwnerId>,
+    context: crate::ptc::Context,
+    defaults: BTreeMap<OwnerId, Vec<Option<n::Expr>>>,
+    locals: BTreeMap<n::LocalId, Term>,
+    code_values: BTreeMap<n::LocalId, std::sync::Arc<cmtt::ExpressionCode>>,
+    code_generators: BTreeMap<OwnerId, cmtt::Generator>,
+    code_packet_nominals: BTreeSet<DeclarationId>,
+    generator_data: BTreeMap<n::LocalId, Option<n::Expr>>,
+    checking_code_generator: bool,
+    abstract_code_dependencies: BTreeMap<n::LocalId, BTreeSet<n::LocalId>>,
+    in_code_body: bool,
+    quote_holes:BTreeSet<(u32,u32)>,
+    code_construction_depth: usize,
+    expansion_sources: Vec<n::ExpansionSource>,
+    aliases: BTreeSet<OwnerId>,
+    completed_aliases: std::collections::HashMap<(OwnerId, Vec<Term>), std::sync::Arc<Term>>,
+    checked_alias_definitions: BTreeSet<OwnerId>,
+    alias_scopes: BTreeMap<OwnerId, Option<OwnerId>>,
+    alias_substitution: BTreeMap<DeclarationId, std::sync::Arc<Term>>,
+    alias_value_bindings: BTreeMap<DeclarationId, n::LocalId>,
+    normal_default_bindings: BTreeMap<DeclarationId, (n::LocalId, Term)>,
+    forbidden_default_inputs: BTreeSet<DeclarationId>,
+    next_temporary_binding: u32,
+    alias_expression_budget: usize,
+    constants: BTreeMap<OwnerId, n::Expr>,
+    active_constants: BTreeSet<OwnerId>,
+    active_nominals: BTreeSet<OwnerId>,
+    active_required: BTreeSet<n::LocalId>,
+    active_contracts: BTreeSet<OwnerId>,
+    active_function_defaults: BTreeSet<(OwnerId, usize)>,
+    active_type_defaults: BTreeSet<(OwnerId, usize)>,
+    default_uses:
+        BTreeMap<(OwnerId, usize), Vec<(Option<OwnerId>, bool, OwnerId, FormationInputs, Span)>>,
+    contract_uses: BTreeMap<OwnerId, Vec<(Option<OwnerId>, bool, OwnerId, FormationInputs, Span)>>,
+    required_steps: u64,
+    in_required_comptime: bool,
+    in_staged_input: bool,
+    preparing_spread: Option<n::SourceRange>,
+    pending_spread_inputs: BTreeMap<n::LocalId, spreads::PendingPacket>,
+    observing_type: bool,
+    result: Option<Term>,
+    partial_return_context: Option<crate::calls::InputContext>,
+    // Unresolved missing returns (explicit null or propagation), completed
+    // before exporting the enclosing callback. Values are absence-node spans.
+    pending_optional_returns: BTreeMap<(u32, u32), n::SourceRange>,
+    optional_branch_probe_budget: usize,
+    probing_optional_branch: bool,
+    optional_target_probe: Option<hir::HirId>,
+    effect_environment: Option<Vec<nir::effects::Operation>>,
+    effect_resume_result: Option<Term>,
+    preserve_effect_value: bool,
+    captures: Vec<CaptureFrame>,
+    return_observations: Option<Vec<Term>>,
+    loops: Vec<n::LocalId>,
+    structs: BTreeMap<DeclarationId, n::Struct>,
+    enums: BTreeMap<DeclarationId, n::Enum>,
+    enum_sources: BTreeMap<DeclarationId, Vec<&'h hir::item::Variant<'h>>>,
+    field_defaults: BTreeMap<(OwnerId, Option<usize>, usize), n::Expr>,
+    active_defaults: BTreeSet<(OwnerId, Option<usize>, usize)>,
+    immutable: BTreeSet<n::LocalId>,
+}
+impl Checker<'_, '_> {
+    /// Resolve signature dependencies on demand, retaining only completed
+    /// signatures. Recursive value bodies do not require recursive signatures;
+    /// cycles through type observations are diagnosed explicitly.
+    fn ensure_signature(&mut self, owner: OwnerId, span: Span) -> Result<(), Error> {
+        self.validate_quote_function(owner,span)?;
+        if self.is_code_generator(owner) { return self.ensure_code_generator(owner, span); }
+        if self.signatures.contains_key(&owner) || self.interface_signatures.contains_key(&owner) || self.open_functions.contains_key(&owner) {
+            return Ok(());
+        }
+        if self.active_signatures.len() >= 64 {
+            return Err(error(
+                span,
+                "function signature dependency depth limit exceeded",
+            ));
+        }
+        if !self.active_signatures.insert(owner) {
+            return Err(error(span, "cyclic function signature dependency"));
+        }
+        let saved_owner = self.signature_owner.replace(owner);
+        let saved_locals = std::mem::take(&mut self.locals);
+        let saved_captures = std::mem::take(&mut self.captures);
+        let saved_result = self.result.take();
+        let saved_partial_return = self.partial_return_context.take();
+        let saved_optional_returns = std::mem::take(&mut self.pending_optional_returns);
+        let saved_returns = self.return_observations.take();
+        let saved_loops = std::mem::take(&mut self.loops);
+        let saved_immutable = std::mem::take(&mut self.immutable);
+        let saved_context = self.context.clone();
+        let saved_contract = std::mem::replace(&mut self.checking_contract, false);
+        let saved_defaults = std::mem::replace(&mut self.numeric_defaults, true);
+        self.context = self.nominal_context();
+        // Declaration obligations survive a failed caller-side inference probe;
+        // keep them separate from the caller's speculative obligations.
+        let saved_pending = self.pending_type_uses.replace(Vec::new());
+        let package = self.package;
+        let saved_capabilities = self.capabilities.get(&owner).cloned();
+        let had_contract = self.requirements.contains_key(&owner);
+        let checked = (|| {
+            let item = package
+                .item(owner)
+                .ok_or_else(|| error(span, "missing function declaration"))?;
+            let (ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) | ItemKind::Effect(sig, _)) = &item.kind else {
+                return Err(error(span, "declaration is not a supported callable"));
+            };
+            if let Some(parent) = self.effect_parents.get(&owner).copied() {
+                self.ensure_contract(parent, span)?;
+            }
+            let mut type_parameters = if let Some(parent) = self.effect_parents.get(&owner).or_else(|| self.self_containers.get(&owner)) {
+                self.type_parameters[parent].clone()
+            } else {
+                match self.self_types.get(&owner) {
+                    Some(Term::Rigid {
+                        declaration: interface,
+                        ..
+                    }) => {
+                        let parent = package
+                            .owners()
+                            .find_map(|(owner, _)| {
+                                (declaration(self.package, &self.package_identities, owner)
+                                    == *interface)
+                                    .then_some(owner)
+                            })
+                            .unwrap();
+                        std::iter::once(*interface)
+                            .chain(self.type_parameters[&parent].iter().copied())
+                            .collect()
+                    }
+                    _ => Vec::new(),
+                }
+            };
+            let parent = self.effect_parents.get(&owner).or_else(|| self.self_containers.get(&owner)).copied().or_else(|| {
+                let Some(Term::Rigid {
+                    declaration: interface,
+                    ..
+                }) = self.self_types.get(&owner)
+                else {
+                    return None;
+                };
+                package.owners().find_map(|(parent, _)| {
+                    (declaration(self.package, &self.package_identities, parent) == *interface)
+                        .then_some(parent)
+                })
+            });
+            let mut capabilities = parent
+                .and_then(|parent| self.capabilities.get(&parent))
+                .cloned()
+                .unwrap_or_default();
+            self.capabilities.insert(owner, capabilities.clone());
+            let parameter_subjects = required::parameter_capability_subjects(sig.clause_params)?;
+            let mut pending_capabilities = Vec::new();
+            for (subject, bound) in &parameter_subjects {
+                let atom = Expr { kind: H::TraitBound(subject, bound), ..subject.clone() };
+                required::signature_capability_atoms(&atom, &mut pending_capabilities, 0)?;
+            }
+            let mut normal_parameters = Vec::new();
+            for parameter in sig.clause_params {
+                self.ready_signature_capabilities(owner, &mut pending_capabilities, false)?;
+                if let hir::clause::ClauseParamKind::Varadic(_, declared) = parameter.kind {
+                    let ty = self.type_expr(declared)?;
+                    if !sig.modifiers.is_normal_form_head || !self.is_type_list_type(&ty) {
+                        return Err(error(parameter.span, "variadic normal-form input requires a bound meta.List<Type>"));
+                    }
+                    if !std::ptr::eq(parameter, sig.clause_params.last().unwrap()) {
+                        return Err(error(parameter.span, "variadic normal-form input must be the final parameter"));
+                    }
+                    let id = parameter.definition.ok_or_else(|| error(parameter.span, "missing normal-form parameter identity"))?;
+                    normal_parameters.push((DeclarationId {package: semantic_package(&self.package_identities,id.pkg),local:id.index},local(parameter.hir_id),ty));
+                    continue;
+                }
+                if let hir::clause::ClauseParamKind::Positional(_, ty) = parameter.kind {
+                    let ty = self.type_expr(ty)?;
+                    if ty != p(P::Type) && !sig.modifiers.is_normal_form_head {
+                        return Err(error(
+                            parameter.span,
+                            "comptime/generic/contract clause kind is not implemented",
+                        ));
+                    }
+                    if !nir::normal_forms::supported_input_type_with_layouts(&ty, &type_parameters, |head| Some(head) == self.protocols.tuple,
+                            |id|self.structs.contains_key(&id) || self.enums.contains_key(&id)) {
+                        return Err(error(
+                            parameter.span,
+                            "normal-form parameter type is not yet supported",
+                        ));
+                    }
+                    if ty != p(P::Type) {
+                        let id = parameter.definition.ok_or_else(|| {
+                            error(parameter.span, "missing normal-form parameter identity")
+                        })?;
+                        normal_parameters.push((
+                            DeclarationId {
+                                package: semantic_package(&self.package_identities, id.pkg),
+                                local: id.index,
+                            },
+                            local(parameter.hir_id),
+                            ty,
+                        ));
+                        continue;
+                    }
+                } else if let hir::clause::ClauseParamKind::Optional(_, ty, _) = parameter.kind {
+                    let ty = self.type_expr(ty)?;
+                    if ty != p(P::Type) {
+                        if !sig.modifiers.is_normal_form_head {
+                            return Err(error(parameter.span,"comptime/generic/contract clause kind is not implemented: optional function clause currently requires Type"));
+                        }
+                        if !nir::normal_forms::supported_input_type_with_layouts(&ty, &type_parameters, |head| Some(head) == self.protocols.tuple,
+                            |id|self.structs.contains_key(&id) || self.enums.contains_key(&id)) {
+                            return Err(error(parameter.span,"normal-form parameter type is not yet supported"));
+                        }
+                        let id = parameter.definition.ok_or_else(|| error(parameter.span,"missing normal-form parameter identity"))?;
+                        normal_parameters.push((DeclarationId {package:semantic_package(&self.package_identities,id.pkg),local:id.index},local(parameter.hir_id),ty));
+                        continue;
+                    }
+                } else if !matches!(
+                    parameter.kind,
+                    hir::clause::ClauseParamKind::Type(_)
+                        | hir::clause::ClauseParamKind::TraitBound(..)
+                ) {
+                    return Err(error(
+                        parameter.span,
+                        "comptime/generic/contract clause kind is not implemented",
+                    ));
+                }
+                let id = parameter
+                    .definition
+                    .ok_or_else(|| error(parameter.span, "missing clause parameter identity"))?;
+                type_parameters.push(DeclarationId {
+                    package: semantic_package(&self.package_identities, id.pkg),
+                    local: id.index,
+                });
+                if sig.modifiers.is_normal_form_head {
+                    // Later input types may refer only to Type inputs already
+                    // encountered in this declaration telescope.
+                    self.type_parameters.insert(owner, type_parameters.clone());
+                    normal_parameters.push((
+                        DeclarationId {
+                            package: semantic_package(&self.package_identities, id.pkg),
+                            local: id.index,
+                        },
+                        local(parameter.hir_id),
+                        p(P::Type),
+                    ));
+                }
+            }
+            capabilities = self.capabilities.get(&owner).cloned().unwrap_or_default();
+            if had_contract {
+                for requirement in saved_capabilities.iter().flatten() {
+                    if !capabilities.contains(requirement) { capabilities.push(requirement.clone()); }
+                }
+            }
+            self.capabilities.insert(owner, capabilities);
+            self.type_parameters.insert(owner, type_parameters);
+            let mut parameters = normal_parameters
+                .iter()
+                .filter(|(_, _, ty)| *ty != p(P::Type))
+                .map(|(_, _, ty)| Parameter {
+                    sort: Sort::ComptimeValue,
+                    ty: ty.clone(),
+                })
+                .collect::<Vec<_>>();
+            if sig.modifiers.is_normal_form_head {
+                self.normal_parameters.insert(owner, normal_parameters);
+            }
+            for clause in sig.clause_constraints {
+                if let hir::clause::ClauseConstraintKind::Requires(value) = clause.kind {
+                    required::signature_capability_atoms(value, &mut pending_capabilities, 0)?;
+                }
+            }
+            self.ready_signature_capabilities(owner, &mut pending_capabilities, false)?;
+            if let ItemKind::Effect(_, modifiers) = &item.kind {
+                if modifiers.is_direct_passing && (modifiers.is_async || !sig.params.is_empty()) {
+                    return Err(error(item.span, "direct passing effects must be synchronous and have no parameters"));
+                }
+            }
+            let mut annotations = Vec::new();
+            for (parameter_index, parameter) in sig.params.iter().enumerate() {
+                self.ready_signature_capabilities(owner, &mut pending_capabilities, false)?;
+                if matches!(item.kind, ItemKind::Effect(..)) && !matches!(parameter.ty.kind, TyParamKind::Positional(_)) {
+                    return Err(error(parameter.span, "effect parameter protocol is not yet implemented"));
+                }
+                if parameter.ty.flags & !(hir::common::TPARAM_IMPLICIT | hir::common::TPARAM_LAMBDA | hir::common::TPARAM_COMPTIME) != 0 {
+                    return Err(error(
+                        parameter.span,
+                        "parameter protocols are not implemented",
+                    ));
+                }
+                if (parameter.ty.is_implicit() || parameter.ty.is_lambda())
+                    && (matches!(item.kind, ItemKind::Effect(..))
+                        || !matches!(parameter.ty.kind, TyParamKind::Positional(_) | TyParamKind::PositionalDependencyCatched(..)))
+                {
+                    return Err(error(parameter.span, "this parameter marker combination is not yet implemented"));
+                }
+                let annotation = match parameter.ty.kind {
+                    TyParamKind::Itself { is_ref } => {
+                        if parameter_index != 0 {
+                            return Err(error(parameter.span, "self must be the first parameter"));
+                        }
+                        let subject = self.self_type(owner, parameter.span)?;
+                        if is_ref {
+                            open_functions::Annotation::Known(Term::Pointer(Box::new(subject)))
+                        } else {
+                            open_functions::Annotation::Known(subject)
+                        }
+                    }
+                    TyParamKind::Optional(_, ty, _)
+                    | TyParamKind::Positional(ty)
+                    | TyParamKind::PositionalDependencyCatched(_, ty)
+                    | TyParamKind::Varadic(_, ty) => self.signature_annotation(ty)?,
+                };
+                if let open_functions::Annotation::Pending(_) = &annotation {
+                    if parameter.ty.is_comptime() {
+                        return Err(error(parameter.span, "a deferred comptime parameter domain requires staged-domain elaboration not yet implemented"));
+                    }
+                    annotations.push((Sort::Runtime, annotation));
+                    continue;
+                }
+                let open_functions::Annotation::Known(ty) = annotation else { unreachable!() };
+                if parameter.ty.is_comptime() && annotations.iter().any(|(_, annotation)| annotation.is_pending()) {
+                    return Err(error(parameter.span, "comptime parameters after deferred runtime domains require telescope elaboration not yet implemented"));
+                }
+                let ty = if parameter.ty.is_comptime() {
+                    self.signature_parameter_domain(ty, sig.clause_constraints, parameter.span)?
+                } else { ty };
+                let parameter_type = Parameter {
+                    sort: if parameter.ty.is_comptime() {
+                        if ty == p(P::Type) {Sort::Type} else {Sort::ComptimeValue}
+                    } else {Sort::Runtime},
+                    ty,
+                };
+                annotations.push((parameter_type.sort, open_functions::Annotation::Known(parameter_type.ty.clone())));
+                if annotations.iter().any(|(_, annotation)| annotation.is_pending()) { continue; }
+                parameters.push(parameter_type);
+                self.signature_prefixes.entry(owner).or_default().push(parameters.last().unwrap().clone());
+                if parameters.last().unwrap().sort == Sort::Type {
+                    self.type_input_bindings.insert(local(parameter.hir_id), Term::Bound {
+                        depth: 0, index: parameters.len() - 1, sort: Sort::Type,
+                    });
+                }
+                if parameters.last().unwrap().sort == Sort::ComptimeValue {
+                    self.value_input_bindings.insert(local(parameter.hir_id), (
+                        Term::Bound {depth:0,index:parameters.len()-1,sort:Sort::ComptimeValue},
+                        parameters.last().unwrap().ty.clone(),
+                    ));
+                }
+            }
+            self.ready_signature_capabilities(owner, &mut pending_capabilities, true)?;
+            let result_annotation = if let Some(ty) = sig.return_ty {
+                self.signature_annotation(ty)?
+            } else {
+                open_functions::Annotation::Known(p(P::Void))
+            };
+            if result_annotation.is_pending() || annotations.iter().any(|(_, annotation)| annotation.is_pending()) {
+                self.register_open_function(owner, annotations, result_annotation, item.span)?;
+                return Ok(());
+            }
+            let open_functions::Annotation::Known(result) = result_annotation else { unreachable!() };
+            if sig.modifiers.is_normal_form_head && result != p(P::Type) {
+                return Err(error(
+                    item.span,
+                    "only Type-result normal-form heads are currently supported",
+                ));
+            }
+            let signatures = if matches!(item.kind, ItemKind::FnDeclaration(_)) {
+                &mut self.interface_signatures
+            } else {
+                &mut self.signatures
+            };
+            signatures.insert(
+                owner,
+                Term::Function {
+                    parameters,
+                    result: Box::new(result),
+                },
+            );
+            Ok(())
+        })();
+        let signature_pending =
+            std::mem::replace(&mut self.pending_type_uses, saved_pending).unwrap();
+        if checked.is_ok() {
+            self.signature_type_uses.extend(signature_pending);
+        }
+        self.signature_owner = saved_owner;
+        self.locals = saved_locals;
+        self.captures = saved_captures;
+        self.result = saved_result;
+        self.partial_return_context = saved_partial_return;
+        self.pending_optional_returns = saved_optional_returns;
+        self.return_observations = saved_returns;
+        self.loops = saved_loops;
+        self.immutable = saved_immutable;
+        self.context = saved_context;
+        self.checking_contract = saved_contract;
+        self.numeric_defaults = saved_defaults;
+        self.active_signatures.remove(&owner);
+        self.signature_prefixes.remove(&owner);
+        if checked.is_err() {
+            self.pending_refinements.retain(|pending| pending.owner != owner);
+            self.type_input_bindings.retain(|binding, _| binding.owner != owner.def_id.raw());
+            self.value_input_bindings.retain(|binding, _| binding.owner != owner.def_id.raw());
+            match saved_capabilities {
+                Some(capabilities) => { self.capabilities.insert(owner, capabilities); }
+                None => { self.capabilities.remove(&owner); }
+            }
+        }
+        checked
+    }
+
+    fn bound_optional_declaration(&mut self, span: Span) -> Result<(OwnerId, DeclarationId), Error> {
+        let id = self.protocols.optional.ok_or_else(|| error(span, "optional type requires a bound optional declaration"))?;
+        let owner = self.package.owners().find_map(|(owner, _)|
+            (declaration(self.package, &self.package_identities, owner) == id).then_some(owner))
+            .ok_or_else(|| error(span, "optional declaration is unavailable"))?;
+        self.ensure_nominal(owner, span)?;
+        let definition = self.enums.get(&id).ok_or_else(|| error(span, "optional binding requires an enum"))?;
+        if !definition.is_optional_representation() {
+            return Err(error(span, "optional binding requires one Type parameter, one unit variant and one single-value variant"));
+        }
+        Ok((owner, id))
+    }
+
+    fn optional_layout(&self, ty: &Term, span: Span) -> Result<(DeclarationId, usize, usize, Term), Error> {
+        let shape = self.type_identity_view(ty, span)?;
+        let Term::Nominal { declaration, arguments } = shape else {
+            return Err(error(span, "optional operation requires a bound optional type"));
+        };
+        if self.protocols.optional != Some(declaration) {
+            return Err(error(span, "optional operation requires the bound optional declaration"));
+        }
+        let definition = self.enums.get(&declaration)
+            .filter(|definition| definition.is_optional_representation())
+            .ok_or_else(|| error(span, "invalid optional representation"))?;
+        let [payload] = arguments.as_slice() else { return Err(error(span, "optional type argument count mismatch")); };
+        let none = definition.variants.iter().position(|variant| variant.shape == n::VariantShape::Unit).unwrap();
+        Ok((declaration, none, 1 - none, payload.clone()))
+    }
+    fn instantiated_variants(&self, ty: &Term, span: Span) -> Result<Vec<n::Variant>, Error> {
+        let Term::Nominal {
+            declaration,
+            arguments,
+        } = ty
+        else {
+            return Err(error(span, "variant requires an enum type"));
+        };
+        self.enums
+            .get(declaration)
+            .ok_or_else(|| error(span, "missing enum descriptor"))?
+            .instantiate_variants_in_scope(arguments, &self.call_input_frames())
+            .map_err(|e| error(span, e.to_string()))
+    }
+    fn variant_target(
+        &mut self,
+        callee: &Expr<'_>,
+        expected: Option<&Term>,
+    ) -> Result<Option<(Term, usize)>, Error> {
+        let Some((ty,name)) = self.enum_member_reference(callee,expected)? else {return Ok(None)};
+        let Term::Nominal {
+            declaration, ..
+        } = &ty
+        else {
+            return Ok(None);
+        };
+        let Some(definition) = self.enums.get(declaration) else {
+            return Ok(None);
+        };
+        let index = definition
+            .variants
+            .iter()
+            .position(|variant| variant.name == name.as_str());
+        match index {
+            Some(index) => Ok(Some((ty, index))),
+            None if definition.groups.contains(&name) => Err(error(callee.span,"enum group is a pattern set, not a constructible value")),
+            // A qualified enum member may be an inherent method. Keep symbol
+            // construction diagnostics, but let ordinary member lookup decide.
+            None if matches!(callee.kind, H::Projection(..)) => Ok(None),
+            None => Err(error(callee.span, "unknown enum variant")),
+        }
+    }
+    fn construct_named_variant(
+        &mut self,
+        expr: &Expr<'_>,
+        ty: Term,
+        index: usize,
+        args: &[Arg<'_>],
+        expected: Option<&Term>,
+    ) -> Result<n::Expr, Error> {
+        let Term::Nominal {
+            declaration: id,
+            arguments,
+        } = &ty
+        else {
+            unreachable!()
+        };
+        let id = *id;
+        let variant = self.instantiated_variants(&ty, expr.span)?[index].clone();
+        let n::VariantShape::Named(names) = &variant.shape else {
+            return Err(error(expr.span, "enum variant does not have named fields"));
+        };
+        let mut supplied = BTreeMap::new();
+        for arg in args {
+            let Arg::Named(name, value) = arg else {
+                return Err(error(expr.span, "enum payload fields must be fully named"));
+            };
+            let slot = names
+                .iter()
+                .position(|n| n == name.name.as_str())
+                .ok_or_else(|| error(name.span, "unknown enum payload field"))?;
+            if supplied.insert(slot, *value).is_some() {
+                return Err(error(
+                    name.span,
+                    "enum payload field supplied more than once",
+                ));
+            }
+        }
+        let owner = self
+            .package
+            .owners()
+            .find_map(|(owner, _)| {
+                (declaration(self.package, &self.package_identities, owner) == id).then_some(owner)
+            })
+            .unwrap();
+        let mut fields = Vec::new();
+        for (slot, ty) in variant.fields.iter().enumerate() {
+            fields.push(if let Some(value) = supplied.get(&slot) {
+                self.expr(value, Some(ty))?
+            } else {
+                self.field_default(owner, Some(index), slot)?
+                    .instantiate_types_in_scope(&self.enums[&id].type_parameters, arguments, &self.call_input_frames())
+                    .map_err(|e| error(expr.span, e.to_string()))?
+            });
+        }
+        let ty = if fields.iter().any(|f| is_never(&f.ty)) {
+            p(P::Never)
+        } else {
+            ty
+        };
+        if let Some(expected) = expected {
+            self.require(&ty, expected, expr.span)?;
+        }
+        Ok(n::Expr {
+            ty,
+            source: source(expr.span),
+            kind: K::Variant {
+                declaration: id,
+                index,
+                fields,
+            },
+        })
+    }
+    /// Infer a contextual enum payload without publishing candidate-local holes.
+    fn infer_contextual_variant(
+        &mut self,
+        expr: &Expr<'_>,
+        id: nir::DeclarationId,
+        name: &str,
+        args: &[Arg<'_>],
+        context: &crate::calls::InputContext,
+    ) -> Result<n::Expr, Error> {
+        let definition = self.enums.get(&id)
+            .ok_or_else(|| error(expr.span, "variant requires an enum type"))?.clone();
+        let index = definition.variants.iter().position(|variant| variant.name == name)
+            .ok_or_else(|| error(expr.span, format!("unknown enum variant {name}")))?;
+        let variant = &definition.variants[index];
+        let owner = self.package.owners().find_map(|(owner, _)|
+            (declaration(self.package, &self.package_identities, owner) == id).then_some(owner))
+            .ok_or_else(|| error(expr.span, "enum declaration owner is unavailable"))?;
+        let result = Term::Nominal { declaration: id, arguments: definition.type_parameters.iter()
+            .map(|id| Term::Rigid { declaration: *id, sort: Sort::Type }).collect() };
+        let signature = Term::Function {
+            parameters: variant.fields.iter().map(|ty| Ok(Parameter { sort: Sort::Runtime,
+                ty: ty.abstract_parameters(&[]).map_err(|e| error(expr.span, e.to_string()))?,
+            })).collect::<Result<Vec<_>, Error>>()?,
+            result: Box::new(result.abstract_parameters(&[]).map_err(|e| error(expr.span, e.to_string()))?),
+        }.abstract_types(&definition.type_parameters).map_err(|e| error(expr.span, e.to_string()))?;
+        let scheme = crate::calls::Scheme { type_parameters: definition.type_parameters.len(), signature };
+        let mut inputs = vec![None; variant.fields.len()];
+        let mut defaults = vec![None; variant.fields.len()];
+        match (&variant.shape, &expr.kind) {
+            (n::VariantShape::Tuple, H::Application(..)) => {
+                if args.iter().any(|arg| matches!(arg, Arg::Expand(_))) {
+                    let mut checked = BTreeMap::new();
+                    let mut prepared_packets = BTreeMap::new();
+                    let candidate = self.infer_enum_spread_inputs(&scheme, variant.fields.len(), args,
+                        context, expr.span, &mut checked, &mut prepared_packets)?;
+                    let fields = (0..variant.fields.len()).map(|slot| candidate.parameter_input_context(slot)
+                        .map_err(|e| call_inference_error(expr.span, e))).collect::<Result<Vec<_>, _>>()?;
+                    let mut widths = BTreeMap::new();
+                    for (index, packet) in &prepared_packets {
+                        if let Term::Tuple(fields) = self.structural_type(&packet.ty, expr.span)? {
+                            widths.insert(*index, fields.len());
+                        }
+                    }
+                    let packets = self.spread_packet_layout_with_widths(args, &fields, expr.span, &widths)?.into_iter()
+                        .map(|fields| fields.map(|fields| match self.protocols.tuple {
+                            Some(head) => crate::calls::InputContext::NormalTuple { head, fields },
+                            None => crate::calls::InputContext::Tuple(fields),
+                        })).collect::<Vec<_>>();
+                    return self.prepare_spreads_with_input(expr, args, &packets, checked, prepared_packets, |this, inputs| {
+                        this.infer_contextual_variant(expr, id, name, inputs, context)
+                    });
+                }
+                if args.len() != inputs.len() {
+                    return Err(error(expr.span, "enum payload argument count mismatch"));
+                }
+                for (slot, arg) in args.iter().enumerate() {
+                    let Arg::Positional(value) = arg else {
+                        return Err(error(expr.span, "positional enum payload requires positional arguments"));
+                    };
+                    inputs[slot] = Some(*value);
+                }
+            }
+            (n::VariantShape::Named(names), H::ExtendedApplication(..)) => {
+                for arg in args {
+                    let Arg::Named(name, value) = arg else {
+                        return Err(error(expr.span, "enum payload fields must be fully named"));
+                    };
+                    let slot = names.iter().position(|field| field == name.name.as_str())
+                        .ok_or_else(|| error(name.span, "unknown enum payload field"))?;
+                    if inputs[slot].replace(*value).is_some() {
+                        return Err(error(name.span, "enum payload field supplied more than once"));
+                    }
+                }
+                for (slot, input) in inputs.iter().enumerate() {
+                    if input.is_none() { defaults[slot] = Some(self.field_default(owner, Some(index), slot)?); }
+                }
+            }
+            _ => return Err(error(expr.span, "enum construction syntax does not match the variant payload")),
+        }
+        let scope = self.call_inference_scope();
+        let mut checked: Vec<Option<n::Expr>> = vec![None; inputs.len()];
+        let instance = loop {
+            let actual = checked.iter().map(|value| value.as_ref().filter(|value| !is_never(&value.ty))
+                .map(|value| value.ty.clone())).collect::<Vec<_>>();
+            let mut candidate = scheme.infer_scoped_types(&actual, None, &self.context,
+                crate::ptc::Budget::default(), &scope).map_err(|e| call_inference_error(expr.span, e))?;
+            candidate.constrain_result_context(context, crate::ptc::Budget::default())
+                .map_err(|e| call_inference_error(expr.span, e))?;
+            candidate.refine_type_views(|ty, budget| self.callable_input_view_budgeted(ty, budget, expr.span)
+                .map_err(|e| e.message), crate::ptc::Budget::default())
+                .map_err(|e| call_inference_error(expr.span, e))?;
+            if checked.iter().zip(&inputs).all(|(value, input)| value.is_some() || input.is_none()) {
+                break candidate.finish().map_err(|e| call_inference_error(expr.span, e))?;
+            }
+            let mut progress = false;
+            for defaults in [false, true] {
+                if defaults && (!self.numeric_defaults || progress) { break; }
+                for (slot, input) in inputs.iter().enumerate() {
+                    let Some(input) = input else { continue; };
+                    if checked[slot].is_some() { continue; }
+                    let input_context = candidate.parameter_input_context(slot)
+                        .map_err(|e| call_inference_error(input.span, e))?;
+                    let expected = candidate.parameter_type(slot)
+                        .map_err(|e| call_inference_error(input.span, e))?;
+                    checked[slot] = self.argument_attempt_with_input(input, expected.as_ref(), None,
+                        defaults, Some(&input_context))?;
+                    if checked[slot].is_some() {
+                        progress = true;
+                        // Rebuild constraints before another payload can default.
+                        break;
+                    }
+                }
+                if progress { break; }
+            }
+            if !progress {
+                return Err(context_error(expr.span, "enum payload inference needs more type information"));
+            }
+        };
+        self.check_type_application(owner, &instance.type_arguments, expr.span)?;
+        let variants = self.instantiated_variants(&instance.result, expr.span)?;
+        let mut fields = Vec::with_capacity(checked.len());
+        for (slot, (value, default)) in checked.into_iter().zip(defaults).enumerate() {
+            let value = match value {
+                Some(value) => value,
+                None => default.expect("omitted payload has a checked default")
+                    .instantiate_types_in_scope(&definition.type_parameters, &instance.type_arguments, &self.call_input_frames())
+                    .map_err(|e| error(expr.span, e.to_string()))?,
+            };
+            self.require(&value.ty, &variants[index].fields[slot], expr.span)?;
+            fields.push(value);
+        }
+        Ok(n::Expr { source: source(expr.span),
+            ty: if fields.iter().any(|value| is_never(&value.ty)) { p(P::Never) } else { instance.result },
+            kind: K::Variant { declaration: id, index, fields },
+        })
+    }
+    fn construct_variant(
+        &mut self,
+        expr: &Expr<'_>,
+        ty: Term,
+        index: usize,
+        args: &[Arg<'_>],
+        expected: Option<&Term>,
+    ) -> Result<n::Expr, Error> {
+        let Term::Nominal { declaration, .. } = &ty else {
+            unreachable!()
+        };
+        let declaration = *declaration;
+        let variant = self.instantiated_variants(&ty, expr.span)?[index].clone();
+        if variant.shape != n::VariantShape::Tuple {
+            return Err(error(
+                expr.span,
+                "unit enum variant does not take arguments",
+            ));
+        }
+        if args.iter().any(|arg| matches!(arg, Arg::Expand(_))) {
+            let contexts = self.spread_packet_contexts(args, &variant.fields, expr.span)?;
+            return self.prepare_spreads(expr, args, &contexts, |this, inputs| {
+                this.construct_variant(expr, ty, index, inputs, expected)
+            });
+        }
+        if args.len() != variant.fields.len() {
+            return Err(error(expr.span, "enum payload argument count mismatch"));
+        }
+        let mut fields = Vec::new();
+        for (arg, ty) in args.iter().zip(&variant.fields) {
+            let Arg::Positional(value) = arg else {
+                return Err(error(
+                    expr.span,
+                    "positional enum payload requires positional arguments",
+                ));
+            };
+            fields.push(self.expr(value, Some(ty))?);
+        }
+        let ty = if fields.iter().any(|field| is_never(&field.ty)) {
+            p(P::Never)
+        } else {
+            ty
+        };
+        if let Some(expected) = expected {
+            self.require(&ty, expected, expr.span)?;
+        }
+        Ok(n::Expr {
+            ty,
+            source: source(expr.span),
+            kind: K::Variant {
+                declaration,
+                index,
+                fields,
+            },
+        })
+    }
+    fn enum_variant(&self, ty: &Term, name: &str, span: Span) -> Result<n::Expr, Error> {
+        let shape = self.structural_type(ty, span)?;
+        let ty = &shape;
+        let Term::Nominal {
+            declaration,
+            arguments,
+        } = ty
+        else {
+            return Err(incompatible_context(span, "variant requires a nominal enum context"));
+        };
+        let definition = self
+            .enums
+            .get(declaration)
+            .ok_or_else(|| error(span, "variant requires an enum type"))?;
+        definition
+            .instantiate_variants_in_scope(arguments, &self.call_input_frames())
+            .map_err(|e| error(span, e.to_string()))?;
+        let index = definition
+            .variants
+            .iter()
+            .position(|variant| variant.name == name)
+            .ok_or_else(|| error(span, format!("unknown enum variant {name}")))?;
+        if definition.variants[index].shape != n::VariantShape::Unit {
+            return Err(error(span, "enum payload variant requires arguments"));
+        }
+        Ok(n::Expr {
+            ty: ty.clone(),
+            source: source(span),
+            kind: K::Variant {
+                declaration: *declaration,
+                index,
+                fields: Vec::new(),
+            },
+        })
+    }
+    fn bound_tuple_elements<'a>(&self, ty: &'a Term) -> Option<&'a [Term]> {
+        if let Term::NormalForm {head, sort: Sort::Type, arguments} = ty {
+            if Some(*head) == self.protocols.tuple {
+                if let [Term::TypeListValue(elements)] = arguments.as_slice() {
+                    return Some(elements);
+                }
+            }
+        }
+        None
+    }
+    fn structural_type(&self, ty: &Term, span: Span) -> Result<Term, Error> {
+        let ty = self.type_identity_view(ty, span)?;
+        if let Some(elements) = self.bound_tuple_elements(&ty) {
+            return Ok(Term::Tuple(elements.to_vec()));
+        }
+        Ok(ty)
+    }
+    fn type_identity_view(&self, ty: &Term, span: Span) -> Result<Term, Error> {
+        if self.bound_tuple_elements(ty).is_some() { return Ok(ty.clone()); }
+        if !matches!(
+            ty,
+            Term::Bound { .. } | Term::AssociatedType { .. } | Term::Rigid { .. } | Term::NormalForm { .. } | Term::Hole { .. }
+        ) {
+            return Ok(ty.clone());
+        }
+        self.context
+            .structural_view_with_heads_metered(ty, crate::ptc::Budget::default(), |head| Some(head) == self.protocols.tuple).0
+            .map(|view| {
+                let view = view.map(|(ty, _)| ty).unwrap_or_else(|| ty.clone());
+                view
+            })
+            .map_err(|reason| {
+                error(
+                    span,
+                    format!("structural type view remains unresolved: {reason:?}"),
+                )
+            })
+    }
+    fn negated_pattern_domain(
+        &self,
+        ty: &Term,
+        fuel: &mut usize,
+        depth: usize,
+        cache: &mut std::collections::HashMap<Term, bool>,
+    ) -> Result<bool, String> {
+        if depth >= 128 {
+            return Err("negated pattern type depth exceeded".into());
+        }
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or("negated pattern type budget exhausted")?;
+        let symbolic = matches!(
+            ty,
+            Term::Bound { .. }
+                | Term::AssociatedType { .. }
+                | Term::Rigid { .. }
+                | Term::NormalForm { .. }
+                | Term::Hole { .. }
+        );
+        if symbolic {
+            crate::associated::charge_projection_copy(ty, fuel)?;
+            if let Some(answer) = cache.get(ty) {
+                return Ok(*answer);
+            }
+        }
+        let original = ty;
+        let exposed;
+        let ty = if symbolic {
+            let (view, used) = self.context.structural_view_with_heads_metered(
+                ty,
+                // The prover reserves its allowance. Leave budget for sibling
+                // fields instead of letting the first generic field take all.
+                crate::ptc::Budget {
+                    steps: (*fuel / 2).min(10_000),
+                    max_depth: 128,
+                },
+                |head| Some(head) == self.protocols.tuple,
+            );
+            *fuel = fuel.saturating_sub(used);
+            let Some((view, _)) = view.map_err(|reason| {
+                format!("negated pattern type view remains unresolved: {reason:?}")
+            })?
+            else {
+                return Ok(false);
+            };
+            exposed = if let Some(elements) = self.bound_tuple_elements(&view) {
+                crate::associated::charge_projection_copy(&view, fuel)?;
+                Term::Tuple(elements.to_vec())
+            } else { view };
+            &exposed
+        } else {
+            ty
+        };
+        let answer = match ty {
+            Term::Primitive(primitive) => {
+                matches!(
+                    primitive,
+                    P::Bool | P::Char | P::Integer | P::F32 | P::F64 | P::BitVec(_)
+                ) || primitive.fixed_integer_layout().is_some()
+            }
+            Term::Tuple(fields) => {
+                for field in fields {
+                    if !self.negated_pattern_domain(field, fuel, depth + 1, cache)? {
+                        return Ok(false);
+                    }
+                }
+                true
+            }
+            Term::Record(fields) => {
+                for (_, field) in fields {
+                    if !self.negated_pattern_domain(field, fuel, depth + 1, cache)? {
+                        return Ok(false);
+                    }
+                }
+                true
+            }
+            // Nominal/resource-bearing values need their own access and
+            // ownership rules; structural observability is not Copy evidence.
+            _ => false,
+        };
+        if symbolic {
+            crate::associated::charge_projection_copy(original, fuel)?;
+            cache.insert(original.clone(), answer);
+        }
+        Ok(answer)
+    }
+
+    fn patterns_exhaustive(
+        &self,
+        patterns: &[&n::Pattern],
+        ty: &Term,
+    ) -> crate::coverage::Coverage {
+        crate::coverage::check_in_context_with_tuple_head(
+            &self.structs,
+            &self.enums,
+            ty,
+            patterns,
+            100_000,
+            &self.context,
+            self.protocols.tuple,
+        )
+    }
+    fn pattern_exhaustive(&self, pattern: &n::Pattern, ty: &Term) -> bool {
+        self.patterns_exhaustive(&[pattern], ty) == crate::coverage::Coverage::Exhaustive
+    }
+    fn field_default(
+        &mut self,
+        owner: OwnerId,
+        variant: Option<usize>,
+        index: usize,
+    ) -> Result<n::Expr, Error> {
+        if let Some(value) = self.field_defaults.get(&(owner, variant, index)) {
+            return Ok(value.clone());
+        }
+        let item = self.package.item(owner).unwrap();
+        let (field, ty) = match (&item.kind, variant) {
+            (ItemKind::Struct(def), None) => (
+                &def.fields[index],
+                self.structs[&declaration(self.package, &self.package_identities, owner)].fields
+                    [index]
+                    .1
+                    .clone(),
+            ),
+            (ItemKind::Enum(_), Some(v)) => {
+                let id = declaration(self.package, &self.package_identities, owner);
+                let hir::item::VariantKind::Struct(fields) = &self.enum_sources[&id][v].kind else {
+                    return Err(error(item.span,"missing required enum payload field"));
+                };
+                (
+                    &fields[index],
+                    self.enums[&declaration(self.package, &self.package_identities, owner)]
+                        .variants[v]
+                        .fields[index]
+                        .clone(),
+                )
+            }
+            _ => unreachable!(),
+        };
+        let value = field.default.ok_or_else(|| {
+            error(
+                field.span,
+                format!(
+                    "missing required {} field {}",
+                    if variant.is_some() {
+                        "enum payload"
+                    } else {
+                        "struct"
+                    },
+                    field.ident.name
+                ),
+            )
+        })?;
+        if !self.active_defaults.insert((owner, variant, index)) {
+            return Err(error(field.span, "cyclic field default elaboration"));
+        }
+        let locals = std::mem::take(&mut self.locals);
+        let captures = std::mem::take(&mut self.captures);
+        let result = self.result.take();
+        let partial_return_context = self.partial_return_context.take();
+        let optional_returns = std::mem::take(&mut self.pending_optional_returns);
+        let returns = self.return_observations.take();
+        let loops = std::mem::take(&mut self.loops);
+        let base_context = self.definition_context(owner);
+        let context = std::mem::replace(&mut self.context, base_context);
+        let signature_owner = self.signature_owner.replace(owner);
+        let checked = self.expr(value, Some(&ty));
+        self.signature_owner = signature_owner;
+        self.context = context;
+        self.locals = locals;
+        self.captures = captures;
+        self.result = result;
+        self.partial_return_context = partial_return_context;
+        self.pending_optional_returns = optional_returns;
+        self.return_observations = returns;
+        self.loops = loops;
+        self.active_defaults.remove(&(owner, variant, index));
+        let checked = checked?;
+        self.field_defaults
+            .insert((owner, variant, index), checked.clone());
+        Ok(checked)
+    }
+    fn construct(
+        &mut self,
+        expr: &Expr<'_>,
+        callee: &Expr<'_>,
+        args: &[Arg<'_>],
+        expected: Option<&Term>,
+    ) -> Result<n::Expr, Error> {
+        let ty = self.type_expr(callee)?;
+        self.ensure_nominal_type(&ty, expr.span)?;
+        let Term::Nominal {
+            declaration: id,
+            arguments,
+        } = &ty
+        else {
+            return Err(error(
+                expr.span,
+                "construction requires a supported struct type",
+            ));
+        };
+        let def = self
+            .structs
+            .get(id)
+            .ok_or_else(|| error(expr.span, "missing struct descriptor"))?
+            .clone();
+        let instantiated_fields = def
+            .instantiate_fields_in_scope(arguments, &self.call_input_frames())
+            .map_err(|e| error(expr.span, e.to_string()))?;
+        let owner = self
+            .package
+            .owners()
+            .find_map(|(owner, _)| {
+                (declaration(self.package, &self.package_identities, owner) == *id).then_some(owner)
+            })
+            .unwrap();
+        let mut supplied = BTreeMap::new();
+        for arg in args {
+            let Arg::Named(name, value) = arg else {
+                return Err(error(expr.span, "struct fields must be fully named"));
+            };
+            let index = def
+                .fields
+                .iter()
+                .position(|(field, _)| field == name.name.as_str())
+                .ok_or_else(|| error(name.span, format!("unknown struct field {}", name.name)))?;
+            if supplied.insert(index, *value).is_some() {
+                return Err(error(name.span, "struct field supplied more than once"));
+            }
+        }
+        let mut fields = Vec::new();
+        for (index, (_, field_type)) in instantiated_fields.iter().enumerate() {
+            fields.push(if let Some(value) = supplied.get(&index) {
+                let field_type = self.callable_input_view(field_type, value.span)?;
+                self.expr(value, Some(&field_type))?
+            } else {
+                self.field_default(owner, None, index)?
+                    .instantiate_types_in_scope(&def.type_parameters, arguments, &self.call_input_frames())
+                    .map_err(|e| error(expr.span, e.to_string()))?
+            });
+        }
+        let actual = if fields.iter().any(|f| is_never(&f.ty)) {
+            p(P::Never)
+        } else {
+            ty
+        };
+        if let Some(expected) = expected {
+            self.require(&actual, expected, expr.span)?;
+        }
+        Ok(n::Expr {
+            ty: actual,
+            source: source(expr.span),
+            kind: K::Record {
+                declaration: def.declaration,
+                fields,
+            },
+        })
+    }
+    fn check_struct_cycles(&self) -> Result<(), Error> {
+        fn visit(
+            ty: &Term,
+            defs: &BTreeMap<DeclarationId, n::Struct>,
+            enums: &BTreeMap<DeclarationId, n::Enum>,
+            active: &mut std::collections::HashSet<Term>,
+            done: &mut std::collections::HashSet<Term>,
+            fuel: &mut usize,
+        ) -> Result<(), &'static str> {
+            *fuel = fuel
+                .checked_sub(1)
+                .ok_or("struct representation expansion budget exhausted")?;
+            if active.len() >= 128 {
+                return Err("struct representation expansion budget exhausted");
+            }
+            // Bound expanding generic arguments before hashing/cloning them.
+            let mut nodes = vec![ty];
+            let mut size = 0;
+            while let Some(node) = nodes.pop() {
+                size += 1;
+                if size > 4096 {
+                    return Err("struct representation expansion budget exhausted");
+                }
+                match node {
+                    Term::Nominal { arguments, .. } | Term::Tuple(arguments) => {
+                        nodes.extend(arguments)
+                    }
+                    _ => {}
+                }
+            }
+            match ty {
+                Term::Nominal {
+                    declaration,
+                    arguments,
+                } if !done.contains(ty) => {
+                    if !active.insert(ty.clone()) {
+                        return Err("recursive by-value struct representation or enum payload");
+                    }
+                    if let Some(def) = defs.get(declaration) {
+                        let fields = def
+                            .instantiate_fields(arguments)
+                            .map_err(|_| "invalid struct type arguments in representation")?;
+                        for (_, field) in fields {
+                            visit(&field, defs, enums, active, done, fuel)?;
+                        }
+                    }
+                    if let Some(def) = enums.get(declaration) {
+                        let variants = def
+                            .instantiate_variants(arguments)
+                            .map_err(|_| "invalid enum type arguments in representation")?;
+                        for field in variants.iter().flat_map(|v| &v.fields) {
+                            visit(field, defs, enums, active, done, fuel)?;
+                        }
+                    }
+                    active.remove(ty);
+                    done.insert(ty.clone());
+                    Ok(())
+                }
+                Term::Tuple(items) => {
+                    for item in items {
+                        visit(item, defs, enums, active, done, fuel)?;
+                    }
+                    Ok(())
+                }
+                _ => Ok(()), // pointer/function representations break by-value recursion
+            }
+        }
+        let mut done = std::collections::HashSet::new();
+        let mut fuel = 100_000;
+        for (owner, info) in self.package.owners() {
+            if matches!(
+                &info.node.expect_item().kind,
+                ItemKind::Struct(_) | ItemKind::Enum(_)
+            ) {
+                let arguments = self
+                    .type_parameters
+                    .get(&owner)
+                    .into_iter()
+                    .flatten()
+                    .map(|id| Term::Rigid {
+                        declaration: *id,
+                        sort: Sort::Type,
+                    })
+                    .collect();
+                visit(
+                    &Term::Nominal {
+                        declaration: declaration(self.package, &self.package_identities, owner),
+                        arguments,
+                    },
+                    &self.structs,
+                    &self.enums,
+                    &mut std::collections::HashSet::new(),
+                    &mut done,
+                    &mut fuel,
+                )
+                .map_err(|message| error(info.node.expect_item().span, message))?;
+            }
+        }
+        Ok(())
+    }
+    fn when_expr(
+        &mut self,
+        expr: &Expr<'_>,
+        arms: &[hir::expr::CondictionArm<'_>],
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+    ) -> Result<n::Expr, Error> {
+        self.when_expr_with_input(expr, arms, expected, partial, None)
+    }
+    fn when_expr_with_input(
+        &mut self,
+        expr: &Expr<'_>,
+        arms: &[hir::expr::CondictionArm<'_>],
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+        input_context: Option<&crate::calls::InputContext>,
+    ) -> Result<n::Expr, Error> {
+        let parent=self.context.clone();
+        let result=self.when_expr_in_context(expr,arms,expected,partial,input_context);
+        self.context=parent;
+        result
+    }
+    fn when_expr_in_context(
+        &mut self,
+        expr: &Expr<'_>,
+        arms: &[hir::expr::CondictionArm<'_>],
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+        input_context: Option<&crate::calls::InputContext>,
+    ) -> Result<n::Expr, Error> {
+        let fallback = arms.iter().position(|arm| arm.cond.is_none());
+        if fallback.is_some_and(|index| index + 1 != arms.len()) {
+            return Err(error(expr.span, "when fallback must be the final arm"));
+        }
+        let inferred = if expected.is_none() && fallback.is_some() {
+            match input_context {
+                Some(context) => self.optional_branch_context(expr.span, context, arms.len(), |checker, index| {
+                    // The probe must see the same ordered path as the final
+                    // check. checking_attempt rolls all these facts back.
+                    for (prior, arm) in arms[..=index].iter().enumerate() {
+                        checker.optional_branch_probe_budget=checker.optional_branch_probe_budget.checked_sub(1)
+                            .ok_or_else(||error(expr.span,"optional branch inference budget exhausted; add a type annotation"))?;
+                        if let Some(condition)=arm.cond {
+                            let condition=checker.expr(condition,Some(&p(P::Bool)))?;
+                            checker.assume_type_condition(&condition,prior==index,arm.body.span)?;
+                        }
+                    }
+                    checker.input_context_expression(arms[index].body, context)
+                })?,
+                None => None,
+            }
+        } else { None };
+        let expected = expected.or(inferred.as_ref());
+        let mut branches = Vec::new();
+        let join_context=self.context.clone();
+        let mut branch_type = if fallback.is_some() {
+            expected.cloned()
+        } else {
+            None
+        };
+        for arm in arms {
+            let condition = arm
+                .cond
+                .map(|cond| self.expr(cond, Some(&p(P::Bool))))
+                .transpose()?;
+            let check=|checker:&mut Self|match input_context {
+                Some(input_context) if fallback.is_some() && branch_type.is_none() => {
+                    checker.input_context_expression(arm.body, input_context)
+                }
+                _ => checker.expr_context(
+                    arm.body,
+                    branch_type.as_ref(),
+                    if fallback.is_some() { partial } else { None },
+                ),
+            };
+            let mut body=match &condition {
+                Some(condition)=>self.under_type_condition(condition,true,arm.body.span,check)?,
+                None=>check(self)?,
+            };
+            if branch_type.is_none() && !is_never(&body.ty) {
+                branch_type = Some(body.ty.clone());
+            }
+            if fallback.is_none() {
+                body = discard_result(body);
+            }
+            if let Some(condition)=&condition {
+                self.assume_type_condition(condition,false,arm.body.span)?;
+            }
+            branches.push((condition, body));
+        }
+        self.context=join_context;
+        let mut tail = n::Expr {
+            ty: p(P::Void),
+            source: source(expr.span),
+            kind: K::Unit,
+        };
+        for (condition, body) in branches.into_iter().rev() {
+            let Some(condition) = condition else {
+                tail = body;
+                continue;
+            };
+            let ty = if control::conditional_never(&condition, &body.ty, &tail.ty) {
+                p(P::Never)
+            } else if fallback.is_some() && branch_type.is_some() {
+                // Each completing arm was checked against this context under
+                // its own ordered type facts, including a sole surviving arm.
+                branch_type.clone().unwrap()
+            } else if is_never(&body.ty) {
+                tail.ty.clone()
+            } else if is_never(&tail.ty) {
+                body.ty.clone()
+            } else {
+                self.require(&tail.ty, &body.ty, expr.span)?;
+                body.ty.clone()
+            };
+            tail = n::Expr {
+                ty,
+                source: source(expr.span),
+                kind: K::If {
+                    condition: Box::new(condition),
+                    then_branch: Box::new(body),
+                    else_branch: Some(Box::new(tail)),
+                },
+            };
+        }
+        if let Some(expected) = expected {
+            self.require(&tail.ty, expected, expr.span)?;
+        }
+        Ok(tail)
+    }
+    fn is_type_head(&self, expr: &Expr<'_>) -> bool {
+        if self.associated_reference_is_type(expr) { return true; }
+        match &expr.kind {
+            H::RefinedType {..} | H::RefinementSubject | H::EffectQualifiedType(..) | H::TypeOf(_) | H::Builtin(_) | H::TyType | H::TyVoid | H::TyNoReturn
+            | H::TyPtr(_) | H::TyOptional(_) | H::TyClosure(..) | H::TyFn(_) | H::TyComptimeFn(_) | H::TyFnArrow(..) => true,
+            H::TySelf => {
+                self.self_types.contains_key(&expr.hir_id.owner)
+                    || self.self_containers.contains_key(&expr.hir_id.owner)
+            }
+            H::ResolvedClauseParam(..) => true,
+            H::NFApplication(head, _) => {
+                self.is_type_head(head)
+                    || matches!(head.kind,
+                H::ResolvedDef { def_id, .. } if self.package.definition_owner(def_id)
+                    .and_then(|o| self.package.item(o)).is_some_and(|i| matches!(&i.kind,
+                        ItemKind::Fn(sig, _) if sig.modifiers.is_normal_form_head)))
+            }
+            H::ResolvedDef { def_id, .. } => self
+                .package
+                .definition_owner(*def_id)
+                .and_then(|owner| self.package.item(owner))
+                .is_some_and(|item| {
+                    matches!(
+                        item.kind,
+                        ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::TypeAlias(..)
+                    )
+                }),
+            _ => false,
+        }
+    }
+    fn type_expr(&mut self, expr: &Expr<'_>) -> Result<Term, Error> {
+        if let H::RefinementSubject = &expr.kind {
+            return self.refinement_subjects.last().cloned()
+                .ok_or_else(||error(expr.span,"Itself has no active refinement subject"));
+        }
+        if let H::RefinedType { requirement, base } = &expr.kind {
+            let base=self.type_expr(base)?;
+            self.refinement_subjects.push(base.clone());
+            let requirement_result=self.check_refinement_expression(requirement);
+            self.refinement_subjects.pop();
+            requirement_result?;
+            return Ok(base);
+        }
+        if let H::Defer(value) = &expr.kind {
+            // Signature annotations prepare open computations separately. Other
+            // type positions still demand a completed computation here; never
+            // manufacture an opaque normal-form head for unavailable inputs.
+            return self.type_expr(value);
+        }
+        if let H::Projection(value, field) = &expr.kind {
+            if let Some(value) = self.associated_projection(value, field.name.as_str(), expr.span)? {
+                let K::TypeValue(ty) = value.kind else { return Err(error(expr.span,"associated value used as a type does not contain a completed Type")); };
+                return Ok(ty);
+            }
+        }
+        match &expr.kind {
+            H::ResolvedLocal(_,id) if self.generator_data.contains_key(&local(*id)) => {
+                match self.generator_data.get(&local(*id)) {
+                    Some(Some(value)) if matches!(value.kind,K::TypeValue(_)) => {
+                        constants::charge_copy(value,&mut self.required_steps,expr.span)?;
+                        let K::TypeValue(ty)=&value.kind else {unreachable!()};
+                        Ok(ty.clone())
+                    }
+                    _=>Err(error(expr.span,"local constant used as a type must contain a completed Type value")),
+                }
+            }
+            H::ResolvedFnParam(_, id) => {
+                let binding = local(*id);
+                let in_signature = self.signature_owner.is_some_and(|owner|
+                    owner == id.owner && self.active_signatures.contains(&owner));
+                self.type_input_bindings.get(&binding)
+                    .filter(|_| in_signature || self.locals.contains_key(&binding)
+                        || (self.checking_contract && self.signature_owner == Some(id.owner))).cloned()
+                    .ok_or_else(|| error(expr.span, "type annotation requires an earlier comptime Type parameter"))
+            },
+            H::EffectQualifiedType(effects, result) => {
+                let operations = self.effect_row(effects, 0)?;
+                Ok(Term::computation(operations, self.type_expr(result)?))
+            }
+            H::Application(..)
+            | H::ExtendedApplication(..)
+            | H::Index(..)
+            | H::If(..)
+            | H::When(_)
+            | H::Match(..)
+            | H::Block(_) => {
+                let value = self.required_value(expr, P::Type)?;
+                let comptime_interpretor::Value::Type(ty) = value else {
+                    unreachable!()
+                };
+                Ok(ty)
+            }
+            H::TySelf => {
+                let ty = self.self_type(expr.hir_id.owner, expr.span)?;
+                if let Term::Rigid { declaration, .. } = &ty {
+                    if let Some(value) = self.alias_substitution.get(declaration).cloned() {
+                        return self.copy_alias_type(&value, expr.span);
+                    }
+                }
+                if !self.alias_substitution.is_empty() {
+                    let parameters:Vec<_>=self.alias_substitution.keys().copied().collect();
+                    let arguments:Vec<_>=self.alias_substitution.values().map(|ty| ty.as_ref().clone()).collect();
+                    return ty.instantiate_types(&parameters,&arguments).map_err(|e|error(expr.span,e.to_string()));
+                }
+                Ok(ty)
+            },
+            H::NFApplication(head, args) => {
+                if let H::Builtin(name) = &head.kind {
+                    if name.as_str() == "BitVec" {
+                        let [Arg::Positional(width)] = *args else {
+                            return Err(error(
+                                expr.span,
+                                "builtin BitVec requires exactly one positional comptime width",
+                            ));
+                        };
+                        if matches!(
+                            &width.kind,
+                            H::Lit(hir::Lit {
+                                kind: hir::LitKind::Float(_),
+                                ..
+                            })
+                        ) {
+                            return Err(error(
+                                width.span,
+                                "BitVec width requires a nonnegative comptime integer",
+                            ));
+                        }
+                        let exact = if let H::Lit(hir::Lit {
+                            kind: hir::LitKind::Integer(spelling),
+                            ..
+                        }) = &width.kind
+                        {
+                            comptime_runtime::Integer::parse_literal(
+                                spelling,
+                                &mut comptime_runtime::Budget::default(),
+                            )
+                            .map_err(|e| error(width.span, e.to_string()))?
+                        } else {
+                            let comptime_interpretor::Value::Integer(value) =
+                                self.required_value(width, P::Integer)?
+                            else {
+                                unreachable!()
+                            };
+                            value
+                        };
+                        if exact.is_negative() {
+                            return Err(error(
+                                width.span,
+                                "BitVec width must be a nonnegative comptime integer",
+                            ));
+                        }
+                        let width = exact
+                            .to_u128()
+                            .ok()
+                            .and_then(|width| usize::try_from(width).ok())
+                            .ok_or_else(|| {
+                                error(
+                                    width.span,
+                                    "BitVec width exceeds the implementation size limit",
+                                )
+                            })?;
+                        return Ok(p(P::BitVec(width)));
+                    }
+                }
+                let H::ResolvedDef { def_id, .. } = head.kind else {
+                    return Err(error(
+                        expr.span,
+                        "type application requires a resolved generic type",
+                    ));
+                };
+                let owner = self
+                    .package
+                    .definition_owner(def_id)
+                    .ok_or_else(|| error(expr.span, "type definition has no HIR owner"))?;
+                if matches!(&self.package.item(owner).unwrap().kind,
+                    ItemKind::Fn(sig, _) if sig.modifiers.is_normal_form_head)
+                {
+                    self.ensure_signature(owner, expr.span)?;
+                    if !self.normal_type_list_tail(owner) {
+                        if let Some(arguments) = normal::literal_spreads(args) {
+                            let expanded = Expr { hir_id: expr.hir_id, span: expr.span,
+                                kind: H::NFApplication(head, &arguments) };
+                            return self.type_expr(&expanded);
+                        }
+                    }
+                    if (self.has_optional_type_clauses(owner) || (!self.normal_type_list_tail(owner) && args.iter().any(|a| matches!(a, Arg::Expand(_))))) && self.normal_parameters[&owner].iter().any(|(_,_,ty)| *ty != p(P::Type)) {
+                        // Type annotations consume these inputs at comptime;
+                        // a bound runtime Splice protocol must not intercept a
+                        // packet producer while preparing the head application.
+                        let checked = self.with_staged_input(true, |this|
+                            this.normal_type_expression(expr,owner,args,Some(&p(P::Type))))?;
+                        let mut budget = comptime_runtime::Budget {steps:self.required_steps as usize,max_limbs:4096};
+                        let before=budget.steps;
+                        let known=self.known_normal_input(&checked,0,&mut budget);
+                        self.required_steps-=(before-budget.steps) as u64;
+                        let known=match known {Some(known)=>Some(known),None=>self.required_normal_type_plan(expr,&checked)?};
+                        if let Some(ty @ Term::NormalForm {..})=known {
+                            let Term::NormalForm {arguments,..}=&ty else {unreachable!()};
+                            self.check_type_application(owner,arguments,expr.span)?;
+                            return Ok(ty);
+                        }
+                        let (comptime_interpretor::Value::Type(ty), _) = self.required_normal_input(expr,checked,Vec::new())? else {
+                            return Err(error(expr.span,"normal-form application did not produce Type"));
+                        };
+                        return Ok(ty);
+                    }
+                    if self.has_optional_type_clauses(owner) || (args.iter().any(|arg| matches!(arg, Arg::Expand(_)))
+                        && self.normal_parameters[&owner].iter().all(|(_, _, ty)| *ty == p(P::Type))) {
+                        let arguments = self.type_clause_arguments(owner, args, None, expr.span)?;
+                        self.check_type_application(owner, &arguments, expr.span)?;
+                        return Ok(Term::NormalForm {
+                            head: declaration(self.package, &self.package_identities, owner),
+                            sort: Sort::Type,
+                            arguments,
+                        });
+                    }
+                    let parameters = self.normal_parameters[&owner].clone();
+                    let variadic = self.normal_type_list_tail(owner);
+                    let (routed, order) = self.normal_type_list_route(owner, args, expr.span)?;
+                    let args = routed.as_slice();
+                    if if variadic { args.len() < parameters.len() - 1 } else { parameters.len() != args.len() } {
+                        return Err(error(expr.span, "normal-form argument count mismatch"));
+                    }
+                    let mut arguments = vec![None; parameters.len()];
+                    let mut type_arguments = Vec::new();
+                    for slot in order {
+                        let (_, _, ty) = &parameters[slot];
+                        if variadic && slot + 1 == parameters.len() {
+                            if let Some(input) = self.normal_type_list_supply(owner, &args[slot..], expr.span)? {
+                                arguments[slot] = Some(self.normal_value_argument(input, ty)?);
+                                continue;
+                            }
+                            let mut parts = Vec::new();
+                            for argument in &args[slot..] {
+                                match argument {
+                                    Arg::Positional(value) => parts.push(Term::TypeListValue(vec![self.type_expr(value)?])),
+                                    Arg::Expand(value) => {
+                                        parts.push(self.normal_value_argument(value, ty)?);
+                                    }
+                                    _ => return Err(error(expr.span, "unsupported type-list collection input")),
+                                }
+                            }
+                            arguments[slot] = Some(Term::type_list_concat(parts));
+                            continue;
+                        }
+                        let argument = &args[slot];
+                        let Arg::Positional(value) = argument else {
+                            return Err(error(
+                                expr.span,
+                                "normal-form arguments must be positional",
+                            ));
+                        };
+                        let argument = if *ty == p(P::Type) {
+                            let value = self.type_expr(value)?;
+                            type_arguments.push(value.clone());
+                            value
+                        } else {
+                            let ty = self.instantiate_input_types(ty,
+                                &self.type_parameters[&owner][..type_arguments.len()],
+                                &type_arguments,value.span)?;
+                            self.normal_value_argument(value, &ty)?
+                        };
+                        arguments[slot] = Some(argument);
+                    }
+                    let arguments = arguments.into_iter().collect::<Option<Vec<_>>>()
+                        .ok_or_else(|| error(expr.span, "incomplete normal-form input routing"))?;
+                    self.check_type_application(owner, &arguments, expr.span)?;
+                    return Ok(Term::NormalForm {
+                        head: declaration(self.package, &self.package_identities, owner),
+                        sort: Sort::Type,
+                        arguments,
+                    });
+                }
+                if let Some(ItemKind::TypeAlias(value, ..)) =
+                    self.package.item(owner).map(|item| &item.kind)
+                {
+                    let count = self.type_parameters[&owner].len();
+                    if count == 0 { return Err(error(expr.span,"generic type alias argument count mismatch")); }
+                    let arguments = self.type_clause_arguments(owner,args,None,expr.span)
+                        .map_err(|mut failure| { if failure.message == "type argument count mismatch" {failure.message="generic type alias argument count mismatch".into();} failure })?;
+                    self.check_type_application(owner, &arguments, expr.span)?;
+                    return self.alias_type(owner, value, &arguments, expr.span);
+                }
+                if !matches!(
+                    self.package.item(owner).map(|item| &item.kind),
+                    Some(ItemKind::Struct(_) | ItemKind::Enum(_))
+                ) {
+                    return Err(error(
+                        expr.span,
+                        "this type application requires comptime elaboration not yet implemented",
+                    ));
+                }
+                if self.type_parameters[&owner].is_empty() {
+                    return Err(error(expr.span, "generic type type argument count mismatch"));
+                }
+                let arguments = self.type_clause_arguments(owner, args, None, expr.span)?;
+                self.check_type_application(owner, &arguments, expr.span)?;
+                Ok(Term::Nominal {
+                    declaration: declaration(self.package, &self.package_identities, owner),
+                    arguments,
+                })
+            }
+
+            H::TypeOf(value) => {
+                if matches!(
+                    &value.kind,
+                    H::Lit(hir::Lit {
+                        kind: hir::LitKind::Integer(_),
+                        ..
+                    })
+                ) {
+                    return Ok(p(P::Integer));
+                }
+                if let H::Unary(UnOp::Neg, inner) = &value.kind {
+                    if matches!(
+                        &inner.kind,
+                        H::Lit(hir::Lit {
+                            kind: hir::LitKind::Integer(_),
+                            ..
+                        })
+                    ) {
+                        return Ok(p(P::Integer));
+                    }
+                }
+                if matches!(
+                    &value.kind,
+                    H::Lit(hir::Lit {
+                        kind: hir::LitKind::Float(_),
+                        ..
+                    })
+                ) {
+                    return Ok(p(P::Float));
+                }
+                if let H::Unary(UnOp::Neg, inner) = &value.kind {
+                    if matches!(
+                        &inner.kind,
+                        H::Lit(hir::Lit {
+                            kind: hir::LitKind::Float(_),
+                            ..
+                        })
+                    ) {
+                        return Ok(p(P::Float));
+                    }
+                }
+                // Observing a type does not evaluate/capture the operand in
+                // surrounding runtime closures. Closures inside the operand
+                // still build their own capture types during checking.
+                let captures = std::mem::take(&mut self.captures);
+                let locals = self.locals.clone();
+                let result = self.result.take();
+                let partial_return_context = self.partial_return_context.take();
+                let optional_returns = std::mem::take(&mut self.pending_optional_returns);
+                let returns = self.return_observations.take();
+                let observing = std::mem::replace(&mut self.observing_type, true);
+                let checked = self.expr(value, None).map(|value| value.ty);
+                self.observing_type = observing;
+                self.captures = captures;
+                self.locals = locals;
+                self.result = result;
+                self.partial_return_context = partial_return_context;
+                self.pending_optional_returns = optional_returns;
+                self.return_observations = returns;
+                checked
+            }
+            H::TyClosure(context, body) => {
+                let H::TyClosureEnvironment(bindings) = &context.kind else {
+                    return Err(error(
+                        context.span,
+                        "open closure contexts require environment-parameter elaboration not yet implemented",
+                    ));
+                };
+                let mut names = std::collections::HashSet::new();
+                let mut environment = Vec::new();
+                for binding in *bindings {
+                    if !names.insert(binding.name.name) {
+                        return Err(error(
+                            binding.name.span,
+                            "duplicate closure environment binding",
+                        ));
+                    }
+                    if binding.value.is_some() {
+                        return Err(error(
+                            binding.name.span,
+                            "closure environment sources require dependency/provenance checking not yet implemented",
+                        ));
+                    }
+                    environment.push(self.type_expr(binding.ty)?);
+                }
+                let body = self.type_expr(body)?;
+                if environment.is_empty() {
+                    return Ok(body);
+                }
+                if matches!(body, Term::Closure { .. }) {
+                    return Err(error(
+                        expr.span,
+                        "a type cannot have repeated nonempty closure qualification",
+                    ));
+                }
+                if !matches!(body, Term::Function { .. } | Term::ComptimeFunction(_)) {
+                    return Err(error(
+                        expr.span,
+                        "non-callable closure-qualified bodies are not yet implemented",
+                    ));
+                }
+                Ok(Term::Closure {
+                    environment,
+                    signature: Box::new(body),
+                })
+            }
+            H::TyFn(params) | H::TyComptimeFn(params) => {
+                let mut parameters = Vec::new();
+                for parameter in *params {
+                    if parameter.flags != 0 {
+                        return Err(error(
+                            expr.span,
+                            "function type parameter protocols are not implemented",
+                        ));
+                    }
+                    let TyParamKind::Positional(value) = parameter.kind else {
+                        return Err(error(
+                            expr.span,
+                            "function type parameter form is not implemented",
+                        ));
+                    };
+                    parameters.push(Parameter {
+                        sort: Sort::Runtime,
+                        ty: self.type_expr(value)?.abstract_parameters(&[])
+                            .map_err(|e| error(value.span,e.to_string()))?,
+                    });
+                }
+                Ok(Term::Function {
+                    parameters,
+                    result: Box::new(p(P::Void)),
+                }
+                .with_comptime_phase(matches!(expr.kind, H::TyComptimeFn(_))))
+            }
+            H::TyFnArrow(input, output) => {
+                let input = self.type_expr(input)?;
+                if !matches!(input.callable_signature(), Term::Function { .. }) {
+                    return Err(error(expr.span, "arrow input must be a function type"));
+                }
+                let output = self.type_expr(output)?.abstract_parameters(&[])
+                    .map_err(|e| error(output.span,e.to_string()))?;
+                input
+                    .with_callable_result(output)
+                    .ok_or_else(|| error(expr.span, "arrow input must be a function type"))
+            }
+            H::ResolvedClauseParam(_, id) => {
+                let declaration = DeclarationId {
+                    package: semantic_package(&self.package_identities, id.pkg),
+                    local: id.index,
+                };
+                if self.forbidden_default_inputs.contains(&declaration) {
+                    return Err(error(expr.span,"normal-form default references itself or a later parameter"));
+                }
+                if self.alias_value_bindings.contains_key(&declaration) {
+                    return Err(error(
+                        expr.span,
+                        "required comptime input is not yet available in this definition",
+                    ));
+                }
+                if let Some(value) = self.alias_substitution.get(&declaration).cloned() {
+                    return self.copy_alias_type(&value, expr.span);
+                }
+                if self
+                    .type_parameters
+                    .values()
+                    .any(|parameters| parameters.contains(&declaration))
+                {
+                    Ok(Term::Rigid {
+                        declaration,
+                        sort: Sort::Type,
+                    })
+                } else {
+                    Err(error(
+                        expr.span,
+                        "clause parameter is not an available Type parameter",
+                    ))
+                }
+            }
+            H::TyVoid => Ok(p(P::Void)),
+            H::TyType => Ok(p(P::Type)),
+            H::TyNoReturn => Ok(p(P::Never)),
+            H::TyOptional(inner) => {
+                let (owner, id) = self.bound_optional_declaration(expr.span)?;
+                let arguments = vec![self.type_expr(inner)?];
+                self.check_type_application(owner, &arguments, expr.span)?;
+                Ok(Term::Nominal { declaration: id, arguments })
+            }
+            H::TyPtr(inner) => Ok(Term::Pointer(Box::new(self.type_expr(inner)?))),
+            H::Tuple(items) => {
+                let elements = items.iter().map(|x| self.type_expr(x)).collect::<Result<_, _>>()?;
+                self.tuple_value_type(elements, expr.span)
+            },
+            H::Unit => Ok(p(P::Void)),
+            H::Builtin(name) => {
+                if name.as_str() == "BitVec" {
+                    return Err(error(
+                        expr.span,
+                        "builtin BitVec is a type constructor and requires a width argument",
+                    ));
+                }
+                let primitive = match name.as_str() {
+                    "bool" => P::Bool,
+                    "char" => P::Char,
+                    "str" => P::Str,
+                    "Symbol" => P::Symbol,
+                    "Type" => P::Type,
+                    "Integer" => P::Integer,
+                    "Float" => P::Float,
+                    "void" => P::Void,
+                    "noreturn" => P::Never,
+                    "i8" => P::I8,
+                    "i16" => P::I16,
+                    "i32" => P::I32,
+                    "i64" => P::I64,
+                    "i128" => P::I128,
+                    "u8" => P::U8,
+                    "u16" => P::U16,
+                    "u32" => P::U32,
+                    "u64" => P::U64,
+                    "u128" => P::U128,
+                    "isize" => P::Isize,
+                    "usize" => P::Usize,
+                    "f32" => P::F32,
+                    "f64" => P::F64,
+                    _ => return Err(error(expr.span, format!("unsupported builtin type {name}"))),
+                };
+                Ok(p(primitive))
+            }
+            H::ResolvedDef { def_id, .. } => {
+                let owner = self.package.definition_owner(*def_id).ok_or_else(|| {
+                    error(expr.span, "resolved type declaration has no HIR owner")
+                })?;
+                if matches!(self.package.item(owner).map(|i| &i.kind), Some(ItemKind::Associated(_))) {
+                    let value = self.lexical_associated_value(owner, expr.span)?;
+                    return match value.kind {
+                        K::TypeValue(ty) => Ok(ty),
+                        _ => Err(error(expr.span, "associated value used as a type does not contain a completed Type")),
+                    };
+                }
+                if matches!(
+                    self.package.item(owner).map(|i| &i.kind),
+                    Some(ItemKind::Const(..))
+                ) {
+                    let value = self.constant_value(owner, expr.span)?;
+                    return match value.kind {
+                        K::TypeValue(ty) => Ok(ty),
+                        _ => Err(error(
+                            expr.span,
+                            "constant used as a type does not contain a Type value",
+                        )),
+                    };
+                }
+                if let Some(ItemKind::TypeAlias(value, ..)) =
+                    self.package.item(owner).map(|i| &i.kind)
+                {
+                    let arguments = self.type_clause_arguments(owner,&[],None,expr.span)
+                        .map_err(|mut failure| {if failure.message == "type argument count mismatch" {failure.message="generic type alias requires explicit type arguments".into();} failure})?;
+                    self.check_type_application(owner, &arguments, expr.span)?;
+                    return self.alias_type(owner, value, &arguments, expr.span);
+                }
+                if !self.aliases.insert(owner) {
+                    return Err(error(expr.span, "cyclic type alias"));
+                }
+                let result = match self.package.item(owner).map(|i| &i.kind) {
+                    Some(ItemKind::Struct(_) | ItemKind::Enum(_)) => (|| {
+                        let arguments = self.type_clause_arguments(owner, &[], None, expr.span)
+                            .map_err(|mut failure| {
+                                if failure.message.contains("argument count mismatch") {
+                                    failure.message = "generic type requires explicit type arguments".into();
+                                }
+                                failure
+                            })?;
+                        self.check_type_application(owner, &arguments, expr.span)
+                            .map(|()| Term::Nominal {
+                                declaration: declaration(self.package, &self.package_identities, owner),
+                                arguments,
+                            })
+                    })(),
+                    _ => Err(error(
+                        expr.span,
+                        "declaration does not produce a supported type",
+                    )),
+                };
+                self.aliases.remove(&owner);
+                result
+            }
+            _ => Err(error(
+                expr.span,
+                "type expression requires comptime elaboration not yet implemented",
+            )),
+        }
+    }
+    fn type_predicate(&mut self, expr: &Expr<'_>) -> Result<n::TypePredicate, Error> {
+        match &expr.kind {
+            H::TraitBound(subject, bound) => {
+                let subject = self.type_expr(subject)?;
+                let atoms = self.parent_interfaces_for(bound, &subject)?.into_iter().map(|interface|
+                    n::TypePredicate::Trait(n::TraitRequirement { interface: interface.declaration,
+                        interface_arguments: interface.arguments, subject: subject.clone() })).collect();
+                Ok(n::TypePredicate::And(atoms))
+            },
+            H::Lit(hir::Lit {
+                kind: hir::LitKind::Bool(value),
+                ..
+            }) => Ok(n::TypePredicate::Bool(*value)),
+            H::Unary(UnOp::Not, value) => {
+                Ok(n::TypePredicate::Not(Box::new(self.type_predicate(value)?)))
+            }
+            H::Binary(op @ (BinOp::And | BinOp::Or), a, b) => {
+                let parts = vec![self.type_predicate(a)?, self.type_predicate(b)?];
+                Ok(if *op == BinOp::And {
+                    n::TypePredicate::And(parts)
+                } else {
+                    n::TypePredicate::Or(parts)
+                })
+            }
+            H::Binary(op @ (BinOp::Eq | BinOp::Ne), a, b) => {
+                let operand_error = |mut failure: Error| {
+                    // Retain the failing inner span and resumability flag. A
+                    // malformed type application is not a program predicate,
+                    // and must not lose its concrete formation diagnostic.
+                    failure.message = format!(
+                        "requires type operand could not be elaborated: {}; program specifications are not handled by PTC",
+                        failure.message
+                    );
+                    failure
+                };
+                let left = self.type_expr(a).map_err(operand_error)?;
+                let right = self.type_expr(b).map_err(operand_error)?;
+                let equality = n::TypePredicate::Equal(left, right);
+                Ok(if *op == BinOp::Ne {
+                    n::TypePredicate::Not(Box::new(equality))
+                } else {
+                    equality
+                })
+            }
+            _ => Err(error(
+                expr.span,
+                "requires is not a supported type proposition; program specifications are not handled by PTC",
+            )),
+        }
+    }
+    fn nominal_context(&self) -> crate::ptc::Context {
+        let mut context = crate::ptc::Context::default();
+        for declaration in &self.code_packet_nominals {context.admit_nominal_constructor(*declaration);}
+        // Nominal declaration identity does not depend on obtaining its field
+        // layout. World preparation can compare impl heads before unrelated
+        // layouts/signatures have been demanded; formation is checked separately.
+        for (owner, info) in self.package.owners() {
+            if matches!(
+                info.node.expect_item().kind,
+                ItemKind::Struct(_) | ItemKind::Enum(_)
+            ) {
+                context.admit_nominal_constructor(declaration(
+                    self.package,
+                    &self.package_identities,
+                    owner,
+                ));
+            }
+        }
+        // Only checked opaque definitions with the supported immutable input
+        // telescope receive forward congruence. No body equation or inverse
+        // constructor rule is introduced by this admission.
+        for owner in self.normal_parameters.keys() {
+            if matches!(self.package.item(*owner).map(|item| &item.kind),
+                Some(ItemKind::Fn(sig, _)) if sig.modifiers.is_normal_form_head && sig.modifiers.is_pure)
+            {
+                context.admit_congruence(declaration(
+                    self.package,
+                    &self.package_identities,
+                    *owner,
+                ));
+                let head = declaration(self.package, &self.package_identities, *owner);
+                if Some(head) == self.protocols.tuple && self.normal_type_list_tail(*owner)
+                    && self.normal_parameters[owner].len() == 1
+                    && self.is_type_list_type(&self.normal_parameters[owner][0].2) {
+                    context.admit_tuple_head(head);
+                }
+            }
+        }
+        context
+    }
+    fn definition_context(&self, owner: OwnerId) -> crate::ptc::Context {
+        let base = self.binder_context(owner);
+        let scope = self.signatures.get(&owner).or_else(||self.interface_signatures.get(&owner))
+            .and_then(|signature| match signature.callable_signature() {
+                Term::Function {parameters,..} if !parameters.is_empty() => Some(vec![parameters.iter().map(|p|p.sort).collect()]),
+                _ => None,
+            }).or_else(|| self.open_functions.get(&owner).map(|definition| vec![definition.input_sorts()])).unwrap_or_default();
+        let mut context = base.theory_in_scope(scope);
+        for assumption in base.assumptions() { context.assume(assumption.clone()); }
+        for capability in self.capabilities.get(&owner).into_iter().flatten() {
+            if std::iter::once(&capability.subject).chain(&capability.interface_arguments)
+                .any(|ty| ty.substitution_parameters().is_ok_and(|slots| !slots.is_empty())) {
+                context.assume(crate::ptc::Formula::from_predicate(&n::TypePredicate::Trait(capability.clone())));
+            }
+        }
+        if let Some(equations) = self.associated_definition_equations.get(
+            &declaration(self.package, &self.package_identities, owner),
+        ) {
+            for (projection, value) in equations {
+                context.assume(crate::ptc::Formula::equal(projection.clone(), value.clone()));
+            }
+        }
+        if let Some(requirements) = self.requirements.get(&owner) {
+            for requirement in requirements {
+                context.assume(crate::ptc::Formula::from_predicate(requirement));
+            }
+        }
+        context
+    }
+    fn binder_assumptions(&self, owner: OwnerId) -> Vec<n::TraitRequirement> {
+        let mut assumptions = self.capabilities.get(&owner).cloned().unwrap_or_default();
+        if let Some(interface) = self.checked_traits.iter().find(|interface| {
+            interface.methods.iter().any(|method| {
+                method.declaration == declaration(self.package, &self.package_identities, owner)
+            }) || interface.associated.iter().any(|member|
+                member.declaration==declaration(self.package,&self.package_identities,owner))
+        }) {
+            assumptions.push(n::TraitRequirement {
+                subject: Term::Rigid {
+                    declaration: interface.self_parameter,
+                    sort: Sort::Type,
+                },
+                interface: interface.declaration,
+                interface_arguments: interface
+                    .type_parameters
+                    .iter()
+                    .map(|id| Term::Rigid {
+                        declaration: *id,
+                        sort: Sort::Type,
+                    })
+                    .collect(),
+            });
+        }
+        assumptions
+    }
+    // Carry the same type premises used to check the body into owned NIR.
+    // Program verification must recover scalar domains without guessing from
+    // the body's chosen operations or relying on the transient checker state.
+    fn definition_requirements(&self, owner: OwnerId) -> Vec<n::TypePredicate> {
+        let mut requirements = self.requirements.get(&owner).cloned().unwrap_or_default();
+        for requirement in crate::capabilities::subject_requirements(
+            &self.checked_traits, &self.binder_assumptions(owner), crate::ptc::Budget::default(),
+        ) {
+            if !requirements.contains(&requirement) {requirements.push(requirement);}
+        }
+        requirements
+    }
+    fn binder_context(&self, owner: OwnerId) -> crate::ptc::Context {
+        let mut context = self.nominal_context();
+        for requirement in crate::capabilities::subject_requirements(
+            &self.checked_traits, &self.binder_assumptions(owner), crate::ptc::Budget::default(),
+        ) {
+            context.assume(crate::ptc::Formula::from_predicate(&requirement));
+        }
+        context
+    }
+    fn check_type_application(
+        &mut self,
+        owner: OwnerId,
+        arguments: &[Term],
+        span: Span,
+    ) -> Result<(), Error> {
+        self.check_formation_application(owner, FormationInputs::ready(arguments), span)
+    }
+    fn check_formation_application(
+        &mut self,
+        owner: OwnerId,
+        arguments: FormationInputs,
+        span: Span,
+    ) -> Result<(), Error> {
+        if let Some(pending) = &mut self.pending_type_uses {
+            let scope = self.signature_owner.and_then(|owner| {
+                self.alias_scopes
+                    .get(&owner)
+                    .copied()
+                    .unwrap_or(Some(owner))
+            });
+            pending.push((scope, !self.checking_contract, owner, arguments, span));
+            Ok(())
+        } else {
+            self.check_formation_requirements(owner, &arguments, span)
+        }
+    }
+    fn requirement_type_view(
+        &self,
+        input: &n::TypePredicate,
+        span: Span,
+        fuel: &mut usize,
+        depth: usize,
+    ) -> Result<n::TypePredicate, Error> {
+        use n::TypePredicate as Q;
+        if depth >= 64 {
+            return Err(error(span, "associated requirement view depth exhausted"));
+        }
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or_else(|| error(span, "associated requirement view budget exhausted"))?;
+        Ok(match input {
+            Q::Bool(value) => Q::Bool(*value),
+            Q::Trait(requirement) => Q::Trait(n::TraitRequirement {
+                interface: requirement.interface,
+                subject: self.callable_input_view(&requirement.subject, span)?,
+                interface_arguments: requirement.interface_arguments.iter()
+                    .map(|term| self.callable_input_view(term, span)).collect::<Result<_, _>>()?,
+            }),
+            Q::Equal(a, b) => Q::Equal(
+                self.callable_input_view(a, span)?,
+                self.callable_input_view(b, span)?,
+            ),
+            Q::Not(inner) => Q::Not(Box::new(self.requirement_type_view(
+                inner,
+                span,
+                fuel,
+                depth + 1,
+            )?)),
+            Q::And(items) | Q::Or(items) => {
+                let values = items
+                    .iter()
+                    .map(|item| self.requirement_type_view(item, span, fuel, depth + 1))
+                    .collect::<Result<_, _>>()?;
+                if matches!(input, Q::And(_)) {
+                    Q::And(values)
+                } else {
+                    Q::Or(values)
+                }
+            }
+        })
+    }
+    fn check_requirements(
+        &self,
+        owner: OwnerId,
+        arguments: &[Term],
+        span: Span,
+    ) -> Result<(), Error> {
+        self.check_formation_requirements(owner, &FormationInputs::ready(arguments), span)
+    }
+    fn check_formation_requirements(
+        &self,
+        owner: OwnerId,
+        inputs: &FormationInputs,
+        span: Span,
+    ) -> Result<(), Error> {
+        let arguments = &inputs.terms;
+        let requirements = self
+            .requirements
+            .get(&owner)
+            .ok_or_else(|| error(span, "function requirements await definition elaboration"))?;
+        let mut work: Vec<_> = requirements.iter().rev().collect();
+        while let Some(requirement) = work.pop() {
+            if let n::TypePredicate::And(parts) = requirement {
+                work.extend(parts.iter().rev());
+                continue;
+            }
+            let terms = required::requirement_terms(requirement, span)?;
+            if terms.iter().any(|ty| ty.substitution_parameters().is_ok_and(|slots| !slots.is_empty())) {
+                let signature = self.signatures.get(&owner).or_else(||self.interface_signatures.get(&owner))
+                    .ok_or_else(||error(span,"ordinary type requirement needs a function signature"))?;
+                let Term::Function {parameters,..} = signature.callable_signature() else {
+                    return Err(error(span,"ordinary type requirement needs a function signature"));
+                };
+                let frames = vec![parameters.iter().map(|p|p.sort).collect()];
+                for ty in terms { ty.check_scope(&frames).map_err(|e|error(span,e.to_string()))?; }
+                // Retained in the declaration; discharge after ordinary input preparation.
+                continue;
+            }
+            if inputs
+                .deferred
+                .iter()
+                .any(|input| requirement.mentions_rigid(*input))
+            {
+                // The stable head contract is retained in NIR and checked after
+                // the constructor evaluates these inputs, before a value escapes.
+                continue;
+            }
+            // Interface formation has no implementation subject yet. Its
+            // Self-dependent obligations are checked on each implementation.
+            if matches!(
+                self.package.item(owner).map(|item| &item.kind),
+                Some(ItemKind::Trait(_))
+            ) && requirement.mentions_rigid(declaration(
+                self.package,
+                &self.package_identities,
+                owner,
+            )) {
+                continue;
+            }
+            let instantiated = if let Some(parameters) = self.normal_parameters.get(&owner) {
+                let declarations: Vec<_> = parameters.iter().map(|(id, _, _)| *id).collect();
+                requirement.instantiate_rigids(&declarations, arguments)
+            } else {
+                let parameters=self.type_parameters[&owner].iter().map(|id|nir::DeclarationParameter {
+                    declaration:*id,sort:Sort::Type,
+                }).collect::<Vec<_>>();
+                requirement.instantiate_parameters_in_scope(&parameters, arguments, self.context.scope())
+            }
+            .map_err(|e| error(span, e.to_string()))?;
+            let mut outcome=self.context.prove(
+                crate::ptc::Formula::from_predicate(&instantiated),
+                crate::ptc::Budget::default(),
+            );
+            if self.interfaces_ready && matches!(outcome,crate::ptc::Outcome::Unknown {..}|crate::ptc::Outcome::NotEntailed(_)) {
+                let viewed=self.requirement_type_view(&instantiated,span,&mut 10_000,0)?;
+                let assumptions = self.capability_assumptions();
+                outcome = crate::capabilities::World {
+                    index: &self.implementation_index, implementations: &self.checked_implementations,
+                    traits: &self.checked_traits, assumptions: &assumptions, context: &self.context,
+                }.check_predicate(&viewed, crate::ptc::Budget::default()).map_err(|message| error(span, message))?;
+            }
+            match outcome {
+                crate::ptc::Outcome::Entailed(_) => {}
+                crate::ptc::Outcome::NotEntailed(_) => {
+                    return Err(error(
+                        span,
+                        format!("type requirement is not satisfied: {instantiated}"),
+                    ));
+                }
+                crate::ptc::Outcome::Unknown { .. } => {
+                    return Err(error(
+                        span,
+                        format!("type requirement remains unresolved: {instantiated}"),
+                    ));
+                }
+                crate::ptc::Outcome::IllFormed(reason) => {
+                    return Err(error(span, format!("invalid type requirement: {reason}")));
+                }
+            }
+        }
+        if let Some(parameters) = self.normal_parameters.get(&owner) {
+            if parameters.len() != arguments.len() {
+                return Err(error(span, "normal-form contract argument count mismatch"));
+            }
+            let types: Vec<_> = parameters
+                .iter()
+                .zip(arguments)
+                .filter(|((_, _, ty), _)| *ty == p(P::Type))
+                .map(|(_, argument)| argument.clone())
+                .collect();
+            self.check_capabilities(owner, &types, span)
+        } else {
+            self.check_capabilities(owner, arguments, span)
+        }
+    }
+    fn require(&self, actual: &Term, expected: &Term, span: Span) -> Result<(), Error> {
+        // Diverging control flow is admissible at a result position; this does
+        // not assert the false type equation Never = expected.
+        if is_never(actual) {
+            return Ok(());
+        }
+        use crate::ptc::{Budget, Formula, Outcome};
+        // PTC receives well-scoped type propositions. Preserve the enclosing
+        // telescope instead of submitting its body as a free bound variable.
+        let scoped = |ty: &Term| -> Result<Term, Error> {
+            let parameters=self.call_inference_scope();
+            if parameters.is_empty() {return Ok(ty.clone());}
+            Ok(Term::Function { parameters, result: Box::new(ty.clone()) })
+        };
+        let has_inputs = !actual.substitution_parameters().map_err(|e| error(span,e.to_string()))?.is_empty()
+            || !expected.substitution_parameters().map_err(|e| error(span,e.to_string()))?.is_empty();
+        let frames = self.call_input_frames();
+        let (left, right) = if has_inputs && self.context.scope() != frames.as_slice() { (scoped(actual)?, scoped(expected)?) } else { (actual.clone(), expected.clone()) };
+        match self.context.prove(
+            Formula::equal(left, right),
+            Budget::default(),
+        ) {
+            Outcome::Entailed(_) => Ok(()),
+            Outcome::NotEntailed(_) => Err(error(
+                span,
+                format!("type mismatch: expected {expected}, found {actual}"),
+            )),
+            Outcome::Unknown { reason, .. } => Err(error(
+                span,
+                format!(
+                    "unresolved type equality ({reason:?}): expected {expected}, found {actual}"
+                ),
+            )),
+            Outcome::IllFormed(reason) => {
+                Err(error(span, format!("ill-formed type equality: {reason}")))
+            }
+        }
+    }
+    fn block(&mut self, block: &hir::Block<'_>, expected: Option<&Term>) -> Result<n::Expr, Error> {
+        self.block_context(block, expected, None)
+    }
+    fn block_context(
+        &mut self,
+        block: &hir::Block<'_>,
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+    ) -> Result<n::Expr, Error> {
+        self.block_context_with_input(block, expected, partial, None)
+    }
+    fn block_context_with_input(
+        &mut self,
+        block: &hir::Block<'_>,
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+        input_context: Option<&crate::calls::InputContext>,
+    ) -> Result<n::Expr, Error> {
+        let saved = self.locals.clone();
+        let saved_code = self.code_values.clone();
+        let saved_context=self.context.clone();
+        let result = (|| {
+            let mut statements = Vec::new();
+            let mut diverges = false;
+            for statement in block.stmts {
+                let value = self.expr(statement, None)?;
+                diverges |= is_never(&value.ty);
+                if !diverges {
+                    self.assume_statement_type_facts(&value,statement.span)?;
+                    if self.signature_owner.is_some_and(|owner| self.open_functions.contains_key(&owner)) {
+                        self.assume_open_continuation(statement)?;
+                    }
+                }
+                statements.push(value);
+            }
+            let tail = block
+                .expr
+                .map(|value| match input_context {
+                    Some(input_context) if expected.is_none() => self.input_context_expression(value, input_context),
+                    _ => self.expr_context(value, expected, partial),
+                })
+                .transpose()?
+                .map(Box::new);
+            let ty = if diverges {
+                p(P::Never)
+            } else {
+                tail.as_ref().map(|x| x.ty.clone()).unwrap_or(p(P::Void))
+            };
+            if let Some(expected) = expected {
+                self.require(&ty, expected, block.span)?;
+            }
+            Ok(n::Expr {
+                ty,
+                source: source(block.span),
+                kind: K::Block {
+                    statements,
+                    result: tail,
+                },
+            })
+        })();
+        self.locals = saved;
+        self.code_values = saved_code;
+        self.context=saved_context;
+        result
+    }
+    fn callable_type(&self, owner: OwnerId, signature: Term) -> Term {
+        let comptime = self.package.item(owner).is_some_and(|item| {
+            matches!(&item.kind, ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)
+                if sig.modifiers.is_comptime && !sig.modifiers.is_normal_form_head)
+        });
+        signature.with_comptime_phase(comptime)
+    }
+    fn function_instance(
+        &mut self,
+        expr: &Expr<'_>,
+        owner: OwnerId,
+        arguments: Vec<Term>,
+        expected: Option<&Term>,
+        allow_optional: bool,
+    ) -> Result<n::Expr, Error> {
+        self.ensure_signature(owner, expr.span)?;
+        let parameters = self.type_parameters.get(&owner).ok_or_else(|| {
+            error(
+                expr.span,
+                "explicit instantiation requires a generic function",
+            )
+        })?;
+        if parameters.is_empty() {
+            return Err(error(
+                expr.span,
+                "explicit instantiation requires a generic function",
+            ));
+        }
+        if !allow_optional {
+            if let Some(ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) = self.package.item(owner).map(|item| &item.kind) {
+                arguments::require_function_value_parameters(signature.params, expr.span)?;
+            }
+        }
+        let scope=self.call_inference_scope();
+        let frames=if scope.is_empty() {vec![]} else {vec![scope.iter().map(|p|p.sort).collect()]};
+        let ty = self
+            .signatures
+            .get(&owner)
+            .or_else(|| self.interface_signatures.get(&owner))
+            .ok_or_else(|| error(expr.span, "declaration is not a supported callable"))?
+            .instantiate_types_in_scope(parameters, &arguments,&frames)
+            .map_err(|e| error(expr.span, format!("invalid function type arguments: {e}")))?;
+        let ty = self.callable_type(owner, ty);
+        self.check_type_application(owner, &arguments, expr.span)?;
+        if let Some(expected) = expected {
+            self.require(&ty, expected, expr.span)?;
+        }
+        Ok(n::Expr {
+            ty,
+            source: source(expr.span),
+            kind: K::FunctionInstance {
+                declaration: declaration(self.package, &self.package_identities, owner),
+                arguments,
+            },
+        })
+    }
+    fn explicit_function_instance(
+        &mut self,
+        expr: &Expr<'_>,
+        callee: &Expr<'_>,
+        args: &[Arg<'_>],
+        expected: Option<&Term>,
+        allow_optional: bool,
+    ) -> Result<n::Expr, Error> {
+        if let H::Projection(base, name) = &callee.kind {
+            if let Some(method) = self.static_method(base, name.name.as_str(), callee.span)? {
+                return self.explicit_method_instance(expr, method, args, expected, allow_optional);
+            }
+        }
+        let H::ResolvedDef { def_id, .. } = callee.kind else {
+            return Err(error(
+                expr.span,
+                "explicit instantiation requires a resolved generic function",
+            ));
+        };
+        let owner = self
+            .package
+            .definition_owner(def_id)
+            .ok_or_else(|| error(expr.span, "generic function has no HIR owner"))?;
+        self.ensure_signature(owner, expr.span)?;
+        if self.has_optional_type_clauses(owner) {
+            let arguments=self.type_clause_arguments(owner,args,None,expr.span)?;
+            let value=self.function_instance(expr,owner,arguments,None,allow_optional)?;
+            return if allow_optional {Ok(value)} else {self.callable_value_view(value,expected,expr.span)};
+        }
+        let arguments = self.expanded_type_inputs(args, self.type_parameters[&owner].len(), expr.span)?.into_iter().map(|(name, ty)| {
+            if name.is_some() { Err(error(expr.span, "explicit type arguments currently require positional inputs")) }
+            else { Ok(ty) }
+        }).collect::<Result<Vec<_>, _>>()?;
+        let value = self.function_instance(expr, owner, arguments, None, allow_optional)?;
+        if allow_optional { Ok(value) } else { self.callable_value_view(value, expected, expr.span) }
+    }
+    fn contextual_function_instance(
+        &mut self,
+        expr: &Expr<'_>,
+        owner: OwnerId,
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+    ) -> Result<n::Expr, Error> {
+        self.contextual_function_instance_with_fixed(expr, owner, Vec::new(), expected, partial)
+    }
+    fn contextual_function_instance_with_fixed(
+        &mut self,
+        expr: &Expr<'_>,
+        owner: OwnerId,
+        fixed: Vec<Term>,
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+    ) -> Result<n::Expr, Error> {
+        self.contextual_function_instance_with_fixed_view(expr, owner, fixed, expected, partial, None)
+    }
+    fn contextual_function_instance_with_fixed_view(
+        &mut self,
+        expr: &Expr<'_>,
+        owner: OwnerId,
+        fixed: Vec<Term>,
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+        view: Option<&n::Expr>,
+    ) -> Result<n::Expr, Error> {
+        self.ensure_signature(owner, expr.span)?;
+        if !self.signatures.contains_key(&owner) && !self.interface_signatures.contains_key(&owner) {
+            return Err(error(expr.span, "declaration is not a supported callable"));
+        }
+        let (generic_parameters, template, pending_defaults) = self.function_type_plan(owner, &fixed, expr.span)?;
+        if generic_parameters.is_empty() {
+            let value=self.function_instance(expr,owner,template,None,true)?;
+            return self.callable_value_view(value,expected,expr.span);
+        }
+        let expected_shape = expected
+            .map(|ty| self.structural_type(ty, expr.span))
+            .transpose()?;
+        // A complete function type owns a parameter frame. Remove it before
+        // comparing components in the caller's scope; partial callable contexts
+        // already contain caller-relative components. Substitution also rejects
+        // dependencies on the removed frame rather than capturing caller slots.
+        let (actual, result) = match (
+            expected_shape.as_ref().map(Term::callable_signature),
+            partial,
+        ) {
+            (Some(Term::Function { parameters, result }), _) => (
+                parameters
+                    .iter()
+                    .map(|p|p.ty.substitute(&[]).map(Some))
+                    .collect::<Result<Vec<_>,_>>().map_err(|e|error(expr.span,e.to_string()))?,
+                Some(result.substitute(&[]).map_err(|e|error(expr.span,e.to_string()))?),
+            ),
+            (None, Some(context)) => (context.parameters.clone(), context.result.clone()),
+            _ => {
+                return Err(context_error(
+                    expr.span,
+                    "generic function value requires instantiation through a call or function type context",
+                ));
+            }
+        };
+        if let Some(partial) = partial {
+            let phase_type = self.callable_type(owner, self.signatures.get(&owner).or_else(|| self.interface_signatures.get(&owner)).unwrap().clone());
+            if matches!(phase_type, Term::ComptimeFunction(_)) != partial.comptime {
+                return Err(error(
+                    expr.span,
+                    "function context requires a different execution phase",
+                ));
+            }
+        }
+        let all_parameters = &self.type_parameters[&owner];
+        if fixed.len() > all_parameters.len() {
+            return Err(error(expr.span, "too many fixed generic function arguments"));
+        }
+
+        let original = self.signatures.get(&owner).or_else(||self.interface_signatures.get(&owner))
+            .ok_or_else(||error(expr.span,"declaration is not a supported callable"))?;
+        let signature=self.instantiate_input_types(original,all_parameters,&template,expr.span)?;
+        // Refine stable components after method-local binders enter inference.
+        let scheme = crate::calls::Scheme {
+            type_parameters: generic_parameters.len(),
+            signature: signature
+                .abstract_types(&generic_parameters)
+                .map_err(|e| error(expr.span, e.to_string()))?,
+        };
+        let scope=self.call_inference_scope();
+        let mut candidate = scheme.infer_scoped_types(&actual,result.as_ref(),&self.context,crate::ptc::Budget::default(),&scope)
+            .map_err(|e|call_inference_error(expr.span,e))?;
+        candidate.refine_type_views(|ty,budget|self.callable_input_view_budgeted(ty,budget,expr.span).map_err(|e|e.message),crate::ptc::Budget::default())
+            .map_err(|e|call_inference_error(expr.span,e))?;
+        if !self.settle_function_defaults(owner,&generic_parameters,&template,&pending_defaults,&mut BTreeMap::new(),&mut candidate,expr.span)? {
+            return Err(context_error(expr.span,"function type defaults are waiting for inferred inputs"));
+        }
+        let instance=candidate.finish().map_err(|e| {
+            let message=format!("generic function context inference failed: {e:?}");
+            Error {message,..call_inference_error(expr.span,e)}
+        })?;
+        let arguments = template.iter().map(|ty| self.instantiate_input_types(ty,&generic_parameters,&instance.type_arguments,expr.span)).collect::<Result<Vec<_>,_>>()?;
+        let value = self.function_instance(expr, owner, arguments, None, false)?;
+        if view.is_some() { Ok(value) } else { self.callable_value_view(value, expected, expr.span) }
+    }
+    // Staged availability is checked separately from required execution.
+    // Carry only the phase context here; do not eagerly invoke deferred inputs.
+    fn with_staged_input<R>(&mut self, staged: bool, check: impl FnOnce(&mut Self) -> R) -> R {
+        let saved = self.in_staged_input;
+        self.in_staged_input |= staged;
+        let result = check(self);
+        self.in_staged_input = saved;
+        result
+    }
+
+    /// Check an input transactionally. Only a complete expression publishes
+    /// captures, return observations and local state. Immutable declaration
+    /// tables are shared; they are not copied for speculative input checking.
+    fn argument_attempt(
+        &mut self,
+        input: &Expr<'_>,
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+    ) -> Result<Option<n::Expr>, Error> {
+        self.argument_attempt_with_defaults(input, expected, partial, false)
+    }
+    fn argument_attempt_with_defaults(
+        &mut self,
+        input: &Expr<'_>,
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+        allow_defaults: bool,
+    ) -> Result<Option<n::Expr>, Error> {
+        self.argument_attempt_with_input(input, expected, partial, allow_defaults, None)
+    }
+    fn wrap_inferred_optional(&self, value: n::Expr, declaration: DeclarationId, span: Span) -> Result<n::Expr, Error> {
+        let ty = Term::Nominal { declaration, arguments: vec![value.ty.clone()] };
+        let (_, _, index, _) = self.optional_layout(&ty, span)?;
+        Ok(n::Expr { source: source(span), ty, kind: K::Variant { declaration, index, fields: vec![value] } })
+    }
+
+    fn input_context_expression(
+        &mut self,
+        input: &Expr<'_>,
+        context: &crate::calls::InputContext,
+    ) -> Result<n::Expr, Error> {
+        use crate::calls::InputContext as C;
+        if let C::Nominal { declaration, arguments } = context {
+            let directed = matches!(&input.kind, H::Null | H::Block(_) | H::If(..) | H::Match(..) | H::When(_)
+                | H::Return(_) | H::EffectRequest(_) | H::EffectHandle(..))
+                || enum_groups::symbol_path(input).is_some()
+                || matches!(&input.kind, H::Application(head,_) | H::ExtendedApplication(head,_)
+                    if enum_groups::symbol_path(head).is_some());
+            if self.protocols.optional == Some(*declaration) && !directed {
+                let [payload_context] = arguments.as_slice() else {
+                    return Err(error(input.span, "optional context argument count mismatch"));
+                };
+                if let Some(mut value) = self.argument_attempt(input, None, None)? {
+                    if is_never(&value.ty) { return Ok(value); }
+                    // Preserve existing layers first. Only add outer layers required
+                    // by the context; the enclosing candidate checks leaf constraints.
+                    let mut depth = 0;
+                    let mut cursor = context;
+                    while let C::Nominal { declaration: head, arguments } = cursor {
+                        if *head != *declaration { break; }
+                        let [inner] = arguments.as_slice() else { break; };
+                        depth += 1;
+                        if depth > 128 { return Err(error(input.span, "optional context depth exhausted")); }
+                        cursor = inner;
+                    }
+                    let mut ty = value.ty.clone();
+                    let mut present = 0;
+                    while present < depth {
+                        let Ok((_, _, _, inner)) = self.optional_layout(&ty, input.span) else { break; };
+                        present += 1;
+                        ty = inner;
+                    }
+                    for _ in present..depth { value = self.wrap_inferred_optional(value, *declaration, input.span)?; }
+                    return Ok(value);
+                }
+                let value = self.input_context_expression(input, payload_context)?;
+                if is_never(&value.ty) { return Ok(value); }
+                return self.wrap_inferred_optional(value, *declaration, input.span);
+            }
+        }
+        match (context, &input.kind) {
+            (C::Nominal { declaration, .. }, H::Application(callee, args) | H::ExtendedApplication(callee, args))
+                if enum_groups::symbol_path(callee).is_some() => {
+                let name = enum_groups::symbol_path(callee).unwrap();
+                self.infer_contextual_variant(input, *declaration, name.as_str(), args, context)
+            }
+            (
+                C::Tuple(_) | C::NormalTuple { .. } | C::Record(_) | C::Nominal { .. },
+                H::Application(..) | H::ExtendedApplication(..) | H::EffectRequest(_),
+            )
+            | (C::Callable(_), H::EffectRequest(_)) => {
+                let saved = self.structural_result_context.replace((input.hir_id, context.clone()));
+                let result = self.expr(input, None);
+                self.structural_result_context = saved;
+                result
+            }
+            (C::Known(ty), _) => self.expr(input, Some(ty)),
+            (C::Callable(callable), _) => self.expr_context(input, None, Some(callable)),
+            (C::Tuple(_) | C::NormalTuple { .. } | C::Record(_) | C::Nominal { .. }, H::Match(value, arms)) => {
+                self.match_expr_with_input(input, value, arms, None, None, Some(context))
+            }
+            (C::Tuple(_) | C::NormalTuple { .. } | C::Record(_) | C::Nominal { .. }, H::When(arms)) => {
+                self.when_expr_with_input(input, arms, None, None, Some(context))
+            }
+            (C::Tuple(_) | C::NormalTuple { .. } | C::Record(_) | C::Nominal { .. }, H::Block(block)) => {
+                let saved = self.comptime_callee_result;
+                if saved == Some(input.hir_id) {
+                    self.comptime_callee_result = block.expr.map(|tail| tail.hir_id);
+                }
+                let result = self.block_context_with_input(block, None, None, Some(context));
+                self.comptime_callee_result = saved;
+                result
+            }
+            (C::Tuple(_) | C::NormalTuple { .. } | C::Record(_) | C::Nominal { .. }, H::If(condition, yes, Some(no))) => {
+                let condition = self.expr(condition, Some(&p(P::Bool)))?;
+                let inferred = self.optional_branch_context(input.span, context, 2, |checker, index| {
+                    checker.under_type_condition(&condition,index==0,input.span,|checker|if index == 0 {
+                        checker.block_context_with_input(yes, None, None, Some(context))
+                    } else {
+                        checker.input_context_expression(no, context)
+                    })
+                })?;
+                let yes = self.under_type_condition(&condition,true,input.span,|checker|
+                    checker.block_context_with_input(yes, inferred.as_ref(), None, Some(context)))?;
+                let no = self.under_type_condition(&condition,false,input.span,|checker|if is_never(&yes.ty) {
+                    match &inferred {
+                        Some(ty) => checker.expr(no, Some(ty)),
+                        None => checker.input_context_expression(no, context),
+                    }
+                } else {
+                    checker.expr(no, Some(&yes.ty))
+                })?;
+                let ty = if is_never(&condition.ty) {
+                    p(P::Never)
+                } else if is_never(&yes.ty) {
+                    no.ty.clone()
+                } else {
+                    self.require(&no.ty, &yes.ty, input.span)?;
+                    yes.ty.clone()
+                };
+                Ok(n::Expr {
+                    ty,
+                    source: source(input.span),
+                    kind: K::If {
+                        condition: Box::new(condition),
+                        then_branch: Box::new(yes),
+                        else_branch: Some(Box::new(no)),
+                    },
+                })
+            }
+            (C::Record(fields), H::CollectedProperties(properties)) => {
+                self.property_packet_with_context(input, properties, None, Some(fields))
+            }
+            (C::Tuple(fields) | C::NormalTuple { fields, .. }, H::Tuple(items)) => {
+                if fields.len() != items.len() {
+                    return Err(error(input.span, "tuple argument arity mismatch"));
+                }
+                let values = items
+                    .iter()
+                    .zip(fields)
+                    .map(|(item, context)| self.input_context_expression(item, context))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let ty = if values.iter().any(|value| is_never(&value.ty)) {
+                    p(P::Never)
+                } else {
+                    self.tuple_value_type(values.iter().map(|value| value.ty.clone()).collect(), input.span)?
+                };
+                Ok(n::Expr {
+                    ty,
+                    source: source(input.span),
+                    kind: K::Tuple(values),
+                })
+            }
+            _ => self.expr(input, None),
+        }
+    }
+
+    fn argument_attempt_with_input(
+        &mut self,
+        input: &Expr<'_>,
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+        allow_defaults: bool,
+        input_context: Option<&crate::calls::InputContext>,
+    ) -> Result<Option<n::Expr>, Error> {
+        self.checking_attempt(allow_defaults, true, |checker| {
+            if expected.is_none()
+                && matches!(input_context, Some(crate::calls::InputContext::Tuple(_) | crate::calls::InputContext::NormalTuple { .. } | crate::calls::InputContext::Record(_) | crate::calls::InputContext::Nominal { .. } | crate::calls::InputContext::Callable(_))) {
+                match input_context {
+                    Some(input_context) => checker.input_context_expression(input, input_context),
+                    None => checker.expr_context(input, expected, partial),
+                }
+            } else {
+                checker.expr_context(input, expected, partial)
+            }
+        })
+    }
+
+    /// Speculative branches share the argument transaction but never publish
+    /// their local bindings, captures or return evidence, even on success.
+    fn checking_attempt(
+        &mut self,
+        allow_defaults: bool,
+        commit: bool,
+        check: impl FnOnce(&mut Self) -> Result<n::Expr, Error>,
+    ) -> Result<Option<n::Expr>, Error> {
+        let saved = (
+            self.locals.clone(),
+            self.code_values.clone(),
+            self.aliases.clone(),
+            self.result.clone(),
+            self.partial_return_context.clone(),
+            self.pending_optional_returns.clone(),
+            self.captures.clone(),
+            self.return_observations.clone(),
+            self.loops.clone(),
+            self.immutable.clone(),
+            self.context.clone(),
+            self.field_defaults.clone(),
+            self.active_defaults.clone(),
+        );
+        let pending_len = self.pending_type_uses.as_ref().map(Vec::len);
+        let old_defaults = std::mem::replace(&mut self.numeric_defaults, allow_defaults);
+        let attempt = check(self);
+        self.numeric_defaults = old_defaults;
+        if !commit || attempt.is_err() {
+            if let (Some(pending), Some(len)) = (&mut self.pending_type_uses, pending_len) {
+                pending.truncate(len);
+            }
+            (
+                self.locals,
+                self.code_values,
+                self.aliases,
+                self.result,
+                self.partial_return_context,
+                self.pending_optional_returns,
+                self.captures,
+                self.return_observations,
+                self.loops,
+                self.immutable,
+                self.context,
+                self.field_defaults,
+                self.active_defaults,
+            ) = saved;
+        }
+        match attempt {
+            Ok(value) => Ok(Some(value)),
+            Err(failure) if failure.needs_context => Ok(None),
+            Err(failure) => Err(failure),
+        }
+    }
+
+    fn optional_branch_context(
+        &mut self,
+        span: Span,
+        context: &crate::calls::InputContext,
+        count: usize,
+        mut check: impl FnMut(&mut Self, usize) -> Result<n::Expr, Error>,
+    ) -> Result<Option<Term>, Error> {
+        if !matches!(context, crate::calls::InputContext::Nominal { declaration, .. }
+            if Some(*declaration) == self.protocols.optional) {
+            return Ok(None);
+        }
+        // Prefer evidence from every branch before defaulting numeric literals.
+        for defaults in [false, true] {
+            if defaults && !self.numeric_defaults { break; }
+            for index in 0..count {
+                self.optional_branch_probe_budget = self.optional_branch_probe_budget.checked_sub(1)
+                    .ok_or_else(|| error(span, "optional branch inference budget exhausted; add a type annotation"))?;
+                let probing = std::mem::replace(&mut self.probing_optional_branch, true);
+                let attempt = self.checking_attempt(defaults, false, |checker| check(checker, index));
+                self.probing_optional_branch = probing;
+                if let Some(value) = attempt? {
+                    if !is_never(&value.ty) { return Ok(Some(value.ty)); }
+                }
+            }
+        }
+        // The enclosing probe only needs a result type. With no evidence,
+        // falling through to ordinary branch checking would probe this same
+        // subtree again, multiplying work for every nested null-only branch.
+        // The final, non-speculative check still validates every branch.
+        if self.probing_optional_branch {
+            return Err(context_error(span, "optional branches need a result type context"));
+        }
+        Ok(None)
+    }
+    fn generic_call(
+        &mut self,
+        expr: &Expr<'_>,
+        owner: OwnerId,
+        args: &[Arg<'_>],
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+    ) -> Result<n::Expr, Error> {
+        self.generic_call_with_receiver(expr, owner, args, expected, partial, Vec::new(), Vec::new())
+    }
+    fn generic_call_with_receiver(
+        &mut self,
+        expr: &Expr<'_>,
+        owner: OwnerId,
+        args: &[Arg<'_>],
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+        prefix: Vec<n::Expr>,
+        known: Vec<Term>,
+    ) -> Result<n::Expr, Error> {
+        if self.is_quote_function(owner) {
+            self.record_quote_application(expr.span)?;
+        }
+        let structural_result = self.structural_result_context.as_ref()
+            .filter(|(id, _)| *id == expr.hir_id).map(|(_, context)| context.clone());
+        self.ensure_signature(owner, expr.span)?;
+        let all_parameters = self.type_parameters[&owner].clone();
+        if known.len() > all_parameters.len() {
+            return Err(error(expr.span, "too many fixed generic call arguments"));
+        }
+        let (parameters, template, pending_defaults) = self.function_type_plan(owner, &known, expr.span)?;
+        let signature = self
+            .signatures
+            .get(&owner)
+            .or_else(|| self.interface_signatures.get(&owner))
+            .ok_or_else(|| error(expr.span, "declaration is not a supported callable"))?
+            .instantiate_types(&all_parameters, &template)
+            .map_err(|e| error(expr.span, e.to_string()))?;
+        let Some(ItemKind::Fn(declaration_sig, _) | ItemKind::FnDeclaration(declaration_sig)) =
+            self.package.item(owner).map(|item| &item.kind)
+        else {
+            unreachable!()
+        };
+        let declarations = declaration_sig.params;
+        let offset = prefix.len();
+        if offset > declarations.len() { return Err(error(expr.span, "method receiver count mismatch")); }
+        let (routes, supplied) = route_arguments(args, Some(&declarations[offset..]), declarations.len() - offset, expr.span)?;
+        let assigned: Vec<_> = std::iter::repeat_n(true, offset).chain(supplied).collect();
+        let Term::Function { parameters: ordinary, result } = &signature else { unreachable!() };
+        let (known_inputs,known_values,seed)=self.infer_independent_call_inputs(ordinary,result,&parameters,&routes,offset,&prefix,expr,expected)?;
+        let caller_scope=self.call_inference_scope();
+        let caller_frames=if caller_scope.is_empty() {vec![]} else {vec![caller_scope.iter().map(|p|p.sort).collect()]};
+        let prepared_signature=signature.instantiate_types_in_scope(&known_inputs,&known_values,&caller_frames)
+            .map_err(|e|error(expr.span,e.to_string()))?;
+        let preview_arguments=template.iter().map(|ty|ty.instantiate_types_in_scope(&known_inputs,&known_values,&caller_frames))
+            .collect::<Result<Vec<_>,_>>().map_err(|e|error(expr.span,e.to_string()))?;
+        let preview = n::Expr {
+            source: source(expr.span), ty: self.callable_type(owner,prepared_signature.clone()),
+            kind: K::FunctionInstance {declaration:declaration(self.package,&self.package_identities,owner),arguments:preview_arguments},
+        };
+        let Term::Function {parameters:prepared_parameters,result:prepared_result}=&prepared_signature else {unreachable!()};
+        let mut prepared = self.prepare_call_types(prepared_parameters,prepared_result,&preview,Some(owner),&routes,offset,&assigned[offset..],&prefix,expr,seed)?;
+        let call_binding = self.prepare_call_binding(prepared_parameters, &prepared.symbols, expr.span)?;
+        // Ordinary Type inputs are values in the function frame, whereas the
+        // clause parameters below become inference variables in an outer frame.
+        let inference_signature = Term::Function {
+            parameters: ordinary.iter().map(|parameter| Ok(Parameter {
+                sort: parameter.sort,
+                ty: call_binding.substitute(&parameter.ty).and_then(|ty|ty.abstract_parameters(&[])).map_err(|e|error(expr.span,e.to_string()))?,
+            })).collect::<Result<Vec<_>,Error>>()?,
+            result: Box::new(call_binding.substitute(result).and_then(|ty|ty.abstract_parameters(&[])).map_err(|e|error(expr.span,e.to_string()))?),
+        };
+        let scheme = crate::calls::Scheme {
+            type_parameters: parameters.len(),
+            signature: inference_signature.abstract_types(&parameters).map_err(|e|error(expr.span,e.to_string()))?,
+        };
+        let mut inputs = vec![None; declarations.len()];
+        let mut checked = vec![None; declarations.len()];
+        for (index, value) in prefix.into_iter().enumerate() { checked[index] = Some(prepared.values[index].take().unwrap_or(value)); }
+        let discharge_effects = self.active_effect_environment().is_some() && !matches!(expected, Some(Term::Computation {..}));
+        let initial_types: Vec<_> = checked.iter().map(|value| value.as_ref().filter(|value| !is_never(&value.ty)).map(|value| value.ty.clone())).collect();
+        // Propagate result information before probing children. Besides making
+        // bidirectional checking effective for nested calls, this avoids
+        // recursively repeating context-free attempts along an identity chain.
+        let mut initial = scheme
+            .infer_scoped_types_mode(
+                &initial_types,
+                expected,
+                partial,
+                &self.context,
+                crate::ptc::Budget::default(),
+                discharge_effects,
+                &caller_scope,
+            )
+            .map_err(|e| call_inference_error(expr.span, e))?;
+        if let Some(context) = &structural_result {
+            initial.constrain_result_context(context, crate::ptc::Budget::default())
+                .map_err(|e| call_inference_error(expr.span, e))?;
+        }
+        initial.refine_type_views(
+            |ty, budget| self.callable_input_view_budgeted(ty, budget, expr.span).map_err(|e| e.message),
+            crate::ptc::Budget::default(),
+        ).map_err(|e| call_inference_error(expr.span, e))?;
+        let mut resolved_defaults=BTreeMap::new();
+        self.settle_function_defaults(owner,&parameters,&template,&pending_defaults,&mut resolved_defaults,&mut initial,expr.span)?;
+        for route in &routes {
+            let parameter = &(route.parameter + offset);
+            inputs[*parameter] = Some(route);
+            let value = route.expression(expr);
+            let context = initial
+                .parameter_type(*parameter)
+                .map_err(|e| call_inference_error(value.span, e))?;
+            let partial = if context.is_none() {
+                initial
+                    .parameter_callable_context(*parameter)
+                    .map_err(|e| call_inference_error(value.span, e))?
+            } else {
+                None
+            };
+            let input_context = initial.parameter_input_context(*parameter)
+                .map_err(|e| call_inference_error(value.span, e))?;
+            if let Some(ty) = &context {
+                route.require_collection_type(self, ty, expr.span)?;
+            }
+            if context.is_none() && matches!(&scheme.signature,Term::Function {parameters,..} if matches!(parameters[*parameter].ty,Term::Computation {..})) {
+                self.preserve_effect_value = true;
+            }
+            checked[*parameter] = if let Some(value) = prepared.values[*parameter].take() {
+                Some(value)
+            } else {
+                self.with_staged_input(declarations[*parameter].ty.is_comptime(), |this| this.argument_attempt_with_input(&value, context.as_ref(), partial.as_ref(), false, Some(&input_context)))?
+            };
+        }
+        for (index, assigned) in assigned.iter().enumerate() {
+            if !assigned {
+                checked[index] = Some(if let Some(value) = prepared.values[index].take() {
+                    value
+                } else {
+                    let mut value = prepared.defaults[index].take().unwrap();
+                    value.rewrite_types(&mut |ty|call_binding.substitute(ty))
+                        .map_err(|e|error(expr.span,e.to_string()))?;
+                    value
+                });
+            }
+        }
+        let instance = loop {
+            let actual: Vec<_> = checked
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    value
+                        .as_ref()
+                        // A definition-side default may still contain this
+                        // declaration's rigid binders. It is not a concrete
+                        // caller input that can constrain those same binders.
+                        .filter(|v| {
+                            assigned[index]
+                                || v.ty
+                                    .abstract_types(&parameters)
+                                    .is_ok_and(|t| t.check_scope(&[]).is_ok())
+                        })
+                        .filter(|v| !is_never(&v.ty))
+                        .map(|v| v.ty.clone())
+                })
+                .collect();
+            let mut candidate = scheme
+                .infer_scoped_types_mode(
+                    &actual,
+                    expected,
+                    partial,
+                    &self.context,
+                    crate::ptc::Budget::default(),
+                    discharge_effects,
+                    &caller_scope,
+                )
+                .map_err(|e| call_inference_error(expr.span, e))?;
+            if let Some(context) = &structural_result {
+                candidate.constrain_result_context(context, crate::ptc::Budget::default())
+                    .map_err(|e| call_inference_error(expr.span, e))?;
+            }
+            candidate.refine_type_views(
+                |ty, budget| self.callable_input_view_budgeted(ty, budget, expr.span).map_err(|e| e.message),
+                crate::ptc::Budget::default(),
+            ).map_err(|e| call_inference_error(expr.span, e))?;
+            let defaults_ready=self.settle_function_defaults(owner,&parameters,&template,&pending_defaults,&mut resolved_defaults,&mut candidate,expr.span)?;
+            if checked.iter().all(Option::is_some) {
+                if !defaults_ready {return Err(context_error(expr.span,"function type defaults are waiting for inferred inputs"));}
+                break candidate
+                    .finish()
+                    .map_err(|e| call_inference_error(expr.span, e))?;
+            }
+            let mut progress = false;
+            for (index, input) in inputs.iter().enumerate() {
+                if checked[index].is_some() {
+                    continue;
+                }
+                let route = input.expect("an unchecked parameter has an explicit input");
+                let input = route.expression(expr);
+                let context = candidate.parameter_type(index).map_err(|e| {
+                    error(input.span, format!("generic call inference failed: {e:?}"))
+                })?;
+                let partial = if context.is_none() {
+                    candidate
+                        .parameter_callable_context(index)
+                        .map_err(|e| call_inference_error(input.span, e))?
+                } else {
+                    None
+                };
+                if let Some(ty) = &context {
+                    route.require_collection_type(self, ty, expr.span)?;
+                }
+                let input_context = candidate.parameter_input_context(index)
+                    .map_err(|e| call_inference_error(input.span, e))?;
+                if context.is_some() || partial.is_some() || matches!(input_context, crate::calls::InputContext::Tuple(_) | crate::calls::InputContext::NormalTuple { .. } | crate::calls::InputContext::Record(_) | crate::calls::InputContext::Nominal { .. }) {
+                    checked[index] =
+                        self.with_staged_input(declarations[index].ty.is_comptime(), |this| this.argument_attempt_with_input(&input, context.as_ref(), partial.as_ref(), false, Some(&input_context)))?;
+                    progress |= checked[index].is_some();
+                }
+            }
+            if !progress && self.numeric_defaults {
+                for (index, input) in inputs.iter().enumerate() {
+                    if checked[index].is_some() {
+                        continue;
+                    }
+                    let route = input.expect("unchecked explicit argument");
+                    let input = route.expression(expr);
+                    let context = candidate
+                        .parameter_type(index)
+                        .map_err(|e| call_inference_error(input.span, e))?;
+                    let partial = candidate
+                        .parameter_callable_context(index)
+                        .map_err(|e| call_inference_error(input.span, e))?;
+                    let input_context = candidate.parameter_input_context(index)
+                        .map_err(|e| call_inference_error(input.span, e))?;
+                    if let Some(ty) = &context {
+                        route.require_collection_type(self, ty, expr.span)?;
+                    }
+                    checked[index] = self.with_staged_input(declarations[index].ty.is_comptime(), |this| this.argument_attempt_with_input(
+                        &input, context.as_ref(), partial.as_ref(), true, Some(&input_context),
+                    ))?;
+                    // Recompute constraints before defaulting a second input.
+                    if checked[index].is_some() {
+                        progress = true;
+                        break;
+                    }
+                }
+            }
+            if !progress {
+                return Err(context_error(
+                    expr.span,
+                    "generic argument context is unresolved; add a type annotation or explicit type arguments",
+                ));
+            }
+        };
+        let full_arguments = template.iter().map(|ty| ty.instantiate_types_in_scope(&parameters, &instance.type_arguments,&caller_frames).map_err(|e| error(expr.span,e.to_string()))).collect::<Result<Vec<_>,_>>()?;
+        self.check_type_application(owner, &full_arguments, expr.span)?;
+        self.check_ordinary_capabilities(owner, &full_arguments, &prepared.symbols, expr.span)?;
+        self.check_ordinary_type_requirements(owner, &full_arguments, &prepared.symbols, expr.span)?;
+        // Elaboration may visit delayed inputs later, but runtime evaluation
+        // remains in the original source order and each expression occurs once.
+        let mut arguments = Vec::new();
+        for (parameter, value) in checked.iter_mut().enumerate().take(offset) {
+            arguments.push(n::CallArgument { parameter, value: value.take().unwrap(), is_default: false });
+        }
+        for route in &routes {
+            let parameter = route.parameter + offset;
+            arguments.push(n::CallArgument {
+                parameter,
+                value: checked[parameter].take().unwrap(),
+                is_default: false,
+            });
+        }
+        for (parameter, assigned) in assigned.iter().enumerate() {
+            if !assigned {
+                let mut value = checked[parameter].take().unwrap();
+                value.rewrite_types(&mut |ty|ty.instantiate_types_in_scope(&parameters,&instance.type_arguments,&caller_frames))
+                    .map_err(|e|error(expr.span,e.to_string()))?;
+                value.rewrite_types(&mut |ty| self.callable_input_view(ty, expr.span))?;
+                arguments.push(n::CallArgument {
+                    parameter,
+                    value,
+                    is_default: true,
+                });
+            }
+        }
+        let actual: Vec<_> = arguments.iter().map(|arg| arg.value.ty.clone()).collect();
+        let ty = if actual.iter().any(is_never) {
+            p(P::Never)
+        } else {
+            self.callable_input_view(&instance.result, expr.span)?
+        };
+        let call = n::Expr {
+            ty,
+            source: source(expr.span),
+            kind: K::Call {
+                callee: Box::new(n::Expr {
+                    ty: self.callable_type(owner, signature.instantiate_types_in_scope(&parameters,&instance.type_arguments,&caller_frames)
+                        .map_err(|e|error(expr.span,e.to_string()))?),
+                    source: source(expr.span),
+                    kind: K::FunctionInstance {
+                        declaration: declaration(self.package, &self.package_identities, owner),
+                        arguments: full_arguments,
+                    },
+                }),
+                arguments,
+                parameter_bindings: declarations
+                    .iter()
+                    .map(|param| local(param.hir_id))
+                    .collect(),
+            },
+        };
+        let call = self.freeze_staged_call_inputs(call, expr)?;
+        self.stage_collected_call(call, &routes, offset, expr.span)
+    }
+    fn call(
+        &mut self,
+        expr: &Expr<'_>,
+        callee: &Expr<'_>,
+        args: &[Arg<'_>],
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+    ) -> Result<n::Expr, Error> {
+        // Direct comptime calls must be checked in their source phase before
+        // runtime expected types or spread preparation can affect their inputs.
+        let head = if let H::NFApplication(head, _) = callee.kind { head } else { callee };
+        if let H::ResolvedDef {def_id, ..} = head.kind {
+            if self.package.definition_owner(def_id).is_some_and(|owner| self.is_code_generator(owner)) {
+                return Err(error(expr.span, "code generator must be invoked in a comptime code position"));
+            }
+        }
+        let comptime = if let H::ResolvedDef { def_id, .. } = head.kind {
+            self.package.definition_owner(def_id).and_then(|owner| self.package.item(owner))
+                .is_some_and(|item| matches!(&item.kind, ItemKind::Fn(sig, _) if sig.modifiers.is_comptime && !sig.modifiers.is_normal_form_head))
+        } else { false };
+        if comptime && self.protocols.splice.is_some() && self.runtime_value_context() {
+            let value = self.with_staged_input(true, |this| this.call(expr, callee, args, None, None))?;
+            return self.deliver_comptime_result(expr, value, expected);
+        }
+        if args.iter().any(|arg| matches!(arg, Arg::Expand(_))) {
+            return self.spread_call(expr, callee, args, expected, partial);
+        }
+        if let Some(call) = self.receiver_call(expr, callee, args, expected, partial)? {
+            return Ok(call);
+        }
+        let explicit = if let H::NFApplication(head, types) = &callee.kind {
+            Some((*head, *types))
+        } else {
+            None
+        };
+        let head = explicit.map_or(callee, |(head, _)| head);
+        let direct = if let H::ResolvedDef { def_id, .. } = head.kind {
+            self.package.definition_owner(def_id).filter(|owner| {
+                !matches!(
+                    self.package.item(*owner).map(|item| &item.kind),
+                    Some(ItemKind::Const(..) | ItemKind::Associated(_))
+                )
+            })
+        } else {
+            None
+        };
+        if let Some(owner) = direct {
+            if matches!(&self.package.item(owner).unwrap().kind, ItemKind::Fn(sig, _) if sig.modifiers.is_normal_form_head)
+            {
+                return Err(error(
+                    callee.span,
+                    "normal-form heads cannot be invoked as ordinary functions",
+                ));
+            }
+            self.require_non_trait_body_reference(owner, callee.span)?;
+            self.ensure_signature(owner, expr.span)?;
+            if self.open_functions.contains_key(&owner) {
+                if explicit.is_some() { return Err(error(expr.span, "open function clause arguments are not yet implemented")); }
+                return self.open_function_call(expr, owner, args, expected);
+            }
+            if explicit.is_none()
+                && self
+                    .type_parameters
+                    .get(&owner)
+                    .is_some_and(|types| !types.is_empty())
+            {
+                return self.generic_call(expr, owner, args, expected, partial);
+            }
+        }
+        let callee = if let Some((head, types)) = explicit {
+            self.explicit_function_instance(callee, head, types, None, true)?
+        } else if let Some(owner) = direct {
+            self.ensure_signature(owner, expr.span)?;
+            let ty = self
+                .signatures
+                .get(&owner)
+                .ok_or_else(|| error(callee.span, "declaration is not a supported callable"))?
+                .clone();
+            let ty = self.callable_type(owner, ty);
+            self.check_type_application(owner, &[], expr.span)?;
+            n::Expr {
+                ty,
+                source: source(callee.span),
+                kind: if self.requirements.get(&owner).is_some_and(Vec::is_empty) {
+                    K::Function(declaration(self.package, &self.package_identities, owner))
+                } else {
+                    K::FunctionInstance {
+                        declaration: declaration(self.package, &self.package_identities, owner),
+                        arguments: vec![],
+                    }
+                },
+            }
+        } else {
+            self.invocation_callee(callee)?
+        };
+        self.finish_call(expr, callee, args, Vec::new(), expected, partial)
+    }
+
+    /// One source-ordered plan for ordinary, static and receiver calls.
+    fn finish_call(
+        &mut self,
+        expr: &Expr<'_>,
+        mut callee: n::Expr,
+        args: &[Arg<'_>],
+        prefix: Vec<n::Expr>,
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+    ) -> Result<n::Expr, Error> {
+        // Selected trait methods and stored comptime callables use this same
+        // boundary. The synthesized splice method itself remains runtime.
+        if callee.ty.is_comptime_callable() && self.protocols.splice.is_some() && self.runtime_value_context() {
+            let value = self.with_staged_input(true, |this| this.finish_call(expr, callee, args, prefix, None, None))?;
+            return self.deliver_comptime_result(expr, value, expected);
+        }
+        let direct_id = match &callee.kind {
+            K::Function(id)
+            | K::FunctionInstance {
+                declaration: id, ..
+            } => Some(*id),
+            // Interface entry metadata remains independent of the selected body.
+            K::TraitMethod { member, .. } => Some(*member),
+            _ => None,
+        };
+        let direct = direct_id.and_then(|id| {
+            self.package.owners().find_map(|(owner, _)| {
+                (declaration(self.package, &self.package_identities, owner) == id).then_some(owner)
+            })
+        });
+        if direct.is_some_and(|owner| self.is_quote_function(owner)) {
+            self.record_quote_application(expr.span)?;
+        }
+        if let (Some(owner), K::FunctionInstance { arguments, .. }) = (direct, &callee.kind) {
+            if arguments.len() < self.type_parameters[&owner].len() {
+                return self.generic_call_with_receiver(expr, owner, args, expected, partial, prefix, arguments.clone());
+            }
+        }
+        if let (Some(owner), K::TraitMethod { interface_arguments, method_arguments, .. }) = (direct, &callee.kind) {
+            if 1 + interface_arguments.len() + method_arguments.len() < self.type_parameters[&owner].len() {
+                return self.generic_trait_call(expr, owner, callee, args, prefix, expected, partial);
+            }
+        }
+        let retained_callable = self.structural_type(&callee.ty, expr.span)?;
+        let callable = self.callable_input_view(&retained_callable, expr.span)?;
+        let signature = if let Term::Closure { signature, .. } = &callable {
+            signature.as_ref()
+        } else {
+            &callable
+        };
+        let Term::Function { parameters, result } = signature.callable_signature() else {
+            return Err(error(expr.span, "called expression is not a function"));
+        };
+        let declarations = direct
+            .and_then(|owner| self.package.item(owner))
+            .and_then(|item| match &item.kind {
+                ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature) => {
+                    Some(signature.params)
+                }
+                _ => None,
+            });
+        let offset = prefix.len();
+        if offset > parameters.len() {
+            return Err(error(expr.span, "method receiver count mismatch"));
+        }
+        let (routes, assigned) = route_arguments(
+            args,
+            declarations.map(|p| &p[offset..]),
+            parameters.len() - offset,
+            expr.span,
+        )
+        .map_err(|mut failure| {
+            if offset != 0 && failure.message.starts_with("argument count mismatch") {
+                failure.message = format!("method {}", failure.message);
+            }
+            failure
+        })?;
+        let mut prepared = self.prepare_call_types(parameters,result,&callee,direct,&routes,offset,&assigned,&prefix,expr,vec![])?;
+        let mut arguments: Vec<_> = prefix
+            .into_iter()
+            .enumerate()
+            .map(|(parameter, value)| n::CallArgument {
+                parameter,
+                value,
+                is_default: false,
+            })
+            .collect();
+        let type_inputs = prepared.symbols;
+        let call_binding = self.prepare_call_binding(&parameters, &type_inputs, expr.span)?;
+        if let Some(owner) = direct {
+            // Trait entries carry Self, interface arguments and method arguments
+            // separately. Contract checking needs their complete declaration substitution.
+            let type_arguments = self.method_instantiation_inputs(&callee)
+                .map(|(_, arguments)| arguments).unwrap_or_default();
+            self.check_ordinary_capabilities(owner, &type_arguments, &type_inputs, expr.span)?;
+            self.check_ordinary_type_requirements(owner, &type_arguments, &type_inputs, expr.span)?;
+        }
+        for route in &routes {
+            let parameter = route.parameter + offset;
+            let input_type = call_binding.substitute(&parameters[parameter].ty)
+                .map_err(|e| error(expr.span,format!("dependent call input is not available: {e}")))?;
+            let input_type = self.callable_input_view(&input_type, expr.span)?;
+            route.require_collection_type(self, &input_type, expr.span)?;
+            let value = route.expression(expr);
+            let checked = if let Some(value) = prepared.values[parameter].take() {
+                value
+            } else {
+                self.with_staged_input(parameters[parameter].sort != Sort::Runtime, |this| this.expr(&value, Some(&input_type)))?
+            };
+            arguments.push(n::CallArgument {
+                parameter,
+                value: checked,
+                is_default: false,
+            });
+        }
+        for (parameter, assigned) in assigned.iter().enumerate() {
+            let parameter = parameter + offset;
+            if !assigned {
+                let value = if let Some(value) = prepared.values[parameter].take() {
+                    value
+                } else {
+                    let mut value = prepared.defaults[parameter].take().unwrap();
+                    // Value bindings name the callee; annotations name the caller.
+                    value.rewrite_types(&mut |ty| call_binding.substitute(ty))
+                        .map_err(|e| error(expr.span,e.to_string()))?;
+                    value.rewrite_types(&mut |ty| self.callable_input_view(ty, expr.span))?;
+                    value
+                };
+                arguments.push(n::CallArgument {
+                    parameter,
+                    value,
+                    is_default: true,
+                });
+            }
+        }
+        let ty = if arguments
+            .iter()
+            .any(|argument| is_never(&argument.value.ty))
+        {
+            p(P::Never)
+        } else {
+            let result = call_binding.substitute(&result)
+                .map_err(|e| error(expr.span,format!("dependent call result is not available: {e}")))?;
+            self.callable_input_view(&result, expr.span)?
+        };
+        if let Some(expected) = expected {
+            self.require_expression(&ty, expected, expr.span)?;
+        }
+        // Retain the interface-origin signature for phase validation. The
+        // selected projection view above checks inputs/results; IIR closure
+        // resolves all retained annotations together without losing origin.
+        callee.ty = retained_callable;
+        let call = n::Expr {
+            ty,
+            source: source(expr.span),
+            kind: K::Call {
+                callee: Box::new(callee),
+                arguments,
+                parameter_bindings: declarations
+                    .map(|params| params.iter().map(|p| local(p.hir_id)).collect())
+                    .unwrap_or_default(),
+            },
+        };
+        let call = self.freeze_staged_call_inputs(call, expr)?;
+        self.stage_collected_call(call, &routes, offset, expr.span)
+    }
+
+    fn closure(
+        &mut self,
+        expr: &Expr<'_>,
+        parameters: &[hir::expr::ClosureParam<'_>],
+        annotation: Option<&Expr<'_>>,
+        body_id: hir::BodyId,
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+    ) -> Result<n::Expr, Error> {
+        let body = self.package.body(body_id).ok_or_else(|| error(expr.span, "missing lambda body"))?;
+        self.closure_body(expr, parameters, annotation, body.value, expected, partial, false).map(|(value, _)| value)
+    }
+
+    fn closure_body(
+        &mut self,
+        expr: &Expr<'_>,
+        parameters: &[hir::expr::ClosureParam<'_>],
+        annotation: Option<&Expr<'_>>,
+        body: &Expr<'_>,
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+        tactic: bool,
+    ) -> Result<(n::Expr, bool), Error> {
+        let expected_shape = expected
+            .map(|ty| self.structural_type(ty, expr.span))
+            .transpose()?;
+        let expected_signature = match expected_shape.as_ref() {
+            Some(Term::Closure { signature, .. }) => Some(signature.as_ref()),
+            other => other,
+        };
+        let comptime = self.in_required_comptime || self.in_staged_input || self.signature_owner
+            .and_then(|owner| self.package.item(owner))
+            .is_some_and(|item| matches!(&item.kind, ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) if sig.modifiers.is_comptime));
+        let contextual = match expected_signature.map(Term::callable_signature) {
+            Some(Term::Function { parameters, result }) => Some((parameters, result)),
+            Some(_) => return Err(incompatible_context(expr.span, "lambda target is not callable")),
+            None => None,
+        };
+        if expected_signature.is_some_and(|ty| ty.is_comptime_callable() != comptime)
+            || partial.is_some_and(|context| context.comptime != comptime)
+        {
+            return Err(error(
+                expr.span,
+                "lambda target requires a different execution phase",
+            ));
+        }
+        if let Some((expected, _)) = contextual {
+            if expected.len() != parameters.len() {
+                return Err(error(
+                    expr.span,
+                    "lambda parameter count does not match target",
+                ));
+            }
+        }
+        if partial.is_some_and(|context| context.parameters.len() != parameters.len()) {
+            return Err(error(
+                expr.span,
+                "lambda parameter count does not match target",
+            ));
+        }
+        let saved_locals = self.locals.clone();
+        let saved_result = self.result.clone();
+        let saved_partial_return = self.partial_return_context.take();
+        let saved_optional_returns = std::mem::take(&mut self.pending_optional_returns);
+        let saved_tactic = self.tactic_frame.take();
+        // A callback infers its own result from both its tail and explicit
+        // returns, even when the callback value is being probed by a parent.
+        let saved_branch_probe = std::mem::replace(&mut self.probing_optional_branch, false);
+        if tactic {
+            self.tactic_frame = Some((source(body.span), parameters.iter().map(|p| p.hir_id).collect(), false));
+        }
+        let saved_returns = self.return_observations.take();
+        let saved_loops = std::mem::take(&mut self.loops);
+        self.captures.push(CaptureFrame {
+            comptime,
+            outer: self.locals.keys().copied().collect(),
+            values: Vec::new(),
+        });
+        let checked = (|| {
+            let mut parameter_types = Vec::new();
+            for (index, parameter) in parameters.iter().enumerate() {
+                if !matches!(parameter.pat.kind, hir::PatternKind::Binding(_, _, None)) {
+                    return Err(error(
+                        parameter.span,
+                        "lambda parameters must be anchored identifiers",
+                    ));
+                }
+                let context_type = contextual
+                    .map(|(parameters, _)| parameters[index].ty.substitute_partial(&[]))
+                    .transpose().map_err(|e| error(parameter.span,e.to_string()))?
+                    .or_else(|| partial.and_then(|context| context.parameters[index].clone()));
+                let ty = if let Some(annotation) = parameter.ty {
+                    let ty = self.type_expr(annotation)?;
+                    if let Some(context_type) = context_type.as_ref() {
+                        self.require(&ty, context_type, parameter.span)?;
+                    }
+                    ty
+                } else {
+                    context_type.ok_or_else(|| {
+                        context_error(
+                            parameter.span,
+                            "lambda parameter needs an annotation or a callable target",
+                        )
+                    })?
+                };
+                self.locals.insert(local(parameter.hir_id), ty.clone());
+                parameter_types.push(Parameter {
+                    sort: Sort::Runtime,
+                    ty: ty.abstract_parameters(&[]).map_err(|e| error(parameter.span,e.to_string()))?,
+                });
+            }
+            let contextual_result = contextual.map(|(_, result)| result.substitute_partial(&[]))
+                .transpose().map_err(|e| error(expr.span,e.to_string()))?
+                .or_else(|| partial.and_then(|context| context.result.clone()));
+            let result_type = if let Some(annotation) = annotation {
+                let ty = self.type_expr(annotation)?;
+                if let Some(expected) = contextual_result.as_ref() {
+                    self.require(&ty, expected, expr.span)?;
+                }
+                Some(ty)
+            } else {
+                contextual_result
+            };
+            self.result = result_type.clone();
+            self.return_observations = Some(Vec::new());
+            let result_context = partial.and_then(|context| context.result_context.as_deref());
+            let mut body = if result_type.is_none() {
+                let mut return_hint = None;
+                let attempted = self.checking_attempt(self.numeric_defaults, true, |checker| {
+                    let checked = checker.computation_body_with_input(body, None, result_context);
+                    if matches!(&checked, Err(failure) if failure.needs_context) {
+                        return_hint = checker.return_observations.as_ref()
+                            .and_then(|returns| returns.iter().find(|ty| !is_never(ty)).cloned());
+                    }
+                    checked
+                })?;
+                match attempted {
+                    Some(body) => body,
+                    None => {
+                        let hint = return_hint.ok_or_else(|| context_error(body.span,
+                            "callback result needs a tail or explicit return type"))?;
+                        // Retry once with concrete return evidence. The failed
+                        // attempt has rolled back captures, pending returns and
+                        // local state; only the completed type crosses attempts.
+                        self.computation_body_with_input(body, Some(&hint), result_context)?
+                    }
+                }
+            } else {
+                self.computation_body_with_input(body, result_type.as_ref(), result_context)?
+            };
+            let returns = self.return_observations.as_ref().unwrap();
+            let result = result_type.unwrap_or_else(|| {
+                if !is_never(&body.ty) {
+                    body.ty.clone()
+                } else {
+                    returns
+                        .iter()
+                        .find(|ty| !is_never(ty))
+                        .cloned()
+                        .unwrap_or_else(|| p(P::Never))
+                }
+            });
+            if !self.pending_optional_returns.is_empty() {
+                let value_result = if let Term::Computation { result, .. } = &result { result.as_ref() } else { &result };
+                let (declaration, index, _, _) = self.optional_layout(value_result, expr.span)?;
+                let mut remaining = self.pending_optional_returns.keys().copied().collect::<BTreeSet<_>>();
+                nir::visit::expression_mut(&mut body, &mut 100_000, |node, _| {
+                    if matches!(node.kind, K::Return(None)) {
+                        if let Some(empty_source) = self.pending_optional_returns.get(&(node.source.start, node.source.end)) {
+                            remaining.remove(&(node.source.start, node.source.end));
+                            node.kind = K::Return(Some(Box::new(n::Expr { source: *empty_source,
+                                ty: value_result.clone(), kind: K::Variant { declaration, index, fields: Vec::new() } })));
+                        }
+                    }
+                    Ok(())
+                }).map_err(|message| error(expr.span, message))?;
+                if !remaining.is_empty() { return Err(error(expr.span, "unresolved optional return site")); }
+            }
+            self.require(&body.ty, &result, expr.span)?;
+            for actual in returns {
+                let value_result = if let Term::Computation {result, ..} = &result {result.as_ref()} else {&result};
+                self.require(actual, value_result, expr.span)?;
+            }
+            let captures = self.captures.last().unwrap().values.clone();
+            let signature = Term::Function {
+                parameters: parameter_types,
+                result: Box::new(result.abstract_parameters(&[]).map_err(|e| error(expr.span,e.to_string()))?),
+            }
+            .with_comptime_phase(comptime);
+            let ty = if captures.is_empty() {
+                signature
+            } else {
+                Term::Closure {
+                    environment: captures.iter().map(|capture| capture.ty.clone()).collect(),
+                    signature: Box::new(signature),
+                }
+            };
+            if let Some(expected) = expected {
+                self.require(&ty, expected, expr.span)?;
+            }
+            Ok(n::Expr {
+                ty,
+                source: source(expr.span),
+                kind: K::Closure {
+                    parameters: parameters.iter().map(|p| local(p.hir_id)).collect(),
+                    captures,
+                    body: std::sync::Arc::new(body),
+                },
+            })
+        })();
+        self.captures.pop();
+        self.locals = saved_locals;
+        self.result = saved_result;
+        self.partial_return_context = saved_partial_return;
+        self.pending_optional_returns = saved_optional_returns;
+        let used = self.tactic_frame.as_ref().is_some_and(|(_, _, used)| *used);
+        self.tactic_frame = saved_tactic;
+        self.probing_optional_branch = saved_branch_probe;
+        self.return_observations = saved_returns;
+        self.loops = saved_loops;
+        checked.map(|value| (value, used)).map_err(|mut failure| { if !tactic { failure.needs_tactic = false; } failure })
+    }
+
+    /// Let either operand supply a type before committing numeric defaults.
+    /// Incomplete attempts use the generic-call transaction to restore scope.
+    fn peer_operands(
+        &mut self,
+        left: &Expr<'_>,
+        right: &Expr<'_>,
+        expected: Option<&Term>,
+        fallback: Option<&Term>,
+    ) -> Result<(n::Expr, n::Expr), Error> {
+        let a = self.argument_attempt(left, expected, None)?;
+        self.peer_operands_with_left(left,right,expected,fallback,a)
+    }
+    fn peer_operands_with_left(&mut self,left:&Expr<'_>,right:&Expr<'_>,expected:Option<&Term>,
+        fallback:Option<&Term>,a:Option<n::Expr>)->Result<(n::Expr,n::Expr),Error> {
+        self.peer_operands_with_ready(left,right,expected,fallback,a,None)
+    }
+    fn peer_operands_with_ready(&mut self,left:&Expr<'_>,right:&Expr<'_>,expected:Option<&Term>,
+        fallback:Option<&Term>,mut a:Option<n::Expr>,mut b:Option<n::Expr>)->Result<(n::Expr,n::Expr),Error> {
+        let defaults = self.numeric_defaults;
+        let context = expected.or_else(|| a.as_ref().filter(|a| !is_never(&a.ty)).map(|a| &a.ty));
+        if b.is_none() {b=self.argument_attempt(right, context, None)?;}
+        if a.is_none() {
+            if let Some(b) = b.as_ref().filter(|b| !is_never(&b.ty)) {
+                a = self.argument_attempt(left, Some(&b.ty), None)?;
+            }
+        }
+        if b.is_none() {
+            if let Some(a) = a.as_ref().filter(|a| !is_never(&a.ty)) {
+                b = self.argument_attempt(right, Some(&a.ty), None)?;
+            }
+        }
+        if a.is_none() || b.is_none() {
+            if !defaults {
+                return Err(context_error(
+                    left.span,
+                    "numeric operands await a shared type context",
+                ));
+            }
+            if a.is_none() {
+                let context = expected
+                    .or_else(|| b.as_ref().filter(|b| !is_never(&b.ty)).map(|b| &b.ty))
+                    .or(fallback);
+                a = Some(self.expr(left, context)?);
+            }
+            if b.is_none() {
+                let context = expected
+                    .or_else(|| a.as_ref().filter(|a| !is_never(&a.ty)).map(|a| &a.ty))
+                    .or(fallback);
+                b = Some(self.expr(right, context)?);
+            }
+        }
+        Ok((a.unwrap(), b.unwrap()))
+    }
+
+    fn float_associated_constant(
+        &self,
+        ty: &Term,
+        name: &str,
+        span: Span,
+    ) -> Result<Option<n::Expr>, Error> {
+        if !matches!(name, "NaN" | "Infinity") {
+            return Ok(None);
+        }
+        // Membership needs positive type-equality evidence. An unresolved
+        // opaque head must remain available to ordinary member lookup, not
+        // become a failed attempt to obtain a structural float view.
+        let ty = if matches!(ty, Term::Primitive(P::F32 | P::F64)) {
+            ty.clone()
+        } else {
+            let Some(ty) = [p(P::F32), p(P::F64)].into_iter().find(|candidate| {
+                matches!(
+                    self.context.prove(
+                        crate::ptc::Formula::equal(ty.clone(), candidate.clone()),
+                        crate::ptc::Budget::default(),
+                    ),
+                    crate::ptc::Outcome::Entailed(_)
+                )
+            }) else {
+                return Ok(None);
+            };
+            ty
+        };
+        let literal = match (&ty, name) {
+            (Term::Primitive(P::F32), "NaN") => n::Literal::Float32(0x7fc00000),
+            (Term::Primitive(P::F32), "Infinity") => n::Literal::Float32(0x7f800000),
+            (Term::Primitive(P::F64), "NaN") => n::Literal::Float64(0x7ff8000000000000),
+            (Term::Primitive(P::F64), "Infinity") => n::Literal::Float64(0x7ff0000000000000),
+            _ => return Ok(None),
+        };
+        Ok(Some(n::Expr {
+            ty,
+            source: source(span),
+            kind: K::Literal(literal),
+        }))
+    }
+
+    fn equality_expression(
+        &self,
+        left: n::Expr,
+        right: n::Expr,
+        shape: &Term,
+        span: Span,
+    ) -> Result<n::Expr, Error> {
+        let ty = p(if is_never(&left.ty) || is_never(&right.ty) {
+            P::Never
+        } else {
+            P::Bool
+        });
+        let left = Box::new(left);
+        let right = Box::new(right);
+        let kind = match shape {
+            Term::Primitive(P::Type) => K::TypeEqual(left, right),
+            Term::Primitive(P::Integer) => K::IntegerBinary {
+                op: n::IntegerOp::Equal,
+                left,
+                right,
+            },
+            Term::Primitive(P::BitVec(_)) => K::BitEqual(left, right),
+            Term::Primitive(primitive)
+                if matches!(primitive, P::Bool | P::Char | P::Str | P::Symbol | P::F32 | P::F64)
+                    || primitive.fixed_integer_layout().is_some() =>
+            {
+                K::ScalarEqual(left, right)
+            }
+            _ => {
+                return Err(error(
+                    span,
+                    "equality protocol for this type is not implemented",
+                ));
+            }
+        };
+        Ok(n::Expr {
+            ty,
+            source: source(span),
+            kind,
+        })
+    }
+
+    fn pattern(
+        &mut self,
+        pattern: &hir::pattern::Pattern<'_>,
+        ty: &Term,
+    ) -> Result<n::Pattern, Error> {
+        self.pattern_observed(pattern,ty,None)
+    }
+    fn pattern_observed(
+        &mut self,
+        pattern: &hir::pattern::Pattern<'_>,
+        ty: &Term,
+        observed: Option<&Term>,
+    ) -> Result<n::Pattern, Error> {
+        use hir::pattern::PatternKind as HP;
+        match &pattern.kind {
+            HP::OptionSome(inner) => {
+                let (declaration, _, index, payload) = self.optional_layout(ty, pattern.span)?;
+                Ok(n::Pattern::Variant { declaration, index, fields: vec![self.pattern(inner, &payload)?] })
+            }
+            HP::OptionNull => {
+                let (declaration, index, _, _) = self.optional_layout(ty, pattern.span)?;
+                Ok(n::Pattern::Variant { declaration, index, fields: Vec::new() })
+            }
+
+            HP::Not(inner) => {
+                if !self.negated_pattern_domain(ty, &mut 100_000, 0, &mut std::collections::HashMap::new())
+                    .map_err(|message| error(pattern.span, message))? {
+                    return Err(error(pattern.span,
+                        "negated pattern elaboration for this domain is not implemented"));
+                }
+                let saved = self.locals.clone();
+                let checked = self.pattern(inner, ty);
+                // Bindings exist only while checking the failed candidate.
+                // Success of its negation exports none of them.
+                self.locals = saved;
+                let checked = checked?;
+                if let Some(mask) = boolean_pattern_coverage(&checked) {
+                    return Ok(match mask {
+                        0 => n::Pattern::Wild,
+                        1 => n::Pattern::Literal(n::Literal::Bool(true)),
+                        2 => n::Pattern::Literal(n::Literal::Bool(false)),
+                        _ => n::Pattern::Or(Vec::new()),
+                    });
+                }
+                // An executable candidate must run normally, including guard
+                // effects and rollback. Only its final match result is inverted.
+                let index = self.next_temporary_binding;
+                self.next_temporary_binding = index.checked_add(1).ok_or_else(|| {
+                    error(pattern.span, "pattern temporary binding space exhausted")
+                })?;
+                let binding = n::LocalId { owner: u32::MAX, index };
+                let boolean = |value| n::Expr {
+                    ty: p(P::Bool),
+                    source: source(pattern.span),
+                    kind: K::Literal(n::Literal::Bool(value)),
+                };
+                Ok(n::Pattern::Guard {
+                    pattern: Box::new(n::Pattern::Binding {
+                        binding,
+                        inner: Box::new(n::Pattern::Wild),
+                    }),
+                    condition: Box::new(n::Expr {
+                        ty: p(P::Bool),
+                        source: source(pattern.span),
+                        kind: K::Match {
+                            value: Box::new(n::Expr {
+                                ty: ty.clone(),
+                                source: source(pattern.span),
+                                kind: K::Local(binding),
+                            }),
+                            arms: vec![
+                                n::MatchArm { pattern: checked, guard: None, body: boolean(false) },
+                                n::MatchArm { pattern: n::Pattern::Wild, guard: None, body: boolean(true) },
+                            ],
+                        },
+                    }),
+                })
+            }
+            HP::Range(lower, upper, bound) => {
+                if lower.is_none() && upper.is_none() {
+                    return Ok(n::Pattern::Wild);
+                }
+                let shape = self.structural_type(ty, pattern.span)?;
+                if !matches!(&shape, Term::Primitive(primitive) if matches!(primitive, P::Integer | P::Char) || primitive.fixed_integer_layout().is_some())
+                {
+                    return Err(error(
+                        pattern.span,
+                        "range pattern ordering protocol for this type is not implemented",
+                    ));
+                }
+                let mut fresh = || {
+                    let index = self.next_temporary_binding;
+                    self.next_temporary_binding = index.checked_add(1).ok_or_else(|| {
+                        error(pattern.span, "pattern temporary binding space exhausted")
+                    })?;
+                    Ok::<_, Error>(n::LocalId {
+                        owner: u32::MAX,
+                        index,
+                    })
+                };
+                let observed = fresh()?;
+                let lower_binding = fresh()?;
+                let upper_binding = fresh()?;
+                let local_expr = |binding| n::Expr {
+                    ty: ty.clone(),
+                    source: source(pattern.span),
+                    kind: K::Local(binding),
+                };
+                let mut statements = Vec::new();
+                let mut checks = Vec::new();
+                let mut diverges = false;
+                for (endpoint, binding, upper_end) in [
+                    (*lower, lower_binding, false),
+                    (*upper, upper_binding, true),
+                ] {
+                    let Some(endpoint) = endpoint else { continue };
+                    let endpoint = self.expr(endpoint, Some(ty))?;
+                    diverges |= is_never(&endpoint.ty);
+                    statements.push(n::Expr {
+                        ty: if is_never(&endpoint.ty) {
+                            p(P::Never)
+                        } else {
+                            p(P::Void)
+                        },
+                        source: endpoint.source,
+                        kind: K::Let {
+                            binding,
+                            value: Box::new(endpoint),
+                        },
+                    });
+                    let exclusive =
+                        upper_end && matches!(bound, hir::pattern::BoundType::Exclusive);
+                    let (left, right) = if upper_end && !exclusive {
+                        (local_expr(observed), local_expr(binding))
+                    } else {
+                        (local_expr(binding), local_expr(observed))
+                    };
+                    let kind = if shape == p(P::Integer) {
+                        K::IntegerBinary {
+                            op: n::IntegerOp::LessEqual,
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        }
+                    } else {
+                        K::ScalarLessEqual(Box::new(left), Box::new(right))
+                    };
+                    let check = n::Expr {
+                        ty: p(P::Bool),
+                        source: source(pattern.span),
+                        kind,
+                    };
+                    checks.push(if exclusive {
+                        n::Expr {
+                            ty: p(P::Bool),
+                            source: source(pattern.span),
+                            kind: K::Not(Box::new(check)),
+                        }
+                    } else {
+                        check
+                    });
+                }
+                let first = checks.remove(0);
+                let result = if let Some(second) = checks.pop() {
+                    n::Expr {
+                        ty: p(P::Bool),
+                        source: source(pattern.span),
+                        kind: K::And(Box::new(first), Box::new(second)),
+                    }
+                } else {
+                    first
+                };
+                Ok(n::Pattern::Guard {
+                    pattern: Box::new(n::Pattern::Binding {
+                        binding: observed,
+                        inner: Box::new(n::Pattern::Wild),
+                    }),
+                    condition: Box::new(n::Expr {
+                        ty: p(if diverges { P::Never } else { P::Bool }),
+                        source: source(pattern.span),
+                        kind: K::Block {
+                            statements,
+                            result: Some(Box::new(result)),
+                        },
+                    }),
+                })
+            }
+            HP::BitVec { radix, segments } => {
+                let shape = self.structural_type(ty, pattern.span)?;
+                let Term::Primitive(P::BitVec(width)) = shape else {
+                    return Err(error(
+                        pattern.span,
+                        "bit-vector patterns require a BitVec subject",
+                    ));
+                };
+                let binding = local(pattern.hir_id);
+                let mut remaining = width;
+                let mut values = Vec::new();
+                let mut patterns = Vec::new();
+                for segment in segments {
+                    let (segment_width, segment_ty, checked) = match segment {
+                        hir::pattern::BitSegment::Literal { spelling, span } => {
+                            let digits = spelling.bytes().filter(|c| *c != b'_').count();
+                            let bits_per_digit = match radix {
+                                2 => 1usize,
+                                8 => 3,
+                                16 => 4,
+                                _ => return Err(error(*span, "invalid bit-vector radix")),
+                            };
+                            let segment_width = digits
+                                .checked_mul(bits_per_digit)
+                                .ok_or_else(|| error(*span, "bit-vector pattern width overflow"))?;
+                            let prefix = match radix {
+                                2 => "0b",
+                                8 => "0o",
+                                _ => "0x",
+                            };
+                            let mut budget = comptime_runtime::Budget::default();
+                            let integer = comptime_runtime::Integer::parse_literal(
+                                &format!("{prefix}{spelling}"),
+                                &mut budget,
+                            )
+                            .map_err(|_| {
+                                error(*span, "invalid digit in bit-vector literal segment")
+                            })?;
+                            let bits = integer
+                                .to_bitvec(segment_width, &mut budget)
+                                .map_err(|e| error(*span, e.to_string()))?;
+                            (
+                                segment_width,
+                                p(P::BitVec(segment_width)),
+                                n::Pattern::Literal(n::Literal::BitVec {
+                                    width: segment_width,
+                                    words: bits.words().to_vec(),
+                                }),
+                            )
+                        }
+                        hir::pattern::BitSegment::Typed { pattern: inner, ty } => {
+                            let ty = self.type_expr(ty)?;
+                            let shape = self.structural_type(&ty, inner.span)?;
+                            let width=match shape {
+                                Term::Primitive(P::BitVec(width))=>width,
+                                Term::Primitive(primitive)=>primitive.unrestricted_scalar_width().map(|width|width as usize)
+                                    .ok_or_else(||error(inner.span,"bit-vector segment type requires a supported unrestricted scalar or BitVec representation"))?,
+                                _=>return Err(error(inner.span,"bit-vector segment type has no supported representation")),
+                            };
+                            let checked = self.pattern(inner, &ty)?;
+                            (width, ty, checked)
+                        }
+                        hir::pattern::BitSegment::Computed(expr) => {
+                            let value = self.required_expression(expr, None)?;
+                            let comptime_interpretor::Value::BitVec(bits) = value else {
+                                return Err(error(
+                                    expr.span,
+                                    "computed bit-vector segment requires a concrete BitVec value",
+                                ));
+                            };
+                            let width = bits.width();
+                            (
+                                width,
+                                p(P::BitVec(width)),
+                                n::Pattern::Literal(n::Literal::BitVec {
+                                    width,
+                                    words: bits.words().to_vec(),
+                                }),
+                            )
+                        }
+                    };
+                    let start = remaining.checked_sub(segment_width).ok_or_else(|| {
+                        error(
+                            pattern.span,
+                            "bit-vector pattern width differs from its subject",
+                        )
+                    })?;
+                    let slice = n::Expr {
+                        ty: p(P::BitVec(segment_width)),
+                        source: source(pattern.span),
+                        kind: K::BitSlice {
+                            value: Box::new(n::Expr {
+                                ty: shape.clone(),
+                                source: source(pattern.span),
+                                kind: K::Local(binding),
+                            }),
+                            start,
+                            end: remaining,
+                        },
+                    };
+                    let value = if self.structural_type(&segment_ty, pattern.span)? == slice.ty {
+                        slice
+                    } else {
+                        n::Expr {
+                            ty: segment_ty,
+                            source: source(pattern.span),
+                            kind: K::BitConvert(Box::new(slice)),
+                        }
+                    };
+                    remaining = start;
+                    values.push(value);
+                    patterns.push(checked);
+                }
+                if remaining != 0 {
+                    return Err(error(
+                        pattern.span,
+                        "bit-vector pattern width differs from its subject",
+                    ));
+                }
+                let mut checked = n::Pattern::Binding {
+                    binding,
+                    inner: Box::new(n::Pattern::Wild),
+                };
+                for (value, next) in values.into_iter().zip(patterns) {
+                    checked = n::Pattern::Then {
+                        first: Box::new(checked),
+                        value: Box::new(value),
+                        next: Box::new(next),
+                    };
+                }
+                Ok(checked)
+            }
+            HP::Then(first, value, next) => {
+                let first = self.pattern_observed(first, ty,observed)?;
+                let (value,next)=self.under_observed_pattern_type_facts(&first,observed,value.span,|checker| {
+                    let value=checker.expr(value,None)?;
+                    let next=checker.pattern_observed(next,&value.ty,match &value.kind {K::TypeValue(ty)=>Some(ty),_=>None})?;
+                    Ok((value,next))
+                })?;
+                Ok(n::Pattern::Then {
+                    first: Box::new(first),
+                    value: Box::new(value),
+                    next: Box::new(next),
+                })
+            }
+            HP::Guard(pattern, condition) => {
+                let pattern = self.pattern_observed(pattern, ty,observed)?;
+                let condition = self.under_observed_pattern_type_facts(&pattern,observed,condition.span,|checker|
+                    checker.expr(condition, Some(&p(P::Bool))))?;
+                Ok(n::Pattern::Guard {
+                    pattern: Box::new(pattern),
+                    condition: Box::new(condition),
+                })
+            }
+            HP::NormalForm(head, arguments) => {
+                if self.structural_type(ty, pattern.span)? != p(P::Type) {
+                    return Err(error(
+                        pattern.span,
+                        "normal-form patterns require a Type value",
+                    ));
+                }
+                let H::ResolvedDef { def_id, .. } = head.kind else {
+                    return Err(error(
+                        head.span,
+                        "normal-form pattern head requires a resolved declaration",
+                    ));
+                };
+                let owner = self
+                    .package
+                    .definition_owner(def_id)
+                    .ok_or_else(|| error(head.span, "missing normal-form head"))?;
+                let Some(ItemKind::Fn(sig, _)) = self.package.item(owner).map(|item| &item.kind)
+                else {
+                    return Err(error(
+                        head.span,
+                        "pattern head is not a normal-form definition",
+                    ));
+                };
+                if !sig.modifiers.is_normal_form_head {
+                    return Err(error(
+                        head.span,
+                        "pattern head is not a normal-form definition",
+                    ));
+                }
+                self.ensure_signature(owner, head.span)?;
+                let parameters = self.normal_parameters[&owner].clone();
+                if arguments.len() != parameters.len() {
+                    return Err(error(
+                        pattern.span,
+                        "normal-form pattern argument count mismatch",
+                    ));
+                }
+                // Route names first, then elaborate in declaration order: a
+                // later parameter's type may depend on an earlier Type input
+                // even when the named patterns were written in reverse order.
+                let mut routed = vec![None; parameters.len()];
+                let mut positional = 0;
+                for argument in *arguments {
+                    let slot = if let Some(name) = argument.name {
+                        sig.clause_params
+                            .iter()
+                            .position(|parameter| parameter.name.name == name.name)
+                            .ok_or_else(|| {
+                                error(name.span, "unknown normal-form pattern argument")
+                            })?
+                    } else {
+                        while positional < routed.len() && routed[positional].is_some() {
+                            positional += 1;
+                        }
+                        let slot = positional;
+                        positional += 1;
+                        slot
+                    };
+                    if slot >= routed.len() || routed[slot].replace(&argument.pattern).is_some() {
+                        return Err(error(
+                            argument.pattern.span,
+                            "duplicate normal-form pattern argument",
+                        ));
+                    }
+                }
+                let mut fields = Vec::with_capacity(parameters.len());
+                let mut known_parameters = Vec::new();
+                let mut known_types = Vec::new();
+                for (argument, (parameter, _, declared_ty)) in routed.into_iter().zip(&parameters) {
+                    let argument = argument.expect("arity and routing cover every parameter");
+                    let ty = declared_ty
+                        .instantiate_types(&known_parameters, &known_types)
+                        .map_err(|failure| error(argument.span, failure.to_string()))?;
+                    let dependent = parameters
+                        .iter()
+                        .any(|(parameter, _, _)| ty.mentions_rigid(*parameter));
+                    let field = if dependent {
+                        if matches!(argument.kind, HP::Wild) {
+                            n::Pattern::Wild
+                        } else {
+                            return Err(error(
+                                argument.span,
+                                "dependent normal-form value patterns require contextual pattern elaboration not yet implemented",
+                            ));
+                        }
+                    } else {
+                        self.pattern(argument, &ty)?
+                    };
+                    if ty == p(P::Type) && matches!(argument.kind, HP::Const(_)) {
+                        // The equality guard remains in the residual pattern.
+                        // Only its successful branch justifies using this Type
+                        // for subsequent fields; no global solver fact is added.
+                        if let n::Pattern::Guard { condition, .. } = &field {
+                            if let K::TypeEqual(_, expected) = &condition.kind {
+                                if let K::TypeValue(value) = &expected.kind {
+                                    known_parameters.push(*parameter);
+                                    known_types.push(value.clone());
+                                }
+                            }
+                        }
+                    }
+                    fields.push(field);
+                }
+                Ok(n::Pattern::NormalForm {
+                    head: declaration(self.package, &self.package_identities, owner),
+                    arguments: fields,
+                })
+            }
+            HP::Tuple(fields) => {
+                let shape = self.structural_type(ty, pattern.span)?;
+                if shape == p(P::Type) {
+                    let fields = fields
+                        .iter()
+                        .map(|field| self.pattern(field, &p(P::Type)))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    return Ok(n::Pattern::TypeTuple(fields));
+                }
+                let Term::Tuple(types) = &shape else {
+                    return Err(error(
+                        pattern.span,
+                        "tuple pattern requires a tuple type; custom pattern view elaboration is not implemented",
+                    ));
+                };
+                if fields.len() != types.len() {
+                    return Err(error(pattern.span, "tuple pattern arity mismatch"));
+                }
+                let fields = fields
+                    .iter()
+                    .zip(types)
+                    .map(|(pattern, ty)| self.pattern(pattern, ty))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(n::Pattern::Tuple(fields))
+            }
+            HP::Struct(callee, fields, rest) if matches!(callee.kind, HP::Wild) => {
+                let shape = self.structural_type(ty, pattern.span)?;
+                if let Term::Record(declared) = &shape {
+                    if *rest { return Err(error(pattern.span, "record rest binding is not implemented")); }
+                    let mut checked = vec![n::Pattern::Wild; declared.len()];
+                    let mut seen = BTreeSet::new();
+                    for field in *fields {
+                        let slot = declared.iter().position(|(name,_)| name == field.ident.name.as_str())
+                            .ok_or_else(|| error(field.span,"unknown struct pattern field"))?;
+                        if !seen.insert(slot) { return Err(error(field.span,"duplicate struct pattern field")); }
+                        checked[slot] = self.pattern(&field.pat, &declared[slot].1)?;
+                    }
+                    return Ok(n::Pattern::AnonymousRecord { names: declared.iter().map(|(name,_)| name.clone()).collect(), fields: checked });
+                }
+                let Term::Nominal {
+                    declaration,
+                    arguments,
+                } = &shape
+                else {
+                    return Err(error(
+                        pattern.span,
+                        "record pattern requires a struct type; custom pattern view elaboration is not implemented",
+                    ));
+                };
+                let definition = self
+                    .structs
+                    .get(declaration)
+                    .ok_or_else(|| error(pattern.span, "record pattern requires a struct type"))?;
+                if *rest {
+                    return Err(error(
+                        pattern.span,
+                        "record rest binding is not implemented",
+                    ));
+                }
+                let declared = definition
+                    .instantiate_fields_in_scope(arguments, &self.call_input_frames())
+                    .map_err(|e| error(pattern.span, e.to_string()))?;
+                let mut checked = vec![n::Pattern::Wild; declared.len()];
+                let mut seen = BTreeSet::new();
+                for field in *fields {
+                    let slot = declared
+                        .iter()
+                        .position(|(name, _)| name == field.ident.name.as_str())
+                        .ok_or_else(|| error(field.span, "unknown struct pattern field"))?;
+                    if !seen.insert(slot) {
+                        return Err(error(field.span, "duplicate struct pattern field"));
+                    }
+                    checked[slot] = self.pattern(&field.pat, &declared[slot].1)?;
+                }
+                Ok(n::Pattern::Record {
+                    declaration: *declaration,
+                    fields: checked,
+                })
+            }
+            HP::Struct(callee, fields, rest) => {
+                let HP::Const(callee) = &callee.kind else {
+                    return Err(error(
+                        pattern.span,
+                        "named enum pattern requires a variant name",
+                    ));
+                };
+                let Some((variant_type, index)) = self.variant_target(callee, Some(ty))? else {
+                    return Err(error(
+                        pattern.span,
+                        "named enum pattern requires an enum context",
+                    ));
+                };
+                self.require(&variant_type, ty, pattern.span)?;
+                let Term::Nominal { declaration, .. } = variant_type else {
+                    unreachable!()
+                };
+                let variant =
+                    self.instantiated_variants(&variant_type, pattern.span)?[index].clone();
+                let n::VariantShape::Named(names) = &variant.shape else {
+                    return Err(error(
+                        pattern.span,
+                        "enum variant does not have named fields",
+                    ));
+                };
+                if *rest {
+                    return Err(error(pattern.span, "enum rest binding is not implemented"));
+                }
+                let mut checked = vec![n::Pattern::Wild; names.len()];
+                let mut seen = BTreeSet::new();
+                for field in *fields {
+                    let slot = names
+                        .iter()
+                        .position(|n| n == field.ident.name.as_str())
+                        .ok_or_else(|| error(field.span, "unknown enum payload field"))?;
+                    if !seen.insert(slot) {
+                        return Err(error(field.span, "duplicate enum payload pattern field"));
+                    }
+                    checked[slot] = self.pattern(&field.pat, &variant.fields[slot])?;
+                }
+                Ok(n::Pattern::Variant {
+                    declaration,
+                    index,
+                    fields: checked,
+                })
+            }
+            HP::AppTuple(callee, fields) => {
+                let HP::Const(callee) = &callee.kind else {
+                    return Err(error(
+                        pattern.span,
+                        "enum payload pattern requires a variant name",
+                    ));
+                };
+                let Some((variant_type, index)) = self.variant_target(callee, Some(ty))? else {
+                    return Err(error(
+                        pattern.span,
+                        "enum payload pattern requires an enum context",
+                    ));
+                };
+                self.require(&variant_type, ty, pattern.span)?;
+                let Term::Nominal { declaration, .. } = variant_type else {
+                    unreachable!()
+                };
+                let variant =
+                    self.instantiated_variants(&variant_type, pattern.span)?[index].clone();
+                if variant.shape != n::VariantShape::Tuple || fields.len() != variant.fields.len() {
+                    return Err(error(pattern.span, "enum payload pattern arity mismatch"));
+                }
+                let fields = fields
+                    .iter()
+                    .zip(&variant.fields)
+                    .map(|(pattern, ty)| self.pattern(pattern, ty))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(n::Pattern::Variant {
+                    declaration,
+                    index,
+                    fields,
+                })
+            }
+            HP::Wild => Ok(n::Pattern::Wild),
+            HP::Binding(hir::common::BindingMode::ByValue, _, inner) => {
+                let inner = inner
+                    .map(|p| self.pattern_observed(p, ty,observed))
+                    .transpose()?
+                    .unwrap_or(n::Pattern::Wild);
+                let binding = local(pattern.hir_id);
+                self.locals.insert(binding, ty.clone());
+                Ok(n::Pattern::Binding {
+                    binding,
+                    inner: Box::new(inner),
+                })
+            }
+            HP::Const(value) => {
+                if let Some(group) = self.enum_group_pattern(value,ty)? { return Ok(group); }
+                let value = self.expr(value, Some(ty))?;
+                if self.structural_type(ty, pattern.span)? == p(P::Type) {
+                    let index = self.next_temporary_binding;
+                    self.next_temporary_binding = index.checked_add(1).ok_or_else(|| {
+                        error(pattern.span, "pattern temporary binding space exhausted")
+                    })?;
+                    let binding = n::LocalId {
+                        owner: u32::MAX,
+                        index,
+                    };
+                    let condition = n::Expr {
+                        source: source(pattern.span),
+                        ty: if is_never(&value.ty) {
+                            p(P::Never)
+                        } else {
+                            p(P::Bool)
+                        },
+                        kind: K::TypeEqual(
+                            Box::new(n::Expr {
+                                source: source(pattern.span),
+                                ty: p(P::Type),
+                                kind: K::Local(binding),
+                            }),
+                            Box::new(value),
+                        ),
+                    };
+                    // Equality matching is an observation, not inversion of a
+                    // normal-form head. A guard leaves coverage conservative
+                    // and uses the existing candidate-local rollback protocol.
+                    return Ok(n::Pattern::Guard {
+                        pattern: Box::new(n::Pattern::Binding {
+                            binding,
+                            inner: Box::new(n::Pattern::Wild),
+                        }),
+                        condition: Box::new(condition),
+                    });
+                }
+                match value.kind {
+                    K::Literal(literal) => Ok(n::Pattern::Literal(literal)),
+                    K::Unit => Ok(n::Pattern::Unit),
+                    K::Variant {
+                        declaration,
+                        index,
+                        fields,
+                    } if fields.is_empty() => Ok(n::Pattern::Variant {
+                        declaration,
+                        index,
+                        fields: Vec::new(),
+                    }),
+                    _ => {
+                        let shape = self.structural_type(ty, pattern.span)?;
+                        let index = self.next_temporary_binding;
+                        self.next_temporary_binding = index.checked_add(1).ok_or_else(|| {
+                            error(pattern.span, "pattern temporary binding space exhausted")
+                        })?;
+                        let binding = n::LocalId {
+                            owner: u32::MAX,
+                            index,
+                        };
+                        let observed = n::Expr {
+                            ty: ty.clone(),
+                            source: source(pattern.span),
+                            kind: K::Local(binding),
+                        };
+                        let condition =
+                            self.equality_expression(observed, value, &shape, pattern.span)?;
+                        Ok(n::Pattern::Guard {
+                            pattern: Box::new(n::Pattern::Binding {
+                                binding,
+                                inner: Box::new(n::Pattern::Wild),
+                            }),
+                            condition: Box::new(condition),
+                        })
+                    }
+                }
+            }
+            HP::Or(patterns) => {
+                let saved = self.locals.clone();
+                let mut alternatives = Vec::new();
+                let mut canonical = None;
+                let mut exported = saved.clone();
+                for pattern in *patterns {
+                    self.locals = saved.clone();
+                    let mut checked = self.pattern_observed(pattern, ty,observed)?;
+                    let bindings = pattern_bindings(pattern)?;
+                    if let Some(first) = &canonical {
+                        let first: &BTreeMap<String, n::LocalId> = first;
+                        if !first.keys().eq(bindings.keys()) {
+                            self.locals = saved;
+                            return Err(error(
+                                pattern.span,
+                                "or-pattern branches must export the same binding names",
+                            ));
+                        }
+                        let mut remap = BTreeMap::new();
+                        for (name, binding) in &bindings {
+                            let target = first[name];
+                            self.require(&self.locals[binding], &exported[&target], pattern.span)?;
+                            remap.insert(*binding, target);
+                        }
+                        checked = n::Pattern::Remap {
+                            pattern: Box::new(checked),
+                            bindings: remap.into_iter().collect(),
+                        };
+                    } else {
+                        canonical = Some(bindings);
+                        exported = self.locals.clone();
+                    }
+                    alternatives.push(checked);
+                }
+                self.locals = exported;
+                Ok(n::Pattern::Or(alternatives))
+            }
+            _ => Err(error(
+                pattern.span,
+                "pattern view/protocol elaboration is not implemented for this pattern",
+            )),
+        }
+    }
+
+    fn match_expr(
+        &mut self,
+        expr: &Expr<'_>,
+        value: &Expr<'_>,
+        arms: &[hir::pattern::PatternArm<'_>],
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+    ) -> Result<n::Expr, Error> {
+        self.match_expr_with_input(expr, value, arms, expected, partial, None)
+    }
+    fn match_arm_pattern(&mut self,arm:&hir::pattern::PatternArm<'_>,value:&n::Expr)->Result<n::Pattern,Error> {
+        let pattern=self.pattern_observed(&arm.pat,&value.ty,
+            match &value.kind {K::TypeValue(ty)=>Some(ty),_=>None})?;
+        let guard=arm.guard.map(|guard|
+            self.under_matched_pattern_type_facts(&pattern,value,guard.span,|checker|
+                checker.expr(guard,Some(&p(P::Bool))))).transpose()?;
+        // Final guard runs after candidate selection, including or-patterns.
+        Ok(match guard {
+            Some(condition)=>n::Pattern::Guard {pattern:Box::new(pattern),condition:Box::new(condition)},
+            None=>pattern,
+        })
+    }
+    fn match_expr_with_input(
+        &mut self,
+        expr: &Expr<'_>,
+        value: &Expr<'_>,
+        arms: &[hir::pattern::PatternArm<'_>],
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+        input_context: Option<&crate::calls::InputContext>,
+    ) -> Result<n::Expr, Error> {
+        let value = self.expr(value, None)?;
+        let saved = self.locals.clone();
+        let result = (|| {
+            let inferred = if expected.is_none() {
+                match input_context {
+                    Some(context) => self.optional_branch_context(expr.span, context, arms.len(), |checker, index| {
+                        let arm=&arms[index];
+                        let pattern=checker.match_arm_pattern(arm,&value)?;
+                        checker.under_matched_pattern_type_facts(&pattern,&value,arm.body.span,|checker|
+                            checker.input_context_expression(arm.body, context))
+                    })?,
+                    None => None,
+                }
+            } else { None };
+            let expected = expected.or(inferred.as_ref());
+            let mut checked = Vec::new();
+            let mut result_ty = p(P::Never);
+            for arm in arms {
+                self.locals = saved.clone();
+                let pattern = self.match_arm_pattern(arm,&value)?;
+                let arm_context =
+                    expected.or_else(|| (!is_never(&result_ty)).then_some(&result_ty));
+                let body = self.under_matched_pattern_type_facts(&pattern,&value,arm.body.span,|checker|match input_context {
+                    Some(input_context) if arm_context.is_none() => checker.input_context_expression(arm.body, input_context),
+                    _ => checker.expr_context(arm.body, arm_context, partial),
+                })?;
+                if !is_never(&body.ty) {
+                    if !is_never(&result_ty) {
+                        self.require(&body.ty, &result_ty, arm.span)?;
+                    }
+                    result_ty = body.ty.clone();
+                }
+                checked.push(n::MatchArm {
+                    pattern,
+                    guard: None,
+                    body,
+                });
+            }
+            let patterns: Vec<_> = checked
+                .iter()
+                .filter(|arm| arm.guard.is_none())
+                .map(|arm| &arm.pattern)
+                .collect();
+            let exhaustive = self.patterns_exhaustive(&patterns, &value.ty);
+            if exhaustive != crate::coverage::Coverage::Exhaustive {
+                return Err(error(
+                    expr.span,
+                    if exhaustive == crate::coverage::Coverage::Unknown {
+                        "match coverage budget exhausted; add an unguarded fallback pattern"
+                    } else {
+                        "non-exhaustive match; add an unguarded fallback pattern"
+                    },
+                ));
+            }
+            Ok(n::Expr {
+                ty: if is_never(&value.ty) {
+                    p(P::Never)
+                } else {
+                    result_ty
+                },
+                source: source(expr.span),
+                kind: K::Match {
+                    value: Box::new(value),
+                    arms: checked,
+                },
+            })
+        })();
+        self.locals = saved;
+        result
+    }
+
+    /// Elaborate once, then choose execution phase from dependencies, never by
+    /// catching an interpreter failure. A closed runtime call remains runtime.
+    fn bit_read_index(&mut self, index: &Expr<'_>) -> Result<(n::Expr, Option<usize>), Error> {
+        let saved_numeric = std::mem::replace(&mut self.numeric_defaults, true);
+        let checked = self.with_staged_input(true, |this| this.expr(index, None));
+        self.numeric_defaults = saved_numeric;
+        let checked = checked?;
+        let shape = self.structural_type(&checked.ty, index.span)?;
+        if !matches!(shape, Term::Primitive(P::Integer | P::Never))
+            && !matches!(shape, Term::Primitive(p) if p.fixed_integer_layout().is_some()) {
+            return Err(error(index.span, "BitVec index must produce an integer"));
+        }
+        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let availability = (|| {
+            let mut runtime = !nir::free_bindings::collect(&checked, &mut fuel)?.is_empty();
+            nir::visit::expression(&checked, &mut fuel, |value, _| {
+                if let K::Call {callee, ..} = &value.kind {
+                    runtime |= !callee.ty.is_comptime_callable();
+                }
+                runtime |= matches!(value.kind,
+                    K::Return(_) | K::Break(_) | K::Continue(_)
+                    | K::AddressOf(_) | K::ReadPointer(_) | K::WritePointer {..} | K::BitWritePointer {..}
+                    | K::PointerField {..} | K::PointerAnonymousField {..}
+                    | K::EffectResume(_) | K::EffectHandle {..} | K::EffectRun {..}
+                    | K::EffectComputation {..} | K::EffectRequest {..});
+                Ok(())
+            })?;
+            Ok::<_, String>(runtime)
+        })();
+        self.required_steps -= (before - fuel) as u64;
+        if availability.map_err(|e|error(index.span,e))? {
+            return Ok((checked, None));
+        }
+        let (value, _) = self.required_normal_input(index, checked.clone(), Vec::new())?;
+        let value = match value {
+            comptime_interpretor::Value::Integer(value) => value,
+            comptime_interpretor::Value::UnsignedInteger(value) => comptime_runtime::Integer::from_u128(value),
+            comptime_interpretor::Value::SignedInteger(value) => comptime_runtime::Integer::from_i128(value),
+            _ => return Err(error(index.span, "BitVec index must produce an integer")),
+        };
+        if value.is_negative() {return Err(error(index.span,"BitVec index must be nonnegative"));}
+        let position = value.to_u128().ok().and_then(|v|usize::try_from(v).ok())
+            .ok_or_else(||error(index.span,"BitVec index exceeds the implementation size limit"))?;
+        Ok((checked, Some(position)))
+    }
+
+    fn float_proxy(
+        &self,
+        spelling: &str,
+        negative: bool,
+        expected: Option<&Term>,
+        span: Span,
+    ) -> Result<n::Expr, Error> {
+        let target = match expected {
+            Some(ty) => self.structural_type(ty, span)?,
+            None if self.numeric_defaults => p(P::F64),
+            None => {
+                return Err(context_error(
+                    span,
+                    "float runtime proxy awaits type context",
+                ));
+            }
+        };
+        if !matches!(target, Term::Primitive(P::F32 | P::F64)) {
+            return Err(error(
+                span,
+                "float runtime proxy requires an f32 or f64 target",
+            ));
+        }
+        let mut budget = comptime_runtime::Budget::default();
+        let mut exact = comptime_runtime::decimal::DecimalLiteral::parse(spelling, &mut budget)
+            .map_err(|e| error(span, e.to_string()))?;
+        if negative {
+            exact = exact.negated();
+        }
+        let failure = |e: comptime_runtime::Error| {
+            error(
+                span,
+                if e == comptime_runtime::Error::OutOfRange {
+                    "overflowing finite float literal conversion is not yet implemented".into()
+                } else {
+                    e.to_string()
+                },
+            )
+        };
+        let literal = if target == p(P::F32) {
+            n::Literal::Float32(exact.to_f32_bits(&mut budget).map_err(failure)?)
+        } else {
+            n::Literal::Float64(exact.to_f64_bits(&mut budget).map_err(failure)?)
+        };
+        Ok(n::Expr {
+            ty: target,
+            source: source(span),
+            kind: K::Literal(literal),
+        })
+    }
+    fn integer_proxy(
+        &self,
+        spelling: &str,
+        negative: bool,
+        expected: Option<&Term>,
+        span: Span,
+    ) -> Result<n::Expr, Error> {
+        let target = match expected {
+            Some(ty) => self.structural_type(ty, span)?,
+            None if self.numeric_defaults => p(if self.in_required_comptime || self.signature_owner
+                .and_then(|owner| self.package.item(owner))
+                .is_some_and(|item| matches!(&item.kind, ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) if sig.modifiers.is_comptime)) {
+                    P::Integer
+                } else { P::I32 }),
+            None => {
+                return Err(context_error(
+                    span,
+                    "integer runtime proxy awaits type context",
+                ));
+            }
+        };
+        let Term::Primitive(primitive) = target else {
+            return Err(error(
+                span,
+                "integer runtime proxy requires a supported fixed-width integer target",
+            ));
+        };
+        if primitive == P::Integer {
+            comptime_runtime::Integer::parse_literal(
+                spelling,
+                &mut comptime_runtime::Budget::default(),
+            )
+            .map_err(|e| error(span, e.to_string()))?;
+            return Ok(n::Expr {
+                ty: p(P::Integer),
+                source: source(span),
+                kind: K::Literal(n::Literal::Integer(if negative {
+                    format!("-{spelling}")
+                } else {
+                    spelling.into()
+                })),
+            });
+        }
+        if let P::BitVec(width) = primitive {
+            let mut budget = comptime_runtime::Budget::default();
+            let mut integer = comptime_runtime::Integer::parse_literal(spelling, &mut budget)
+                .map_err(|e| error(span, e.to_string()))?;
+            if negative {
+                integer = integer.negated();
+            }
+            let bits = integer.to_bitvec(width, &mut budget).map_err(|_| {
+                error(
+                    span,
+                    "integer literal does not fit the BitVec width or conversion budget",
+                )
+            })?;
+            return Ok(n::Expr {
+                ty: target,
+                source: source(span),
+                kind: K::Literal(n::Literal::BitVec {
+                    width,
+                    words: bits.words().to_vec(),
+                }),
+            });
+        }
+        let Some((signed, width)) = primitive.fixed_integer_layout() else {
+            return Err(error(
+                span,
+                if matches!(primitive, P::Isize | P::Usize) {
+                    "integer runtime proxy requires target pointer-width information"
+                } else {
+                    "integer runtime proxy requires a supported fixed-width integer target"
+                },
+            ));
+        };
+        let mut exact = comptime_runtime::Integer::parse_literal(
+            spelling,
+            &mut comptime_runtime::Budget::default(),
+        )
+        .map_err(|e| error(span, e.to_string()))?;
+        if negative {
+            exact = exact.negated();
+        }
+        let literal = if signed {
+            n::Literal::SignedInteger(
+                exact
+                    .to_signed(width)
+                    .map_err(|e| error(span, e.to_string()))?,
+            )
+        } else {
+            n::Literal::UnsignedInteger(
+                exact
+                    .to_unsigned(width)
+                    .map_err(|e| error(span, e.to_string()))?,
+            )
+        };
+        Ok(n::Expr {
+            ty: p(primitive),
+            source: source(span),
+            kind: K::Literal(literal),
+        })
+    }
+    fn expr(&mut self, expr: &Expr<'_>, expected: Option<&Term>) -> Result<n::Expr, Error> {
+        self.expr_context(expr, expected, None)
+    }
+    #[inline(never)]
+    fn arithmetic_expression(
+        &mut self,
+        expr: &Expr<'_>,
+        op: &BinOp,
+        left: &Expr<'_>,
+        right: &Expr<'_>,
+        expected: Option<&Term>,
+    ) -> Result<n::Expr, Error> {
+        let operator=match op {
+            BinOp::Add=>crate::arithmetic::Operator::Add,
+            BinOp::Sub=>crate::arithmetic::Operator::Subtract,
+            BinOp::Mul=>crate::arithmetic::Operator::Multiply,
+            BinOp::Div=>crate::arithmetic::Operator::Divide,
+            BinOp::Rem=>crate::arithmetic::Operator::Remainder,
+            _=>unreachable!(),
+        };
+        let mut checked_right=None;
+        let checked_left=if let Some(protocol)=self.protocols.arithmetic[operator as usize] {
+            let checked=self.argument_attempt(left,None,None)?;
+            if let Some(value)=checked.as_ref().filter(|value|!is_never(&value.ty)) {
+                let shape=match self.context.structural_view_with_heads_metered(&value.ty,crate::ptc::Budget::default(),|head|Some(head)==self.protocols.tuple).0 {
+                    Ok(view)=>view.map(|(ty,_)|ty).unwrap_or_else(||value.ty.clone()),
+                    Err(crate::ptc::UnknownReason::UnvalidatedModel)=>value.ty.clone(),
+                    Err(reason)=>return Err(error(left.span,format!("arithmetic operand view remains unresolved: {reason:?}"))),
+                };
+                let native=operators::native_arithmetic_operand(op, &shape);
+                // A native left operand does not imply a homogeneous RHS.
+                // Probe it without a fabricated left-type requirement, and
+                // retain successful work for either the protocol or core path.
+                checked_right=self.argument_attempt(right,None,None)?;
+                // Try the native operand context transactionally before asking
+                // for a protocol context. This preserves numeric literal
+                // inference (including nested literals), while an incompatible
+                // enum/callable context can be retried through a unique trait
+                // RHS even inside a block, branch, or generic call. Never use
+                // semantic errors or solver exhaustion as candidate evidence.
+                let mut native_failure=None;
+                if checked_right.is_none() && native {
+                    match self.argument_attempt(right,Some(&value.ty),None) {
+                        Ok(value)=>checked_right=value,
+                        Err(failure) if failure.incompatible_context=>native_failure=Some(failure),
+                        Err(failure)=>return Err(failure),
+                    }
+                }
+                if checked_right.is_none() {
+                    if let Some(rhs)=self.protocol_argument_context(&value.ty,protocol,expr.span)? {
+                        checked_right=Some(self.expr(right,Some(&rhs))?);
+                    } else if let Some(mut failure)=native_failure {
+                        failure.message.push_str("; arithmetic RHS has no unique protocol context");
+                        return Err(failure);
+                    }
+                }
+                let homogeneous=match checked_right.as_ref() {
+                    Some(rhs) if !is_never(&rhs.ty) && rhs.ty!=value.ty=>match self.context.prove(
+                        crate::ptc::Formula::equal(value.ty.clone(),rhs.ty.clone()),crate::ptc::Budget::default()) {
+                        crate::ptc::Outcome::Entailed(_)=>true,
+                        crate::ptc::Outcome::NotEntailed(_) | crate::ptc::Outcome::Unknown {reason:crate::ptc::UnknownReason::UnvalidatedModel,..}=>false,
+                        outcome=>return Err(error(expr.span,format!("arithmetic operand equality remains unresolved: {outcome}"))),
+                    },
+                    _=>true,
+                };
+                if !native || !homogeneous {
+                    let right=match checked_right.take() {Some(right)=>right,None=>self.expr(right,None)?};
+                    return self.finish_binary_protocol_call(expr, protocol, operator.method(),
+                        checked.unwrap(), right, expected);
+                }
+            }
+            Some(checked)
+        } else {None};
+        let hint = expected.map(|ty| self.structural_type(ty, expr.span)).transpose()?;
+        let hint = hint.as_ref().filter(|ty| {
+            matches!(ty, Term::Primitive(P::F32 | P::F64 | P::Integer))
+                || matches!(ty, Term::Primitive(p) if p.fixed_integer_layout().is_some())
+        });
+        let fallback = (is_numeric_literal(left) && !is_float_literal(left)).then(|| p(P::Integer));
+        let (left,right)=match checked_left {
+            Some(checked)=>self.peer_operands_with_ready(left,right,hint,fallback.as_ref(),checked,checked_right)?,
+            None=>self.peer_operands(left,right,hint,fallback.as_ref())?,
+        };
+        // No operator or RHS executes after a nonreturning left operand.
+        // Both source operands were still elaborated above. In particular,
+        // do not invent a rounding protocol from the unreachable RHS type.
+        if is_never(&left.ty) {
+            if let Some(expected) = expected {
+                self.require_expression(&left.ty, expected, expr.span)?;
+            }
+            return Ok(left);
+        }
+        let shape = self.structural_type(&left.ty, expr.span)?;
+        // A literal/block receiver may only become typed during peer inference.
+        // Reuse both checked operands when selecting its protocol: do not
+        // re-elaborate producers or assume the associated Output is the input
+        // type. In particular signed division/remainder have no native policy.
+        if !is_never(&left.ty) && !operators::native_arithmetic_operand(op, &shape) {
+            if let Some(protocol) = self.protocols.arithmetic[operator as usize] {
+                return self.finish_binary_protocol_call(expr, protocol, operator.method(), left, right, expected);
+            }
+        }
+        let ty = if is_never(&left.ty) || is_never(&right.ty) {
+            p(P::Never)
+        } else {
+            shape.clone()
+        };
+        if *op == BinOp::Rem && !matches!(shape, Term::Primitive(p) if matches!(p.fixed_integer_layout(), Some((false, _)))) {
+            return Err(error(expr.span, "protocol or construct not yet implemented: remainder rounding for this type"));
+        }
+        let kind = if matches!(shape, Term::Primitive(P::F32 | P::F64)) {
+            K::FloatBinary {
+                op: match op {
+                    BinOp::Add => n::FloatOp::Add,
+                    BinOp::Sub => n::FloatOp::Subtract,
+                    BinOp::Mul => n::FloatOp::Multiply,
+                    _ => n::FloatOp::Divide,
+                },
+                left: Box::new(left),
+                right: Box::new(right),
+            }
+        } else {
+            let integer_type = if matches!(shape, Term::Primitive(p) if p.fixed_integer_layout().is_some())
+            {
+                shape.clone()
+            } else {
+                p(P::Integer)
+            };
+            self.require(&left.ty, &integer_type, expr.span)?;
+            self.require(&right.ty, &integer_type, expr.span)?;
+            if *op == BinOp::Div && !matches!(shape, Term::Primitive(p) if matches!(p.fixed_integer_layout(), Some((false, _)))) {
+                return Err(error(
+                    expr.span,
+                    "Integer division operator rounding protocol is not implemented",
+                ));
+            }
+            K::IntegerBinary {
+                op: match op {
+                    BinOp::Add => n::IntegerOp::Add,
+                    BinOp::Sub => n::IntegerOp::Subtract,
+                    BinOp::Div => n::IntegerOp::DivideTrunc,
+                    BinOp::Rem => n::IntegerOp::RemainderTrunc,
+                    _ => n::IntegerOp::Multiply,
+                },
+                left: Box::new(left),
+                right: Box::new(right),
+            }
+        };
+        if let Some(expected) = expected {
+            self.require(&ty, expected, expr.span)?;
+        }
+        Ok(n::Expr {
+            ty,
+            source: source(expr.span),
+            kind,
+        })
+    }
+
+    fn expr_context(
+        &mut self,
+        expr: &Expr<'_>,
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+    ) -> Result<n::Expr, Error> {
+        if self.protocols.optional.is_some() && self.optional_target_probe != Some(expr.hir_id) {
+            if let Some(target) = expected {
+                if let Ok((declaration, _, index, payload)) = self.optional_layout(target, expr.span) {
+                    // Branches and null receive the whole destination, not a payload hint.
+                    let directed = matches!(&expr.kind, H::Null | H::Block(_) | H::If(..) | H::Match(..)
+                        | H::When(_) | H::Return(_) | H::EffectRequest(_) | H::EffectHandle(..))
+                        || enum_groups::symbol_path(expr).is_some()
+                        || matches!(&expr.kind, H::Application(head,_) | H::ExtendedApplication(head,_)
+                            if enum_groups::symbol_path(head).is_some());
+                    if !directed {
+                        if let Some(value) = self.argument_attempt(expr, None, partial)? {
+                            return self.inject_optional_value(value, target, expr.span);
+                        }
+                        // A generic producer or optional elimination may itself
+                        // produce the complete optional, preserving nested layers.
+                        if matches!(expr.kind, H::Application(..) | H::ExtendedApplication(..) | H::OptionPropagate(_)) {
+                            let saved = self.optional_target_probe.replace(expr.hir_id);
+                            let attempt = self.argument_attempt_with_defaults(expr, Some(target), partial, false);
+                            self.optional_target_probe = saved;
+                            if let Ok(Some(value)) = attempt { return Ok(value); }
+                        }
+                        let value = self.expr_context(expr, Some(&payload), partial)?;
+                        if is_never(&value.ty) { return Ok(value); }
+                        return Ok(n::Expr { source: source(expr.span), ty: target.clone(),
+                            kind: K::Variant { declaration, index, fields: vec![value] } });
+                    }
+                }
+            }
+        }
+        self.expr_context_unadapted(expr, expected, partial)
+    }
+
+    fn inject_optional_value(&self, mut value: n::Expr, target: &Term, span: Span) -> Result<n::Expr, Error> {
+        let mut layers = Vec::new();
+        let mut inner = target.clone();
+        for _ in 0..128 {
+            if self.require(&value.ty, &inner, span).is_ok() {
+                for (ty, declaration, index) in layers.into_iter().rev() {
+                    value = n::Expr { source: source(span), ty,
+                        kind: K::Variant { declaration, index, fields: vec![value] } };
+                }
+                return Ok(value);
+            }
+            let (declaration, _, index, payload) = self.optional_layout(&inner, span)?;
+            layers.push((inner, declaration, index));
+            inner = payload;
+        }
+        Err(error(span, "optional injection depth exhausted"))
+    }
+
+    fn expr_context_unadapted(
+        &mut self,
+        expr: &Expr<'_>,
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+    ) -> Result<n::Expr, Error> {
+        let preserve_effect_value = std::mem::take(&mut self.preserve_effect_value);
+        if let H::Binary(op @ (BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem), left, right) =
+            &expr.kind
+        {
+            // Numeric recursion must not retain the large general expression
+            // dispatcher frame at every arithmetic node.
+            let value=self.arithmetic_expression(expr, op, left, right, expected)?;
+            return if preserve_effect_value {Ok(value)} else {self.run_computation(value,expected,expr.span)};
+        }
+        // Calls recurse through arguments. Keep that path outside the large
+        // general dispatcher frame, including projection and extended calls.
+        let value = match &expr.kind {
+            // Recursive control-flow wrappers must not retain the large
+            // general dispatcher frame for each nested source expression.
+            H::Block(block) => {
+                // A block used as a callee delivers its tail in that position;
+                // statements and their arguments remain ordinary expressions.
+                let saved = self.comptime_callee_result;
+                if saved == Some(expr.hir_id) {
+                    self.comptime_callee_result = block.expr.map(|tail| tail.hir_id);
+                }
+                let result = self.block_context(block, expected, partial);
+                self.comptime_callee_result = saved;
+                result
+            }
+            H::Match(value, arms) => self.match_expr(expr, value, arms, expected, partial),
+            H::When(arms) => self.when_expr(expr, arms, expected, partial),
+            H::Application(callee, args) => {
+                let quote_head=if let H::NFApplication(head,_)=callee.kind {head} else {callee};
+                if let H::ResolvedDef {def_id,..}=quote_head.kind {
+                    if self.package.definition_owner(def_id).is_some_and(|owner|self.is_quote_function(owner)) {
+                        self.record_quote_application(expr.span)?;
+                    }
+                }
+                if let Some((ty, index)) = self.variant_target(callee, expected)? {
+                    self.construct_variant(expr, ty, index, args, expected)
+                } else {
+                    self.call(expr, callee, args, expected, partial)
+                }
+            }
+            H::ExtendedApplication(callee, args) => {
+                if let Some((ty, index)) = self.variant_target(callee, expected)? {
+                    self.construct_named_variant(expr, ty, index, args, expected)
+                } else if let Some(call) = self.extended_call(expr, callee, args, expected, partial)? {
+                    Ok(call)
+                } else {
+                    self.construct(expr, callee, args, expected)
+                }
+            }
+            H::Projection(value, field) => {
+                self.projection_expression(expr, value, field, expected, partial)
+            }
+            H::Unary(UnOp::Neg | UnOp::Not, _) => self.unary_expression(expr, expected),
+            H::Binary(BinOp::And | BinOp::Or, _, _) => self.logical_expression(expr, expected),
+            H::Binary(BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge, _, _) => self.comparison_expression(expr, expected),
+            H::Binary(BinOp::Concat, _, _) => self.concat_expression(expr, expected),
+            _ => self.expr_context_inner(expr, expected, partial),
+        }?;
+        if preserve_effect_value {Ok(value)} else {self.run_computation(value, expected, expr.span)}
+    }
+
+    #[inline(never)]
+    fn expr_context_inner(
+        &mut self,
+        expr: &Expr<'_>,
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+    ) -> Result<n::Expr, Error> {
+        if let H::CodeSplice(operand, substitutions) = &expr.kind {
+            self.record_quote_hole(expr.span)?;
+            return self.connect_code(expr, operand, substitutions, expected);
+        }
+        if matches!(expr.kind, H::CodeQuote(..)) {
+            return Err(error(expr.span, "quoted code is a comptime value; bind it with const or supply it to a code splice"));
+        }
+        if let H::ResolvedDef {def_id, ..} = expr.kind {
+            if self.package.definition_owner(def_id).is_some_and(|owner| self.is_code_generator(owner)) {
+                return Err(error(expr.span, "code generator must be invoked in a comptime code position"));
+            }
+        }
+        if let H::Resume(value) = &expr.kind {
+            let ty = self.effect_resume_result.clone().ok_or_else(|| error(expr.span, "resume requires an enclosing direct effect branch"))?;
+            let value = if let Some(value) = value {self.expr(value, Some(&ty))?} else {
+                self.require(&p(P::Void), &ty, expr.span)?;
+                n::Expr {source:source(expr.span), ty:p(P::Void), kind:K::Unit}
+            };
+            return Ok(n::Expr {source:source(expr.span), ty:p(P::Never), kind:K::EffectResume(Box::new(value))});
+        }
+        if let H::EffectHandle(value, arms) = &expr.kind {
+            return self.effect_handle(expr, value, arms, expected);
+        }
+        if let H::EffectRequest(call) = &expr.kind {
+            return self.effect_request(expr, call, expected);
+        }
+        if let H::ResolvedClauseParam(_, id) = expr.kind {
+            let declaration = DeclarationId {
+                package: semantic_package(&self.package_identities, id.pkg),
+                local: id.index,
+            };
+            if self.forbidden_default_inputs.contains(&declaration) {
+                return Err(error(expr.span,"normal-form default references itself or a later parameter"));
+            }
+            if let Some((binding, ty)) = self.normal_default_bindings.get(&declaration).cloned() {
+                if let Some(expected) = expected {self.require_expression(&ty,expected,expr.span)?;}
+                return Ok(n::Expr {source:source(expr.span),ty,kind:K::Local(binding)});
+            }
+            if let Some(binding) = self.alias_value_bindings.get(&declaration).copied() {
+                let ty = p(P::Type);
+                if let Some(expected) = expected {
+                    self.require_expression(&ty, expected, expr.span)?;
+                }
+                for frame in &mut self.captures {
+                    if frame.outer.contains(&binding)
+                        && !frame
+                            .values
+                            .iter()
+                            .any(|capture| capture.binding == binding)
+                    {
+                        frame.values.push(n::Capture {
+                            binding,
+                            ty: ty.clone(),
+                            value: None,
+                        });
+                    }
+                }
+                return Ok(n::Expr {
+                    source: source(expr.span),
+                    ty,
+                    kind: K::Local(binding),
+                });
+            }
+            if let Some((_, binding, ty)) = self
+                .normal_parameters
+                .values()
+                .flatten()
+                .find(|(d, _, ty)| *d == declaration && *ty != p(P::Type))
+            {
+                if let Some(expected) = expected {
+                    self.require(ty, expected, expr.span)?;
+                }
+                return Ok(n::Expr {
+                    source: source(expr.span),
+                    ty: ty.clone(),
+                    kind: K::Local(*binding),
+                });
+            }
+        }
+        // Type observations form values without evaluating the observed term.
+        // Only the explicit builtin BitVec head is an executable constructor;
+        // ordinary normal-form heads remain opaque.
+        if let H::NFApplication(head, args) = &expr.kind {
+            if matches!(&head.kind, H::Builtin(name) if name.as_str() == "BitVec") {
+                let [Arg::Positional(width)] = *args else {
+                    return Err(error(
+                        expr.span,
+                        "builtin BitVec requires exactly one positional comptime width",
+                    ));
+                };
+                let width = self.expr(width, Some(&p(P::Integer)))?;
+                let ty = if is_never(&width.ty) {
+                    p(P::Never)
+                } else {
+                    p(P::Type)
+                };
+                if let Some(expected) = expected {
+                    self.require_expression(&ty, expected, expr.span)?;
+                }
+                return Ok(n::Expr {
+                    ty,
+                    source: source(expr.span),
+                    kind: K::BitVecType(Box::new(width)),
+                });
+            }
+        }
+        if let H::NFApplication(head, arguments) = &expr.kind {
+            if let H::ResolvedDef { def_id, .. } = head.kind {
+                if let Some(owner) = self.package.definition_owner(def_id) {
+                    if (self.has_optional_type_clauses(owner) || arguments.iter().any(|arg| matches!(arg, Arg::Expand(_)))) && matches!(self.package.item(owner).map(|item| &item.kind), Some(ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::TypeAlias(..))) {
+                        return self.defaulted_type_expression(owner,arguments,expr.span,expected);
+                    }
+                    if matches!(
+                        self.package.item(owner).map(|item| &item.kind),
+                        Some(ItemKind::Struct(_) | ItemKind::Enum(_))
+                    ) {
+                        let parameters = self.type_parameters[&owner].clone();
+                        if parameters.is_empty() || parameters.len() != arguments.len() {
+                            return Err(error(
+                                expr.span,
+                                "generic type type argument count mismatch",
+                            ));
+                        }
+                        let mut values = Vec::new();
+                        let mut terms = Vec::new();
+                        let mut deferred = BTreeSet::new();
+                        for (argument, parameter) in arguments.iter().zip(&parameters) {
+                            let Arg::Positional(value) = argument else {
+                                return Err(error(expr.span, "type arguments must be positional"));
+                            };
+                            let value = self.expr(value, Some(&p(P::Type)))?;
+                            if let K::TypeValue(ty) = &value.kind {
+                                terms.push(ty.clone());
+                            } else {
+                                deferred.insert(*parameter);
+                                terms.push(Term::Rigid {
+                                    declaration: *parameter,
+                                    sort: Sort::Type,
+                                });
+                            }
+                            values.push(value);
+                        }
+                        let dynamic = !deferred.is_empty();
+                        self.check_formation_application(
+                            owner,
+                            FormationInputs {
+                                terms: terms.clone(),
+                                deferred,
+                            },
+                            expr.span,
+                        )?;
+                        let ty = if values.iter().any(|value| is_never(&value.ty)) {
+                            p(P::Never)
+                        } else {
+                            p(P::Type)
+                        };
+                        if let Some(expected) = expected {
+                            self.require_expression(&ty, expected, expr.span)?;
+                        }
+                        let kind = if dynamic {
+                            self.ensure_nominal(owner, expr.span)?;
+                            K::NominalType {
+                                declaration: declaration(
+                                    self.package,
+                                    &self.package_identities,
+                                    owner,
+                                ),
+                                arguments: values,
+                            }
+                        } else {
+                            K::TypeValue(Term::Nominal {
+                                declaration: declaration(
+                                    self.package,
+                                    &self.package_identities,
+                                    owner,
+                                ),
+                                arguments: terms,
+                            })
+                        };
+                        return Ok(n::Expr {
+                            source: source(expr.span),
+                            ty,
+                            kind,
+                        });
+                    }
+                    if let ItemKind::TypeAlias(value, ..) = &self.package.item(owner).unwrap().kind
+                    {
+                        let parameters = self.type_parameters[&owner].clone();
+                        if parameters.is_empty() || parameters.len() != arguments.len() {
+                            return Err(error(
+                                expr.span,
+                                "generic type alias argument count mismatch",
+                            ));
+                        }
+                        let mut values = Vec::new();
+                        for argument in *arguments {
+                            let Arg::Positional(value) = argument else {
+                                return Err(error(
+                                    expr.span,
+                                    "type alias arguments must be positional",
+                                ));
+                            };
+                            values.push(self.expr(value, Some(&p(P::Type)))?);
+                        }
+                        let result =
+                            self.alias_value_expression(owner, value, values, expr.span)?;
+                        if let Some(expected) = expected {
+                            self.require(&result.ty, expected, expr.span)?;
+                        }
+                        return Ok(result);
+                    }
+                    if matches!(&self.package.item(owner).unwrap().kind, ItemKind::Fn(sig, _) if sig.modifiers.is_normal_form_head)
+                    {
+                        return self.normal_type_expression(expr, owner, arguments, expected);
+                    }
+                }
+            }
+        }
+        match &expr.kind {
+            H::TraitBound(..) if self.executable_refinement_owner==Some(expr.hir_id.owner) => {
+                let value=self.refinement_trait_value(expr)?;
+                let ty=p(P::Bool);
+                if let Some(expected)=expected {self.require_expression(&ty,expected,expr.span)?;}
+                return Ok(n::Expr {source:source(expr.span),ty,kind:K::Literal(n::Literal::Bool(value))});
+            }
+            H::RefinedType {..} | H::RefinementSubject => {
+                let value=self.type_expr(expr)?;
+                let ty=p(P::Type);
+                if let Some(expected)=expected {self.require_expression(&ty,expected,expr.span)?;}
+                return Ok(n::Expr {source:source(expr.span),ty,kind:K::TypeValue(value)});
+            }
+            H::TyOptional(inner) => {
+                let (owner, declaration) = self.bound_optional_declaration(expr.span)?;
+                let inner = self.expr(inner, Some(&p(P::Type)))?;
+                let ty = inner.ty.clone();
+                if let Some(expected) = expected { self.require_expression(&ty, expected, expr.span)?; }
+                let kind = if let K::TypeValue(payload) = &inner.kind {
+                    self.check_type_application(owner, std::slice::from_ref(payload), expr.span)?;
+                    K::TypeValue(Term::Nominal { declaration, arguments: vec![payload.clone()] })
+                } else {
+                    let parameter = self.enums[&declaration].type_parameters[0];
+                    self.check_formation_application(owner, FormationInputs {
+                        terms: vec![Term::Rigid { declaration: parameter, sort: Sort::Type }],
+                        deferred: BTreeSet::from([parameter]),
+                    }, expr.span)?;
+                    K::NominalType { declaration, arguments: vec![inner] }
+                };
+                return Ok(n::Expr { source: source(expr.span), ty, kind });
+            }
+            H::TyPtr(inner) => {
+                let inner = self.expr(inner, Some(&p(P::Type)))?;
+                let ty = inner.ty.clone();
+                if let Some(expected) = expected {
+                    self.require_expression(&ty, expected, expr.span)?;
+                }
+                let kind = match inner.kind {
+                    K::TypeValue(value) => K::TypeValue(Term::Pointer(Box::new(value))),
+                    _ => K::PointerType(Box::new(inner)),
+                };
+                return Ok(n::Expr {
+                    source: source(expr.span),
+                    ty,
+                    kind,
+                });
+            }
+            H::TyClosure(context, body) => {
+                let H::TyClosureEnvironment(bindings) = &context.kind else {
+                    return Err(error(
+                        context.span,
+                        "open closure contexts require environment-parameter elaboration not yet implemented",
+                    ));
+                };
+                let mut names = std::collections::HashSet::new();
+                let mut environment = Vec::new();
+                for binding in *bindings {
+                    if !names.insert(binding.name.name) {
+                        return Err(error(
+                            binding.name.span,
+                            "duplicate closure environment binding",
+                        ));
+                    }
+                    if binding.value.is_some() {
+                        return Err(error(
+                            binding.name.span,
+                            "closure environment sources require dependency/provenance checking not yet implemented",
+                        ));
+                    }
+                    environment.push(self.expr(binding.ty, Some(&p(P::Type)))?);
+                }
+                let signature = self.expr(body, Some(&p(P::Type)))?;
+                let ty = if environment
+                    .iter()
+                    .chain(std::iter::once(&signature))
+                    .any(|field| is_never(&field.ty))
+                {
+                    p(P::Never)
+                } else {
+                    p(P::Type)
+                };
+                if let Some(expected) = expected {
+                    self.require_expression(&ty, expected, expr.span)?;
+                }
+                if environment.is_empty() {
+                    return Ok(signature);
+                }
+                if let K::TypeValue(body) = &signature.kind {
+                    if matches!(body, Term::Closure { .. }) {
+                        return Err(error(
+                            expr.span,
+                            "a type cannot have repeated nonempty closure qualification",
+                        ));
+                    }
+                    if !matches!(body, Term::Function { .. } | Term::ComptimeFunction(_)) {
+                        return Err(error(
+                            expr.span,
+                            "non-callable closure-qualified bodies are not yet implemented",
+                        ));
+                    }
+                }
+                let kind = if environment
+                    .iter()
+                    .all(|field| matches!(field.kind, K::TypeValue(_)))
+                    && matches!(signature.kind, K::TypeValue(_))
+                {
+                    let environment = environment
+                        .into_iter()
+                        .map(|field| {
+                            let K::TypeValue(ty) = field.kind else {
+                                unreachable!()
+                            };
+                            ty
+                        })
+                        .collect();
+                    let K::TypeValue(body) = signature.kind else {
+                        unreachable!()
+                    };
+                    K::TypeValue(Term::Closure {
+                        environment,
+                        signature: Box::new(body),
+                    })
+                } else {
+                    K::ClosureType {
+                        environment,
+                        signature: Box::new(signature),
+                    }
+                };
+                return Ok(n::Expr {
+                    source: source(expr.span),
+                    ty,
+                    kind,
+                });
+            }
+            H::TyFn(parameters) | H::TyComptimeFn(parameters) => {
+                let comptime = matches!(expr.kind, H::TyComptimeFn(_));
+                let mut fields = Vec::new();
+                for parameter in *parameters {
+                    if parameter.flags != 0 {
+                        return Err(error(
+                            expr.span,
+                            "function type parameter protocols are not implemented",
+                        ));
+                    }
+                    let TyParamKind::Positional(value) = parameter.kind else {
+                        return Err(error(
+                            expr.span,
+                            "function type parameter form is not implemented",
+                        ));
+                    };
+                    fields.push(self.expr(value, Some(&p(P::Type)))?);
+                }
+                let ty = if fields.iter().any(|field| is_never(&field.ty)) {
+                    p(P::Never)
+                } else {
+                    p(P::Type)
+                };
+                if let Some(expected) = expected {
+                    self.require_expression(&ty, expected, expr.span)?;
+                }
+                let kind = if fields
+                    .iter()
+                    .all(|field| matches!(field.kind, K::TypeValue(_)))
+                {
+                    let parameters = fields
+                        .into_iter()
+                        .map(|field| {
+                            let K::TypeValue(ty) = field.kind else {
+                                unreachable!()
+                            };
+                            Parameter {
+                                sort: Sort::Runtime,
+                                ty,
+                            }
+                        })
+                        .collect();
+                    K::TypeValue(
+                        Term::Function {
+                            parameters,
+                            result: Box::new(p(P::Void)),
+                        }
+                        .with_comptime_phase(comptime),
+                    )
+                } else {
+                    K::FunctionType {
+                        comptime,
+                        parameters: fields,
+                    }
+                };
+                return Ok(n::Expr {
+                    source: source(expr.span),
+                    ty,
+                    kind,
+                });
+            }
+            H::TyFnArrow(input, output) => {
+                let signature = self.expr(input, Some(&p(P::Type)))?;
+                let result = self.expr(output, Some(&p(P::Type)))?;
+                let ty = if is_never(&signature.ty) || is_never(&result.ty) {
+                    p(P::Never)
+                } else {
+                    p(P::Type)
+                };
+                if let Some(expected) = expected {
+                    self.require_expression(&ty, expected, expr.span)?;
+                }
+                let kind = if let (K::TypeValue(input), K::TypeValue(output)) =
+                    (&signature.kind, &result.kind)
+                {
+                    K::TypeValue(
+                        input
+                            .clone()
+                            .with_callable_result(output.clone())
+                            .ok_or_else(|| {
+                                error(expr.span, "arrow input must be a function type")
+                            })?,
+                    )
+                } else {
+                    K::FunctionResultType {
+                        signature: Box::new(signature),
+                        result: Box::new(result),
+                    }
+                };
+                return Ok(n::Expr {
+                    source: source(expr.span),
+                    ty,
+                    kind,
+                });
+            }
+            _ => {}
+        }
+        if expected == Some(&p(P::Type)) {
+            if let H::Tuple(items) = &expr.kind {
+                let fields = items
+                    .iter()
+                    .map(|item| self.expr(item, Some(&p(P::Type))))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let ty = if fields.iter().any(|field| is_never(&field.ty)) {
+                    p(P::Never)
+                } else {
+                    p(P::Type)
+                };
+                let kind = if fields
+                    .iter()
+                    .all(|field| matches!(field.kind, K::TypeValue(_)))
+                {
+                    let elements = fields
+                            .into_iter()
+                            .map(|field| {
+                                let K::TypeValue(ty) = field.kind else {
+                                    unreachable!()
+                                };
+                                ty
+                            })
+                            .collect();
+                    K::TypeValue(self.tuple_value_type(elements, expr.span)?)
+                } else if let Some(head) = self.bound_tuple_head(expr.span)? {
+                    self.dynamic_tuple_type(head, fields, expr.span)?
+                } else {
+                    K::TupleType(fields)
+                };
+                return Ok(n::Expr {
+                    source: source(expr.span),
+                    ty,
+                    kind,
+                });
+            }
+        }
+        let type_value = self.is_type_head(expr)
+            || matches!(
+                expr.kind,
+                H::TypeOf(_)
+                    | H::Builtin(_)
+                    | H::TyType
+                    | H::TyVoid
+                    | H::TyNoReturn
+                    | H::TyPtr(_)
+                    | H::TyOptional(_)
+                    | H::TyClosure(..)
+                    | H::TyFn(_)
+                    | H::TyComptimeFn(_)
+                    | H::TyFnArrow(..)
+            )
+            || (expected == Some(&p(P::Type)) && matches!(expr.kind, H::Tuple(_) | H::Unit));
+        if type_value {
+            let ty = p(P::Type);
+            if let Some(expected) = expected {
+                self.require_expression(&ty, expected, expr.span)?;
+            }
+            let value = self.type_expr(expr)?;
+            return Ok(n::Expr {
+                ty,
+                source: source(expr.span),
+                kind: K::TypeValue(value),
+            });
+        }
+        let (ty, kind) = match &expr.kind {
+            H::Lit(lit) => match &lit.kind {
+                hir::LitKind::Bool(x) => (p(P::Bool), K::Literal(n::Literal::Bool(*x))),
+                hir::LitKind::Char(x) => (p(P::Char), K::Literal(n::Literal::Char(*x))),
+                hir::LitKind::String(x) => (p(P::Str), K::Literal(n::Literal::String(x.clone()))),
+                hir::LitKind::Integer(spelling) => {
+                    let value = self.integer_proxy(spelling, false, expected, expr.span)?;
+                    (value.ty, value.kind)
+                }
+                hir::LitKind::Float(spelling) => {
+                    let value = self.float_proxy(spelling, false, expected, expr.span)?;
+                    (value.ty, value.kind)
+                }
+                hir::LitKind::Symbol(name) => {
+                    if expected.is_none() && !self.numeric_defaults {
+                        return Err(context_error(expr.span,
+                            "symbol awaits a contextual target before literal defaulting"));
+                    }
+                    let shape = expected.map(|ty| self.structural_type(ty, expr.span)).transpose()?;
+                    if expected.is_none() || shape.as_ref() == Some(&p(P::Symbol)) {
+                        (p(P::Symbol), K::Literal(n::Literal::Symbol(name.as_str().to_owned())))
+                    } else {
+                        let value = self.enum_variant(expected.unwrap(), name.as_str(), expr.span)?;
+                        (value.ty, value.kind)
+                    }
+                }
+                _ => return Err(error(expr.span, "literal protocol is not implemented")),
+            },
+            H::OptionPropagate(input) => {
+                let result = self.result.clone();
+                let deferred = self.return_observations.is_some() && matches!(&self.partial_return_context,
+                    Some(crate::calls::InputContext::Nominal { declaration, .. }) if Some(*declaration) == self.protocols.optional);
+                if result.is_none() && !deferred {
+                    return Err(context_error(expr.span, "optional propagation requires an optional function result context"));
+                }
+                let result_layout = result.as_ref().map(|result| self.optional_layout(result, expr.span)).transpose()?;
+                let input = if let Some(payload) = expected {
+                    if let Some(value) = self.argument_attempt(input, None, None)? {
+                        value
+                    } else {
+                        let (_, declaration) = self.bound_optional_declaration(expr.span)?;
+                        let target = Term::Nominal { declaration, arguments: vec![payload.clone()] };
+                        // Supply the missing operand context without implicitly
+                        // injecting an already nonoptional operand at this root.
+                        self.expr_context_unadapted(input, Some(&target), None)?
+                    }
+                } else {
+                    self.expr(input, None)?
+                };
+                if is_never(&input.ty) { return Ok(input); }
+                let (declaration, absent, present, payload) = self.optional_layout(&input.ty, expr.span)?;
+                let binding = self.spread_binding(expr.span)?;
+                // Match, successful projection, empty value and Return need distinct
+                // source anchors: cleanup uses them to identify runtime boundaries.
+                let return_source = n::SourceRange { start: expr.span.lo().0, end: expr.span.lo().0 };
+                let empty_source = n::SourceRange { start: expr.span.lo().0, end: expr.span.lo().0 + 1 };
+                let empty = if let Some((result_declaration, missing, _, _)) = result_layout {
+                    let result = result.unwrap();
+                    if let Some(observations) = &mut self.return_observations { observations.push(result.clone()); }
+                    Some(Box::new(n::Expr { source: empty_source, ty: result,
+                        kind: K::Variant { declaration: result_declaration, index: missing, fields: Vec::new() } }))
+                } else {
+                    // This private control-exit site is completed before the closure is exported.
+                    self.pending_optional_returns.insert((return_source.start, return_source.end), empty_source);
+                    None
+                };
+                if let Some(expected) = expected { self.require(&payload, expected, expr.span)?; }
+                let match_source = n::SourceRange { start: input.source.start, end: expr.span.hi().0 };
+                return Ok(n::Expr { source: match_source, ty: payload.clone(), kind: K::Match { value: Box::new(input), arms: vec![
+                    n::MatchArm { pattern: n::Pattern::Variant { declaration, index: present,
+                        fields: vec![n::Pattern::Binding { binding, inner: Box::new(n::Pattern::Wild) }] },
+                        guard: None, body: n::Expr {
+                            source: n::SourceRange { start: expr.span.hi().0, end: expr.span.hi().0 },
+                            ty: payload, kind: K::Local(binding) } },
+                    n::MatchArm { pattern: n::Pattern::Variant { declaration, index: absent, fields: Vec::new() },
+                        guard: None, body: n::Expr { source: return_source, ty: p(P::Never), kind: K::Return(empty) } },
+                ] } });
+            }
+            H::Null => {
+                let ty = expected.ok_or_else(|| context_error(expr.span, "null requires an optional target type"))?;
+                let (declaration, index, _, _) = self.optional_layout(ty, expr.span)?;
+                (ty.clone(), K::Variant { declaration, index, fields: Vec::new() })
+            }
+            H::Unit => (p(P::Void), K::Unit),
+            H::SelfValue => {
+                let item = self
+                    .package
+                    .item(expr.hir_id.owner)
+                    .ok_or_else(|| error(expr.span, "self requires a method receiver"))?;
+                let (ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) = &item.kind else {
+                    return Err(error(expr.span, "self requires a method receiver"));
+                };
+                let param = sig
+                    .params
+                    .first()
+                    .filter(|p| matches!(p.ty.kind, TyParamKind::Itself { .. }))
+                    .ok_or_else(|| error(expr.span, "self requires a method receiver"))?;
+                let resolved = Expr {
+                    kind: H::ResolvedFnParam(param.name.name, param.hir_id),
+                    ..expr.clone()
+                };
+                return self.expr_context(&resolved, expected, partial);
+            }
+            H::TacticArgument(value) => return self.tactic_argument(value, expected, partial),
+            H::PostLambdaBody(body) => return self.closure(expr, &[], None, *body, expected, partial),
+            H::TacticParameter(index) => {
+                let id = self.tactic_parameter(expr, *index)?;
+                let resolved = Expr { kind: H::ResolvedLocal(hir::Symbol::intern("$tactic"), id), ..expr.clone() };
+                return self.expr_context(&resolved, expected, partial);
+            }
+            H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => {
+                let id = local(*id);
+                if let Some(Some(value)) = self.generator_data.get(&id) {
+                    constants::charge_copy(value, &mut self.required_steps, expr.span)?;
+                    let mut value = value.clone();
+                    if matches!(value.kind,K::Block {..}) {
+                        self.freshen_constant_graph(&mut value,expr.span)?;
+                    }
+                    if let Some(expected) = expected { self.require_expression(&value.ty, expected, expr.span)?; }
+                    return Ok(value);
+                }
+                if self.code_values.contains_key(&id) {
+                    return Err(error(expr.span, "quoted code cannot be delivered as a runtime value; use a code splice"));
+                }
+                if self.in_required_comptime && self.required_runtime_parameter(id) {
+                    return Err(error(expr.span,
+                        "required comptime computation cannot read a runtime parameter; defer does not change the parameter's phase"));
+                }
+                let ty = self.locals.get(&id).cloned()
+                    .or_else(||self.signature_comptime_input(id).map(|(_,ty)|ty))
+                    .ok_or_else(|| error(expr.span, "local binding is unavailable in this scope"))?;
+                // Concrete open instances already own these staged Type
+                // inputs. Preserve the immutable identity for type observations
+                // instead of rebuilding a runtime-looking local read.
+                if ty == p(P::Type) && !self.old_scope.as_ref().is_some_and(|scope| scope.active)
+                    && let Some((_, _, symbol)) = self.specialization_inputs.iter().find(|(binding, _, _)| *binding == id)
+                {
+                    if let Some(expected) = expected { self.require_expression(&ty, expected, expr.span)?; }
+                    return Ok(n::Expr {source: source(expr.span), ty, kind: K::TypeValue(symbol.clone())});
+                }
+                // An ordinary Type input is already supplied during staging.
+                // Runtime lambdas refer to its symbolic type, not a Type-valued
+                // environment cell; substitution closes it with the caller.
+                if (self.captures.last().is_some_and(|frame| !frame.comptime)
+                    || (self.captures.is_empty() && !self.in_staged_input && !self.in_required_comptime
+                        && self.signature_owner.is_some_and(|owner| self.open_functions.contains_key(&owner))))
+                    && !self.old_scope.as_ref().is_some_and(|scope| scope.active)
+                    && let Some(symbol) = self.type_input_bindings.get(&id)
+                {
+                    if let Some(expected) = expected { self.require_expression(&ty, expected, expr.span)?; }
+                    return Ok(n::Expr {source: source(expr.span), ty, kind: K::TypeValue(symbol.clone())});
+                }
+                if self.in_staged_input
+                    && self.captures.last().is_some_and(|frame| !frame.comptime)
+                    && self.value_input_bindings.contains_key(&id)
+                    && !self.old_scope.as_ref().is_some_and(|scope| scope.active)
+                {
+                    // This use disappears when the enclosing staged input is
+                    // substituted. A runtime use still takes the capture path.
+                    if let Some(expected) = expected { self.require_expression(&ty, expected, expr.span)?; }
+                    return Ok(n::Expr {source: source(expr.span), ty, kind: K::Local(id)});
+                }
+                let mut id = id;
+                if self
+                    .old_scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.active && Some(scope.owner) == self.signature_owner)
+                {
+                    if !matches!(expr.kind, H::ResolvedFnParam(..)) {
+                        return Err(error(
+                            expr.span,
+                            "old requires an entry parameter, not an exit result or local",
+                        ));
+                    }
+                    let scope = self.old_scope.as_mut().unwrap();
+                    id = if let Some(binding) = scope.bindings.get(&id) {
+                        *binding
+                    } else {
+                        let index = self.next_temporary_binding;
+                        self.next_temporary_binding = index.checked_add(1).ok_or_else(|| {
+                            error(expr.span, "entry snapshot binding limit exceeded")
+                        })?;
+                        let binding = n::LocalId {
+                            owner: u32::MAX,
+                            index,
+                        };
+                        scope.bindings.insert(id, binding);
+                        self.locals.insert(binding, ty.clone());
+                        binding
+                    };
+                }
+                for frame in &mut self.captures {
+                    if frame.outer.contains(&id)
+                        && !frame.values.iter().any(|capture| capture.binding == id)
+                    {
+                        frame.values.push(n::Capture {
+                            value: None,
+                            binding: id,
+                            ty: ty.clone(),
+                        });
+                    }
+                }
+                (ty, K::Local(id))
+            }
+            H::NFApplication(callee, args) => {
+                return self.explicit_function_instance(expr, callee, args, expected, false);
+            }
+            H::ResolvedDef { def_id, .. } => {
+                let owner = self.package.definition_owner(*def_id).ok_or_else(|| {
+                    error(expr.span, "resolved function declaration has no HIR owner")
+                })?;
+                if matches!(self.package.item(owner).map(|i| &i.kind), Some(ItemKind::Associated(_))) {
+                    let value = self.lexical_associated_value(owner, expr.span)?;
+                    if let Some(expected) = expected { self.require(&value.ty, expected, expr.span)?; }
+                    return Ok(value);
+                }
+                if matches!(
+                    self.package.item(owner).map(|i| &i.kind),
+                    Some(ItemKind::Const(..))
+                ) {
+                    if self.runtime_value_context() {
+                        return self.splice_constant(expr, owner, expected);
+                    }
+                    let mut value = self.constant_value(owner, expr.span)?;
+                    value.source = source(expr.span);
+                    if let Some(expected) = expected {
+                        self.require(&value.ty, expected, expr.span)?;
+                    }
+                    return Ok(value);
+                }
+                self.require_non_trait_body_reference(owner, expr.span)?;
+                self.ensure_signature(owner, expr.span)?;
+                if self
+                    .type_parameters
+                    .get(&owner)
+                    .is_some_and(|types| !types.is_empty())
+                {
+                    return self.contextual_function_instance(expr, owner, expected, partial);
+                }
+                if let Some(item) = self.package.item(owner) {
+                    if let ItemKind::Fn(signature, _) = &item.kind {
+                        arguments::require_function_value_parameters(signature.params, expr.span)?;
+                    }
+                }
+                let ty = self
+                    .signatures
+                    .get(&owner)
+                    .ok_or_else(|| error(expr.span, "declaration is not a supported callable"))?
+                    .clone();
+                let ty = self.callable_type(owner, ty);
+                self.check_type_application(owner, &[], expr.span)?;
+                (
+                    ty,
+                    if self.requirements.get(&owner).is_some_and(Vec::is_empty) {
+                        K::Function(declaration(self.package, &self.package_identities, owner))
+                    } else {
+                        K::FunctionInstance {
+                            declaration: declaration(self.package, &self.package_identities, owner),
+                            arguments: vec![],
+                        }
+                    },
+                )
+            }
+            H::Closure(parameters, annotation, body) => {
+                return self.closure(expr, parameters, *annotation, *body, expected, partial);
+            }
+            H::Semi(inner) => {
+                let value = self.expr(inner, None)?;
+                let ty = if is_never(&value.ty) {
+                    p(P::Never)
+                } else {
+                    p(P::Void)
+                };
+                (ty, K::Discard(Box::new(value)))
+            }
+            H::Ref(inner) => {
+                if let Some(pointer) = self.dereferenced_place(inner)? {
+                    if let Some(expected) = expected {
+                        self.require(&pointer.ty, expected, expr.span)?;
+                    }
+                    return Ok(pointer);
+                }
+                let place = self.expr(inner, None)?;
+                let result = n::Expr {
+                    ty: Term::Pointer(Box::new(place.ty.clone())),
+                    source: source(expr.span),
+                    kind: K::AddressOf(Box::new(place)),
+                };
+                if let Some(message) = n::pointer_operation_error(&result) {
+                    return Err(error(expr.span, message));
+                }
+                if let Some(expected) = expected {
+                    self.require(&result.ty, expected, expr.span)?;
+                }
+                return Ok(result);
+            }
+            H::Deref(inner) => {
+                let pointer = self.expr(inner, None)?;
+                let Term::Pointer(ty) = &pointer.ty else {
+                    return Err(error(expr.span, "dereference requires a pointer"));
+                };
+                if !self.intrinsic_pointer_input(ty) {
+                    return Err(error(
+                        expr.span,
+                        "non-Copy pointer reads require memory transfer contracts",
+                    ));
+                }
+                ((**ty).clone(), K::ReadPointer(Box::new(pointer)))
+            }
+            H::AssignOp(op, target, value) => {
+                return self.compound_assignment(expr, op, target, value, expected);
+            }
+            H::Assign(target, value) => {
+                if let Some(mut pointer) = self.dereferenced_place(target)? {
+                    let Term::Pointer(ty) = &pointer.ty else {
+                        return Err(error(target.span, "pointer assignment requires a pointer"));
+                    };
+                    if !self.intrinsic_pointer_input(ty) {
+                        return Err(error(
+                            target.span,
+                            "non-Copy pointer writes require memory transfer contracts",
+                        ));
+                    }
+                    let value = self.expr(value, Some(ty))?;
+                    // Expected-type checking has established equality with the
+                    // stored type. Express that identity view on the pointer so
+                    // the operation keeps matching operand annotations.
+                    let ty = if is_never(&value.ty) {
+                        p(P::Never)
+                    } else {
+                        pointer.ty = Term::Pointer(Box::new(value.ty.clone()));
+                        p(P::Void)
+                    };
+                    if let Some(expected) = expected {
+                        self.require_expression(&ty, expected, expr.span)?;
+                    }
+                    return Ok(n::Expr {
+                        ty,
+                        source: source(expr.span),
+                        kind: K::WritePointer {
+                            pointer: Box::new(pointer),
+                            value: Box::new(value),
+                        },
+                    });
+                }
+
+                let mut storage = *target;
+                let mut selections = Vec::new();
+                while let H::Index(base, index) = &storage.kind {
+                    selections.push(*index);
+                    storage = base;
+                }
+                selections.reverse();
+                let take_bits = if let H::TakeBitVec(base) = &storage.kind {
+                    storage = base;
+                    true
+                } else {
+                    false
+                };
+                let bit_assignment = take_bits || !selections.is_empty();
+                if bit_assignment {
+                    if let Some(mut pointer) = self.dereferenced_place(storage)? {
+                        let Term::Pointer(ty) = &pointer.ty else {unreachable!()};
+                        let storage_type = self.structural_type(ty, target.span)?;
+                        let width = match &storage_type {
+                            Term::Primitive(P::BitVec(width))=>*width,
+                            Term::Primitive(primitive) if take_bits => primitive.unrestricted_scalar_width().map(|width|width as usize)
+                                .ok_or_else(||error(target.span,"bit writeback requires an unrestricted scalar representation"))?,
+                            _=>return Err(error(target.span,"bit writeback requires a direct bit view or a BitVec place")),
+                        };
+                        pointer.ty = Term::Pointer(Box::new(storage_type));
+                        return self.bit_pointer_writeback(expr,pointer,width,&selections,value,expected);
+                    }
+                }
+                let mut base = storage;
+                let mut fields = Vec::new();
+                while let H::Projection(inner, name) = &base.kind {
+                    fields.push(*name);
+                    base = inner;
+                }
+                fields.reverse();
+                let binding = match base.kind {
+                    H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => local(id),
+                    H::TacticParameter(index) => local(self.tactic_parameter(base, index)?),
+                    _ => {
+                        return Err(error(
+                            target.span,
+                            "assignment place elaboration is not implemented for this target",
+                        ));
+                    }
+                };
+                if fields.is_empty() && self.immutable.contains(&binding) {
+                    return Err(error(
+                        target.span,
+                        "cannot reassign a let binding; use var for whole-value assignment",
+                    ));
+                }
+                if self.captures.iter().any(|frame| frame.outer.contains(&binding)) {
+                    // Assignment-only use still captures the old slot: replacing
+                    // it must retire the value held by this closure environment.
+                    let ty = self.locals[&binding].clone();
+                    for frame in &mut self.captures {
+                        if frame.outer.contains(&binding) && !frame.values.iter().any(|capture| capture.binding == binding) {
+                            frame.values.push(n::Capture { binding, ty: ty.clone(), value: None });
+                        }
+                    }
+                }
+                let mut ty =
+                    self.locals.get(&binding).cloned().ok_or_else(|| {
+                        error(target.span, "assignment target is outside its scope")
+                    })?;
+                let mut path = Vec::new();
+                for field in fields {
+                    let shape = self.structural_type(&ty, field.span)?;
+                    self.ensure_nominal_type(&shape, field.span)?;
+                    if let Term::Record(fields) = &shape {
+                        let index = fields.iter().position(|(name, _)| name == field.name.as_str())
+                            .ok_or_else(|| error(field.span, format!("unknown record field {}", field.name)))?;
+                        path.push((n::FieldOwner::Anonymous, index));
+                        ty = fields[index].1.clone();
+                        continue;
+                    }
+                    let Term::Nominal {
+                        declaration,
+                        arguments,
+                    } = &shape
+                    else {
+                        return Err(error(
+                            field.span,
+                            "field assignment requires a struct place",
+                        ));
+                    };
+                    let def = self
+                        .structs
+                        .get(declaration)
+                        .ok_or_else(|| error(field.span, "missing struct descriptor"))?;
+                    let index = def
+                        .fields
+                        .iter()
+                        .position(|(name, _)| name == field.name.as_str())
+                        .ok_or_else(|| {
+                            error(field.span, format!("unknown struct field {}", field.name))
+                        })?;
+                    path.push((n::FieldOwner::Nominal(*declaration), index));
+                    ty = self.instantiate_input_types(&def.fields[index].1,
+                        &def.type_parameters,arguments,field.span)?;
+                }
+                if bit_assignment {
+                    let storage_type = self.structural_type(&ty, target.span)?;
+                    let width = match storage_type {
+                        Term::Primitive(P::BitVec(width)) => width,
+                        Term::Primitive(primitive) if take_bits => primitive.unrestricted_scalar_width().map(|width| width as usize)
+                            .ok_or_else(|| error(target.span,"bit writeback requires a supported scalar or BitVec representation with no invalid bit patterns"))?,
+                        _ => return Err(error(target.span,"bit writeback requires a direct bit view or a BitVec place")),
+                    };
+                    return self.bit_writeback(expr, n::Place {root: binding, fields: path},
+                        storage_type, width, &selections, value, expected);
+                }
+                let value = self.expr(value, Some(&ty))?;
+                let result = if is_never(&value.ty) {
+                    p(P::Never)
+                } else {
+                    p(P::Void)
+                };
+                (
+                    result,
+                    K::Assign {
+                        place: n::Place {
+                            root: binding,
+                            fields: path,
+                        },
+                        value: Box::new(value),
+                    },
+                )
+            }
+            H::For {..} => return Err(error(expr.span,
+                "for requires iteration protocol elaboration, which is not yet implemented")),
+            H::Loop(block) => {
+                let identity = local(expr.hir_id);
+                self.loops.push(identity);
+                let body = self.block(block, None);
+                self.loops.pop();
+                let body = body?;
+                let may_complete = control::loop_may_complete(&body, identity, &mut 100_000)
+                    .map_err(|reason| error(expr.span, reason))?;
+                (
+                    p(if may_complete { P::Void } else { P::Never }),
+                    K::Loop { identity, body: Box::new(body) },
+                )
+            }
+            H::BreakTo(target) | H::ContinueTo(target) => {
+                let identity = local(*target);
+                if !self.loops.contains(&identity) {
+                    return Err(error(
+                        expr.span,
+                        "loop transfer outside a loop in this function or lambda",
+                    ));
+                }
+                let kind = if matches!(expr.kind, H::BreakTo(_)) {
+                    K::Break(identity)
+                } else {
+                    K::Continue(identity)
+                };
+                (p(P::Never), kind)
+            }
+            H::Break(label) | H::Continue(label) => {
+                if label.name != hir::Symbol::invalid() {
+                    return Err(error(expr.span, "named loop transfer is not implemented"));
+                }
+                let identity = *self
+                    .loops
+                    .last()
+                    .ok_or_else(|| error(expr.span, "loop transfer outside a loop"))?;
+                let kind = if matches!(expr.kind, H::Break(_)) {
+                    K::Break(identity)
+                } else {
+                    K::Continue(identity)
+                };
+                (p(P::Never), kind)
+            }
+            H::Let(decl) => {
+                let in_comptime_body=!self.in_code_body && self.captures.last().map(|frame|frame.comptime)
+                    .unwrap_or_else(||self.in_required_comptime || self.in_staged_input
+                        || self.signature_owner.and_then(|owner|self.package.item(owner)).is_some_and(|item|
+                            matches!(&item.kind,ItemKind::Fn(sig,_) if sig.modifiers.is_comptime || sig.modifiers.is_normal_form_head)));
+                if decl.comptime && (!in_comptime_body
+                    || decl.init.is_some_and(|value|self.code_producer(value))
+                    || decl.ty.is_some_and(|ty|matches!(ty.kind,H::ContextualExprType(..)))) {
+                    return self.code_declaration(decl, expected);
+                }
+                let annotation = decl.ty.map(|x| self.type_expr(x)).transpose()?;
+                let init = decl.init.ok_or_else(|| {
+                    error(
+                        decl.span,
+                        "uninitialized binding analysis is not implemented",
+                    )
+                })?;
+                let value = self.expr(init, annotation.as_ref())?;
+                let binding_type = annotation.unwrap_or_else(|| value.ty.clone());
+                // The failure branch cannot observe bindings from this declaration.
+                let otherwise = decl
+                    .otherwise
+                    .map(|body| self.expr(body, None))
+                    .transpose()?;
+                if let Some(otherwise) = &otherwise {
+                    if !is_never(&otherwise.ty) {
+                        return Err(error(decl.span, "let else branch must diverge"));
+                    }
+                }
+                // Binding mutability applies while checking computations inside
+                // the pattern, including noncanonical or-pattern candidates.
+                if !decl.mutable {
+                    self.immutable.extend(pattern_binding_ids(&decl.pattern));
+                }
+                let pattern = self.pattern_observed(&decl.pattern, &binding_type,match &value.kind {K::TypeValue(ty)=>Some(ty),_=>None})?;
+                let guard = decl
+                    .guard
+                    .map(|guard| self.under_matched_pattern_type_facts(&pattern,&value,guard.span,|checker|
+                        checker.expr(guard, Some(&p(P::Bool)))))
+                    .transpose()?;
+                if otherwise.is_none()
+                    && !is_never(&value.ty)
+                    && (guard.is_some() || !self.pattern_exhaustive(&pattern, &binding_type))
+                {
+                    return Err(error(
+                        decl.span,
+                        "refutable let pattern requires a diverging else branch",
+                    ));
+                }
+                let ty = if is_never(&value.ty) || guard.as_ref().is_some_and(|g| is_never(&g.ty)) {
+                    p(P::Never)
+                } else {
+                    p(P::Void)
+                };
+                if !decl.mutable && guard.is_none() && otherwise.is_none() {
+                    self.record_staged_pattern(&pattern, &value, decl.span)?;
+                }
+                let kind = match pattern {
+                    n::Pattern::Binding { binding, ref inner }
+                        if matches!(**inner, n::Pattern::Wild)
+                            && guard.is_none()
+                            && otherwise.is_none() =>
+                    {
+                        K::Let {
+                            binding,
+                            value: Box::new(value),
+                        }
+                    }
+                    pattern => K::LetPattern {
+                        pattern,
+                        value: Box::new(value),
+                        guard: guard.map(Box::new),
+                        otherwise: otherwise.map(Box::new),
+                    },
+                };
+                (ty, kind)
+            }
+            H::CollectedProperties(fields) => {
+                return self.property_packet(expr, fields, expected);
+            }
+            H::Tuple(items) => {
+                // A proven type equation can expose a tuple's element contexts
+                // without unfolding an opaque normal-form head. Keep the final
+                // equality check against the original expected type below.
+                let expected_shape = expected
+                    .map(|ty| self.structural_type(ty, expr.span))
+                    .transpose()?;
+                let expected_items = if let Some(Term::Tuple(items)) = expected_shape.as_ref() {
+                    Some(items)
+                } else {
+                    None
+                };
+                let values = items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, x)| self.expr(x, expected_items.and_then(|xs| xs.get(i))))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let ty = if values.iter().any(|x| is_never(&x.ty)) {
+                    p(P::Never)
+                } else {
+                    self.tuple_value_type(values.iter().map(|x| x.ty.clone()).collect(), expr.span)?
+                };
+                (ty, K::Tuple(values))
+            }
+            H::If(condition, yes, no) => {
+                let condition = self.expr(condition, Some(&p(P::Bool)))?;
+                let yes = self.under_type_condition(&condition,true,expr.span,|checker|checker.block_context(
+                    yes,
+                    if no.is_some() { expected } else { None },
+                    if no.is_some() { partial } else { None },
+                ))?;
+                let yes = if no.is_none() {
+                    discard_result(yes)
+                } else {
+                    yes
+                };
+                let branch_context = expected.or_else(|| (!is_never(&yes.ty)).then_some(&yes.ty));
+                let no = no
+                    .map(|x| self.under_type_condition(&condition,false,expr.span,|checker|
+                        checker.expr_context(x, branch_context, partial)))
+                    .transpose()?;
+                let other = no.as_ref().map(|x| x.ty.clone()).unwrap_or(p(P::Void));
+                let ty = if control::conditional_never(&condition, &yes.ty, &other) {
+                    p(P::Never)
+                } else if no.is_some() && branch_context.is_some() {
+                    // Branch-local type equalities already justified every
+                    // completing delivery, including a sole surviving branch.
+                    branch_context.unwrap().clone()
+                } else if is_never(&yes.ty) {
+                    other
+                } else if is_never(&other) {
+                    yes.ty.clone()
+                } else {
+                    self.require(&other, &yes.ty, expr.span)?;
+                    yes.ty.clone()
+                };
+                (
+                    ty,
+                    K::If {
+                        condition: Box::new(condition),
+                        then_branch: Box::new(yes),
+                        else_branch: no.map(Box::new),
+                    },
+                )
+            }
+            H::Defer(value) if self.in_required_comptime || self.in_staged_input
+                || self.signature_owner.and_then(|owner|self.package.item(owner))
+                    .is_some_and(|item|matches!(&item.kind,ItemKind::Fn(sig,_) if sig.modifiers.is_comptime)) => {
+                // These contexts retain checked code in a comptime body or
+                // input/default plan. That invocation owns when it runs;
+                // checking the operand must not invoke it eagerly or weaken
+                // ordinary checking of its operations and result type.
+                return self.expr(value, expected);
+            }
+            H::Defer(_) => {
+                return Err(error(expr.span, "deferred value computation requires instantiation support, which is not yet implemented"));
+            }
+            H::Assumes(condition) if self.is_type_assumption(condition)
+                && self.signature_owner.is_some_and(|owner| self.open_functions.contains_key(&owner)) => {
+                // Open bodies are emitted only after concrete input preparation.
+                // Discharge the type assumption now, before publishing the instance.
+                let predicate = self.type_predicate(condition)?;
+                self.check_source_refinement(predicate.clone(), condition.span)?;
+                self.context.assume(crate::ptc::Formula::from_predicate(&predicate));
+                (p(P::Void), K::Unit)
+            }
+            H::Assumes(condition) => {
+                let condition = self.boolean_predicate(condition)?;
+                if !n::checkable_predicate(&condition) {
+                    return Err(error(
+                        expr.span,
+                        "assumes requires a supported effect-free program predicate; calls and type propositions need further contract elaboration",
+                    ));
+                }
+                (p(P::Void), K::CheckPredicate(Box::new(condition)))
+            }
+            H::Return(value) => {
+                if self.result.is_none() && self.return_observations.is_none() {
+                    return Err(error(expr.span, "return outside a function"));
+                }
+                let expected_return = self.result.clone().or_else(|| self.return_observations.as_ref()
+                    .and_then(|observations| observations.iter().find(|ty| !is_never(ty)).cloned()));
+                let partial = self.partial_return_context.clone();
+                // Absence supplies no payload evidence. Keep the control exit
+                // private until the callback's successful paths determine ?T,
+                // just as for the missing branch of optional propagation.
+                if expected_return.is_none()
+                    && matches!(&partial, Some(crate::calls::InputContext::Nominal { declaration, .. })
+                        if Some(*declaration) == self.protocols.optional)
+                    && value.is_some_and(|value| matches!(value.kind, H::Null))
+                {
+                    let return_source = source(expr.span);
+                    self.pending_optional_returns.insert(
+                        (return_source.start, return_source.end),
+                        source(value.unwrap().span),
+                    );
+                    return Ok(n::Expr {
+                        source: return_source,
+                        ty: p(P::Never),
+                        kind: K::Return(None),
+                    });
+                }
+                let value = value.map(|x| match (&expected_return, &partial) {
+                    (None, Some(context)) => self.input_context_expression(x, context),
+                    (expected, _) => self.expr(x, expected.as_ref()),
+                }).transpose()?;
+                let ty = value
+                    .as_ref()
+                    .map(|value| value.ty.clone())
+                    .unwrap_or_else(|| p(P::Void));
+                if let Some(expected) = &expected_return {
+                    self.require_expression(&ty, expected, expr.span)?;
+                }
+                if let Some(observations) = &mut self.return_observations {
+                    observations.push(ty);
+                }
+                (p(P::Never), K::Return(value.map(Box::new)))
+            }
+            H::Index(value, index) => {
+                let value = self.expr(value, None)?;
+                if self.is_type_list_type(&value.ty) {
+                    let index=self.expr(index,Some(&p(P::Integer)))?;
+                    let ty=if index.ty==p(P::Never) {p(P::Never)} else {p(P::Type)};
+                    let result=n::Expr {source:source(expr.span),ty,kind:K::TypeListIndex(Box::new(value),Box::new(index))};
+                    if let Some(expected)=expected {self.require_expression(&result.ty,expected,expr.span)?;}
+                    return Ok(result);
+                }
+                let Term::Primitive(P::BitVec(width)) =
+                    self.structural_type(&value.ty, expr.span)?
+                else {
+                    let protocol = self.protocols.index.ok_or_else(|| error(expr.span,
+                        "indexing requires a bound Index protocol, BitVec or comptime List<Type>"))?;
+                    let argument = match self.argument_attempt(index, None, None)? {
+                        Some(argument) => argument,
+                        None => {
+                            let context = self.protocol_argument_context(&value.ty, protocol, expr.span)?;
+                            self.expr(index, context.as_ref())?
+                        }
+                    };
+                    return self.finish_binary_protocol_call(expr, protocol, "index", value, argument, expected);
+                };
+                let (start, end) = match &index.kind {
+                    H::Range {
+                        start: Some(start),
+                        end: Some(end),
+                        inclusive: false,
+                    } => {
+                        return self.bit_window(expr, value, start, end, expected);
+                    },
+                    H::Range { .. } => {
+                        return Err(error(
+                            index.span,
+                            "BitVec slicing currently requires an explicit half-open range",
+                        ));
+                    }
+                    _ => {
+                        let (checked, position) = self.bit_read_index(index)?;
+                        let Some(index) = position else {
+                            let ty = if checked.ty == p(P::Never) {p(P::Never)} else {p(P::BitVec(1))};
+                            if let Some(expected) = expected {self.require_expression(&ty, expected, expr.span)?;}
+                            return Ok(n::Expr {source: source(expr.span), ty,
+                                kind: K::BitIndex(Box::new(value), Box::new(checked))});
+                        };
+                        (
+                            index,
+                            index
+                                .checked_add(1)
+                                .ok_or_else(|| error(expr.span, "BitVec index overflow"))?,
+                        )
+                    }
+                };
+                if start > end || end > width {
+                    return Err(error(expr.span, "BitVec index or slice is out of bounds"));
+                }
+                (
+                    p(P::BitVec(end - start)),
+                    K::BitSlice {
+                        value: Box::new(value),
+                        start,
+                        end,
+                    },
+                )
+            }
+            H::Cast(value, target) => {
+                let target = self.type_expr(target)?;
+                let value = self.expr(value, None)?;
+                let Term::Primitive(P::BitVec(width)) =
+                    self.structural_type(&value.ty, expr.span)?
+                else {
+                    return Err(error(
+                        expr.span,
+                        "this conversion requires a protocol not yet implemented",
+                    ));
+                };
+                let shape = self.structural_type(&target, expr.span)?;
+                let (target_width, widening) = match shape {
+                    Term::Primitive(P::BitVec(width)) => (width, true),
+                    Term::Primitive(primitive) => (
+                        primitive.unrestricted_scalar_width().ok_or_else(|| error(expr.span,
+                            "BitVec conversion requires an unrestricted scalar or BitVec target; other representations need unsafe construction support"))? as usize,
+                        primitive.fixed_integer_layout().is_some_and(|(signed, _)| !signed),
+                    ),
+                    _ => return Err(error(expr.span, "BitVec conversion target is not implemented")),
+                };
+                if !widening && target_width != width {
+                    return Err(error(
+                        expr.span,
+                        "BitVec representation conversion requires exactly the target width",
+                    ));
+                }
+                if target_width < width {
+                    return Err(error(
+                        expr.span,
+                        "BitVec narrowing requires an explicit slice",
+                    ));
+                }
+                (target, K::BitConvert(Box::new(value)))
+            }
+            H::TakeOld(value) => {
+                let Some(scope) = self
+                    .old_scope
+                    .as_mut()
+                    .filter(|scope| Some(scope.owner) == self.signature_owner)
+                else {
+                    return Err(error(
+                        expr.span,
+                        "old is only available in program postconditions",
+                    ));
+                };
+                let previous = std::mem::replace(&mut scope.active, true);
+                let result = self.expr(value, expected);
+                self.old_scope.as_mut().unwrap().active = previous;
+                return result;
+            }
+            H::TakeTagName(value) => {
+                let value = self.expr(value, None)?;
+                let source_ty = self.structural_type(&value.ty, expr.span)?;
+                self.ensure_nominal_type(&source_ty, expr.span)?;
+                if let Term::Nominal { declaration, .. } = source_ty {
+                    if !self.enums.contains_key(&declaration) {
+                        return Err(error(expr.span, "tag_name requires a Symbol or enum value"));
+                    }
+                    (p(P::Str), K::EnumName(Box::new(value)))
+                } else {
+                    if !is_never(&source_ty) && source_ty != p(P::Symbol) {
+                        return Err(error(expr.span, "tag_name requires a Symbol or enum value"));
+                    }
+                    let ty = if is_never(&value.ty) { p(P::Never) } else { p(P::Str) };
+                    (ty, K::SymbolName(Box::new(value)))
+                }
+            }
+            H::TakeBitVec(value) => {
+                let value = self.expr(value, None)?;
+                let source_ty = self.structural_type(&value.ty, expr.span)?;
+                self.ensure_nominal_type(&source_ty, expr.span)?;
+                let width = match source_ty {
+                    Term::Primitive(P::BitVec(width)) => width,
+                    Term::Nominal {declaration,..} => self.enums.get(&declaration)
+                        .and_then(|definition|definition.encoding.as_ref()).map(|encoding|encoding.width())
+                        .ok_or_else(||error(expr.span,"enum bit view requires a checked fixed-width encoding"))?,
+                    Term::Primitive(primitive) => primitive
+                        .unrestricted_scalar_width()
+                        .map(|width| width as usize)
+                        .ok_or_else(|| {
+                            error(
+                                expr.span,
+                                "bit view requires a supported fixed-width representation",
+                            )
+                        })?,
+                    _ => {
+                        return Err(error(
+                            expr.span,
+                            "bit view requires a supported fixed-width representation",
+                        ));
+                    }
+                };
+                (p(P::BitVec(width)), K::TakeBits(Box::new(value)))
+            }
+            _ => {
+                return Err(error(
+                    expr.span,
+                    "expression elaboration requires a protocol or construct not yet implemented",
+                ));
+            }
+        };
+        if let Some(expected) = expected {
+            self.require_expression(&ty, expected, expr.span)?;
+        }
+        Ok(n::Expr {
+            ty,
+            source: source(expr.span),
+            kind,
+        })
+    }
+}
+
+fn is_numeric_literal(expr: &Expr<'_>) -> bool {
+    let expr = match &expr.kind {
+        H::Unary(UnOp::Neg, inner) => *inner,
+        _ => expr,
+    };
+    matches!(
+        expr.kind,
+        H::Lit(hir::Lit {
+            kind: hir::LitKind::Integer(_) | hir::LitKind::Float(_),
+            ..
+        })
+    )
+}
+
+fn is_float_literal(expr: &Expr<'_>) -> bool {
+    let expr = match &expr.kind {
+        H::Unary(UnOp::Neg, inner) => *inner,
+        _ => expr,
+    };
+    matches!(
+        expr.kind,
+        H::Lit(hir::Lit {
+            kind: hir::LitKind::Float(_),
+            ..
+        })
+    )
+}
+
+// This is a sufficient proof for the currently supported finite, immutable
+// value-construction fragment, not the complete runtime purity/specification solver.
+fn stable_pattern(pattern: &n::Pattern) -> bool {
+    match pattern {
+        n::Pattern::Then { first, value, next } => {
+            stable_pattern(first) && stable_observation(value) && stable_pattern(next)
+        }
+        n::Pattern::Guard { pattern, condition } => {
+            stable_pattern(pattern) && stable_observation(condition)
+        }
+        n::Pattern::Binding { inner, .. } | n::Pattern::Remap { pattern: inner, .. } => {
+            stable_pattern(inner)
+        }
+        n::Pattern::NormalForm {
+            arguments: fields, ..
+        }
+        | n::Pattern::TypeTuple(fields)
+        | n::Pattern::Tuple(fields)
+        | n::Pattern::Or(fields)
+        | n::Pattern::Record { fields, .. } | n::Pattern::AnonymousRecord { fields, .. }
+        | n::Pattern::Variant { fields, .. } => fields.iter().all(stable_pattern),
+        _ => true,
+    }
+}
+fn copy_scalar(ty: &Term) -> bool {
+    match ty {
+        Term::Primitive(
+            P::Bool
+            | P::Char
+            | P::Void
+            | P::I8
+            | P::I16
+            | P::I32
+            | P::I64
+            | P::I128
+            | P::U8
+            | P::U16
+            | P::U32
+            | P::U64
+            | P::U128
+            | P::Isize
+            | P::Usize
+            | P::F32
+            | P::F64
+            | P::BitVec(_),
+        ) => true,
+        // Copying an input pointer's representation neither observes its
+        // pointee nor creates a new resource identity.
+        Term::Pointer(_) => true,
+        // An environment-free code value has no captured resource identity.
+        // Copying a parameter's code reference does not invoke its body.
+        Term::Function { .. } => true,
+        Term::Tuple(items) => items.iter().all(copy_scalar),
+        Term::Record(fields) => fields.iter().all(|(_, ty)| copy_scalar(ty)),
+        _ => false,
+    }
+}
+fn stable_observation(expr: &n::Expr) -> bool {
+    copy_scalar(&expr.ty) && stable_default(expr)
+}
+// A later constructor field must not fail after an earlier owned field was
+// acquired: that would execute hidden partial-construction cleanup. Until the
+// general totality prover supplies evidence, use this finite infallible subset.
+fn total_default_field(expr: &n::Expr) -> bool {
+    match &expr.kind {
+        K::Function(_) | K::FunctionInstance { .. } => true,
+        K::Closure { captures, .. } => captures.iter().all(|capture| {
+            capture
+                .value
+                .as_ref()
+                .is_none_or(|value| matches!(value.kind, K::Local(_)) || total_default_field(value))
+        }),
+        K::Literal(_) | K::Local(_) | K::Unit => copy_scalar(&expr.ty),
+        K::Not(value) => total_default_field(value),
+        K::Discard(value) | K::Let { value, .. } => {
+            copy_scalar(&value.ty) && total_default_field(value)
+        }
+        K::And(a, b)
+        | K::Or(a, b)
+        | K::ScalarLess(a, b)
+        | K::ScalarGreater(a, b)
+        | K::ScalarLessEqual(a, b)
+        | K::ScalarGreaterEqual(a, b)
+        | K::ScalarEqual(a, b)
+        | K::BitEqual(a, b) => total_default_field(a) && total_default_field(b),
+        K::AnonymousRecord { fields } | K::Record { fields, .. } | K::Variant { fields, .. } | K::Tuple(fields) => {
+            fields.iter().all(total_default_field)
+        }
+        K::Block { statements, result } | K::CallPreparation { statements, result } => {
+            statements
+                .iter()
+                .all(|statement| copy_scalar(&statement.ty) && total_default_field(statement))
+                && result
+                    .as_ref()
+                    .is_none_or(|value| total_default_field(value))
+        }
+        K::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            total_default_field(condition)
+                && total_default_field(then_branch)
+                && else_branch
+                    .as_ref()
+                    .is_none_or(|value| total_default_field(value))
+        }
+        _ => false,
+    }
+}
+fn stable_default(expr: &n::Expr) -> bool {
+    // Direct constructors deliver all their fields to the result. They do not
+    // invoke allocation, user code or Drop. A nominal result need not be Copy.
+    // Local owned temporaries and projections are excluded below: their cleanup
+    // can be observable even if all the field computations are stable.
+    match &expr.kind {
+        // Creating code/environment values does not invoke their bodies. Read
+        // lexical captures by value; ownership admission checks their delivery.
+        K::Function(_) | K::FunctionInstance { .. } | K::Closure { .. } => {
+            return total_default_field(expr);
+        }
+        K::AnonymousRecord { fields } | K::Record { fields, .. } | K::Variant { fields, .. } | K::Tuple(fields) => {
+            return if fields.iter().all(|field| copy_scalar(&field.ty)) {
+                fields.iter().all(stable_default)
+            } else {
+                fields.iter().all(total_default_field)
+            };
+        }
+        K::Block { statements, result } | K::CallPreparation { statements, result } => {
+            return statements.iter().all(stable_observation)
+                && result.as_ref().is_none_or(|value| stable_default(value));
+        }
+        K::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            return stable_observation(condition)
+                && stable_default(then_branch)
+                && else_branch
+                    .as_ref()
+                    .is_none_or(|value| stable_default(value));
+        }
+        K::Match { value, arms } => {
+            return stable_observation(value)
+                && arms.iter().all(|arm| {
+                    stable_pattern(&arm.pattern)
+                        && arm.guard.as_ref().is_none_or(stable_observation)
+                        && stable_default(&arm.body)
+                });
+        }
+        _ => {}
+    }
+    if !copy_scalar(&expr.ty) {
+        return false;
+    }
+    match &expr.kind {
+        K::BitWindow {..} | K::BitIndex(..) | K::EffectResume(_) | K::EffectHandle {..} | K::EffectRun {..} | K::EffectComputation {..} | K::EffectRequest {..} => false,
+        K::AssociatedValue {..} | K::Literal(_) | K::Local(_) | K::Unit => true,
+        K::BitSlice { value, .. }
+        | K::BitConvert(value)
+        | K::Snapshot(value) | K::TakeBits(value) | K::SymbolName(value) | K::EnumName(value)
+        | K::FloatNegate(value)
+        | K::Not(value) => stable_default(value),
+        K::Discard(value) => stable_observation(value),
+        // Structural scalar packets carry no owned field cleanup. Nominal
+        // projections still require separate ownership/stability evidence.
+        K::AnonymousField { value, .. } => stable_observation(value),
+        K::FloatBinary {
+            left: a, right: b, ..
+        }
+        | K::ScalarLess(a, b)
+        | K::ScalarGreater(a, b)
+        | K::ScalarGreaterEqual(a, b)
+        | K::ScalarLessEqual(a, b)
+        | K::ScalarEqual(a, b)
+        | K::BitEqual(a, b)
+        | K::BitConcat(a, b)
+        | K::And(a, b)
+        | K::Or(a, b) => stable_default(a) && stable_default(b),
+        K::TupleType(items) => items.iter().all(stable_default),
+        K::Let { value, .. } => stable_observation(value),
+        K::LetPattern {
+            pattern,
+            value,
+            guard,
+            otherwise,
+        } => {
+            stable_pattern(pattern)
+                && otherwise.is_none()
+                && stable_observation(value)
+                && guard.as_ref().is_none_or(|g| stable_default(g))
+        }
+        K::IntegerNegate(value) => n::machine_integer_type(expr).is_some() && stable_default(value),
+        K::IntegerBinary { left, right, .. } => {
+            n::machine_integer_type(expr).is_some() && stable_default(left) && stable_default(right)
+        }
+        K::RequirePredicate(_) | K::EnsurePredicate(_) | K::CheckPredicate(_)
+        | K::BitAssign { .. } | K::BitUpdate {..}
+        | K::Assign { .. }
+        | K::Loop { .. }
+        | K::Break(_)
+        | K::Continue(_)
+        | K::FunctionInstance { .. }
+        | K::Function(_)
+        | K::TraitMethod { .. }
+        | K::Closure { .. }
+        | K::Return(_)
+        | K::Call { .. }
+        | K::Field { .. }
+        | K::TypeValue(_) | K::TypeListValue(_)
+        | K::NormalFormType { .. }
+        | K::BitVecType(_)
+        | K::TypeEqual(..) | K::TypeListIndex(..)
+        | K::NominalType { .. }
+        | K::AddressOf(_)
+        | K::ReadPointer(_)
+        | K::PointerAnonymousField { .. } | K::PointerField { .. }
+        | K::WritePointer { .. } | K::BitWritePointer {..}
+        | K::PointerType(_)
+        | K::ClosureType { .. }
+        | K::FunctionType { .. }
+        | K::FunctionResultType { .. } => false,
+        K::AnonymousRecord { .. } | K::Record { .. }
+        | K::Variant { .. }
+        | K::Tuple(_)
+        | K::Block { .. }
+        | K::CallPreparation { .. }
+        | K::If { .. }
+        | K::Match { .. } => unreachable!(),
+    }
+}
+
+// Pure Boolean patterns can be complemented without executing a guard or view.
+// The resulting ordinary pattern shares coverage and matching with every phase.
+fn boolean_pattern_coverage(pattern: &n::Pattern) -> Option<u8> {
+    let mut pending = vec![pattern];
+    let mut mask = 0;
+    let mut fuel = 100_000usize;
+    while let Some(pattern) = pending.pop() {
+        fuel = fuel.checked_sub(1)?;
+        match pattern {
+            n::Pattern::Wild => mask |= 3,
+            n::Pattern::Literal(n::Literal::Bool(value)) => mask |= if *value { 2 } else { 1 },
+            n::Pattern::Binding { inner, .. } => pending.push(inner),
+            n::Pattern::Remap { pattern, .. } => pending.push(pattern),
+            n::Pattern::Or(patterns) => {
+                if patterns.len() > fuel {
+                    return None;
+                }
+                pending.extend(patterns);
+            }
+            _ => return None,
+        }
+    }
+    Some(mask)
+}
+
+fn pattern_binding_ids(pattern: &hir::pattern::Pattern<'_>) -> Vec<n::LocalId> {
+    use hir::pattern::PatternKind;
+    let mut pending = vec![pattern];
+    let mut bindings = Vec::new();
+    while let Some(pattern) = pending.pop() {
+        match &pattern.kind {
+            PatternKind::Binding(_, _, inner) => {
+                bindings.push(local(pattern.hir_id));
+                if let Some(inner) = inner {
+                    pending.push(inner);
+                }
+            }
+            PatternKind::Then(first, _, next) => {
+                pending.push(first);
+                pending.push(next);
+            }
+            PatternKind::BitVec { segments, .. } => {
+                for segment in segments {
+                    if let hir::pattern::BitSegment::Typed { pattern, .. } = segment {
+                        pending.push(pattern);
+                    }
+                }
+            }
+            PatternKind::Guard(pattern, _) | PatternKind::OptionSome(pattern) => pending.push(pattern),
+            PatternKind::NormalForm(_, arguments) => {
+                pending.extend(arguments.iter().map(|argument| &argument.pattern))
+            }
+            PatternKind::Tuple(fields)
+            | PatternKind::AppTuple(_, fields)
+            | PatternKind::Or(fields) => pending.extend(fields.iter()),
+            PatternKind::Struct(_, fields, _) => {
+                pending.extend(fields.iter().map(|field| &field.pat))
+            }
+            _ => {}
+        }
+    }
+    bindings
+}
+
+fn pattern_bindings(
+    pattern: &hir::pattern::Pattern<'_>,
+) -> Result<BTreeMap<String, n::LocalId>, Error> {
+    use hir::pattern::PatternKind;
+    let mut result = BTreeMap::new();
+    match &pattern.kind {
+        PatternKind::Then(first, _, next) => {
+            result = pattern_bindings(first)?;
+            for (name, id) in pattern_bindings(next)? {
+                if result.insert(name, id).is_some() {
+                    return Err(error(pattern.span, "duplicate pattern binding"));
+                }
+            }
+        }
+        PatternKind::BitVec { segments, .. } => {
+            for segment in segments {
+                if let hir::pattern::BitSegment::Typed { pattern: inner, .. } = segment {
+                    for (name, id) in pattern_bindings(inner)? {
+                        if result.insert(name, id).is_some() {
+                            return Err(error(pattern.span, "duplicate pattern binding"));
+                        }
+                    }
+                }
+            }
+        }
+        PatternKind::Guard(pattern, _) | PatternKind::OptionSome(pattern) => result = pattern_bindings(pattern)?,
+        PatternKind::Binding(_, name, inner) => {
+            if let Some(inner) = inner {
+                result = pattern_bindings(inner)?;
+            }
+            if result
+                .insert(name.name.to_string(), local(pattern.hir_id))
+                .is_some()
+            {
+                return Err(error(pattern.span, "duplicate pattern binding"));
+            }
+        }
+        PatternKind::Struct(_, fields, _) => {
+            for field in *fields {
+                for (name, id) in pattern_bindings(&field.pat)? {
+                    if result.insert(name, id).is_some() {
+                        return Err(error(field.span, "duplicate pattern binding"));
+                    }
+                }
+            }
+        }
+        PatternKind::NormalForm(_, arguments) => {
+            for argument in *arguments {
+                for (name, id) in pattern_bindings(&argument.pattern)? {
+                    if result.insert(name, id).is_some() {
+                        return Err(error(argument.pattern.span, "duplicate pattern binding"));
+                    }
+                }
+            }
+        }
+        PatternKind::Tuple(fields) | PatternKind::AppTuple(_, fields) => {
+            for field in *fields {
+                for (name, id) in pattern_bindings(field)? {
+                    if result.insert(name, id).is_some() {
+                        return Err(error(field.span, "duplicate pattern binding"));
+                    }
+                }
+            }
+        }
+        PatternKind::Or(alternatives) => {
+            if let Some(first) = alternatives.first() {
+                result = pattern_bindings(first)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(result)
+}

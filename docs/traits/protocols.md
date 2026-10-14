@@ -59,6 +59,74 @@ Capability 系统由 trait 协议配合 elaboration 实现。Trait 描述处理�
 
 ## 常见示例
 
+### 算术协议的输入与关联结果
+
+算术操作的右操作数类型与结果类型由协议说明，不要求它们都等于左操作数类型。例如，使用 builtin 提供的 Add 协议：
+
+~~~flurry
+struct Flag {
+    enabled: bool,
+}
+
+impl Add<.Rhs=bool> for Flag {
+    assoc Output: Type = bool;
+
+    fn add(self, rhs: bool) -> bool {
+        self.enabled or rhs
+    }
+}
+
+fn enabled() -> bool {
+    Flag { enabled: false } + true
+}
+~~~
+
+这里的 `+` 查询 `Flag` 对 `Add<.Rhs=bool>` 的实现，并通过关联 Output 得到 bool 结果。左右操作数按源顺序各求值一次，再进入选中的方法。方法的契约、执行阶段和效应继续适用；运算符写法不豁免这些要求。协议身份由编译环境绑定，同名的普通 trait 声明不会自动获得运算符含义。
+
+协议选择也适用于从上下文取得类型的左操作数。例如 `7 / right()` 中，若 `right()` 返回 `i32`，左侧字面量先取得该类型，再查询已绑定的除法协议；关联 Output 不必是 `i32`。块、条件与 match 产生的字面量遵循相同规则。这里不默认指定有符号除法或余数的舍入方式：缺少适用协议仍拒绝；无符号整数已有的内建运算保持其契约。取得类型与选择协议不会重复执行操作数。
+
+右侧表达式需要上下文时，已成立的协议约束或唯一适用实现可以提供其类型。这个上下文也可以传入块、分支和泛型调用：
+
+~~~flurry
+enum Choice { Ready, Other }
+
+impl Add<.Rhs=Choice> for u8 {
+    assoc Output: Type = bool;
+    fn add(self, rhs: Choice) -> bool {
+        self == 9 and (rhs match { .Ready => true, .Other => false })
+    }
+}
+
+fn identity(value: T) -> T where T { value }
+
+fn ready(value: u8) -> bool {
+    value + identity(.Ready)
+}
+~~~
+
+这里的 `.Ready` 由 `Choice` 上下文解释。如果有多个尚不能排除的 RHS 类型，必须通过显式类型或限定的枚举构造消除歧义，不能按实现的声明顺序选择。内建算术的数字字面量仍从标量操作数取得上下文；枚举或闭包与该上下文明确定为不兼容时，才继续查询协议上下文。类型检查的重试不会在运行时重复求值，未知名称、契约失败和求解预算耗尽也不构成改选实现的理由。
+
+### 一元运算的关联结果
+
+`-value` 使用 `Neg.neg`，`not value` 使用 `Not.invert`。它们没有 RHS 类型参数，方法接收一个按值传递的 `self`，结果由关联类型 `Output` 指定：
+
+~~~flurry
+use builtin.Not;
+
+impl Not for Flag {
+    assoc Output: Type = bool;
+    fn invert(self) -> bool {
+        not self.enabled
+    }
+}
+
+fn disabled() -> bool {
+    not Flag { enabled: false }
+}
+~~~
+
+上例沿用前面的 `Flag`，结果是 bool。操作数按普通调用规则求值一次；方法的阶段、前置要求及效应均保留。内建数值取负、bool 和 BitVec 的 `not` 保持各自已有行为，负数字面量仍整体按目标数值类型检查，因此最小有符号整数不会先因正数部分超出范围而被拒绝。
+
 ### 自定义像素后缀
 
 ~~~flurry

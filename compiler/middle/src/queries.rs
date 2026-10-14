@@ -3,15 +3,29 @@
 //! # Architecture
 //!
 //! ```text
-//!   ┌─────────────────────────────────┐
-//!   │  Db                             │
-//!   │  ├ storage   – salsa engine     │
-//!   │  ├ ty_ctxt   – type arena       │
-//!   │  ├ providers – fn-ptr dispatch  │
-//!   │  ├ hir_input – query inputs     │
-//!   │  └ hir_cache – memoised result  │
-//!   └─────────────────────────────────┘
+//!   ┌──────────────────────────────────────┐
+//!   │  Db                                  │
+//!   │  ├ storage      – salsa Database     │
+//!   │  ├ ty_ctxt      – type arena         │
+//!   │  ├ providers    – fn-ptr dispatch    │
+//!   │  ├ query_engine – stack + hooks      │
+//!   │  ├ hir_input    – query inputs       │
+//!   │  └ caches       – per-query memo     │
+//!   └──────────────────────────────────────┘
 //! ```
+//!
+//! # Adding a new query
+//!
+//! See [`query::howto`] for the full checklist.  Summary:
+//!
+//! 1. Add a `fn` field to [`Providers`] (+ panicking `Default`).
+//! 2. Add a [`query::QueryCache`] field to [`QueryCaches`] / [`Db`].
+//! 3. Add a [`LunaDatabase`] method that calls [`query::force_get_with`]
+//!    (or [`query::try_get_with`]) and dispatches to `self.providers.*`.
+//! 4. Register the provider from the pass crate via `set_providers`.
+//! 5. Optionally forward from `interface::Compiler`.
+//!
+//! The live example is [`LunaDatabase::hir_package`].
 //!
 //! Providers are registered by calling `ast_lowering::set_providers(&mut db.providers)`
 //! before issuing any HIR query.  Query inputs are set via `db.set_hir_input(…)`.
@@ -19,6 +33,9 @@
 use std::sync::Arc;
 
 use hir::hir_id::LocalDefId;
+use query::{
+    QueryCache, QueryDesc, QueryEngine, force_get_with,
+};
 
 use crate::hir_package::HirPackageBox;
 use crate::hir_query::HirQueryInput;
@@ -54,6 +71,10 @@ impl<T: Clone> Clone for SyncCell<T> {
     }
 }
 
+// ── Query descriptors ─────────────────────────────────────────────────────────
+
+const HIR_PACKAGE: QueryDesc = QueryDesc::new("hir_package");
+
 // ── Providers ─────────────────────────────────────────────────────────────────
 
 /// Function-pointer dispatch table for compiler queries.
@@ -67,6 +88,17 @@ impl<T: Clone> Clone for SyncCell<T> {
 /// ```ignore
 /// ast_lowering::set_providers(&mut instance.db.providers);
 /// ```
+///
+/// # Extending
+///
+/// To add a query `foo(key) -> Val`:
+/// ```ignore
+/// pub struct Providers {
+///     pub hir_package: fn(&Db) -> Arc<HirPackageBox>,
+///     pub foo: fn(&Db, Key) -> Val,   // ← new slot
+/// }
+/// ```
+/// and a panicking default in [`Default`].  See [`query::howto`].
 #[derive(Clone, Copy)]
 pub struct Providers {
     /// Provider for the `hir_package` query.
@@ -87,6 +119,25 @@ impl Default for Providers {
     }
 }
 
+// ── QueryCaches ───────────────────────────────────────────────────────────────
+
+/// Per-query memo tables owned by [`Db`].
+///
+/// When adding a query, add a corresponding [`QueryCache`] here and share it
+/// via `Arc` so `Db: Clone` keeps a single memo table.
+#[derive(Clone, Default)]
+pub struct QueryCaches {
+    pub hir_package: Arc<QueryCache<(), Arc<HirPackageBox>>>,
+}
+
+impl QueryCaches {
+    pub fn new() -> Self {
+        QueryCaches {
+            hir_package: Arc::new(QueryCache::new()),
+        }
+    }
+}
+
 // ── LunaDatabase trait ────────────────────────────────────────────────────────
 
 /// Extension of [`salsa::Database`] with Luna compiler query methods.
@@ -94,13 +145,13 @@ pub trait LunaDatabase: salsa::Database {
     /// Downcast to the concrete [`Db`].
     fn as_db(&self) -> &Db;
 
-    // ── ADT queries ───────────────────────────────────────────────────────
+    // ── ADT lookups (TyCtxt side tables, not demand queries) ──────────────
 
     fn adt_def(&self, id: NFId) -> Option<Arc<AdtDef>> {
         self.as_db().ty_ctxt.adt_def(id).map(Arc::new)
     }
 
-    // ── Type queries ──────────────────────────────────────────────────────
+    // ── Type lookups ──────────────────────────────────────────────────────
 
     fn def_ty_exists(&self, id: LocalDefId) -> bool {
         self.as_db().ty_ctxt.def_ty(id).is_some()
@@ -110,14 +161,15 @@ pub trait LunaDatabase: salsa::Database {
 
     /// Lower the package's AST to HIR, returning an owned [`HirPackageBox`].
     ///
-    /// The result is **memoised**: the provider is called at most once per
-    /// database instance.
+    /// Memoised via [`query::QueryCache`]: the provider runs at most once per
+    /// key (`()`) per database instance.  Cycles panic as an ICE.
     ///
     /// # Panics
     ///
-    /// Panics if no provider has been registered or no input has been set.
-    fn hir_package(&self, _: ()) -> Arc<HirPackageBox> {
-        self.as_db().hir_package_impl()
+    /// Panics if no provider has been registered, no input has been set,
+    /// the query is poisoned, or a cycle is detected.
+    fn hir_package(&self, key: ()) -> Arc<HirPackageBox> {
+        self.as_db().hir_package_query(key)
     }
 }
 
@@ -129,7 +181,7 @@ pub trait LunaDatabase: salsa::Database {
 #[derive(Clone)]
 #[salsa::db]
 pub struct Db {
-    /// Salsa storage — tracks query dependencies and memoised results.
+    /// Salsa storage — host for [`salsa::Database`].
     storage: salsa::Storage<Db>,
 
     /// Type-interning arena (wrapped in `Arc` for cheap `Clone`).
@@ -138,11 +190,14 @@ pub struct Db {
     /// Registered query providers (function pointers, trivially `Sync`).
     pub providers: Providers,
 
+    /// Active query stack + optional dep-graph hooks.
+    pub query_engine: Arc<QueryEngine>,
+
     /// Inputs for the `hir_package` query (set before calling the query).
     hir_input: Arc<SyncCell<Option<Arc<HirQueryInput>>>>,
 
-    /// Memoised result of the `hir_package` query.
-    hir_cache: Arc<SyncCell<Option<Arc<HirPackageBox>>>>,
+    /// Per-query memo tables.
+    pub caches: QueryCaches,
 }
 
 #[salsa::db]
@@ -167,8 +222,9 @@ impl Db {
             storage: salsa::Storage::default(),
             ty_ctxt: Arc::new(TyCtxt::new()),
             providers: Providers::default(),
+            query_engine: Arc::new(QueryEngine::new()),
             hir_input: Arc::new(SyncCell::new(None)),
-            hir_cache: Arc::new(SyncCell::new(None)),
+            caches: QueryCaches::new(),
         }
     }
 
@@ -184,20 +240,16 @@ impl Db {
         self.hir_input.borrow().clone()
     }
 
-    /// Internal implementation of the `hir_package` query.
-    fn hir_package_impl(&self) -> Arc<HirPackageBox> {
-        // Fast path: already computed.
-        {
-            let cache = self.hir_cache.borrow();
-            if let Some(result) = cache.as_ref() {
-                return result.clone();
-            }
-        }
-
-        // Slow path: call the registered provider function.
-        let result = (self.providers.hir_package)(self);
-        *self.hir_cache.borrow_mut() = Some(result.clone());
-        result
+    /// `hir_package` query body — goes through the generic query engine.
+    fn hir_package_query(&self, key: ()) -> Arc<HirPackageBox> {
+        force_get_with(
+            &self.query_engine,
+            &self.caches.hir_package,
+            HIR_PACKAGE,
+            key,
+            |_| "()".to_string(),
+            || (self.providers.hir_package)(self),
+        )
     }
 }
 

@@ -1,0 +1,21 @@
+typealias UInt = .u32'builtin;
+
+fn quotient(numerator: UInt, denominator: UInt) -> result: UInt
+where requires denominator != 0, ensures result <= numerator
+{
+    numerator / denominator
+}
+
+fn checked_quotient(numerator: UInt, denominator: UInt) -> UInt {
+    assumes denominator != 0;
+    quotient(numerator, denominator)
+}
+
+fn configured(comptime numerator: UInt,
+    comptime .value: UInt = numerator / 3) -> UInt {
+    value
+}
+
+fn run() -> (UInt, UInt) {
+    (checked_quotient(20, 3), configured(20))
+}

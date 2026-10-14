@@ -1,0 +1,22 @@
+typealias Byte = .u8'builtin;
+
+fn materialize(comptime value: bool) -> bool {
+    value
+}
+
+-- The loop runs after count is supplied; runtime code receives its result.
+fn parity(comptime count: Byte) -> bool {
+    materialize(do {
+        var remaining = count;
+        var odd = false;
+        while remaining > 0 {
+            remaining = remaining - 1;
+            odd = not odd;
+        }
+        odd
+    })
+}
+
+fn run() -> (bool, bool) {
+    (parity(7), parity(8))
+}

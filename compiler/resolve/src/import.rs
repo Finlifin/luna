@@ -14,7 +14,7 @@ pub enum ImportKind {
         /// The original name being imported.
         name: Symbol,
     },
-    /// `use a.b.*`  – glob import of all public names.
+    /// `use a.b.*` — gather accessible entries; `pub use` filters public entries.
     Glob { source_scope: Option<ScopeId> },
     /// `use a.b.{x, y, z}` – import a selected set of names.
     Multi {
@@ -36,6 +36,9 @@ pub enum ImportKind {
 pub struct ImportDirective {
     /// The scope that contains this `use` statement.
     pub owner_scope: ScopeId,
+    /// Compiler-selected source package for an implicit prelude import. The
+    /// consumer remains owner_scope for permission checks and entry visibility.
+    pub origin_scope: Option<ScopeId>,
     /// The root anchor for the path (local, super, or package).
     pub anchor: PathAnchor,
     /// The kind + payload of the import.
@@ -54,6 +57,7 @@ pub struct ImportDirective {
     /// Whether this import is a re-export (`pub use …`); the name becomes part
     /// of the owning scope's public API.
     pub is_reexport: bool,
+    pub visibility: crate::binding::Visibility,
     /// Whether this import has been resolved.
     pub resolved: bool,
 }
@@ -67,17 +71,19 @@ impl ImportDirective {
         span: rustc_span::Span,
         ast_node: ast::NodeIndex,
         file_id: vfs::FileId,
-        is_reexport: bool,
+        visibility: crate::binding::Visibility,
     ) -> Self {
         Self {
             owner_scope,
+            origin_scope: None,
             anchor,
             kind,
             path_segments,
             span,
             ast_node,
             file_id,
-            is_reexport,
+            is_reexport: visibility == crate::binding::Visibility::Public,
+            visibility,
             resolved: false,
         }
     }

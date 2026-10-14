@@ -15,10 +15,16 @@ pub struct Pattern<'hir> {
 
 /// All pattern kinds in the Flurry HIR.
 ///
-/// Control-flow pattern syntax such as `and_is` and `if_guard` is desugared
-/// into nested match expressions before reaching this representation.
+/// Arm guards are retained on `PatternArm`; unimplemented pattern protocols
+/// must produce diagnostics rather than dropping their matching conditions.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PatternKind<'hir> {
+    Then(
+        &'hir Pattern<'hir>,
+        &'hir super::expr::Expr<'hir>,
+        &'hir Pattern<'hir>,
+    ),
+    Guard(&'hir Pattern<'hir>, &'hir super::expr::Expr<'hir>),
     Wild,
 
     Projection(&'hir Pattern<'hir>, Ident),
@@ -32,9 +38,10 @@ pub enum PatternKind<'hir> {
 
     /// Tuple pattern: `(pat1, pat2, …)`.
     Tuple(&'hir [Pattern<'hir>]),
+    NormalForm(&'hir super::expr::Expr<'hir>, &'hir [TypePatternArg<'hir>]),
     /// Struct pattern without a leading path; the concrete struct type is
     /// inferred.  Syntax: `{ field1, field2, field3: pat3, .. }`.
-    /// Fields without an explicit sub-pattern are matched with `field: _`.
+    /// Fields without an explicit sub-pattern bind their name (`field: field`).
     Struct(&'hir Pattern<'hir>, &'hir [FieldPat<'hir>], bool),
     /// List / slice / iterator pattern: `[pat1, pat2, rest..]`.
     List(&'hir [Pattern<'hir>], Option<&'hir Pattern<'hir>>),
@@ -55,6 +62,7 @@ pub enum PatternKind<'hir> {
     ErrorErr(&'hir Pattern<'hir>),
 
     Or(&'hir [Pattern<'hir>]),
+    Not(&'hir Pattern<'hir>),
     Ref(&'hir Pattern<'hir>),
     Range(
         Option<&'hir super::expr::Expr<'hir>>,
@@ -64,7 +72,10 @@ pub enum PatternKind<'hir> {
 
     // TODO
     Async,
-    BitVec,
+    BitVec {
+        radix: u32,
+        segments: Vec<BitSegment<'hir>>,
+    },
 
     Invalid,
 }
@@ -73,6 +84,7 @@ pub enum PatternKind<'hir> {
 pub struct PatternArm<'hir> {
     pub hir_id: HirId,
     pub pat: Pattern<'hir>,
+    pub guard: Option<&'hir Expr<'hir>>,
     pub body: &'hir Expr<'hir>,
     pub span: Span,
 }
@@ -88,4 +100,23 @@ pub struct FieldPat<'hir> {
     pub ident: Ident,
     pub pat: Pattern<'hir>,
     pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BitSegment<'hir> {
+    Literal {
+        spelling: String,
+        span: Span,
+    },
+    Typed {
+        pattern: &'hir Pattern<'hir>,
+        ty: &'hir Expr<'hir>,
+    },
+    Computed(&'hir Expr<'hir>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypePatternArg<'hir> {
+    pub name: Option<Ident>,
+    pub pattern: Pattern<'hir>,
 }

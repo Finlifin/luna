@@ -55,12 +55,12 @@ pub fn get_expr_op_info(token_kind: TokenKind) -> ExprOpInfo {
         TokenKind::LParen => ExprOpInfo::new(100, NodeKind::Application), // (
         TokenKind::LBracket => ExprOpInfo::new(100, NodeKind::IndexApplication), // [
         TokenKind::LBrace => ExprOpInfo::new(100, NodeKind::ExtendedApplication), // {
-        TokenKind::Lt => ExprOpInfo::new(100, NodeKind::NormalFormApplication), // <
+        TokenKind::Lt => ExprOpInfo::new(100, NodeKind::NormalFormHeadApplication), // <
         TokenKind::Hash => ExprOpInfo::new(100, NodeKind::EffectElimination), // #
         TokenKind::Bang => ExprOpInfo::new(100, NodeKind::ErrorElimination), // !
         TokenKind::Question => ExprOpInfo::new(100, NodeKind::OptionElimination), // ?
-        TokenKind::Match => ExprOpInfo::new(100, NodeKind::PostMatch), // match
-        TokenKind::Do => ExprOpInfo::new(100, NodeKind::PostLambda),   // do
+        TokenKind::Match => ExprOpInfo::new(100, NodeKind::PostMatch),    // match
+        TokenKind::Do => ExprOpInfo::new(100, NodeKind::PostLambda),      // do
         TokenKind::Matches => ExprOpInfo::new(100, NodeKind::BoolMatches), // matches
 
         // projection and take_view (110)
@@ -85,12 +85,12 @@ pub fn get_pattern_op_info(token_kind: TokenKind) -> ExprOpInfo {
 
         // propagation postfix (high precedence)
         TokenKind::Question => ExprOpInfo::new(40, NodeKind::OptionSomePattern), // ?
-        TokenKind::Bang => ExprOpInfo::new(40, NodeKind::ErrorOkPattern), // !
+        TokenKind::Bang => ExprOpInfo::new(40, NodeKind::ErrorOkPattern),        // !
 
         // application postfix
         TokenKind::LParen => ExprOpInfo::new(80, NodeKind::ApplicationPattern), // (
         TokenKind::LBrace => ExprOpInfo::new(80, NodeKind::ExtendedApplicationPattern), // {
-        TokenKind::Lt => ExprOpInfo::new(80, NodeKind::NormalFormApplicationPattern), // <
+        TokenKind::Lt => ExprOpInfo::new(80, NodeKind::NormalFormHeadApplicationPattern), // <
 
         // projection
         TokenKind::Dot => ExprOpInfo::new(90, NodeKind::Projection), // .

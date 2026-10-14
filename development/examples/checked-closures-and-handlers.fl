@@ -1,0 +1,95 @@
+-- Run with checked ownership and cleanup:
+-- python3 -B development/cargo.py run -p luna -- development/examples/checked-closures-and-handlers.fl --interpret entry --copy-protocol Duplicate --drop-protocol Retire
+
+trait Duplicate {}
+trait Retire {
+    fn drop(*self);
+}
+
+struct Ticket {
+    ready: bool,
+}
+
+impl Retire for Ticket {
+    fn drop(*self) {
+        -- Cleanup must still see the initialized field after each control exit.
+        assumes self.ready.*;
+    }
+}
+
+typealias Reader = %{pointer: *bool} fn() -> bool;
+struct Actions {
+    read: Reader,
+}
+enum ReadAction {
+    read(Reader),
+    skip,
+}
+
+fn borrowed_views() -> bool {
+    var ready = false;
+    let pointer = ready.ref;
+    let update = || { pointer.* = true; };
+    update();
+
+    let actions = Actions { read: || pointer.* };
+    let first = actions.read();
+    let action = ReadAction.read(|| pointer.*);
+    let second = action match {
+        .read(read) => read(),
+        .skip => false,
+    };
+    -- A temporary callee returns the original pointer, not an address into
+    -- its private capture storage.
+    let observed = (|| pointer)();
+    first and second and observed.*
+}
+
+effect poll() -> bool;
+
+fn subject() -> #poll bool {
+    let held = Ticket { ready: true };
+    poll()#
+}
+
+fn handler_loop() -> bool {
+    var first = true;
+    while true {
+        let iteration = Ticket { ready: true };
+        subject()# {
+            poll() => do {
+                let handler_local = Ticket { ready: true };
+                if first {
+                    first = false;
+                    continue;
+                }
+                break;
+            },
+        };
+        assumes false;
+    }
+    not first
+}
+
+typealias Factory = %{ticket: Ticket} fn() -> Ticket;
+
+fn factory() -> Factory {
+    subject()# {
+        poll() => do {
+            let ticket = Ticket { ready: true };
+            -- Leave subject(), return from factory(), and deliver the owned
+            -- environment to the caller. The handler does not destroy ticket.
+            return || ticket;
+        },
+    };
+    let ticket = Ticket { ready: true };
+    || ticket
+}
+
+fn entry() -> bool {
+    let views_work = borrowed_views();
+    let loop_work = handler_loop();
+    let make = factory();
+    let ticket = make();
+    views_work and loop_work and ticket.ready
+}

@@ -1,0 +1,18 @@
+-- Run with: luna mixed-collections.fl --interpret run
+-- Positional packets and named properties retain independent collection roles.
+fn packet() -> (bool, bool) { (true, false) }
+
+fn collect(...items: (bool, bool), ...properties: T) -> ((bool, bool), T)
+where T
+{
+    (items, properties)
+}
+
+fn run() -> bool {
+    let ((first, second), options) = collect {
+        enabled: true,
+        ...packet(),
+        disabled: false,
+    };
+    first and not second and options.enabled and not options.disabled
+}

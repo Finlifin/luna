@@ -1,0 +1,6 @@
+-- Compiler-bound immutable comptime sequences. List applications retain their
+-- own normal-form head; the driver supplies the value representation.
+-- Current compiler value support covers List<Type>.
+pub pure comptime fn List<T> -> .Type'builtin {
+    List<T>
+}

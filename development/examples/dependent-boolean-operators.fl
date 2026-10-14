@@ -1,0 +1,21 @@
+typealias Type = .Type'builtin;
+
+fn invert(comptime T: Type, value: T) -> result: T
+where requires T == bool, requires not value, ensures result {
+    not value
+}
+
+fn both(comptime A: Type, comptime B: Type, left: A, right: B) -> result: bool
+where requires A == bool, requires A == B,
+      requires left and right, ensures result {
+    left and right
+}
+
+fn either(comptime T: Type, left: T, right: T) -> result: bool
+where requires T == bool, requires left or right, ensures result {
+    left or right
+}
+
+fn run() -> (bool, bool, bool) {
+    (invert(bool, false), both(bool, bool, true, true), either(bool, false, true))
+}

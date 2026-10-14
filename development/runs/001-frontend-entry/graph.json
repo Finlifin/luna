@@ -1,0 +1,735 @@
+{
+  "task": {
+    "objective": "Deliver first reproducible frontend path with HIR Display and targeted regressions",
+    "scope": "Explicit CLI source-to-HIR, current HIR formatting, tests; no backend",
+    "acceptance_criteria": [
+      {
+        "id": "C11",
+        "criterion": "luna takes explicit input; HIR default or AST selection; stdout or explicit output; usage/I/O/lex/parse/resolve/lowering failures return nonzero and do not publish success dumps; normal input leaves source and legacy dump files unchanged",
+        "class": "rerun"
+      },
+      {
+        "id": "C12",
+        "criterion": "HIR Package implements Display using valid deterministic S-expressions, covers all existing expression/pattern/item payload variants and body/signature data without Debug placeholders, escapes text, orders body tables deterministically, and dump_to_lisp delegates to it",
+        "class": "rerun"
+      },
+      {
+        "id": "C13",
+        "criterion": "Independent targeted tests cover successful input, selected output, failure paths, output preservation and structural/escaping/determinism HIR cases; documented commands are reproducible; code check and relevant tests pass without LLVM",
+        "class": "rerun"
+      },
+      {
+        "id": "C14",
+        "criterion": "Work stays on dev with prior unrelated modifications intact; no backend or language-semantic redesign; independent writers use identical dirty-baseline snapshots and disjoint ownership, changes and remaining frontend limits are documented",
+        "class": "rerun"
+      }
+    ],
+    "constraints": [
+      "Preserve dirty baseline",
+      "dev branch",
+      "No whole-workspace repeated tests",
+      "No language redesign"
+    ],
+    "baseline": {
+      "commit": "4f5e3733ca88121b086b3a9e4389923abb9d837c",
+      "snapshot": "/tmp/luna-dev-001/baseline",
+      "manifest": "/tmp/luna-dev-001/baseline-manifest.json"
+    }
+  },
+  "units": [
+    {
+      "id": "hir",
+      "input": "/tmp/luna-dev-001/hir plus contract.md and canonical grammar",
+      "output": "Scoped source changes and report with paths/commands/results",
+      "evidence_required": "Actual targeted test/build output; diff against snapshot",
+      "write_boundary": [
+        "compiler/hir/src/lib.rs",
+        "compiler/hir/src/display.rs",
+        "compiler/hir/tests/"
+      ],
+      "owner": "/root/dev001_hir_display",
+      "verifier": "root integration and fresh grader",
+      "selected_skills": [
+        {
+          "name": "graph-engineering-workflow",
+          "reason": "bounded ownership and evidence; no spawning"
+        }
+      ],
+      "retry": 1,
+      "stop_condition": "contract implemented within ownership with actual checks; report blockers instead of expanding scope",
+      "isolation": "/tmp/luna-dev-001/hir",
+      "status": "verified"
+    },
+    {
+      "id": "driver",
+      "input": "/tmp/luna-dev-001/driver plus contract.md and canonical grammar",
+      "output": "Scoped source changes and report with paths/commands/results",
+      "evidence_required": "Actual targeted test/build output; diff against snapshot",
+      "write_boundary": [
+        "compiler/luna/src/",
+        "compiler/diagnostic/src/lib.rs"
+      ],
+      "owner": "/root/dev001_driver",
+      "verifier": "root integration and fresh grader",
+      "selected_skills": [
+        {
+          "name": "graph-engineering-workflow",
+          "reason": "bounded ownership and evidence; no spawning"
+        }
+      ],
+      "retry": 1,
+      "stop_condition": "contract implemented within ownership with actual checks; report blockers instead of expanding scope",
+      "isolation": "/tmp/luna-dev-001/driver",
+      "status": "verified"
+    },
+    {
+      "id": "tests",
+      "input": "/tmp/luna-dev-001/tests plus contract.md and canonical grammar",
+      "output": "Scoped source changes and report with paths/commands/results",
+      "evidence_required": "Actual targeted test/build output; diff against snapshot",
+      "write_boundary": [
+        "compiler/luna/tests/"
+      ],
+      "owner": "/root/compilation_docs_grader",
+      "verifier": "root integration and fresh grader",
+      "selected_skills": [
+        {
+          "name": "graph-engineering-workflow",
+          "reason": "bounded ownership and evidence; no spawning"
+        }
+      ],
+      "retry": 1,
+      "stop_condition": "contract implemented within ownership with actual checks; report blockers instead of expanding scope",
+      "isolation": "/tmp/luna-dev-001/tests",
+      "status": "verified",
+      "repair_input": {
+        "baseline_test": "/tmp/luna-dev-001/tests-before-repair.rs",
+        "coordinator_updated_implementation": [
+          "compiler/luna/src/main.rs",
+          "compiler/luna/src/cli.rs",
+          "compiler/luna/src/output.rs",
+          "compiler/hir/src/lib.rs",
+          "compiler/hir/src/display.rs",
+          "compiler/diagnostic/src/lib.rs",
+          "compiler/ast_lowering/src/item.rs",
+          "compiler/parse/src/parser.rs"
+        ],
+        "implementation_source": "pre-repair integrated patch /tmp/luna-dev-001/round1.patch; coordinator copied before dispatch",
+        "worker_only_changed": "compiler/luna/tests/frontend_cli.rs"
+      }
+    },
+    {
+      "id": "root",
+      "input": "baseline, worker patches, tests",
+      "output": "integrated dev changes, verification logs and report",
+      "evidence_required": "Scoped diffs, baseline preservation and integrated checks",
+      "write_boundary": [
+        "development/runs/001-frontend-entry/",
+        "development/README.md",
+        "integration of assigned worker files",
+        "compiler/ast_lowering/src/item.rs: lower_top_level_node debug print only",
+        "compiler/parse/src/parser.rs: fallback warning stream only",
+        "compiler/ast_lowering/src/expr.rs: take-view structural routing and unsupported diagnostic",
+        "compiler/ast_lowering/src/item.rs: unsupported top-level diagnostic"
+      ],
+      "owner": "root",
+      "verifier": "fresh grader",
+      "selected_skills": [
+        {
+          "name": "graph-engineering-workflow",
+          "reason": "graph controller"
+        }
+      ],
+      "retry": 1,
+      "stop_condition": "acceptance passed or capped",
+      "status": "verified"
+    },
+    {
+      "id": "grader",
+      "input": "rubric, final artifacts, baseline diff, run record; no build conversation",
+      "output": "criteria verdicts and defects",
+      "evidence_required": "fresh rerun/readback anchors",
+      "write_boundary": [],
+      "owner": "/root/dev001_acceptance",
+      "verifier": "root computes gate",
+      "selected_skills": [
+        {
+          "name": "graph-engineering-workflow",
+          "reason": "read-only rubric"
+        }
+      ],
+      "retry": 1,
+      "stop_condition": "complete C1-C14 defect list",
+      "status": "verified"
+    }
+  ],
+  "edges": [
+    {
+      "from": "hir",
+      "to": "root",
+      "crosses": "owned patch and verification report"
+    },
+    {
+      "from": "driver",
+      "to": "root",
+      "crosses": "owned patch and verification report"
+    },
+    {
+      "from": "tests",
+      "to": "root",
+      "crosses": "owned patch and verification report"
+    },
+    {
+      "from": "root",
+      "to": "grader",
+      "crosses": "integrated code, tests and actual verification outputs"
+    }
+  ],
+  "rejected_edges": [
+    {
+      "from": "hir",
+      "to": "driver",
+      "reason": "driver uses stable Package Display contract; implementation can compile after integration"
+    },
+    {
+      "from": "driver",
+      "to": "tests",
+      "reason": "test design starts from fixed CLI contract; execution needs integration only"
+    }
+  ],
+  "parallel_groups": [
+    [
+      "hir",
+      "driver",
+      "tests"
+    ]
+  ],
+  "limits": {
+    "max_workers": 5,
+    "max_concurrency": 4,
+    "max_waves": 4,
+    "max_retries": 1,
+    "max_depth": 1,
+    "time_limit_seconds": 5400,
+    "budget": {
+      "kind": "worker_turns",
+      "value": 12
+    },
+    "max_grader_rounds": 2
+  },
+  "observed": {
+    "workers": 5,
+    "peak_concurrency": 4,
+    "waves": 4,
+    "retries": 0,
+    "depth": 1,
+    "elapsed_seconds": 1739,
+    "budget_used": 6,
+    "grader_rounds": 2
+  },
+  "approvals": {
+    "graph": "approved",
+    "basis": "User explicitly requested graph workflow and delegated implementation/review decisions",
+    "commit": "not_requested",
+    "push": "not_requested",
+    "deploy": "not_requested",
+    "publish": "not_requested",
+    "delete": "not_requested",
+    "payment": "not_requested",
+    "external_send": "not_requested"
+  },
+  "skills": [
+    {
+      "name": "graph-engineering-workflow",
+      "status": "selected",
+      "node": "all",
+      "reason": "explicit user request"
+    },
+    {
+      "name": "graphify",
+      "status": "skipped",
+      "reason": "No graphify-out index; rg discovery already resolves bounded frontend dependencies; no graph extraction needed"
+    },
+    {
+      "name": "implementation/review companions",
+      "status": "skipped",
+      "reason": "No specific Rust compiler skill in exposed inventory"
+    }
+  ],
+  "claims": [],
+  "verifications": [
+    {
+      "target": "baseline luna",
+      "anchor": "cargo check -p luna --locked --offline --target-dir /tmp/luna-dev-bootstrap-target",
+      "result": "pass",
+      "output_pointer": "/tmp/luna-dev-bootstrap-baseline-check.log"
+    },
+    {
+      "target": "independent CLI tests compile",
+      "anchor": "cargo test -p luna --test frontend_cli --no-run --locked --offline --target-dir /tmp/luna-dev-001/tests-target",
+      "result": "pass",
+      "output_pointer": "/tmp/luna-dev-001/tests-compile.log"
+    },
+    {
+      "target": "CLI behavior on baseline",
+      "anchor": "cargo test -p luna --test frontend_cli --locked --offline --target-dir /tmp/luna-dev-001/tests-target",
+      "result": "fail",
+      "output_pointer": "/tmp/luna-dev-001/tests-baseline.log",
+      "interpretation": "Expected red baseline: old driver ignores args; 26 tests fail."
+    },
+    {
+      "target": "HIR local behavior and formatting",
+      "anchor": "cargo test -p hir --locked --offline --target-dir /tmp/luna-dev-001/hir-target; rustfmt --edition 2024 --config skip_children=true --check owned files",
+      "result": "pass",
+      "output_pointer": "/tmp/luna-dev-001/hir-test.log"
+    },
+    {
+      "target": "driver local unit tests",
+      "anchor": "cargo test -p luna --bin luna --locked --offline --target-dir /tmp/luna-dev-001/driver-target",
+      "result": "pass",
+      "output_pointer": "/tmp/luna-dev-001/driver-unit.log"
+    },
+    {
+      "target": "integrated HIR and CLI",
+      "anchor": "cargo test -p hir -p luna --locked --offline --target-dir /tmp/luna-dev-001/integration-target",
+      "result": "pass",
+      "output_pointer": "/tmp/luna-dev-001/integration-tests.log",
+      "counts": {
+        "passed": 41,
+        "failed": 0,
+        "ignored_doctests": 3
+      }
+    },
+    {
+      "target": "HIR editor compatibility",
+      "anchor": "Run example.fl with luna, then emacs --batch -Q --script development/runs/001-frontend-entry/verify-lisp.el /tmp/luna-dev-001/example.hir.lisp",
+      "result": "pass",
+      "output_pointer": "/tmp/luna-dev-001/editor-check.json"
+    },
+    {
+      "target": "owned Rust formatting",
+      "anchor": "rustfmt --edition 2024 --config skip_children=true --check changed owned Rust files",
+      "result": "pass",
+      "output_pointer": "/tmp/luna-dev-001/format-check.log"
+    },
+    {
+      "target": "lowering repair targeted probes",
+      "anchor": "7 CLI inputs with previous outputs; exact cases and status in JSON",
+      "result": "pass",
+      "output_pointer": "/tmp/luna-dev-001/repair-probes.json"
+    },
+    {
+      "target": "new lowering regressions on pre-repair implementation",
+      "anchor": "cargo test -p luna --test frontend_cli lowering_ --locked --offline --target-dir /tmp/luna-dev-001/tests-target",
+      "result": "fail",
+      "output_pointer": "/tmp/luna-dev-001/tests-repair-red.log",
+      "interpretation": "Expected red: 1 passed, 5 failed, 26 filtered; captures panic and wrong-child recursion"
+    },
+    {
+      "target": "integrated repaired frontend",
+      "anchor": "cargo test -p hir -p luna --locked --offline --target-dir /tmp/luna-dev-001/integration-target",
+      "result": "pass",
+      "output_pointer": "/tmp/luna-dev-001/repair-tests.log",
+      "counts": {
+        "passed": 47,
+        "failed": 0,
+        "ignored_doctests": 3
+      }
+    },
+    {
+      "target": "independent final acceptance",
+      "anchor": "Full rubric, targeted cargo tests/check, scoped formatting, Emacs, 35 probes and protected-workspace checks",
+      "result": "pass",
+      "output_pointer": "development/runs/001-frontend-entry/acceptance.json",
+      "additional_outputs": [
+        "/tmp/luna-dev-001/grader2-tests.log",
+        "/tmp/luna-dev-001/grader2-extra.json",
+        "/tmp/luna-dev-001/grader2-workspace.json",
+        "/tmp/luna-dev-001/grader2-isolation.json"
+      ]
+    }
+  ],
+  "repairs": [
+    {
+      "finding": "Existing lowering prints a full AST debug dump to stdout for every item; parser warning also uses stdout",
+      "severity": "major",
+      "owner": "root",
+      "artifact": [
+        "compiler/ast_lowering/src/item.rs",
+        "compiler/parse/src/parser.rs"
+      ],
+      "round": 0,
+      "rechecks": [
+        "CLI stdout isolation integration tests"
+      ],
+      "status": "repaired",
+      "recheck_output": "/tmp/luna-dev-001/integration-tests.log"
+    },
+    {
+      "finding": "Temporary output RAII cleanup would remove the published dump if output equals the generated temporary path",
+      "severity": "minor",
+      "owner": "/root/dev001_driver",
+      "artifact": "compiler/luna/src/output.rs",
+      "round": 0,
+      "rechecks": [
+        "output publication edge test",
+        "CLI output tests"
+      ],
+      "status": "repaired",
+      "evidence": "/tmp/luna-dev-001/driver-unit.log",
+      "recheck_output": "/tmp/luna-dev-001/integration-tests.log"
+    },
+    {
+      "finding": "C10: parsed unsupported take-view/top-level item panics, contradicting controlled failure contract",
+      "severity": "minor",
+      "owner": "root",
+      "artifact": [
+        "compiler/ast_lowering/src/expr.rs",
+        "compiler/ast_lowering/src/item.rs",
+        "compiler/luna/tests/frontend_cli.rs",
+        "development/runs/001-frontend-entry/report.md"
+      ],
+      "round": 1,
+      "rechecks": [
+        "targeted HIR/luna tests",
+        "adversarial lowering inputs",
+        "full rubric regrade"
+      ],
+      "status": "repaired",
+      "recheck_output": "/tmp/luna-dev-001/repair-tests.log"
+    },
+    {
+      "finding": "C11: parsed unsupported take-view/top-level item panics, contradicting controlled failure contract",
+      "severity": "major",
+      "owner": "root",
+      "artifact": [
+        "compiler/ast_lowering/src/expr.rs",
+        "compiler/ast_lowering/src/item.rs",
+        "compiler/luna/tests/frontend_cli.rs",
+        "development/runs/001-frontend-entry/report.md"
+      ],
+      "round": 1,
+      "rechecks": [
+        "targeted HIR/luna tests",
+        "adversarial lowering inputs",
+        "full rubric regrade"
+      ],
+      "status": "repaired",
+      "recheck_output": "/tmp/luna-dev-001/repair-tests.log"
+    }
+  ],
+  "conflicts": [],
+  "start_time": 1791349798.5475395,
+  "run_log": [
+    {
+      "at": "discovery",
+      "event": "investigation_complete",
+      "detail": "Root read active AGENTS, manifests, HIR, driver, diagnostics and skill routing; offline luna check passed; identified fixed input/output driver and incomplete HIR dump."
+    },
+    {
+      "at": "plan",
+      "event": "criteria_and_ownership_frozen",
+      "detail": "C11-C14 fixed before implementation. Isolated filesystem checkouts copy exact current dirty files, omit build artifacts/symlinks; immutable baseline manifest retained. No Git actions planned."
+    },
+    {
+      "at": "wave-1",
+      "event": "dispatch",
+      "detail": "HIR and driver fresh agents started. New test-agent spawn hit host thread limit and created no worker; existing completed compilation_docs_grader reassigned to test authoring only. Three writers active in separate snapshots, no acceptance grader reused."
+    },
+    {
+      "at": "wave-1",
+      "event": "verification_prepared",
+      "detail": "Added independent Emacs reader/formatter anchor. Integration helper checks all worker file differences against disjoint ownership and identical dirty baseline before copying. No source integration has occurred."
+    },
+    {
+      "at": "wave-1",
+      "event": "narrow_integration_repair",
+      "detail": "Root owns two previously unassigned files to remove lowering debug stdout and redirect parser warning to stderr, required by frozen C11. Driver informed; no overlap with worker snapshots. Outcome rubric unchanged."
+    },
+    {
+      "at": "wave-1",
+      "event": "tests_integrated",
+      "detail": "One owned file integrated after full snapshot comparison. 26 CLI tests compile; actual old-driver baseline run is 0/26 pass, exit 101. This is expected red evidence, not a successful implementation."
+    },
+    {
+      "at": "wave-1",
+      "event": "repair_routed",
+      "detail": "Root code review identified successful same-path rename followed by unconditional temporary-file deletion; routed cleanup disarm and focused regression to driver owner."
+    },
+    {
+      "at": "wave-1",
+      "event": "hir_integrated",
+      "detail": "Integrated exactly 3 scoped HIR files after baseline comparison; reviewed exhaustive formatter and tests. Local 8 behavior tests pass; existing 3 doctests remain ignored. Driver integration and independent acceptance still pending."
+    },
+    {
+      "at": "wave-1",
+      "event": "driver_integrated",
+      "detail": "Integrated exactly 4 assigned files after snapshot comparison. Actual local 7 unit tests/check/build/fmt pass; independent manual write-failure and 22-case checks available. Root has read CLI/options/output/dump changes. Three workers delivered usable scoped output."
+    },
+    {
+      "at": "integration",
+      "event": "anchors_passed",
+      "detail": "Root integrated HIR/driver/test patches, all 41 tests pass with 3 existing doctests ignored. Emacs parses and indents actual generated example HIR preserving structure. Owned rustfmt passes; 1767 unrelated paths preserved. Outcome criteria unchanged; fresh independent grading next."
+    },
+    {
+      "at": "grading",
+      "event": "fresh_grader_dispatched",
+      "detail": "Fresh context /root/dev001_acceptance receives frozen rubric, final artifacts, baseline diff and live record, not build conversation. Independent targeted reruns and artifact checks; no repair rights. Controller will route any defect and compute score."
+    },
+    {
+      "at": "grading",
+      "event": "scoped_diff_check",
+      "detail": "git diff --check passed on changed tracked source and development README. Root read back formatter, CLI argument parsing, atomic output and test assertions; original baseline warnings left untouched."
+    },
+    {
+      "at": "grading-1",
+      "event": "defects_routed",
+      "detail": "Independent grader reports C10 minor and C11 major: old take-view and test block lowering panic. 11/13 applicable passed. Root owns narrow lowering repair and report; test author gets focused independent regressions. No outcome/rubric changes. Related recognized take-view child routing is inspected within same failure family."
+    },
+    {
+      "at": "repair-1",
+      "event": "code_repair_and_focused_probes",
+      "detail": "Root replaced unsupported view/top-level dispatch panics with existing diagnostic+invalid-node paths, corrected recognized take-view child[0] routing and builtin full-node handoff/non-symbol diagnostic. No arbitrary panic catching. Actual probes: old/test/non-symbol builtin exit1 and preserve output; bitvec/type/multi_deref/symbolic builtin reach HIR. Independent test author adds regressions in isolated snapshot with pre-repair integrated baseline."
+    },
+    {
+      "at": "repair-1",
+      "event": "repair_integrated",
+      "detail": "Six independent tests merged after comparison with tests-before-repair. Source fixtures were actually red on prior integrated snapshot, 1 pass/5 fail. Repaired integration passes 47 tests. Report now documents baseline defects, precise repair scope and 1766 protected paths. C1-C14 unchanged."
+    },
+    {
+      "at": "grading-2",
+      "event": "independent_regrade_dispatched",
+      "detail": "Same independent read-only grader rechecks all fixed criteria from current artifacts and diff, retaining no repair author role; no build conversation provided. Reusing grader preserves isolation from implementers and graph worker cap."
+    },
+    {
+      "at": "grading-2",
+      "event": "acceptance_passed",
+      "detail": "Independent grader rechecked all C1-C14; 13/13 applicable pass, C4 not applicable. 47 tests and 35 extra probes pass. Controller computes gate=passed. One targeted repair cycle completed; no remaining acceptance defects. No Git commit/push performed."
+    }
+  ],
+  "acceptance": {
+    "grader": "independent",
+    "round": 2,
+    "score": "13/13",
+    "gate": "passed",
+    "criteria": [
+      {
+        "id": "C1",
+        "verdict": "pass",
+        "class": "record",
+        "severity": "none",
+        "evidence": "graph.json: independent units, concrete artifact edges, rejected fake edges and repair test input dependency (attested)"
+      },
+      {
+        "id": "C2",
+        "verdict": "pass",
+        "class": "record",
+        "severity": "none",
+        "evidence": "graph.json: explicit bounded node contracts and selected skills (attested)"
+      },
+      {
+        "id": "C3",
+        "verdict": "pass",
+        "class": "artifact",
+        "severity": "none",
+        "evidence": "/tmp/luna-dev-001/grader2-isolation.json: isolated writers, refreshed inputs match round1.patch, test-only repair delta"
+      },
+      {
+        "id": "C4",
+        "verdict": "not_applicable",
+        "class": "artifact",
+        "severity": "none",
+        "evidence": "No external research node or claim"
+      },
+      {
+        "id": "C5",
+        "verdict": "pass",
+        "class": "artifact",
+        "severity": "none",
+        "evidence": "All verification output pointers retrieved, including red/green tests, probes and editor checks"
+      },
+      {
+        "id": "C6",
+        "verdict": "pass",
+        "class": "rerun",
+        "severity": "none",
+        "evidence": "/tmp/luna-dev-001/grader2-tests.log: 47 passed, 3 existing doctests ignored; grader2-check.log, grader2-format.log, grader2-emacs.log pass"
+      },
+      {
+        "id": "C7",
+        "verdict": "pass",
+        "class": "record",
+        "severity": "none",
+        "evidence": "graph.json: C10/C11 routed to root; independent tests and affected checks recorded (attested)"
+      },
+      {
+        "id": "C8",
+        "verdict": "pass",
+        "class": "record",
+        "severity": "none",
+        "evidence": "graph.json observed/limits: workers5/5, concurrency4/4, waves4/4, retries0/1, depth1/1, worker turns6/12, grader rounds2/2, time within5400 seconds (attested)"
+      },
+      {
+        "id": "C9",
+        "verdict": "pass",
+        "class": "artifact",
+        "severity": "none",
+        "evidence": "dev HEAD remains 4f5e3733ca88121b086b3a9e4389923abb9d837c; no gated external action"
+      },
+      {
+        "id": "C10",
+        "verdict": "pass",
+        "class": "artifact",
+        "severity": "none",
+        "evidence": "report.md now documents baseline failures, actual repair, test results, formatting scope and frontend limitations; independent reruns support claims"
+      },
+      {
+        "id": "C11",
+        "verdict": "pass",
+        "class": "rerun",
+        "severity": "none",
+        "evidence": "/tmp/luna-dev-001/grader2-extra.json: 35/35 probes plus 32 CLI tests; prior panic cases diagnose exit1 and preserve outputs, recognized view operands retained"
+      },
+      {
+        "id": "C12",
+        "verdict": "pass",
+        "class": "rerun",
+        "severity": "none",
+        "evidence": "8 HIR tests, exhaustive payload formatting, dump_to_lisp delegation and actual Emacs reader/formatter pass"
+      },
+      {
+        "id": "C13",
+        "verdict": "pass",
+        "class": "rerun",
+        "severity": "none",
+        "evidence": "47 targeted tests without LLVM; six independent lowering regressions were actually red before repair"
+      },
+      {
+        "id": "C14",
+        "verdict": "pass",
+        "class": "rerun",
+        "severity": "none",
+        "evidence": "/tmp/luna-dev-001/grader2-workspace.json: 1766 protected paths unchanged, dev and HEAD unchanged; final.patch independently matches 12 paths"
+      }
+    ],
+    "unreachable": []
+  },
+  "acceptance_history": [
+    {
+      "grader": "independent",
+      "round": 1,
+      "score": "11/13",
+      "gate": "blocked",
+      "criteria": [
+        {
+          "id": "C1",
+          "verdict": "pass",
+          "class": "record",
+          "severity": "none",
+          "evidence": "/tmp/luna-dev-001/grader-tests.log"
+        },
+        {
+          "id": "C2",
+          "verdict": "pass",
+          "class": "record",
+          "severity": "none",
+          "evidence": "/tmp/luna-dev-001/grader-tests.log"
+        },
+        {
+          "id": "C3",
+          "verdict": "pass",
+          "class": "artifact",
+          "severity": "none",
+          "evidence": "/tmp/luna-dev-001/grader-tests.log"
+        },
+        {
+          "id": "C4",
+          "verdict": "not_applicable",
+          "class": "artifact",
+          "severity": "none",
+          "evidence": "/tmp/luna-dev-001/grader-tests.log"
+        },
+        {
+          "id": "C5",
+          "verdict": "pass",
+          "class": "artifact",
+          "severity": "none",
+          "evidence": "/tmp/luna-dev-001/grader-tests.log"
+        },
+        {
+          "id": "C6",
+          "verdict": "pass",
+          "class": "rerun",
+          "severity": "none",
+          "evidence": "/tmp/luna-dev-001/grader-tests.log"
+        },
+        {
+          "id": "C7",
+          "verdict": "pass",
+          "class": "record",
+          "severity": "none",
+          "evidence": "/tmp/luna-dev-001/grader-tests.log"
+        },
+        {
+          "id": "C8",
+          "verdict": "pass",
+          "class": "record",
+          "severity": "none",
+          "evidence": "/tmp/luna-dev-001/grader-tests.log"
+        },
+        {
+          "id": "C9",
+          "verdict": "pass",
+          "class": "artifact",
+          "severity": "none",
+          "evidence": "/tmp/luna-dev-001/grader-tests.log"
+        },
+        {
+          "id": "C10",
+          "verdict": "fail",
+          "class": "artifact",
+          "severity": "minor",
+          "evidence": "/tmp/luna-dev-001/grader-extra.json"
+        },
+        {
+          "id": "C11",
+          "verdict": "fail",
+          "class": "rerun",
+          "severity": "major",
+          "evidence": "/tmp/luna-dev-001/grader-extra.json"
+        },
+        {
+          "id": "C12",
+          "verdict": "pass",
+          "class": "rerun",
+          "severity": "none",
+          "evidence": "/tmp/luna-dev-001/grader-tests.log"
+        },
+        {
+          "id": "C13",
+          "verdict": "pass",
+          "class": "rerun",
+          "severity": "none",
+          "evidence": "/tmp/luna-dev-001/grader-tests.log"
+        },
+        {
+          "id": "C14",
+          "verdict": "pass",
+          "class": "rerun",
+          "severity": "none",
+          "evidence": "/tmp/luna-dev-001/grader-tests.log"
+        }
+      ],
+      "unreachable": [
+        {
+          "id": "C10",
+          "reason": "Exit guarantee contradicted by unsupported lowering panic"
+        },
+        {
+          "id": "C11",
+          "reason": "Code repair required for parsed unsupported views/items"
+        }
+      ]
+    }
+  ]
+}

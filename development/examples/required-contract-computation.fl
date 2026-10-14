@@ -1,0 +1,18 @@
+typealias Type = .Type'builtin;
+typealias Int = .Integer'builtin;
+comptime fn Byte() -> Type { .u8'builtin }
+comptime fn Countdown(n: Int) -> Type {
+    if n == 0 { .u8'builtin } else { Countdown(n - 1) }
+}
+comptime fn Even(n: Int) -> Type {
+    if n == 0 { .u8'builtin } else { Odd(n - 1) }
+}
+comptime fn Odd(n: Int) -> Type {
+    if n == 0 { .u16'builtin } else { Even(n - 1) }
+}
+fn simple() -> true'type where requires Byte() == .u8'builtin { true }
+fn recursive() -> true'type where requires Countdown(8) == .u8'builtin { true }
+fn mutual() -> true'type where requires Even(8) == .u8'builtin { true }
+comptime fn Wrapped() -> Type where requires Byte() == .u8'builtin { Countdown(4) }
+fn nested() -> true'type where requires Wrapped() == .u8'builtin { true }
+fn run() -> true'type { simple() and recursive() and mutual() and nested() }

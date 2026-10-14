@@ -7,9 +7,9 @@ use hir::{
 };
 use rustc_span::Span;
 
-use crate::LoweringContext;
+use crate::{LoweringContext, expr::ExprContext};
 
-impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
+impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
     /// Lower an AST node in pattern position into an HIR [`Pattern`].
     pub fn lower_pattern(&mut self, node: NodeIndex) -> Pattern<'hir> {
         let Some((kind, span, children)) = self.ast.get_node(node) else {
@@ -17,6 +17,45 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
         };
 
         match kind {
+            NodeKind::OptionSomePattern => {
+                let inner = self.lower_pattern(children[0]);
+                Pattern { hir_id: self.next_hir_id(), span,
+                    kind: PatternKind::OptionSome(self.arena.alloc_pattern(inner)) }
+            }
+            NodeKind::NotPattern => {
+                let inner = self.lower_pattern(children[0]);
+                Pattern {
+                    hir_id: self.next_hir_id(),
+                    kind: PatternKind::Not(self.arena.alloc_pattern(inner)),
+                    span,
+                }
+            }
+            NodeKind::AndIsPattern | NodeKind::IfGuardPattern => {
+                // Candidate-local scope: only the left pattern is visible while
+                // lowering the next expression. The caller later exports the
+                // complete successful pattern, including all duplicate checks.
+                let scope = self.local_enter(resolve::RibKind::MatchBody);
+                let first = self.lower_pattern(children[0]);
+                self.bind_arm_pattern(children[0], &first);
+                let value = self.lower_expr(ExprContext::RuntimeFunctionBody, children[1]);
+                let next = if kind == NodeKind::AndIsPattern {
+                    Some(self.lower_pattern(children[2]))
+                } else {
+                    None
+                };
+                self.local_exit(scope);
+                let first = self.arena.alloc_pattern(first);
+                let value = self.arena.alloc_expr(value);
+                let kind = match next {
+                    Some(next) => PatternKind::Then(first, value, self.arena.alloc_pattern(next)),
+                    None => PatternKind::Guard(first, value),
+                };
+                Pattern {
+                    hir_id: self.next_hir_id(),
+                    kind,
+                    span,
+                }
+            }
             // _ (wildcard)
             NodeKind::Wildcard => Pattern {
                 hir_id: self.next_hir_id(),
@@ -35,8 +74,15 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
             }
 
             // Literals used as constant patterns
-            NodeKind::Int | NodeKind::Real | NodeKind::Str | NodeKind::Char | NodeKind::Bool => {
-                let expr = self.lower_expr(node);
+            NodeKind::Int
+            | NodeKind::Real
+            | NodeKind::Str
+            | NodeKind::StringConcat
+            | NodeKind::Char
+            | NodeKind::Bool
+            | NodeKind::Symbol
+            | NodeKind::LiteralExtension => {
+                let expr = self.lower_expr(ExprContext::PatternConstant, node);
                 let expr_ref = self.arena.alloc_expr(expr);
                 Pattern {
                     hir_id: self.next_hir_id(),
@@ -70,8 +116,8 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
 
             // `pat as name`
             NodeKind::AsBindPattern => {
-                let name_ident = self.node_to_ident(children[0]);
-                let inner = self.lower_pattern(children[1]);
+                let name_ident = self.node_to_ident(children[1]);
+                let inner = self.lower_pattern(children[0]);
                 let inner_ref = self.arena.alloc_pattern(inner);
                 Pattern {
                     hir_id: self.next_hir_id(),
@@ -101,12 +147,37 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                 let pats_slice = self.arena.alloc_pattern_slice(pats);
                 Pattern {
                     hir_id: self.next_hir_id(),
-                    kind: PatternKind::Tuple(pats_slice),
+                    kind: PatternKind::List(pats_slice, None),
                     span,
                 }
             }
 
             // Ctor(a, b) application pattern
+            NodeKind::NormalFormHeadApplicationPattern => {
+                let head = self.lower_expr(ExprContext::PatternConstant, children[0]);
+                let mut arguments = Vec::new();
+                for node in self.ast.get_multi_child_slice(children[1]).unwrap_or(&[]) {
+                    let (name, pattern) =
+                        if self.ast.get_node_kind(*node) == Some(NodeKind::PropertyPattern) {
+                            let children = self.ast.get_children(*node);
+                            (Some(self.node_to_ident(children[0])), children[1])
+                        } else {
+                            (None, *node)
+                        };
+                    arguments.push(hir::pattern::TypePatternArg {
+                        name,
+                        pattern: self.lower_pattern(pattern),
+                    });
+                }
+                Pattern {
+                    hir_id: self.next_hir_id(),
+                    span,
+                    kind: PatternKind::NormalForm(
+                        self.arena.alloc_expr(head),
+                        self.arena.alloc_type_pattern_arg_slice(arguments),
+                    ),
+                }
+            }
             NodeKind::ApplicationPattern => {
                 let callee = self.lower_pattern(children[0]);
                 let callee_ref = self.arena.alloc_pattern(callee);
@@ -167,54 +238,58 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
                 }
             }
 
-            // Range patterns
-            NodeKind::RangeFromToPattern => {
-                let lo = self.lower_expr(children[0]);
-                let hi = self.lower_expr(children[1]);
-                let lo_ref = self.arena.alloc_expr(lo);
-                let hi_ref = self.arena.alloc_expr(hi);
+            // Range endpoints are expressions in the surrounding scope, not
+            // binders. Preserve inclusive ends all the way into HIR.
+            NodeKind::RangeFromToPattern
+            | NodeKind::RangeFromToInclusivePattern
+            | NodeKind::RangeFromPattern
+            | NodeKind::RangeToPattern
+            | NodeKind::RangeToInclusivePattern
+            | NodeKind::RangeFull => {
+                let (lo, hi) = match kind {
+                    NodeKind::RangeFull => (None, None),
+                    NodeKind::RangeFromPattern => (Some(children[0]), None),
+                    NodeKind::RangeToPattern | NodeKind::RangeToInclusivePattern => {
+                        (None, Some(children[0]))
+                    }
+                    _ => (Some(children[0]), Some(children[1])),
+                };
+                let hir_id = self.next_hir_id();
+                let mut lower = |node| {
+                    let node = match self.ast.get_node(node) {
+                        Some((
+                            NodeKind::ExprAsPattern | NodeKind::TypeBindPattern,
+                            _,
+                            children,
+                        )) => children[0],
+                        _ => node,
+                    };
+                    let value = self.lower_expr(ExprContext::PatternConstant, node);
+                    &*self.arena.alloc_expr(value)
+                };
                 Pattern {
-                    hir_id: self.next_hir_id(),
+                    hir_id,
                     kind: PatternKind::Range(
-                        Some(lo_ref),
-                        Some(hi_ref),
-                        hir::pattern::BoundType::Exclusive,
+                        lo.map(&mut lower),
+                        hi.map(&mut lower),
+                        if matches!(
+                            kind,
+                            NodeKind::RangeFromToInclusivePattern
+                                | NodeKind::RangeToInclusivePattern
+                        ) {
+                            hir::pattern::BoundType::Inclusive
+                        } else {
+                            hir::pattern::BoundType::Exclusive
+                        },
                     ),
                     span,
                 }
             }
 
-            NodeKind::RangeFromPattern => {
-                let lo = self.lower_expr(children[0]);
-                let lo_ref = self.arena.alloc_expr(lo);
-                Pattern {
-                    hir_id: self.next_hir_id(),
-                    kind: PatternKind::Range(
-                        Some(lo_ref),
-                        None,
-                        hir::pattern::BoundType::Exclusive,
-                    ),
-                    span,
-                }
-            }
-
-            NodeKind::RangeToPattern => {
-                let hi = self.lower_expr(children[0]);
-                let hi_ref = self.arena.alloc_expr(hi);
-                Pattern {
-                    hir_id: self.next_hir_id(),
-                    kind: PatternKind::Range(
-                        None,
-                        Some(hi_ref),
-                        hir::pattern::BoundType::Exclusive,
-                    ),
-                    span,
-                }
-            }
-
-            // < expr > pattern (expression-as-pattern)
-            NodeKind::ExprAsPattern => {
-                let expr = self.lower_expr(children[0]);
+            // <expr> and quoted identifiers observe an outer expression;
+            // neither introduces a new binding in the matching arm.
+            NodeKind::ExprAsPattern | NodeKind::TypeBindPattern => {
+                let expr = self.lower_expr(ExprContext::PatternConstant, children[0]);
                 let expr_ref = self.arena.alloc_expr(expr);
                 Pattern {
                     hir_id: self.next_hir_id(),
@@ -225,7 +300,7 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
 
             // Unit / null / undefined
             NodeKind::Unit | NodeKind::Null | NodeKind::Undefined => {
-                let expr = self.lower_expr(node);
+                let expr = self.lower_expr(ExprContext::PatternConstant, node);
                 let expr_ref = self.arena.alloc_expr(expr);
                 Pattern {
                     hir_id: self.next_hir_id(),
@@ -236,13 +311,76 @@ impl<'hir, 'ast> LoweringContext<'hir, 'ast> {
 
             // Projection-based path as pattern (e.g. Mod.Variant)
             NodeKind::Projection => {
-                let base = self.lower_pattern(children[0]);
+                // A qualified name is a resolved pattern head, not a binding
+                // pattern named after the path's first segment. Resolve it in
+                // the surrounding scope before publishing payload binders.
+                let value = self.lower_expr(ExprContext::PatternConstant, node);
+                let value = self.arena.alloc_expr(value);
                 Pattern {
                     hir_id: self.next_hir_id(),
-                    kind: PatternKind::Projection(
-                        self.arena.alloc_pattern(base),
-                        self.node_to_ident(children[1]),
-                    ),
+                    kind: PatternKind::Const(value),
+                    span,
+                }
+            }
+
+            NodeKind::BitVecBinPattern
+            | NodeKind::BitVecOctPattern
+            | NodeKind::BitVecHexPattern => {
+                let radix = match kind {
+                    NodeKind::BitVecBinPattern => 2,
+                    NodeKind::BitVecOctPattern => 8,
+                    _ => 16,
+                };
+                let nodes = self
+                    .ast
+                    .get_multi_child_slice(children[0])
+                    .unwrap_or(&[])
+                    .to_vec();
+                let mut segments = Vec::new();
+                for (index, node) in nodes.into_iter().enumerate() {
+                    let (kind, segment_span, children) = self.ast.get_node(node).unwrap();
+                    let segment = match kind {
+                        NodeKind::Int | NodeKind::Id => {
+                            let spelling = self
+                                .ast
+                                .source_content(node, self.source_map)
+                                .unwrap_or_default();
+                            let spelling = if index == 0
+                                && (spelling.starts_with("0b")
+                                    || spelling.starts_with("0o")
+                                    || spelling.starts_with("0x"))
+                            {
+                                spelling[2..].to_string()
+                            } else {
+                                spelling
+                            };
+                            hir::pattern::BitSegment::Literal {
+                                spelling,
+                                span: segment_span,
+                            }
+                        }
+                        NodeKind::TypeBoundDeclClause => {
+                            let pattern = self.lower_pattern(children[0]);
+                            let ty = self.lower_expr(ExprContext::PatternConstant, children[1]);
+                            hir::pattern::BitSegment::Typed {
+                                pattern: self.arena.alloc_pattern(pattern),
+                                ty: self.arena.alloc_expr(ty),
+                            }
+                        }
+                        NodeKind::ExprAsPattern => {
+                            let expr = self.lower_expr(ExprContext::PatternConstant, children[0]);
+                            hir::pattern::BitSegment::Computed(self.arena.alloc_expr(expr))
+                        }
+                        _ => {
+                            self.emit_invalid_pattern("invalid bit-vector segment", segment_span);
+                            return self.make_error_pattern(span);
+                        }
+                    };
+                    segments.push(segment);
+                }
+                Pattern {
+                    hir_id: self.next_hir_id(),
+                    kind: PatternKind::BitVec { radix, segments },
                     span,
                 }
             }

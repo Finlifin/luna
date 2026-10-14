@@ -1,0 +1,22 @@
+-- A known tuple entry collects positional inputs; the other entry receives
+-- the default record packet. Input evaluation follows this call's source order.
+fn render(...children: (bool, bool), ...properties: T) -> (bool, T)
+where T
+{
+    let (first, second) = children;
+    (first and second, properties)
+}
+
+fn entry() -> bool {
+    let (ready, options) = render {
+        true,
+        enabled: true,
+        true,
+        label: 'x',
+    };
+    let (forwarded, options) = render(
+        .children = (true, true),
+        .properties = options,
+    );
+    ready and forwarded and options.enabled and options.label == 'x'
+}

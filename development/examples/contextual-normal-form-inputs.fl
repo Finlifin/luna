@@ -1,0 +1,28 @@
+typealias Type = .Type'builtin;
+pure comptime fn Tagged<T: Type, value: T> -> Type { T }
+pure comptime fn Pair<A: Type, first: A, B: Type, last: B> -> Type { (A, B) }
+comptime fn Choice(ty: Type, flag: true'type) -> Type {
+    Tagged<ty, if flag { 1 } else { 2 }>
+}
+comptime fn Ordered(ty: Type) -> Type {
+    var count: .Integer'builtin = 0;
+    Pair<ty, if do { count = count + 1; true } { count = count + 1; 7 } else { count = count + 100; 9 },
+         .Integer'builtin, count>
+}
+comptime fn diverge() -> .u8'builtin { diverge() }
+comptime fn Skipped(ty: Type) -> Type { Tagged<ty, if true { 1 } else { diverge() }> }
+comptime fn Early(ty: Type, flag: true'type) -> Type {
+    Tagged<ty, if flag { return .u16'builtin; } else { 3 }>
+}
+comptime fn Locals(ty: Type) -> Type {
+    Tagged<ty, do { let local: .u8'builtin = 4; if true { local } else { 5 } }>
+}
+comptime fn UnselectedOverflow(ty: Type) -> Type { Tagged<ty, if true { 1 } else { 256 }> }
+typealias Byte = Choice(.u8'builtin, true);
+typealias OtherByte = Choice(.u8'builtin, false);
+typealias SkippedByte = Skipped(.u8'builtin);
+comptime fn Generic(ty: Type, value: T, flag: true'type) -> Type where T {
+    Tagged<ty, if flag { value } else { value }>
+}
+comptime fn GenericObserved(ty: Type) -> Type { Generic<.u8'builtin>(ty, 7, true) }
+typealias GenericByte = GenericObserved(.u8'builtin);

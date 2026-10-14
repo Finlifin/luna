@@ -51,7 +51,10 @@ pub use ids::{DefId, ScopeId};
 pub use impl_directive::{ImplDirective, ImplKind};
 pub use import::{ImportDirective, ImportKind};
 pub use item_scope::ItemScope;
-pub use module_builder::{ModuleTree, build_module_tree};
+pub use module_builder::{
+    DependencyEdge, ModuleTree, PackageSetTree, build_module_tree, build_package_set,
+    build_package_set_with_builtin,
+};
 pub use resolver::Resolver;
 pub use rib::{Rib, RibKind, RibStack};
 pub use scope::Scope;

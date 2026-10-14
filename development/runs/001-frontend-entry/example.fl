@@ -1,0 +1,11 @@
+fn first() {}
+
+fn second() {
+    first();
+}
+
+fn nested() {
+    if true {
+        let message = "parentheses: () quote: \" backslash: \\";
+    } else {}
+}

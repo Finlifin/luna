@@ -20,6 +20,8 @@ pub enum ScopeKind {
     Module,
     /// A function body.
     FnBody,
+    /// A type alias parameter telescope and target.
+    TypeAlias,
     /// A block expression (`{ ... }`).
     Block,
     /// A struct / enum / union body (for associated items).

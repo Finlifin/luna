@@ -1,0 +1,12 @@
+[package]
+name = "elaboration"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+nir = { path = "../nir" }
+hir = { path = "../hir" }
+rustc_span = { workspace = true }
+comptime_runtime = { path = "../comptime_runtime" }
+comptime_interpretor = { path = "../comptime_interpretor" }
+iir = { path = "../iir" }

@@ -1,0 +1,14 @@
+-- Forward references require completed signatures, not body execution.
+typealias Bits = byte()'bitvec'type;
+fn entry() -> Bits { 42 }
+fn byte() -> .u8'builtin { 0 }
+
+-- Calling a constrained generic in type observation retains its obligation.
+typealias Flag = identity(true)'type;
+fn identity(value: T) -> T where T, requires T == true'type { value }
+fn ready() -> Flag { true }
+
+-- Signature dependencies may span several declarations.
+fn first() -> second()'type { true }
+fn second() -> third()'type { true }
+fn third() -> true'type { true }

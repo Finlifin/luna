@@ -1,0 +1,29 @@
+typealias Flag = true'type;
+typealias Letter = 'x''type;
+
+struct Packet where T {
+    payload: T,
+    ready: Flag = true,
+}
+
+enum Message where T {
+    empty,
+    packet(Packet<(T, Flag)>),
+}
+
+fn read(message: Message<T>, fallback: T) -> T where T {
+    message match {
+        .packet({ payload: (value, true), ready: true }) => value,
+        _ => fallback,
+    }
+}
+
+fn run() -> Letter {
+    let packet = Packet<(Letter, Flag)> { payload: ('y', true) };
+    let { ready } = packet;
+    if ready {
+        read(Message<Letter>.packet(packet), 'n')
+    } else {
+        'n'
+    }
+}

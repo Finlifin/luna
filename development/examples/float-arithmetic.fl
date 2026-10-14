@@ -1,0 +1,30 @@
+typealias F32 = .f32'builtin;
+typealias F64 = .f64'builtin;
+typealias Bool = true'type;
+comptime fn single(a: F32, b: F32) -> (F32, F32, F32, F32, F32) {
+    (-a, a + b, a - b, a * b, a / b)
+}
+comptime fn double(a: F64, b: F64) -> (F64, F64, F64, F64, F64) {
+    (-a, a + b, a - b, a * b, a / b)
+}
+comptime fn rounding() -> F32 { (16777216.0 + 1.0) - 16777216.0 }
+comptime fn unfused() -> F32 { (1.0000001192092896 * 0.9999998807907104) - 1.0 }
+comptime fn contextual(value: F32) -> F32 { 2.0 * value + 1.0 }
+comptime fn generic(a: T, b: T) -> T where T, requires T == F32 { -a + b / a }
+comptime fn specialized() -> F32 { generic<F32>(2.0, 6.0) }
+fn runtime(a: F32, b: F32) -> F32 { -a + b / a }
+fn defaults(value: F32, .result: F32 = -value * 2.0) -> F32 { result }
+fn default_result() -> F32 { defaults(3.0) }
+comptime fn ordered() -> F32 {
+    var seen = false;
+    (do { seen = true; 2.0 }) - (do { if seen { 1.0 } else { 4.0 } })
+}
+comptime fn early() -> F32 { (do { return 3.0; }) / 0.0 }
+comptime fn early_right() -> F32 { 1.0 + (do { return 4.0; }) }
+comptime fn Select() -> .Type'builtin {
+    if rounding() == 0.0 { Bool } else { 'x''type }
+}
+typealias Chosen = Select();
+comptime fn run() -> (Chosen, Bool, Bool, Bool) {
+    (rounding() == 0.0, unfused() == 0.0, specialized() == 1.0, ordered() == 1.0)
+}

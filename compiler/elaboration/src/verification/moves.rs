@@ -1,0 +1,8134 @@
+//! Ordered owned-position move analysis. This pass reports cleanup obligations;
+//! it neither executes Drop nor proves Copy representation/alias legality.
+//! Unsupported operations fail explicitly instead of silently passing.
+use super::pattern_facts::{constant_bool, irrefutable_shape, known_pattern, outer_guards};
+use super::{
+    PlaceId,
+    ownership::{Availability, CleanupTree, Place, Shape, State},
+};
+use nir::{
+    Term,
+    program::{
+        Expr, ExprKind as K, Function, FunctionPhase, LocalId, Package, Pattern, SourceRange,
+    },
+};
+use std::{
+    borrow::Borrow,
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
+mod patterns;
+mod origins;
+mod effects;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Delivery {
+    Move,
+    Copy,
+}
+#[derive(Debug)]
+pub struct Error {
+    pub source: SourceRange,
+    pub reason: String,
+}
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(move-error (source {}) (reason {}))",
+            self.source,
+            Term::String(self.reason.clone().into())
+        )
+    }
+}
+impl std::error::Error for Error {}
+#[derive(Debug)]
+pub struct Cleanup {
+    pub source: SourceRange,
+    pub place: Place,
+    pub availability: Availability,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TemporaryBoundary {
+    FullExpression,
+    Condition,
+    Match,
+    ReturnValue,
+    FunctionResult,
+    DefaultArgument,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TemporaryScope {
+    pub source: SourceRange,
+    pub boundary: TemporaryBoundary,
+}
+impl fmt::Display for TemporaryScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match self.boundary {
+            TemporaryBoundary::FullExpression => "full-expression",
+            TemporaryBoundary::Condition => "condition",
+            TemporaryBoundary::Match => "match",
+            TemporaryBoundary::ReturnValue => "return-value",
+            TemporaryBoundary::FunctionResult => "function-result",
+            TemporaryBoundary::DefaultArgument => "default-argument",
+        };
+        write!(
+            f,
+            "(temporary-scope (kind {kind}) (source {}))",
+            self.source
+        )
+    }
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct TemporaryCleanup {
+    pub scope: TemporaryScope,
+    pub source: SourceRange,
+    pub ty: Term,
+    pub fields: Vec<usize>,
+}
+/// One completed component, before ownership reaches the enclosing operation.
+#[derive(Clone, Debug)]
+pub struct PendingValue {
+    pub sequence: u64,
+    pub source: SourceRange,
+    pub scope: TemporaryScope,
+    pub ty: Term,
+    pub slot: usize,
+    /// Lexical anchors at acquisition; a future cleanup planner must interleave
+    /// local and pending responsibilities rather than concatenate report lists.
+    pub locals_before: Vec<PlaceId>,
+}
+#[derive(Clone, Debug)]
+struct PendingFrame {
+    origins: BTreeMap<u64, ValueOrigins>,
+    source: SourceRange,
+    values: Vec<PendingValue>,
+}
+#[derive(Debug)]
+pub struct IncompleteCleanup {
+    pub exit: SourceRange,
+    pub construction: SourceRange,
+    /// Completed components only, in reverse acquisition order. No Drop of the
+    /// unfinished enclosing object is implied.
+    pub values: Vec<PendingValue>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CleanupReason {
+    /// Abandon this resource scope through an effect handler outside it.
+    /// The selected installer uses its return/loop plan instead; resume never
+    /// runs this checkpoint. Intermediate handler scopes may share an invocation.
+    EffectEscape,
+    /// Installer return after handler and interrupted invocations have unwound.
+    EffectReturn,
+    EffectBreak(LocalId),
+    EffectContinue(LocalId),
+    HandlerEnd,
+    EffectResume,
+    Return,
+    FunctionEnd,
+    PredicateFailure,
+    Break,
+    Continue,
+    ScopeEnd,
+    Replacement,
+    TemporaryEnd,
+}
+impl fmt::Display for CleanupReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Self::EffectBreak(id) | Self::EffectContinue(id) = self {
+            let kind = if matches!(self, Self::EffectBreak(_)) { "effect-break" } else { "effect-continue" };
+            return write!(f, "({kind} (loop {} {}))", id.owner, id.index);
+        }
+        f.write_str(match self {
+            Self::EffectEscape => "effect-escape",
+            Self::EffectReturn => "effect-return",
+            Self::EffectBreak(_) | Self::EffectContinue(_) => unreachable!(),
+            Self::HandlerEnd => "handler-end",
+            Self::EffectResume => "effect-resume",
+            Self::Return => "return",
+            Self::FunctionEnd => "function-end",
+            Self::PredicateFailure => "predicate-failure",
+            Self::Break => "break",
+            Self::Continue => "continue",
+            Self::ScopeEnd => "scope-end",
+            Self::Replacement => "replacement",
+            Self::TemporaryEnd => "temporary-end",
+        })
+    }
+}
+/// A known enum case at a relative position within an owned cleanup tree.
+/// An absent entry leaves enum cleanup dependent on its runtime discriminant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VariantSelection {
+    pub fields: Vec<usize>,
+    pub index: usize,
+}
+impl fmt::Display for VariantSelection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("(variant-selection (fields")?;
+        for index in &self.fields {
+            write!(f, " {index}")?;
+        }
+        write!(f, ") (index {}))", self.index)
+    }
+}
+// Callable evidence paths qualify enum payloads with [VARIANT_PATH, tag].
+// Ownership paths remain ordinary field paths after a successful tag guard.
+// No allocated field layout can have usize::MAX entries.
+const VARIANT_PATH: usize = usize::MAX;
+
+fn display_callable_path(path: &[usize], f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    let mut components = path.iter();
+    while let Some(index) = components.next() {
+        if *index == VARIANT_PATH {
+            match components.next() {
+                Some(variant) => write!(f, " (variant {variant})")?,
+                None => f.write_str(" (invalid-variant)")?,
+            }
+        } else {
+            write!(f, " {index}")?;
+        }
+    }
+    Ok(())
+}
+
+struct CallablePlace<'a>(&'a Place);
+impl fmt::Display for CallablePlace<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(owned-place (owner {}) (local {}) (fields", self.0.root.owner, self.0.root.local)?;
+        display_callable_path(&self.0.fields, f)?;
+        f.write_str("))")
+    }
+}
+
+fn select_variant_callables<T: Clone>(
+    callables: &BTreeMap<Vec<usize>, T>,
+    path: &[usize],
+    variant: usize,
+    fuel: &mut usize,
+    source: SourceRange,
+) -> Result<BTreeMap<Vec<usize>, T>, Error> {
+    let mut selected = BTreeMap::new();
+    for (leaf, callable) in callables {
+        *fuel = fuel.checked_sub(leaf.len().saturating_add(1))
+            .ok_or_else(|| error(source, "variant callable selection budget exhausted"))?;
+        if let Some(relative) = leaf.strip_prefix(path) {
+            if relative.get(..2) == Some(&[VARIANT_PATH, variant]) {
+                let mut projected = path.to_vec();
+                projected.extend_from_slice(&relative[2..]);
+                selected.insert(projected, callable.clone());
+            }
+        } else {
+            selected.insert(leaf.clone(), callable.clone());
+        }
+    }
+    Ok(selected)
+}
+
+type EnumDomains = BTreeMap<Vec<usize>, BTreeSet<usize>>;
+
+fn enum_path_excluded(path: &[usize], domains: &EnumDomains) -> bool {
+    let mut index = 0;
+    while index + 1 < path.len() {
+        if path[index] == VARIANT_PATH {
+            if domains.get(&path[..index]).is_some_and(|tags| !tags.contains(&path[index + 1])) {
+                return true;
+            }
+            index += 2;
+        } else { index += 1; }
+    }
+    false
+}
+
+fn copy_enum_domains(domains: &EnumDomains, fuel: &mut usize, source: SourceRange) -> Result<EnumDomains, Error> {
+    for (path, tags) in domains {
+        *fuel = fuel.checked_sub(path.len().saturating_add(tags.len()).saturating_add(1))
+            .ok_or_else(|| error(source, "enum domain export budget exhausted"))?;
+    }
+    Ok(domains.clone())
+}
+
+fn join_enum_domains(left: &EnumDomains, right: &EnumDomains, fuel: &mut usize, source: SourceRange)
+    -> Result<EnumDomains, Error> {
+    let mut result = EnumDomains::new();
+    for (path, tags) in left.iter().chain(right) {
+        *fuel = fuel.checked_sub(path.len().saturating_add(tags.len()).saturating_add(1))
+            .ok_or_else(|| error(source, "enum domain join budget exhausted"))?;
+        if result.contains_key(path) { continue; }
+        match (left.get(path), right.get(path)) {
+            (Some(a), Some(b)) => {
+                *fuel = fuel.checked_sub(b.len()).ok_or_else(|| error(source, "enum domain join budget exhausted"))?;
+                result.insert(path.clone(), a.union(b).copied().collect());
+            }
+            (Some(a), None) if enum_path_excluded(path, right) => { result.insert(path.clone(), a.clone()); }
+            (None, Some(b)) if enum_path_excluded(path, left) => { result.insert(path.clone(), b.clone()); }
+            _ => (),
+        }
+    }
+    Ok(result)
+}
+
+fn join_guarded_callables<A: Borrow<Callable>, B: Borrow<Callable>>(
+    left: &BTreeMap<Vec<usize>, A>, right: &BTreeMap<Vec<usize>, B>,
+    left_tags: &EnumDomains, right_tags: &EnumDomains, fuel: &mut usize, source: SourceRange,
+) -> Result<BTreeMap<Vec<usize>, Callable>, Error> {
+    let mut result = BTreeMap::new();
+    for path in left.keys().chain(right.keys()) {
+        *fuel = fuel.checked_sub(path.len().saturating_add(1))
+            .ok_or_else(|| error(source, "guarded callable join budget exhausted"))?;
+        if result.contains_key(path) { continue; }
+        let value = match (left.get(path), right.get(path)) {
+            (Some(a), Some(b)) => merge_callable_provenance(a.borrow(), b.borrow(), fuel, source, 0)?,
+            (Some(a), None) if enum_path_excluded(path, right_tags) => Some(a.borrow().clone()),
+            (None, Some(b)) if enum_path_excluded(path, left_tags) => Some(b.borrow().clone()),
+            _ => None,
+        };
+        if let Some(value) = value { result.insert(path.clone(), value); }
+    }
+    Ok(result)
+}
+
+fn known_pattern_with_domains(pattern: &Pattern, value: &Expr, domains: &EnumDomains, fuel: &mut usize, source: SourceRange) -> Result<Option<bool>, Error> {
+    let known = known_pattern(pattern, value, 0);
+    if known.is_some() || domains.is_empty() { return Ok(known); }
+    pattern_from_enum_domains(pattern, &mut vec![], domains, fuel, source, 0)
+}
+
+fn pattern_from_enum_domains(pattern: &Pattern, path: &mut Vec<usize>, domains: &EnumDomains, fuel: &mut usize, source: SourceRange, depth: usize) -> Result<Option<bool>, Error> {
+    if depth >= 128 { return Err(error(source, "enum pattern depth exhausted")); }
+    *fuel = fuel.checked_sub(path.len().saturating_add(1)).ok_or_else(|| error(source, "enum pattern budget exhausted"))?;
+    let (fields, tag_known) = match pattern {
+        Pattern::Wild | Pattern::Unit => return Ok(Some(true)),
+        Pattern::Binding {inner, ..} | Pattern::Remap {pattern:inner, ..} => return pattern_from_enum_domains(inner, path, domains, fuel, source, depth + 1),
+        Pattern::Guard {pattern:inner, ..} | Pattern::Then {first:inner, ..} => {
+            return Ok(if pattern_from_enum_domains(inner, path, domains, fuel, source, depth + 1)? == Some(false) {Some(false)} else {None});
+        }
+        Pattern::Or(alternatives) => {
+            let mut unknown = false;
+            for alternative in alternatives {
+                match pattern_from_enum_domains(alternative, path, domains, fuel, source, depth + 1)? {
+                    Some(true) => return Ok(Some(true)), None => unknown = true, _ => (),
+                }
+            }
+            return Ok(if unknown {None} else {Some(false)});
+        }
+        Pattern::Variant {index, fields, ..} => {
+            let known = domains.get(path).map(|tags| tags.len() == 1 && tags.contains(index)).unwrap_or(false);
+            if domains.get(path).is_some_and(|tags| !tags.contains(index)) { return Ok(Some(false)); }
+            path.extend([VARIANT_PATH, *index]);
+            (fields, known)
+        }
+        Pattern::Tuple(fields) | Pattern::Record {fields, ..} | Pattern::AnonymousRecord { fields, .. } => (fields, true),
+        _ => return Ok(None),
+    };
+    let mut result = if tag_known {Some(true)} else {None};
+    for (index, field) in fields.iter().enumerate() {
+        path.push(index);
+        let child = pattern_from_enum_domains(field, path, domains, fuel, source, depth + 1)?;
+        path.pop();
+        if child == Some(false) {result = Some(false);break;}
+        if child.is_none() {result = None;}
+    }
+    if matches!(pattern, Pattern::Variant {..}) {path.truncate(path.len() - 2);}
+    Ok(result)
+}
+
+fn group_owned_callables<'a>(fields: &'a BTreeMap<Place, Callable>, fuel: &mut usize, source: SourceRange)
+    -> Result<BTreeMap<PlaceId, BTreeMap<Vec<usize>, &'a Callable>>, Error> {
+    let mut grouped: BTreeMap<PlaceId, BTreeMap<Vec<usize>, &Callable>> = BTreeMap::new();
+    for (place, value) in fields {
+        *fuel = fuel.checked_sub(place.fields.len().saturating_add(1))
+            .ok_or_else(|| error(source, "callable field grouping budget exhausted"))?;
+        grouped.entry(place.root).or_default().insert(place.fields.clone(), value);
+    }
+    Ok(grouped)
+}
+
+struct PatternPreparation<'a> {
+    origins: &'a ValueOrigins,
+    domains: EnumDomains,
+    callables: BTreeMap<Vec<usize>, Callable>,
+    transfers: Vec<Vec<usize>>,
+    moved_bindings: Vec<(LocalId, Vec<usize>)>,
+    variants: Vec<VariantSelection>,
+    /// Inner bindings of an as-pattern observe a retained whole owner.
+    /// Each extracted value therefore needs its own checked Copy delivery.
+    copy_bindings: bool,
+    binding_remaps: Vec<BTreeMap<LocalId, LocalId>>,
+}
+#[derive(Debug)]
+pub enum CleanupAction {
+    /// A validated plan for this exact candidate, not an additional action.
+    Planned { candidate: Box<CleanupAction>, plan: Box<super::drop::CleanupPlan> },
+    /// Alternative residual layouts before attaching executable proof plans.
+    Alternatives(Vec<CleanupAction>),
+    Temporary {
+        identity: u64,
+        temporary: TemporaryCleanup,
+        presence: Availability,
+        remaining: CleanupTree,
+        variants: Vec<VariantSelection>,
+    },
+    Owned {
+        ty: Term,
+        remaining: CleanupTree,
+    },
+    Prepared {
+        construction: SourceRange,
+        value: PendingValue,
+    },
+}
+impl fmt::Display for CleanupAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Alternatives(cases) => {
+                f.write_str("(cleanup-alternatives")?;
+                for case in cases { write!(f, " {case}")?; }
+                f.write_str(")")
+            }
+            Self::Planned {candidate, plan} => write!(f, "(planned-cleanup {candidate} {plan})"),
+            Self::Temporary {
+                identity,
+                temporary,
+                presence,
+                remaining,
+                variants,
+            } => {
+                write!(
+                    f,
+                    "(temporary-cleanup (identity {identity}) (source {}) {} (type {}) (presence {}) (fields",
+                    temporary.source,
+                    temporary.scope,
+                    temporary.ty,
+                    match presence {
+                        Availability::Present => "present",
+                        Availability::Conditional => "conditional",
+                        Availability::Empty => "empty",
+                    }
+                )?;
+                for index in &temporary.fields {
+                    write!(f, " {index}")?;
+                }
+                f.write_str(") (variants")?;
+                for variant in variants {
+                    write!(f, " {variant}")?;
+                }
+                write!(f, ") {remaining})")
+            }
+            Self::Owned { ty, remaining } => write!(f, "(owned-cleanup (type {ty}) {remaining})"),
+            Self::Prepared {
+                construction,
+                value,
+            } => write!(
+                f,
+                "(prepared-cleanup (construction {construction}) (source {}) (slot {}) (type {}) {})",
+                value.source, value.slot, value.ty, value.scope
+            ),
+        }
+    }
+}
+/// Ordered structural candidates, before applying user Drop contracts. A user
+/// destructor runs before children and may change the remaining field state.
+/// Temporary presence is path-sensitive, but conditional execution still needs
+/// runtime/path evidence. The selected enum layouts accompany decomposed
+/// subjects; destructor access/environment/post-Drop state requires additional
+/// contracts before these candidates can become executable cleanup.
+#[derive(Debug)]
+pub struct CleanupSite {
+    pub interface_precondition: bool,
+    pub result_origin: Option<SourceRange>,
+    pub default_origin: Option<(SourceRange, usize)>,
+    pub source: SourceRange,
+    pub reason: CleanupReason,
+    pub actions: Vec<CleanupAction>,
+}
+impl fmt::Display for CleanupSite {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(cleanup-site (source {}) (reason {})",
+            self.source, self.reason
+        )?;
+        if let Some((construction,parameter))=self.default_origin {
+            write!(f," (default-origin (construction {construction}) (parameter {parameter}))")?;
+        }
+        if self.interface_precondition {f.write_str(" (interface-precondition true)")?;}
+        if let Some(origin) = self.result_origin {write!(f, " (result-origin {origin})")?;}
+        f.write_str(" (actions")?;
+        for action in &self.actions {
+            write!(f, " {action}")?;
+        }
+        f.write_str("))")
+    }
+}
+#[derive(Debug)]
+pub struct TemporaryOwner {
+    pub scope: TemporaryScope,
+    pub source: SourceRange,
+    pub ty: Term,
+    /// Relative ownership shape in an isolated synthetic root, not a source local.
+    pub remaining: State,
+}
+#[derive(Debug)]
+pub struct ClosureReport {
+    pub definition: Expr,
+    pub invoked: bool,
+    pub source: SourceRange,
+    pub captures: Vec<PlaceId>,
+    pub invocation: Report,
+}
+#[derive(Debug)]
+pub struct LoopReport {
+    pub source: SourceRange,
+    pub header: State,
+    pub breaks: Vec<State>,
+}
+#[derive(Debug)]
+pub struct CallPreparation {
+    pub source: SourceRange,
+    pub parameters: State,
+}
+#[derive(Debug)]
+pub struct MatchArmReport {
+    pub pattern: Pattern,
+    pub guards: Vec<Expr>,
+    pub exit: Option<State>,
+}
+#[derive(Debug)]
+pub struct MatchReport {
+    pub source: SourceRange,
+    pub arms: Vec<MatchArmReport>,
+}
+#[derive(Debug)]
+pub struct Decomposition {
+    pub source: SourceRange,
+    pub ty: Term,
+    pub fields: Vec<usize>,
+    pub variant: Option<usize>,
+}
+#[derive(Debug)]
+pub struct LetReport {
+    pub source: SourceRange,
+    pub pattern: Pattern,
+    pub guards: Vec<Expr>,
+    pub success: bool,
+    pub failure: bool,
+}
+/// Default-local obligations live in a separate parameter environment. Its
+/// prepared parameters alias pending caller arguments, rather than new owners.
+#[derive(Debug)]
+pub struct DefaultEvaluation {
+    pub construction: SourceRange,
+    pub source: SourceRange,
+    pub parameter: usize,
+    pub evaluation: Report,
+}
+impl fmt::Display for DefaultEvaluation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(default-evaluation (source {}) (construction {}) (parameter {}) {})", self.source, self.construction, self.parameter, self.evaluation)
+    }
+}
+/// Caller-established enum tags, conditional on qualified enclosing variant paths.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnumParameter {
+    pub parameter: usize,
+    pub domains: BTreeMap<Vec<usize>, BTreeSet<usize>>,
+}
+impl fmt::Display for EnumParameter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(enum-parameter (parameter {}) (domains", self.parameter)?;
+        for (path, tags) in &self.domains {
+            f.write_str(" (domain (path")?; display_callable_path(path, f)?;
+            f.write_str(") (tags")?;
+            for tag in tags { write!(f, " {tag}")?; }
+            f.write_str("))")?;
+        }
+        f.write_str("))")
+    }
+}
+fn validate_enum_domains(package: Option<&Package>, subject: &Term, domains: &EnumDomains, fuel: &mut usize, source: SourceRange) -> Result<(), Error> {
+    if domains.is_empty() { return Err(error(source, "empty enum domain premise")); }
+    for (path, tags) in domains {
+        if tags.is_empty() { return Err(error(source, "empty enum tag domain")); }
+        super::memory::bound_type(subject, fuel).map_err(|e| error(source, e))?;
+        let ty = owned_field_type(package, subject, path, fuel, source)?;
+        let Term::Nominal {declaration, arguments} = ty else { return Err(error(source, "enum premise requires an enum type")); };
+        let definition = package.and_then(|p| p.enums.iter().find(|e| e.declaration == declaration))
+            .ok_or_else(|| error(source, "enum premise requires enum metadata"))?;
+        let variants = callable_variant_layout(definition, &arguments, fuel, source)?;
+        if tags.iter().any(|tag| *tag >= variants.len()) { return Err(error(source, "enum premise tag out of bounds")); }
+        if enum_path_excluded(path, domains) { return Err(error(source, "enum premise has contradictory enclosing tags")); }
+    }
+    Ok(())
+}
+
+fn copy_captured_enums(captures: &BTreeMap<PlaceId, EnumDomains>, fuel: &mut usize, source: SourceRange) -> Result<BTreeMap<PlaceId, EnumDomains>, Error> {
+    let mut result = BTreeMap::new();
+    for (root, domains) in captures {
+        *fuel = fuel.checked_sub(1).ok_or_else(|| error(source, "captured enum export budget exhausted"))?;
+        result.insert(*root, copy_enum_domains(domains, fuel, source)?);
+    }
+    Ok(result)
+}
+fn display_captured_enums(captures: &BTreeMap<PlaceId, EnumDomains>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    for (root, domains) in captures {
+        write!(f, " (capture (owner {}) (local {}) (domains", root.owner, root.local)?;
+        for (path, tags) in domains {
+            f.write_str(" (domain (path")?; display_callable_path(path, f)?;
+            f.write_str(") (tags")?;
+            for tag in tags {write!(f, " {tag}")?;}
+            f.write_str("))")?;
+        }
+        f.write_str("))")?;
+    }
+    Ok(())
+}
+fn record_enum_parameter(inputs: &mut Vec<EnumParameter>, parameter: usize, domains: &EnumDomains, fuel: &mut usize, source: SourceRange) -> Result<(), Error> {
+    if !domains.is_empty() {
+        inputs.push(EnumParameter { parameter, domains: copy_enum_domains(domains, fuel, source)? });
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+pub struct NamedCall {
+    pub source: SourceRange,
+    pub callee: Expr,
+    pub callables: Vec<CallableParameter>,
+    pub enums: Vec<EnumParameter>,
+}
+impl fmt::Display for NamedCall {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(named-call (source {}) (callee {}) (callables", self.source, self.callee)?;
+        for input in &self.callables { write!(f, " {input}")?; }
+        f.write_str(") (enums")?;
+        for input in &self.enums { write!(f, " {input}")?; }
+        f.write_str("))")
+    }
+}
+
+/// Finite named targets whose memory contracts were all checked at one call.
+#[derive(Debug)]
+pub struct NamedCandidateCall {
+    pub source: SourceRange,
+    pub candidates: Vec<Expr>,
+}
+impl fmt::Display for NamedCandidateCall {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(named-candidate-call (source {}) (candidates", self.source)?;
+        for candidate in &self.candidates { write!(f, " {candidate}")?; }
+        f.write_str("))")
+    }
+}
+
+/// Code provenance and conditional captured tags, separate from executable
+/// capture initializers. Ownership availability is imported independently at use.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CallableEvidence {
+    /// Additional callable candidates, each retaining its own capture evidence.
+    /// A set containing closures uses a closure representative; named-only sets
+    /// continue to use `alternatives`.
+    pub choices: Vec<CallableEvidence>,
+    pub enum_captures: BTreeMap<PlaceId, BTreeMap<Vec<usize>, BTreeSet<usize>>>,
+    pub definition: Expr,
+    pub alternatives: Vec<Expr>,
+    /// Captured binding plus relative owned field path; an empty path is the whole binding.
+    pub captures: BTreeMap<Place, CallableEvidence>,
+}
+impl fmt::Display for CallableEvidence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(callable-evidence (definition {}) (alternatives",
+            self.definition
+        )?;
+        for alternative in &self.alternatives {
+            write!(f, " {alternative}")?;
+        }
+        f.write_str(") (choices")?;
+        for choice in &self.choices {write!(f, " {choice}")?;}
+        f.write_str(") (captures")?;
+        for (binding, evidence) in &self.captures {
+            write!(
+                f,
+                " (capture {} {evidence})", CallablePlace(binding)
+            )?;
+        }
+        f.write_str(") (enum-captures")?;
+        display_captured_enums(&self.enum_captures, f)?;
+        f.write_str("))")
+    }
+}
+
+/// A conditional input to function-body analysis. The caller must establish
+/// that this callable definition belongs to the delivered parameter; equal callable
+/// types alone do not discharge this premise.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CallableParameter {
+    pub choices: Vec<CallableEvidence>,
+    pub enum_captures: BTreeMap<PlaceId, BTreeMap<Vec<usize>, BTreeSet<usize>>>,
+    pub parameter: usize,
+    /// Relative evidence path; empty means the argument itself. Enum payloads
+    /// use [usize::MAX, variant, field, ...], requiring a matching tag guard.
+    pub fields: Vec<usize>,
+    pub definition: Expr,
+    /// Additional targets for named-only sets. Sets involving closures use
+    /// `choices`, which retains separate evidence for each environment.
+    pub alternatives: Vec<Expr>,
+    /// Captured binding plus relative owned field path; an empty path is the whole binding.
+    pub captures: BTreeMap<Place, CallableEvidence>,
+}
+impl fmt::Display for CallableParameter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(callable-parameter (parameter {}) (definition {}) (alternatives",
+            self.parameter, self.definition
+        )?;
+        for alternative in &self.alternatives {
+            write!(f, " {alternative}")?;
+        }
+        f.write_str(") (fields")?;
+        display_callable_path(&self.fields, f)?;
+        f.write_str(") (choices")?;
+        for choice in &self.choices {write!(f, " {choice}")?;}
+        f.write_str(") (captures")?;
+        for (binding, evidence) in &self.captures {
+            write!(
+                f,
+                " (capture {} {evidence})", CallablePlace(binding)
+            )?;
+        }
+        f.write_str(") (enum-captures")?;
+        display_captured_enums(&self.enum_captures, f)?;
+        f.write_str("))")
+    }
+}
+
+/// Result evidence travels with a lexical handler return, independently of
+/// the interrupted operation's ordinary result. Shared snapshots avoid copying
+/// closure trees at each enclosing installation or suspension checkpoint.
+#[derive(Debug)]
+pub struct HandlerReturnValue {
+    pub source: SourceRange,
+    pub callable: Option<CallableEvidence>,
+    pub fields: BTreeMap<Vec<usize>, CallableEvidence>,
+    pub variants: BTreeMap<Vec<usize>, BTreeSet<usize>>,
+}
+impl fmt::Display for HandlerReturnValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(handler-return (source {}) (callable", self.source)?;
+        if let Some(value) = &self.callable { write!(f, " {value}")?; }
+        f.write_str(") (fields")?;
+        for (path, value) in &self.fields {
+            f.write_str(" (field ")?;
+            display_callable_path(path, f)?;
+            write!(f, " {value})")?;
+        }
+        f.write_str(") (variants")?;
+        for (path, tags) in &self.variants {
+            f.write_str(" (domain ")?;
+            display_callable_path(path, f)?;
+            f.write_str(" (tags")?;
+            for tag in tags { write!(f, " {tag}")?; }
+            f.write_str("))")?;
+        }
+        f.write_str("))")
+    }
+}
+
+#[derive(Debug)]
+pub struct HandlerReport {
+    pub installation: SourceRange,
+    pub handler: usize,
+    pub arm: usize,
+    pub definition: nir::program::MatchArm,
+    pub result: Term,
+    pub invocation: Report,
+}
+impl fmt::Display for HandlerReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(handler-resource-report (installation {}) (handler {}) (arm {}) (result {}) {})",
+            self.installation, self.handler, self.arm, self.result, self.invocation)
+    }
+}
+#[derive(Debug, Default)]
+pub struct Report {
+    /// Checked affine deliveries, executed after evaluating the exact source
+    /// place. Reading a projection's base is not a separate transfer.
+    pub transfers: Vec<(SourceRange, Place)>,
+    /// Checked representation deliveries preserve the source ownership tree.
+    pub copies: Vec<(SourceRange, Place)>,
+    /// Canonical pattern bindings and their checked possible subject positions.
+    pub pattern_transfers: Vec<(SourceRange, LocalId, Vec<usize>)>,
+    pub pattern_orders: Vec<(SourceRange, Vec<Vec<LocalId>>)>,
+    /// Ordered structural candidates. Other lists describe analysis evidence;
+    /// they must not be appended as additional executable cleanup actions.
+    pub cleanup_sites: Vec<CleanupSite>,
+    /// Conditional entry premises; not inferred from the parameter type alone.
+    pub callable_parameters: Vec<CallableParameter>,
+    pub enum_parameters: Vec<EnumParameter>,
+    pub incomplete: Vec<IncompleteCleanup>,
+    pub cleanups: Vec<Cleanup>,
+    /// Successful returns only; closure calls join these continuation states.
+    pub exits: Vec<State>,
+    /// Known result definition per successful exit; None is unknown/non-callable.
+    pub callable_exits: Vec<Option<Expr>>,
+    /// Expression-only candidate view per successful exit. Unknown when nested
+    /// captures need richer evidence; the singleton view also excludes alternatives.
+    pub callable_candidate_exits: Vec<Option<Vec<Expr>>>,
+    /// Authoritative return provenance, including nested callable captures.
+    /// The expression-only views above are unknown if this cannot be encoded.
+    pub callable_evidence_exits: Vec<Option<CallableEvidence>>,
+    /// Known callable leaves delivered on each normal exit, relative to the result.
+    pub callable_field_exits: Vec<BTreeMap<Vec<usize>, CallableEvidence>>,
+    /// Conditional enum tag domains for the delivered value at each normal exit.
+    pub enum_variant_exits: Vec<BTreeMap<Vec<usize>, BTreeSet<usize>>>,
+    /// Callable identities remaining in persistent capture slots at each
+    /// successful exit; aligned with `exits`, never a substitute for its state.
+    pub captured_callable_exits: Vec<BTreeMap<Place, CallableEvidence>>,
+    pub captured_enum_exits: Vec<BTreeMap<PlaceId, BTreeMap<Vec<usize>, BTreeSet<usize>>>>,
+    /// Work charged by the outer analysis entry point, including nested summaries.
+    pub entry_steps_used: usize,
+    pub failed_exits: Vec<State>,
+    /// Source and suspended state on full-frame effect escape. Kept separate
+    /// from normal returns and program rejection, including capture writeback.
+    pub effect_exits: Vec<(SourceRange, State)>,
+    /// Returns targeting the lexical installer rather than operation completion.
+    pub lexical_returns: Vec<std::sync::Arc<HandlerReturnValue>>,
+    /// Lexical target and edge kind: true is break, false is continue.
+    pub lexical_loop_exits: BTreeSet<(LocalId, bool)>,
+    /// Component-level descriptions, including fields retained by one parent
+    /// candidate after pattern decomposition. Not an independent schedule.
+    pub temporaries: Vec<TemporaryCleanup>,
+    pub temporary_owners: Vec<TemporaryOwner>,
+    pub handlers: Vec<HandlerReport>,
+    pub closures: Vec<ClosureReport>,
+    pub loops: Vec<LoopReport>,
+    pub calls: Vec<CallPreparation>,
+    /// Unresolved callable obligations in construction-only body analysis.
+    /// These are never proof of a checked invocation or executable cleanup.
+    pub deferred_calls: Vec<SourceRange>,
+    pub named_calls: Vec<NamedCall>,
+    pub named_candidate_calls: Vec<NamedCandidateCall>,
+    /// Owned callee values that have no source-level local binding.
+    pub callee_temporaries: Vec<(PlaceId, SourceRange)>,
+    pub defaults: Vec<DefaultEvaluation>,
+    pub matches: Vec<MatchReport>,
+    pub decompositions: Vec<Decomposition>,
+    pub bindings: Vec<LetReport>,
+}
+impl fmt::Display for Report {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("(move-report (transfers")?;
+        for (source, place) in &self.transfers {
+            write!(f, " (transfer (source {source}) {place})")?;
+        }
+        f.write_str(") (pattern-orders")?;
+        for (source, orders) in &self.pattern_orders {
+            write!(f, " (pattern-order (source {source})")?;
+            for order in orders { f.write_str(" (bindings")?; for binding in order {write!(f," {binding}")?;} f.write_str(")")?; }
+            f.write_str(")")?;
+        }
+        f.write_str(") (pattern-transfers")?;
+        for (source, binding, path) in &self.pattern_transfers {
+            write!(f, " (pattern-transfer (source {source}) (binding {binding}) (fields")?;
+            for field in path { write!(f, " {field}")?; }
+            f.write_str("))")?;
+        }
+        f.write_str(") (copies")?;
+        for (source,place) in &self.copies {write!(f," (representation-copy (source {source}) {place})")?;}
+        f.write_str(") (cleanups")?;
+        for c in &self.cleanups {
+            write!(
+                f,
+                " (cleanup (source {}) {} {})",
+                c.source,
+                c.place,
+                match c.availability {
+                    Availability::Present => "present",
+                    Availability::Conditional => "conditional",
+                    Availability::Empty => "empty",
+                }
+            )?;
+        }
+        f.write_str(") (callable-parameters")?;
+        for parameter in &self.callable_parameters {
+            write!(f, " {parameter}")?;
+        }
+        f.write_str(") (enum-parameters")?;
+        for parameter in &self.enum_parameters { write!(f, " {parameter}")?; }
+        write!(f, ") (entry-steps-used {}) (exits", self.entry_steps_used)?;
+        for exit in &self.exits {
+            write!(f, " {exit}")?;
+        }
+        f.write_str(") (callable-exits")?;
+        for value in &self.callable_exits {
+            if let Some(value) = value {write!(f, " (known {value})")?;} else {f.write_str(" (unknown)")?;}
+        }
+        f.write_str(") (callable-candidate-exits")?;
+        for candidates in &self.callable_candidate_exits {
+            if let Some(candidates) = candidates {
+                f.write_str(" (candidates")?;
+                for candidate in candidates { write!(f," {candidate}")?; }
+                f.write_str(")")?;
+            } else { f.write_str(" (unknown)")?; }
+        }
+        f.write_str(") (callable-evidence-exits")?;
+        for evidence in &self.callable_evidence_exits {
+            if let Some(evidence) = evidence { write!(f, " {evidence}")?; }
+            else { f.write_str(" (unknown)")?; }
+        }
+        f.write_str(") (callable-field-exits")?;
+        for leaves in &self.callable_field_exits {
+            f.write_str(" (fields")?;
+            for (path, evidence) in leaves {
+                f.write_str(" (leaf (path")?;
+                display_callable_path(path, f)?;
+                write!(f, ") {evidence})")?;
+            }
+            f.write_str(")")?;
+        }
+        f.write_str(") (enum-variant-exits")?;
+        for domains in &self.enum_variant_exits {
+            f.write_str(" (domains")?;
+            for (path, tags) in domains {
+                f.write_str(" (domain (path")?;
+                display_callable_path(path, f)?;
+                f.write_str(") (tags")?;
+                for tag in tags { write!(f, " {tag}")?; }
+                f.write_str("))")?;
+            }
+            f.write_str(")")?;
+        }
+        f.write_str(") (captured-callable-exits")?;
+        for captures in &self.captured_callable_exits {
+            f.write_str(" (captures")?;
+            for (binding, evidence) in captures {
+                write!(f, " (capture {} {evidence})", CallablePlace(binding))?;
+            }
+            f.write_str(")")?;
+        }
+        f.write_str(") (captured-enum-exits")?;
+        for captures in &self.captured_enum_exits {
+            f.write_str(" (captures")?;
+            display_captured_enums(captures, f)?;
+            f.write_str(")")?;
+        }
+        f.write_str(") (failed-exits")?;
+        for exit in &self.failed_exits {
+            write!(f, " {exit}")?;
+        }
+        f.write_str(") (effect-exits")?;
+        for (id, is_break) in &self.lexical_loop_exits {
+            let kind = if *is_break { "handler-break" } else { "handler-continue" };
+            write!(f, " ({kind} (loop {} {}))", id.owner, id.index)?;
+        }
+        for value in &self.lexical_returns { write!(f, " {value}")?; }
+        for (source, state) in &self.effect_exits {
+            write!(f, " (effect-exit (source {source}) {state})")?;
+        }
+        f.write_str(") (temporary-cleanups")?;
+        for temporary in &self.temporaries {
+            write!(
+                f,
+                " (temporary (source {}) (type {}) {} (fields",
+                temporary.source, temporary.ty, temporary.scope
+            )?;
+            for index in &temporary.fields {
+                write!(f, " {index}")?;
+            }
+            f.write_str("))")?;
+        }
+        f.write_str(") (handlers")?;
+        for handler in &self.handlers { write!(f, " {handler}")?; }
+        f.write_str(") (closures")?;
+        for closure in &self.closures {
+            write!(f, " (closure (source {}) (captures", closure.source)?;
+            for capture in &closure.captures {
+                write!(f, " (local {} {})", capture.owner, capture.local)?;
+            }
+            write!(f, ") (invoked {}) (definition {}) (invocation {}))", closure.invoked, closure.definition, closure.invocation)?;
+        }
+        f.write_str(") (callee-temporaries")?;
+        for (root, source) in &self.callee_temporaries {
+            write!(
+                f,
+                " (callee-temporary (owner {}) (local {}) (source {}))",
+                root.owner, root.local, source
+            )?;
+        }
+        f.write_str(") (named-calls")?;
+        for call in &self.named_calls { write!(f, " {call}")?; }
+        f.write_str(") (named-candidate-calls")?;
+        for call in &self.named_candidate_calls { write!(f, " {call}")?; }
+        f.write_str(") (deferred-calls")?;
+        for source in &self.deferred_calls {
+            write!(f, " {source}")?;
+        }
+        f.write_str(") (loops")?;
+        for item in &self.loops {
+            write!(
+                f,
+                " (loop (source {}) (header {}) (breaks",
+                item.source, item.header
+            )?;
+            for exit in &item.breaks {
+                write!(f, " {exit}")?;
+            }
+            f.write_str("))")?;
+        }
+        f.write_str(") (call-preparations")?;
+        for call in &self.calls {
+            write!(
+                f,
+                " (call (source {}) (parameters {}))",
+                call.source, call.parameters
+            )?;
+        }
+        f.write_str(") (default-evaluations")?;
+        for default in &self.defaults {
+            write!(f, " {default}")?;
+        }
+        f.write_str(") (matches")?;
+        for item in &self.matches {
+            write!(f, " (match (source {}) (arms", item.source)?;
+            for arm in &item.arms {
+                write!(f, " (arm (pattern {}) (guards", arm.pattern)?;
+                for guard in &arm.guards {
+                    write!(f, " {guard}")?;
+                }
+                f.write_str(") (exit")?;
+                if let Some(exit) = &arm.exit {
+                    write!(f, " {exit}")?;
+                }
+                f.write_str("))")?;
+            }
+            f.write_str("))")?;
+        }
+        f.write_str(") (decompositions")?;
+        for item in &self.decompositions {
+            write!(
+                f,
+                " (decomposition (source {}) (type {}) (fields",
+                item.source, item.ty
+            )?;
+            for field in &item.fields {
+                write!(f, " {field}")?;
+            }
+            f.write_str(") (variant")?;
+            if let Some(variant) = item.variant {
+                write!(f, " {variant}")?;
+            }
+            f.write_str("))")?;
+        }
+        f.write_str(") (pattern-bindings")?;
+        for binding in &self.bindings {
+            write!(
+                f,
+                " (binding (source {}) (pattern {}) (guards",
+                binding.source, binding.pattern
+            )?;
+            for guard in &binding.guards {
+                write!(f, " {guard}")?;
+            }
+            write!(
+                f,
+                ") (success {}) (failure {}))",
+                binding.success, binding.failure
+            )?;
+        }
+        f.write_str(") (temporary-owners")?;
+        for owner in &self.temporary_owners {
+            write!(
+                f,
+                " (owner (source {}) (type {}) {} (remaining {}))",
+                owner.source, owner.ty, owner.scope, owner.remaining
+            )?;
+        }
+        f.write_str(") (cleanup-sites")?;
+        for site in &self.cleanup_sites {
+            write!(f, " {site}")?;
+        }
+        f.write_str(") (incomplete-cleanups")?;
+        for item in &self.incomplete {
+            write!(
+                f,
+                " (incomplete (exit {}) (construction {}) (values",
+                item.exit, item.construction
+            )?;
+            for value in &item.values {
+                write!(
+                    f,
+                    " (value (source {}) {} (type {}) (slot {}) (locals-before",
+                    value.source, value.scope, value.ty, value.slot
+                )?;
+                for local in &value.locals_before {
+                    write!(f, " (local {} {})", local.owner, local.local)?;
+                }
+                f.write_str("))")?;
+            }
+            f.write_str("))")?;
+        }
+        f.write_str("))")
+    }
+}
+impl Report {
+    fn append(&mut self, mut other: Report) {
+        self.transfers.append(&mut other.transfers);
+        self.copies.append(&mut other.copies);
+        self.pattern_transfers.append(&mut other.pattern_transfers);
+        self.pattern_orders.append(&mut other.pattern_orders);
+        self.cleanup_sites.append(&mut other.cleanup_sites);
+        self.incomplete.append(&mut other.incomplete);
+        self.cleanups.append(&mut other.cleanups);
+        self.exits.append(&mut other.exits);
+        self.callable_exits.append(&mut other.callable_exits);
+        self.callable_candidate_exits.append(&mut other.callable_candidate_exits);
+        self.callable_evidence_exits.append(&mut other.callable_evidence_exits);
+        self.callable_field_exits.append(&mut other.callable_field_exits);
+        self.enum_variant_exits.append(&mut other.enum_variant_exits);
+        self.captured_callable_exits.append(&mut other.captured_callable_exits);
+        self.captured_enum_exits.append(&mut other.captured_enum_exits);
+        self.failed_exits.append(&mut other.failed_exits);
+        self.effect_exits.append(&mut other.effect_exits);
+        self.lexical_returns.append(&mut other.lexical_returns);
+        self.lexical_loop_exits.append(&mut other.lexical_loop_exits);
+        self.temporaries.append(&mut other.temporaries);
+        self.temporary_owners.append(&mut other.temporary_owners);
+        self.closures.append(&mut other.closures);
+        self.handlers.append(&mut other.handlers);
+        self.loops.append(&mut other.loops);
+        self.calls.append(&mut other.calls);
+        self.deferred_calls.append(&mut other.deferred_calls);
+        self.named_calls.append(&mut other.named_calls);
+        self.named_candidate_calls.append(&mut other.named_candidate_calls);
+        self.callee_temporaries.append(&mut other.callee_temporaries);
+        self.defaults.append(&mut other.defaults);
+        self.matches.append(&mut other.matches);
+        self.decompositions.append(&mut other.decompositions);
+        self.bindings.append(&mut other.bindings);
+    }
+}
+#[derive(Clone)]
+struct LoopFrame {
+    temporary_floor: u64,
+    pending_depth: usize,
+    identity: LocalId,
+    roots: BTreeSet<PlaceId>,
+    breaks: Vec<Flow>,
+    continues: Vec<Flow>,
+}
+#[derive(Clone, PartialEq)]
+struct Callable {
+    choices: Vec<Callable>,
+    enum_captures: BTreeMap<PlaceId, EnumDomains>,
+    definition: Expr,
+    // Additional plain named targets, never alternative captured environments.
+    alternatives: Vec<Expr>,
+    generation: u64,
+    // Definition provenance is immutable; live capture availability comes from
+    // the nested owned positions imported at each invocation, never this tree.
+    captures: BTreeMap<Place, Callable>,
+}
+/// Values already prepared at their source evaluation points. Parameter slots
+/// are positional so different closure definitions can bind the same delivered
+/// arguments without evaluating source expressions again.
+#[derive(Clone)]
+struct ClosureArguments {
+    pointers: BTreeMap<usize, BTreeSet<Place>>,
+    callables: BTreeMap<usize, Callable>,
+    fields: BTreeMap<usize, BTreeMap<Vec<usize>, Callable>>,
+    domains: BTreeMap<usize, EnumDomains>,
+}
+#[derive(Clone, Debug, PartialEq)]
+struct ResidualLayout {
+    remaining: State,
+    variants: Vec<VariantSelection>,
+}
+#[derive(Clone, Debug, PartialEq)]
+struct ActiveTemporary {
+    alternatives: Vec<ResidualLayout>,
+    origins: ValueOrigins,
+    variants: Vec<VariantSelection>,
+    scope_id: u64,
+    description: TemporaryCleanup,
+    remaining: State,
+    presence: Availability,
+    locals_before: Vec<PlaceId>,
+}
+// A reserved, uninhabited target preserves uncertainty beside known alternatives.
+// Source locals use u32 owners; synthetic storage uses MAX through MAX-4.
+// MAX-6 similarly marks a target invalidated by retirement. Neither root is
+// ever declared, so neither can justify an access or a borrow premise.
+// Keeping it prevents an unknown branch from erasing a known escaping address.
+fn unknown_pointer_target() -> Place {
+    Place {root:PlaceId {owner:u64::MAX - 5,local:0},fields:vec![]}
+}
+fn invalidated_pointer_target() -> Place {
+    Place {root:PlaceId {owner:u64::MAX - 6,local:0},fields:vec![]}
+}
+// Known pointer leaves relative to the root of a value being delivered.
+// Missing leaves are unknown, not proof that the value has no dependencies.
+type ValueOrigins = BTreeMap<Vec<usize>, BTreeSet<Place>>;
+
+#[derive(Clone, Default)]
+struct Flow {
+    cleanup_before: BTreeMap<PlaceId, BTreeSet<PlaceId>>,
+    borrowed_scope: u64,
+    state: State,
+    roots: BTreeSet<PlaceId>,
+    order: Vec<PlaceId>,
+    types: BTreeMap<PlaceId, Term>,
+    temporaries: BTreeMap<u64, ActiveTemporary>,
+    callables: BTreeMap<PlaceId, Callable>,
+    callable_fields: BTreeMap<Place, Callable>,
+    value_callable: Option<Callable>,
+    // Construction transfers pointer-bearing capture paths with the closure.
+    // Consumed by evaluate_value_origins immediately after a closure expression.
+    constructed_capture_origins: ValueOrigins,
+    // Callable leaves of the value currently being delivered, relative to its root.
+    value_callables: BTreeMap<Vec<usize>, Callable>,
+    value_variants: EnumDomains,
+    enum_domains: BTreeMap<PlaceId, EnumDomains>,
+    pointers: BTreeMap<Place, BTreeSet<Place>>,
+    memory_exposed: bool,
+    live: bool,
+}
+fn root(local: LocalId) -> PlaceId {
+    PlaceId {
+        owner: u64::from(local.owner),
+        local: local.index,
+    }
+}
+fn error(source: SourceRange, reason: impl Into<String>) -> Error {
+    Error {
+        source,
+        reason: reason.into(),
+    }
+}
+/// An immutable-world binding arena. Acquisition is separate from planning;
+/// `plan` must only use choices previously captured by `acquire`.
+pub trait CleanupPolicy {
+    fn acquire(&mut self, ty: &Term, fuel: &mut usize) -> Result<(), String>;
+    fn plan(&mut self, ty: &Term, state: &State, place: &Place,
+        variants: &[VariantSelection], fuel: &mut usize) -> Result<super::drop::CleanupPlan, String>;
+    fn plan_with_memory(&mut self, ty: &Term, state: &State, place: &Place,
+        variants: &[VariantSelection], _pointers: Option<super::drop::PointerMemory<'_>>,
+        fuel: &mut usize) -> Result<super::drop::CleanupPlan, String> {
+        self.plan(ty, state, place, variants, fuel)
+    }
+
+}
+
+struct Analyzer<'a, F, G> {
+    cleanup: Option<&'a mut dyn CleanupPolicy>,
+    package: Option<&'a Package>,
+    exit_contract: Option<&'a Function>,
+    handler_result: Option<Term>,
+    effect_return_enabled: bool,
+    effect_return_values: Vec<std::sync::Arc<HandlerReturnValue>>,
+    effect_loop_targets: BTreeSet<(LocalId, bool)>,
+    rejection: super::rejection::Cache<'a>,
+    delivery: F,
+    shape: G,
+    fuel: usize,
+    report: Report,
+    persistent_roots: BTreeSet<PlaceId>,
+    captured_roots: BTreeSet<PlaceId>,
+    defer_unknown_calls: bool,
+    return_stack: Vec<(nir::DeclarationId, Vec<Term>)>,
+    next_generation: u64,
+    next_borrowed_pointer: u32,
+    next_borrowed_scope: u64,
+    borrowed_pointees: BTreeMap<(u64, Place), (PlaceId, Term)>,
+    temporary_scope: TemporaryScope,
+    temporary_scope_id: u64,
+    next_sequence: u64,
+    loops: Vec<LoopFrame>,
+    pending: Vec<PendingFrame>,
+}
+impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shape, String>>
+    Analyzer<'a, F, G>
+{
+    fn acquire_cleanup(&mut self, ty: &Term, source: SourceRange) -> Result<(), Error> {
+        if let Some(policy) = self.cleanup.as_mut() {
+            policy.acquire(ty, &mut self.fuel).map_err(|e| error(source, e))?;
+        }
+        Ok(())
+    }
+    fn check_contract_predicate(&mut self, condition: &Expr, flow: &mut Flow, depth: usize) -> Result<(), Error> {
+        if !flow.live { return Ok(()); }
+        if !nir::program::checkable_predicate(condition) {
+            return Err(error(condition.source, "invalid runtime predicate check"));
+        }
+        self.observe_guard(condition, flow, depth + 1)?;
+        match constant_bool(condition, 0) {
+            Some(true) => (),
+            Some(false) => self.exit(flow, condition.source, CleanupReason::PredicateFailure)?,
+            None => {
+                let mut failed = flow.clone();
+                self.exit(&mut failed, condition.source, CleanupReason::PredicateFailure)?;
+            }
+        }
+        Ok(())
+    }
+    fn join_pointer_origins<K: Ord + Clone>(&mut self, left: &mut BTreeMap<K, BTreeSet<Place>>,
+        right: &BTreeMap<K, BTreeSet<Place>>, source: SourceRange) -> Result<(), Error> {
+        self.fuel = self.fuel.checked_sub(left.len().saturating_add(right.len()))
+            .ok_or_else(|| error(source, "pointer origin join budget exhausted"))?;
+        for (key, targets) in left.iter_mut() {
+            if !right.contains_key(key) { targets.insert(unknown_pointer_target()); }
+        }
+        for (key, targets) in right {
+            self.pointer_work(targets, source)?;
+            match left.entry(key.clone()) {
+                std::collections::btree_map::Entry::Occupied(mut entry) => entry.get_mut().extend(targets.iter().cloned()),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    let mut targets = targets.clone();
+                    targets.insert(unknown_pointer_target());
+                    entry.insert(targets);
+                }
+            }
+        }
+        Ok(())
+    }
+    fn join_value_origins(
+        &mut self, ty: &Term, left: &mut ValueOrigins, left_tags: &EnumDomains,
+        right: &ValueOrigins, right_tags: &EnumDomains, source: SourceRange,
+    ) -> Result<(), Error> {
+        self.fuel = self.fuel.checked_sub(left.len().saturating_add(right.len()))
+            .ok_or_else(|| error(source, "value pointer origin join budget exhausted"))?;
+        for (path, targets) in left.iter_mut() {
+            if !right.contains_key(path) && origins::pointer_possible(
+                self.package, ty, path, right_tags, &mut vec![], &mut self.fuel, source, 0,
+            )? { targets.insert(unknown_pointer_target()); }
+        }
+        for (path, targets) in right {
+            self.pointer_work(targets, source)?;
+            if let Some(previous) = left.get_mut(path) { previous.extend(targets.iter().cloned()); }
+            else {
+                let mut targets = targets.clone();
+                if origins::pointer_possible(self.package, ty, path, left_tags, &mut vec![], &mut self.fuel, source, 0)? {
+                    targets.insert(unknown_pointer_target());
+                }
+                left.insert(path.clone(), targets);
+            }
+        }
+        Ok(())
+    }
+    fn check_scope_targets(&mut self, targets: &BTreeSet<Place>, retiring: &[PlaceId], source: SourceRange) -> Result<(), Error> {
+        self.pointer_work(targets, source)?;
+        for target in targets {
+            self.fuel = self.fuel.checked_sub(retiring.len().saturating_add(1))
+                .ok_or_else(|| error(source, "pointer escape check budget exhausted"))?;
+            if target.root == invalidated_pointer_target().root || retiring.contains(&target.root) {
+                return Err(error(source, "pointer target unavailable outside its local scope (escaping provenance)"));
+            }
+        }
+        Ok(())
+    }
+    fn check_scope_origins(&mut self, origins: &ValueOrigins, retiring: &[PlaceId], source: SourceRange) -> Result<(), Error> {
+        for (path, targets) in origins {
+            self.fuel = self.fuel.checked_sub(path.len().saturating_add(1))
+                .ok_or_else(|| error(source, "pointer escape check budget exhausted"))?;
+            self.check_scope_targets(targets, retiring, source)?;
+        }
+        Ok(())
+    }
+    fn check_return_origins(&mut self, flow: &Flow, origins: &ValueOrigins, source: SourceRange) -> Result<(), Error> {
+        if !flow.live { return Ok(()); }
+        self.fuel = self.fuel.checked_sub(flow.order.len())
+            .ok_or_else(|| error(source, "pointer escape check budget exhausted"))?;
+        let retiring: Vec<_> = flow.order.iter().filter(|id| !self.persistent_roots.contains(id)).copied().collect();
+        self.check_scope_origins(origins, &retiring, source)
+    }
+    fn check_function_result(&mut self, flow: &mut Flow, origins: ValueOrigins, source: SourceRange, depth: usize) -> Result<(), Error> {
+        let Some(function) = self.exit_contract else { return Ok(()); };
+        if !flow.live { return Ok(()); }
+        if function.postconditions.is_empty() { return self.check_return_origins(flow, &origins, source); }
+        let Term::Function {result,..} = function.signature.callable_signature() else {
+            return Err(error(source, "missing result signature"));
+        };
+        let result=if let Term::Computation {result,..}=result.as_ref() {result} else {result};
+        for targets in origins.values() { self.pointer_work(targets, source)?; }
+        let delivered_origins = origins.clone();
+        let first_site = self.report.cleanup_sites.len();
+        if let Some(binding) = function.result_binding {
+            self.declare(flow, binding, result, source)?;
+            self.install_value_origins(flow, &Place {root:root(binding),fields:vec![]}, origins, source)?;
+            for condition in &function.postconditions {
+                self.check_contract_predicate(condition, flow, depth + 1)?;
+            }
+            if flow.live {
+                // Only after all checks succeed does the result leave this frame.
+                flow.state.take(&Place {root:root(binding),fields:vec![]})
+                    .map_err(|e| error(source, format!("result transfer: {e:?}")))?;
+                self.remove_local(flow, root(binding), source)?;
+            }
+        } else {
+            self.pending_frame(source, |this| {
+                // An unnamed owned result still exists during the postchecks.
+                let value = Expr {source,ty:(**result).clone(),kind:K::Unit};
+                this.remember_pending_origins(&value, 0, flow, origins)?;
+                for condition in &function.postconditions {
+                    this.check_contract_predicate(condition, flow, depth + 1)?;
+                }
+                Ok(())
+            })?;
+        }
+        for site in &mut self.report.cleanup_sites[first_site..] {site.result_origin = Some(source);}
+        self.check_return_origins(flow, &delivered_origins, source)
+    }
+    fn sequence(&mut self, source: SourceRange) -> Result<u64, Error> {
+        let sequence = self.next_sequence;
+        self.next_sequence = sequence
+            .checked_add(1)
+            .ok_or_else(|| error(source, "cleanup sequence exhausted"))?;
+        Ok(sequence)
+    }
+    fn retain_temporary(
+        &mut self,
+        description: TemporaryCleanup,
+        state: State,
+        origins: ValueOrigins,
+        flow: &mut Flow,
+    ) -> Result<(), Error> {
+        self.acquire_cleanup(&description.ty, description.source)?;
+        let id = self.sequence(description.source)?;
+        flow.temporaries.insert(
+            id,
+            ActiveTemporary {
+                alternatives: vec![],
+                origins,
+                variants: vec![],
+                scope_id: self.temporary_scope_id,
+                description,
+                remaining: state,
+                presence: Availability::Present,
+                locals_before: flow.order.clone(),
+            },
+        );
+        Ok(())
+    }
+    fn temporary_component(
+        &mut self,
+        ty: &Term,
+        source: SourceRange,
+        fields: &[usize],
+        origins: ValueOrigins,
+        flow: &mut Flow,
+    ) -> Result<(), Error> {
+        if *ty == Term::Primitive(nir::Primitive::Void) {
+            return Ok(());
+        }
+        let description = TemporaryCleanup {
+            scope: self.temporary_scope,
+            source,
+            ty: ty.clone(),
+            fields: fields.to_vec(),
+        };
+        let mut state = State::default();
+        flow.memory_exposed |= matches!(ty, Term::Pointer(_));
+        let shape = (self.shape)(ty).map_err(|e| error(source, e))?;
+        state
+            .declare(
+                PlaceId {
+                    owner: u64::MAX,
+                    local: 0,
+                },
+                &shape,
+                true,
+                &mut self.fuel,
+            )
+            .map_err(|e| error(source, format!("temporary shape: {e:?}")))?;
+        self.report.temporaries.push(description.clone());
+        self.retain_temporary(description, state, origins, flow)
+    }
+    fn temporary_action(
+        &mut self,
+        identity: u64,
+        temporary: &ActiveTemporary,
+        flow: &Flow,
+        retired: &[Place],
+        source: SourceRange,
+    ) -> Result<CleanupAction, Error> {
+        if temporary.alternatives.is_empty() {
+            return self.temporary_layout_action(identity, temporary, &temporary.remaining, &temporary.variants, flow, retired, source);
+        }
+        let mut actions = vec![];
+        actions.push(self.temporary_layout_action(identity, temporary, &temporary.remaining, &temporary.variants, flow, retired, source)?);
+        for layout in &temporary.alternatives {
+            actions.push(self.temporary_layout_action(identity, temporary, &layout.remaining, &layout.variants, flow, retired, source)?);
+        }
+        if self.cleanup.is_none() { return Ok(CleanupAction::Alternatives(actions)); }
+        let mut candidates = vec![];
+        let mut plans = vec![];
+        for action in actions {
+            let CleanupAction::Planned { candidate, plan } = action else {
+                return Err(error(source, "residual layout lacks a checked cleanup plan"));
+            };
+            candidates.push(*candidate);
+            plans.push(*plan);
+        }
+        let plan = super::drop::CleanupPlan {
+            receiver: plans[0].receiver.clone(), initial: None, variants: vec![],
+            steps: vec![super::drop::CleanupStep::SelectVariantPlan { plans }],
+        };
+        // The executable target is one retained subject. Every layout's
+        // initial tree and exact tag premises remain in the nested plans.
+        Ok(CleanupAction::Planned {
+            candidate: Box::new(CleanupAction::Alternatives(candidates)), plan: Box::new(plan),
+        })
+    }
+    fn temporary_layout_action(
+        &mut self, identity: u64, temporary: &ActiveTemporary,
+        state: &State, variants: &[VariantSelection], flow: &Flow,
+        retired: &[Place], source: SourceRange,
+    ) -> Result<CleanupAction, Error> {
+        let remaining = state
+            .cleanup_tree(
+                &Place {
+                    root: PlaceId {
+                        owner: u64::MAX,
+                        local: 0,
+                    },
+                    fields: vec![],
+                },
+                &mut self.fuel,
+            )
+            .map_err(|e| error(source, format!("temporary cleanup: {e:?}")))?
+            .ok_or_else(|| error(source, "temporary has no remaining owner"))?;
+        let candidate = CleanupAction::Temporary {
+            identity,
+            temporary: temporary.description.clone(),
+            presence: temporary.presence,
+            variants: variants.to_vec(),
+            remaining,
+        };
+        // Presence is external to the per-instance remaining-state plan.
+        // Executable lowering must guard conditional instances by retained storage.
+        self.plan_retained_action(candidate, &temporary.description.ty, state,
+            variants, &temporary.origins, flow, retired, source)
+    }
+    fn plan_retained_action(&mut self, candidate: CleanupAction, ty: &Term,
+        remaining: &State, variants: &[VariantSelection], origins: &ValueOrigins,
+        flow: &Flow, retired: &[Place], source: SourceRange) -> Result<CleanupAction, Error> {
+        let place = Place {root:PlaceId {owner:u64::MAX,local:0}, fields:vec![]};
+        let Some(policy) = self.cleanup.as_mut() else { return Ok(candidate); };
+        // Retained ownership is relative to the canonical temporary root;
+        // pointee validity comes from the current surrounding frame.
+        let mut state = flow.state.join(&flow.state, &mut self.fuel)
+            .map_err(|e| error(source, format!("temporary memory snapshot: {e:?}")))?;
+        state.import_position(place.root, remaining, &place, &mut self.fuel)
+            .map_err(|e| error(source, format!("temporary memory import: {e:?}")))?;
+        let mut types = BTreeMap::new();
+        for (root, ty) in &flow.types {
+            super::memory::bound_type(ty, &mut self.fuel).map_err(|e| error(source, e))?;
+            types.insert(*root, ty.clone());
+        }
+        types.insert(place.root, ty.clone());
+        let mut slots = BTreeMap::new();
+        for (slot, targets) in &flow.pointers {
+            let cost = targets.iter().fold(slot.fields.len().saturating_add(1),
+                |cost, target| cost.saturating_add(target.fields.len()).saturating_add(1));
+            self.fuel = self.fuel.checked_sub(cost).ok_or_else(|| error(source, "temporary pointer snapshot budget exhausted"))?;
+            slots.insert(slot.clone(), targets.clone());
+        }
+        for (fields, targets) in origins {
+            let cost = targets.iter().fold(fields.len().saturating_add(1),
+                |cost, target| cost.saturating_add(target.fields.len()).saturating_add(1));
+            self.fuel = self.fuel.checked_sub(cost).ok_or_else(|| error(source, "temporary pointer origin budget exhausted"))?;
+            slots.insert(Place {root:place.root, fields:fields.clone()}, targets.clone());
+        }
+        let plan = policy.plan_with_memory(ty, &state, &place,
+            variants, Some(super::drop::PointerMemory {types:&types, slots:&slots, retired}), &mut self.fuel)
+            .map_err(|e| error(source, e))?;
+        Ok(CleanupAction::Planned {candidate:Box::new(candidate), plan:Box::new(plan)})
+    }
+    fn finish_temporaries(
+        &mut self,
+        flow: &mut Flow,
+        source: SourceRange,
+        scope_id: u64,
+    ) -> Result<(), Error> {
+        let ids: Vec<_> = flow
+            .temporaries
+            .iter()
+            .rev()
+            .filter(|(_, t)| t.scope_id == scope_id)
+            .map(|(id, _)| *id)
+            .collect();
+        let mut actions = vec![];
+        for id in &ids {
+            actions.push(self.temporary_action(*id, &flow.temporaries[id], flow, &[], source)?);
+        }
+        for id in ids {
+            flow.temporaries.remove(&id);
+        }
+        if !actions.is_empty() {
+            self.report.cleanup_sites.push(CleanupSite {
+                default_origin: None,
+                result_origin: None,
+                interface_precondition: false,
+                source,
+                reason: CleanupReason::TemporaryEnd,
+                actions,
+            });
+        }
+        Ok(())
+    }
+    fn owned_action(
+        &mut self,
+        state: &State,
+        place: Place,
+        ty: &Term,
+        pointers: super::drop::PointerMemory<'_>,
+        source: SourceRange,
+    ) -> Result<Option<CleanupAction>, Error> {
+        let Some(remaining) = state.cleanup_tree(&place, &mut self.fuel)
+            .map_err(|e| error(source, format!("cleanup hierarchy: {e:?}")))? else { return Ok(None); };
+        let candidate = CleanupAction::Owned {ty:ty.clone(),remaining};
+        let Some(policy) = self.cleanup.as_mut() else { return Ok(Some(candidate)); };
+        let plan = policy.plan_with_memory(ty, state, &place, &[], Some(pointers), &mut self.fuel)
+            .map_err(|e| error(source, e))?;
+        Ok(Some(CleanupAction::Planned {candidate: Box::new(candidate), plan: Box::new(plan)}))
+    }
+
+    fn local_action(
+        &mut self,
+        flow: &Flow,
+        id: PlaceId,
+        retired: &[Place],
+        source: SourceRange,
+    ) -> Result<Option<CleanupAction>, Error> {
+        let ty = flow
+            .types
+            .get(&id)
+            .ok_or_else(|| error(source, "missing cleanup local type"))?;
+        let mut possible_retired = retired.to_vec();
+        if let Some(before) = flow.cleanup_before.get(&id) {
+            self.fuel = self.fuel.checked_sub(before.len().saturating_add(1))
+                .ok_or_else(|| error(source, "conditional cleanup dependency budget exhausted"))?;
+            possible_retired.extend(before.iter().map(|id| Place {root: *id, fields: vec![]}));
+        }
+        self.owned_action(
+            &flow.state,
+            Place {
+                root: id,
+                fields: vec![],
+            },
+            ty,
+            super::drop::PointerMemory {types: &flow.types, slots: &flow.pointers, retired: &possible_retired},
+            source,
+        )
+    }
+    fn cleanup_exit(
+        &mut self,
+        flow: &mut Flow,
+        locals: Vec<PlaceId>,
+        pending_depth: usize,
+        temporary_floor: u64,
+        source: SourceRange,
+        reason: CleanupReason,
+    ) -> Result<(), Error> {
+        let mut events: Vec<_> = self.pending[pending_depth..]
+            .iter()
+            .flat_map(|frame| {
+                frame.values.iter().map(|value| {
+                    (
+                        value.sequence,
+                        value.locals_before.clone(),
+                        Some(CleanupAction::Prepared {
+                            construction: frame.source,
+                            value: value.clone(),
+                        }),
+                    )
+                })
+            })
+            .collect();
+        let temp_ids: Vec<_> = flow
+            .temporaries
+            .range(temporary_floor..)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &temp_ids {
+            let temporary = &flow.temporaries[id];
+            events.push((
+                *id,
+                temporary.locals_before.clone(),
+                None,
+            ));
+        }
+        events.sort_by_key(|(id, _, _)| std::cmp::Reverse(*id));
+        let mut locals = locals;
+        let mut actions = vec![];
+        let mut retired = vec![];
+        for (identity, anchors, action) in events {
+            while locals.last().is_some_and(|id| !anchors.contains(id)) {
+                let id = locals.pop().unwrap();
+                if let Some(local) = self.local_action(flow, id, &retired, source)? { actions.push(local); }
+                retired.push(Place {root:id, fields:vec![]});
+            }
+            let mut action = match action {
+                Some(action) => action,
+                None => self.temporary_action(identity, &flow.temporaries[&identity], flow, &retired, source)?,
+            };
+            if self.cleanup.is_some() {
+                if let CleanupAction::Prepared {value,..} = &action {
+                    let ty = value.ty.clone();
+                    let shape = (self.shape)(&ty).map_err(|e| error(source,e))?;
+                    let place = Place {root:PlaceId {owner:u64::MAX,local:0},fields:vec![]};
+                    let mut state = State::default();
+                    state.declare(place.root,&shape,true,&mut self.fuel)
+                        .map_err(|e| error(source,format!("prepared cleanup shape: {e:?}")))?;
+                    let origins = self.pending.iter().find_map(|frame| frame.origins.get(&value.sequence))
+                        .cloned().unwrap_or_default();
+                    action = self.plan_retained_action(action,&ty,&state,&[],&origins,flow,&retired,source)?;
+                }
+            }
+            actions.push(action);
+        }
+        for id in locals.into_iter().rev() {
+            if let Some(action) = self.local_action(flow, id, &retired, source)? {
+                actions.push(action);
+            }
+            retired.push(Place {root: id, fields: vec![]});
+        }
+        for id in temp_ids {
+            flow.temporaries.remove(&id);
+        }
+        if !actions.is_empty() {
+            self.report.cleanup_sites.push(CleanupSite {
+                default_origin: None,
+                result_origin: None,
+                interface_precondition: false,
+                source,
+                reason,
+                actions,
+            });
+        }
+        Ok(())
+    }
+    fn pending_frame<T>(
+        &mut self,
+        source: SourceRange,
+        run: impl FnOnce(&mut Self) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        self.pending.push(PendingFrame {
+            origins: BTreeMap::new(),
+            source,
+            values: vec![],
+        });
+        let result = run(self);
+        self.pending.pop().expect("active preparation frame");
+        result
+    }
+    fn remember_pending_origins(&mut self, expr: &Expr, slot: usize, flow: &Flow,
+        origins: ValueOrigins) -> Result<(), Error> {
+        let ty = completion_type(&expr.ty);
+        if flow.live && *ty != Term::Primitive(nir::Primitive::Void) {
+            self.acquire_cleanup(ty, expr.source)?;
+            for (path, targets) in &origins {
+                self.fuel = self.fuel.checked_sub(path.len().saturating_add(1))
+                    .ok_or_else(|| error(expr.source, "prepared pointer origin budget exhausted"))?;
+                self.pointer_work(targets, expr.source)?;
+            }
+            let sequence = self.sequence(expr.source)?;
+            self.pending.last_mut().expect("active preparation frame").origins.insert(sequence, origins);
+            self.pending
+                .last_mut()
+                .expect("active preparation frame")
+                .values
+                .push(PendingValue {
+                    sequence,
+                    source: expr.source,
+                    scope: self.temporary_scope,
+                    ty: ty.clone(),
+                    slot,
+                    locals_before: flow.order.clone(),
+                });
+        }
+        Ok(())
+    }
+    fn incomplete_exit(&mut self, source: SourceRange, depth: usize) {
+        // Observation only: conditional exits must not consume sibling paths'
+        // preparation state. Loop edges preserve frames outside their loop.
+        for frame in self.pending[depth..].iter().rev() {
+            if !frame.values.is_empty() {
+                self.report.incomplete.push(IncompleteCleanup {
+                    exit: source,
+                    construction: frame.source,
+                    values: frame.values.iter().rev().cloned().collect(),
+                });
+            }
+        }
+    }
+    fn check_interface_preparation(
+        &mut self,
+        callee: &Expr,
+        flow: &Flow,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        if !flow.live {
+            return Ok(());
+        }
+        let K::TraitMethod {
+            interface, member, ..
+        } = &callee.kind
+        else {
+            return Ok(());
+        };
+        let package = self
+            .package
+            .ok_or_else(|| error(source, "interface preparation requires a package"))?;
+        let contract = package
+            .traits
+            .iter()
+            .find(|t| t.declaration == *interface)
+            .and_then(|t| t.methods.iter().find(|m| m.declaration == *member))
+            .ok_or_else(|| error(source, "interface preparation lacks its method contract"))?;
+        if contract
+            .program
+            .preconditions
+            .iter()
+            .any(|condition| constant_bool(condition, 0) != Some(true))
+        {
+            let mut failed = flow.clone();
+            let first = self.report.cleanup_sites.len();
+            self.exit(&mut failed, source, CleanupReason::PredicateFailure)?;
+            for site in &mut self.report.cleanup_sites[first..] {
+                site.interface_precondition = true;
+            }
+        }
+        Ok(())
+    }
+    fn prepare_values<'b>(
+        &mut self,
+        source: SourceRange,
+        values: impl IntoIterator<Item = (usize, &'b Expr)>,
+        flow: &mut Flow,
+        depth: usize,
+    ) -> Result<(), Error> {
+        self.pending_frame(source, |this| {
+            for (slot, value) in values {
+                let origins = this.evaluate_value_origins(value, flow, depth + 1)?;
+                if !flow.live {
+                    break;
+                }
+                this.remember_pending_origins(value, slot, flow, origins)?;
+            }
+            Ok(())
+        })
+    }
+    fn in_temporary_scope<T>(
+        &mut self,
+        source: SourceRange,
+        boundary: TemporaryBoundary,
+        flow: &mut Flow,
+        run: impl FnOnce(&mut Self, &mut Flow) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let id = self.sequence(source)?;
+        let previous_id = std::mem::replace(&mut self.temporary_scope_id, id);
+        let previous = std::mem::replace(
+            &mut self.temporary_scope,
+            TemporaryScope { source, boundary },
+        );
+        let result = run(self, flow);
+        let cleanup = if result.is_ok() && flow.live {
+            self.finish_temporaries(flow, source, id)
+        } else {
+            Ok(())
+        };
+        self.temporary_scope = previous;
+        self.temporary_scope_id = previous_id;
+        result.and_then(|value| {
+            cleanup?;
+            Ok(value)
+        })
+    }
+    fn full_expression(&mut self, expr: &Expr, flow: &mut Flow, depth: usize) -> Result<(), Error> {
+        self.in_temporary_scope(
+            expr.source,
+            TemporaryBoundary::FullExpression,
+            flow,
+            |this, flow| {
+                let origins = this.evaluate_value_origins(expr, flow, depth)?;
+                if flow.live {
+                    this.temporary(expr, origins, flow)?;
+                }
+                Ok(())
+            },
+        )
+    }
+    fn fresh_borrowed_scope(&mut self, source: SourceRange) -> Result<u64, Error> {
+        let scope = self.next_borrowed_scope;
+        self.next_borrowed_scope = scope.checked_add(1)
+            .ok_or_else(|| error(source, "borrowed context identity exhausted"))?;
+        Ok(scope)
+    }
+    fn complete_borrowed_premises(&mut self, flow: &mut Flow, source: SourceRange) -> Result<(), Error> {
+        // These are conditional validity premises, not local acquisitions.
+        // Every caller must discharge the complete body-derived footprint.
+        for ((scope, slot), (pointee, subject)) in &self.borrowed_pointees {
+            self.fuel = self.fuel.checked_sub(slot.fields.len().saturating_add(1))
+                .ok_or_else(|| error(source, "borrowed premise join budget exhausted"))?;
+            if *scope != flow.borrowed_scope { continue; }
+            if let Some(actual) = flow.types.get(pointee) {
+                if actual != subject { return Err(error(source, "borrowed pointer premise changed type")); }
+            } else {
+                super::memory::bound_type(subject, &mut self.fuel).map_err(|e| error(source, e))?;
+                let shape = (self.shape)(subject).map_err(|e| error(source, e))?;
+                flow.state.declare(*pointee, &shape, true, &mut self.fuel)
+                    .map_err(|e| error(source, format!("borrowed premise join shape: {e:?}")))?;
+                flow.types.insert(*pointee, subject.clone());
+            }
+            flow.pointers.entry(slot.clone()).or_insert_with(||
+                BTreeSet::from([Place {root:*pointee, fields:vec![]} ]));
+        }
+        Ok(())
+    }
+    fn join_flow(
+        &mut self,
+        left: &mut Flow,
+        right: &Flow,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        if left.borrowed_scope != right.borrowed_scope || left.order != right.order {
+            return Err(error(source, "ownership scope declaration order mismatch"));
+        }
+        self.complete_borrowed_premises(left, source)?;
+        self.fuel = self.fuel.checked_sub(self.borrowed_pointees.len())
+            .ok_or_else(|| error(source, "borrowed premise join budget exhausted"))?;
+        let needs_completion = self.borrowed_pointees.iter().any(|((scope, slot), (pointee, _))|
+            *scope == right.borrowed_scope && (!right.types.contains_key(pointee) || !right.pointers.contains_key(slot)));
+        let completed_right;
+        let right = if needs_completion {
+            for ty in right.types.values() { super::memory::bound_type(ty, &mut self.fuel).map_err(|e| error(source, e))?; }
+            for targets in right.pointers.values() { self.pointer_work(targets, source)?; }
+            let mut completed = right.clone();
+            self.complete_borrowed_premises(&mut completed, source)?;
+            completed_right = completed;
+            &completed_right
+        } else { right };
+        if left.types != right.types {
+            return Err(error(source, "ownership scope declaration order mismatch"));
+        }
+        left.state = left
+            .state
+            .join(&right.state, &mut self.fuel)
+            .map_err(|e| error(source, format!("ownership join: {e:?}")))?;
+        left.value_callable = match (&left.value_callable, &right.value_callable) {
+            (Some(a), Some(b))
+                if same_callable_definition(&a.definition, &b.definition)
+                    && a.choices == b.choices && a.alternatives == b.alternatives
+                    && a.captures == b.captures && a.enum_captures == b.enum_captures =>
+            {
+                Some(a.clone())
+            }
+            (Some(a), Some(b)) => merge_callable_provenance(a, b, &mut self.fuel, source, 0)?,
+            _ => None,
+        };
+        left.value_callables = join_guarded_callables(
+            &left.value_callables, &right.value_callables, &left.value_variants, &right.value_variants,
+            &mut self.fuel, source,
+        )?;
+        left.value_variants = join_enum_domains(&left.value_variants, &right.value_variants, &mut self.fuel, source)?;
+        left.memory_exposed |= right.memory_exposed;
+        for (id, before) in &right.cleanup_before {
+            self.fuel = self.fuel.checked_sub(before.len().saturating_add(1))
+                .ok_or_else(|| error(source, "conditional cleanup order budget exhausted"))?;
+            left.cleanup_before.entry(*id).or_default().extend(before);
+        }
+        self.join_pointer_origins(&mut left.pointers, &right.pointers, source)?;
+        let mut callables = BTreeMap::new();
+        for (id, value) in &left.callables {
+            if let Some(other) = right.callables.get(id) {
+                let merged = if value == other {
+                    Some(value.clone())
+                } else {
+                    merge_callable_provenance(value, other, &mut self.fuel, source, 0)?
+                };
+                if let Some(merged) = merged {
+                    callables.insert(*id, merged);
+                }
+            }
+        }
+        left.callables = callables;
+        let mut fields = BTreeMap::new();
+        let mut domains = BTreeMap::new();
+        let unknown = EnumDomains::new();
+        let empty_fields = BTreeMap::new();
+        let left_fields = group_owned_callables(&left.callable_fields, &mut self.fuel, source)?;
+        let right_fields = group_owned_callables(&right.callable_fields, &mut self.fuel, source)?;
+        for root in &left.roots {
+            let a = left_fields.get(root).unwrap_or(&empty_fields);
+            let b = right_fields.get(root).unwrap_or(&empty_fields);
+            let at = left.enum_domains.get(root).unwrap_or(&unknown);
+            let bt = right.enum_domains.get(root).unwrap_or(&unknown);
+            for (path, callable) in join_guarded_callables(a, b, at, bt, &mut self.fuel, source)? {
+                fields.insert(Place { root: *root, fields: path }, callable);
+            }
+            let joined = join_enum_domains(at, bt, &mut self.fuel, source)?;
+            if !joined.is_empty() { domains.insert(*root, joined); }
+        }
+        left.callable_fields = fields;
+        left.enum_domains = domains;
+        for (id, temporary) in &mut left.temporaries {
+            match right.temporaries.get(id) {
+                Some(other) => {
+                    if temporary.scope_id != other.scope_id
+                        || temporary.description != other.description
+                        || temporary.remaining != other.remaining
+                        || temporary.alternatives != other.alternatives
+                        || temporary.locals_before != other.locals_before
+                        || temporary.variants != other.variants
+                        || temporary.origins != other.origins
+                    {
+                        return Err(error(source, "temporary identity has inconsistent state"));
+                    }
+                    if temporary.presence != other.presence {
+                        temporary.presence = Availability::Conditional;
+                    }
+                }
+                None => temporary.presence = Availability::Conditional,
+            }
+        }
+        for (id, temporary) in &right.temporaries {
+            if !left.temporaries.contains_key(id) {
+                let mut temporary = temporary.clone();
+                temporary.presence = Availability::Conditional;
+                left.temporaries.insert(*id, temporary);
+            }
+        }
+        Ok(())
+    }
+    fn loop_edge(
+        &mut self,
+        identity: LocalId,
+        is_break: bool,
+        flow: &mut Flow,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        let index = self.loops.iter().rposition(|frame| frame.identity == identity);
+        let Some(index) = index else {
+            if self.handler_result.is_none() {
+                return Err(error(source, "ownership loop target is not active"));
+            }
+            self.report.lexical_loop_exits.insert((identity, is_break));
+            // The handler owns only its private arm storage. The lexical
+            // target's loop boundary is discharged at the suspended installer.
+            self.exit(flow, source, if is_break { CleanupReason::Break } else { CleanupReason::Continue })?;
+            return Ok(());
+        };
+        self.incomplete_exit(source, self.loops[index].pending_depth);
+        let locals: Vec<_> = flow
+            .order
+            .iter()
+            .rev()
+            .filter(|id| !self.loops[index].roots.contains(id))
+            .copied()
+            .collect();
+        self.cleanup_exit(
+            flow,
+            locals.iter().rev().copied().collect(),
+            self.loops[index].pending_depth,
+            self.loops[index].temporary_floor,
+            source,
+            if is_break {
+                CleanupReason::Break
+            } else {
+                CleanupReason::Continue
+            },
+        )?;
+        for local in locals {
+            self.remove_local(flow, local, source)?;
+        }
+        let edge = flow.clone();
+        if is_break {
+            self.loops[index].breaks.push(edge);
+        } else {
+            self.loops[index].continues.push(edge);
+        }
+        flow.live = false;
+        Ok(())
+    }
+    fn loop_body(
+        &mut self,
+        identity: LocalId,
+        body: &Expr,
+        flow: &mut Flow,
+        source: SourceRange,
+        depth: usize,
+    ) -> Result<(), Error> {
+        let entry = flow.clone();
+        let mut header = entry.clone();
+        let enclosing_loops = self.loops.clone();
+        loop {
+            if self.fuel == 0 || depth > 128 {
+                return Err(error(source, "ownership loop fixed point budget exhausted"));
+            }
+            self.fuel -= 1;
+            // Speculative rounds must not publish cleanup or nonlocal edges.
+            self.loops = enclosing_loops.clone();
+            self.loops.push(LoopFrame {
+                temporary_floor: self.next_sequence,
+                pending_depth: self.pending.len(),
+                identity,
+                roots: header.roots.clone(),
+                breaks: vec![],
+                continues: vec![],
+            });
+            let outer_report = std::mem::take(&mut self.report);
+            let mut current = header.clone();
+            let result = self.in_temporary_scope(
+                body.source,
+                TemporaryBoundary::FullExpression,
+                &mut current,
+                |this, current| {
+                    let origins = this.scope_origins(body, current, depth + 1)?;
+                    if current.live {
+                        this.temporary(body, origins, current)?;
+                    }
+                    Ok(())
+                },
+            );
+            let mut iteration = std::mem::replace(&mut self.report, outer_report);
+            let mut frame = self.loops.pop().expect("active loop frame");
+            result?;
+            if current.live {
+                frame.continues.push(current);
+            }
+            let mut next = entry.clone();
+            for back in &frame.continues {
+                self.join_flow(&mut next, back, source)?;
+            }
+            if next.state != header.state
+                || next.memory_exposed != header.memory_exposed
+                || next.pointers != header.pointers
+                || next.enum_domains != header.enum_domains
+                || next.callable_fields != header.callable_fields
+                || next.callables != header.callables
+                || next.temporaries != header.temporaries
+                || next.cleanup_before != header.cleanup_before
+            {
+                header = next;
+                continue;
+            }
+            iteration.loops.push(LoopReport {
+                source,
+                header: header.state,
+                breaks: frame.breaks.iter().map(|f| f.state.clone()).collect(),
+            });
+            self.report.append(iteration);
+            let mut breaks = frame.breaks.into_iter();
+            if let Some(mut exit) = breaks.next() {
+                for other in breaks {
+                    self.join_flow(&mut exit, &other, source)?;
+                }
+                *flow = exit;
+            } else {
+                flow.live = false;
+            }
+            return Ok(());
+        }
+    }
+    fn store_callable(
+        &mut self,
+        flow: &mut Flow,
+        id: PlaceId,
+        mut callable: Callable,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        let generation = self.next_generation;
+        self.next_generation = generation
+            .checked_add(1)
+            .ok_or_else(|| error(source, "closure generation exhausted"))?;
+        callable.generation = if matches!(callable.definition.kind, K::Function(_) | K::FunctionInstance { .. }) {0} else {generation};
+        flow.callables.insert(id, callable);
+        Ok(())
+    }
+    fn forget_callable_fields(&mut self, flow: &mut Flow, destination: &Place, source: SourceRange) -> Result<(), Error> {
+        let mut remove = vec![];
+        for place in flow.callable_fields.keys() {
+            self.fuel = self.fuel.checked_sub(place.fields.len().saturating_add(1))
+                .ok_or_else(|| error(source, "callable field budget exhausted"))?;
+            if place.root == destination.root && place.fields.starts_with(&destination.fields) {
+                remove.push(place.clone());
+            }
+        }
+        for place in remove { flow.callable_fields.remove(&place); }
+        if let Some(domains) = flow.enum_domains.get_mut(&destination.root) {
+            domains.retain(|path, _| !path.starts_with(&destination.fields));
+            if domains.is_empty() { flow.enum_domains.remove(&destination.root); }
+        }
+        Ok(())
+    }
+    fn install_enum_domains(&mut self, flow: &mut Flow, destination: &Place, domains: EnumDomains, source: SourceRange) -> Result<(), Error> {
+        let stored = flow.enum_domains.entry(destination.root).or_default();
+        stored.retain(|path, _| !path.starts_with(&destination.fields));
+        for (path, tags) in domains {
+            self.fuel = self.fuel.checked_sub(path.len().saturating_add(destination.fields.len()).saturating_add(tags.len()).saturating_add(1))
+                .ok_or_else(|| error(source, "enum domain storage budget exhausted"))?;
+            let mut nested = destination.fields.clone(); nested.extend(path);
+            stored.insert(nested, tags);
+        }
+        if stored.is_empty() { flow.enum_domains.remove(&destination.root); }
+        Ok(())
+    }
+    fn install_callable_fields(&mut self, flow: &mut Flow, destination: &Place,
+        leaves: BTreeMap<Vec<usize>, Callable>, source: SourceRange) -> Result<(), Error> {
+        self.forget_callable_fields(flow, destination, source)?;
+        for (path, mut callable) in leaves {
+            self.fuel = self.fuel.checked_sub(path.len().saturating_add(destination.fields.len()).saturating_add(1))
+                .ok_or_else(|| error(source, "callable field budget exhausted"))?;
+            let mut place = destination.clone();
+            place.fields.extend(path);
+            if place.fields.is_empty() { continue; }
+            if !matches!(callable.definition.kind, K::Function(_) | K::FunctionInstance { .. }) {
+                callable.generation = self.next_generation;
+                self.next_generation = self.next_generation.checked_add(1)
+                    .ok_or_else(|| error(source, "closure generation exhausted"))?;
+            }
+            flow.callable_fields.insert(place, callable);
+        }
+        Ok(())
+    }
+    fn field_type(&mut self, ty: &Term, path: &[usize], source: SourceRange) -> Result<Term, Error> {
+        owned_field_type(self.package, ty, path, &mut self.fuel, source)
+    }
+    fn project_temporary(
+        &mut self,
+        expr: &Expr,
+        flow: &mut Flow,
+        depth: usize,
+    ) -> Result<ValueOrigins, Error> {
+        let mut base = expr;
+        let mut path = vec![];
+        while let K::AnonymousField { value, index, .. } | K::Field { value, index, .. } = &base.kind {
+            if self.fuel == 0 || path.len() >= 128 {
+                return Err(error(expr.source, "temporary projection budget exhausted"));
+            }
+            self.fuel -= 1;
+            path.push(*index);
+            base = value;
+        }
+        path.reverse();
+        if path.is_empty() {
+            return Err(error(expr.source, "temporary projection has no field path"));
+        }
+        let field_type = self.field_type(&base.ty, &path, expr.source)?;
+        if field_type != expr.ty {
+            return Err(error(
+                expr.source,
+                "temporary projection field type mismatch",
+            ));
+        }
+        let origins = self.evaluate_value_origins(base, flow, depth + 1)?;
+        if !flow.live {
+            return Ok(BTreeMap::new());
+        }
+        let mut selected_callables = BTreeMap::new();
+        for (leaf, callable) in std::mem::take(&mut flow.value_callables) {
+            self.fuel = self.fuel.checked_sub(leaf.len().saturating_add(1))
+                .ok_or_else(|| error(expr.source, "callable projection budget exhausted"))?;
+            if leaf.starts_with(&path) {
+                selected_callables.insert(leaf[path.len()..].to_vec(), callable);
+            }
+        }
+        flow.value_callable = selected_callables.get(&vec![]).cloned();
+        flow.value_callables = selected_callables;
+        flow.value_variants = std::mem::take(&mut flow.value_variants).into_iter()
+            .filter_map(|(leaf, tags)| leaf.strip_prefix(path.as_slice()).map(|rest| (rest.to_vec(), tags))).collect();
+        let root = PlaceId {
+            owner: u64::MAX,
+            local: 0,
+        };
+        let shape = (self.shape)(&base.ty).map_err(|e| error(expr.source, e))?;
+        let mut state = State::default();
+        state
+            .declare(root, &shape, true, &mut self.fuel)
+            .map_err(|e| error(expr.source, format!("temporary shape: {e:?}")))?;
+        let selected = Place {
+            root,
+            fields: path.clone(),
+        };
+        state
+            .require_present(&selected)
+            .map_err(|e| error(expr.source, format!("temporary projection: {e:?}")))?;
+        if (self.delivery)(&expr.ty).map_err(|e| error(expr.source, e))? == Delivery::Move {
+            state
+                .take(&selected)
+                .map_err(|e| error(expr.source, format!("temporary field move: {e:?}")))?;
+        }
+        // Preserve the parent state as well as leaf responsibilities. A user
+        // destructor can inspect still-present siblings before automatic fields.
+        for (place, _) in state.remaining().into_iter().rev() {
+            let ty = self.field_type(&base.ty, &place.fields, expr.source)?;
+            self.report.temporaries.push(TemporaryCleanup {
+                scope: self.temporary_scope,
+                source: base.source,
+                ty,
+                fields: place.fields,
+            });
+        }
+        self.retain_temporary(
+            TemporaryCleanup {
+                scope: self.temporary_scope,
+                source: base.source,
+                ty: base.ty.clone(),
+                fields: vec![],
+            },
+            state.clone(),
+            origins.clone(),
+            flow,
+        )?;
+        self.report.temporary_owners.push(TemporaryOwner {
+            scope: self.temporary_scope,
+            source: base.source,
+            ty: base.ty.clone(),
+            remaining: state,
+        });
+        let mut selected_origins = BTreeMap::new();
+        for (leaf, targets) in origins {
+            self.fuel = self
+                .fuel
+                .checked_sub(leaf.len().saturating_add(1))
+                .ok_or_else(|| error(expr.source, "projection origin budget exhausted"))?;
+            if leaf.starts_with(&path) {
+                selected_origins.insert(leaf[path.len()..].to_vec(), targets);
+            }
+        }
+        Ok(selected_origins)
+    }
+    fn temporary(&mut self, expr: &Expr, origins: ValueOrigins, flow: &mut Flow) -> Result<(), Error> {
+        self.temporary_component(completion_type(&expr.ty), expr.source, &[], origins, flow)
+    }
+    fn declare(
+        &mut self,
+        flow: &mut Flow,
+        id: LocalId,
+        ty: &Term,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        self.acquire_cleanup(ty, source)?;
+        let shape = (self.shape)(ty).map_err(|e| error(source, e))?;
+        flow.state
+            .declare(root(id), &shape, true, &mut self.fuel)
+            .map_err(|e| error(source, format!("cannot establish local: {e:?}")))?;
+        flow.roots.insert(root(id));
+        flow.order.push(root(id));
+        flow.types.insert(root(id), ty.clone());
+        Ok(())
+    }
+    fn evaluate_default(
+        &mut self, argument: &nir::program::CallArgument, frame: &mut Flow,
+        caller: &mut Flow, depth: usize,
+    ) -> Result<(), Error> {
+        let construction=self.pending.last().ok_or_else(||error(argument.value.source,"default lacks its construction frame"))?.source;
+        let prepared = frame.roots.clone();
+        let outer_report = std::mem::take(&mut self.report);
+        let outer_pending = std::mem::take(&mut self.pending);
+        let outer_loops = std::mem::take(&mut self.loops);
+        let outer_contract = self.exit_contract.take();
+        let outer_handler = self.handler_result.take();
+        let outer_effect_return = std::mem::replace(&mut self.effect_return_enabled, false);
+        let outer_return_values = std::mem::take(&mut self.effect_return_values);
+        let outer_effect_loops = std::mem::take(&mut self.effect_loop_targets);
+        let outer_persistent = std::mem::replace(&mut self.persistent_roots, prepared.clone());
+        let result = self.in_temporary_scope(argument.value.source, TemporaryBoundary::DefaultArgument,
+            frame, |this, frame| this.scope(&argument.value, frame, depth + 1));
+        let evaluation = std::mem::replace(&mut self.report, outer_report);
+        self.pending = outer_pending;
+        self.loops = outer_loops;
+        self.exit_contract = outer_contract;
+        self.handler_result = outer_handler;
+        self.effect_return_enabled = outer_effect_return;
+        self.effect_return_values = outer_return_values;
+        self.effect_loop_targets = outer_effect_loops;
+        self.persistent_roots = outer_persistent;
+        result?;
+        if !evaluation.effect_exits.is_empty() {
+            return Err(error(argument.value.source, "effectful default requires caller escape routing"));
+        }
+        if !evaluation.exits.is_empty() || (!frame.live && evaluation.failed_exits.is_empty()) {
+            return Err(error(argument.value.source, "default argument nonlocal exit requires control transfer semantics"));
+        }
+        for failed in &evaluation.failed_exits {
+            for binding in &prepared {
+                failed.require_present(&Place {root:*binding,fields:vec![]}).map_err(|_| error(
+                    argument.value.source, "default failure consumed a prepared parameter"))?;
+            }
+            let mut failed_caller = caller.clone();
+            let first_site=self.report.cleanup_sites.len();
+            self.exit(&mut failed_caller, argument.value.source, CleanupReason::PredicateFailure)?;
+            for site in &mut self.report.cleanup_sites[first_site..] {
+                site.default_origin=Some((construction,argument.parameter));
+            }
+        }
+        self.report.defaults.push(DefaultEvaluation {
+            construction,
+            source:argument.value.source, parameter:argument.parameter, evaluation,
+        });
+        if !frame.live {caller.live=false;}
+        Ok(())
+    }
+    fn prepare_defaults(
+        &mut self,
+        callee: &Expr,
+        arguments: &[nir::program::CallArgument],
+        bindings: &[LocalId],
+        flow: &mut Flow,
+        source: SourceRange,
+        depth: usize,
+    ) -> Result<(), Error> {
+        let Term::Function { parameters, .. } = callee.ty.callable_signature() else {
+            return Err(error(source, "default call lacks a callable signature"));
+        };
+        if bindings.len() != parameters.len()
+            || arguments.len() != parameters.len()
+            || bindings.iter().collect::<BTreeSet<_>>().len() != bindings.len()
+        {
+            return Err(error(source, "invalid default parameter frame"));
+        }
+        let mut slots = BTreeSet::new();
+        let mut last_default = None;
+        for argument in arguments {
+            if argument.parameter >= bindings.len() || !slots.insert(argument.parameter) {
+                return Err(error(source, "invalid default argument slot"));
+            }
+            if argument.is_default {
+                if last_default.is_some_and(|last| last >= argument.parameter) {
+                    return Err(error(
+                        source,
+                        "default arguments are not in declaration order",
+                    ));
+                }
+                last_default = Some(argument.parameter);
+            } else if last_default.is_some() {
+                return Err(error(source, "explicit argument follows a default"));
+            }
+        }
+        let mut frame = Flow {
+            borrowed_scope: self.fresh_borrowed_scope(source)?,
+            live: true,
+            ..Default::default()
+        };
+        self.pending_frame(source, |this| {
+            for argument in arguments {
+                let mut origins = BTreeMap::new();
+                let callable = callable_source(&argument.value, if argument.is_default { &frame } else { flow }, &mut this.fuel)?;
+                if argument.is_default {
+                    this.evaluate_default(argument, &mut frame, flow, depth + 1)?;
+                    if !flow.live {return Ok(());}
+                } else {
+                    origins = this.evaluate_value_origins(&argument.value, flow, depth + 1)?;
+                    if !flow.live {
+                        return Ok(());
+                    }
+                }
+                let callable = (if argument.is_default {frame.value_callable.clone()} else {flow.value_callable.clone()}).or(callable);
+                let fields = if argument.is_default {frame.value_callables.clone()} else {flow.value_callables.clone()};
+                let domains = copy_enum_domains(if argument.is_default {&frame.value_variants} else {&flow.value_variants}, &mut this.fuel, source)?;
+                this.remember_pending_origins(&argument.value, argument.parameter, flow, origins)?;
+                this.declare(
+                    &mut frame,
+                    bindings[argument.parameter],
+                    &parameters[argument.parameter].ty,
+                    source,
+                )?;
+                if let Some(callable) = callable {
+                    this.store_callable(&mut frame, root(bindings[argument.parameter]), callable, source)?;
+                }
+                this.install_callable_fields(&mut frame, &Place {root:root(bindings[argument.parameter]),fields:vec![]}, fields, source)?;
+                this.install_enum_domains(&mut frame, &Place {root:root(bindings[argument.parameter]),fields:vec![]}, domains, source)?;
+            }
+            this.check_interface_preparation(callee, flow, source)
+        })?;
+        if !flow.live {
+            return Ok(());
+        }
+        for binding in bindings {
+            let parameter = Place {
+                root: root(*binding),
+                fields: vec![],
+            };
+            frame.state.require_present(&parameter).map_err(|_| error(source, format!("default preparation consumed a parameter still required by the call: {parameter}")))?;
+        }
+        if frame.memory_exposed || flow.memory_exposed {
+            return Err(error(
+                source,
+                "call with pointer dependencies requires a memory contract",
+            ));
+        }
+        // The complete frame is transferred to the callee, not cleaned as a
+        // temporary caller scope. No runtime representation copy is implied.
+        let mut callables = vec![];
+        let mut enums = vec![];
+        for (slot, binding) in bindings.iter().enumerate() {
+            if let Some(domains) = frame.enum_domains.get(&root(*binding)) {
+                record_enum_parameter(&mut enums, slot, domains, &mut self.fuel, source)?;
+            }
+            if let Some(callable) = frame.callables.get(&root(*binding)) {
+                callables.push(export_callable_parameter(slot, callable, &mut self.fuel)?);
+            }
+            for (place, value) in &frame.callable_fields {
+                if place.root == root(*binding) {
+                    let mut input = export_callable_parameter(slot, value, &mut self.fuel)?;
+                    input.fields = place.fields.clone();
+                    callables.push(input);
+                }
+            }
+        }
+        flow.value_callable = self.record_named_call(callee, callables, enums, source, flow)?;
+        self.report.calls.push(CallPreparation {
+            source,
+            parameters: frame.state,
+        });
+        Ok(())
+    }
+    // Reconstruct code provenance only where Copy preserves all captured
+    // positions and captured code cannot change after its construction snapshot.
+    // Runtime values and pointer origins never come from these descriptors.
+    fn returned_code_candidate(
+        &mut self, code:&super::memory::PreparedCode, ty:&Term,
+        source:SourceRange, depth:usize,
+    )->Result<Option<Callable>,Error> {
+        use super::memory::{PreparedCode,CallableResult,CallablePlace};
+        if depth>=64 || self.fuel==0 {return Err(error(source,"returned code evidence budget exhausted"));}
+        self.fuel-=1;
+        super::memory::bound_type(ty,&mut self.fuel).map_err(|e|error(source,e))?;
+        match code {
+            PreparedCode::Named(key)=>{
+                for argument in &key.arguments {super::memory::bound_type(argument,&mut self.fuel).map_err(|e|error(source,e))?;}
+                let definition=Expr {source,ty:ty.clone(),kind:if key.arguments.is_empty() {K::Function(key.declaration)} else {K::FunctionInstance {declaration:key.declaration,arguments:key.arguments.clone()}}};
+                validate_callable_input(self.package,&definition,&mut self.fuel,depth)?;
+                callable_source(&definition,&Flow::default(),&mut self.fuel)
+            }
+            PreparedCode::Closure {definition,captures:known,prepared_captures}=>{
+                if definition.ty!=*ty {return Ok(None);}
+                nir::visit::expression(definition,&mut self.fuel,|expr,fuel|super::memory::bound_type(&expr.ty,fuel)).map_err(|e|error(source,e))?;
+                let K::Closure {captures,body,..}=&definition.kind else {return Ok(None);};
+                let mut evidence=BTreeMap::new();
+                for capture in captures {
+                    if !recoverable_return_capture_layout(self.package,&capture.ty,&mut self.fuel,source,0)?
+                        || (self.delivery)(&capture.ty).map_err(|e|error(source,e))?!=Delivery::Copy {return Ok(None);}
+                    for fields in callable_value_paths(self.package,&capture.ty,&mut self.fuel,source,0)? {
+                        let place=CallablePlace {binding:capture.binding,fields:fields.clone()};
+                        let named;
+                        let candidates=match (known.get(&place),prepared_captures.get(&place)) {
+                            (None,Some(values))=>values.as_slice(),
+                            (Some(keys),None)=>{
+                                let keys=match keys {CallableResult::Known(key)=>std::slice::from_ref(key),CallableResult::Candidates(keys)=>keys.as_slice(),_=>return Ok(None)};
+                                named=keys.iter().map(|key| {
+                                    self.fuel=self.fuel.checked_sub(1).ok_or_else(||error(source,"returned capture candidates budget exhausted"))?;
+                                    for argument in &key.arguments {super::memory::bound_type(argument,&mut self.fuel).map_err(|e|error(source,e))?;}
+                                    Ok(PreparedCode::Named(key.clone()))
+                                }).collect::<Result<Vec<_>,Error>>()?;
+                                named.as_slice()
+                            }
+                            _=>return Ok(None),
+                        };
+                        let expected=owned_field_type(self.package,&capture.ty,&fields,&mut self.fuel,source)?;
+                        let mut joined=None;
+                        for candidate in candidates {
+                            let Some(value)=self.returned_code_candidate(candidate,&expected,source,depth+1)? else {return Ok(None);};
+                            joined=if let Some(previous)=joined {merge_callable_provenance(&previous,&value,&mut self.fuel,source,0)?} else {Some(value)};
+                            if joined.is_none() {return Ok(None);}
+                        }
+                        let Some(value)=joined else {return Ok(None);};
+                        evidence.insert(Place {root:root(capture.binding),fields},value);
+                    }
+                }
+                let mut stable=true;
+                if !evidence.is_empty() {
+                    nir::visit::expression(body,&mut self.fuel,|expr,fuel| {
+                        let changed=match &expr.kind {
+                            K::Assign {place,..} | K::BitAssign {place,..} | K::BitUpdate {place,..}=>{
+                                *fuel=fuel.checked_sub(place.fields.len()+1).ok_or("returned capture mutation budget exhausted")?;
+                                Some(Place {root:root(place.root),fields:place.fields.iter().map(|(_,index)|*index).collect()})
+                            }
+                            K::AddressOf(place)=>expression_place(place),
+                            _=>None,
+                        };
+                        if let Some(changed)=changed {
+                            for protected in evidence.keys() {
+                                *fuel=fuel.checked_sub(protected.fields.len()+changed.fields.len()+1).ok_or("returned capture mutation budget exhausted")?;
+                                if protected.root==changed.root && (protected.fields.starts_with(&changed.fields) || changed.fields.starts_with(&protected.fields)) {stable=false;}
+                            }
+                        }
+                        Ok(())
+                    }).map_err(|e|error(source,e))?;
+                }
+                if !stable {return Ok(None);}
+                Ok(Some(Callable {definition:definition.as_ref().clone(),captures:evidence,choices:vec![],enum_captures:Default::default(),alternatives:vec![],generation:0}))
+            }
+        }
+    }
+
+    fn named_callable_result(
+        &mut self,
+        callee: &Expr,
+        inputs: &[CallableParameter],
+        enum_inputs: &[EnumParameter],
+        source: SourceRange,
+        result_fields: &mut BTreeMap<Vec<usize>, Callable>,
+        result_variants: &mut EnumDomains,
+    ) -> Result<Option<Callable>, Error> {
+        let Term::Function { result, .. } = callee.ty.callable_signature() else {
+            return Ok(None);
+        };
+        let result = completion_type(result);
+        if !contains_callable_value(self.package, result, &mut self.fuel, source, 0)? {
+            return Ok(None);
+        }
+        let (declaration, arguments) = match &callee.kind {
+            K::Function(id) => (*id, vec![]),
+            K::FunctionInstance {
+                declaration,
+                arguments,
+            } => (*declaration, arguments.clone()),
+            _ => return Ok(None),
+        };
+        let key = (declaration, arguments.clone());
+        if self.return_stack.contains(&key) {
+            return Ok(None);
+        }
+        if self.return_stack.len() >= 128 || self.fuel == 0 {
+            return Err(error(source, "callable result analysis budget exhausted"));
+        }
+        self.fuel -= 1;
+        let Some(package) = self.package else {
+            return Ok(None);
+        };
+        let original = package
+            .functions
+            .iter()
+            .find(|f| f.declaration == declaration)
+            .ok_or_else(|| error(source, "callable result function is missing"))?;
+        if original.phase != FunctionPhase::Runtime
+            || original.type_parameters.len() != arguments.len()
+        {
+            return Err(error(
+                source,
+                "callable result requires a concrete runtime function",
+            ));
+        }
+        let mut function = original.clone();
+        let instantiate = |expr: &Expr| {
+            expr.instantiate_types(&original.type_parameters, &arguments)
+                .map_err(|e| error(source, format!("callable result instantiation: {e}")))
+        };
+        function.signature = original
+            .signature
+            .instantiate_types(&original.type_parameters, &arguments)
+            .map_err(|e| error(source, format!("callable result signature: {e}")))?;
+        if function.signature.callable_signature() != callee.ty.callable_signature() {
+            return Err(error(source, "callable result signature mismatch"));
+        }
+        function.body = instantiate(&original.body)?;
+        function.preconditions = original
+            .preconditions
+            .iter()
+            .map(instantiate)
+            .collect::<Result<_, _>>()?;
+        function.postconditions = original
+            .postconditions
+            .iter()
+            .map(instantiate)
+            .collect::<Result<_, _>>()?;
+        function.defaults = original
+            .defaults
+            .iter()
+            .map(|(slot, value)| Ok((*slot, instantiate(value)?)))
+            .collect::<Result<_, Error>>()?;
+        // Requirements/capabilities remain the materialization/publication
+        // boundary's obligations. This summary never unfolds a normal-form head.
+        function.type_parameters.clear();
+        let mut borrows = vec![];
+        if let Term::Function {parameters, ..} = function.signature.callable_signature() {
+            for (slot, parameter) in parameters.iter().enumerate() {
+                if let Term::Pointer(subject) = &parameter.ty { borrows.push((slot, (**subject).clone())); }
+            }
+        }
+        if !borrows.is_empty() {
+            let footprint = self.memory_summary_with_inputs(callee, inputs, source).map_err(|reason|error(source, reason))?;
+            if footprint.signature != function.signature {
+                return Err(error(source, "callable result borrowed signature mismatch"));
+            }
+        }
+        let mut stack = self.return_stack.clone();
+        stack.push(key);
+        let report = analyze_with_shapes(
+            Some(package),
+            &function,
+            &mut self.delivery as &mut dyn FnMut(&Term) -> Result<Delivery, String>,
+            &mut self.shape as &mut dyn FnMut(&Term) -> Result<Shape, String>,
+            self.fuel,
+            None,
+            &borrows,
+            inputs,
+            enum_inputs,
+            stack,
+        )?;
+        self.fuel = self
+            .fuel
+            .checked_sub(report.entry_steps_used)
+            .ok_or_else(|| error(source, "callable result analysis budget exhausted"))?;
+        if !report.deferred_calls.is_empty() {
+            return Ok(None);
+        }
+        (*result_fields, *result_variants) = callable_aggregate_return_summary(&report, &mut self.fuel, source)?;
+        callable_return_summary(&report,&mut self.fuel,source)
+    }
+
+    fn record_named_call(
+        &mut self,
+        callee: &Expr,
+        callables: Vec<CallableParameter>,
+        enums: Vec<EnumParameter>,
+        source: SourceRange,
+        flow: &mut Flow,
+    ) -> Result<Option<Callable>, Error> {
+        flow.value_callables.clear(); flow.value_variants.clear();
+        if !matches!(callee.kind, K::Function(_) | K::FunctionInstance { .. }) {
+            return Ok(None);
+        }
+        let Term::Function { parameters, result: result_ty, .. } = callee.ty.callable_signature() else {
+            return Ok(None);
+        };
+        let result_ty = completion_type(result_ty);
+        let mut required = vec![];
+        for (slot, parameter) in parameters.iter().enumerate() {
+            for fields in callable_value_paths(self.package, &parameter.ty, &mut self.fuel, source, 0)? {
+                required.push((slot, fields));
+            }
+        }
+        if required.iter().any(|(slot, fields)|
+            !enums.iter().any(|input| input.parameter == *slot && enum_path_excluded(fields, &input.domains))
+            && !callables.iter().any(|input| input.parameter == *slot && input.fields == *fields))
+        {
+            // An ordinary checker can still describe this as an unresolved
+            // obligation; the source publisher must reject it before execution.
+            self.report.deferred_calls.push(source);
+            return Ok(None);
+        }
+        let mut result = self.named_callable_result(callee, &callables, &enums, source, &mut flow.value_callables, &mut flow.value_variants)?;
+        {
+            let paths=callable_value_paths(self.package,result_ty,&mut self.fuel,source,0)?;
+            if paths.iter().any(|path|if path.is_empty() {result.is_none()} else {!flow.value_callables.contains_key(path)}) {
+                // A closed package fixed point can recover recursive result
+                // leaves that this finite contextual walk cannot unfold.
+                let summary=match self.memory_summary_with_inputs(callee, &callables, source) {
+                    Ok(summary) => Some(summary),
+                    Err(reason) if reason.contains("budget exhausted") || reason.contains("depth exhausted") => return Err(error(source,reason)),
+                    Err(_) => None,
+                };
+                if let Some(summary)=summary {
+                    for (path,evidence) in &summary.code_fields {
+                        if if path.is_empty() {result.is_some()} else {flow.value_callables.contains_key(path)} {continue;}
+                        let super::memory::CodeResult::Known(values)=evidence else {continue;};
+                        let ty=owned_field_type(self.package,result_ty,path,&mut self.fuel,source)?;
+                        // A memory footprint does not prove arbitrary capture
+                        // ownership. Recovery checks Copy data and stable code
+                        // captures separately; pointer/tag/affine environments
+                        // still require contextual environment-state evidence.
+                        let mut joined=None;
+                        let mut complete=!values.is_empty();
+                        for code in values {
+                            let Some(value)=self.returned_code_candidate(code,&ty,source,0)? else {complete=false;break;};
+                            joined=if let Some(previous)=joined {merge_callable_provenance(&previous,&value,&mut self.fuel,source,0)?} else {Some(value)};
+                            if joined.is_none() {complete=false;break;}
+                        }
+                        if complete {if let Some(value)=joined {if path.is_empty() {result=Some(value);} else {flow.value_callables.insert(path.clone(),value);}}}
+                    }
+                    let mut actuals: BTreeMap<usize,BTreeMap<Vec<usize>,super::memory::CallableResult>>=BTreeMap::new();
+                    for input in &callables {
+                        if input.choices.is_empty() {
+                            if let Some(keys)=named_memory_definitions(&input.definition,&input.alternatives,&mut self.fuel,source)? {
+                                actuals.entry(input.parameter).or_default().insert(input.fields.clone(),keys);
+                            }
+                        }
+                    }
+                    for (path,keys) in summary.callable_fields {
+                        if if path.is_empty() {result.is_some()} else {flow.value_callables.contains_key(&path)} {continue;}
+                        let keys=keys.substitute_inputs(&actuals,&mut self.fuel).map_err(|reason|error(source,reason))?;
+                        let definitions=match keys {
+                            super::memory::CallableResult::Known(key) => vec![key],
+                            super::memory::CallableResult::Candidates(keys) => keys,
+                            _ => continue,
+                        };
+                        let ty=owned_field_type(self.package,result_ty,&path,&mut self.fuel,source)?;
+                        let mut joined=None;
+                        for key in definitions {
+                            super::memory::bound_type(&ty,&mut self.fuel).map_err(|reason|error(source,reason))?;
+                            let definition=Expr {source,ty:ty.clone(),kind:if key.arguments.is_empty() {K::Function(key.declaration)} else {K::FunctionInstance {declaration:key.declaration,arguments:key.arguments}}};
+                            let value=callable_source(&definition,&Flow::default(),&mut self.fuel)?.ok_or_else(||error(source,"invalid callable result identity"))?;
+                            joined=if let Some(previous)=joined {merge_named_callables(&previous,&value,&mut self.fuel,source)?} else {Some(value)};
+                        }
+                        if let Some(value)=joined {if path.is_empty() {result=Some(value);} else {flow.value_callables.insert(path,value);}}
+                    }
+                }
+            }
+        }
+        if !required.is_empty() {
+            self.report.named_calls.push(NamedCall {
+                source,
+                callee: callee.clone(),
+                callables,
+                enums,
+            });
+        }
+        Ok(result)
+    }
+
+    fn call_temporary(
+        &mut self,
+        expr: &Expr,
+        callee: &Expr,
+        arguments: &[nir::program::CallArgument],
+        parameter_bindings: &[LocalId],
+        flow: &mut Flow,
+        depth: usize,
+    ) -> Result<Option<BTreeSet<Place>>, Error> {
+        let origins = self.evaluate_value_origins(callee, flow, depth + 1)?;
+        if !flow.live {
+            return Ok(None);
+        }
+        let callable = flow.value_callable.take().ok_or_else(|| {
+            error(
+                callee.source,
+                "temporary callee requires known callable provenance",
+            )
+        })?;
+        let identity = self.sequence(expr.source)?;
+        let id = PlaceId {
+            owner: u64::MAX - 3,
+            local: u32::try_from(identity)
+                .map_err(|_| error(expr.source, "temporary callee identity exhausted"))?,
+        };
+        let anchors = flow.order.clone();
+        self.acquire_cleanup(&callee.ty, callee.source)?;
+        let shape = (self.shape)(&callee.ty).map_err(|e| error(callee.source, e))?;
+        flow.state
+            .declare(id, &shape, true, &mut self.fuel)
+            .map_err(|e| error(callee.source, format!("temporary callee shape: {e:?}")))?;
+        flow.roots.insert(id);
+        flow.order.push(id);
+        flow.types.insert(id, callee.ty.clone());
+        self.install_value_origins(flow, &Place {root:id,fields:vec![]}, origins.clone(), callee.source)?;
+        self.store_callable(flow, id, callable, callee.source)?;
+        let callable = flow.callables[&id].clone();
+        self.report.callee_temporaries.push((id, callee.source));
+        let mut pointer_result = None;
+        if !callable.alternatives.is_empty() {
+            pointer_result = self.call_named_candidates(
+                expr,
+                &callable,
+                arguments,
+                parameter_bindings,
+                flow,
+                depth + 1,
+            )?;
+        } else if matches!(callable.definition.kind, K::Closure { .. }) {
+            pointer_result = self.call_closure(id, &callable, arguments, flow, expr.source, depth + 1)?;
+        } else {
+            let mut target = callable.definition;
+            target.source = callee.source;
+            let declaration = match target.kind {
+                K::Function(id)
+                | K::FunctionInstance {
+                    declaration: id, ..
+                } => id,
+                _ => return Err(error(callee.source, "unknown temporary callee kind")),
+            };
+            let bindings = if parameter_bindings.is_empty() {
+                self.package
+                    .and_then(|p| p.functions.iter().find(|f| f.declaration == declaration))
+                    .map(|f| f.parameters.clone())
+                    .unwrap_or_default()
+            } else {
+                parameter_bindings.to_vec()
+            };
+            let resolved = Expr {
+                source: expr.source,
+                ty: expr.ty.clone(),
+                kind: K::Call {
+                    callee: Box::new(target),
+                    arguments: arguments.to_vec(),
+                    parameter_bindings: bindings,
+                },
+            };
+            if matches!(expr.ty, Term::Pointer(_)) {
+                pointer_result = self.evaluate_pointer_value(&resolved, flow, depth + 1)?;
+            } else {
+                self.expr(&resolved, flow, depth + 1)?;
+            }
+        }
+        let result = flow.value_callable.clone();
+        if flow.live {
+            // A successful call does not end its enclosing full expression.
+            // Retain the receiver's remaining responsibility in the same
+            // canonical root representation used by every temporary action.
+            let mut remaining = State::default();
+            remaining
+                .import_position(
+                    PlaceId {
+                        owner: u64::MAX,
+                        local: 0,
+                    },
+                    &flow.state,
+                    &Place {
+                        root: id,
+                        fields: vec![],
+                    },
+                    &mut self.fuel,
+                )
+                .map_err(|e| error(expr.source, format!("temporary callee transfer: {e:?}")))?;
+            self.remove_local(flow, id, expr.source)?;
+            flow.temporaries.insert(
+                identity,
+                ActiveTemporary {
+                    alternatives: vec![],
+                    origins,
+                    variants: vec![],
+                    scope_id: self.temporary_scope_id,
+                    description: TemporaryCleanup {
+                        scope: self.temporary_scope,
+                        source: callee.source,
+                        ty: callee.ty.clone(),
+                        fields: vec![],
+                    },
+                    remaining,
+                    presence: Availability::Present,
+                    locals_before: anchors,
+                },
+            );
+        }
+        flow.value_callable = result;
+        Ok(pointer_result)
+    }
+    fn call_closure(
+        &mut self,
+        binding: PlaceId,
+        callable: &Callable,
+        arguments: &[nir::program::CallArgument],
+        flow: &mut Flow,
+        source: SourceRange,
+        depth: usize,
+    ) -> Result<Option<BTreeSet<Place>>, Error> {
+        if self.fuel == 0 || depth > 128 {
+            return Err(error(
+                source,
+                "closure invocation analysis budget exhausted",
+            ));
+        }
+        self.fuel -= 1;
+        let Term::Function {parameters, result, ..} = callable.definition.ty.callable_signature() else {
+            return Err(error(source, "closure invocation lacks a signature"));
+        };
+        let memory = flow.memory_exposed || matches!(result.as_ref(), Term::Pointer(_))
+            || parameters.iter().any(|parameter|matches!(parameter.ty, Term::Pointer(_)))
+            || matches!(&callable.definition.kind,K::Closure {captures,..}
+                if captures.iter().any(|capture|matches!(capture.ty,Term::Pointer(_))));
+        let Some(prepared) = self.prepare_closure_arguments(callable, arguments, flow, source, depth)? else {
+            return Ok(None);
+        };
+        // Arguments can mutate state. Do not resurrect a callable moved while
+        // evaluating an argument, or confuse a replacement with this receiver.
+        if flow.callables.get(&binding) != Some(callable) {
+            return Err(error(
+                source,
+                "closure receiver changed while evaluating arguments",
+            ));
+        }
+        let mut continuation: Option<Flow> = None;
+        let mut failure: Option<Flow> = None;
+        let mut result_targets = Some(BTreeSet::new());
+        for candidate in std::iter::once(callable).chain(&callable.choices) {
+            self.fuel = self.fuel.checked_sub(1).ok_or_else(||error(source,"closure candidate invocation budget exhausted"))?;
+            let mut candidate=candidate.clone();candidate.choices.clear();candidate.generation=callable.generation;
+            let mut branch=flow.clone();
+            branch.callables.insert(binding,candidate.clone());
+            if memory {
+                self.fuel=self.fuel.checked_sub(prepared.pointers.len())
+                    .ok_or_else(||error(source,"closure pointer input budget exhausted"))?;
+                for targets in prepared.pointers.values() { self.pointer_work(targets,source)?; }
+                let mut pointer_inputs=prepared.pointers.clone();
+                if let K::Closure {captures,..}=&candidate.definition.kind {
+                    let mut slot=parameters.len();
+                    for (index,capture) in captures.iter().enumerate() {
+                        if matches!(capture.ty,Term::Pointer(_)) {
+                            let place=Place {root:binding,fields:vec![index]};
+                            branch.state.require_present(&place).map_err(|e|error(source,format!("pointer capture unavailable: {e:?}")))?;
+                            let targets=branch.pointers.get(&place)
+                                .ok_or_else(||error(source,"captured pointer provenance is not established"))?;
+                            self.pointer_work(targets,source)?;
+                            pointer_inputs.insert(slot,targets.clone());
+                            slot+=1;
+                        }
+                    }
+                }
+                let inputs=prepared_memory_inputs(&prepared, &mut self.fuel, source)?;
+                let code_inputs=prepared_memory_code_inputs(&prepared, &mut self.fuel, source)?;
+                let footprint = if matches!(candidate.definition.kind, K::Closure {..}) {
+                    let mut callees = BTreeMap::new();
+                    if let K::Closure {captures, ..} = &candidate.definition.kind {
+                        for capture in captures {
+                            for (place,value) in &candidate.captures {
+                                self.fuel=self.fuel.checked_sub(place.fields.len()+1).ok_or_else(||error(source,"captured memory field budget exhausted"))?;
+                                if place.root==root(capture.binding) && !place.fields.contains(&VARIANT_PATH) {
+                                    if let Some(keys) = named_memory_callees(value, &mut self.fuel, source)? {
+                                        callees.insert(super::memory::CallablePlace {binding:capture.binding,fields:place.fields.clone()},keys);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let definitions=memory_code_definitions(&candidate,&mut self.fuel,source)?;
+                    let prepared_captures=definitions.as_ref().and_then(|values|values.first()).and_then(|value|match value {
+                        super::memory::CodeDefinition::Closure {prepared_captures,..}=>Some(prepared_captures.as_ref()), _=>None,
+                    });
+                    super::memory::infer_closure_with_borrowed_captures(self.package.ok_or_else(||error(source,"closure memory requires a package"))?, &candidate.definition, &callees, prepared_captures.unwrap_or(&BTreeMap::new()), &inputs, &code_inputs, &mut self.fuel)
+                } else {
+                    self.memory_summary_with_prepared_code(&candidate.definition, &inputs, &code_inputs).map(|summary|
+                        super::memory::ArgumentSummary { code_fields:summary.code_fields, accesses: summary.accesses, may_reject: summary.may_reject, result_targets: summary.result_targets })
+                };
+                let footprint = match footprint {
+                    Ok(footprint) => Some(footprint),
+                    // A construction-time invocation has no actual callback
+                    // arguments yet. Keep its obligation, then recheck with the
+                    // prepared evidence on invocation. Never publish a successful
+                    // footprint or pointer provenance for this unknown case.
+                    Err(reason) if self.defer_unknown_calls
+                        && reason == "dynamic call requires a richer memory contract" => {
+                        self.report.deferred_calls.push(source);
+                        result_targets = None;
+                        None
+                    }
+                    Err(reason) => return Err(error(source, reason)),
+                };
+                if let Some(footprint) = footprint {
+                    self.memory_accesses(&footprint.accesses, &pointer_inputs, &mut branch, source)?;
+                    let mut previous = result_targets.take().unwrap_or_else(|| BTreeSet::from([unknown_pointer_target()]));
+                    if let Some(targets) = footprint.result_targets {
+                        for target in targets {
+                            if let Some(mapped) = self.map_memory_target(&target, &pointer_inputs, &mut branch, source)? {
+                                previous.extend(mapped);
+                            } else { previous.insert(unknown_pointer_target()); }
+                        }
+                    } else { previous.insert(unknown_pointer_target()); }
+                    result_targets = Some(previous);
+                }
+            }
+            let failed = if matches!(candidate.definition.kind, K::Closure { .. }) {
+                self.call_prepared_closure(binding, &candidate, prepared.clone(), &mut branch, source, depth)?
+            } else {
+                self.call_prepared_named_candidate(&candidate.definition, &prepared, &mut branch, source)?
+            };
+            if let Some(failed) = failed {
+                if let Some(previous)=&mut failure {self.join_flow(previous,&failed,source)?;} else {failure=Some(failed);}
+            }
+            if branch.live {
+                if let Some(previous)=&mut continuation {self.join_flow(previous,&branch,source)?;} else {continuation=Some(branch);}
+            }
+        }
+        if let Some(mut failed)=failure {self.exit(&mut failed,source,CleanupReason::PredicateFailure)?;}
+        if let Some(continuation)=continuation {*flow=continuation;} else {flow.live=false;}
+        Ok(if memory {result_targets} else {None})
+    }
+    // Mixed sets use the same completed argument frame as closure candidates.
+    // Any pointer footprint has already been checked against actual targets.
+    fn call_prepared_named_candidate(
+        &mut self,
+        callee: &Expr,
+        prepared: &ClosureArguments,
+        flow: &mut Flow,
+        source: SourceRange,
+    ) -> Result<Option<Flow>, Error> {
+        let mut callables = vec![];
+        let mut enums = vec![];
+        for (&parameter, callable) in &prepared.callables {
+            callables.push(export_callable_parameter(parameter, callable, &mut self.fuel)?);
+        }
+        for (&parameter, fields) in &prepared.fields {
+            for (path, callable) in fields {
+                if !path.is_empty() {
+                    let mut input = export_callable_parameter(parameter, callable, &mut self.fuel)?;
+                    input.fields = path.clone();
+                    callables.push(input);
+                }
+            }
+        }
+        for (&parameter, domains) in &prepared.domains {
+            record_enum_parameter(&mut enums, parameter, domains, &mut self.fuel, source)?;
+        }
+        flow.value_callable = self.record_named_call(callee, callables, enums, source, flow)?;
+        if self.rejection.may_reject(callee, &mut self.fuel)
+            .map_err(|reason| error(source, reason))?
+        {
+            Ok(Some(flow.clone()))
+        } else {
+            Ok(None)
+        }
+    }
+    fn prepare_closure_arguments(
+        &mut self,
+        callable: &Callable,
+        arguments: &[nir::program::CallArgument],
+        flow: &mut Flow,
+        source: SourceRange,
+        depth: usize,
+    ) -> Result<Option<ClosureArguments>, Error> {
+        let definition = &callable.definition;
+        let K::Closure {
+            parameters,
+            ..
+        } = &definition.kind
+        else {
+            return Err(error(source, "invalid closure provenance"));
+        };
+        let Term::Function {
+            parameters: types, ..
+        } = definition.ty.callable_signature()
+        else {
+            return Err(error(source, "invalid closure signature"));
+        };
+        if arguments.iter().any(|a| a.is_default) {
+            return Err(error(
+                source,
+                "closure defaults require parameter-frame transfer",
+            ));
+        }
+        if parameters.len() != arguments.len() || types.len() != parameters.len() {
+            return Err(error(source, "closure argument count mismatch"));
+        }
+        let mut seen = BTreeSet::new();
+        for argument in arguments {
+            if argument.parameter >= parameters.len() || !seen.insert(argument.parameter) {
+                return Err(error(source, "invalid closure argument plan"));
+            }
+        }
+        // Preserve each argument's provenance at its own evaluation point.
+        // Later arguments may replace the source local without changing the
+        // already prepared callable value delivered to this parameter.
+        let mut argument_pointers = BTreeMap::new();
+        let mut argument_callables = BTreeMap::new();
+        let mut argument_fields = BTreeMap::new();
+        let mut argument_domains = BTreeMap::new();
+        self.pending_frame(source, |this| {
+            for argument in arguments {
+                let callable = callable_source(&argument.value, flow, &mut this.fuel)?;
+                let origins = this.evaluate_value_origins(&argument.value, flow, depth + 1)?;
+                if let Some(targets) = origins.get(&vec![]) {
+                    argument_pointers.insert(argument.parameter, targets.clone());
+                }
+                let callable = flow.value_callable.clone().or(callable);
+                if !flow.live {
+                    break;
+                }
+                this.remember_pending_origins(&argument.value, argument.parameter, flow, origins)?;
+                if let Some(callable) = callable {
+                    argument_callables.insert(argument.parameter, callable);
+                }
+                argument_fields.insert(argument.parameter, flow.value_callables.clone());
+                argument_domains.insert(argument.parameter, copy_enum_domains(&flow.value_variants, &mut this.fuel, source)?);
+            }
+            Ok(())
+        })?;
+        if !flow.live {
+            return Ok(None);
+        }
+        Ok(Some(ClosureArguments {
+            pointers: argument_pointers,
+            callables: argument_callables,
+            fields: argument_fields,
+            domains: argument_domains,
+        }))
+    }
+    fn declare_closure_borrow(
+        &mut self, flow: &mut Flow, slot: usize, binding: LocalId,
+        subject: &Term, source: SourceRange,
+    ) -> Result<(), Error> {
+        // Conditional borrowed premises never become owned cleanup roots.
+        // Actual pointees must separately satisfy the invocation footprint.
+        let pointee = PlaceId {owner: u64::MAX - 1, local: u32::try_from(slot)
+            .map_err(|_|error(source,"too many closure pointer parameters"))?};
+        let shape = (self.shape)(subject).map_err(|reason|error(source,reason))?;
+        flow.state.declare(pointee, &shape, true, &mut self.fuel)
+            .map_err(|reason|error(source,format!("closure borrowed parameter shape: {reason:?}")))?;
+        flow.types.insert(pointee, subject.clone());
+        flow.pointers.insert(Place {root:root(binding),fields:vec![]},
+            BTreeSet::from([Place {root:pointee,fields:vec![]}]));
+        flow.memory_exposed = true;
+        Ok(())
+    }
+    fn call_prepared_closure(
+        &mut self,
+        binding: PlaceId,
+        callable: &Callable,
+        prepared: ClosureArguments,
+        flow: &mut Flow,
+        source: SourceRange,
+        depth: usize,
+    ) -> Result<Option<Flow>, Error> {
+        let definition = &callable.definition;
+        let K::Closure {parameters, captures, body} = &definition.kind else {
+            return Err(error(source, "invalid prepared closure provenance"));
+        };
+        let Term::Function {parameters: types, result: closure_result} = definition.ty.callable_signature() else {
+            return Err(error(source, "invalid prepared closure signature"));
+        };
+        let ClosureArguments {
+            pointers: _,
+            callables: mut argument_callables,
+            fields: mut argument_fields,
+            domains: mut argument_domains,
+        } = prepared;
+        let mut inner = Flow {
+            borrowed_scope: self.fresh_borrowed_scope(source)?,
+            live: true,
+            ..Default::default()
+        };
+        let mut capture_roots = BTreeSet::new();
+        for (index, capture) in captures.iter().enumerate() {
+            let id = root(capture.binding);
+            inner
+                .state
+                .import_position(
+                    id,
+                    &flow.state,
+                    &Place {
+                        root: binding,
+                        fields: vec![index],
+                    },
+                    &mut self.fuel,
+                )
+                .map_err(|e| error(source, format!("closure environment import: {e:?}")))?;
+            inner.roots.insert(id);
+            inner.order.push(id);
+            inner.types.insert(id, capture.ty.clone());
+            if let Term::Pointer(subject)=&capture.ty {
+                self.declare_closure_borrow(&mut inner, parameters.len()+index, capture.binding, subject, source)?;
+            }
+            if let Some(captured) = callable.captures.get(&Place {root:id,fields:vec![]}) {
+                inner.callables.insert(id, captured.clone());
+            }
+            for (place, evidence) in &callable.captures {
+                if place.root == id && !place.fields.is_empty() {
+                    inner.callable_fields.insert(place.clone(), evidence.clone());
+                }
+            }
+            if let Some(domains) = callable.enum_captures.get(&id) {
+                let domains = copy_enum_domains(domains, &mut self.fuel, source)?;
+                self.install_enum_domains(&mut inner, &Place {root:id,fields:vec![]}, domains, source)?;
+            }
+            capture_roots.insert(id);
+        }
+        for (index, (parameter, ty)) in parameters.iter().zip(types).enumerate() {
+            self.declare(&mut inner, *parameter, &ty.ty, source)?;
+            if let Term::Pointer(subject) = &ty.ty {
+                self.declare_closure_borrow(&mut inner, index, *parameter, subject, source)?;
+            }
+            if let Some(callable) = argument_callables.remove(&index) {
+                self.store_callable(&mut inner, root(*parameter), callable, source)?;
+            }
+            if let Some(fields) = argument_fields.remove(&index) {
+                self.install_callable_fields(&mut inner, &Place {root:root(*parameter),fields:vec![]}, fields, source)?;
+            }
+            if let Some(domains) = argument_domains.remove(&index) {
+                self.install_enum_domains(&mut inner, &Place {root:root(*parameter),fields:vec![]}, domains, source)?;
+            }
+        }
+        let outer_report = std::mem::take(&mut self.report);
+        let outer_captured_callables = std::mem::replace(
+            &mut self.captured_roots,
+            captures.iter().map(|c| root(c.binding)).collect(),
+        );
+        let outer_persistent = std::mem::replace(&mut self.persistent_roots, capture_roots.clone());
+        let outer_pending = std::mem::take(&mut self.pending);
+        let outer_loops = std::mem::take(&mut self.loops);
+        let outer_contract = self.exit_contract.take();
+        let outer_handler = self.handler_result.take();
+        let outer_effect_return = std::mem::replace(&mut self.effect_return_enabled, false);
+        let outer_return_values = std::mem::take(&mut self.effect_return_values);
+        let outer_effect_loops = std::mem::take(&mut self.effect_loop_targets);
+        let result = self.in_temporary_scope(
+            body.source,
+            TemporaryBoundary::FunctionResult,
+            &mut inner,
+            |this, inner| this.expr(body, inner, depth + 1),
+        );
+        self.loops = outer_loops;
+        self.exit_contract = outer_contract;
+        self.handler_result = outer_handler;
+        self.effect_return_enabled = outer_effect_return;
+        self.effect_return_values = outer_return_values;
+        self.effect_loop_targets = outer_effect_loops;
+        let result = result.and_then(|()| {
+            if inner.live {
+                self.exit(&mut inner, body.source, CleanupReason::FunctionEnd)
+            } else {
+                Ok(())
+            }
+        });
+        self.pending = outer_pending;
+        let invocation = std::mem::replace(&mut self.report, outer_report);
+        self.persistent_roots = outer_persistent;
+        self.captured_roots = outer_captured_callables;
+        result?;
+        // Failed checks unwind this invocation; they are never evidence for a
+        // normal continuation. Reflect consumed captures before reporting the
+        // caller's outstanding obligations. The call boundary has one runtime
+        // failure continuation: join only captured ownership across its exits,
+        // retaining conditional tokens instead of publishing competing plans
+        // for the same caller owner. Invocation-local exits remain separate.
+        let mut failed_captures: Option<State> = None;
+        for failed in &invocation.failed_exits {
+            let captured = failed.select_roots(&capture_roots, &mut self.fuel)
+                .map_err(|e| error(source, format!("closure failure state: {e:?}")))?;
+            failed_captures = Some(match failed_captures {
+                None => captured,
+                Some(previous) => previous.join(&captured, &mut self.fuel)
+                    .map_err(|e| error(source, format!("closure failure join: {e:?}")))?,
+            });
+        }
+        let mut failure = None;
+        if let Some(captured) = failed_captures {
+            let mut failed_flow = flow.clone();
+            for (index, capture) in captures.iter().enumerate() {
+                failed_flow.state.update_position(
+                    &Place {root: binding, fields: vec![index]},
+                    &captured, root(capture.binding), &mut self.fuel,
+                ).map_err(|e| error(source, format!("closure failure writeback: {e:?}")))?;
+            }
+            failure = Some(failed_flow);
+        }
+        let mut escaped_captures: Option<State> = None;
+        // Locally installed handlers cannot abandon the closure's caller.
+        // Only effects exported by this callable's row can cross that boundary.
+        let outward_effects = matches!(closure_result.as_ref(), Term::Computation {effects,..} if !effects.is_empty());
+        for (_, escaped) in invocation.effect_exits.iter().filter(|_| outward_effects) {
+            let captured = escaped.select_roots(&capture_roots, &mut self.fuel)
+                .map_err(|e| error(source, format!("closure effect escape state: {e:?}")))?;
+            escaped_captures = Some(match escaped_captures {
+                None => captured,
+                Some(previous) => previous.join(&captured, &mut self.fuel)
+                    .map_err(|e| error(source, format!("closure effect escape join: {e:?}")))?,
+            });
+        }
+        if let Some(captured) = escaped_captures {
+            let mut escaped_flow = flow.clone();
+            for (index, capture) in captures.iter().enumerate() {
+                escaped_flow.state.update_position(
+                    &Place {root: binding, fields: vec![index]},
+                    &captured, root(capture.binding), &mut self.fuel,
+                ).map_err(|e| error(source, format!("closure effect escape writeback: {e:?}")))?;
+            }
+            self.effect_escape_checkpoint(&escaped_flow, source)?;
+        }
+        let mut exits = invocation.exits.iter();
+        let Some(first) = exits.next() else {
+            self.report.closures.push(ClosureReport {
+                invoked: true,
+                definition: definition.clone(),
+                source,
+                captures: captures.iter().map(|c| root(c.binding)).collect(),
+                invocation,
+            });
+            flow.live = false;
+            return Ok(failure);
+        };
+        let mut merged = first
+            .select_roots(&capture_roots, &mut self.fuel)
+            .map_err(|e| error(source, format!("closure exit: {e:?}")))?;
+        for exit in exits {
+            let next = exit
+                .select_roots(&capture_roots, &mut self.fuel)
+                .map_err(|e| error(source, format!("closure exit: {e:?}")))?;
+            merged = merged
+                .join(&next, &mut self.fuel)
+                .map_err(|e| error(source, format!("closure exit join: {e:?}")))?;
+        }
+        for (index, capture) in captures.iter().enumerate() {
+            flow.state
+                .update_position(
+                    &Place {
+                        root: binding,
+                        fields: vec![index],
+                    },
+                    &merged,
+                    root(capture.binding),
+                    &mut self.fuel,
+                )
+                .map_err(|e| error(source, format!("closure environment writeback: {e:?}")))?;
+        }
+        // A call mutates capture cells, not the enclosing code identity. Retain
+        // a target only when every normal exit provides compatible evidence.
+        if invocation.captured_callable_exits.len() != invocation.captured_enum_exits.len() {
+            return Err(error(source, "captured callable and enum exits disagree"));
+        }
+        let mut updated: Option<(BTreeMap<Place, Callable>, BTreeMap<PlaceId, EnumDomains>)> = None;
+        for (exit, domains) in invocation.captured_callable_exits.iter().zip(&invocation.captured_enum_exits) {
+            let mut values = BTreeMap::new();
+            for (place, evidence) in exit {
+                values.insert(place.clone(), restore_callable_evidence(evidence, &mut self.fuel, 0)?);
+            }
+            updated = Some(if let Some((previous, tags)) = updated {
+                join_capture_evidence(&previous, &values, &tags, domains, &mut self.fuel, source, 0)?
+            } else { (values, copy_captured_enums(domains, &mut self.fuel, source)?) });
+        }
+        if let Some(receiver) = flow.callables.get_mut(&binding) {
+            (receiver.captures, receiver.enum_captures) = updated.unwrap_or_default();
+        }
+        flow.value_callable = callable_return_summary(&invocation,&mut self.fuel,source)?;
+        (flow.value_callables, flow.value_variants) = callable_aggregate_return_summary(&invocation, &mut self.fuel, source)?;
+        self.report.closures.push(ClosureReport {
+                invoked: true,
+                definition: definition.clone(),
+            source,
+            captures: captures.iter().map(|c| root(c.binding)).collect(),
+            invocation,
+        });
+        Ok(failure)
+    }
+    fn let_pattern(
+        &mut self,
+        pattern: &Pattern,
+        value: &Expr,
+        guard: Option<&Expr>,
+        otherwise: Option<&Expr>,
+        flow: &mut Flow,
+        source: SourceRange,
+        depth: usize,
+    ) -> Result<(), Error> {
+        let (pattern, mut guards) = outer_guards(pattern);
+        guards.extend(guard);
+        let ignored_place = matches!(pattern, Pattern::Wild)
+            .then(|| expression_place(value))
+            .flatten();
+        let origins = if let Some(place) = &ignored_place {
+            flow.state
+                .require_place(place)
+                .map_err(|_| error(source, "wildcard refers to an unknown owned position"))?;
+            BTreeMap::new()
+        } else {
+            let origins = self.evaluate_value_origins(value, flow, depth + 1)?;
+            if !flow.live {
+                return Ok(());
+            }
+            origins
+        };
+        let known = known_pattern_with_domains(pattern, value, &flow.value_variants, &mut self.fuel, source)?
+            .or_else(|| irrefutable_shape(pattern, 0).then_some(true));
+        let mut success = None;
+        let mut guard_known = Some(true);
+        if known != Some(false) {
+            let mut candidate = flow.clone();
+            let outer_report = std::mem::take(&mut self.report);
+            if ignored_place.is_none() {
+                self.bind_pattern(
+                    pattern,
+                    &value.ty,
+                    &origins,
+                    &mut candidate,
+                    source,
+                    &mut vec![],
+                    depth + 1,
+                )?;
+            }
+            for guard in &guards {
+                self.observe_guard(guard, &candidate, depth + 1)?;
+                match constant_bool(guard, 0) {
+                    Some(false) => {
+                        guard_known = Some(false);
+                        break;
+                    }
+                    None => guard_known = None,
+                    _ => (),
+                }
+            }
+            let prepared = std::mem::replace(&mut self.report, outer_report);
+            if guard_known != Some(false) {
+                self.report.append(prepared);
+                success = Some(candidate);
+            }
+        }
+        // Absence of else on typed NIR carries the frontend's irrefutability
+        // check. A known failing pattern still cannot bypass that contract.
+        let failure = known == Some(false)
+            || guard_known == Some(false)
+            || otherwise.is_some() && (known != Some(true) || guard_known != Some(true));
+        if failure {
+            let otherwise =
+                otherwise.ok_or_else(|| error(source, "failing pattern binding lacks else"))?;
+            let mut failed = flow.clone();
+            if ignored_place.is_none() {
+                self.temporary(value, origins.clone(), &mut failed)?;
+            }
+            self.scope(otherwise, &mut failed, depth + 1)?;
+            if failed.live {
+                return Err(error(
+                    source,
+                    "let-else failure branch does not establish divergence",
+                ));
+            }
+        }
+        self.report.bindings.push(LetReport {
+            source,
+            pattern: pattern.clone(),
+            guards: guards.iter().map(|g| (*g).clone()).collect(),
+            success: success.is_some(),
+            failure,
+        });
+        if let Some(success) = success {
+            *flow = success;
+        } else {
+            flow.live = false;
+        }
+        Ok(())
+    }
+    fn observe_guard(&mut self, expr: &Expr, flow: &Flow, depth: usize) -> Result<(), Error> {
+        if self.fuel == 0 || depth > 128 {
+            return Err(error(expr.source, "guard observation budget exhausted"));
+        }
+        self.fuel -= 1;
+        let source = expr.source;
+        if let Some(message) = nir::program::pointer_operation_error(expr) {
+            return Err(error(source, message));
+        }
+        match &expr.kind {
+            K::Literal(_) | K::Unit => (),
+            K::Local(_) | K::AnonymousField { .. } | K::Field { .. } => {
+                let place = expression_place(expr).ok_or_else(|| {
+                    error(
+                        source,
+                        "guard temporary projection needs observation semantics",
+                    )
+                })?;
+                flow.state.require_present(&place).map_err(|_| {
+                    error(source, format!("guard observes unavailable value {place}"))
+                })?;
+                if (self.delivery)(&expr.ty).map_err(|e| error(source, e))? != Delivery::Copy {
+                    return Err(error(
+                        source,
+                        "guard consumption requires tentative binding and failure-path transfer",
+                    ));
+                }
+            }
+            K::PointerAnonymousField { pointer, .. } | K::PointerField { pointer, .. } => {
+                self.observe_guard(pointer, flow, depth + 1)?;
+                for target in self.pointer_target(expr, flow, depth + 1)? {
+                    flow.state.require_place(&target).map_err(|e| {
+                        error(source, format!("guard field target unavailable: {e:?}"))
+                    })?;
+                }
+            }
+            K::ReadPointer(pointer) => {
+                self.observe_guard(pointer, flow, depth + 1)?;
+                if !nir::program::intrinsic_pointer_value(&expr.ty) {
+                    return Err(error(
+                        source,
+                        "guard pointee observation requires Copy evidence",
+                    ));
+                }
+                for target in self.pointer_target(pointer, flow, depth + 1)? {
+                    flow.state.require_present(&target).map_err(|e| {
+                        error(source, format!("guard pointer target unavailable: {e:?}"))
+                    })?;
+                }
+            }
+            K::EnumName(value) => {
+                if let Some(place) = expression_place(value) {
+                    flow.state.require_present(&place)
+                        .map_err(|reason|error(source, format!("enum name requires an available value: {reason:?}")))?;
+                } else {
+                    self.observe_guard(value, flow, depth + 1)?;
+                }
+            }
+            K::Not(value)
+            | K::IntegerNegate(value)
+            | K::FloatNegate(value)
+            | K::BitConvert(value)
+            | K::Snapshot(value) | K::TakeBits(value) | K::SymbolName(value)
+            | K::BitSlice { value, .. } => self.observe_guard(value, flow, depth + 1)?,
+            K::BitWindow {value, start, end} => {
+                self.observe_guard(value, flow, depth + 1)?;
+                self.observe_guard(start, flow, depth + 1)?;
+                self.observe_guard(end, flow, depth + 1)?;
+            }
+            K::IntegerBinary { left, right, .. }
+            | K::FloatBinary { left, right, .. }
+            | K::ScalarEqual(left, right)
+            | K::ScalarLess(left, right)
+            | K::ScalarLessEqual(left, right)
+            | K::ScalarGreater(left, right)
+            | K::ScalarGreaterEqual(left, right)
+            | K::BitEqual(left, right)
+            | K::BitConcat(left, right) | K::BitIndex(left, right) => {
+                self.observe_guard(left, flow, depth + 1)?;
+                self.observe_guard(right, flow, depth + 1)?;
+            }
+            K::And(left, right) | K::Or(left, right) => {
+                self.observe_guard(left, flow, depth + 1)?;
+                let skip = constant_bool(left, 0).map(|value| {
+                    if matches!(expr.kind, K::And(..)) {
+                        !value
+                    } else {
+                        value
+                    }
+                });
+                if skip != Some(true) {
+                    self.observe_guard(right, flow, depth + 1)?;
+                }
+            }
+            K::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                self.observe_guard(condition, flow, depth + 1)?;
+                let known = constant_bool(condition, 0);
+                if known != Some(false) {
+                    self.observe_guard(then_branch, flow, depth + 1)?;
+                }
+                if known != Some(true) {
+                    if let Some(other) = else_branch {
+                        self.observe_guard(other, flow, depth + 1)?;
+                    }
+                }
+            }
+            K::Block { statements, result } => {
+                self.fuel = self.fuel.checked_sub(flow.types.len().saturating_add(1))
+                    .ok_or_else(|| error(source, "candidate block scope budget exhausted"))?;
+                let mut scope = flow.clone();
+                let scalar = |ty: &Term| matches!(ty, Term::Primitive(_))
+                    && nir::program::intrinsic_pointer_value(ty);
+                for statement in statements {
+                    let statement = match &statement.kind {
+                        K::Discard(value) => value.as_ref(),
+                        _ => statement,
+                    };
+                    match &statement.kind {
+                        K::Let { binding, value } if scalar(&value.ty) => {
+                            self.observe_guard(value, &scope, depth + 1)?;
+                            self.declare(&mut scope, *binding, &value.ty, statement.source)?;
+                        }
+                        K::Assign { place, value }
+                            if place.fields.is_empty() && scalar(&value.ty)
+                                && scope.roots.contains(&root(place.root))
+                                && !flow.roots.contains(&root(place.root)) => {
+                            self.observe_guard(value, &scope, depth + 1)?;
+                            self.expr(statement, &mut scope, depth + 1)?;
+                        }
+                        _ if scalar(&statement.ty) || matches!(statement.kind, K::Unit) =>
+                            self.observe_guard(statement, &scope, depth + 1)?,
+                        _ => return Err(error(statement.source,
+                            "candidate block changes external resources or owns a non-scalar; failure-path resource transfer is required")),
+                    }
+                }
+                if let Some(result) = result {
+                    self.observe_guard(result, &scope, depth + 1)?;
+                }
+                let locals: Vec<_> = scope.order.iter().rev()
+                    .filter(|id| !flow.roots.contains(id)).copied().collect();
+                for local in locals {
+                    self.retire(&mut scope, local, source)?;
+                }
+            }
+            K::Call { callee, arguments, .. }
+                if matches!(callee.kind, K::Function(_) | K::FunctionInstance { .. }) =>
+            {
+                // Scalar observations cannot expose tentative owners to the
+                // callee. Defaults have a separate parameter environment and
+                // require the general candidate transaction, as do rejections.
+                let scalar = |ty: &Term| matches!(ty, Term::Primitive(_))
+                    && nir::program::intrinsic_pointer_value(ty);
+                if !scalar(&expr.ty) || arguments.iter().any(|a| a.is_default || !scalar(&a.value.ty)) {
+                    return Err(error(source, "guard call requires scalar explicit inputs and result; other calls need failure-path resource transfer"));
+                }
+                for argument in arguments {
+                    self.observe_guard(&argument.value, flow, depth + 1)?;
+                }
+                if self.rejection.may_reject(callee, &mut self.fuel)
+                    .map_err(|reason| error(source, reason))? {
+                    return Err(error(source, "rejecting guard call needs failure-path resource transfer"));
+                }
+                // Keep ordinary call contracts and graph acquisition. The
+                // observation precheck above forbids consuming caller state;
+                // result metadata is local to the boolean computation.
+                let mut observed = flow.clone();
+                self.expr(expr, &mut observed, depth + 1)?;
+                if !observed.live || observed.state != flow.state
+                    || observed.roots != flow.roots || observed.order != flow.order
+                    || observed.pointers != flow.pointers || observed.temporaries != flow.temporaries {
+                    return Err(error(source, "guard call changes caller resources and needs failure-path resource transfer"));
+                }
+            }
+            _ => {
+                return Err(error(
+                    source,
+                    "effectful guard needs failure-path resource transfer",
+                ));
+            }
+        }
+        Ok(())
+    }
+    fn match_arms(
+        &mut self,
+        value: &Expr,
+        arms: &[nir::program::MatchArm],
+        flow: &mut Flow,
+        source: SourceRange,
+        depth: usize,
+    ) -> Result<ValueOrigins, Error> {
+        let origins = self.evaluate_value_origins(value, flow, depth + 1)?;
+        if !flow.live {
+            return Ok(BTreeMap::new());
+        }
+        let base = flow.clone();
+        let mut continuation: Option<Flow> = None;
+        let mut result_origins: Option<ValueOrigins> = None;
+        let mut report = MatchReport {
+            source,
+            arms: vec![],
+        };
+        for arm in arms {
+            let (pattern, mut guards) = outer_guards(&arm.pattern);
+            guards.extend(arm.guard.as_ref());
+            let known = known_pattern_with_domains(pattern, value, &base.value_variants, &mut self.fuel, source)?;
+            if known == Some(false) {
+                continue;
+            }
+            let mut branch = base.clone();
+            let outer_report = std::mem::take(&mut self.report);
+            // These bindings are provisional aliases for read-only guard
+            // observation. Their cleanup/decomposition records commit only
+            // along the successful candidate path.
+            self.bind_pattern(
+                pattern,
+                &value.ty,
+                &origins,
+                &mut branch,
+                arm.body.source,
+                &mut vec![],
+                depth + 1,
+            )?;
+            let mut guard_known = Some(true);
+            for guard in &guards {
+                self.observe_guard(guard, &branch, depth + 1)?;
+                match constant_bool(guard, 0) {
+                    Some(false) => {
+                        guard_known = Some(false);
+                        break;
+                    }
+                    None => guard_known = None,
+                    _ => (),
+                }
+            }
+            let prepared = std::mem::replace(&mut self.report, outer_report);
+            if guard_known == Some(false) {
+                continue;
+            }
+            self.report.append(prepared);
+            let arm_origins = self.evaluate_value_origins(&arm.body, &mut branch, depth + 1)?;
+            if branch.live {
+                let locals: Vec<_> = branch
+                    .order
+                    .iter()
+                    .rev()
+                    .filter(|id| !base.roots.contains(id))
+                    .copied()
+                    .collect();
+                self.check_scope_origins(&arm_origins, &locals, arm.body.source)?;
+                for local in locals {
+                    self.retire(&mut branch, local, arm.body.source)?;
+                }
+                report.arms.push(MatchArmReport {
+                    pattern: pattern.clone(),
+                    guards: guards.iter().map(|g| (*g).clone()).collect(),
+                    exit: Some(branch.state.clone()),
+                });
+                if let Some(merged) = &mut result_origins {
+                    let previous = continuation.as_ref().expect("live result continuation");
+                    self.join_value_origins(&arm.body.ty, merged, &previous.value_variants,
+                        &arm_origins, &branch.value_variants, source)?;
+                } else {
+                    result_origins = Some(arm_origins);
+                }
+                if let Some(merged) = &mut continuation {
+                    self.join_flow(merged, &branch, source)?;
+                } else {
+                    continuation = Some(branch);
+                }
+            } else {
+                report.arms.push(MatchArmReport {
+                    pattern: pattern.clone(),
+                    guards: guards.iter().map(|g| (*g).clone()).collect(),
+                    exit: None,
+                });
+            }
+            if known == Some(true) && guard_known == Some(true) {
+                break;
+            }
+        }
+        self.report.matches.push(report);
+        if let Some(continuation) = continuation {
+            *flow = continuation;
+        } else {
+            flow.live = false;
+        }
+        Ok(result_origins.unwrap_or_default())
+    }
+    fn decomposition(
+        &mut self,
+        ty: &Term,
+        source: SourceRange,
+        fields: &[usize],
+        variant: Option<usize>,
+        empty: bool,
+    ) -> Result<(), Error> {
+        self.report.decompositions.push(Decomposition {
+            source,
+            ty: ty.clone(),
+            fields: fields.to_vec(),
+            variant,
+        });
+        if empty {
+            self.report.temporaries.push(TemporaryCleanup {
+                scope: self.temporary_scope,
+                source,
+                ty: ty.clone(),
+                fields: fields.to_vec(),
+            });
+        }
+        Ok(())
+    }
+    fn bind_pattern(
+        &mut self,
+        pattern: &Pattern,
+        ty: &Term,
+        origins: &ValueOrigins,
+        flow: &mut Flow,
+        source: SourceRange,
+        path: &mut Vec<usize>,
+        depth: usize,
+    ) -> Result<(), Error> {
+        // The delivered subject precedes bindings acquired from it. This
+        // anchor matters on return from an arm: bindings retire before the
+        // retained subject, just as on ordinary match completion.
+        self.acquire_cleanup(ty, source)?;
+        let identity = self.sequence(source)?;
+        let locals_before = flow.order.clone();
+        // Copy-only patterns retain the subject and use the compact observation
+        // path. Affine cases join independently checked successful transfers.
+        let candidates = if !patterns::has_alternatives(pattern, &mut self.fuel, source, depth)?
+            || self.observation_pattern(pattern, ty, source, depth, true)? {
+            vec![std::borrow::Cow::Borrowed(pattern)]
+        } else { patterns::alternatives(pattern, &mut self.fuel, source, depth)?
+            .into_iter().map(std::borrow::Cow::Owned).collect() };
+        let conditional = candidates.len() > 1;
+        if conditional { patterns::binding_map(pattern, &[], &mut self.fuel, source)?; }
+        let root = PlaceId { owner: u64::MAX, local: 0 };
+        let mut merged: Option<Flow> = None;
+        let mut layouts: Vec<ResidualLayout> = vec![];
+        let mut orders: Vec<Vec<PlaceId>> = vec![];
+        for (index, candidate) in candidates.iter().enumerate() {
+            let mut preparation = PatternPreparation {
+                origins, domains: flow.value_variants.clone(), callables: flow.value_callables.clone(),
+                transfers: vec![], moved_bindings: vec![], variants: vec![],
+                copy_bindings: false, binding_remaps: vec![],
+            };
+            let mut candidate_flow = if index + 1 == candidates.len() { std::mem::take(flow) } else {
+                self.fuel = self.fuel.checked_sub(flow.types.len().saturating_add(1))
+                    .ok_or_else(|| error(source, "pattern candidate flow budget exhausted"))?;
+                flow.clone()
+            };
+            let shape = self.bind_components(candidate, ty, &mut candidate_flow, source, path, &mut preparation, depth)?;
+            let mut state = State::default();
+            state.declare(root, &shape, true, &mut self.fuel)
+                .map_err(|e| error(source, format!("pattern subject shape: {e:?}")))?;
+            for fields in preparation.transfers {
+                state.take(&Place { root, fields })
+                    .map_err(|e| error(source, format!("pattern subject transfer: {e:?}")))?;
+            }
+            if conditional {
+                for (binding, fields) in preparation.moved_bindings {
+                    self.report.pattern_transfers.push((source, binding, fields));
+                }
+            }
+            let order = candidate_flow.order[locals_before.len()..].to_vec();
+            if !orders.contains(&order) { orders.push(order); }
+            if let Some(previous) = &merged {
+                let mut expected = previous.order[locals_before.len()..].to_vec();
+                let mut actual = candidate_flow.order[locals_before.len()..].to_vec();
+                expected.sort(); actual.sort();
+                if expected != actual { return Err(error(source, "pattern candidates declare different owners")); }
+                // Canonicalize analysis bookkeeping only. Observable cleanup
+                // uses the successful candidate's separately retained order.
+                candidate_flow.order = previous.order.clone();
+            }
+            if let Some(previous) = &mut merged {
+                self.join_flow(previous, &candidate_flow, source)?;
+            } else { merged = Some(candidate_flow); }
+            preparation.variants.sort_by(|a,b| a.fields.cmp(&b.fields));
+            if let Some(previous) = layouts.iter_mut().find(|layout| layout.variants == preparation.variants) {
+                previous.remaining = previous.remaining.join(&state, &mut self.fuel)
+                    .map_err(|e| error(source, format!("pattern residual ownership join: {e:?}")))?;
+            } else {
+                for previous in &layouts {
+                    self.fuel = self.fuel.checked_sub(previous.variants.len().saturating_mul(preparation.variants.len()).saturating_add(1))
+                        .ok_or_else(|| error(source, "pattern variant discrimination budget exhausted"))?;
+                    if !previous.variants.iter().any(|a| preparation.variants.iter().any(|b| a.fields == b.fields && a.index != b.index)) {
+                        return Err(error(source, "pattern residual layouts lack disjoint variant evidence"));
+                    }
+                }
+                layouts.push(ResidualLayout { remaining: state, variants: preparation.variants });
+            }
+        }
+        let Some(candidate_flow) = merged else {
+            return Err(error(source, "pattern has no successful ownership candidate"));
+        };
+        let ResidualLayout { remaining: state, variants } = layouts.remove(0);
+        *flow = candidate_flow;
+        if orders.len() > 1 {
+            let published = patterns::binding_orders(pattern, &mut self.fuel, source, depth)?;
+            for order in &published {
+                self.fuel = self.fuel.checked_sub(order.len().saturating_mul(order.len()).saturating_add(1))
+                    .ok_or_else(|| error(source, "pattern cleanup permutation budget exhausted"))?;
+                for (index, id) in order.iter().enumerate() {
+                    flow.cleanup_before.entry(self::root(*id)).or_default().extend(order[index + 1..].iter().copied().map(self::root));
+                }
+            }
+            self.report.pattern_orders.push((source, published));
+        }
+        if *ty == Term::Primitive(nir::Primitive::Void) { return Ok(()); }
+        if state
+            .cleanup_tree(
+                &Place {
+                    root,
+                    fields: vec![],
+                },
+                &mut self.fuel,
+            )
+            .map_err(|e| error(source, format!("pattern subject cleanup: {e:?}")))?
+            .is_some()
+        {
+            flow.temporaries.insert(
+                identity,
+                ActiveTemporary {
+                    alternatives: layouts,
+                    origins: origins.clone(),
+                    variants,
+                    scope_id: self.temporary_scope_id,
+                    description: TemporaryCleanup {
+                        scope: self.temporary_scope,
+                        source,
+                        ty: ty.clone(),
+                        fields: vec![],
+                    },
+                    remaining: state,
+                    presence: Availability::Present,
+                    locals_before,
+                },
+            );
+        }
+        Ok(())
+    }
+    /// A structural test may inspect an affine value without acquiring its
+    /// fields. Keep this distinct from decomposition and from patterns which
+    /// run code: a failed test must leave ownership available to the next arm.
+    /// With `allow_copy_bindings`, every exported value must have Copy evidence;
+    /// no field is thereby transferred out of the observed subject.
+    fn observation_pattern(
+        &mut self,
+        pattern: &Pattern,
+        ty: &Term,
+        source: SourceRange,
+        depth: usize,
+        allow_copy_bindings: bool,
+    ) -> Result<bool, Error> {
+        if depth > 128 || self.fuel == 0 {
+            return Err(error(source, "pattern observation budget exhausted"));
+        }
+        self.fuel -= 1;
+        let (patterns, types) = match pattern {
+            Pattern::Wild | Pattern::Literal(_) => return Ok(true),
+            Pattern::Unit => return Ok(*ty == Term::Primitive(nir::Primitive::Void)),
+            Pattern::Binding { inner, .. } if allow_copy_bindings => {
+                if (self.delivery)(ty).map_err(|e| error(source, e))? != Delivery::Copy {
+                    return Ok(false);
+                }
+                return self.observation_pattern(inner, ty, source, depth + 1, true);
+            }
+            Pattern::Or(alternatives) => {
+                for alternative in alternatives {
+                    if !self.observation_pattern(alternative, ty, source, depth + 1, allow_copy_bindings)? {
+                        return Ok(false);
+                    }
+                }
+                return Ok(true);
+            }
+            Pattern::Remap { pattern, bindings } if allow_copy_bindings || bindings.is_empty() => {
+                if allow_copy_bindings {
+                    patterns::binding_map(pattern, bindings, &mut self.fuel, source)?;
+                }
+                return self.observation_pattern(pattern, ty, source, depth + 1, allow_copy_bindings);
+            }
+            Pattern::Tuple(patterns) => {
+                let Some(types) = nir::normal_forms::tuple_fields(self.package, ty) else {
+                    return Err(error(source, "tuple observation type mismatch"));
+                };
+                (patterns, types.to_vec())
+            }
+            Pattern::AnonymousRecord { names, fields } => {
+                let Term::Record(types) = ty else {
+                    return Err(error(source, "record observation type mismatch"));
+                };
+                if names.len() != types.len() || names.iter().zip(types).any(|(name, (expected, _))| name != expected) {
+                    return Err(error(source, "record observation labels mismatch"));
+                }
+                (fields, types.iter().map(|(_, ty)| ty.clone()).collect())
+            }
+            Pattern::Record { declaration, fields } | Pattern::Variant { declaration, fields, .. } => {
+                let Term::Nominal { declaration: actual, arguments } = ty else {
+                    return Err(error(source, "nominal observation type mismatch"));
+                };
+                if actual != declaration {
+                    return Err(error(source, "nominal observation declaration mismatch"));
+                }
+                let package = self.package.ok_or_else(|| error(source, "nominal observation requires package metadata"))?;
+                let types = if let Pattern::Variant { index, .. } = pattern {
+                    let definition = package.enums.iter().find(|item| item.declaration == *declaration)
+                        .ok_or_else(|| error(source, "enum observation requires declaration metadata"))?;
+                    definition.instantiate_variants(arguments)
+                        .map_err(|failure| error(source, format!("enum observation: {failure}")))?
+                        .get(*index).ok_or_else(|| error(source, "enum observation variant out of bounds"))?.fields.clone()
+                } else {
+                    let definition = package.structs.iter().find(|item| item.declaration == *declaration)
+                        .ok_or_else(|| error(source, "record observation requires declaration metadata"))?;
+                    definition.instantiate_fields(arguments)
+                        .map_err(|failure| error(source, format!("record observation: {failure}")))?
+                        .into_iter().map(|(_, ty)| ty).collect()
+                };
+                (fields, types)
+            }
+            // Bindings transfer values. Guard/Then run expressions and need
+            // their own failure-path analysis, even when they export no names.
+            _ => return Ok(false),
+        };
+        if patterns.len() != types.len() {
+            return Err(error(source, "pattern observation field count mismatch"));
+        }
+        for (pattern, ty) in patterns.iter().zip(&types) {
+            if !self.observation_pattern(pattern, ty, source, depth + 1, allow_copy_bindings)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+    fn observe_pattern_value(&mut self, value: &Expr, flow: &Flow,
+        preparation: &PatternPreparation<'_>, depth: usize) -> Result<(), Error> {
+        if preparation.binding_remaps.is_empty() {
+            return self.observe_guard(value, flow, depth + 1);
+        }
+        // Executable candidate expressions precede their enclosing Remap;
+        // analysis has already published canonical binding identities.
+        nir::visit::expression(value, &mut self.fuel, |_, _| Ok(()))
+            .map_err(|reason| error(value.source, reason))?;
+        let mut value = value.clone();
+        nir::visit::expression_mut(&mut value, &mut self.fuel, |expr, fuel| {
+            if let K::Local(binding) = &mut expr.kind {
+                for mapping in preparation.binding_remaps.iter().rev() {
+                    *fuel = fuel.checked_sub(1).ok_or("pattern expression remap budget exhausted")?;
+                    *binding = mapping.get(binding).copied().unwrap_or(*binding);
+                }
+            }
+            Ok(())
+        }).map_err(|reason| error(value.source, reason))?;
+        self.observe_guard(&value, flow, depth + 1)
+    }
+    fn bind_components(
+        &mut self,
+        pattern: &Pattern,
+        ty: &Term,
+        flow: &mut Flow,
+        source: SourceRange,
+        path: &mut Vec<usize>,
+        preparation: &mut PatternPreparation<'_>,
+        depth: usize,
+    ) -> Result<Shape, Error> {
+        if self.fuel == 0 || depth > 128 {
+            return Err(error(source, "pattern move budget exhausted"));
+        }
+        self.fuel -= 1;
+        match pattern {
+            Pattern::Guard { pattern, condition } => {
+                let shape = self.bind_components(pattern, ty, flow, source, path, preparation, depth + 1)?;
+                self.observe_pattern_value(condition, flow, preparation, depth + 1)?;
+                return Ok(shape);
+            }
+            Pattern::Then { first, value, next } => {
+                let shape = self.bind_components(first, ty, flow, source, path, preparation, depth + 1)?;
+                if !matches!(value.ty, Term::Primitive(_)) || !nir::program::intrinsic_pointer_value(&value.ty) {
+                    return Err(error(value.source, "computed pattern value needs independent resource and failure-path transfer"));
+                }
+                self.observe_pattern_value(value, flow, preparation, depth + 1)?;
+                // Scalar computed values have no residual owner or borrowed
+                // origins. Their binders must never subtract subject fields.
+                let origins = BTreeMap::new();
+                let mut computed = PatternPreparation {
+                    origins: &origins, domains: BTreeMap::new(), callables: BTreeMap::new(),
+                    transfers: vec![], moved_bindings: vec![], variants: vec![],
+                    copy_bindings: true, binding_remaps: preparation.binding_remaps.clone(),
+                };
+                self.bind_components(next, &value.ty, flow, source, &mut vec![], &mut computed, depth + 1)?;
+                return Ok(shape);
+            }
+            Pattern::Or(alternatives) if preparation.copy_bindings => {
+                let mut merged = None;
+                let original_order = flow.order.len();
+                for alternative in alternatives {
+                    let known = pattern_from_enum_domains(alternative, path, &preparation.domains, &mut self.fuel, source, depth + 1)?;
+                    if known == Some(false) { continue; }
+                    self.fuel = self.fuel.checked_sub(flow.types.len().saturating_add(1))
+                        .ok_or_else(|| error(source, "copied pattern candidate budget exhausted"))?;
+                    let mut candidate = flow.clone();
+                    self.bind_components(alternative, ty, &mut candidate, source, path, preparation, depth + 1)?;
+                    // Newly declared bindings are all Copy, without cleanup
+                    // effects or candidate-local address acquisition. Their
+                    // declaration order may differ with the extraction paths.
+                    candidate.order[original_order..].sort();
+                    if let Some(previous) = &mut merged {
+                        self.join_flow(previous, &candidate, source)?;
+                    } else {
+                        merged = Some(candidate);
+                    }
+                    if known == Some(true) { break; }
+                }
+                if let Some(merged) = merged { *flow = merged; }
+                return (self.shape)(ty).map_err(|e| error(source, e));
+            }
+            Pattern::Remap { pattern, bindings } => {
+                let mapping = patterns::binding_map(pattern, bindings, &mut self.fuel, source)?;
+                preparation.binding_remaps.push(mapping);
+                let result = self.bind_components(pattern, ty, flow, source, path, preparation, depth + 1);
+                preparation.binding_remaps.pop();
+                return result;
+            }
+            Pattern::Or(_) => {
+                if self.observation_pattern(pattern, ty, source, depth, true)? {
+                    // All exported values are independent copies. Candidate
+                    // layouts may differ while the subject stays intact.
+                    preparation.copy_bindings = true;
+                    let result = self.bind_components(pattern, ty, flow, source, path, preparation, depth + 1);
+                    preparation.copy_bindings = false;
+                    result?;
+                    return self.bind_components(&Pattern::Wild, ty, flow, source, path, preparation, depth + 1);
+                }
+                let (observation, transfer) = patterns::common_plan(pattern, &mut self.fuel, source, depth)?;
+                // Validate every candidate's structural observations before
+                // using its common successful transfer. Runtime matching still
+                // uses the original pattern and commits its canonical binders.
+                if !self.observation_pattern(&observation, ty, source, depth, false)? {
+                    return Err(error(source, "or-pattern observation requires candidate evaluation"));
+                }
+                return self.bind_components(&transfer,ty,flow,source,path,preparation,depth+1);
+            }
+            Pattern::Wild | Pattern::Literal(_) => {
+                if !preparation.copy_bindings && *ty != Term::Primitive(nir::Primitive::Void) {
+                    self.report.temporaries.push(TemporaryCleanup {
+                        scope: self.temporary_scope,
+                        source,
+                        ty: ty.clone(),
+                        fields: path.clone(),
+                    });
+                }
+                return (self.shape)(ty).map_err(|e| error(source, e));
+            }
+            Pattern::Unit if *ty == Term::Primitive(nir::Primitive::Void) => {
+                if !preparation.copy_bindings { preparation.transfers.push(path.clone()); }
+                return Ok(Shape::Value);
+            }
+            Pattern::Binding { binding, inner } if self.observation_pattern(inner, ty, source, depth, false)? => {
+                let mut binding = *binding;
+                for mapping in preparation.binding_remaps.iter().rev() {
+                    self.fuel = self.fuel.checked_sub(1)
+                        .ok_or_else(|| error(source, "copied pattern remap budget exhausted"))?;
+                    binding = mapping.get(&binding).copied().unwrap_or(binding);
+                }
+                // A field binding follows ordinary Copy/move delivery. A
+                // copied field remains initialized in the residual parent,
+                // including for a parent destructor which reads it. At the
+                // root, the already delivered subject can transfer directly.
+                let copied = (preparation.copy_bindings || !path.is_empty())
+                    && (self.delivery)(ty).map_err(|e| error(source, e))? == Delivery::Copy;
+                if preparation.copy_bindings && !copied {
+                    return Err(error(source, "overlapping pattern binding requires Copy for the extracted value"));
+                }
+                self.declare(flow, binding, ty, source)?;
+                let mut origins = BTreeMap::new();
+                for (leaf, targets) in preparation.origins {
+                    self.fuel = self
+                        .fuel
+                        .checked_sub(leaf.len().saturating_add(1))
+                        .ok_or_else(|| error(source, "pattern origin budget exhausted"))?;
+                    if leaf.starts_with(path) {
+                        self.pointer_work(targets, source)?;
+                        origins.insert(leaf[path.len()..].to_vec(), targets.clone());
+                    }
+                }
+                self.install_value_origins(
+                    flow,
+                    &Place {
+                        root: root(binding),
+                        fields: vec![],
+                    },
+                    origins,
+                    source,
+                )?;
+                let mut leaves = BTreeMap::new();
+                for (leaf, callable) in &preparation.callables {
+                    self.fuel = self.fuel.checked_sub(leaf.len().saturating_add(1))
+                        .ok_or_else(|| error(source, "pattern callable budget exhausted"))?;
+                    if leaf.starts_with(path) {
+                        leaves.insert(leaf[path.len()..].to_vec(), callable.clone());
+                    }
+                }
+                self.install_callable_fields(flow, &Place { root: root(binding), fields: vec![] }, leaves, source)?;
+                let domains = preparation.domains.iter().filter_map(|(leaf, tags)| leaf.strip_prefix(path.as_slice()).map(|rest| (rest.to_vec(), tags.clone()))).collect();
+                self.install_enum_domains(flow, &Place {root: root(binding), fields: vec![]}, domains, source)?;
+                if let Some(callable) = preparation.callables.get(path).cloned() {
+                    self.store_callable(flow, root(binding), callable, source)?;
+                }
+                if !copied {
+                    preparation.transfers.push(path.clone());
+                    preparation.moved_bindings.push((binding, path.clone()));
+                }
+                return (self.shape)(ty).map_err(|e| error(source, e));
+            }
+            Pattern::Tuple(patterns) => {
+                let Some(types) = nir::normal_forms::tuple_fields(self.package, ty) else {
+                    return Err(error(source, "tuple pattern ownership type mismatch"));
+                };
+                if !preparation.copy_bindings { self.decomposition(ty, source, path, None, patterns.is_empty())?; }
+                return self.bind_fields(patterns, types, flow, source, path, preparation, depth);
+            }
+            Pattern::AnonymousRecord { names, fields } => {
+                let Term::Record(types) = ty else { return Err(error(source,"anonymous record pattern ownership type mismatch")); };
+                if names.len() != fields.len() || names.len() != types.len()
+                    || names.iter().zip(types).any(|(name,(expected,_))|name != expected) {
+                    return Err(error(source,"anonymous record pattern ownership labels mismatch"));
+                }
+                let types = types.iter().map(|(_,ty)|ty.clone()).collect::<Vec<_>>();
+                if !preparation.copy_bindings { self.decomposition(ty, source, path, None, fields.is_empty())?; }
+                return self.bind_fields(fields, &types, flow, source, path, preparation, depth);
+            }
+            Pattern::Record {
+                declaration,
+                fields,
+            } => {
+                let Term::Nominal {
+                    declaration: actual,
+                    arguments,
+                } = ty
+                else {
+                    return Err(error(source, "record pattern ownership type mismatch"));
+                };
+                if actual != declaration {
+                    return Err(error(
+                        source,
+                        "record pattern ownership declaration mismatch",
+                    ));
+                }
+                let definition = self
+                    .package
+                    .and_then(|p| p.structs.iter().find(|s| s.declaration == *declaration))
+                    .ok_or_else(|| {
+                        error(source, "record pattern ownership requires package metadata")
+                    })?;
+                let fields_types: Vec<_> = definition
+                    .instantiate_fields(arguments)
+                    .map_err(|e| error(source, format!("record pattern ownership: {e:?}")))?
+                    .into_iter()
+                    .map(|(_, ty)| ty)
+                    .collect();
+                if !preparation.copy_bindings { self.decomposition(ty, source, path, None, fields.is_empty())?; }
+                return self.bind_fields(
+                    fields,
+                    &fields_types,
+                    flow,
+                    source,
+                    path,
+                    preparation,
+                    depth,
+                );
+            }
+            Pattern::Variant {
+                declaration,
+                index,
+                fields,
+            } => {
+                let Term::Nominal {
+                    declaration: actual,
+                    arguments,
+                } = ty
+                else {
+                    return Err(error(source, "variant ownership type mismatch"));
+                };
+                if actual != declaration {
+                    return Err(error(source, "variant ownership declaration mismatch"));
+                }
+                let definition = self
+                    .package
+                    .and_then(|p| p.enums.iter().find(|e| e.declaration == *declaration))
+                    .ok_or_else(|| error(source, "variant ownership requires package metadata"))?;
+                let variants = definition
+                    .instantiate_variants(arguments)
+                    .map_err(|e| error(source, format!("variant ownership: {e:?}")))?;
+                let variant = variants
+                    .get(*index)
+                    .ok_or_else(|| error(source, "variant ownership index out of bounds"))?;
+                if !preparation.copy_bindings {
+                    self.decomposition(ty, source, path, Some(*index), fields.is_empty())?;
+                    preparation.variants.push(VariantSelection {
+                        fields: path.clone(),
+                        index: *index,
+                    });
+                }
+                // A tag guard authorizes only that variant's payload evidence.
+                // Restore the qualified map afterwards for sibling patterns.
+                let selected = select_variant_callables(
+                    &preparation.callables, path, *index, &mut self.fuel, source,
+                )?;
+                let selected_domains = select_variant_callables(&preparation.domains, path, *index, &mut self.fuel, source)?;
+                let qualified_domains = std::mem::replace(&mut preparation.domains, selected_domains);
+                let qualified = std::mem::replace(&mut preparation.callables, selected);
+                let result = self.bind_fields(
+                    fields,
+                    &variant.fields,
+                    flow,
+                    source,
+                    path,
+                    preparation,
+                    depth,
+                );
+                preparation.callables = qualified;
+                preparation.domains = qualified_domains;
+                return result;
+            }
+            Pattern::Binding { binding, inner } => {
+                // The whole will be delivered once. Additional constituent
+                // bindings may only copy; they must not decompose the retained
+                // owner or subtract fields from its cleanup responsibility.
+                let previous = std::mem::replace(&mut preparation.copy_bindings, true);
+                let observed = self.bind_components(inner, ty, flow, source, path, preparation, depth + 1);
+                preparation.copy_bindings = previous;
+                observed?;
+                return self.bind_components(
+                    &Pattern::Binding { binding: *binding, inner: Box::new(Pattern::Wild) },
+                    ty, flow, source, path, preparation, depth + 1,
+                );
+            }
+            _ => {
+                return Err(error(
+                    source,
+                    "pattern requires additional transfer and failure semantics",
+                ));
+            }
+        }
+    }
+    fn bind_fields(
+        &mut self,
+        patterns: &[Pattern],
+        types: &[Term],
+        flow: &mut Flow,
+        source: SourceRange,
+        path: &mut Vec<usize>,
+        preparation: &mut PatternPreparation<'_>,
+        depth: usize,
+    ) -> Result<Shape, Error> {
+        if patterns.len() != types.len() {
+            return Err(error(source, "pattern ownership field count mismatch"));
+        }
+        let mut shapes = vec![];
+        for (index, (pattern, ty)) in patterns.iter().zip(types).enumerate() {
+            path.push(index);
+            shapes.push(self.bind_components(
+                pattern,
+                ty,
+                flow,
+                source,
+                path,
+                preparation,
+                depth + 1,
+            )?);
+            path.pop();
+        }
+        Ok(Shape::Fields(shapes))
+    }
+    fn retire(&mut self, flow: &mut Flow, id: PlaceId, source: SourceRange) -> Result<(), Error> {
+        if let Some(action) = self.local_action(flow, id, &[], source)? {
+            self.report.cleanup_sites.push(CleanupSite {
+                default_origin: None,
+                result_origin: None,
+                interface_precondition: false,
+                source,
+                reason: CleanupReason::ScopeEnd,
+                actions: vec![action],
+            });
+        }
+        self.remove_local(flow, id, source)
+    }
+    fn remove_local(
+        &mut self,
+        flow: &mut Flow,
+        id: PlaceId,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        for (place, availability) in flow
+            .state
+            .retire(id)
+            .map_err(|e| error(source, format!("cleanup: {e:?}")))?
+            .into_iter()
+            .rev()
+        {
+            self.report.cleanups.push(Cleanup {
+                source,
+                place,
+                availability,
+            });
+        }
+        flow.roots.remove(&id);
+        flow.types.remove(&id);
+        flow.cleanup_before.remove(&id);
+        flow.order.retain(|root| *root != id);
+        flow.callables.remove(&id);
+        flow.callable_fields.retain(|place, _| place.root != id);
+        flow.enum_domains.remove(&id);
+        // Retired local identities may be reused by a later loop iteration.
+        // Neither an old pointer nor an alias to its slot revives with it.
+        flow.pointers.retain(|binding, _| binding.root != id);
+        for targets in flow.pointers.values_mut() {
+            self.pointer_work(targets, source)?;
+            let before = targets.len();
+            targets.retain(|target| target.root != id);
+            if targets.len() != before { targets.insert(invalidated_pointer_target()); }
+        }
+        Ok(())
+    }
+    fn exit(
+        &mut self,
+        flow: &mut Flow,
+        source: SourceRange,
+        reason: CleanupReason,
+    ) -> Result<(), Error> {
+        let callable_evidence = if reason == CleanupReason::PredicateFailure { None } else {
+            flow.value_callable.as_ref().map(|callable| export_callable_evidence(callable, &mut self.fuel, 0)).transpose()?
+        };
+        let callable_fields = if reason == CleanupReason::PredicateFailure { BTreeMap::new() } else {
+            flow.value_callables.iter().filter(|(path, _)| !path.is_empty())
+                .map(|(path, value)| Ok((path.clone(), export_callable_evidence(value, &mut self.fuel, 0)?)))
+                .collect::<Result<_, Error>>()?
+        };
+        let variant_domains = if reason == CleanupReason::PredicateFailure { EnumDomains::new() } else {
+            copy_enum_domains(&flow.value_variants, &mut self.fuel, source)?
+        };
+        let callable_candidates = if let Some(evidence) = &callable_evidence {
+            legacy_callable_definitions(evidence, &mut self.fuel, 0)?
+        } else { None };
+        let callable_result = callable_candidates.as_ref().filter(|values|values.len()==1).map(|values|values[0].clone());
+        let locals = flow
+            .order
+            .iter()
+            .filter(|id| !self.persistent_roots.contains(id))
+            .copied()
+            .collect();
+        self.cleanup_exit(flow, locals, 0, 0, source, reason)?;
+        self.incomplete_exit(source, 0);
+        if reason == CleanupReason::PredicateFailure {
+            self.report.failed_exits.push(flow.state.clone());
+        } else {
+            self.report.exits.push(flow.state.clone());
+            self.report.callable_exits.push(callable_result);
+            self.report.callable_candidate_exits.push(callable_candidates);
+            self.report.callable_evidence_exits.push(callable_evidence);
+            self.report.callable_field_exits.push(callable_fields);
+            self.report.enum_variant_exits.push(variant_domains);
+            let captures = self.captured_roots.iter().filter_map(|binding| {
+                flow.callables.get(binding).map(|callable| (Place {root:*binding,fields:vec![]}, callable))
+            }).chain(flow.callable_fields.iter().filter(|(place, _)| self.captured_roots.contains(&place.root))
+                .map(|(place, callable)| (place.clone(), callable))).map(|(binding, callable)| Ok((binding, export_callable_evidence(callable, &mut self.fuel, 0)?)))
+                .collect::<Result<_, Error>>()?;
+            self.report.captured_callable_exits.push(captures);
+            let mut domains = BTreeMap::new();
+            for root in &self.captured_roots {
+                if let Some(tags) = flow.enum_domains.get(root) {
+                    domains.insert(*root, copy_enum_domains(tags, &mut self.fuel, source)?);
+                }
+            }
+            self.report.captured_enum_exits.push(domains);
+        }
+        let mut remaining: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        for (place, availability) in flow.state.remaining() {
+            remaining
+                .entry(place.root)
+                .or_default()
+                .push((place, availability));
+        }
+        for root in flow.order.iter().rev() {
+            if self.persistent_roots.contains(root) {
+                continue;
+            }
+            for (place, availability) in
+                remaining.remove(root).unwrap_or_default().into_iter().rev()
+            {
+                self.report.cleanups.push(Cleanup {
+                    source,
+                    place,
+                    availability,
+                });
+            }
+        }
+        flow.live = false;
+        Ok(())
+    }
+    /// Bind a prepared input without ending the enclosing expression's temporaries.
+    fn prepared_binding(&mut self, expr: &Expr, flow: &mut Flow, depth: usize) -> Result<(), Error> {
+        if !flow.live { return Ok(()); }
+        if self.fuel == 0 || depth > 128 { return Err(error(expr.source, "call preparation budget exhausted")); }
+        self.fuel -= 1;
+        if let K::LetPattern { pattern: pattern @ Pattern::Tuple(_), value, guard: None, otherwise: None } = &expr.kind {
+            return self.let_pattern(pattern, value, None, None, flow, expr.source, depth + 1);
+        }
+        let K::Let { binding, value } = &expr.kind else {
+            return Err(error(expr.source, "call preparation requires binding statements"));
+        };
+        let callable = callable_source(value, flow, &mut self.fuel)?;
+        let origins = self.evaluate_value_origins(value, flow, depth + 1)?;
+        let callable = flow.value_callable.clone().or(callable);
+        if flow.live {
+            let leaves = flow.value_callables.clone();
+            self.declare(flow, *binding, &value.ty, expr.source)?;
+            self.install_callable_fields(flow, &Place { root: root(*binding), fields: vec![] }, leaves, expr.source)?;
+            self.install_enum_domains(flow, &Place {root:root(*binding),fields:vec![]}, flow.value_variants.clone(), expr.source)?;
+            self.install_value_origins(flow, &Place { root: root(*binding), fields: vec![] }, origins, expr.source)?;
+            if let Some(callable) = callable { self.store_callable(flow, root(*binding), callable, expr.source)?; }
+        }
+        Ok(())
+    }
+    fn scope_origins(&mut self, expr: &Expr, flow: &mut Flow, depth: usize) -> Result<ValueOrigins, Error> {
+        let outer = flow.roots.clone();
+        let origins = self.evaluate_value_origins(expr, flow, depth)?;
+        if flow.live {
+            let locals: Vec<_> = flow.order.iter().rev().filter(|id| !outer.contains(id)).copied().collect();
+            self.check_scope_origins(&origins, &locals, expr.source)?;
+            for id in locals { self.retire(flow, id, expr.source)?; }
+        }
+        Ok(origins)
+    }
+    fn scope(&mut self, expr: &Expr, flow: &mut Flow, depth: usize) -> Result<(), Error> {
+        let outer = flow.roots.clone();
+        self.expr(expr, flow, depth)?;
+        if flow.live {
+            let locals: Vec<_> = flow
+                .order
+                .iter()
+                .rev()
+                .filter(|id| !outer.contains(id))
+                .copied()
+                .collect();
+            for id in locals {
+                self.retire(flow, id, expr.source)?;
+            }
+        }
+        Ok(())
+    }
+    fn fork(
+        &mut self,
+        left: &Expr,
+        right: Option<&Expr>,
+        flow: &mut Flow,
+        depth: usize,
+    ) -> Result<(), Error> {
+        let mut other = flow.clone();
+        self.scope(left, flow, depth + 1)?;
+        if let Some(right) = right {
+            self.scope(right, &mut other, depth + 1)?;
+        }
+        match (flow.live, other.live) {
+            (true, true) => {
+                self.join_flow(flow, &other, left.source)?;
+            }
+            (false, true) => *flow = other,
+            _ => (),
+        }
+        Ok(())
+    }
+    /// Resolve the body selected by a local callable before argument evaluation.
+    /// The caller must still read the original local once; this is provenance,
+    /// not permission to bypass availability or to unfold a type-level head.
+    fn indirect_named_call(&self, expr: &Expr, flow: &Flow) -> Option<Expr> {
+        let K::Call {
+            callee,
+            arguments,
+            parameter_bindings,
+        } = &expr.kind
+        else {
+            return None;
+        };
+        let K::Local(binding) = &callee.kind else {
+            return None;
+        };
+        let callable = flow.callables.get(&root(*binding))?;
+        if !callable.alternatives.is_empty() { return None; }
+        let mut target = callable.definition.clone();
+        let declaration = match target.kind {
+            K::Function(id)
+            | K::FunctionInstance {
+                declaration: id, ..
+            } => id,
+            _ => return None,
+        };
+        target.source = callee.source;
+        let bindings = if parameter_bindings.is_empty() {
+            self.package
+                .and_then(|p| p.functions.iter().find(|f| f.declaration == declaration))
+                .map(|f| f.parameters.clone())
+                .unwrap_or_default()
+        } else {
+            parameter_bindings.clone()
+        };
+        Some(Expr {
+            source: expr.source,
+            ty: expr.ty.clone(),
+            kind: K::Call {
+                callee: Box::new(target),
+                arguments: arguments.clone(),
+                parameter_bindings: bindings,
+            },
+        })
+    }
+    fn call_named_candidates(
+        &mut self,
+        expr: &Expr,
+        callable: &Callable,
+        arguments: &[nir::program::CallArgument],
+        bindings: &[LocalId],
+        flow: &mut Flow,
+        depth: usize,
+    ) -> Result<Option<BTreeSet<Place>>, Error> {
+        if arguments.iter().any(|a| a.is_default) {
+            return Err(error(
+                expr.source,
+                "multi-target defaults require a shared parameter contract",
+            ));
+        }
+        let declaration=match callable.definition.kind {
+            K::Function(id) | K::FunctionInstance {declaration:id,..} => id,
+            _=>return Err(error(expr.source,"named callable definition is missing")),
+        };
+        let recovered;
+        let bindings = if bindings.is_empty() {
+            recovered = self
+                .package
+                .and_then(|p| {
+                    p.functions
+                        .iter()
+                        .find(|f| f.declaration == declaration)
+                })
+                .ok_or_else(|| error(expr.source, "callable candidate body is missing"))?
+                .parameters
+                .clone();
+            recovered.as_slice()
+        } else {
+            bindings
+        };
+        let mut target = callable.definition.clone();
+        target.source = expr.source;
+        let mut prepared_callables = vec![];
+        let mut prepared_enums = vec![];
+        let (result, summary) = self.memory_call(
+            &target,
+            arguments,
+            bindings,
+            &callable.alternatives,
+            &mut prepared_callables,
+            &mut prepared_enums,
+            flow,
+            expr.source,
+            depth + 1,
+        )?;
+        let Some(summary)=summary else {return Ok(result);};
+        flow.value_callable = if flow.live && matches!(expr.ty, Term::Function { .. }) {
+            let definitions = match &summary.callable_result {
+                super::memory::CallableResult::Known(key) => std::slice::from_ref(key),
+                super::memory::CallableResult::Candidates(keys) => keys.as_slice(),
+                _ => &[],
+            };
+            let mut result: Option<Callable> = None;
+            for key in definitions {
+                super::memory::bound_type(&expr.ty, &mut self.fuel)
+                    .map_err(|e| error(expr.source, e))?;
+                for ty in &key.arguments {
+                    super::memory::bound_type(ty, &mut self.fuel)
+                        .map_err(|e| error(expr.source, e))?;
+                }
+                let definition = Expr {
+                    source: expr.source,
+                    ty: expr.ty.clone(),
+                    kind: if key.arguments.is_empty() {
+                        K::Function(key.declaration)
+                    } else {
+                        K::FunctionInstance {
+                            declaration: key.declaration,
+                            arguments: key.arguments.clone(),
+                        }
+                    },
+                };
+                let next = callable_source(&definition, &Flow::default(), &mut self.fuel)?.unwrap();
+                result = if let Some(previous) = result {
+                    merge_named_callables(&previous, &next, &mut self.fuel, expr.source)?
+                } else {
+                    Some(next)
+                };
+            }
+            result
+        } else {
+            None
+        };
+        let scalar_result = flow.value_callable.clone();
+        let mut contextual_scalar: Option<Callable> = None;
+        let mut scalar_complete = true;
+        let mut result_fields: Option<(BTreeMap<Vec<usize>, Callable>, EnumDomains)> = None;
+        if flow.live {
+            for candidate in std::iter::once(&callable.definition).chain(&callable.alternatives) {
+                // Each body gets the snapshots from the one preparation above.
+                let candidate_scalar = self.record_named_call(candidate, prepared_callables.clone(), prepared_enums.clone(), expr.source, flow)?;
+                if scalar_complete {
+                    contextual_scalar = match (contextual_scalar.take(), candidate_scalar) {
+                        (None, Some(value)) => Some(value),
+                        (Some(previous), Some(value)) => {
+                            if same_callable_definition(&previous.definition, &value.definition)
+                                && previous.choices == value.choices && previous.alternatives == value.alternatives && previous.captures == value.captures && previous.enum_captures == value.enum_captures {
+                                Some(previous)
+                            } else { merge_callable_provenance(&previous, &value, &mut self.fuel, expr.source, 0)? }
+                        }
+                        _ => None,
+                    };
+                    scalar_complete = contextual_scalar.is_some();
+                }
+                let fields = std::mem::take(&mut flow.value_callables);
+                let domains = std::mem::take(&mut flow.value_variants);
+                result_fields = Some(if let Some((previous, previous_domains)) = result_fields {
+                    let merged = join_guarded_callables(&previous, &fields, &previous_domains, &domains, &mut self.fuel, expr.source)?;
+                    (merged, join_enum_domains(&previous_domains, &domains, &mut self.fuel, expr.source)?)
+                } else { (fields, domains) });
+            }
+        }
+        // A context-sensitive result is valid only if every candidate supplied
+        // compatible evidence. Otherwise retain independently proved worklist
+        // evidence (which can cover recursive returns this local walk cannot).
+        flow.value_callable = if scalar_complete { contextual_scalar.or(scalar_result) } else { scalar_result };
+        (flow.value_callables, flow.value_variants) = result_fields.unwrap_or_default();
+        let mut candidates = vec![];
+        for candidate in std::iter::once(&callable.definition).chain(&callable.alternatives) {
+            super::memory::bound_type(&candidate.ty, &mut self.fuel)
+                .map_err(|e| error(expr.source, e))?;
+            candidates.push(candidate.clone());
+        }
+        self.report.named_candidate_calls.push(NamedCandidateCall {
+            source: expr.source,
+            candidates,
+        });
+        Ok(result)
+    }
+    fn memory_candidate_summary(
+        &mut self, callee: &Expr, alternatives: &[Expr], inputs: &[CallableParameter], source: SourceRange,
+    ) -> Result<super::memory::Summary, Error> {
+        let mut combined: Option<super::memory::Summary> = None;
+        for target in std::iter::once(callee).chain(alternatives) {
+            let summary = self.memory_summary_with_inputs(target, inputs, source).map_err(|reason| {
+                error(source, format!("every callable candidate requires a memory contract: {reason}"))
+            })?;
+            if &summary.signature != callee.ty.callable_signature() {
+                return Err(error(source, "callable candidate signature mismatch"));
+            }
+            if let Some(combined) = &mut combined {
+                self.fuel = self
+                    .fuel
+                    .checked_sub(summary.accesses.len() + 1)
+                    .ok_or_else(|| {
+                        error(source, "callable candidate effects budget exhausted")
+                    })?;
+                super::memory::join_code_fields(&mut combined.code_fields,&summary.code_fields,&mut self.fuel).map_err(|reason|error(source,reason))?;
+                combined.accesses.extend(summary.accesses);
+                combined.may_reject |= summary.may_reject;
+                for (path, key) in &mut combined.callable_fields {
+                    self.fuel=self.fuel.checked_sub(path.len()+1).ok_or_else(||error(source,"callable result merge budget exhausted"))?;
+                    key.join(summary.callable_fields.get(path).unwrap_or(&super::memory::CallableResult::Unknown), &mut self.fuel)
+                        .map_err(|reason|error(source,reason))?;
+                }
+                for (path, _) in summary.callable_fields {
+                    self.fuel=self.fuel.checked_sub(path.len()+1).ok_or_else(||error(source,"callable result merge budget exhausted"))?;
+                    combined.callable_fields.entry(path).or_insert(super::memory::CallableResult::Unknown);
+                }
+                combined
+                    .callable_result
+                    .join(&summary.callable_result, &mut self.fuel)
+                    .map_err(|e| error(source, e))?;
+                combined.result_targets =
+                    match (combined.result_targets.take(), summary.result_targets) {
+                        (Some(mut left), Some(right)) => {
+                            for place in &right {
+                                self.fuel = self
+                                    .fuel
+                                    .checked_sub(place.fields.len() + 1)
+                                    .ok_or_else(|| {
+                                        error(
+                                            source,
+                                            "callable candidate results budget exhausted",
+                                        )
+                                    })?;
+                            }
+                            left.extend(right);
+                            Some(left)
+                        }
+                        _ => None,
+                    };
+            } else {
+                combined = Some(summary);
+            }
+        }
+        combined.ok_or_else(|| error(source, "empty callable candidates"))
+    }
+    fn memory_summary_with_inputs(&mut self, callee: &Expr, inputs: &[CallableParameter], source: SourceRange) -> Result<super::memory::Summary, String> {
+        let (declaration,arguments)=match &callee.kind {
+            K::Function(id)=>(*id,&[][..]),
+            K::FunctionInstance {declaration,arguments}=>(*declaration,arguments.as_slice()),
+            _=>return Err("memory callee must identify a function".into()),
+        };
+        infer_callable_memory(self.package.ok_or("memory summary requires a package")?,declaration,arguments,inputs,&mut self.fuel,source)
+    }
+    fn memory_summary_with_code(&mut self, callee: &Expr, inputs: &BTreeMap<super::memory::CallableInput, super::memory::CallableResult>) -> Result<super::memory::Summary, String> {
+        self.memory_summary_with_prepared_code(callee,inputs,&BTreeMap::new())
+    }
+    fn memory_summary_with_prepared_code(&mut self, callee: &Expr, inputs: &BTreeMap<super::memory::CallableInput, super::memory::CallableResult>, code_inputs: &super::memory::CodeInputs<'_>) -> Result<super::memory::Summary, String> {
+        let (id, arguments) = match &callee.kind {
+            K::Function(id) => (*id, &[][..]),
+            K::FunctionInstance {
+                declaration,
+                arguments,
+            } => (*declaration, arguments.as_slice()),
+            _ => return Err("memory callee must identify a function".into()),
+        };
+        super::memory::infer_with_code_inputs(self.package.ok_or("memory summary requires a package")?, id, arguments, inputs, code_inputs, &mut self.fuel)
+    }
+    /// Conditional borrowed-body analysis only. Concrete callers must establish
+    /// every indirect footprint against their own stored pointer provenance.
+    /// These roots are validity premises, never owned values or no-alias facts.
+    fn borrowed_pointer_contents(&mut self, flow: &mut Flow, slot: &Place, source: SourceRange) -> Result<(), Error> {
+        if flow.pointers.contains_key(slot)
+            || !matches!(slot.root.owner, x if x == u64::MAX - 1 || x == u64::MAX - 2 || x == u64::MAX - 4) {
+            return Ok(());
+        }
+        flow.state.require_present(slot).map_err(|e| error(source, format!("borrowed pointer slot unavailable: {e:?}")))?;
+        let root_ty = flow.types.get(&slot.root).ok_or_else(|| error(source, "borrowed pointer root type missing"))?.clone();
+        let Term::Pointer(subject) = self.field_type(&root_ty, &slot.fields, source)? else {
+            return Err(error(source, "borrowed pointer slot has non-pointer type"));
+        };
+        self.fuel = self.fuel.checked_sub(1)
+            .ok_or_else(|| error(source, "borrowed pointer premise budget exhausted"))?;
+        let key = (flow.borrowed_scope, slot.clone());
+        let pointee = if let Some((id, previous)) = self.borrowed_pointees.get(&key) {
+            if previous != subject.as_ref() { return Err(error(source, "borrowed pointer premise changed type")); }
+            *id
+        } else {
+            let local = self.next_borrowed_pointer;
+            self.next_borrowed_pointer = local.checked_add(1)
+                .ok_or_else(|| error(source, "borrowed pointer premise identity exhausted"))?;
+            let id = PlaceId {owner:u64::MAX - 4, local};
+            self.borrowed_pointees.insert(key, (id, (*subject).clone()));
+            id
+        };
+        if !flow.types.contains_key(&pointee) {
+            let shape = (self.shape)(&subject).map_err(|e| error(source, e))?;
+            flow.state.declare(pointee, &shape, true, &mut self.fuel)
+                .map_err(|e| error(source, format!("borrowed pointer shape: {e:?}")))?;
+            flow.types.insert(pointee, *subject);
+        }
+        flow.pointers.insert(slot.clone(), BTreeSet::from([Place {root: pointee, fields: vec![]}]));
+        Ok(())
+    }
+    fn map_memory_target(
+        &mut self,
+        target: &super::memory::ParameterPlace,
+        arguments: &BTreeMap<usize, BTreeSet<Place>>,
+        flow: &mut Flow,
+        source: SourceRange,
+    ) -> Result<Option<BTreeSet<Place>>, Error> {
+        let Some(candidates) = arguments.get(&target.parameter) else { return Ok(None); };
+        self.pointer_work(candidates, source)?;
+        let mut targets = candidates.clone();
+        for fields in &target.through {
+            let mut loaded = BTreeSet::new();
+            for mut place in targets {
+                self.fuel = self.fuel.checked_sub(fields.len().saturating_add(1))
+                    .ok_or_else(|| error(source, "pointer provenance budget exhausted"))?;
+                place.fields.extend(fields.iter().map(|(_, index)| *index));
+                flow.state.require_present(&place)
+                    .map_err(|reason| error(source, format!("memory pointer slot unavailable: {reason:?}")))?;
+                self.borrowed_pointer_contents(flow, &place, source)?;
+                let Some(pointees) = flow.pointers.get(&place) else { return Ok(None); };
+                self.pointer_work(pointees, source)?;
+                loaded.extend(pointees.iter().cloned());
+            }
+            targets = loaded;
+        }
+        let mut result = BTreeSet::new();
+        for mut place in targets {
+            self.fuel = self.fuel.checked_sub(target.fields.len())
+                .ok_or_else(|| error(source, "pointer provenance budget exhausted"))?;
+            place.fields.extend(target.fields.iter().map(|(_, index)| *index));
+            result.insert(place);
+        }
+        Ok(Some(result))
+    }
+    fn memory_accesses(
+        &mut self,
+        accesses: &[super::memory::Access],
+        targets: &BTreeMap<usize, BTreeSet<Place>>,
+        flow: &mut Flow,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        for access in accesses {
+            let targets = self
+                .map_memory_target(&access.target, targets, flow, source)?
+                .ok_or_else(|| error(source, "memory call target is not established"))?;
+            for target in targets {
+                let checked = if access.read_value {
+                    flow.state.require_present(&target)
+                } else {
+                    flow.state.require_place(&target)
+                };
+                checked.map_err(|reason| {
+                    error(
+                        source,
+                        format!("memory call target unavailable: {reason:?}"),
+                    )
+                })?;
+                if access.write {
+                    self.forget_callable_fields(flow, &target, source)?;
+                    if target.fields.is_empty() { flow.callables.remove(&target.root); }
+                }
+            }
+        }
+        Ok(())
+    }
+    fn memory_call(
+        &mut self,
+        callee: &Expr,
+        arguments: &[nir::program::CallArgument],
+        bindings: &[LocalId],
+        alternatives: &[Expr],
+        prepared_callables: &mut Vec<CallableParameter>,
+        prepared_enums: &mut Vec<EnumParameter>,
+        flow: &mut Flow,
+        source: SourceRange,
+        depth: usize,
+    ) -> Result<(Option<BTreeSet<Place>>, Option<super::memory::Summary>), Error> {
+        let selected;
+        let callee = if matches!(callee.kind, K::TraitMethod { .. }) {
+            let package = self.package.ok_or_else(|| error(source, "method memory analysis requires a package"))?;
+            selected = super::memory::method_callee(package, callee, &mut self.fuel)
+                .map_err(|reason| error(source, reason))?;
+            &selected
+        } else { callee };
+        let Term::Function { parameters, .. } = callee.ty.callable_signature() else {
+            return Err(error(source, "memory call lacks a signature"));
+        };
+        super::memory::validate_argument_plan(arguments, bindings, parameters.len())
+            .map_err(|message| error(source, message))?;
+        if bindings.len() != parameters.len() || bindings.iter().collect::<BTreeSet<_>>().len() != bindings.len() {
+            return Err(error(source, "memory call requires a complete unique parameter binding frame"));
+        }
+        self.expr(callee, flow, depth + 1)?;
+        let mut targets = BTreeMap::new();
+        let mut prepared = Vec::new();
+        let mut frame = Flow {
+            borrowed_scope: self.fresh_borrowed_scope(source)?,
+            live: true,
+            ..Default::default()
+        };
+        let mut frame_targets = BTreeMap::new();
+        self.pending_frame(source, |this| {
+            for argument in arguments {
+                let mut default_targets = None;
+                let mut origins = BTreeMap::new();
+                if argument.is_default {
+                    let package = this.package.ok_or_else(|| {
+                        error(source, "default memory analysis requires a package")
+                    })?;
+                    let argument_summary = super::memory::infer_argument(
+                        package,
+                        &argument.value,
+                        &prepared,
+                        &mut this.fuel,
+                    )
+                    .map_err(|message| error(argument.value.source, message))?;
+                    this.memory_accesses(
+                        &argument_summary.accesses,
+                        &targets,
+                        flow,
+                        argument.value.source,
+                    )?;
+                    // Produce the same isolated cleanup report as ordinary
+                    // defaults. The footprint above checks external accesses;
+                    // this frame owns only prepared parameters and default locals.
+                    this.evaluate_default(argument, &mut frame, flow, depth + 1)?;
+                    if !flow.live {
+                        return Ok(());
+                    }
+                    if let Some(alternatives) = argument_summary.result_targets {
+                        let mut actual = BTreeSet::new();
+                        let mut local = BTreeSet::new();
+                        let mut known = true;
+                        for target in alternatives {
+                            match (
+                                this.map_memory_target(&target, &targets, flow, argument.value.source)?,
+                                this.map_memory_target(
+                                    &target,
+                                    &frame_targets,
+                                    &mut frame,
+                                    argument.value.source,
+                                )?,
+                            ) {
+                                (Some(mapped), Some(borrowed)) => {
+                                    actual.extend(mapped);
+                                    local.extend(borrowed);
+                                }
+                                _ => known = false,
+                            }
+                        }
+                        if !known {
+                            actual.insert(unknown_pointer_target());
+                            local.insert(unknown_pointer_target());
+                        }
+                        origins.insert(vec![], actual.clone());
+                        targets.insert(argument.parameter, actual);
+                        default_targets = Some(local);
+                    }
+                } else {
+                    // Snapshot in source order, before later argument effects.
+                    origins = this.evaluate_value_origins(&argument.value, flow, depth + 1)?;
+                    if let Some(target) = origins.get(&vec![]) {
+                        targets.insert(argument.parameter, target.clone());
+                    }
+                    if !flow.live {
+                        return Ok(());
+                    }
+                }
+                let delivered = if argument.is_default { &frame } else { &*flow };
+                let callable = delivered.value_callable.clone();
+                let fields = delivered.value_callables.clone();
+                let domains = copy_enum_domains(&delivered.value_variants, &mut this.fuel, source)?;
+                record_enum_parameter(prepared_enums, argument.parameter, &domains, &mut this.fuel, source)?;
+                if let Some(value) = &callable {
+                    prepared_callables.push(export_callable_parameter(argument.parameter, value, &mut this.fuel)?);
+                }
+                for (path, value) in &fields {
+                    if !path.is_empty() {
+                        let mut input = export_callable_parameter(argument.parameter, value, &mut this.fuel)?;
+                        input.fields = path.clone();
+                        prepared_callables.push(input);
+                    }
+                }
+                this.remember_pending_origins(&argument.value, argument.parameter, flow, origins)?;
+                let binding = bindings[argument.parameter];
+                let ty = &parameters[argument.parameter].ty;
+                this.declare(&mut frame, binding, ty, source)?;
+                if let Some(value) = callable { this.store_callable(&mut frame, root(binding), value, source)?; }
+                this.install_callable_fields(&mut frame, &Place {root:root(binding),fields:vec![]}, fields, source)?;
+                this.install_enum_domains(&mut frame, &Place {root:root(binding),fields:vec![]}, domains, source)?;
+                if let Term::Pointer(pointee) = ty {
+                    let borrowed = if argument.is_default {
+                        default_targets
+                    } else if targets.contains_key(&argument.parameter) {
+                        // Separate borrowed roots avoid collisions between caller
+                        // locals and callee parameter IDs, including recursion.
+                        let id = PlaceId {
+                            owner: u64::MAX - 2,
+                            local: u32::try_from(argument.parameter)
+                                .map_err(|_| error(source, "too many borrowed argument slots"))?,
+                        };
+                        let shape = (this.shape)(pointee).map_err(|e| error(source, e))?;
+                        frame
+                            .state
+                            .declare(id, &shape, true, &mut this.fuel)
+                            .map_err(|e| {
+                                error(source, format!("borrowed argument shape: {e:?}"))
+                            })?;
+                        frame.types.insert(id, (**pointee).clone());
+                        Some(BTreeSet::from([Place {
+                            root: id,
+                            fields: vec![],
+                        }]))
+                    } else {
+                        None
+                    };
+                    if let Some(borrowed) = borrowed {
+                        frame_targets.insert(argument.parameter, borrowed.clone());
+                        frame.pointers.insert(
+                            Place {
+                                root: root(binding),
+                                fields: vec![],
+                            },
+                            borrowed,
+                        );
+                    }
+                    frame.memory_exposed = true;
+                }
+                prepared.push((binding, ty.clone(), argument.parameter));
+            }
+            Ok(())
+        })?;
+        if flow.live {
+            for binding in bindings {
+                frame
+                    .state
+                    .require_present(&Place {
+                        root: root(*binding),
+                        fields: vec![],
+                    })
+                    .map_err(|_| error(source, "memory default consumed a prepared parameter"))?;
+            }
+        }
+        if !flow.live { return Ok((None,None)); }
+        let summary = match self.memory_candidate_summary(callee, alternatives, prepared_callables, source) {
+            Ok(summary) => summary,
+            Err(failure) if self.defer_unknown_calls && failure.reason ==
+                "every callable candidate requires a memory contract: dynamic call requires a richer memory contract" => {
+                // Construction-time checks have no concrete callback arguments.
+                // Preserve the obligation for invocation without inventing an
+                // access summary or a returned pointer target.
+                self.report.deferred_calls.push(source);
+                return Ok((None,None));
+            }
+            Err(failure) => return Err(failure),
+        };
+        if &summary.signature != callee.ty.callable_signature() {
+            return Err(error(source, "memory callee signature disagrees with its body"));
+        }
+        if flow.live {
+            self.memory_accesses(&summary.accesses, &targets, flow, source)?;
+            if summary.may_reject {
+                let mut failed = flow.clone();
+                self.exit(&mut failed, source, CleanupReason::PredicateFailure)?;
+            }
+        }
+        if !flow.live {
+            return Ok((None,Some(summary)));
+        }
+        let Some(results) = &summary.result_targets else {
+            return Ok((None,Some(summary)));
+        };
+        let mut all = BTreeSet::new();
+        for target in results {
+            if let Some(actual) = self.map_memory_target(target, &targets, flow, source)? {
+                all.extend(actual);
+            } else {
+                all.insert(unknown_pointer_target());
+            }
+        }
+        Ok((Some(all),Some(summary)))
+    }
+    fn pointer_work(
+        &mut self,
+        targets: &BTreeSet<Place>,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        for target in targets {
+            let Some(remaining) = self.fuel.checked_sub(target.fields.len().saturating_add(1))
+            else {
+                self.fuel = 0;
+                return Err(error(source, "pointer provenance budget exhausted"));
+            };
+            self.fuel = remaining;
+        }
+        Ok(())
+    }
+    fn pointer_target(
+        &mut self,
+        expr: &Expr,
+        flow: &Flow,
+        depth: usize,
+    ) -> Result<BTreeSet<Place>, Error> {
+        if self.fuel == 0 || depth > 128 {
+            return Err(error(expr.source, "pointer provenance budget exhausted"));
+        }
+        self.fuel -= 1;
+        match &expr.kind {
+            K::AddressOf(place) => expression_place(place)
+                .map(|place| BTreeSet::from([place]))
+                .ok_or_else(|| error(expr.source, "pointer address requires a known local place")),
+            K::Local(_) | K::AnonymousField { .. } | K::Field { .. } => {
+                let slot = expression_place(expr)
+                    .ok_or_else(|| error(expr.source, "pointer value requires a local place"))?;
+                let targets = flow.pointers.get(&slot).ok_or_else(|| {
+                    error(expr.source, "pointer target provenance is not established")
+                })?;
+                self.pointer_work(targets, expr.source)?;
+                Ok(targets.clone())
+            }
+            K::ReadPointer(pointer) => {
+                let slots = self.pointer_target(pointer, flow, depth + 1)?;
+                let mut targets = BTreeSet::new();
+                for slot in slots {
+                    flow.state.require_present(&slot).map_err(|e| {
+                        error(expr.source, format!("pointer slot unavailable: {e:?}"))
+                    })?;
+                    let values = flow.pointers.get(&slot).ok_or_else(|| {
+                        error(
+                            expr.source,
+                            "pointer slot contents provenance is not established",
+                        )
+                    })?;
+                    self.pointer_work(values, expr.source)?;
+                    targets.extend(values.iter().cloned());
+                }
+                Ok(targets)
+            }
+            K::PointerAnonymousField { pointer, index, .. } | K::PointerField { pointer, index, .. } => {
+                let targets = self.pointer_target(pointer, flow, depth + 1)?;
+                self.pointer_work(&targets, expr.source)?;
+                Ok(targets
+                    .into_iter()
+                    .map(|mut target| {
+                        target.fields.push(*index);
+                        target
+                    })
+                    .collect())
+            }
+            K::Block {
+                statements,
+                result: Some(result),
+            } if statements.is_empty() => self.pointer_target(result, flow, depth + 1),
+            K::If {
+                condition,
+                then_branch,
+                else_branch: Some(other),
+            } if matches!(
+                condition.kind,
+                K::Local(_) | K::Literal(nir::program::Literal::Bool(_))
+            ) =>
+            {
+                match constant_bool(condition, 0) {
+                    Some(true) => self.pointer_target(then_branch, flow, depth + 1),
+                    Some(false) => self.pointer_target(other, flow, depth + 1),
+                    None => {
+                        let mut targets = self.pointer_target(then_branch, flow, depth + 1)?;
+                        targets.extend(self.pointer_target(other, flow, depth + 1)?);
+                        Ok(targets)
+                    }
+                }
+            }
+            _ => Err(error(
+                expr.source,
+                "pointer target requires a memory contract",
+            )),
+        }
+    }
+    fn forget_pointer_subtree(
+        &mut self,
+        flow: &mut Flow,
+        destination: &Place,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        self.fuel = self
+            .fuel
+            .checked_sub(flow.pointers.len())
+            .ok_or_else(|| error(source, "pointer storage budget exhausted"))?;
+        flow.pointers.retain(|slot, _| {
+            slot.root != destination.root || !slot.fields.starts_with(&destination.fields)
+        });
+        Ok(())
+    }
+    fn replace_pointer_slot(
+        &mut self,
+        flow: &mut Flow,
+        destination: &Place,
+        pointer: Option<BTreeSet<Place>>,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        self.forget_pointer_subtree(flow, destination, source)?;
+        if let Some(pointer) = pointer {
+            self.pointer_work(&pointer, source)?;
+            flow.pointers.insert(destination.clone(), pointer);
+        }
+        Ok(())
+    }
+    fn install_value_origins(
+        &mut self,
+        flow: &mut Flow,
+        destination: &Place,
+        origins: ValueOrigins,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        self.forget_pointer_subtree(flow, destination, source)?;
+        for (path, targets) in origins {
+            self.pointer_work(&targets, source)?;
+            self.fuel = self
+                .fuel
+                .checked_sub(
+                    path.len()
+                        .saturating_add(destination.fields.len())
+                        .saturating_add(1),
+                )
+                .ok_or_else(|| error(source, "value origin budget exhausted"))?;
+            let mut slot = destination.clone();
+            slot.fields.extend(path);
+            flow.pointers.insert(slot, targets);
+        }
+        Ok(())
+    }
+    fn evaluate_value_origins(
+        &mut self,
+        expr: &Expr,
+        flow: &mut Flow,
+        depth: usize,
+    ) -> Result<ValueOrigins, Error> {
+        flow.value_callable = None;
+        flow.value_callables.clear(); flow.value_variants.clear();
+        let origins = self.evaluate_value_origins_inner(expr, flow, depth)?;
+        if matches!(expr.ty, Term::Pointer(_)) { flow.value_variants.clear(); }
+        if !flow.live || !matches!(completion_type(&expr.ty).callable_signature(), Term::Function {..}) {flow.value_callable = None;}
+        if !flow.live {
+            flow.value_callables.clear(); flow.value_variants.clear();
+        } else if let Some(callable) = &flow.value_callable {
+            flow.value_callables.insert(vec![], callable.clone());
+        }
+        Ok(origins)
+    }
+    fn evaluate_value_origins_inner(
+        &mut self, expr: &Expr, flow: &mut Flow, depth: usize,
+    ) -> Result<ValueOrigins, Error> {
+        if !flow.live {
+            return Ok(BTreeMap::new());
+        }
+        if self.fuel == 0 || depth > 128 {
+            return Err(error(expr.source, "value origin budget exhausted"));
+        }
+        self.fuel -= 1;
+        if let K::EffectHandle { computation, handlers, .. } = &expr.kind {
+            let (may_reject, return_values, loop_targets) = self.handler_resources(expr, handlers, flow, depth + 1)?;
+            let may_return = !return_values.is_empty();
+            if may_reject {
+                // Providers run before any subject argument is prepared. Their
+                // failure therefore unwinds the installer's current owners.
+                let mut rejected = flow.clone();
+                self.exit(&mut rejected, expr.source, CleanupReason::PredicateFailure)?;
+            }
+            if may_return && self.handler_result.is_some() {
+                self.fuel = self.fuel.checked_sub(return_values.len())
+                    .ok_or_else(||error(expr.source,"handler return summary budget exhausted"))?;
+                self.report.lexical_returns.extend(return_values.iter().cloned());
+            }
+            let previous = self.effect_return_enabled;
+            let return_floor = self.effect_return_values.len();
+            self.effect_return_values.extend(return_values);
+            self.fuel = self.fuel.checked_sub(self.effect_loop_targets.len().saturating_add(loop_targets.len()))
+                .ok_or_else(||error(expr.source,"effect loop target budget exhausted"))?;
+            let previous_loops = self.effect_loop_targets.clone();
+            self.effect_loop_targets.extend(loop_targets.iter().copied());
+            for &(target, is_break) in &loop_targets {
+                if self.handler_result.is_some() && !self.loops.iter().any(|frame|frame.identity == target) {
+                    self.report.lexical_loop_exits.insert((target, is_break));
+                }
+            }
+            self.effect_return_enabled |= may_return;
+            let result = (|| {
+                if (may_return || !loop_targets.is_empty()) && handlers.iter().any(|h| h.abi == nir::effects::Abi::DirectPassing) {
+                    if self.handler_result.is_some() {
+                        self.effect_escape_checkpoint(flow, expr.source)?;
+                    } else {
+                        if may_return { self.effect_return_checkpoint(flow, expr.source, depth + 1)?; }
+                        self.effect_loop_checkpoints(flow, expr.source)?;
+                    }
+                }
+                self.evaluate_value_origins(computation, flow, depth + 1)
+            })();
+            self.effect_return_enabled = previous;
+            self.effect_return_values.truncate(return_floor);
+            self.effect_loop_targets = previous_loops;
+            return result;
+        }
+        // Transparent evaluation boundaries must run before pointer handling:
+        // a run can deliver a borrowed pointer or a closure with provenance.
+        match &expr.kind {
+            K::EffectComputation { effects, body } => {
+                let Term::Computation { effects: declared, result } = &expr.ty else {
+                    return Err(error(expr.source, "computation boundary requires a computation type"));
+                };
+                if effects != declared || (body.ty != **result && body.ty != Term::Primitive(nir::Primitive::Never)) {
+                    return Err(error(expr.source, "computation boundary disagrees with its completion type"));
+                }
+                return self.evaluate_value_origins(body, flow, depth + 1);
+            }
+            K::EffectRun { computation, .. } => {
+                let Term::Computation { result, .. } = &computation.ty else {
+                    return Err(error(expr.source, "effect run requires a computation"));
+                };
+                if expr.ty != **result {
+                    return Err(error(expr.source, "effect run disagrees with its completion type"));
+                }
+                return self.evaluate_value_origins(computation, flow, depth + 1);
+            }
+            _ => {}
+        }
+        if let K::Snapshot(value)=&expr.kind {
+            if value.ty!=expr.ty || (self.delivery)(&expr.ty).map_err(|e|error(expr.source,e))?!=Delivery::Copy {
+                return Err(error(expr.source,"entry snapshot requires checked Copy permission"));
+            }
+            return self.evaluate_value_origins(value,flow,depth+1);
+        }
+        if matches!(expr.ty, Term::Pointer(_)) {
+            return Ok(self
+                .evaluate_pointer_value(expr, flow, depth + 1)?
+                .map(|targets| BTreeMap::from([(vec![], targets)]))
+                .unwrap_or_default());
+        }
+        match &expr.kind {
+            K::Closure { .. } => {
+                flow.constructed_capture_origins.clear();
+                self.expr(expr, flow, depth + 1)?;
+                Ok(std::mem::take(&mut flow.constructed_capture_origins))
+            }
+            K::AnonymousField { .. } | K::Field { .. } if expression_place(expr).is_none() => {
+                self.project_temporary(expr, flow, depth + 1)
+            }
+            K::Match { value, arms } => self.in_temporary_scope(
+                expr.source,
+                TemporaryBoundary::Match,
+                flow,
+                |this, flow| this.match_arms(value, arms, flow, expr.source, depth + 1),
+            ),
+            K::Tuple(fields) | K::AnonymousRecord { fields } | K::Record { fields, .. } | K::Variant { fields, .. } => self
+                .pending_frame(expr.source, |this| {
+                    let mut origins = BTreeMap::new();
+                    let mut callables = BTreeMap::new();
+                    let mut domains = EnumDomains::new();
+                    if let K::Variant {index, ..} = &expr.kind {
+                        domains.insert(vec![], BTreeSet::from([*index]));
+                    }
+                    for (index, field) in fields.iter().enumerate() {
+                        let children = this.evaluate_value_origins(field, flow, depth + 1)?;
+                        if !flow.live {
+                            return Ok(BTreeMap::new());
+                        }
+                        for (path, tags) in std::mem::take(&mut flow.value_variants) {
+                            this.fuel = this.fuel.checked_sub(path.len().saturating_add(tags.len()).saturating_add(3))
+                                .ok_or_else(|| error(expr.source, "enum domain construction budget exhausted"))?;
+                            let mut nested = match &expr.kind {
+                                K::Variant {index: tag, ..} => vec![VARIANT_PATH, *tag, index],
+                                _ => vec![index],
+                            };
+                            nested.extend(path);
+                            domains.insert(nested, tags);
+                        }
+                        for (path, callable) in std::mem::take(&mut flow.value_callables) {
+                            let qualifier = match &expr.kind {
+                                K::Variant { index: variant, .. } => Some(*variant),
+                                _ => None,
+                            };
+                            let prefix_len = if qualifier.is_some() { 3 } else { 1 };
+                            this.fuel = this.fuel.checked_sub(path.len().saturating_add(prefix_len))
+                                .ok_or_else(|| error(expr.source, "callable origin budget exhausted"))?;
+                            let mut nested = match qualifier {
+                                Some(variant) => vec![VARIANT_PATH, variant, index],
+                                None => vec![index],
+                            };
+                            nested.extend(path);
+                            callables.insert(nested, callable);
+                        }
+                        this.remember_pending_origins(field, index, flow, children.clone())?;
+                        for (path, targets) in children {
+                            this.fuel = this
+                                .fuel
+                                .checked_sub(path.len().saturating_add(1))
+                                .ok_or_else(|| {
+                                    error(expr.source, "value origin budget exhausted")
+                                })?;
+                            let mut nested = vec![index];
+                            nested.extend(path);
+                            origins.insert(nested, targets);
+                        }
+
+                    }
+                    flow.value_callables = callables;
+                    flow.value_variants = domains;
+                    Ok(origins)
+                }),
+            K::Block { statements, result } | K::CallPreparation { statements, result } => {
+                let outer = flow.roots.clone();
+                for statement in statements {
+                    if matches!(expr.kind, K::CallPreparation { .. }) {
+                        self.prepared_binding(statement, flow, depth + 1)?;
+                    } else {
+                        self.full_expression(statement, flow, depth + 1)?;
+                    }
+                }
+                let origins = if let Some(result) = result {
+                    self.evaluate_value_origins(result, flow, depth + 1)?
+                } else {
+                    flow.value_callable = None;
+                    flow.value_callables.clear(); flow.value_variants.clear();
+                    BTreeMap::new()
+                };
+                if flow.live {
+                    if result.is_some()
+                        && self.temporary_scope.boundary == TemporaryBoundary::FunctionResult
+                        && self.temporary_scope.source == expr.source
+                    {
+                        self.finish_temporaries(flow, expr.source, self.temporary_scope_id)?;
+                    }
+                    let locals: Vec<_> = flow
+                        .order
+                        .iter()
+                        .rev()
+                        .filter(|id| !outer.contains(id))
+                        .copied()
+                        .collect();
+                    self.check_scope_origins(&origins, &locals, expr.source)?;
+                    for id in locals {
+                        self.retire(flow, id, expr.source)?;
+                    }
+                }
+                Ok(origins)
+            }
+            K::If {
+                condition,
+                then_branch,
+                else_branch: Some(other),
+            } => {
+                self.in_temporary_scope(
+                    condition.source,
+                    TemporaryBoundary::Condition,
+                    flow,
+                    |this, flow| this.expr(condition, flow, depth + 1),
+                )?;
+                if !flow.live {
+                    return Ok(BTreeMap::new());
+                }
+                if let Some(value) = constant_bool(condition, 0) {
+                    return self.evaluate_value_origins(
+                        if value { then_branch } else { other },
+                        flow,
+                        depth + 1,
+                    );
+                }
+                let mut right = flow.clone();
+                let mut left_origins = self.evaluate_value_origins(then_branch, flow, depth + 1)?;
+                let right_origins = self.evaluate_value_origins(other, &mut right, depth + 1)?;
+                match (flow.live, right.live) {
+                    (true, true) => {
+                        self.join_value_origins(completion_type(&expr.ty), &mut left_origins, &flow.value_variants,
+                            &right_origins, &right.value_variants, expr.source)?;
+                        self.join_flow(flow, &right, expr.source)?;
+                        Ok(left_origins)
+                    }
+                    (false, true) => {
+                        *flow = right;
+                        Ok(right_origins)
+                    }
+                    (true, false) => Ok(left_origins),
+                    (false, false) => Ok(BTreeMap::new()),
+                }
+            }
+            _ => {
+                let mut origins = BTreeMap::new();
+                let mut leaves = BTreeMap::new();
+                if let Some(source) = expression_place(expr) {
+                    for (slot, callable) in &flow.callable_fields {
+                        self.fuel = self.fuel.checked_sub(slot.fields.len().saturating_add(1))
+                            .ok_or_else(|| error(expr.source, "callable field budget exhausted"))?;
+                        if slot.root == source.root && slot.fields.starts_with(&source.fields) {
+                            leaves.insert(slot.fields[source.fields.len()..].to_vec(), callable.clone());
+                        }
+                    }
+                    for (slot, targets) in &flow.pointers {
+                        self.fuel = self
+                            .fuel
+                            .checked_sub(slot.fields.len().saturating_add(1))
+                            .ok_or_else(|| error(expr.source, "value origin budget exhausted"))?;
+                        if slot.root == source.root && slot.fields.starts_with(&source.fields) {
+                            self.pointer_work(targets, expr.source)?;
+                            origins.insert(
+                                slot.fields[source.fields.len()..].to_vec(),
+                                targets.clone(),
+                            );
+                        }
+                    }
+                }
+                self.expr(expr, flow, depth + 1)?;
+                if expression_place(expr).is_some() { flow.value_callables = leaves; }
+                Ok(origins)
+            }
+        }
+    }
+    // Evaluate once and return the provenance of that evaluation. In particular,
+    // call results must use the actual prepared arguments, not re-evaluate a
+    // callee or inspect a caller state changed by later argument effects.
+    fn evaluate_pointer_value(
+        &mut self,
+        expr: &Expr,
+        flow: &mut Flow,
+        depth: usize,
+    ) -> Result<Option<BTreeSet<Place>>, Error> {
+        if !flow.live {
+            return Ok(None);
+        }
+        if self.fuel == 0 || depth > 128 {
+            return Err(error(expr.source, "pointer evaluation budget exhausted"));
+        }
+        self.fuel -= 1;
+        if let Some(message) = nir::program::pointer_operation_error(expr) {
+            return Err(error(expr.source, message));
+        }
+        if matches!(expr.ty, Term::Pointer(_)) {
+            match &expr.kind {
+                K::AnonymousField { .. } | K::Field { .. } if expression_place(expr).is_none() => {
+                    let mut origins = self.project_temporary(expr, flow, depth + 1)?;
+                    return Ok(origins.remove(&vec![]));
+                }
+                K::Match { value, arms } => {
+                    let mut origins = self.in_temporary_scope(
+                        expr.source,
+                        TemporaryBoundary::Match,
+                        flow,
+                        |this, flow| this.match_arms(value, arms, flow, expr.source, depth + 1),
+                    )?;
+                    return Ok(origins.remove(&vec![]));
+                }
+                K::Block { statements, result } | K::CallPreparation { statements, result } => {
+                    let outer = flow.roots.clone();
+                    for statement in statements {
+                        if matches!(expr.kind, K::CallPreparation { .. }) {
+                        self.prepared_binding(statement, flow, depth + 1)?;
+                    } else {
+                        self.full_expression(statement, flow, depth + 1)?;
+                    }
+                    }
+                    let targets = if let Some(result) = result {
+                        self.evaluate_pointer_value(result, flow, depth + 1)?
+                    } else {
+                        None
+                    };
+                    if flow.live {
+                        if result.is_some()
+                            && self.temporary_scope.boundary == TemporaryBoundary::FunctionResult
+                            && self.temporary_scope.source == expr.source
+                        {
+                            self.finish_temporaries(flow, expr.source, self.temporary_scope_id)?;
+                        }
+                        let locals: Vec<_> = flow
+                            .order
+                            .iter()
+                            .rev()
+                            .filter(|id| !outer.contains(id))
+                            .copied()
+                            .collect();
+                        if let Some(targets) = &targets {
+                            self.check_scope_targets(targets, &locals, expr.source)?;
+                        }
+                        for id in locals {
+                            self.retire(flow, id, expr.source)?;
+                        }
+                    }
+                    return Ok(targets);
+                }
+                K::If {
+                    condition,
+                    then_branch,
+                    else_branch: Some(other),
+                } => {
+                    self.in_temporary_scope(
+                        condition.source,
+                        TemporaryBoundary::Condition,
+                        flow,
+                        |this, flow| this.expr(condition, flow, depth + 1),
+                    )?;
+                    if !flow.live {
+                        return Ok(None);
+                    }
+                    if let Some(value) = constant_bool(condition, 0) {
+                        return self.evaluate_pointer_value(
+                            if value { then_branch } else { other },
+                            flow,
+                            depth + 1,
+                        );
+                    }
+                    let mut right = flow.clone();
+                    let left_targets = self.evaluate_pointer_value(then_branch, flow, depth + 1)?;
+                    let right_targets =
+                        self.evaluate_pointer_value(other, &mut right, depth + 1)?;
+                    return match (flow.live, right.live) {
+                        (true, true) => {
+                            self.join_flow(flow, &right, expr.source)?;
+                            match (left_targets, right_targets) {
+                                (Some(mut left), Some(right)) => {
+                                    self.pointer_work(&right, expr.source)?;
+                                    left.extend(right);
+                                    Ok(Some(left))
+                                }
+                                (Some(mut targets), None) | (None, Some(mut targets)) => {
+                                    targets.insert(unknown_pointer_target());
+                                    Ok(Some(targets))
+                                }
+                                (None, None) => Ok(None),
+                            }
+                        }
+                        (false, true) => {
+                            *flow = right;
+                            Ok(right_targets)
+                        }
+                        (true, false) => Ok(left_targets),
+                        (false, false) => Ok(None),
+                    };
+                }
+                K::ReadPointer(pointer) => {
+                    let slots = self.evaluate_pointer_value(pointer, flow, depth + 1)?;
+                    if !flow.live {
+                        return Ok(None);
+                    }
+                    let slots = slots.ok_or_else(|| {
+                        error(expr.source, "pointer slot provenance is not established")
+                    })?;
+                    let mut result = BTreeSet::new();
+                    let mut known = true;
+                    for slot in &slots {
+                        flow.state.require_present(slot).map_err(|e| {
+                            error(
+                                expr.source,
+                                format!("pointer read target unavailable: {e:?}"),
+                            )
+                        })?;
+                        self.borrowed_pointer_contents(flow, slot, expr.source)?;
+                        if let Some(targets) = flow.pointers.get(slot) {
+                            self.pointer_work(targets, expr.source)?;
+                            result.extend(targets.iter().cloned());
+                        } else {
+                            known = false;
+                        }
+                    }
+                    if !known && !result.is_empty() { result.insert(unknown_pointer_target()); }
+                    return Ok(if known || !result.is_empty() { Some(result) } else { None });
+                }
+                K::Call {
+                    callee,
+                    arguments,
+                    parameter_bindings,
+                } => {
+                    if !matches!(callee.kind, K::Local(_) | K::Function(_) | K::FunctionInstance { .. } | K::TraitMethod { .. }) {
+                        return self.call_temporary(expr, callee, arguments, parameter_bindings, flow, depth + 1);
+                    }
+                if let K::Local(binding) = callee.kind
+                    && let Some(callable) = flow.callables.get(&root(binding)).filter(|c| !c.alternatives.is_empty()).cloned()
+                {
+                    self.expr(callee,flow,depth+1)?;
+                    if !flow.live { return Ok(None); }
+                    return self.call_named_candidates(expr,&callable,arguments,parameter_bindings,flow,depth+1);
+                }
+                    if let K::Local(binding) = callee.kind
+                        && let Some(callable) = flow.callables.get(&root(binding)).filter(|c|matches!(c.definition.kind,K::Closure {..})).cloned()
+                    {
+                        return self.call_closure(root(binding), &callable, arguments, flow, expr.source, depth + 1);
+                    }
+                    if let Some(resolved) = self.indirect_named_call(expr, flow) {
+                        self.expr(callee, flow, depth + 1)?;
+                        if !flow.live { return Ok(None); }
+                        return self.evaluate_pointer_value(&resolved, flow, depth + 1);
+                    }
+                    let mut prepared_callables = vec![];
+                    let mut prepared_enums = vec![];
+                    let (result, _) = self.memory_call(
+                        callee,
+                        arguments,
+                        parameter_bindings,
+                        &[],
+                        &mut prepared_callables,
+                        &mut prepared_enums,
+                        flow,
+                        expr.source,
+                        depth + 1,
+                    )?;
+                    if flow.live {
+                        self.record_named_call(callee, prepared_callables, prepared_enums, expr.source, flow)?;
+                    }
+                    return Ok(result);
+                }
+                K::PointerAnonymousField { pointer, index, .. } | K::PointerField { pointer, index, .. } => {
+                    let result = self.evaluate_pointer_value(pointer, flow, depth + 1)?;
+                    if !flow.live {
+                        return Ok(None);
+                    }
+                    let targets = result.ok_or_else(|| {
+                        error(expr.source, "field pointer provenance is not established")
+                    })?;
+                    self.pointer_work(&targets, expr.source)?;
+                    let targets: BTreeSet<_> = targets
+                        .into_iter()
+                        .map(|mut place| {
+                            place.fields.push(*index);
+                            place
+                        })
+                        .collect();
+                    for target in &targets {
+                        flow.state.require_place(target).map_err(|e| {
+                            error(
+                                expr.source,
+                                format!("field pointer target unavailable: {e:?}"),
+                            )
+                        })?;
+                    }
+                    return Ok(Some(targets));
+                }
+                _ => (),
+            }
+        }
+        let pointer = self.pointer_initializer(expr, flow);
+        self.expr(expr, flow, depth + 1)?;
+        Ok(pointer)
+    }
+    fn pointer_initializer(&mut self, expr: &Expr, flow: &Flow) -> Option<BTreeSet<Place>> {
+        if matches!(expr.ty, Term::Pointer(_)) {
+            self.pointer_target(expr, flow, 0).ok()
+        } else {
+            None
+        }
+    }
+    fn expr(&mut self, expr: &Expr, flow: &mut Flow, depth: usize) -> Result<(), Error> {
+        flow.value_callables.clear(); flow.value_variants.clear();
+        let mut delivered_fields = None;
+        let mut delivered_variants = None;
+        if let Some(place) = expression_place(expr) {
+            let mut leaves = BTreeMap::new();
+            for (slot, value) in &flow.callable_fields {
+                self.fuel = self.fuel.checked_sub(slot.fields.len().saturating_add(1))
+                    .ok_or_else(|| error(expr.source, "callable field budget exhausted"))?;
+                if slot.root == place.root && slot.fields.starts_with(&place.fields) {
+                    leaves.insert(slot.fields[place.fields.len()..].to_vec(), value.clone());
+                }
+            }
+            delivered_fields = Some(leaves);
+            let mut domains = EnumDomains::new();
+            if let Some(stored) = flow.enum_domains.get(&place.root) {
+                for (path, tags) in stored {
+                    self.fuel = self.fuel.checked_sub(path.len().saturating_add(tags.len()).saturating_add(1))
+                        .ok_or_else(|| error(expr.source, "enum domain delivery budget exhausted"))?;
+                    if let Some(relative) = path.strip_prefix(place.fields.as_slice()) {
+                        domains.insert(relative.to_vec(), tags.clone());
+                    }
+                }
+            }
+            delivered_variants = Some(domains);
+        }
+        flow.value_callable = None;
+        let callable_type = matches!(completion_type(&expr.ty).callable_signature(), Term::Function {..});
+        let known = if flow.live && callable_type && !matches!(expr.kind, K::Closure {..}) {callable_source(expr, flow, &mut self.fuel)?} else {None};
+        self.expr_inner(expr, flow, depth)?;
+        if flow.live && matches!(&expr.kind, K::Call { callee, .. }
+            if matches!(callee.ty.callable_signature(), Term::Function { result, .. }
+                if matches!(result.as_ref(), Term::Computation { effects, .. } if !effects.is_empty()))) {
+            if !self.report.effect_exits.iter().any(|(source, _)| *source == expr.source) {
+                self.effect_escape_checkpoint(flow, expr.source)?;
+            }
+        }
+        if !flow.live { flow.value_callables.clear(); flow.value_variants.clear(); }
+        else if let Some(leaves) = delivered_fields { flow.value_callables = leaves; }
+        else if !matches!(expr.kind, K::Tuple(_) | K::Record {..} | K::AnonymousRecord {..} | K::Variant {..}
+            | K::EffectHandle {..} | K::EffectComputation {..} | K::EffectRun {..} | K::Block {..} | K::CallPreparation {..} | K::If {..} | K::Match {..} | K::Call {..}
+            | K::Field {..} | K::AnonymousField {..}) { flow.value_callables.clear(); flow.value_variants.clear(); }
+        if !flow.live || matches!(expr.kind, K::Closure {..}) {
+            flow.value_variants.clear();
+        } else if let Some(domains) = delivered_variants {
+            flow.value_variants = domains;
+        }
+        if !flow.live || !callable_type {flow.value_callable = None;}
+        else if known.is_some() && !matches!(expr.kind, K::Closure {..}) {flow.value_callable = known;}
+        else if !matches!(expr.kind, K::Field {..} | K::AnonymousField {..} | K::Closure {..} | K::EffectHandle {..} | K::EffectComputation {..} | K::EffectRun {..} | K::Block {..} | K::CallPreparation {..} | K::If {..} | K::Match {..} | K::Call {..}) {flow.value_callable = None;}
+        Ok(())
+    }
+    fn expr_inner(&mut self, expr: &Expr, flow: &mut Flow, depth: usize) -> Result<(), Error> {
+        if !flow.live {
+            return Ok(());
+        }
+        if self.fuel == 0 || depth > 128 {
+            return Err(error(expr.source, "move analysis budget exhausted"));
+        }
+        self.fuel -= 1;
+        let source = expr.source;
+        if let Some(message) = nir::program::pointer_operation_error(expr) {
+            return Err(error(source, message));
+        }
+        match &expr.kind {
+            K::AddressOf(place) => {
+                flow.memory_exposed = true;
+                let target = expression_place(place)
+                    .ok_or_else(|| error(source, "address requires a local place"))?;
+                flow.state
+                    .require_place(&target)
+                    .map_err(|e| error(source, format!("address target unavailable: {e:?}")))?;
+            }
+            K::PointerAnonymousField { .. } | K::PointerField { .. } => {
+                self.evaluate_pointer_value(expr, flow, depth + 1)?;
+            }
+            K::ReadPointer(pointer) => {
+                let target = self.evaluate_pointer_value(pointer, flow, depth + 1)?;
+                if !flow.live {
+                    return Ok(());
+                }
+                let target = target
+                    .ok_or_else(|| error(source, "pointer target provenance is not established"))?;
+                if !nir::program::intrinsic_pointer_value(&expr.ty) {
+                    return Err(error(
+                        source,
+                        "pointer delivery requires a memory transfer contract",
+                    ));
+                }
+                for target in &target {
+                    flow.state.require_present(target).map_err(|e| {
+                        error(source, format!("pointer read target unavailable: {e:?}"))
+                    })?;
+                }
+            }
+            K::BitWritePointer {pointer,selections,value} => {
+                let Term::Pointer(storage) = &pointer.ty else {return Err(error(source,"bit writeback requires a pointer"))};
+                self.fuel = self.fuel.checked_sub(selections.len()).ok_or_else(||error(source,"bit selection ownership budget exhausted"))?;
+                if let Some(reason) = nir::program::bit_update_error(storage,selections,&value.ty,&expr.ty) {return Err(error(source,reason));}
+                self.in_temporary_scope(source,TemporaryBoundary::FullExpression,flow,|this,flow| {
+                    let target = this.evaluate_pointer_value(pointer,flow,depth+1)?;
+                    if !flow.live {return Ok(());}
+                    let targets = target.ok_or_else(||error(source,"pointer target provenance is not established"))?;
+                    for input in selections.iter().flat_map(nir::program::BitSelection::expressions) {this.expr(input,flow,depth+1)?;}
+                    this.expr(value,flow,depth+1)?;
+                    if flow.live {
+                        for target in targets {
+                            flow.state.require_present(&target).map_err(|reason|error(source,format!("bit writeback target unavailable: {reason:?}")))?;
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+            K::WritePointer { pointer, value } => {
+                let target = self.evaluate_pointer_value(pointer, flow, depth + 1)?;
+                if !flow.live {
+                    return Ok(());
+                }
+                let target = target
+                    .ok_or_else(|| error(source, "pointer target provenance is not established"))?;
+                let replacement = self.evaluate_pointer_value(value, flow, depth + 1)?;
+                if flow.live {
+                    if !nir::program::intrinsic_pointer_value(&value.ty) {
+                        return Err(error(
+                            source,
+                            "pointer write requires a memory transfer contract",
+                        ));
+                    }
+                    for slot in &target {
+                        flow.state.require_present(slot).map_err(|e| {
+                            error(source, format!("pointer write target unavailable: {e:?}"))
+                        })?;
+                    }
+                    let exact = target.len() == 1;
+                    for slot in &target {
+                        let updated = if exact {
+                            if let Some(replacement) = &replacement {
+                                self.pointer_work(replacement, source)?;
+                            }
+                            replacement.clone()
+                        } else {
+                            match (flow.pointers.get(slot), &replacement) {
+                                (Some(previous), Some(replacement)) => {
+                                    self.pointer_work(previous, source)?;
+                                    self.pointer_work(replacement, source)?;
+                                    let mut all = previous.clone();
+                                    all.extend(replacement.iter().cloned());
+                                    Some(all)
+                                }
+                                _ => None,
+                            }
+                        };
+                        self.replace_pointer_slot(flow, slot, updated, source)?;
+                    }
+                }
+            }
+            K::Local(_) | K::AnonymousField { .. } | K::Field { .. } => {
+                let Some(p) = expression_place(expr) else {
+                    return self.project_temporary(expr, flow, depth + 1).map(|_| ());
+                };
+                flow.state.require_present(&p).map_err(|reason| {
+                    error(
+                        source,
+                        if reason == super::ownership::Error::MissingPlace {
+                            format!("missing place or field shape semantics for {p}")
+                        } else {
+                            format!("use of unavailable value {p}")
+                        },
+                    )
+                })?;
+                if (self.delivery)(&expr.ty).map_err(|e| error(source, e))? == Delivery::Move {
+                    flow.state
+                        .take(&p)
+                        .map_err(|e| error(source, format!("move: {e:?}")))?;
+                    self.report.transfers.push((source, p.clone()));
+                    self.forget_callable_fields(flow, &p, source)?;
+                    if p.fields.is_empty() {
+                        flow.callables.remove(&p.root);
+                    }
+                } else {
+                    self.report.copies.push((source,p));
+                }
+            }
+            K::Literal(_)
+            | K::Unit
+            | K::Function(_)
+            | K::FunctionInstance { .. }
+            | K::TraitMethod { .. } => (),
+            K::Closure {
+                parameters,
+                captures,
+                body,
+            } => {
+                let Term::Function {
+                    parameters: parameter_types,
+                    ..
+                } = expr.ty.callable_signature()
+                else {
+                    return Err(error(source, "closure lacks a callable signature"));
+                };
+                if parameters.len() != parameter_types.len() {
+                    return Err(error(source, "closure parameter count mismatch"));
+                }
+                let expected_captures = match &expr.ty {
+                    Term::Closure { environment, .. } => environment.as_slice(),
+                    Term::Function { .. } => &[],
+                    _ => return Err(error(source, "unsupported closure phase")),
+                };
+                if expected_captures.len() != captures.len() {
+                    return Err(error(source, "closure capture count mismatch"));
+                }
+                let mut capture_origins = BTreeMap::new();
+                let mut construction = Callable { choices: vec![], enum_captures: Default::default(),
+                    definition: expr.clone(), alternatives: vec![], generation: 0, captures: BTreeMap::new(),
+                };
+                let mut inner = Flow {
+                    borrowed_scope: self.fresh_borrowed_scope(source)?,
+                    live: true,
+                    ..Default::default()
+                };
+                self.pending_frame(source, |this| {
+                    for (slot, (capture, expected)) in
+                        captures.iter().zip(expected_captures).enumerate()
+                    {
+                        if &capture.ty != expected {
+                            return Err(error(source, "closure capture type mismatch"));
+                        }
+                        let lexical;
+                        let value = if let Some(value) = &capture.value {
+                            value.as_ref()
+                        } else {
+                            lexical = Expr {
+                                source,
+                                ty: capture.ty.clone(),
+                                kind: K::Local(capture.binding),
+                            };
+                            &lexical
+                        };
+                        let callable = callable_source(value, flow, &mut this.fuel)?;
+                        // Sample each capture at its own evaluation point. Earlier
+                        // initializers may legitimately replace a later source.
+                        let origins = this.evaluate_value_origins(value, flow, depth + 1)?;
+                        if !flow.live {
+                            return Ok(());
+                        }
+                        let callable = flow.value_callable.clone().or(callable);
+                        let fields = flow.value_callables.clone();
+                        let domains = copy_enum_domains(&flow.value_variants, &mut this.fuel, source)?;
+                        if !domains.is_empty() { construction.enum_captures.insert(root(capture.binding), domains.clone()); }
+
+                        construction.captures.retain(|place, _| place.root != root(capture.binding));
+                        if let Some(value) = &callable {
+                            construction.captures.insert(Place {root:root(capture.binding),fields:vec![]}, value.clone());
+                        }
+                        for (path, value) in fields {
+                            if !path.is_empty() {
+                                this.fuel = this.fuel.checked_sub(path.len().saturating_add(1))
+                                    .ok_or_else(||error(source,"capture field budget exhausted"))?;
+                                construction.captures.insert(Place {root:root(capture.binding),fields:path},value);
+                            }
+                        }
+                        for (path, targets) in &origins {
+                            this.fuel = this.fuel.checked_sub(path.len().saturating_add(1))
+                                .ok_or_else(||error(source,"closure capture origin budget exhausted"))?;
+                            this.pointer_work(targets, source)?;
+                            let mut captured = vec![slot];
+                            captured.extend(path);
+                            capture_origins.insert(captured, targets.clone());
+                        }
+                        this.remember_pending_origins(value, slot, flow, origins)?;
+                        this.declare(&mut inner, capture.binding, &capture.ty, source)?;
+                        if let Term::Pointer(subject)=&capture.ty {
+                            this.declare_closure_borrow(&mut inner, parameters.len()+slot, capture.binding, subject, source)?;
+                        }
+                        this.install_enum_domains(&mut inner, &Place {root:root(capture.binding),fields:vec![]}, domains, source)?;
+                        if let Some(callable) = callable {
+                            this.store_callable(&mut inner, root(capture.binding), callable, source)?;
+                        }
+                        for (place, evidence) in &construction.captures {
+                            if place.root == root(capture.binding) && !place.fields.is_empty() {
+                                inner.callable_fields.insert(place.clone(), evidence.clone());
+                            }
+                        }
+                    }
+                    Ok(())
+                })?;
+                if !flow.live {
+                    return Ok(());
+                }
+                let capture_roots = inner.roots.clone();
+                for (slot, (binding, parameter)) in parameters.iter().zip(parameter_types).enumerate() {
+                    self.declare(&mut inner, *binding, &parameter.ty, source)?;
+                    if let Term::Pointer(subject) = &parameter.ty {
+                        self.declare_closure_borrow(&mut inner, slot, *binding, subject, source)?;
+                    }
+                }
+                // Analyze a possible invocation independently from construction.
+                // Its surviving environment remains stored; return only cleans
+                // invocation-local responsibilities, never retained captures.
+                let outer_report = std::mem::take(&mut self.report);
+                let outer_captured_callables = std::mem::replace(
+                    &mut self.captured_roots,
+                    captures.iter().map(|c| root(c.binding)).collect(),
+                );
+                let outer_persistent =
+                    std::mem::replace(&mut self.persistent_roots, capture_roots.clone());
+                let outer_pending = std::mem::take(&mut self.pending);
+                let outer_loops = std::mem::take(&mut self.loops);
+        let outer_contract = self.exit_contract.take();
+        let outer_handler = self.handler_result.take();
+        let outer_effect_return = std::mem::replace(&mut self.effect_return_enabled, false);
+        let outer_return_values = std::mem::take(&mut self.effect_return_values);
+        let outer_effect_loops = std::mem::take(&mut self.effect_loop_targets);
+                let outer_defer = std::mem::replace(&mut self.defer_unknown_calls, true);
+                let result = self.in_temporary_scope(
+                    body.source,
+                    TemporaryBoundary::FunctionResult,
+                    &mut inner,
+                    |this, inner| this.expr(body, inner, depth + 1),
+                );
+                self.defer_unknown_calls = outer_defer;
+                self.loops = outer_loops;
+        self.exit_contract = outer_contract;
+        self.handler_result = outer_handler;
+        self.effect_return_enabled = outer_effect_return;
+        self.effect_return_values = outer_return_values;
+        self.effect_loop_targets = outer_effect_loops;
+                let result = result.and_then(|()| {
+                    if inner.live {
+                        self.exit(&mut inner, source, CleanupReason::FunctionEnd)
+                    } else {
+                        Ok(())
+                    }
+                });
+                self.pending = outer_pending;
+                let invocation = std::mem::replace(&mut self.report, outer_report);
+                self.persistent_roots = outer_persistent;
+                self.captured_roots = outer_captured_callables;
+                result?;
+                self.report.closures.push(ClosureReport {
+                    invoked: false,
+                    definition: expr.clone(),
+                    source,
+                    captures: captures
+                        .iter()
+                        .map(|capture| root(capture.binding))
+                        .collect(),
+                    invocation,
+                });
+                flow.value_callable = Some(construction);
+                flow.constructed_capture_origins = capture_origins;
+            }
+            K::Let { .. } => {
+                self.in_temporary_scope(source, TemporaryBoundary::FullExpression, flow,
+                    |this, flow| this.prepared_binding(expr, flow, depth))?;
+            }
+            K::Match { value, arms } => {
+                self.in_temporary_scope(source, TemporaryBoundary::Match, flow, |this, flow| {
+                    this.match_arms(value, arms, flow, source, depth + 1)
+                        .map(|_| ())
+                })?
+            }
+            K::LetPattern {
+                pattern,
+                value,
+                guard,
+                otherwise,
+            } => self.in_temporary_scope(
+                source,
+                TemporaryBoundary::FullExpression,
+                flow,
+                |this, flow| {
+                    this.let_pattern(
+                        pattern,
+                        value,
+                        guard.as_deref(),
+                        otherwise.as_deref(),
+                        flow,
+                        source,
+                        depth + 1,
+                    )
+                },
+            )?,
+            K::BitAssign { place: target, storage_type, value, .. }
+            | K::BitUpdate { place: target, storage_type, value, .. } => {
+                let reason = match &expr.kind {
+                    K::BitAssign {start,end,..}=>nir::program::bit_writeback_error(storage_type,*start,*end,&value.ty,&expr.ty),
+                    K::BitUpdate {selections,..}=>{
+                        self.fuel = self.fuel.checked_sub(selections.len()).ok_or_else(||error(source,"bit selection ownership budget exhausted"))?;
+                        nir::program::bit_update_error(storage_type,selections,&value.ty,&expr.ty)
+                    },
+                    _=>unreachable!(),
+                };
+                if let Some(reason) = reason {return Err(error(source, reason));}
+                let mut actual = flow.types.get(&root(target.root)).cloned()
+                    .ok_or_else(|| error(source, "bit writeback root is not in scope"))?;
+                for (declaration, index) in &target.fields {
+                    if !match (&actual, declaration) {
+                        (Term::Nominal { declaration: owner, .. }, nir::program::FieldOwner::Nominal(id)) => owner == id,
+                        (Term::Record(_), nir::program::FieldOwner::Anonymous) => true,
+                        _ => false,
+                    } {
+                        return Err(error(source, "bit writeback field declaration mismatch"));
+                    }
+                    actual = self.field_type(&actual, &[*index], source)?;
+                }
+                if actual != *storage_type {
+                    return Err(error(source, "bit writeback storage type mismatch"));
+                }
+                let destination = Place {
+                    root: root(target.root),
+                    fields: target.fields.iter().map(|(_, index)| *index).collect(),
+                };
+                self.in_temporary_scope(source, TemporaryBoundary::FullExpression, flow, |this, flow| {
+                    if let K::BitUpdate {selections,..} = &expr.kind {
+                        for input in selections.iter().flat_map(nir::program::BitSelection::expressions) {this.expr(input,flow,depth+1)?;}
+                    }
+                    // Preserved bits are read after the RHS finishes. A RHS may
+                    // replace the destination, move its owner, or exit entirely.
+                    this.expr(value, flow, depth + 1)?;
+                    if flow.live {
+                        flow.state.require_present(&destination).map_err(|reason| {
+                            error(source, format!("bit writeback target unavailable: {reason:?}"))
+                        })?;
+                    }
+                    // This updates scalar contents only. It neither initializes
+                    // an absent owner nor replaces ownership/alias identities.
+                    Ok(())
+                })?;
+            }
+            K::Assign {
+                place: target,
+                value,
+            } => {
+                if self.captured_roots.contains(&root(target.root))
+                    && !matches!(value.ty, Term::Function { .. } | Term::Closure { .. })
+                {
+                    super::memory::require_pointer_free_owned(self.package, &value.ty, &mut self.fuel, 0)
+                        .map_err(|reason| error(source, format!("captured write requires an established memory contract: {reason}")))?;
+                }
+
+                let callable = callable_source(value, flow, &mut self.fuel)?;
+                // RHS completes before retiring the previous destination. A
+                // self-move therefore does not schedule destruction of the RHS.
+                self.in_temporary_scope(
+                    source,
+                    TemporaryBoundary::FullExpression,
+                    flow,
+                    |this, flow| {
+                        let origins = this.evaluate_value_origins(value, flow, depth + 1)?;
+                        let callable = flow.value_callable.clone().or(callable);
+                        if flow.live {
+                            if target.fields.is_empty() {
+                                flow.callables.remove(&root(target.root));
+                                if let Some(callable) = callable {
+                                    this.store_callable(flow, root(target.root), callable, source)?;
+                                }
+                            }
+                            let destination = Place {
+                                root: root(target.root),
+                                fields: target.fields.iter().map(|(_, index)| *index).collect(),
+                            };
+                            let leaves = flow.value_callables.clone();
+                            this.install_callable_fields(flow, &destination, leaves, source)?;
+                            this.install_enum_domains(flow, &destination, flow.value_variants.clone(), source)?;
+                            if let Some(action) = this.owned_action(
+                                &flow.state,
+                                destination.clone(),
+                                &value.ty,
+                                super::drop::PointerMemory {types: &flow.types, slots: &flow.pointers, retired: &[]},
+                                source,
+                            )? {
+                                this.report.cleanup_sites.push(CleanupSite {
+                default_origin: None,
+                result_origin: None,
+                interface_precondition: false,
+                                    source,
+                                    reason: CleanupReason::Replacement,
+                                    actions: vec![action],
+                                });
+                            }
+                            this.install_value_origins(flow, &destination, origins, source)?;
+                            for (place, availability) in flow
+                                .state
+                                .replace_with_budget(&destination, &mut this.fuel)
+                                .map_err(|e| error(source, format!("assignment: {e:?}")))?
+                                .into_iter()
+                                .rev()
+                            {
+                                this.report.cleanups.push(Cleanup {
+                                    source,
+                                    place,
+                                    availability,
+                                });
+                            }
+                        }
+                        Ok(())
+                    },
+                )?;
+            }
+            K::Block { statements, result } | K::CallPreparation { statements, result } => {
+                let outer = flow.roots.clone();
+                for statement in statements {
+                    if matches!(expr.kind, K::CallPreparation { .. }) {
+                        self.prepared_binding(statement, flow, depth + 1)?;
+                    } else {
+                        self.full_expression(statement, flow, depth + 1)?;
+                    }
+                }
+                if let Some(result) = result {
+                    self.expr(result, flow, depth + 1)?;
+                    if flow.live
+                        && self.temporary_scope.boundary == TemporaryBoundary::FunctionResult
+                        && self.temporary_scope.source == source
+                    {
+                        self.finish_temporaries(flow, source, self.temporary_scope_id)?;
+                    }
+                }
+                if flow.live {
+                    let locals: Vec<_> = flow
+                        .order
+                        .iter()
+                        .rev()
+                        .filter(|id| !outer.contains(id))
+                        .copied()
+                        .collect();
+                    for id in locals {
+                        self.retire(flow, id, source)?;
+                    }
+                }
+            }
+            K::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                self.in_temporary_scope(
+                    condition.source,
+                    TemporaryBoundary::Condition,
+                    flow,
+                    |this, flow| this.expr(condition, flow, depth + 1),
+                )?;
+                if flow.live {
+                    match constant_bool(condition, 0) {
+                        Some(true) => self.scope(then_branch, flow, depth + 1)?,
+                        Some(false) => {
+                            if let Some(other) = else_branch {
+                                self.scope(other, flow, depth + 1)?;
+                            }
+                        }
+                        _ => self.fork(then_branch, else_branch.as_deref(), flow, depth)?,
+                    }
+                }
+            }
+            K::Loop { identity, body } => {
+                self.loop_body(*identity, body, flow, source, depth + 1)?
+            }
+            K::Break(identity) => self.loop_edge(*identity, true, flow, source)?,
+            K::Continue(identity) => self.loop_edge(*identity, false, flow, source)?,
+            K::Return(value) => {
+                let origins = if let Some(value) = value {
+                    self.in_temporary_scope(
+                        source,
+                        TemporaryBoundary::ReturnValue,
+                        flow,
+                        |this, flow| this.evaluate_value_origins(value, flow, depth + 1),
+                    )?
+                } else { BTreeMap::new() };
+                if flow.live {
+                    let result_callable = flow.value_callable.clone();
+                    let result_fields = flow.value_callables.clone();
+                    let result_variants = flow.value_variants.clone();
+                    if self.handler_result.is_some() {
+                        self.check_return_origins(flow, &origins, source)?;
+                        if !origins.is_empty() {
+                            return Err(error(source, "handler lexical return requires cross-scope pointer result evidence"));
+                        }
+                        let callable = flow.value_callable.as_ref()
+                            .map(|value|export_callable_evidence(value, &mut self.fuel, 0)).transpose()?;
+                        let mut fields = BTreeMap::new();
+                        for (path, value) in &flow.value_callables {
+                            if path.is_empty() { continue; }
+                            self.fuel = self.fuel.checked_sub(path.len().saturating_add(1))
+                                .ok_or_else(||error(source,"handler return field budget exhausted"))?;
+                            fields.insert(path.clone(), export_callable_evidence(value, &mut self.fuel, 0)?);
+                        }
+                        let variants = copy_enum_domains(&flow.value_variants, &mut self.fuel, source)?;
+                        self.report.lexical_returns.push(std::sync::Arc::new(HandlerReturnValue {source, callable, fields, variants}));
+                    } else {
+                        self.check_function_result(flow, origins, source, depth + 1)?;
+                    }
+                    if flow.live {flow.value_callable = result_callable; flow.value_callables = result_fields; flow.value_variants = result_variants;}
+                }
+                if flow.live {
+                    self.exit(flow, source, CleanupReason::Return)?;
+                }
+            }
+            K::Call {
+                callee,
+                arguments,
+                parameter_bindings,
+            } => {
+                if matches!(callee.kind, K::TraitMethod { .. })
+                    && (flow.memory_exposed || arguments.iter().any(|argument| matches!(argument.value.ty, Term::Pointer(_))))
+                {
+                    let package = self.package.ok_or_else(|| error(source, "method memory analysis requires a package"))?;
+                    let selected = super::memory::method_callee(package, callee, &mut self.fuel)
+                        .map_err(|reason| error(source, reason))?;
+                    let resolved = Expr { source, ty: expr.ty.clone(), kind: K::Call {
+                        callee: Box::new(selected), arguments: arguments.clone(),
+                        parameter_bindings: parameter_bindings.clone(),
+                    } };
+                    return self.expr(&resolved, flow, depth + 1);
+                }
+                if self.defer_unknown_calls && !matches!(callee.kind, K::Local(_))
+                    && expression_place(callee).is_some() && callable_source(callee, flow, &mut self.fuel)?.is_none() {
+                    self.expr(callee, flow, depth + 1)?;
+                    self.prepare_values(source, arguments.iter().map(|a|(a.parameter,&a.value)), flow, depth + 1)?;
+                    self.report.deferred_calls.push(source);
+                    flow.value_callable = None;
+                    flow.value_callables.clear(); flow.value_variants.clear();
+                    return Ok(());
+                }
+                if !matches!(callee.kind,K::Local(_) | K::Function(_) | K::FunctionInstance {..} | K::TraitMethod {..}) {
+                    return self.call_temporary(expr,callee,arguments,parameter_bindings,flow,depth + 1).map(|_| ());
+                }
+                if let K::Local(binding) = callee.kind
+                    && let Some(callable) = flow.callables.get(&root(binding)).filter(|c| !c.alternatives.is_empty()).cloned()
+                {
+                    self.expr(callee,flow,depth+1)?;
+                    if !flow.live { return Ok(()); }
+                    return self.call_named_candidates(expr,&callable,arguments,parameter_bindings,flow,depth+1).map(|_| ());
+                }
+                if let Some(resolved) = self.indirect_named_call(expr, flow) {
+                    self.expr(callee, flow, depth + 1)?;
+                    if !flow.live { return Ok(()); }
+                    return self.expr(&resolved, flow, depth + 1);
+                }
+                if let K::Local(binding) = callee.kind
+                    && let Some(callable) = flow.callables.get(&root(binding)).filter(|c|matches!(c.definition.kind,K::Closure {..})).cloned()
+                {
+                    return self.call_closure(root(binding), &callable, arguments, flow, source, depth + 1).map(|_| ());
+                }
+                if (flow.memory_exposed
+                    || arguments
+                        .iter()
+                        .any(|arg| matches!(arg.value.ty, Term::Pointer(_))))
+                {
+                    if matches!(callee.kind, K::Function(_) | K::FunctionInstance {..}) {
+                        let mut prepared_callables = vec![];
+                        let mut prepared_enums = vec![];
+                        let result = self.memory_call(
+                                callee,
+                                arguments,
+                                parameter_bindings,
+                                &[],
+                                &mut prepared_callables,
+                                &mut prepared_enums,
+                                flow,
+                                source,
+                                depth + 1,
+                            )
+                            .map(|_| ());
+                        result?;
+                        flow.value_callable = if flow.live {
+                            self.record_named_call(callee, prepared_callables, prepared_enums, source, flow)?
+                        } else {
+                            None
+                        };
+                        return Ok(());
+                    }
+                }
+                if self.defer_unknown_calls
+                    && matches!(callee.kind, K::Local(_))
+                    && matches!(callee.ty.callable_signature(), Term::Function { .. })
+                {
+                    // Construction does not execute this body. Defer the unknown
+                    // callback's state transform; actual calls are reanalyzed
+                    // with argument provenance and cannot use this evidence.
+                    self.prepare_values(
+                        source,
+                        arguments.iter().map(|a| (a.parameter, &a.value)),
+                        flow,
+                        depth + 1,
+                    )?;
+                    self.report.deferred_calls.push(source);
+                    flow.value_callable = None;
+                    flow.value_callables.clear(); flow.value_variants.clear();
+                    return Ok(());
+                }
+                if flow.memory_exposed
+                    || arguments
+                        .iter()
+                        .any(|a| matches!(a.value.ty, Term::Pointer(_)))
+                {
+                    return Err(error(
+                        source,
+                        "call with pointer dependencies requires a memory contract",
+                    ));
+                }
+                if let K::Local(binding) = &callee.kind {
+                    if let Some(definition) = flow.callables.get(&root(*binding)).cloned() {
+                        return self.call_closure(
+                            root(*binding),
+                            &definition,
+                            arguments,
+                            flow,
+                            source,
+                            depth + 1,
+                        ).map(|_| ());
+                    }
+                }
+                if matches!(callee.ty, Term::Closure { .. })
+                    || matches!(callee.kind, K::Closure { .. })
+                {
+                    return Err(error(
+                        source,
+                        "closure environment state transfer requires a known live local closure",
+                    ));
+                }
+                self.expr(callee, flow, depth + 1)?;
+                if !flow.live {
+                    return Ok(());
+                }
+                if arguments.iter().any(|a| a.is_default) {
+                    self.prepare_defaults(callee, arguments, parameter_bindings, flow, source, depth + 1)?;
+                } else {
+                    let mut callables = vec![];
+                    let mut enums = vec![];
+                    self.pending_frame(source, |this| {
+                        for argument in arguments {
+                            let callable = callable_source(&argument.value, flow, &mut this.fuel)?;
+                            let origins = this.evaluate_value_origins(&argument.value, flow, depth + 1)?;
+                            let callable = flow.value_callable.clone().or(callable);
+                            if !flow.live {return Ok(());}
+                            record_enum_parameter(&mut enums, argument.parameter, &flow.value_variants, &mut this.fuel, source)?;
+                            this.remember_pending_origins(&argument.value, argument.parameter, flow, origins)?;
+                            if let Some(callable) = callable {
+                                callables.push(export_callable_parameter(argument.parameter, &callable, &mut this.fuel)?);
+                            }
+                            for (path, value) in &flow.value_callables {
+                                if !path.is_empty() {
+                                    let mut input = export_callable_parameter(argument.parameter, value, &mut this.fuel)?;
+                                    input.fields = path.clone();
+                                    callables.push(input);
+                                }
+                            }
+                        }
+                        this.check_interface_preparation(callee, flow, source)
+                    })?;
+                    if flow.live {flow.value_callable = self.record_named_call(callee, callables, enums, source, flow)?;}
+
+                }
+                if flow.live && self.rejection.may_reject(callee, &mut self.fuel)
+                    .map_err(|reason| error(source, reason))?
+                {
+                    // Complete arguments already belong to the callee. Only
+                    // caller-owned positions and enclosing preparation survive.
+                    let mut failed = flow.clone();
+                    self.exit(&mut failed, source, CleanupReason::PredicateFailure)?;
+                }
+                if flow.live && flow.memory_exposed {
+                    return Err(error(
+                        source,
+                        "call with pointer dependencies requires a memory contract",
+                    ));
+                }
+            }
+            K::Tuple(_) | K::AnonymousRecord { .. } | K::Record { .. } | K::Variant { .. } => {
+                self.evaluate_value_origins(expr, flow, depth + 1)?;
+            }
+            K::EffectHandle { .. } => { self.evaluate_value_origins(expr, flow, depth + 1)?; }
+            K::EffectResume(value) => {
+                let result = self.handler_result.as_ref().ok_or_else(||error(source,"resume requires a handler resource context"))?;
+                if value.ty != *result && value.ty != Term::Primitive(nir::Primitive::Never) {
+                    return Err(error(source,"handler resume result type mismatch"));
+                }
+                let origins = self.in_temporary_scope(source, TemporaryBoundary::ReturnValue, flow,
+                    |this, flow| this.evaluate_value_origins(value, flow, depth + 1))?;
+                if flow.live {
+                    self.check_return_origins(flow, &origins, source)?;
+                    self.exit(flow, source, CleanupReason::EffectResume)?;
+                }
+            }
+            K::EffectRequest { abi, signature, arguments, .. } => {
+                self.effect_request_resources(expr, *abi, signature, arguments, flow, depth + 1)?;
+            }
+            K::EffectComputation { .. } | K::EffectRun { .. } | K::Snapshot(_) => {
+                self.evaluate_value_origins(expr, flow, depth + 1)?;
+            }
+            K::RequirePredicate(condition) | K::EnsurePredicate(condition) | K::CheckPredicate(condition) => {
+                if expr.ty != Term::Primitive(nir::Primitive::Void)
+                    || !nir::program::checkable_predicate(condition)
+                {
+                    return Err(error(source, "invalid runtime predicate check"));
+                }
+                self.check_contract_predicate(condition, flow, depth + 1)?;
+            }
+            K::Discard(value) => {
+                let origins = self.evaluate_value_origins(value, flow, depth + 1)?;
+                if flow.live {
+                    self.temporary(value, origins, flow)?;
+                }
+            }
+            K::EnumName(value) => {
+                if let Some(place) = expression_place(value) {
+                    flow.state.require_present(&place)
+                        .map_err(|reason|error(source, format!("enum name requires an available value: {reason:?}")))?;
+                } else {
+                    let origins = self.evaluate_value_origins(value, flow, depth + 1)?;
+                    if flow.live { self.temporary(value, origins, flow)?; }
+                }
+            }
+            K::Not(value)
+            | K::IntegerNegate(value)
+            | K::FloatNegate(value)
+            | K::BitConvert(value)
+            | K::TakeBits(value) | K::SymbolName(value)
+            | K::BitSlice { value, .. } => {
+                self.expr(value, flow, depth + 1)?
+            }
+            K::BitWindow {value, start, end} => {
+                self.expr(value, flow, depth + 1)?;
+                self.expr(start, flow, depth + 1)?;
+                self.expr(end, flow, depth + 1)?;
+            }
+            K::IntegerBinary { left, right, .. }
+            | K::FloatBinary { left, right, .. }
+            | K::ScalarEqual(left, right)
+            | K::ScalarLess(left, right)
+            | K::ScalarLessEqual(left, right)
+            | K::ScalarGreater(left, right)
+            | K::ScalarGreaterEqual(left, right)
+            | K::BitEqual(left, right)
+            | K::BitConcat(left, right) | K::BitIndex(left, right) => {
+                self.expr(left, flow, depth + 1)?;
+                self.expr(right, flow, depth + 1)?;
+            }
+            K::And(left, right) | K::Or(left, right) => {
+                self.expr(left, flow, depth + 1)?;
+                if flow.live && expr.ty != Term::Primitive(nir::Primitive::Bool) {
+                    // BitVec and/or always evaluate both operands. In particular,
+                    // RHS ownership transfers must not become conditional.
+                    self.scope(right, flow, depth + 1)?;
+                } else if flow.live {
+                    let skip = constant_bool(left, 0).map(|value| {
+                        if matches!(expr.kind, K::And(..)) {
+                            !value
+                        } else {
+                            value
+                        }
+                    });
+                    match skip {
+                        Some(true) => (),
+                        Some(false) => self.scope(right, flow, depth + 1)?,
+                        None => self.fork(right, None, flow, depth)?,
+                    }
+                }
+            }
+            _ => {
+                return Err(error(
+                    source,
+                    "operation requires additional move/observation semantics",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+/// `delivery` must supply checked representation-copy permission, not merely
+/// the existence of a Copy impl. This analysis alone does not discharge cleanup,
+/// dependency, observation, or alias obligations and is not a safety certificate.
+pub fn analyze(
+    function: &Function,
+    delivery: impl FnMut(&Term) -> Result<Delivery, String>,
+    fuel: usize,
+) -> Result<Report, Error> {
+    analyze_with_shapes(None, function, delivery, |_| Ok(Shape::Value), fuel, None, &[], &[], &[], vec![])
+}
+
+fn analyze_with_shapes<'a>(
+    package: Option<&'a Package>,
+    function: &'a Function,
+    delivery: impl FnMut(&Term) -> Result<Delivery, String>,
+    shape: impl FnMut(&Term) -> Result<Shape, String>,
+    fuel: usize,
+    cleanup: Option<&'a mut dyn CleanupPolicy>,
+    borrowed_parameters: &[(usize, Term)],
+    callable_parameters: &[CallableParameter],
+    enum_parameters: &[EnumParameter],
+    return_stack: Vec<(nir::DeclarationId, Vec<Term>)>,
+) -> Result<Report, Error> {
+    let source = function.body.source;
+    if function.phase != FunctionPhase::Runtime {
+        return Err(error(source, "move analysis requires a runtime function"));
+    }
+    let mut analyzer = Analyzer {
+        cleanup,
+        package,
+        exit_contract: Some(function),
+        handler_result: None,
+        effect_return_enabled: false,
+        effect_return_values: vec![],
+        effect_loop_targets: BTreeSet::new(),
+        rejection: super::rejection::Cache::new(package),
+        delivery,
+        shape,
+        fuel,
+        report: Report::default(),
+        persistent_roots: BTreeSet::new(),
+        captured_roots: BTreeSet::new(),
+        defer_unknown_calls: false,
+        return_stack,
+        next_generation: 0,
+        next_borrowed_pointer: 0,
+        next_borrowed_scope: 1,
+        borrowed_pointees: BTreeMap::new(),
+        next_sequence: 1,
+        temporary_scope_id: 0,
+        temporary_scope: TemporaryScope {
+            source,
+            boundary: TemporaryBoundary::FunctionResult,
+        },
+        loops: vec![],
+        pending: vec![],
+    };
+    let mut flow = Flow {
+        live: true,
+        ..Default::default()
+    };
+    let Term::Function { parameters, .. } = function.signature.callable_signature() else {
+        return Err(error(source, "missing callable signature"));
+    };
+    if parameters.len() != function.parameters.len() {
+        return Err(error(source, "parameter signature mismatch"));
+    }
+    for (parameter, signature) in function.parameters.iter().zip(parameters) {
+        analyzer.declare(&mut flow, *parameter, &signature.ty, source)?;
+    }
+    let mut callable_slots = BTreeSet::new();
+    for input in callable_parameters {
+        analyzer.fuel = analyzer.fuel.checked_sub(input.fields.len().saturating_add(1))
+            .ok_or_else(||error(source,"callable parameter path budget exhausted"))?;
+        if !callable_slots.insert((input.parameter, input.fields.clone())) {
+            return Err(error(source, "duplicate callable parameter"));
+        }
+        let binding = function.parameters.get(input.parameter)
+            .ok_or_else(|| error(source, "callable parameter is missing"))?;
+        let callable = import_callable_evidence(
+            analyzer.package, &input.definition, &input.alternatives, &input.captures, &input.enum_captures, &input.choices,
+            &owned_field_type(analyzer.package, &parameters[input.parameter].ty, &input.fields, &mut analyzer.fuel, source)?, &mut analyzer.fuel, 0,
+        )?;
+        if input.fields.is_empty() {
+            analyzer.store_callable(&mut flow, root(*binding), callable, source)?;
+        } else {
+            analyzer.install_callable_fields(&mut flow, &Place {root:root(*binding),fields:input.fields.clone()},
+                BTreeMap::from([(vec![], callable)]), source)?;
+        }
+    }
+    analyzer.report.callable_parameters = callable_parameters.to_vec();
+    let mut enum_slots = BTreeSet::new();
+    for input in enum_parameters {
+        if !enum_slots.insert(input.parameter) { return Err(error(source, "duplicate enum parameter")); }
+        let binding = function.parameters.get(input.parameter).ok_or_else(|| error(source, "enum parameter is missing"))?;
+        if input.domains.is_empty() { return Err(error(source, "empty enum parameter premise")); }
+        validate_enum_domains(analyzer.package, &parameters[input.parameter].ty, &input.domains, &mut analyzer.fuel, source)?;
+        let domains = copy_enum_domains(&input.domains, &mut analyzer.fuel, source)?;
+        analyzer.install_enum_domains(&mut flow, &Place {root:root(*binding),fields:vec![]}, domains, source)?;
+    }
+    analyzer.report.enum_parameters = enum_parameters.to_vec();
+    let mut borrowed_slots = BTreeSet::new();
+    for (slot, subject) in borrowed_parameters {
+        if !borrowed_slots.insert(*slot) {
+            return Err(error(source, "duplicate borrowed parameter"));
+        }
+        let binding = function.parameters.get(*slot).ok_or_else(|| error(source, "borrowed parameter is missing"))?;
+        if parameters[*slot].ty != Term::Pointer(Box::new(subject.clone())) {
+            return Err(error(source, "borrowed pointee type disagrees with parameter"));
+        }
+        // Conditional function analysis only: each invocation must establish its
+        // footprint against actual targets. Pointees never enter cleanup order.
+        let pointee = PlaceId {owner: u64::MAX - 1, local: u32::try_from(*slot)
+            .map_err(|_| error(source, "too many borrowed parameters"))?};
+        let shape = (analyzer.shape)(subject).map_err(|e| error(source, e))?;
+        flow.state.declare(pointee, &shape, true, &mut analyzer.fuel)
+            .map_err(|e| error(source, format!("borrowed parameter shape: {e:?}")))?;
+        flow.types.insert(pointee, subject.clone());
+        flow.pointers.insert(Place {root: root(*binding), fields: vec![]},
+            BTreeSet::from([Place {root: pointee, fields: vec![]} ]));
+        flow.memory_exposed = true;
+    }
+    for snapshot in &function.entry_snapshots {
+        if !function.parameters.contains(&snapshot.parameter) {
+            return Err(error(source, "entry snapshot source is not a parameter"));
+        }
+        let ty = flow.types.get(&root(snapshot.parameter)).cloned()
+            .ok_or_else(|| error(source, "entry snapshot parameter is missing"))?;
+        if (analyzer.delivery)(&ty).map_err(|e| error(source,e))? != Delivery::Copy {
+            return Err(error(source, "entry snapshot requires checked Copy permission"));
+        }
+        analyzer.declare(&mut flow, snapshot.binding, &ty, source)?;
+    }
+    for condition in &function.preconditions {
+        analyzer.check_contract_predicate(condition, &mut flow, 0)?;
+    }
+    let origins = analyzer.evaluate_value_origins(&function.body, &mut flow, 0)?;
+    let result_callable = flow.value_callable.clone();
+    let result_fields = flow.value_callables.clone();
+    let result_variants = flow.value_variants.clone();
+    analyzer.check_function_result(&mut flow, origins, source, 0)?;
+    if flow.live {flow.value_callable = result_callable; flow.value_callables = result_fields; flow.value_variants = result_variants;}
+    if flow.live {
+        analyzer.exit(&mut flow, source, CleanupReason::FunctionEnd)?;
+    }
+    analyzer.report.entry_steps_used = fuel - analyzer.fuel;
+    Ok(analyzer.report)
+}
+
+// A computation has no owned runtime representation. Resource evidence belongs
+// to its completion value; keep the effect row on the original IR/signature.
+fn completion_type(ty: &Term) -> &Term {
+    match ty {
+        Term::Computation { result, .. } => result,
+        ty => ty,
+    }
+}
+
+fn expression_place(expr: &Expr) -> Option<Place> {
+    let mut indices = Vec::new();
+    let mut current = expr;
+    loop {
+        match &current.kind {
+            K::Local(id) => {
+                indices.reverse();
+                return Some(Place {
+                    root: root(*id),
+                    fields: indices,
+                });
+            }
+            K::AnonymousField { value, index, .. } | K::Field { value, index, .. } => {
+                indices.push(*index);
+                current = value;
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Expand owned struct/tuple positions for field-sensitive analysis. This is a
+/// structural availability model, not proof of permission to tear down a value
+/// with a destructor or cross-field dependencies. The cleanup planner must
+/// validate those independent obligations before executable code is published.
+pub fn analyze_in_package(
+    package: &nir::program::Package,
+    function: &Function,
+    delivery: impl FnMut(&Term) -> Result<Delivery, String>,
+    fuel: usize,
+) -> Result<Report, Error> {
+    analyze_in_package_with_cleanup(package, function, delivery, fuel, None)
+}
+
+/// Opt-in acquired cleanup planning. Failure returns no partially planned report.
+pub fn analyze_in_package_with_cleanup<'a>(
+    package: &'a Package,
+    function: &'a Function,
+    delivery: impl FnMut(&Term) -> Result<Delivery, String>,
+    fuel: usize,
+    cleanup: Option<&'a mut dyn CleanupPolicy>,
+) -> Result<Report, Error> {
+    analyze_in_package_with_borrows(package, function, delivery, fuel, cleanup, &[])
+}
+
+/// Analyze under explicit borrowed parameter assumptions. This does not prove
+/// validity at any call site; callers must check the instantiated memory footprint.
+pub fn analyze_in_package_with_borrows<'a>(
+    package: &'a Package,
+    function: &'a Function,
+    delivery: impl FnMut(&Term) -> Result<Delivery, String>,
+    fuel: usize,
+    cleanup: Option<&'a mut dyn CleanupPolicy>,
+    borrowed_parameters: &[(usize, Term)],
+) -> Result<Report, Error> {
+    analyze_in_package_with_inputs(
+        package, function, delivery, fuel, cleanup, borrowed_parameters, &[],
+    )
+}
+
+/// Analyze a concrete function under explicit memory and callable premises.
+/// The returned report records callable inputs; publication must associate it
+/// with the matching invocation, never reuse it for arbitrary same-typed values.
+pub fn analyze_in_package_with_inputs<'a>(
+    package: &'a Package,
+    function: &'a Function,
+    delivery: impl FnMut(&Term) -> Result<Delivery, String>,
+    fuel: usize,
+    cleanup: Option<&'a mut dyn CleanupPolicy>,
+    borrowed_parameters: &[(usize, Term)],
+    callable_parameters: &[CallableParameter],
+) -> Result<Report, Error> {
+    analyze_in_package_with_context(package, function, delivery, fuel, cleanup, borrowed_parameters, callable_parameters, &[])
+}
+
+/// Analyze under both code identity and conditional enum tag premises.
+pub fn analyze_in_package_with_context<'a>(
+    package: &'a Package,
+    function: &'a Function,
+    delivery: impl FnMut(&Term) -> Result<Delivery, String>,
+    fuel: usize,
+    cleanup: Option<&'a mut dyn CleanupPolicy>,
+    borrowed_parameters: &[(usize, Term)],
+    callable_parameters: &[CallableParameter],
+    enum_parameters: &[EnumParameter],
+) -> Result<Report, Error> {
+    let mut shape_fuel = fuel;
+    analyze_with_shapes(
+        Some(package),
+        function,
+        delivery,
+        |ty| ownership_shape(package, ty, &mut shape_fuel, 0),
+        fuel,
+        cleanup,
+        borrowed_parameters,
+        callable_parameters,
+        enum_parameters,
+        vec![],
+    )
+}
+
+fn ownership_shape(
+    package: &nir::program::Package,
+    ty: &Term,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Shape, String> {
+    if *fuel == 0 || depth > 128 {
+        return Err("ownership shape budget exhausted".into());
+    }
+    *fuel -= 1;
+    let fields = match ty {
+        Term::NormalForm { .. } if nir::normal_forms::tuple_fields(Some(package), ty).is_some() => {
+            super::memory::bound_type(ty, fuel)?;
+            nir::normal_forms::tuple_fields(Some(package), ty).unwrap().to_vec()
+        }
+        Term::Record(fields) => {
+            super::memory::bound_type(ty, fuel)?;
+            fields.iter().map(|(_, ty)| ty.clone()).collect()
+        }
+        Term::Tuple(fields)
+        | Term::Closure {
+            environment: fields,
+            ..
+        } => fields.clone(),
+        Term::Nominal {
+            declaration,
+            arguments,
+        } => {
+            let Some(definition) = package
+                .structs
+                .iter()
+                .find(|s| s.declaration == *declaration)
+            else {
+                return Ok(Shape::Value);
+            };
+            definition
+                .instantiate_fields(arguments)
+                .map_err(|e| format!("ownership fields: {e:?}"))?
+                .into_iter()
+                .map(|(_, ty)| ty)
+                .collect()
+        }
+        _ => return Ok(Shape::Value),
+    };
+    Ok(Shape::Fields(
+        fields
+            .iter()
+            .map(|ty| ownership_shape(package, ty, fuel, depth + 1))
+            .collect::<Result<_, _>>()?,
+    ))
+}
+
+// Same live closure identity can retain its code while captured named targets
+// widen. Distinct closure generations remain separate receiver identities.
+fn join_capture_evidence(
+    left: &BTreeMap<Place, Callable>, right: &BTreeMap<Place, Callable>,
+    left_tags: &BTreeMap<PlaceId, EnumDomains>, right_tags: &BTreeMap<PlaceId, EnumDomains>,
+    fuel: &mut usize, source: SourceRange, depth: usize,
+) -> Result<(BTreeMap<Place, Callable>, BTreeMap<PlaceId, EnumDomains>), Error> {
+    let unknown = EnumDomains::new();
+    let mut captures = BTreeMap::new();
+    for place in left.keys().chain(right.keys()) {
+        *fuel = fuel.checked_sub(place.fields.len().saturating_add(1))
+            .ok_or_else(|| error(source, "capture join budget exhausted"))?;
+        if captures.contains_key(place) {continue;}
+        let value = match (left.get(place), right.get(place)) {
+            (Some(a), Some(b)) => merge_callable_provenance(a, b, fuel, source, depth + 1)?,
+            (Some(a), None) if enum_path_excluded(&place.fields, right_tags.get(&place.root).unwrap_or(&unknown)) => Some(a.clone()),
+            (None, Some(b)) if enum_path_excluded(&place.fields, left_tags.get(&place.root).unwrap_or(&unknown)) => Some(b.clone()),
+            _ => None,
+        };
+        if let Some(value) = value { captures.insert(place.clone(), value); }
+    }
+    let mut enums = BTreeMap::new();
+    for (root, domains) in left_tags {
+        let joined = join_enum_domains(domains, right_tags.get(root).unwrap_or(&unknown), fuel, source)?;
+        if !joined.is_empty() {enums.insert(*root, joined);}
+    }
+    Ok((captures, enums))
+}
+
+fn merge_callable_provenance(
+    left: &Callable,
+    right: &Callable,
+    fuel: &mut usize,
+    source: SourceRange,
+    depth: usize,
+) -> Result<Option<Callable>, Error> {
+    if *fuel == 0 || depth >= 128 {
+        return Err(error(source, "callable join budget exhausted"));
+    }
+    *fuel -= 1;
+    if let Some(named) = merge_named_callables(left, right, fuel, source)? {
+        return Ok(Some(named));
+    }
+    if !left.choices.is_empty() || !right.choices.is_empty()
+        || !same_callable_definition(&left.definition, &right.definition) {
+        if left.definition.ty != right.definition.ty {
+            return Ok(None);
+        }
+        let mut flattened = vec![];
+        for value in std::iter::once(left).chain(&left.choices).chain(std::iter::once(right)).chain(&right.choices) {
+            for definition in std::iter::once(&value.definition).chain(&value.alternatives) {
+                *fuel = fuel.checked_sub(1).ok_or_else(||error(source,"callable candidate join budget exhausted"))?;
+                if !matches!(definition.kind, K::Closure {..} | K::Function(_) | K::FunctionInstance {..}) {
+                    return Ok(None);
+                }
+                let mut candidate = value.clone();
+                candidate.definition = definition.clone();
+                candidate.choices.clear();
+                candidate.alternatives.clear();
+                candidate.generation = 0;
+                flattened.push(candidate);
+            }
+        }
+        let mut candidates: Vec<Callable> = vec![];
+        for value in flattened {
+            *fuel = fuel.checked_sub(candidates.len().saturating_add(1)).ok_or_else(||error(source,"closure candidate join budget exhausted"))?;
+            if let Some(index)=candidates.iter().position(|previous|same_callable_definition(&previous.definition,&value.definition)) {
+                candidates[index]=merge_callable_provenance(&candidates[index],&value,fuel,source,depth+1)?
+                    .ok_or_else(||error(source,"closure candidate capture evidence cannot be joined"))?;
+            } else {
+                if matches!(value.definition.kind, K::Closure {..}) && candidates.iter().any(|previous|matches!(previous.definition.kind, K::Closure {..}) && previous.definition.source==value.definition.source) {
+                    return Err(error(source,"ambiguous closure definition identity"));
+                }
+                candidates.push(value);
+            }
+        }
+        // Keep a closure representative so dispatch cannot drop its environment.
+        candidates.sort_by_key(|value|(!matches!(value.definition.kind, K::Closure {..}), value.definition.source.start,value.definition.source.end));
+        let mut primary=candidates.remove(0);primary.choices=candidates;
+        return Ok(Some(primary));
+    }
+    if left.generation != right.generation
+        || !same_callable_definition(&left.definition, &right.definition)
+        || !left.alternatives.is_empty()
+        || !right.alternatives.is_empty()
+    {
+        return Ok(None);
+    }
+    let (captures, enum_captures) = join_capture_evidence(
+        &left.captures, &right.captures, &left.enum_captures, &right.enum_captures, fuel, source, depth,
+    )?;
+    Ok(Some(Callable { choices: vec![], enum_captures,
+        definition: left.definition.clone(),
+        alternatives: vec![],
+        generation: left.generation,
+        captures,
+    }))
+}
+
+fn prepared_memory_code_inputs<'a>(
+    prepared: &'a ClosureArguments, fuel: &mut usize, source: SourceRange,
+) -> Result<super::memory::CodeInputs<'a>, Error> {
+    let mut result=BTreeMap::new();
+    for (parameter, callable) in &prepared.callables {
+        if let Some(definitions)=memory_code_definitions(callable,fuel,source)? {
+            result.insert(super::memory::CallableInput {parameter:*parameter,fields:vec![]},definitions);
+        }
+    }
+    for (parameter, fields) in &prepared.fields {
+        for (path, callable) in fields {
+            *fuel=fuel.checked_sub(path.len()+1).ok_or_else(||error(source,"prepared code field budget exhausted"))?;
+            if path.is_empty() || path.contains(&VARIANT_PATH) {continue;}
+            if let Some(definitions)=memory_code_definitions(callable,fuel,source)? {
+                result.insert(super::memory::CallableInput {parameter:*parameter,fields:path.clone()},definitions);
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn memory_code_definitions<'a>(
+    callable: &'a Callable, fuel: &mut usize, source: SourceRange,
+) -> Result<Option<Vec<super::memory::CodeDefinition<'a>>>, Error> {
+    memory_code_definitions_at(callable,fuel,source,0)
+}
+fn memory_code_definitions_at<'a>(
+    callable: &'a Callable, fuel: &mut usize, source: SourceRange, depth: usize,
+) -> Result<Option<Vec<super::memory::CodeDefinition<'a>>>, Error> {
+    if depth>=64 {return Err(error(source,"prepared capture depth exhausted"));}
+    use super::memory::{CodeDefinition,CallablePlace};
+    // Named-only evidence already uses the established summary-input route.
+    if named_memory_callees(callable,fuel,source)?.is_some() {return Ok(None);}
+    let mut definitions=vec![];
+    for candidate in std::iter::once(callable).chain(&callable.choices) {
+        if !std::ptr::eq(candidate,callable) && !candidate.choices.is_empty() {
+            return Err(error(source,"nested prepared code choices require flattening"));
+        }
+        for definition in std::iter::once(&candidate.definition).chain(&candidate.alternatives) {
+            *fuel=fuel.checked_sub(1).ok_or_else(||error(source,"prepared code candidate budget exhausted"))?;
+            let value=match &definition.kind {
+                K::Function(declaration) => CodeDefinition::Named(iir::InstanceKey {declaration:*declaration,arguments:vec![]}),
+                K::FunctionInstance {declaration,arguments} => {
+                    for ty in arguments {super::memory::bound_type(ty,fuel).map_err(|reason|error(source,reason))?;}
+                    CodeDefinition::Named(iir::InstanceKey {declaration:*declaration,arguments:arguments.clone()})
+                }
+                K::Closure {captures,..} => {
+                    let mut code=BTreeMap::new();
+                    let mut prepared_captures=BTreeMap::new();
+                    for capture in captures {
+                        for (place,value) in &candidate.captures {
+                            *fuel=fuel.checked_sub(place.fields.len()+1).ok_or_else(||error(source,"prepared code capture budget exhausted"))?;
+                            if place.root==root(capture.binding) && !place.fields.contains(&VARIANT_PATH) {
+                                if let Some(keys)=named_memory_callees(value,fuel,source)? {
+                                    code.insert(CallablePlace {binding:capture.binding,fields:place.fields.clone()},keys);
+                                } else if let Some(definitions)=memory_code_definitions_at(value,fuel,source,depth+1)? {
+                                    let input=super::memory::CallableInput {parameter:0,fields:vec![]};
+                                    let mut owned=super::memory::own_code_inputs(&BTreeMap::from([(input.clone(),definitions)]),&[],&[],fuel).map_err(|e|error(source,e))?;
+                                    prepared_captures.insert(CallablePlace {binding:capture.binding,fields:place.fields.clone()},owned.remove(&input).unwrap());
+                                }
+                            }
+                        }
+                    }
+                    CodeDefinition::Closure {definition,captures:std::sync::Arc::new(code),prepared_captures:std::sync::Arc::new(prepared_captures)}
+                }
+                _ => return Ok(None),
+            };
+            definitions.push(value);
+        }
+    }
+    Ok(Some(definitions))
+}
+
+fn prepared_memory_inputs(
+    prepared: &ClosureArguments, fuel: &mut usize, source: SourceRange,
+) -> Result<BTreeMap<super::memory::CallableInput, super::memory::CallableResult>, Error> {
+    let mut result=BTreeMap::new();
+    for (parameter, callable) in &prepared.callables {
+        if let Some(value)=named_memory_callees(callable,fuel,source)? {
+            result.insert(super::memory::CallableInput {parameter:*parameter,fields:vec![]},value);
+        }
+    }
+    for (parameter, fields) in &prepared.fields {
+        for (path, callable) in fields {
+            *fuel=fuel.checked_sub(path.len()+1).ok_or_else(||error(source,"prepared memory field budget exhausted"))?;
+            if path.is_empty() || path.contains(&VARIANT_PATH) {continue;}
+            if let Some(value)=named_memory_callees(callable,fuel,source)? {
+                result.insert(super::memory::CallableInput {parameter:*parameter,fields:path.clone()},value);
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// Bridge resource-checked callback premises into the memory worklist. Import
+/// validation checks each environment before the memory layer borrows its code.
+pub fn infer_callable_memory(
+    package: &Package, declaration: nir::DeclarationId, arguments: &[Term],
+    inputs: &[CallableParameter], fuel: &mut usize, source: SourceRange,
+) -> Result<super::memory::Summary,String> {
+    let function=package.functions.iter().find(|f|f.declaration==declaration).ok_or("memory function is missing")?;
+    super::memory::bound_type(&function.signature,fuel)?;
+    for argument in arguments {super::memory::bound_type(argument,fuel)?;}
+    let signature=function.signature.instantiate_types(&function.type_parameters,arguments).map_err(|e|e.to_string())?;
+    let Term::Function {parameters,..}=signature.callable_signature() else {return Err("memory callee lacks a signature".into());};
+    let mut restored=BTreeMap::new();
+    for input in inputs {
+        *fuel=fuel.checked_sub(input.fields.len()+1).ok_or("memory callable input budget exhausted")?;
+        if input.fields.contains(&VARIANT_PATH) {continue;}
+        let parameter=parameters.get(input.parameter).ok_or("memory callable input parameter is missing")?;
+        let expected=owned_field_type(Some(package),&parameter.ty,&input.fields,fuel,source).map_err(|e|e.to_string())?;
+        let callable=import_callable_evidence(Some(package),&input.definition,&input.alternatives,&input.captures,&input.enum_captures,&input.choices,&expected,fuel,0).map_err(|e|e.to_string())?;
+        let key=super::memory::CallableInput {parameter:input.parameter,fields:input.fields.clone()};
+        if restored.insert(key,callable).is_some() {return Err("duplicate memory callable input".into());}
+    }
+    let named=callable_memory_inputs(inputs,fuel,source).map_err(|e|e.to_string())?;
+    let mut code=BTreeMap::new();
+    for (input,callable) in &restored {
+        if let Some(definitions)=memory_code_definitions(callable,fuel,source).map_err(|e|e.to_string())? {
+            code.insert(input.clone(),definitions);
+        }
+    }
+    super::memory::infer_with_code_inputs(package,declaration,arguments,&named,&code,fuel)
+}
+
+/// Export only complete named-code premises. Missing or mixed anonymous leaves
+/// remain unproved and cannot authorize a body-derived dynamic footprint.
+pub fn callable_memory_inputs(
+    inputs: &[CallableParameter], fuel: &mut usize, source: SourceRange,
+) -> Result<BTreeMap<super::memory::CallableInput, super::memory::CallableResult>, Error> {
+    let mut result=BTreeMap::new();
+    for input in inputs {
+        *fuel=fuel.checked_sub(input.fields.len()+1).ok_or_else(||error(source,"memory callable input budget exhausted"))?;
+        if !input.choices.is_empty() || input.fields.contains(&VARIANT_PATH) {continue;}
+        if let Some(value)=named_memory_definitions(&input.definition,&input.alternatives,fuel,source)? {
+            let key=super::memory::CallableInput {parameter:input.parameter,fields:input.fields.clone()};
+            if result.insert(key,value).is_some() {return Err(error(source,"duplicate memory callable input"));}
+        }
+    }
+    Ok(result)
+}
+
+// Only a complete named set can seed the memory inference environment. A
+// closure alternative cannot disappear merely because other targets are named.
+fn named_memory_callees(
+    callable: &Callable, fuel: &mut usize, source: SourceRange,
+) -> Result<Option<super::memory::CallableResult>, Error> {
+    if !callable.choices.is_empty() {return Ok(None);}
+    named_memory_definitions(&callable.definition,&callable.alternatives,fuel,source)
+}
+fn named_memory_definitions(
+    definition: &Expr, alternatives: &[Expr], fuel: &mut usize, source: SourceRange,
+) -> Result<Option<super::memory::CallableResult>,Error> {
+    let mut keys = vec![];
+    for definition in std::iter::once(definition).chain(alternatives) {
+        *fuel = fuel.checked_sub(1).ok_or_else(||error(source,"captured callable footprint budget exhausted"))?;
+        let key = match &definition.kind {
+            K::Function(declaration) => iir::InstanceKey {declaration:*declaration,arguments:vec![]},
+            K::FunctionInstance {declaration,arguments} => {
+                for ty in arguments {super::memory::bound_type(ty,fuel).map_err(|reason|error(source,reason))?;}
+                iir::InstanceKey {declaration:*declaration,arguments:arguments.clone()}
+            }
+            _ => return Ok(None),
+        };
+        keys.push(key);
+    }
+    Ok(Some(if keys.len()==1 {super::memory::CallableResult::Known(keys.remove(0))}
+        else {super::memory::CallableResult::Candidates(keys)}))
+}
+
+fn merge_named_callables(
+    left: &Callable,
+    right: &Callable,
+    fuel: &mut usize,
+    source: SourceRange,
+) -> Result<Option<Callable>, Error> {
+    if !left.choices.is_empty() || !right.choices.is_empty()
+        || left.definition.ty != right.definition.ty
+        || !matches!(
+            left.definition.kind,
+            K::Function(_) | K::FunctionInstance { .. }
+        )
+        || !matches!(
+            right.definition.kind,
+            K::Function(_) | K::FunctionInstance { .. }
+        )
+    {
+        return Ok(None);
+    }
+    let mut targets = vec![];
+    for target in std::iter::once(&left.definition)
+        .chain(&left.alternatives)
+        .chain(std::iter::once(&right.definition))
+        .chain(&right.alternatives)
+    {
+        super::memory::bound_type(&target.ty, fuel).map_err(|e| error(source, e))?;
+        if let K::FunctionInstance { arguments, .. } = &target.kind {
+            for ty in arguments {
+                super::memory::bound_type(ty, fuel).map_err(|e| error(source, e))?;
+            }
+        }
+        *fuel = fuel
+            .checked_sub(targets.len() + 1)
+            .ok_or_else(|| error(source, "callable candidates budget exhausted"))?;
+        if !targets
+            .iter()
+            .any(|previous| same_callable_definition(previous, target))
+        {
+            targets.push(target.clone());
+        }
+    }
+    targets.sort_by_cached_key(|value| format!("{:?}", value.kind));
+    let definition = targets.remove(0);
+    Ok(Some(Callable { choices: vec![], enum_captures: Default::default(),
+        definition,
+        alternatives: targets,
+        generation: 0,
+        captures: BTreeMap::new(),
+    }))
+}
+fn same_callable_definition(left: &Expr, right: &Expr) -> bool {
+    if matches!(left.kind, K::Function(_) | K::FunctionInstance { .. }) {
+        // Reference spans distinguish uses, not named function identities.
+        left.ty == right.ty && left.kind == right.kind
+    } else {
+        left == right
+    }
+}
+
+fn export_callable_parameter(
+    parameter: usize,
+    callable: &Callable,
+    fuel: &mut usize,
+) -> Result<CallableParameter, Error> {
+    let evidence = export_callable_evidence(callable, fuel, 0)?;
+    Ok(CallableParameter { choices: evidence.choices, enum_captures: evidence.enum_captures,
+        parameter,
+        fields: vec![],
+        definition: evidence.definition,
+        alternatives: evidence.alternatives,
+        captures: evidence.captures,
+    })
+}
+
+fn export_callable_evidence(
+    callable: &Callable,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<CallableEvidence, Error> {
+    let source = callable.definition.source;
+    if *fuel == 0 || depth >= 128 {
+        return Err(error(source, "callable input export budget exhausted"));
+    }
+    *fuel -= 1;
+    for definition in std::iter::once(&callable.definition).chain(&callable.alternatives) {
+        super::memory::bound_type(&definition.ty, fuel).map_err(|e| error(source, e))?;
+        if let K::FunctionInstance { arguments, .. } = &definition.kind {
+            for ty in arguments {
+                super::memory::bound_type(ty, fuel).map_err(|e| error(source, e))?;
+            }
+        }
+    }
+    let captures = callable
+        .captures
+        .iter()
+        .map(|(binding, value)| Ok((binding.clone(), export_callable_evidence(value, fuel, depth + 1)?)))
+        .collect::<Result<_, Error>>()?;
+    Ok(CallableEvidence { choices: callable.choices.iter().map(|choice| export_callable_evidence(choice, fuel, depth + 1)).collect::<Result<_, _>>()?, enum_captures: copy_captured_enums(&callable.enum_captures, fuel, source)?,
+        definition: callable.definition.clone(),
+        alternatives: callable.alternatives.clone(),
+        captures,
+    })
+}
+
+fn import_callable_evidence(
+    package: Option<&Package>,
+    definition: &Expr,
+    alternatives: &[Expr],
+    captures: &BTreeMap<Place, CallableEvidence>,
+    enum_captures: &BTreeMap<PlaceId, EnumDomains>,
+    choices: &[CallableEvidence],
+    expected: &Term,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Callable, Error> {
+    let source = definition.source;
+    if *fuel == 0 || depth >= 128 {
+        return Err(error(source, "callable input validation budget exhausted"));
+    }
+    *fuel -= 1;
+    let mut result: Option<Callable> = None;
+    for definition in std::iter::once(definition).chain(alternatives) {
+        super::memory::bound_type(&definition.ty, fuel).map_err(|e| error(source, e))?;
+        if expected != &definition.ty {
+            return Err(error(
+                source,
+                "callable definition type disagrees with parameter",
+            ));
+        }
+        if !alternatives.is_empty()
+            && !matches!(definition.kind, K::Function(_) | K::FunctionInstance { .. })
+        {
+            return Err(error(
+                source,
+                "callable alternatives require named function definitions",
+            ));
+        }
+        validate_callable_input(package, definition, fuel, depth)?;
+        let value = callable_source_depth(definition, &Flow::default(), fuel, depth)?
+            .ok_or_else(|| error(source, "callable input requires a callable definition"))?;
+        result = Some(if let Some(previous) = result {
+            for candidate in std::iter::once(&previous.definition).chain(&previous.alternatives) {
+                if *fuel == 0 {
+                    return Err(error(source, "callable input validation budget exhausted"));
+                }
+                *fuel -= 1;
+                if same_callable_definition(candidate, definition) {
+                    return Err(error(source, "duplicate callable parameter candidate"));
+                }
+            }
+            merge_named_callables(&previous, &value, fuel, source)?
+                .ok_or_else(|| error(source, "incompatible callable parameter candidates"))?
+        } else {
+            value
+        });
+    }
+    let mut result = result.expect("a representative is always present");
+    for (binding, evidence) in captures {
+        let K::Closure {
+            captures: fields, ..
+        } = &definition.kind
+        else {
+            return Err(error(
+                source,
+                "named callable cannot carry capture evidence",
+            ));
+        };
+        let field = fields
+            .iter()
+            .find(|field| root(field.binding) == binding.root)
+            .ok_or_else(|| error(source, "callable evidence refers to an unknown capture"))?;
+        let nested = import_callable_evidence(
+            package,
+            &evidence.definition,
+            &evidence.alternatives,
+            &evidence.captures,
+            &evidence.enum_captures,
+            &evidence.choices,
+            &owned_field_type(package, &field.ty, &binding.fields, fuel, source)?,
+            fuel,
+            depth + 1,
+        )?;
+        result.captures.insert(binding.clone(), nested);
+    }
+    for (binding, domains) in enum_captures {
+        let K::Closure {captures: fields, ..} = &definition.kind else {
+            return Err(error(source, "named callable cannot carry enum capture evidence"));
+        };
+        let field = fields.iter().find(|field| root(field.binding) == *binding)
+            .ok_or_else(|| error(source, "enum evidence refers to an unknown capture"))?;
+        validate_enum_domains(package, &field.ty, domains, fuel, source)?;
+        result.enum_captures.insert(*binding, copy_enum_domains(domains, fuel, source)?);
+    }
+    for choice in choices {
+        if !matches!(definition.kind,K::Closure {..}) || !alternatives.is_empty()
+            || !matches!(choice.definition.kind,K::Closure {..} | K::Function(_) | K::FunctionInstance {..}) || !choice.choices.is_empty() || !choice.alternatives.is_empty() {
+            return Err(error(source,"closure choices require flat callable definitions"));
+        }
+        let candidate=import_callable_evidence(package,&choice.definition,&[],&choice.captures,&choice.enum_captures,&[],expected,fuel,depth+1)?;
+        *fuel=fuel.checked_sub(result.choices.len().saturating_add(1)).ok_or_else(||error(source,"closure choices validation budget exhausted"))?;
+        if std::iter::once(&result).chain(&result.choices).any(|previous|same_callable_definition(&previous.definition,&candidate.definition) || (matches!(previous.definition.kind,K::Closure {..}) && matches!(candidate.definition.kind,K::Closure {..}) && previous.definition.source==candidate.definition.source)) {
+            return Err(error(source,"duplicate closure parameter candidate"));
+        }
+        result.choices.push(candidate);
+    }
+    Ok(result)
+}
+
+// Compatibility views cannot encode candidate sets in one capture initializer.
+// Keep them unknown instead of choosing a representative and losing targets.
+fn legacy_callable_definitions(
+    evidence: &CallableEvidence,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Option<Vec<Expr>>, Error> {
+    let source = evidence.definition.source;
+    if *fuel == 0 || depth >= 128 {
+        return Err(error(source, "callable input export budget exhausted"));
+    }
+    *fuel -= 1;
+    if !evidence.enum_captures.is_empty() || !evidence.choices.is_empty() { return Ok(None); }
+    if evidence.captures.keys().any(|place| !place.fields.is_empty()) { return Ok(None); }
+    let mut definition = evidence.definition.clone();
+    if let K::Closure { captures, .. } = &mut definition.kind {
+        for capture in captures {
+            if let Some(nested) = evidence.captures.get(&Place {root:root(capture.binding),fields:vec![]}) {
+                let Some(mut definitions) = legacy_callable_definitions(nested, fuel, depth + 1)?
+                else {
+                    return Ok(None);
+                };
+                if definitions.len() != 1 {
+                    return Ok(None);
+                }
+                capture.value = Some(Box::new(definitions.remove(0)));
+            }
+        }
+    }
+    let mut values = vec![definition];
+    values.extend(evidence.alternatives.iter().cloned());
+    Ok(Some(values))
+}
+
+fn restore_callable_evidence(
+    evidence: &CallableEvidence,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Callable, Error> {
+    if *fuel == 0 || depth >= 128 {
+        return Err(error(
+            evidence.definition.source,
+            "callable return provenance budget exhausted",
+        ));
+    }
+    *fuel -= 1;
+    for definition in std::iter::once(&evidence.definition).chain(&evidence.alternatives) {
+        super::memory::bound_type(&definition.ty, fuel).map_err(|e| error(definition.source, e))?;
+        if let K::FunctionInstance { arguments, .. } = &definition.kind {
+            for ty in arguments {
+                super::memory::bound_type(ty, fuel).map_err(|e| error(definition.source, e))?;
+            }
+        }
+    }
+    let captures = evidence
+        .captures
+        .iter()
+        .map(|(binding, value)| Ok((binding.clone(), restore_callable_evidence(value, fuel, depth + 1)?)))
+        .collect::<Result<_, Error>>()?;
+    Ok(Callable { choices: evidence.choices.iter().map(|choice| restore_callable_evidence(choice, fuel, depth + 1)).collect::<Result<_, _>>()?, enum_captures: copy_captured_enums(&evidence.enum_captures, fuel, evidence.definition.source)?,
+        definition: evidence.definition.clone(),
+        alternatives: evidence.alternatives.clone(),
+        generation: 0,
+        captures,
+    })
+}
+
+fn callable_aggregate_return_summary(report: &Report, fuel: &mut usize, source: SourceRange)
+    -> Result<(BTreeMap<Vec<usize>, Callable>, EnumDomains), Error> {
+    if report.callable_field_exits.len() != report.enum_variant_exits.len() {
+        return Err(error(source, "callable result and enum domain exits disagree"));
+    }
+    let mut result: Option<(BTreeMap<Vec<usize>, Callable>, EnumDomains)> = None;
+    for (exit, domains) in report.callable_field_exits.iter().zip(&report.enum_variant_exits) {
+        let mut fields = BTreeMap::new();
+        for (path, evidence) in exit {
+            *fuel = fuel.checked_sub(path.len().saturating_add(1))
+                .ok_or_else(|| error(source, "callable field return budget exhausted"))?;
+            fields.insert(path.clone(), restore_callable_evidence(evidence, fuel, 0)?);
+        }
+        result = Some(if let Some((previous, previous_domains)) = result {
+            let merged = join_guarded_callables(&previous, &fields, &previous_domains, domains, fuel, source)?;
+            (merged, join_enum_domains(&previous_domains, domains, fuel, source)?)
+        } else {
+            (fields, copy_enum_domains(domains, fuel, source)?)
+        });
+    }
+    Ok(result.unwrap_or_default())
+}
+
+/// Callable input positions requiring caller-established code identity.
+pub fn callable_parameter_paths(package: &Package, signature: &Term, fuel: &mut usize, source: SourceRange)
+    -> Result<Vec<(usize, Vec<usize>)>, Error> {
+    let Term::Function {parameters, ..} = signature.callable_signature() else { return Err(error(source, "missing callable signature")); };
+    let mut result = vec![];
+    for (slot, parameter) in parameters.iter().enumerate() {
+        for path in callable_value_paths(Some(package), &parameter.ty, fuel, source, 0)? {
+            result.push((slot, path));
+        }
+    }
+    Ok(result)
+}
+
+fn callable_variant_layout(
+    definition: &nir::program::Enum,
+    arguments: &[Term],
+    fuel: &mut usize,
+    source: SourceRange,
+) -> Result<Vec<nir::program::Variant>, Error> {
+    // Charge even empty variants before allocating the instantiated layout.
+    *fuel = fuel.checked_sub(definition.variants.len())
+        .ok_or_else(|| error(source, "callable variant layout budget exhausted"))?;
+    for variant in &definition.variants {
+        for field in &variant.fields {
+            super::memory::bound_type(field, fuel).map_err(|e| error(source, e))?;
+            for argument in arguments {
+                super::memory::bound_type(argument, fuel).map_err(|e| error(source, e))?;
+            }
+        }
+    }
+    definition.instantiate_variants(arguments)
+        .map_err(|e| error(source, format!("callable variant fields: {e}")))
+}
+
+fn callable_value_paths(package: Option<&Package>, ty: &Term, fuel: &mut usize, source: SourceRange, depth: usize)
+    -> Result<Vec<Vec<usize>>, Error> {
+    if *fuel == 0 || depth >= 128 { return Err(error(source, "callable input layout budget exhausted")); }
+    *fuel -= 1;
+    if matches!(ty, Term::Function {..} | Term::Closure {..}) { return Ok(vec![vec![]]); }
+    let fields: Vec<Term> = match ty {
+        Term::NormalForm { .. } if nir::normal_forms::tuple_fields(package, ty).is_some() => {
+            super::memory::bound_type(ty, fuel).map_err(|e|error(source,e))?;
+            nir::normal_forms::tuple_fields(package, ty).unwrap().to_vec()
+        }
+        Term::Tuple(fields) => {
+            super::memory::bound_type(ty, fuel).map_err(|e|error(source,e))?;
+            fields.clone()
+        }
+        Term::Record(fields) => {
+            super::memory::bound_type(ty, fuel).map_err(|e|error(source,e))?;
+            fields.iter().map(|(_,ty)|ty.clone()).collect()
+        }
+        Term::Nominal {declaration,arguments} => {
+            if let Some(definition) = package.and_then(|p| p.enums.iter().find(|e| e.declaration == *declaration)) {
+                let variants = callable_variant_layout(definition, arguments, fuel, source)?;
+                let mut result = vec![];
+                for (variant, layout) in variants.iter().enumerate() {
+                    for (field, ty) in layout.fields.iter().enumerate() {
+                        for path in callable_value_paths(package, ty, fuel, source, depth + 1)? {
+                            *fuel = fuel.checked_sub(path.len().saturating_add(3))
+                                .ok_or_else(|| error(source, "callable input layout budget exhausted"))?;
+                            let mut qualified = vec![VARIANT_PATH, variant, field];
+                            qualified.extend(path);
+                            result.push(qualified);
+                        }
+                    }
+                }
+                return Ok(result);
+            }
+            let Some(definition)=package.and_then(|p|p.structs.iter().find(|s|s.declaration==*declaration)) else {return Ok(vec![]);};
+            for (_,field) in &definition.fields {
+                super::memory::bound_type(field,fuel).map_err(|e|error(source,e))?;
+                for argument in arguments {super::memory::bound_type(argument,fuel).map_err(|e|error(source,e))?;}
+            }
+            definition.instantiate_fields(arguments).map_err(|e|error(source,format!("callable parameter fields: {e}")))?
+                .into_iter().map(|(_,ty)|ty).collect()
+        }
+        _ => return Ok(vec![]),
+    };
+    let mut result=vec![];
+    for (index,field) in fields.iter().enumerate() {
+        for path in callable_value_paths(package,field,fuel,source,depth+1)? {
+            *fuel=fuel.checked_sub(path.len().saturating_add(1)).ok_or_else(||error(source,"callable input layout budget exhausted"))?;
+            let mut nested=vec![index];nested.extend(path);result.push(nested);
+        }
+    }
+    Ok(result)
+}
+
+// Closed return captures may contain plain data and environment-free function
+// slots. Function slots require separate complete, stable code evidence. Enum
+// domains, pointers and nested closure environments need richer state transport.
+// Copy acquisition is checked separately; this predicate never supplies it.
+fn recoverable_return_capture_layout(package:Option<&Package>,ty:&Term,fuel:&mut usize,source:SourceRange,depth:usize)->Result<bool,Error> {
+    if depth>=128 || *fuel==0 {return Err(error(source,"returned capture layout budget exhausted"));}
+    *fuel-=1;
+    super::memory::bound_type(ty,fuel).map_err(|e|error(source,e))?;
+    if matches!(ty,Term::Primitive(_)) {return Ok(nir::program::intrinsic_pointer_value(ty));}
+    if matches!(ty,Term::Function {..}) {return Ok(true);}
+    let fields=if let Some(fields)=nir::normal_forms::tuple_fields(package,ty) {fields.to_vec()} else {match ty {
+        Term::Tuple(fields)=>fields.clone(),
+        Term::Record(fields)=>fields.iter().map(|(_,ty)|ty.clone()).collect(),
+        Term::Nominal {declaration,arguments}=>{
+            let Some(definition)=package.and_then(|p|p.structs.iter().find(|s|s.declaration==*declaration)) else {return Ok(false);};
+            for (_,ty) in &definition.fields {super::memory::bound_type(ty,fuel).map_err(|e|error(source,e))?;}
+            definition.instantiate_fields(arguments).map_err(|e|error(source,format!("returned capture fields: {e}")))?.into_iter().map(|(_,ty)|ty).collect()
+        }
+        _=>return Ok(false),
+    }};
+    for field in &fields {if !recoverable_return_capture_layout(package,field,fuel,source,depth+1)? {return Ok(false);}}
+    Ok(true)
+}
+
+fn contains_callable_value(package: Option<&Package>, ty: &Term, fuel: &mut usize, source: SourceRange, depth: usize) -> Result<bool, Error> {
+    if *fuel == 0 || depth >= 128 { return Err(error(source, "callable result layout budget exhausted")); }
+    *fuel -= 1;
+    if let Some(fields) = nir::normal_forms::tuple_fields(package, ty) {
+        for field in fields {
+            if contains_callable_value(package, field, fuel, source, depth + 1)? { return Ok(true); }
+        }
+        return Ok(false);
+    }
+    match ty {
+        Term::Function {..} | Term::Closure {..} => return Ok(true),
+        Term::Tuple(fields) => {
+            for field in fields {
+                if contains_callable_value(package, field, fuel, source, depth + 1)? { return Ok(true); }
+            }
+        }
+        Term::Record(fields) => {
+            for (_, field) in fields {
+                if contains_callable_value(package, field, fuel, source, depth + 1)? { return Ok(true); }
+            }
+        }
+        Term::Nominal {declaration, arguments} => {
+            if let Some(definition) = package.and_then(|p| p.enums.iter().find(|e| e.declaration == *declaration)) {
+                let variants = callable_variant_layout(definition, arguments, fuel, source)?;
+                for variant in variants {
+                    for field in variant.fields {
+                        if contains_callable_value(package, &field, fuel, source, depth + 1)? { return Ok(true); }
+                    }
+                }
+                return Ok(false);
+            }
+            let Some(definition) = package.and_then(|p| p.structs.iter().find(|s| s.declaration == *declaration)) else { return Ok(false); };
+            // Charge the declaration and substitution inputs before allocating
+            // instantiated layouts. Structural tuple/record traversal borrows.
+            for (_, field) in &definition.fields {
+                super::memory::bound_type(field, fuel).map_err(|e| error(source, e))?;
+                for argument in arguments {
+                    super::memory::bound_type(argument, fuel).map_err(|e| error(source, e))?;
+                }
+            }
+            let fields = definition.instantiate_fields(arguments)
+                .map_err(|e| error(source, format!("callable result fields: {e}")))?;
+            for (_, field) in fields {
+                if contains_callable_value(package, &field, fuel, source, depth + 1)? { return Ok(true); }
+            }
+        }
+        _ => (),
+    }
+    Ok(false)
+}
+
+fn callable_return_summary(
+    report: &Report,
+    fuel: &mut usize,
+    source: SourceRange,
+) -> Result<Option<Callable>, Error> {
+    let mut result: Option<Callable> = None;
+    for evidence in &report.callable_evidence_exits {
+        let Some(evidence) = evidence else {
+            return Ok(None);
+        };
+        let value = restore_callable_evidence(evidence, fuel, 0)?;
+        result = Some(if let Some(previous) = result {
+            if same_callable_definition(&previous.definition, &value.definition)
+                && previous.choices == value.choices && previous.alternatives == value.alternatives
+                && previous.captures == value.captures && previous.enum_captures == value.enum_captures
+            {
+                previous
+            } else if let Some(merged) = merge_callable_provenance(&previous, &value, fuel, source, 0)? {
+                merged
+            } else {
+                return Ok(None);
+            }
+        } else {
+            value
+        });
+    }
+    Ok(result)
+}
+
+fn validate_callable_input(
+    package: Option<&Package>,
+    expr: &Expr,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<(), Error> {
+    if *fuel == 0 || depth >= 128 {
+        return Err(error(
+            expr.source,
+            "callable input validation budget exhausted",
+        ));
+    }
+    *fuel -= 1;
+    let named = match &expr.kind {
+        K::Function(declaration) => Some((*declaration, &[][..])),
+        K::FunctionInstance {
+            declaration,
+            arguments,
+        } => Some((*declaration, arguments.as_slice())),
+        _ => None,
+    };
+    if let Some((declaration, arguments)) = named {
+        let function = package
+            .and_then(|p| p.functions.iter().find(|f| f.declaration == declaration))
+            .ok_or_else(|| error(expr.source, "callable input refers to an unknown function"))?;
+        if function.phase != FunctionPhase::Runtime {
+            return Err(error(
+                expr.source,
+                "callable input requires a runtime function",
+            ));
+        }
+        if arguments.len() != function.type_parameters.len() {
+            return Err(error(
+                expr.source,
+                "callable input has invalid function type arguments",
+            ));
+        }
+        super::memory::bound_type(&function.signature, fuel)
+            .map_err(|e| error(expr.source, e))?;
+        for argument in arguments {
+            super::memory::bound_type(argument, fuel)
+                .map_err(|e| error(expr.source, e))?;
+        }
+        let signature = function
+            .signature
+            .instantiate_types(&function.type_parameters, arguments)
+            .map_err(|_| {
+                error(
+                    expr.source,
+                    "callable input has invalid function type arguments",
+                )
+            })?;
+        if signature != expr.ty || !matches!(signature, Term::Function { .. }) {
+            return Err(error(
+                expr.source,
+                "callable input function signature mismatch",
+            ));
+        }
+        return Ok(());
+    }
+    let K::Closure {
+        parameters,
+        captures,
+        ..
+    } = &expr.kind
+    else {
+        return Err(error(
+            expr.source,
+            "callable input requires a closure definition",
+        ));
+    };
+    let (environment, signature) = match &expr.ty {
+        Term::Closure {
+            environment,
+            signature,
+        } => (environment.as_slice(), signature.as_ref()),
+        Term::Function { .. } => (&[][..], &expr.ty),
+        _ => {
+            return Err(error(
+                expr.source,
+                "callable input requires a runtime closure",
+            ));
+        }
+    };
+    let Term::Function {
+        parameters: types, ..
+    } = signature
+    else {
+        return Err(error(
+            expr.source,
+            "callable input lacks a runtime signature",
+        ));
+    };
+    if parameters.len() != types.len() || captures.len() != environment.len() {
+        return Err(error(
+            expr.source,
+            "callable input shape disagrees with type",
+        ));
+    }
+    let mut bindings = BTreeSet::new();
+    for binding in parameters {
+        if !bindings.insert(*binding) {
+            return Err(error(expr.source, "duplicate callable input binding"));
+        }
+    }
+    for (capture, ty) in captures.iter().zip(environment) {
+        if &capture.ty != ty || !bindings.insert(capture.binding) {
+            return Err(error(expr.source, "invalid callable input capture"));
+        }
+        if let Some(value) = &capture.value {
+            if value.ty != capture.ty {
+                return Err(error(
+                    expr.source,
+                    "callable input capture initializer type mismatch",
+                ));
+            }
+            if matches!(
+                value.kind,
+                K::Closure { .. } | K::Function(_) | K::FunctionInstance { .. }
+            ) {
+                validate_callable_input(package, value, fuel, depth + 1)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn callable_source(expr: &Expr, flow: &Flow, fuel: &mut usize) -> Result<Option<Callable>, Error> {
+    callable_source_depth(expr, flow, fuel, 0)
+}
+
+fn owned_field_type(package: Option<&Package>, ty: &Term, path: &[usize], fuel: &mut usize, source: SourceRange) -> Result<Term, Error> {
+    let mut current = ty.clone();
+    let mut components = path.iter();
+    while let Some(index) = components.next() {
+        if *fuel == 0 {
+            return Err(error(source, "temporary field type budget exhausted"));
+        }
+        *fuel -= 1;
+        let fields: Vec<Term> = match &current {
+            Term::NormalForm { .. } if nir::normal_forms::tuple_fields(package, &current).is_some() => {
+                super::memory::bound_type(&current, fuel).map_err(|e| error(source, e))?;
+                nir::normal_forms::tuple_fields(package, &current).unwrap().to_vec()
+            }
+            Term::Record(fields) => fields.iter().map(|(_, ty)| ty.clone()).collect(),
+            Term::Tuple(fields)
+            | Term::Closure {
+                environment: fields,
+                ..
+            } => fields.clone(),
+            Term::Nominal {
+                declaration,
+                arguments,
+            } => {
+                if *index == VARIANT_PATH {
+                    let variant = components.next().ok_or_else(|| error(source, "missing callable variant index"))?;
+                    let field = components.next().ok_or_else(|| error(source, "missing callable payload field"))?;
+                    let definition = package
+                        .and_then(|p| p.enums.iter().find(|e| e.declaration == *declaration))
+                        .ok_or_else(|| error(source, "callable variant path requires enum metadata"))?;
+                    let variants = callable_variant_layout(definition, arguments, fuel, source)?;
+                    current = variants.get(*variant).and_then(|v| v.fields.get(*field)).cloned()
+                        .ok_or_else(|| error(source, "callable variant field index out of bounds"))?;
+                    continue;
+                }
+                let definition = package
+                    .and_then(|p| p.structs.iter().find(|s| s.declaration == *declaration))
+                    .ok_or_else(|| {
+                        error(
+                            source,
+                            "temporary projection requires known struct metadata",
+                        )
+                    })?;
+                definition
+                    .instantiate_fields(arguments)
+                    .map_err(|e| error(source, format!("temporary projection fields: {e:?}")))?
+                    .into_iter()
+                    .map(|(_, ty)| ty)
+                    .collect()
+            }
+            _ => {
+                return Err(error(
+                    source,
+                    "temporary projection has no owned field layout",
+                ));
+            }
+        };
+        current = fields
+            .get(*index)
+            .cloned()
+            .ok_or_else(|| error(source, "temporary projection field index out of bounds"))?;
+    }
+    Ok(current)
+}
+
+fn callable_source_depth(
+    expr: &Expr,
+    flow: &Flow,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Option<Callable>, Error> {
+    if *fuel == 0 || depth >= 128 {
+        return Err(error(expr.source, "closure provenance budget exhausted"));
+    }
+    *fuel -= 1;
+    match &expr.kind {
+        K::Closure { captures, .. } => {
+            let mut known = BTreeMap::new();
+            for capture in captures {
+                let lexical;
+                let value = if let Some(value) = &capture.value {
+                    value.as_ref()
+                } else {
+                    lexical = Expr {
+                        source: expr.source,
+                        ty: capture.ty.clone(),
+                        kind: K::Local(capture.binding),
+                    };
+                    &lexical
+                };
+                if let Some(callable) = callable_source_depth(value, flow, fuel, depth + 1)? {
+                    known.insert(Place {root:root(capture.binding),fields:vec![]}, callable);
+                }
+                if let Some(source) = expression_place(value) {
+                    for (place, callable) in &flow.callable_fields {
+                        *fuel = fuel.checked_sub(place.fields.len().saturating_add(1))
+                            .ok_or_else(|| error(expr.source, "capture field budget exhausted"))?;
+                        if place.root == source.root && place.fields.starts_with(&source.fields) {
+                            known.insert(Place {root:root(capture.binding),fields:place.fields[source.fields.len()..].to_vec()}, callable.clone());
+                        }
+                    }
+                }
+            }
+            Ok(Some(Callable { choices: vec![], enum_captures: Default::default(),
+                definition: expr.clone(),
+                alternatives: vec![],
+                generation: 0,
+                captures: known,
+            }))
+        }
+        K::Function(_) | K::FunctionInstance { .. } => Ok(Some(Callable { choices: vec![], enum_captures: Default::default(),
+            definition: expr.clone(),
+            alternatives: vec![],
+            generation: 0,
+            captures: BTreeMap::new(),
+        })),
+        K::Local(binding) => Ok(flow.callables.get(&root(*binding)).cloned()),
+        K::Field { .. } | K::AnonymousField { .. } => Ok(expression_place(expr)
+            .and_then(|place| flow.callable_fields.get(&place).cloned())),
+        _ => Ok(None),
+    }
+}
+
+// Only syntactically pure Boolean trees are folded; no program-state claim is
+// obtained from a call, assignment, local, predicate or opaque normal form.
+
+#[cfg(test)]
+mod record_shape_tests {
+    use super::*;
+    #[test]
+    fn enum_domains_join_only_under_established_guards() {
+        let source = SourceRange { start: 0, end: 0 };
+        let nested = vec![VARIANT_PATH, 0, 0];
+        let left = EnumDomains::from([
+            (vec![], BTreeSet::from([0])),
+            (nested.clone(), BTreeSet::from([2])),
+        ]);
+        let right = EnumDomains::from([(vec![], BTreeSet::from([1]))]);
+        assert!(join_enum_domains(&left, &right, &mut 0, source).is_err());
+        let joined = join_enum_domains(&left, &right, &mut 100, source).unwrap();
+        assert_eq!(joined.get(&vec![]), Some(&BTreeSet::from([0,1])));
+        assert_eq!(joined.get(&nested), Some(&BTreeSet::from([2])));
+        let mut absent = nested.clone(); absent.extend([VARIANT_PATH, 3, 0]);
+        let mut present = nested; present.extend([VARIANT_PATH, 2, 0]);
+        assert!(enum_path_excluded(&absent, &joined));
+        assert!(!enum_path_excluded(&present, &joined));
+        assert!(join_enum_domains(&left, &EnumDomains::new(), &mut 100, source).unwrap().is_empty());
+        // The same outer tag with an unknown nested tag does not exclude it.
+        let same = EnumDomains::from([(vec![], BTreeSet::from([0]))]);
+        assert_eq!(join_enum_domains(&left, &same, &mut 100, source).unwrap(), same);
+    }
+    #[test]
+    fn enum_callable_dumps_name_variant_guards() {
+        let definition = Expr { source: SourceRange { start: 0, end: 0 },
+            ty: Term::Primitive(nir::Primitive::Void), kind: K::Unit };
+        let evidence = CallableEvidence { choices: vec![], enum_captures: Default::default(), definition: definition.clone(), alternatives: vec![], captures: BTreeMap::new() };
+        let parameter = CallableParameter { choices: vec![], enum_captures: Default::default(),
+            parameter: 0, fields: vec![2, VARIANT_PATH, 1, 0], definition,
+            alternatives: vec![], captures: BTreeMap::from([(
+                Place { root: PlaceId { owner: 3, local: 4 }, fields: vec![VARIANT_PATH, 2, 0] }, evidence,
+            )]),
+        };
+        let dump = parameter.to_string();
+        assert!(dump.contains("(fields 2 (variant 1) 0)"), "{dump}");
+        assert!(dump.contains("(owned-place (owner 3) (local 4) (fields (variant 2) 0))"), "{dump}");
+        assert!(!dump.contains(&usize::MAX.to_string()), "{dump}");
+    }
+    #[test]
+    fn enum_evidence_layout_validates_tags_fields_substitution_and_budget() {
+        let source = SourceRange { start: 0, end: 0 };
+        let declaration = nir::DeclarationId { package: 0, local: 0 };
+        let boolean = Term::Primitive(nir::Primitive::Bool);
+        let mut package = Package::default();
+        package.enums.push(nir::program::Enum {
+            groups: vec![],
+            encoding: None, symbol_encoding: None,
+            capabilities: vec![], requirements: vec![], type_parameters: vec![],
+            declaration, name: "Choice".into(), variants: vec![
+                nir::program::Variant { name: "empty".into(), shape: nir::program::VariantShape::Unit, fields: vec![] },
+                nir::program::Variant { name: "value".into(), shape: nir::program::VariantShape::Tuple, fields: vec![Term::Tuple(vec![boolean.clone()])] },
+            ],
+        });
+        let mut empty_variants = package.enums[0].clone();
+        for variant in &mut empty_variants.variants { variant.fields.clear(); }
+        assert!(callable_variant_layout(&empty_variants, &[], &mut 1, source).is_err());
+        assert_eq!(callable_variant_layout(&empty_variants, &[], &mut 2, source).unwrap().len(), 2);
+        let ty = Term::Nominal { declaration, arguments: vec![] };
+        let path = [VARIANT_PATH, 1, 0, 0];
+        assert!(owned_field_type(Some(&package), &ty, &path, &mut 0, source).is_err());
+        assert_eq!(owned_field_type(Some(&package), &ty, &path, &mut 100, source).unwrap(), boolean);
+        for path in [vec![0], vec![VARIANT_PATH], vec![VARIANT_PATH, 1],
+            vec![VARIANT_PATH, 0, 0], vec![VARIANT_PATH, 99, 0], vec![VARIANT_PATH, 1, 99]] {
+            assert!(owned_field_type(Some(&package), &ty, &path, &mut 100, source).is_err(), "{path:?}");
+        }
+        let invalid_arguments = Term::Nominal { declaration, arguments: vec![boolean] };
+        assert!(owned_field_type(Some(&package), &invalid_arguments, &path, &mut 100, source).is_err());
+    }
+    #[test]
+    fn enum_callable_paths_require_the_matching_tag_and_preserve_siblings() {
+        let source = SourceRange { start: 0, end: 0 };
+        let callable = Callable { choices: vec![], enum_captures: Default::default(),
+            definition: Expr { source, ty: Term::Primitive(nir::Primitive::Void), kind: K::Unit },
+            alternatives: vec![], generation: 0, captures: BTreeMap::new(),
+        };
+        let leaves = BTreeMap::from([
+            (vec![0, VARIANT_PATH, 0, 0], callable.clone()),
+            (vec![0, VARIANT_PATH, 1, 0], callable.clone()),
+            (vec![0, VARIANT_PATH, 1, 1, VARIANT_PATH, 2, 0], callable.clone()),
+            (vec![1, VARIANT_PATH, 0, 0], callable.clone()),
+            // An unqualified path is not a proof for any enum payload.
+            (vec![0, 2], callable),
+        ]);
+        assert!(select_variant_callables(&leaves, &[0], 1, &mut 0, source).is_err());
+        let selected = select_variant_callables(&leaves, &[0], 1, &mut 100, source).unwrap();
+        assert_eq!(selected.keys().cloned().collect::<Vec<_>>(), vec![
+            vec![0, 0], vec![0, 1, VARIANT_PATH, 2, 0], vec![1, VARIANT_PATH, 0, 0],
+        ]);
+        let nested = select_variant_callables(&selected, &[0, 1], 2, &mut 100, source).unwrap();
+        assert!(nested.contains_key(&vec![0, 1, 0]));
+        assert!(!nested.contains_key(&vec![0, 1, VARIANT_PATH, 2, 0]));
+        let wrong = select_variant_callables(&leaves, &[0], 3, &mut 100, source).unwrap();
+        assert_eq!(wrong.keys().cloned().collect::<Vec<_>>(), vec![vec![1, VARIANT_PATH, 0, 0]]);
+    }
+    #[test]
+    fn record_partial_moves_preserve_siblings_and_reinitialization() {
+        let scalar=Term::Primitive(nir::Primitive::Bool);
+        let ty=Term::Record(vec![("first".into(),scalar.clone()),("nested".into(),Term::Record(vec![("second".into(),scalar)]))]);
+        let shape=ownership_shape(&nir::program::Package::default(),&ty,&mut 1000,0).unwrap();
+        let root=PlaceId {owner:1,local:0};
+        let parent=Place {root,fields:vec![]};
+        let first=Place {root,fields:vec![0]};
+        let second=Place {root,fields:vec![1,0]};
+        let mut state=State::default();
+        state.declare(root,&shape,true,&mut 1000).unwrap();
+        state.take(&second).unwrap();
+        assert!(state.require_present(&parent).is_err());
+        state.require_present(&first).unwrap();
+        assert!(state.take(&second).is_err());
+        state.install(&second).unwrap();
+        state.take(&parent).unwrap();
+        assert!(state.remaining().is_empty());
+    }
+    #[test]
+    fn empty_record_still_owns_a_responsibility_and_shape_budgets_recover() {
+        let package=nir::program::Package::default();
+        let ty=Term::Record(vec![]);
+        assert!(ownership_shape(&package,&ty,&mut 0,0).is_err());
+        let shape=ownership_shape(&package,&ty,&mut 100,0).unwrap();
+        let root=PlaceId {owner:1,local:0};
+        let mut state=State::default();
+        state.declare(root,&shape,true,&mut 100).unwrap();
+        assert_eq!(state.remaining().len(),1);
+        state.take(&Place {root,fields:vec![]}).unwrap();
+        assert!(state.remaining().is_empty());
+    }
+}

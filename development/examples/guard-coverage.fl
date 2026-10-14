@@ -1,0 +1,34 @@
+typealias Int = .Integer'builtin;
+typealias Bool = true'type;
+typealias Byte = .u8'builtin;
+comptime fn sign(value: Int) -> Bool {
+    value match { n if n < 0 => false, n if n >= 0 => true }
+}
+comptime fn zero(value: Int) -> Bool {
+    value match { n if n == 0 => true, n if n != 0 => false }
+}
+comptime fn middle(value: Byte) -> Bool {
+    value match {
+        n if n >= 10 and n <= 20 => true,
+        n if n < 10 or n > 20 => false,
+    }
+}
+comptime fn reverse(value: Byte) -> Bool {
+    value match { n if 128 > n => false, n if 128 <= n => true }
+}
+comptime fn reflexive(value: Int) -> Bool {
+    value match { n if n <= n => true }
+}
+comptime fn run() -> (Bool, Bool, Bool, Bool, Bool, Bool) {
+    (sign(-1), zero(0), zero(1), middle(15), reverse(255), reflexive(7))
+}
+comptime fn ordered_or(value: (Int, Int)) -> Bool {
+    value match { (a, b) or (b, a) if a < 0 => true, _ => false }
+}
+comptime fn check_ordered_or() -> Bool { ordered_or((1, -1)) }
+comptime fn scoped_bound(value: Byte) -> Bool {
+    value match {
+        n if (do { let limit: Byte = 128; n < limit }) => false,
+        n if n >= 128 => true,
+    }
+}

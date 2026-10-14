@@ -1,0 +1,27 @@
+typealias Type = .Type'builtin;
+typealias Char = 'x''type;
+
+-- Both Type inputs and both values come from one evaluated packet.
+comptime fn packet() -> (Type, bool, Type, Char) {
+    (bool, true, Char, 'x')
+}
+
+fn pair(comptime A: Type, left: A, comptime B: Type, right: B) -> (A, B) {
+    (left, right)
+}
+
+comptime fn flags() -> (bool, bool) { (false, true) }
+
+comptime fn Select(flag: bool) -> Type {
+    if flag { bool } else { Char }
+}
+
+-- A packet can supply the configuration that determines a default Type.
+fn configured(comptime flag: bool, other: bool,
+              comptime .T: Type = Select(flag), value: T) -> (bool, bool, T) {
+    (flag, other, value)
+}
+
+fn run() -> ((bool, Char), (bool, bool, Char)) {
+    (pair(...packet()), configured(...flags(), 'y'))
+}

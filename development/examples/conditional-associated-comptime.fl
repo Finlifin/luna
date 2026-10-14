@@ -1,0 +1,23 @@
+trait Allowed {}
+impl Allowed for bool {}
+
+trait Parent {
+    assoc seed: bool = false;
+}
+
+comptime fn read_seed() -> bool where T :- Parent {
+    T.as(Parent).seed
+}
+
+trait Child :- Parent {
+    assoc derived: bool = not read_seed<Self>();
+}
+
+struct Host where X {}
+
+impl Parent for Host<X> where X :- Allowed {}
+impl Child for Host<X> where X :- Allowed {}
+
+fn entry() -> bool {
+    Host<bool>.as(Child).derived
+}

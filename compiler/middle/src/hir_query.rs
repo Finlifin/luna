@@ -22,10 +22,13 @@ use rustc_span::SourceMap;
 pub struct HirQueryInput {
     /// Parsed AST of the source file.
     pub ast: Arc<Ast>,
+    pub additional_files: Vec<(vfs::FileId, Arc<Ast>, ScopeId)>,
     /// Module/scope tree produced by name resolution.
     pub module_tree: Arc<ModuleTree>,
     /// Top-level scope of the file being lowered.
     pub file_scope: ScopeId,
+    /// File ID of the source file being lowered.
+    pub file_id: vfs::FileId,
     /// Raw pointer to the session's `SourceMap`.
     source_map_ptr: *const SourceMap,
     /// Raw pointer to the compiler's `DiagnosticContext` (lifetime erased).
@@ -46,17 +49,30 @@ impl HirQueryInput {
     /// duration that this `HirQueryInput` is live.
     pub fn new(
         ast: Arc<Ast>,
+        file_id: vfs::FileId,
         module_tree: Arc<ModuleTree>,
         file_scope: ScopeId,
         source_map_ptr: *const SourceMap,
         diag_ctx_ptr: *const DiagnosticContext<'static>,
     ) -> Self {
-        HirQueryInput { ast, module_tree, file_scope, source_map_ptr, diag_ctx_ptr }
+        HirQueryInput {
+            ast,
+            additional_files: Vec::new(),
+            file_id,
+            module_tree,
+            file_scope,
+            source_map_ptr,
+            diag_ctx_ptr,
+        }
     }
 
     /// Borrow the AST.
     pub fn ast(&self) -> &Ast {
         &self.ast
+    }
+
+    pub fn file_id(&self) -> vfs::FileId {
+        self.file_id
     }
 
     /// Borrow the module tree.

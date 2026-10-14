@@ -1,0 +1,20 @@
+typealias Byte = .u8'builtin;
+
+fn selected(comptime value: Byte) -> Byte { value }
+
+fn swap_nibbles(comptime byte: Byte) -> Byte {
+    selected((byte'bitvec[0..4] ++ byte'bitvec[4..8]).as(Byte))
+}
+
+fn patch_high_nibble(comptime byte: Byte) -> Byte {
+    selected(do {
+        var result = byte;
+        result'bitvec[4..8] = 3;
+        result
+    })
+}
+
+fn run() -> (Byte, Byte, Byte, Byte) {
+    (swap_nibbles(0), swap_nibbles(255),
+     swap_nibbles(175), patch_high_nibble(175))
+}

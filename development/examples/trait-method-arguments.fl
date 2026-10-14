@@ -1,0 +1,33 @@
+typealias Flag = true'type;
+
+trait Choose {
+    -- The interface owns names, defaults and their preceding-input bindings.
+    fn choose(self, value: Flag, .first: Flag = not value,
+        .last: Flag = first) -> Flag;
+
+    fn indirect(self, value: Flag) -> Flag {
+        self.as(Choose).choose(value)
+    }
+}
+
+struct Host {}
+
+impl Choose for Host {
+    -- These locals belong to the body, independently of the interface locals.
+    fn choose(self, input: Flag, a: Flag, b: Flag) -> Flag { b }
+}
+
+fn forward(host: T, value: Flag) -> Flag where T :- Choose {
+    host.choose(value)
+}
+
+fn from_default() -> Flag { Host {}.as(Choose).indirect(true) }
+fn from_generic() -> Flag { forward(Host {}, true) }
+fn explicit() -> Flag { Host {}.as(Choose).choose(true, .first = true) }
+
+fn function_value() -> Flag {
+    -- A stored function value has positional inputs; named/default entries
+    -- belong to the direct interface projection above.
+    let choose = Host.as(Choose).choose;
+    choose(Host {}, true, false, true)
+}

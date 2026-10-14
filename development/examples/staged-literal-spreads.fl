@@ -1,0 +1,12 @@
+fn selected(comptime value: T) -> T where T { value }
+
+fn forward(comptime flag: bool) -> bool {
+    selected(...(do {
+        let read: %{flag: bool} comptime fn() -> bool = || flag;
+        read()
+    },))
+}
+
+fn run() -> (bool, bool) {
+    (forward(false), forward(true))
+}

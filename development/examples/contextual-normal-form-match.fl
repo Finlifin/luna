@@ -1,0 +1,31 @@
+typealias Type = .Type'builtin;
+typealias Int = .Integer'builtin;
+pure comptime fn Tagged<T: Type, value: T> -> Type { T }
+pure comptime fn Pair<T: Type, first: T, count: Int> -> Type { T }
+comptime fn Select(ty: Type, flag: true'type) -> Type {
+    Tagged<ty, flag match { true => 1, false => 2 }>
+}
+comptime fn Guarded(ty: Type) -> Type {
+    var count: Int = 0;
+    Pair<ty, (true, false) match {
+        (first, _) if do { count = count + 1; false } => 7,
+        (_, second) if do { count = count + 1; not second } => 8,
+        _ => 9,
+    }, count>
+}
+comptime fn flip(flag: true'type) -> true'type { not flag }
+comptime fn Chained(ty: Type, flag: true'type) -> Type {
+    Tagged<ty, flag match { first and flip(first) is true => 1, _ => 2 }>
+}
+comptime fn keep(value: T) -> T where T { value }
+comptime fn Generic(ty: Type, value: T) -> Type where T {
+    Tagged<ty, value match { first and keep(first) is second => second, _ => value }>
+}
+comptime fn GenericObserved(ty: Type) -> Type { Generic<.u8'builtin>(ty, 7) }
+comptime fn Early(ty: Type, flag: true'type) -> Type {
+    Tagged<ty, flag match { true => do { return .u16'builtin; }, false => 3 }>
+}
+comptime fn UnselectedOverflow(ty: Type) -> Type { Tagged<ty, true match { true => 1, false => 256 }> }
+typealias Byte = Select(.u8'builtin, true);
+typealias GenericByte = GenericObserved(.u8'builtin);
+typealias ChainedByte = Chained(.u8'builtin, false);

@@ -5,51 +5,23 @@ use crate::ids::{AstNodeRef, DefId, ScopeId};
 /// A single name-to-definition binding discovered during name resolution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Binding {
-    /// What kind of definition this binding refers to.
     pub kind: BindingKind,
-    /// The definition ID.
-    pub def_id: DefId,
-    /// The scope in which this definition lives.
-    pub defined_in: ScopeId,
-    /// An optional back-reference to the AST node that introduced the name.
-    pub ast_ref: Option<AstNodeRef>,
-    /// The visibility of this binding (public vs. private).
+    /// The original declaration's permission; importing never changes it.
     pub vis: Visibility,
+    /// Permission on the current name entry; original declaration permission
+    /// and defining scope remain in `vis` and `kind`.
+    pub entry: Option<(Visibility, ScopeId)>,
 }
 
 /// What syntactic construct introduced a name.
+/// 这里的AstNodeRef在lowering阶段可以通过AstNodeRef->HirId映射来找到这个名字在HIR中的定义位置。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BindingKind {
-    /// A module (inline `mod`, file-scope, or directory-module).
-    Module,
-    /// A function definition.
-    Function,
-    /// A struct definition.
-    Struct,
-    /// An enum definition.
-    Enum,
-    /// A union definition.
-    Union,
-    /// A type alias.
-    TypeAlias,
-    /// A trait definition.
-    Trait,
-    /// An `extend` block. An extension could be named and be referred to.
-    Extension,
-    /// An enum variant.
-    Variant,
-    /// A struct field.
-    Field,
-    /// A type parameter in a clause (e.g. `T` in `struct Foo where T { ... }`).
-    ClauseParam,
-    /// A value parameter in a function / clause.
-    Param,
-    /// A local `let` / `const` binding.
-    Local,
-    /// An imported name (re-export from another scope). Considered deprecated
-    Import,
-    /// A built-in / intrinsic definition.
-    Builtin,
+    Definition(DefId, ScopeId),
+    FnParam(AstNodeRef),
+    ClauseParam(DefId, AstNodeRef),
+    Local(AstNodeRef),
+    LoopLabel(AstNodeRef),
 }
 
 /// Visibility of a binding.
@@ -71,29 +43,67 @@ pub enum Visibility {
 /// defined.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolution {
-    /// The definition this name resolved to.
-    pub def_id: DefId,
-    /// The kind of definition.
     pub kind: BindingKind,
-    /// The scope where the definition lives.
-    pub defined_in: ScopeId,
-    /// If the resolution crossed module boundaries via `use`, this records the
-    /// intermediate scope from which the name was imported.
-    pub imported_from: Option<ScopeId>,
 }
 
 impl Resolution {
     pub fn from_binding(binding: &Binding) -> Self {
-        Resolution {
-            def_id: binding.def_id,
-            kind: binding.kind,
-            defined_in: binding.defined_in,
-            imported_from: None,
+        Resolution { kind: binding.kind }
+    }
+}
+
+impl Binding {
+    pub fn entry_visibility(&self) -> Visibility {
+        self.entry.map_or(self.vis, |(vis, _)| vis)
+    }
+    pub fn accessible(&self, tree: &crate::scope::ScopeTree, requester: ScopeId) -> bool {
+        fn permits(
+            tree: &crate::scope::ScopeTree,
+            vis: Visibility,
+            owner: ScopeId,
+            requester: ScopeId,
+        ) -> bool {
+            match vis {
+                Visibility::Public => true,
+                Visibility::Private => tree.ancestors(requester).any(|s| s.id == owner),
+                Visibility::Package => {
+                    let package = |scope| {
+                        tree.ancestors(scope)
+                            .find(|s| s.kind == crate::scope::ScopeKind::Package)
+                            .map(|s| s.id)
+                    };
+                    package(owner).is_some() && package(owner) == package(requester)
+                }
+            }
+        }
+        let origin = match self.kind {
+            BindingKind::Definition(_, owner) => permits(tree, self.vis, owner, requester),
+            _ => true,
+        };
+        origin
+            && self
+                .entry
+                .is_none_or(|(vis, owner)| permits(tree, vis, owner, requester))
+    }
+    pub fn imported(&self, owner: ScopeId, visibility: Visibility) -> Self {
+        Self {
+            kind: self.kind,
+            vis: self.vis,
+            entry: Some((visibility, owner)),
         }
     }
-
-    pub fn with_import_source(mut self, scope: ScopeId) -> Self {
-        self.imported_from = Some(scope);
-        self
+    /// Entries for the same identity in one scope form a union of permissions.
+    pub fn merge_entry(&mut self, other: &Self) -> bool {
+        let rank = |vis| match vis {
+            Visibility::Private => 0,
+            Visibility::Package => 1,
+            Visibility::Public => 2,
+        };
+        if self.entry.is_some() && rank(other.entry_visibility()) > rank(self.entry_visibility()) {
+            self.entry = other.entry;
+            true
+        } else {
+            false
+        }
     }
 }

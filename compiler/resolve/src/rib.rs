@@ -17,22 +17,11 @@ use crate::ids::ScopeId;
 /// What syntactic construct pushed this rib.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RibKind {
-    /// A normal block `{ … }`.
-    Normal,
-    /// A function parameter list.
-    FnParams,
-    /// A closure / lambda capture boundary.
-    Closure,
-    /// A `let` / `const` binding.
-    LetBinding,
-    /// A `for` loop pattern.
-    ForLoop,
-    /// A match arm pattern.
-    MatchArm,
-    /// An `if-let` pattern binding.
-    IfLet,
-    /// Type parameter scope (clause-level).
-    TypeParam,
+    ClauseParam,
+    FnParam,
+    Block,
+    Lambda,
+    MatchBody,
 }
 
 /// A rib on the lexical resolution stack.
@@ -63,8 +52,8 @@ impl Rib {
     }
 
     /// Look up a name in this rib only.
-    pub fn get(&self, name: &str) -> Option<&Binding> {
-        self.bindings.get(&Symbol::intern(name))
+    pub fn get(&self, name: Symbol) -> Option<&Binding> {
+        self.bindings.get(&name)
     }
 }
 
@@ -111,7 +100,7 @@ impl RibStack {
     }
 
     /// Look up a name by walking the rib stack top-to-bottom.
-    pub fn lookup(&self, name: &str) -> Option<&Binding> {
+    pub fn lookup(&self, name: Symbol) -> Option<&Binding> {
         for rib in self.ribs.iter().rev() {
             if let Some(binding) = rib.get(name) {
                 return Some(binding);

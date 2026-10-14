@@ -1,0 +1,9 @@
+[package]
+name = "comptime_interpretor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+nir = { path = "../nir" }
+comptime_runtime = { path = "../comptime_runtime" }
+iir = { path = "../iir" }

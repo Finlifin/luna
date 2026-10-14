@@ -88,6 +88,11 @@ impl DefIdGen {
         id
     }
 
+    /// Switch package ownership while retaining the globally unique scan index.
+    pub(crate) fn set_package(&mut self, package: u32) {
+        self.pkg = package;
+    }
+
     /// How many DefIds have been allocated so far.
     pub fn count(&self) -> u32 {
         self.next

@@ -1,0 +1,18 @@
+fn selected(comptime value: bool) -> bool { value }
+
+fn independent(comptime flag: bool) -> bool {
+    selected(do {
+        let toggle: %{flag: bool} comptime fn() -> bool = || {
+            flag = not flag;
+            flag
+        };
+        let read: %{flag: bool} comptime fn() -> bool = || flag;
+        let changed = toggle();
+        let restored = toggle();
+        changed != read() and restored == flag
+    })
+}
+
+fn run() -> (bool, bool) {
+    (independent(false), independent(true))
+}

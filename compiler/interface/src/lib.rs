@@ -54,7 +54,7 @@ use hir::HirArena;
 use hir::hir_id::LocalDefId;
 use intrinsic::IntrinsicContext;
 use intrinsic::sysroot::PackageId;
-use middle::queries::LunaDatabase as _;   // bring query methods into scope
+use middle::queries::LunaDatabase as _; // bring query methods into scope
 use middle::{AdtDef, Db, HirPackageBox, NFId};
 use vfs::Vfs;
 
@@ -134,7 +134,11 @@ impl<'sess> CompilerInstance<'sess> {
 
     /// Get the VFS for a sysroot package by [`PackageId`].
     pub fn sysroot_package(&self, id: PackageId) -> Option<&Vfs> {
-        if id.is_sysroot() { self.sysroot_vfs.get(id.index()) } else { None }
+        if id.is_sysroot() {
+            self.sysroot_vfs.get(id.index())
+        } else {
+            None
+        }
     }
 
     /// Get the `builtin` sysroot VFS (if loaded).
@@ -199,9 +203,9 @@ pub struct Compiler<'c> {
 }
 
 impl<'c> Compiler<'c> {
-    // ── Salsa-backed query methods ────────────────────────────────────────
+    // ── Query methods ─────────────────────────────────────────────────────
 
-    /// Look up an ADT definition by id (memoised by salsa).
+    /// Look up an ADT definition by id (TyCtxt side table).
     ///
     /// Returns `None` if no ADT has been registered for `id`.
     pub fn adt_def(self, id: NFId) -> Option<Arc<AdtDef>> {
@@ -214,14 +218,15 @@ impl<'c> Compiler<'c> {
     }
     // ── HIR queries ────────────────────────────────────────────────────────────
 
-    /// Lower the package's AST to HIR (memoised).
+    /// Lower the package's AST to HIR (memoised via the query engine).
     ///
     /// Dispatches to the provider registered via
-    /// [`CompilerInstance::set_hir_provider`].  Calling this before
-    /// registering a provider will panic.
+    /// `ast_lowering::set_providers`.  Calling this before registering a
+    /// provider will panic.
     pub fn hir_package(self) -> Arc<HirPackageBox> {
         self.db.hir_package(())
-    }}
+    }
+}
 
 impl<'c> Deref for Compiler<'c> {
     type Target = CompilerInstance<'c>;

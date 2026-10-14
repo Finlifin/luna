@@ -1,0 +1,40 @@
+typealias Int = .Integer'builtin;
+typealias Bool = true'type;
+typealias Byte = .u8'builtin;
+typealias Text = ""'type;
+comptime fn first() -> Int { 11 }
+comptime fn second() -> Int { 17 }
+comptime fn choose(value: Int) -> Int {
+    value match { < first() > => 1, < second() > => 2, _ => 0 }
+}
+comptime fn same(value: Int, expected: Int) -> Bool {
+    value match { 'expected => true, _ => false }
+}
+comptime fn same_text(value: Text, expected: Text) -> Bool {
+    value match { 'expected => true, _ => false }
+}
+comptime fn same_byte(value: Byte, expected: Byte) -> Bool {
+    value match { 'expected => true, _ => false }
+}
+comptime fn rollback(value: (Int, Int)) -> Int {
+    value match { (bound, < first() > ) or ( < first() > , bound) => bound, _ => 0 }
+}
+comptime fn run() -> (Int, Int, Int, Bool, Bool, Bool, Bool, Int) {
+    (choose(11), choose(17), choose(23), same(29, 29), same(29, 31),
+     same_text("flurry", "flurry"), same_byte(127, 127), rollback((11, 37)))
+}
+comptime fn scalar_equal() -> (Bool, Bool, Bool, Bool, Bool, Bool) {
+    let byte: Byte = 255;
+    let signed: .i8'builtin = -128;
+    (true == true, true != false, 'a' != 'b', "hello" == "hello",
+     byte == 255, signed != 127)
+}
+comptime fn early(value: Bool) -> Bool {
+    value match { < do { return true; } > => false, _ => false }
+}
+comptime fn unreachable_pattern() -> Bool {
+    true match { _ => true, < do { while true {} false } > => false }
+}
+comptime fn first_text() -> Text { "same" }
+comptime fn second_text() -> Text { "same" }
+comptime fn ordered_equal() -> Bool { first_text() == second_text() }

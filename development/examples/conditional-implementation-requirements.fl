@@ -1,0 +1,26 @@
+-- 条件 impl 的前提是类型命题；查询使用当前已检查的实现世界。
+trait Disabled {}
+trait Missing {}
+trait Enabled {}
+
+impl Enabled for T where T, requires not (T :- Disabled) {}
+
+struct Box where T {}
+trait Read {
+    comptime fn read() -> bool;
+}
+
+impl Read for Box<T> where T,
+    requires (T :- Enabled) or (T :- Missing)
+{
+    comptime fn read() -> bool { true }
+}
+
+-- 必需 comptime 求值不需要构造 Box 的运行时值。
+trait Result {
+    assoc value: bool = Box<bool>.as(Read).read();
+}
+impl Result for bool {}
+
+fn entry() -> bool { bool.as(Result).value }
+comptime fn invoke() -> bool { Box<bool>.as(Read).read() }

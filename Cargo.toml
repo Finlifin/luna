@@ -15,8 +15,8 @@ members = [
     "compiler/middle",
     "compiler/interface",
     "compiler/intrinsic",
-    "compiler/luna",
-    "compiler/nir",
+    "compiler/elaboration",
+    "compiler/luna", "compiler/nir", "compiler/comptime_executor", "compiler/comptime_interpretor", "compiler/comptime_runtime", "compiler/comptime_compiler", "compiler/iir",
     # Disabled until upstream crates are updated to use middle:: instead of ty:::
     # "compiler/ty",
     # "compiler/codegen",

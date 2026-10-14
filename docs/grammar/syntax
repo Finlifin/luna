@@ -157,7 +157,7 @@ post_match -> expr match { match_entry* }
 post_lambda -> expr do (lambda | block | expr)
 application -> expr (argument*)
 normal_form_head_application -> expr<argument*>
-extended_application -> expr { (property | expr)* }
+extended_application -> expr { (property | extend_arg | expr)* }
 index_application -> expr [expr]
 -- BitVec 下标可为索引或半开范围；结果位宽必须在 comptime 确定，位置可以来自 runtime。
 -- 直接作用于合法可写位置的 bitvec 位段可赋值；读出的 BitVec 值不持续关联源存储。
@@ -412,6 +412,7 @@ statement -> expr_statement
     | sub_assignment
     | mul_assignment
     | div_assignment
+    | rem_assignment
     | let_decl
     | var_decl
     | const_decl
@@ -442,6 +443,7 @@ add_assignment -> expr += expr
 sub_assignment -> expr -= expr
 mul_assignment -> expr *= expr
 div_assignment -> expr /= expr
+rem_assignment -> expr %= expr
 const_decl -> const_def
 assumes_statement -> assumes expr
 attributed_statement -> ^expr statement

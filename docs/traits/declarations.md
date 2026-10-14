@@ -20,6 +20,8 @@ Trait 内的方法可以只有签名，末尾使用分号；带默认主体的�
 
 父接口和 trait bound 中 `:-` 右侧的 expr 可以组合多个约束，例如 `trait Report :- Reading + Named`、`where T :- Reading + Named`。这里复用表达式的 `+` 形式；否定约束写在子句中，例如 `requires not (T :- Disabled)`。
 
+声明类型变量与约束该变量有两种写法：`where T, requires T :- Reading + Named` 先声明 T，再用 requires 子句中的类型命题约束它；`where T :- Reading + Named` 则是声明并约束 T 的语法糖。`requires` 本身不声明变量，也不是放在变量名与 trait 表达式之间的运算符，因此 `where T requires Reading` 非法。例如，迭代器适配器的子句可以写成 `where I :- Iterator, U`，也可以写成 `where I, U, requires I :- Iterator`。
+
 ## 正式定义
 
 ### 身份与参数

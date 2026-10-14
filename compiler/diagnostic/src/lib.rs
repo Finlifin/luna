@@ -4,7 +4,9 @@ use ariadne::{Color, ColorGenerator, Label, Report, ReportKind, Source};
 use rustc_span::{FileNameDisplayPreference, SourceMap, Span};
 use std::{
     cell::{Cell, RefCell},
-    fmt, mem,
+    fmt,
+    io::{self, Write},
+    mem,
 };
 
 // 罢了, warning也用这个trait吧
@@ -284,7 +286,10 @@ impl<'a> DiagnosticContext<'a> {
         let source_content = match &source_file.src {
             Some(content) => content.as_str(),
             None => {
-                eprintln!("Error: Source file content not available");
+                let _ = writeln!(
+                    io::stderr().lock(),
+                    "Error: Source file content not available"
+                );
                 return;
             }
         };
@@ -355,16 +360,19 @@ impl<'a> DiagnosticContext<'a> {
         let source_content = match &source_file.src {
             Some(content) => content.as_str(),
             None => {
-                eprintln!("Error: Source file content not available");
+                let _ = writeln!(
+                    io::stderr().lock(),
+                    "Error: Source file content not available"
+                );
                 return;
             }
         };
 
         if let Err(e) = report
             .finish()
-            .print((&file_id_str, Source::from(source_content)))
+            .eprint((&file_id_str, Source::from(source_content)))
         {
-            eprintln!("Error printing diagnostic: {}", e);
+            let _ = writeln!(io::stderr().lock(), "Error printing diagnostic: {}", e);
         }
     }
 }

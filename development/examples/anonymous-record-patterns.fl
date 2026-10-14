@@ -1,0 +1,17 @@
+comptime fn schema(...properties: T) -> T where T { properties }
+const SAMPLE = schema {enabled: true, nested: schema {value: false}};
+typealias Options = SAMPLE'type;
+
+fn build(...properties: T) -> T where T { properties }
+
+fn read(options: Options) -> bool {
+    options match {
+        {enabled: true, nested: {value}} => value,
+        {enabled: false} => false,
+    }
+}
+
+fn run() -> (bool, bool) {
+    let {nested: {value}} = build {nested: build {value: true}, ignored: false};
+    (value, read(build {enabled: false, nested: build {value: true}}))
+}

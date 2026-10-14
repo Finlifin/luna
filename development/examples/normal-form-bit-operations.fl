@@ -1,0 +1,15 @@
+typealias Type = .Type'builtin;
+typealias Bits = .BitVec'builtin<8>;
+pure comptime fn Mask<value: Bits> -> Type { .u8'builtin }
+pure comptime fn Checked<T: Type, value: Bits> -> Type where requires T == Mask<value> { T }
+pure comptime fn Flag<value: true'type> -> Type { .u8'builtin }
+pure comptime fn CheckedFlag<T: Type, value: true'type> -> Type where requires T == Flag<value> { T }
+comptime fn Complement() -> Type { Checked<Mask<not 0xAF>, 0x50> }
+comptime fn Combined() -> Type { Checked<Mask<(0xA0 or 0x0F) and 0xF0>, 0xA0> }
+comptime fn Slice() -> Type { Checked<Mask<do { let high: .BitVec'builtin<4> = 10; let low: .BitVec'builtin<4> = 15; (high ++ low)[0..8] }>, 0xAF> }
+comptime fn Widen() -> Type { Checked<Mask<do { let low: .BitVec'builtin<4> = 15; low.as(Bits) }>, 0x0F> }
+comptime fn Equal() -> Type { CheckedFlag<Flag<(do { let byte: .u8'builtin = 10; byte'bitvec == byte'bitvec })>, true> }
+comptime fn Logical() -> Type { CheckedFlag<Flag<not false and (true or false)>, true> }
+typealias Verified = Complement();
+comptime fn value() -> Bits { 0xAF }
+comptime fn FromCall() -> Type { Checked<Mask<not value()>, 0x50> }

@@ -1,0 +1,20 @@
+typealias Type = .Type'builtin;
+typealias Int = .Integer'builtin;
+pure comptime fn Checked<T: Type> -> Type where requires T == .u8'builtin { T }
+pure comptime fn Bits<N: Int> -> Type { .BitVec'builtin<N> }
+pure comptime fn Eight<N: Int> -> Type where requires Bits<N> == Bits<8> { .u8'builtin }
+pure comptime fn Pair<T: Type, N: Int> -> Type where requires T == Bits<N> { T }
+comptime fn Build(ty: Type) -> Type { Checked<ty> }
+comptime fn Width(width: Int) -> Type { Eight<width> }
+comptime fn Correlated(width: Int) -> Type { Pair<Bits<width>, width> }
+comptime fn Early() -> Type { Checked<do { return .u16'builtin; }> }
+comptime fn Selected(good: true'type) -> Type {
+    if good { Build(.u8'builtin) } else { Build(.u16'builtin) }
+}
+comptime fn Ordered() -> Type {
+    var count: Int = 0;
+    Pair<Bits<do { count = count + 1; count }>, count>
+}
+typealias Byte = Build(.u8'builtin);
+typealias EightBits = Width(4 * 2);
+typealias CorrelatedBits = Correlated(11);

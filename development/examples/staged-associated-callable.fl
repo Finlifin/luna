@@ -1,0 +1,37 @@
+-- A trait can carry a captured comptime callable as configuration data.
+typealias Predicate = %{expected: bool} comptime fn(bool) -> bool;
+
+comptime fn expect(expected: bool) -> Predicate {
+    |actual| actual == expected
+}
+
+trait Rule {
+    assoc accepts: Predicate;
+}
+
+struct Enabled {}
+
+impl Rule for Enabled {
+    assoc accepts: Predicate = expect(true);
+}
+
+fn choose(comptime selected: bool, on: T, off: T) -> T
+where T
+{
+    if selected { on } else { off }
+}
+
+fn configured(comptime flag: bool, on: T, off: T) -> T
+where R :- Rule, T
+{
+    choose(R.as(Rule).accepts(flag), on, off)
+}
+
+typealias Byte = .u8'builtin;
+
+fn run() -> (Byte, Byte) {
+    (
+        configured<Enabled, Byte>(true, 3, 8),
+        configured<Enabled, Byte>(false, 3, 8),
+    )
+}

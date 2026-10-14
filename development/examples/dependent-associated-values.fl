@@ -1,0 +1,24 @@
+-- Derived defaults use the selected implementation's seed, including overrides.
+trait WireFormat {
+    assoc big_endian: bool = true;
+    assoc little_endian: bool = not big_endian;
+    assoc byte_order: (bool, bool) = (Self.as(WireFormat).big_endian, little_endian);
+}
+
+struct Network {}
+struct LittleEndian {}
+
+impl WireFormat for Network {}
+impl WireFormat for LittleEndian {
+    assoc big_endian: bool = false;
+}
+
+fn order(value: T) -> (bool, bool) where T :- WireFormat {
+    T.as(WireFormat).byte_order
+}
+
+fn entry() -> bool {
+    let (network_big, network_little) = order(Network {});
+    let (local_big, local_little) = order(LittleEndian {});
+    network_big and not network_little and not local_big and local_little
+}

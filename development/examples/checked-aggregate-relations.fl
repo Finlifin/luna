@@ -1,0 +1,112 @@
+typealias Byte = .u8'builtin;
+struct Pair { start: Byte, end: Byte }
+enum Choice { empty, pair(Byte, Byte), tuple((Byte, Byte)) }
+struct Holder { item: Choice }
+enum Maybe where T { none, some(T) }
+fn tuple(start: Byte, end: Byte) -> Byte {
+    var a = start;
+    var b = end;
+    assumes a <= b;
+    let pair = (a, b);
+    a = 255;
+    b = 0;
+    let (x, y) = pair;
+    y - x
+}
+fn record(start: Byte, end: Byte) -> Byte {
+    var a = start;
+    var b = end;
+    assumes a <= b;
+    let pair = Pair { start: a, end: b };
+    a = 255;
+    b = 0;
+    pair.end - pair.start
+}
+fn variant(start: Byte, end: Byte) -> Byte {
+    var a = start;
+    var b = end;
+    assumes a <= b;
+    let value = Choice.pair(a, b);
+    a = 255;
+    b = 0;
+    value match { .pair(x, y) => y - x, _ => 0 }
+}
+fn nested(start: Byte, end: Byte) -> Byte {
+    assumes start <= end;
+    let holder = Holder { item: Choice.tuple((start, end)) };
+    holder.item match { .tuple((a, b)) => b - a, _ => 0 }
+}
+fn generic(start: Byte, end: Byte) -> Byte {
+    assumes start <= end;
+    let value = Maybe<(Byte, Byte)>.some((start, end));
+    value match { .some((a, b)) => b - a, _ => 0 }
+}
+fn tuple_capture(start: Byte, end: Byte) -> Byte {
+    assumes start <= end;
+    var pair = (start, end);
+    let callback = || { let (a, b) = pair; b - a };
+    pair = (255, 0);
+    callback()
+}
+fn variant_capture(start: Byte, end: Byte) -> Byte {
+    assumes start <= end;
+    var value = Choice.pair(start, end);
+    let callback = || value match { .pair(a, b) => b - a, _ => 0 };
+    value = Choice.empty;
+    callback()
+}
+fn element_order(start: Byte, end: Byte) -> Byte {
+    var a = start;
+    assumes a <= end;
+    let pair = (a, do { a = 255; end });
+    let (x, y) = pair;
+    y - x
+}
+fn direct_pattern(start: Byte, end: Byte) -> Byte {
+    assumes start <= end;
+    let (a, b) = (start, end);
+    b - a
+}
+fn destructuring_guard(start: Byte, end: Byte) -> Byte {
+    assumes start <= end;
+    var pair = (start, end);
+    pair match {
+        (a, b) if do { pair = (255, 0); true } => b - a,
+        _ => 0,
+    }
+}
+comptime fn run() -> Byte {
+    let start: Byte = 100;
+    let end: Byte = 255;
+    assumes start <= end;
+    let value = Choice.pair(start, end);
+    value match { .pair(a, b) => b - a, _ => 0 }
+}
+fn failed_prefix(start: Byte, end: Byte) -> Byte {
+    assumes start <= end;
+    let value = (start, end);
+    value match {
+        (255, b) if b < 255 => 0,
+        (a, b) => b - a,
+    }
+}
+fn variant_switch(start: Byte, end: Byte) -> Byte {
+    assumes start <= end;
+    var value = Choice.pair(start, end);
+    value = Choice.tuple((end, start));
+    value match { .tuple((a, b)) => a - b, _ => 0 }
+}
+fn unknown() {}
+fn tuple_after_call(pair: (Byte, Byte)) -> Byte {
+    unknown();
+    let (a, b) = pair;
+    assumes a <= b;
+    let (x, y) = pair;
+    y - x
+}
+fn call_after_elements(start: Byte, end: Byte) -> Byte {
+    assumes start <= end;
+    let value = (start, end, do { unknown(); true });
+    let (a, b, _) = value;
+    b - a
+}

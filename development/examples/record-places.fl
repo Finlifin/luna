@@ -1,0 +1,28 @@
+-- Property collection preserves the field names and their distinct types.
+comptime fn schema(...properties: T) -> T where T {
+    properties
+}
+
+const SAMPLE = schema {enabled: false, retained: true};
+typealias Options = SAMPLE'type;
+
+fn options(...properties: T) -> T where T {
+    properties
+}
+
+-- The body-derived memory summary identifies the selected record field.
+fn enable(target: *Options) {
+    target.enabled.* = true;
+}
+
+fn entry() -> bool {
+    var settings = options {enabled: false, retained: true};
+    let enabled = settings.enabled.ref;
+    enable(settings.ref);
+    settings.retained = false;
+    let observed = enabled.* and not settings.retained;
+
+    -- A compatible replacement updates the existing local storage.
+    settings = options {enabled: false, retained: true};
+    observed and not enabled.* and settings.retained
+}

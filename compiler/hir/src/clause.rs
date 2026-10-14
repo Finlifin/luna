@@ -9,6 +9,8 @@ use crate::hir_id::HirId;
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClauseParam<'hir> {
     pub hir_id: HirId,
+    /// Resolver identity used by ResolvedClauseParam references.
+    pub definition: Option<symbol::DefId>,
     pub name: Ident,
     pub kind: ClauseParamKind<'hir>,
     pub span: Span,
@@ -18,9 +20,10 @@ pub struct ClauseParam<'hir> {
 pub enum ClauseParamKind<'hir> {
     Type(Ident),
     Positional(Ident, &'hir Expr<'hir>),
-    Optional(Ident, &'hir Expr<'hir>),
+    Optional(Ident, &'hir Expr<'hir>, &'hir Expr<'hir>),
     Varadic(Ident, &'hir Expr<'hir>),
-    Quote(Ident, &'hir Expr<'hir>),
+    TraitBound(Ident, &'hir Expr<'hir>),
+    Quote(Box<ClauseParamKind<'hir>>),
 }
 
 /// A where-clause constraint on a definition.
@@ -29,6 +32,7 @@ pub enum ClauseParamKind<'hir> {
 /// contract clauses (`requires`, `ensures`, `decreases`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClauseConstraint<'hir> {
+    pub label: Option<Ident>,
     pub hir_id: HirId,
     pub kind: ClauseConstraintKind<'hir>,
     pub span: Span,

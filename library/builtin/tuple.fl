@@ -1,0 +1,5 @@
+-- Tuple identity is this pure comptime head applied to one collected Type list.
+-- The compiler-bound layout view does not unfold the head or replace its identity.
+pub pure comptime fn Tuple<...Es: meta.List<Type>> -> Type {
+    Tuple<...Es>
+}

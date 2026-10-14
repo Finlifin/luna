@@ -62,8 +62,11 @@ pub enum TokenKind {
     Underscore,       // _
 
     // primitive literals
-    Str,     // "..."
-    Int,     // 123
+    Str, // "..."
+    Int, // 123
+    BitBinPrefix,
+    BitOctPrefix,
+    BitHexPrefix,
     IntBin,  // 0b1010
     IntOct,  // 0o777
     IntHex,  // 0xFF
@@ -86,6 +89,7 @@ pub enum TokenKind {
     Case,      // case
     Catch,     // catch
     Comptime,  // comptime
+    Defer,     // defer
     Const,     // const
     Continue,  // continue
     Decreases, // decreases
@@ -119,6 +123,7 @@ pub enum TokenKind {
     Itself,    // itself
     Lambda,    // lambda
     Lemma,     // lemma
+    Var,
     Let,       // let
     Lift,      // lift
     Match,     // match
@@ -256,6 +261,7 @@ impl TokenKind {
             TokenKind::Case => "case",
             TokenKind::Catch => "catch",
             TokenKind::Comptime => "comptime",
+            TokenKind::Defer => "defer",
             TokenKind::Const => "const",
             TokenKind::Continue => "continue",
             TokenKind::Decreases => "decreases",
@@ -290,6 +296,7 @@ impl TokenKind {
             TokenKind::Lambda => "lambda",
             TokenKind::Lemma => "lemma",
             TokenKind::Let => "let",
+            TokenKind::Var => "var",
             TokenKind::Lift => "lift",
             TokenKind::Match => "match",
             TokenKind::Matches => "matches",
@@ -337,6 +344,9 @@ impl TokenKind {
             TokenKind::Eof => "<end of file>",
             TokenKind::Str => "<string literal>",
             TokenKind::Int => "<integer literal>",
+            TokenKind::BitBinPrefix => "0b",
+            TokenKind::BitOctPrefix => "0o",
+            TokenKind::BitHexPrefix => "0x",
             TokenKind::IntBin => "<binary integer literal>",
             TokenKind::IntOct => "<octal integer literal>",
             TokenKind::IntHex => "<hexadecimal integer literal>",
@@ -368,6 +378,7 @@ impl Token {
         map.insert("case", TokenKind::Case);
         map.insert("catch", TokenKind::Catch);
         map.insert("comptime", TokenKind::Comptime);
+        map.insert("defer", TokenKind::Defer);
         map.insert("const", TokenKind::Const);
         map.insert("continue", TokenKind::Continue);
         map.insert("decreases", TokenKind::Decreases);
@@ -402,6 +413,7 @@ impl Token {
         map.insert("lambda", TokenKind::Lambda);
         map.insert("lemma", TokenKind::Lemma);
         map.insert("let", TokenKind::Let);
+        map.insert("var", TokenKind::Var);
         map.insert("lift", TokenKind::Lift);
         map.insert("match", TokenKind::Match);
         map.insert("matches", TokenKind::Matches);

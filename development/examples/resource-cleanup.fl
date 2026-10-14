@@ -1,0 +1,21 @@
+-- Driver-bound identities for this standalone resource-analysis example.
+trait Duplicate {}
+trait Retire {
+    fn drop(*self);
+}
+
+struct Ticket {}
+impl Retire for Ticket {
+    fn drop(*self) {}
+}
+
+enum Choice {
+    empty,
+    pair(Ticket, Ticket),
+}
+
+-- Moving the whole enum transfers its remaining cleanup responsibility.
+-- The generated plan dispatches on next's tag and visits pair fields in reverse.
+fn entry(value:Choice) {
+    let next = value;
+}

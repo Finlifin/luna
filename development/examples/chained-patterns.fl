@@ -1,0 +1,31 @@
+typealias Flag = true'type;
+
+enum Entry {
+    missing,
+    found(Flag),
+}
+
+fn lookup(flag: Flag) -> Entry {
+    if flag { .found(false) } else { .missing }
+}
+
+fn accept(input: Flag) -> Flag {
+    input match {
+        first and lookup(first) is .found(second)
+              and not second is true => first,
+        _ => false,
+    }
+}
+
+fn keep(value: T) -> T where T {
+    value
+}
+
+fn forward(value: T) -> T where T {
+    let first and keep<T>(first) is result = value;
+    result
+}
+
+fn run() -> (Flag, Flag) {
+    (forward(accept(true)), accept(false))
+}

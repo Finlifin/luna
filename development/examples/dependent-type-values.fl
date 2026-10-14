@@ -1,0 +1,22 @@
+typealias Type = .Type'builtin;
+pure comptime fn Identity<T> -> Type { T }
+
+-- The same dependent input can carry an ordinary value or a Type value.
+comptime fn copy_value(comptime T: Type, comptime value: T,
+                       comptime .copy: T = value) -> T {
+    copy
+}
+
+comptime fn check() -> (bool, bool, bool) {
+    (copy_value(Type, bool) == bool,
+     copy_value(Type, Identity<bool>) == Identity<bool>,
+     not copy_value(bool, false))
+}
+
+fn deliver(comptime values: (bool, bool, bool)) -> (bool, bool, bool) {
+    values
+}
+
+fn run() -> (bool, bool, bool) {
+    deliver(check())
+}

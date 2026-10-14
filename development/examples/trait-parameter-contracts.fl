@@ -1,0 +1,34 @@
+-- A default method may use the capabilities promised by its Type parameters.
+trait Read { fn read(self) -> true'type; }
+
+struct Leaf where T { value: T }
+
+impl Read for Leaf<T> where T, requires T == true'type {
+    fn read(self) -> true'type { self.value }
+}
+
+trait Adapter where T :- Read {
+    fn run(value: T) -> true'type { value.read() }
+}
+
+struct Host {}
+impl Adapter<T> for Host where T :- Read {}
+
+fn adapted() -> true'type {
+    Host.as(Adapter<Leaf<true'type>>).run(Leaf<true'type> { value: true })
+}
+
+-- The declaration's type requirement checks both the body and every instance.
+trait Checked where T, requires T == true'type {
+    fn accept(value: T) -> true'type { value }
+}
+
+trait Child :- Checked<T> where T, requires T == true'type {}
+impl Checked<U> for Host where U, requires U == true'type {}
+impl Child<U> for Host where U, requires U == true'type {}
+
+fn forward(value: V) -> true'type where V, requires V == true'type {
+    Host.as(Child<V>).accept(value)
+}
+
+fn checked() -> true'type { forward(true) }

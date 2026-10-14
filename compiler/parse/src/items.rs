@@ -700,7 +700,7 @@ impl Parser<'_> {
             }
 
             let default_value = if p.eat_token(TokenKind::Eq) {
-                let value = p.try_expr_without_extended_call()?;
+                let value = p.try_expr()?;
                 if value == 0 {
                     return Err(ParseError::invalid_syntax(
                         "Expected a default value after `=`".to_string(),
@@ -739,6 +739,7 @@ impl Parser<'_> {
             let nodes = p.try_multi_with_bracket(
                 &[
                     Rule::comma("enum variant", |p| p.try_enum_variant()),
+                    Rule::comma("configuration", |p| p.try_configuration()),
                     Rule::comma("property", |p| p.try_property()),
                     Rule::semicolon("statement or definition", |p| {
                         p.try_statement_or_definition()
@@ -1007,6 +1008,40 @@ impl Parser<'_> {
     }
 
     // fn id? ( params ) (-> return_type)? (handles eff)? clauses?  (block | = expr)
+    pub(crate) fn try_normal_form_head_definition(&mut self) -> ParseResult {
+        self.scoped(|p| {
+            p.eat_tokens(3);
+            let id = p.try_id()?;
+            let parameters = p.try_multi_with_bracket(
+                &[Rule::comma("normal-form parameter", |p| p.try_clause())],
+                (TokenKind::Lt, TokenKind::Gt),
+            )?;
+            let result = p.try_return_type()?;
+            let clauses = p.try_clauses()?;
+            let body = if p.eat_token(TokenKind::Eq) {
+                p.try_expr()?
+            } else {
+                p.try_block()?
+            };
+            if body == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "normal-form head requires a body".into(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+            Ok(
+                NodeBuilder::new(NodeKind::NormalFormHeadDef, p.current_span())
+                    .add_single_child(id)
+                    .add_multiple_children(parameters)
+                    .add_single_child(result)
+                    .add_multiple_children(clauses)
+                    .add_single_child(body)
+                    .build(&mut p.ast),
+            )
+        })
+    }
+
     pub fn try_function(&mut self) -> ParseResult {
         self.scoped_with_expected_prefix(TokenKind::Fn.as_ref(), |p| {
             p.eat_tokens(1);
@@ -1025,19 +1060,15 @@ impl Parser<'_> {
 
             let return_type = p.try_return_type()?;
 
-            let handles = if p.eat_token(TokenKind::Handles) {
-                let eff = p.try_expr_without_extended_call()?;
-                if eff == 0 {
-                    return Err(ParseError::invalid_syntax(
-                        "Expected an effect expression after `handles`".to_string(),
-                        p.peek_next_token().kind,
-                        p.current_span(),
-                    ));
-                }
-                eff
-            } else {
-                0
-            };
+            if p.peek(TokenKind::Handles.as_ref()) {
+                return Err(ParseError::invalid_syntax(
+                    "function signatures do not have a `handles` clause; capabilities use trait bounds".into(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+            // Reserved AST slot retained until all function consumers migrate.
+            let handles = 0;
 
             let clauses = p.try_clauses()?;
 
@@ -1363,64 +1394,93 @@ impl Parser<'_> {
         })
     }
 
-    // async? effect id (parameter*) (-> result)? clauses? (block | (= expr))
+    /// Effect groups contain operation signatures, not ordinary enum payloads.
     pub fn try_effect(&mut self) -> ParseResult {
         self.scoped_with_expected_prefix(TokenKind::Effect.as_ref(), |p| {
-            p.eat_tokens(1); // eat the 'effect'
+            p.eat_tokens(1);
+            if p.eat_token(TokenKind::Enum) {
+                let id = p.try_id()?;
+                if id == 0 {
+                    return Err(ParseError::invalid_syntax(
+                        "expected an effect group name".into(),
+                        p.peek_next_token().kind, p.next_token_span(),
+                    ));
+                }
+                let clauses = p.try_clauses()?;
+                if !p.peek(TokenKind::LBrace.as_ref()) {
+                    return Err(ParseError::invalid_syntax(
+                        "expected `{` after effect group signature".into(),
+                        p.peek_next_token().kind, p.next_token_span(),
+                    ));
+                }
+                let operations = p.try_multi_with_bracket(
+                    &[Rule::comma("effect operation", |p| p.try_effect_operation(true))],
+                    (TokenKind::LBrace, TokenKind::RBrace),
+                )?;
+                let block = NodeBuilder::new(NodeKind::Block, p.current_span())
+                    .add_multiple_children(operations).build(&mut p.ast);
+                Ok(NodeBuilder::new(NodeKind::EffectEnumDef, p.current_span())
+                    .add_single_child(id).add_multiple_children(clauses)
+                    .add_single_child(block).build(&mut p.ast))
+            } else {
+                p.try_effect_operation(false)
+            }
+        })
+    }
+
+    fn try_effect_operation(&mut self, variant: bool) -> ParseResult {
+        self.scoped(|p| {
+            if variant && p.peek(TokenKind::RBrace.as_ref()) {
+                return Ok(0);
+            }
+            let attributes = if variant { p.try_attribute_prefix_chain()? } else { Vec::new() };
+            let is_async = variant && p.eat_token(TokenKind::Async);
+            let is_inline = variant && p.eat_token(TokenKind::Inline);
             let id = p.try_id()?;
+            if id == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "expected an effect operation name".into(),
+                    p.peek_next_token().kind, p.next_token_span(),
+                ));
+            }
             if !p.peek(TokenKind::LParen.as_ref()) {
-                return Err(ParseError::unexpected_token(
-                    TokenKind::LParen,
-                    p.peek_next_token().kind,
-                    p.next_token_span(),
+                return Err(ParseError::invalid_syntax(
+                    "expected `(` after effect operation name".into(),
+                    p.peek_next_token().kind, p.next_token_span(),
                 ));
             }
             let params = p.try_multi_with_bracket(
                 &[Rule::comma("parameter", |p| p.try_param())],
                 (TokenKind::LParen, TokenKind::RParen),
             )?;
-
             let return_type = p.try_return_type()?;
-
-            let clauses = p.try_clauses()?;
-
-            // Optional body: block | (= expr)
-            let body = if p.peek(TokenKind::LBrace.as_ref()) {
-                let nodes = p.try_multi_with_bracket(
-                    &[
-                        Rule::comma("property", |p| p.try_property()),
-                        Rule::semicolon("statement or definition", |p| {
-                            p.try_statement_or_definition()
-                        }),
-                    ],
-                    (TokenKind::LBrace, TokenKind::RBrace),
-                )?;
-                NodeBuilder::new(NodeKind::Block, p.current_span())
-                    .add_multiple_children(nodes)
-                    .build(&mut p.ast)
-            } else if p.eat_token(TokenKind::Eq) {
-                let expr = p.try_expr()?;
-                if expr == 0 {
-                    return Err(ParseError::invalid_syntax(
-                        "Expected an expression after `=`".to_string(),
-                        p.peek_next_token().kind,
-                        p.current_span(),
-                    ));
+            let clauses = if variant { Vec::new() } else { p.try_clauses()? };
+            if p.peek(TokenKind::LBrace.as_ref()) || p.peek(TokenKind::Eq.as_ref()) {
+                return Err(ParseError::invalid_syntax(
+                    "effect operations declare signatures and cannot have bodies".into(),
+                    p.peek_next_token().kind, p.next_token_span(),
+                ));
+            }
+            if !variant && !p.peek(TokenKind::Semi.as_ref()) {
+                return Err(ParseError::invalid_syntax(
+                    "expected `;` after effect operation signature".into(),
+                    p.peek_next_token().kind, p.next_token_span(),
+                ));
+            }
+            let mut node = NodeBuilder::new(NodeKind::AlgebraicEffect, p.current_span())
+                .add_single_child(id).add_multiple_children(params)
+                .add_single_child(return_type).add_multiple_children(clauses)
+                .add_single_child(0).build(&mut p.ast);
+            for (enabled, name) in [(is_inline, "__flurry_kw_inline"), (is_async, "__flurry_kw_async")] {
+                if enabled {
+                    let (hi, lo) = lex::Symbol::intern(name).to_raw_parts();
+                    let attribute = NodeBuilder::new(NodeKind::Id, p.current_span())
+                        .add_single_child(hi).add_single_child(lo).build(&mut p.ast);
+                    node = NodeBuilder::new(NodeKind::AttributeSetTrue, p.current_span())
+                        .add_single_child(attribute).add_single_child(node).build(&mut p.ast);
                 }
-                expr
-            } else {
-                0
-            };
-
-            Ok(
-                NodeBuilder::new(NodeKind::AlgebraicEffect, p.current_span())
-                    .add_single_child(id)
-                    .add_multiple_children(params)
-                    .add_single_child(return_type)
-                    .add_multiple_children(clauses)
-                    .add_single_child(body)
-                    .build(&mut p.ast),
-            )
+            }
+            Ok(p.wrap_with_attributes(node, &attributes))
         })
     }
 

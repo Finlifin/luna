@@ -1,0 +1,23 @@
+-- The trait supplies P4 evidence to generic callers.
+-- Run with: luna pure-trait.fl --interpret run
+trait Flip {
+    pure fn flip(self) -> Self;
+    pure fn twice(self) -> Self { self.flip().flip() }
+}
+
+impl Flip for bool {
+    -- The implementation inherits the interface promise.
+    fn flip(self) -> Self { not self }
+}
+
+pure fn flipped(value: T) -> T where T :- Flip {
+    value.flip()
+}
+
+pure fn preserved(value: T) -> T where T :- Flip {
+    value.twice()
+}
+
+fn run() -> bool {
+    flipped(false) and preserved(true)
+}

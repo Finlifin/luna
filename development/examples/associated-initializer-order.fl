@@ -1,0 +1,25 @@
+-- This initializer precedes every type template and function it needs.
+trait Result {
+    assoc value: bool = read<bool>(true);
+}
+impl Result for bool {}
+
+trait Source :- Base {
+    assoc Item: .Type'builtin = Self.as(Base).Element;
+}
+impl Source for bool {}
+
+trait Base {
+    assoc Element: .Type'builtin = bool;
+}
+impl Base for bool {}
+
+comptime fn read(value: T.as(Source).Item)
+    -> T.as(Source).Item where T :- Source
+{
+    value
+}
+
+fn entry() -> bool {
+    bool.as(Result).value
+}
