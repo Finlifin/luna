@@ -3,10 +3,9 @@ pub mod emitter;
 use ariadne::{Color, ColorGenerator, Label, Report, ReportKind, Source};
 use rustc_span::{FileNameDisplayPreference, SourceMap, Span};
 use std::{
-    cell::{Cell, RefCell},
+    cell::{Cell, Ref, RefCell},
     fmt,
     io::{self, Write},
-    mem,
 };
 
 // 罢了, warning也用这个trait吧
@@ -236,12 +235,58 @@ impl<'a> DiagnosticContext<'a> {
         self.warning_count.get() > 0
     }
 
-    pub unsafe fn diagnostics<'b>(&'b self) -> &'b [Diagnostic] {
-        unsafe {
-            mem::transmute::<&[Diagnostic], &'b [Diagnostic]>(
-                self.emitted_diagnostics.borrow().as_ref(),
-            )
+    /// The borrow guard keeps stored diagnostics alive until the reader is done.
+    pub fn diagnostics(&self) -> Ref<'_, [Diagnostic]> {
+        Ref::map(self.emitted_diagnostics.borrow(), Vec::as_slice)
+    }
+
+    /// Plain, stable diagnostics for library callers, independent of terminal
+    /// rendering. Retain stage, source locations, codes and explanatory labels.
+    pub fn failure_summary(&self, stage: &str) -> String {
+        use std::fmt::Write as _;
+        let mut output = format!("{stage} failed");
+        let location = |output: &mut String, span: Span| {
+            if span != rustc_span::DUMMY_SP {
+                let loc = self.source_map.lookup_char_pos(span.lo());
+                let _ = write!(
+                    output,
+                    "{}:{}:{}: ",
+                    loc.file.name.display(FileNameDisplayPreference::Local),
+                    loc.line,
+                    loc.col.0 + 1
+                );
+            }
+        };
+        for diagnostic in self
+            .diagnostics()
+            .iter()
+            .filter(|value| value.level == Level::Error)
+        {
+            output.push('\n');
+            if let Some(span) = diagnostic
+                .primary_span
+                .or_else(|| diagnostic.labels.first().map(|label| label.span))
+            {
+                location(&mut output, span);
+            }
+            output.push_str("error");
+            if let Some(code) = diagnostic.code {
+                let _ = write!(output, "[E{code:04}]");
+            }
+            let _ = write!(output, ": {}", diagnostic.message);
+            for label in &diagnostic.labels {
+                output.push_str("\n  ");
+                location(&mut output, label.span);
+                let _ = write!(output, "{}: {}", label.level.name(), label.message);
+            }
+            for note in &diagnostic.notes {
+                let _ = write!(output, "\n  note: {note}");
+            }
+            for help in &diagnostic.helps {
+                let _ = write!(output, "\n  help: {help}");
+            }
         }
+        output
     }
 
     /// Create a new diagnostic builder
@@ -429,4 +474,53 @@ macro_rules! diag_help {
     ($ctx:expr, $msg:expr, $($arg:tt)*) => {
         $ctx.help(format!($msg, $($arg)*))
     };
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+    use rustc_span::source_map::FilePathMapping;
+
+    #[test]
+    fn plain_failure_retains_explanations_without_terminal_output() {
+        let map = SourceMap::new(FilePathMapping::empty());
+        let context = DiagnosticContext::new(&map);
+        let diagnostic = DiagnosticBuilder::error("cannot resolve value".into())
+            .with_code(42)
+            .with_note("lookup searched the current scope".into())
+            .with_help("declare the value before this use".into())
+            .build();
+        context
+            .emitted_diagnostics
+            .borrow_mut()
+            .extend([Diagnostic::warning("unrelated warning".into()), diagnostic]);
+        assert_eq!(
+            context.failure_summary("resolution"),
+            "resolution failed\nerror[E0042]: cannot resolve value\n  note: lookup searched the current scope\n  help: declare the value before this use"
+        );
+        assert_eq!(
+            context.diagnostics().len(),
+            2,
+            "formatting must not consume diagnostics"
+        );
+    }
+
+    #[test]
+    fn diagnostic_view_keeps_its_storage_borrowed() {
+        let map = SourceMap::new(FilePathMapping::empty());
+        let context = DiagnosticContext::new(&map);
+        context
+            .emitted_diagnostics
+            .borrow_mut()
+            .push(Diagnostic::error("first".into()));
+        let view = context.diagnostics();
+        assert_eq!(view[0].message, "first");
+        assert!(context.emitted_diagnostics.try_borrow_mut().is_err());
+        drop(view);
+        context
+            .emitted_diagnostics
+            .borrow_mut()
+            .push(Diagnostic::error("second".into()));
+        assert_eq!(context.diagnostics().len(), 2);
+    }
 }

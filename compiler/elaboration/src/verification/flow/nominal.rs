@@ -1,25 +1,49 @@
 //! Nominal shapes come from package declarations, never inferred from payloads.
 use super::*;
 impl Walker<'_> {
-    pub(super) fn place_fields(&mut self, ty: &Term, owner: nir::program::FieldOwner) -> Result<Vec<Term>, Reason> {
+    pub(super) fn place_fields(
+        &mut self,
+        ty: &Term,
+        owner: nir::program::FieldOwner,
+    ) -> Result<Vec<Term>, Reason> {
         match owner {
             nir::program::FieldOwner::Nominal(id) => self.nominal_fields(ty, id, None),
             nir::program::FieldOwner::Anonymous => {
-                let Term::Record(fields) = ty else { return Err(Reason::InvalidSignature) };
+                let Term::Record(fields) = ty else {
+                    return Err(Reason::InvalidSignature);
+                };
                 self.limits.step(fields.len().saturating_add(1))?;
                 Ok(fields.iter().map(|(_, ty)| ty.clone()).collect())
             }
         }
     }
-    pub(super) fn read_anonymous_field(&mut self, base: Value, ty: &Term, index: usize, state: &mut State) -> Result<Value, Reason> {
+    pub(super) fn read_anonymous_field(
+        &mut self,
+        base: Value,
+        ty: &Term,
+        index: usize,
+        state: &mut State,
+    ) -> Result<Value, Reason> {
         let types = self.place_fields(ty, nir::program::FieldOwner::Anonymous)?;
         let field_type = types.get(index).ok_or(Reason::InvalidSignature)?;
         let projection = base.projection.clone();
         let mut result = if let Some(fields) = base.fields {
-            if base.aggregate_kind != Some(AggregateKind::AnonymousRecord) { return Err(Reason::InvalidSignature) }
-            fields.get(index).ok_or(Reason::InvalidSignature)?.snapshot(self.limits, 0)?
-        } else { self.unknown_value(field_type)? };
-        self.project_component(state, &mut result, projection, (AggregateKind::AnonymousRecord, index))?;
+            if base.aggregate_kind != Some(AggregateKind::AnonymousRecord) {
+                return Err(Reason::InvalidSignature);
+            }
+            fields
+                .get(index)
+                .ok_or(Reason::InvalidSignature)?
+                .snapshot(self.limits, 0)?
+        } else {
+            self.unknown_value(field_type)?
+        };
+        self.project_component(
+            state,
+            &mut result,
+            projection,
+            (AggregateKind::AnonymousRecord, index),
+        )?;
         Ok(result)
     }
     pub(super) fn read_record_field(
@@ -83,7 +107,11 @@ impl Walker<'_> {
                 .find(|d| d.declaration == expected)
                 .ok_or(Reason::InvalidSignature)?;
             Term::Tuple(Vec::new())
-                .instantiate_types_in_scope(&definition.type_parameters, arguments, &self.input_frames)
+                .instantiate_types_in_scope(
+                    &definition.type_parameters,
+                    arguments,
+                    &self.input_frames,
+                )
                 .map_err(|_| Reason::InvalidSignature)?;
             let fields = &definition
                 .variants
@@ -94,8 +122,12 @@ impl Walker<'_> {
             fields
                 .iter()
                 .map(|ty| {
-                    ty.instantiate_types_in_scope(&definition.type_parameters, arguments, &self.input_frames)
-                        .map_err(|_| Reason::InvalidSignature)
+                    ty.instantiate_types_in_scope(
+                        &definition.type_parameters,
+                        arguments,
+                        &self.input_frames,
+                    )
+                    .map_err(|_| Reason::InvalidSignature)
                 })
                 .collect()
         } else {

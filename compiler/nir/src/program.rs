@@ -9,39 +9,52 @@ use std::sync::Arc;
 /// Relative selections of a writable bit view, in source order.
 #[derive(Clone, Debug, PartialEq)]
 pub enum BitSelection {
-    Static {start: usize, end: usize},
+    Static {
+        start: usize,
+        end: usize,
+    },
     Index(Box<Expr>),
-    Window {start: Box<Expr>, end: Box<Expr>, width: usize},
+    Window {
+        start: Box<Expr>,
+        end: Box<Expr>,
+        width: usize,
+    },
 }
 impl BitSelection {
-    pub fn expressions(&self) -> impl Iterator<Item=&Expr> {
+    pub fn expressions(&self) -> impl Iterator<Item = &Expr> {
         match self {
-            Self::Static {..} => [None, None],
+            Self::Static { .. } => [None, None],
             Self::Index(index) => [Some(index.as_ref()), None],
-            Self::Window {start,end,..} => [Some(start.as_ref()), Some(end.as_ref())],
-        }.into_iter().flatten()
+            Self::Window { start, end, .. } => [Some(start.as_ref()), Some(end.as_ref())],
+        }
+        .into_iter()
+        .flatten()
     }
-    pub fn expressions_mut(&mut self) -> impl Iterator<Item=&mut Expr> {
+    pub fn expressions_mut(&mut self) -> impl Iterator<Item = &mut Expr> {
         match self {
-            Self::Static {..} => [None, None],
+            Self::Static { .. } => [None, None],
             Self::Index(index) => [Some(index.as_mut()), None],
-            Self::Window {start,end,..} => [Some(start.as_mut()), Some(end.as_mut())],
-        }.into_iter().flatten()
+            Self::Window { start, end, .. } => [Some(start.as_mut()), Some(end.as_mut())],
+        }
+        .into_iter()
+        .flatten()
     }
     pub fn output_width(&self, input: usize) -> Option<usize> {
         match self {
-            Self::Static {start,end} => (start <= end && *end <= input).then(||end - start),
+            Self::Static { start, end } => (start <= end && *end <= input).then(|| end - start),
             Self::Index(_) => Some(1),
-            Self::Window {width,..} => (*width <= input).then_some(*width),
+            Self::Window { width, .. } => (*width <= input).then_some(*width),
         }
     }
 }
 impl fmt::Display for BitSelection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Static {start,end} => write!(f,"(static (start {start}) (end {end}))"),
-            Self::Index(index) => write!(f,"(index {index})"),
-            Self::Window {start,end,width} => write!(f,"(window (start {start}) (end {end}) (width {width}))"),
+            Self::Static { start, end } => write!(f, "(static (start {start}) (end {end}))"),
+            Self::Index(index) => write!(f, "(index {index})"),
+            Self::Window { start, end, width } => {
+                write!(f, "(window (start {start}) (end {end}) (width {width}))")
+            }
         }
     }
 }
@@ -59,8 +72,15 @@ pub struct SourceRange {
 impl SourceRange {
     /// Generated locations are IR identities, not offsets into a source file.
     /// Their origin and connection site live in the package's expansion table.
-    pub fn generated(index: u32) -> Self { Self { start: u32::MAX, end: index } }
-    pub fn expansion_index(self) -> Option<u32> { (self.start == u32::MAX).then_some(self.end) }
+    pub fn generated(index: u32) -> Self {
+        Self {
+            start: u32::MAX,
+            end: index,
+        }
+    }
+    pub fn expansion_index(self) -> Option<u32> {
+        (self.start == u32::MAX).then_some(self.end)
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExpansionSource {
@@ -69,7 +89,11 @@ pub struct ExpansionSource {
 }
 impl fmt::Display for ExpansionSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "(expansion-origin (original {}) (site {}))", self.original, self.site)
+        write!(
+            f,
+            "(expansion-origin (original {}) (site {}))",
+            self.original, self.site
+        )
     }
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -110,34 +134,73 @@ impl NormalFormInputPlan {
     pub fn local_bindings(&self) -> Option<Vec<LocalId>> {
         let mut bindings = self.bindings.clone();
         for preparation in &self.preparations {
-            let ExprKind::LetPattern { pattern: Pattern::Tuple(fields), guard: None, otherwise: None, .. } = &preparation.expression.kind else { return None; };
+            let ExprKind::LetPattern {
+                pattern: Pattern::Tuple(fields),
+                guard: None,
+                otherwise: None,
+                ..
+            } = &preparation.expression.kind
+            else {
+                return None;
+            };
             for field in fields {
-                let Pattern::Binding { binding, inner } = field else { return None; };
-                if !matches!(inner.as_ref(), Pattern::Wild) { return None; }
+                let Pattern::Binding { binding, inner } = field else {
+                    return None;
+                };
+                if !matches!(inner.as_ref(), Pattern::Wild) {
+                    return None;
+                }
                 bindings.push(*binding);
             }
         }
         Some(bindings)
     }
     pub fn valid(&self, count: usize) -> bool {
-        self.order.len() == count && self.bindings.len() == count
-            && self.order.iter().copied().collect::<std::collections::BTreeSet<_>>() == (0..count).collect()
-            && self.bindings.iter().collect::<std::collections::BTreeSet<_>>().len() == count
+        self.order.len() == count
+            && self.bindings.len() == count
+            && self
+                .order
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                == (0..count).collect()
+            && self
+                .bindings
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                == count
             && self.preparations.iter().all(|p| p.before <= count)
-            && self.preparations.windows(2).all(|p| p[0].before <= p[1].before)
-            && self.local_bindings().is_some_and(|bindings|
-                bindings.iter().collect::<std::collections::BTreeSet<_>>().len() == bindings.len())
+            && self
+                .preparations
+                .windows(2)
+                .all(|p| p[0].before <= p[1].before)
+            && self.local_bindings().is_some_and(|bindings| {
+                bindings
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    == bindings.len()
+            })
     }
 }
 impl fmt::Display for NormalFormInputPlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(input-plan (order")?;
-        for slot in &self.order {write!(f," {slot}")?;}
+        for slot in &self.order {
+            write!(f, " {slot}")?;
+        }
         f.write_str(") (bindings")?;
-        for binding in &self.bindings {write!(f," {binding}")?;}
+        for binding in &self.bindings {
+            write!(f, " {binding}")?;
+        }
         f.write_str(") (preparations")?;
         for preparation in &self.preparations {
-            write!(f, " (before {} {})", preparation.before, preparation.expression)?;
+            write!(
+                f,
+                " (before {} {})",
+                preparation.before, preparation.expression
+            )?;
         }
         f.write_str("))")
     }
@@ -146,7 +209,10 @@ impl fmt::Display for NormalFormInputPlan {
 #[derive(Clone, Debug, PartialEq)]
 pub enum NormalFormArgument {
     /// Collect Type expressions into one comptime list argument in source order.
-    TypeList { source: SourceRange, items: Vec<Self> },
+    TypeList {
+        source: SourceRange,
+        items: Vec<Self>,
+    },
     Value(Expr),
     /// Expand a completed Type list inside a Type-list collector.
     TypeListSpread(Expr),
@@ -226,7 +292,9 @@ impl NormalFormArgument {
                     pending.push(else_input);
                     pending.push(then_input);
                 }
-                Self::TypeList { items, .. } | Self::Tuple { items, .. } => pending.extend(items.iter().rev()),
+                Self::TypeList { items, .. } | Self::Tuple { items, .. } => {
+                    pending.extend(items.iter().rev())
+                }
                 Self::Match { value, arms, .. } => {
                     result.push(value);
                     for arm in arms.iter().rev() {
@@ -267,7 +335,9 @@ impl NormalFormArgument {
                     pending.push(else_input);
                     pending.push(then_input);
                 }
-                Self::TypeList { items, .. } | Self::Tuple { items, .. } => pending.extend(items.iter_mut().rev()),
+                Self::TypeList { items, .. } | Self::Tuple { items, .. } => {
+                    pending.extend(items.iter_mut().rev())
+                }
                 Self::Match { value, arms, .. } => {
                     result.push(value);
                     for arm in arms.iter_mut().rev() {
@@ -296,7 +366,9 @@ impl NormalFormArgument {
         let mut patterns = Vec::new();
         while let Some(input) = pending.pop() {
             match input {
-                Self::TypeList { items, .. } | Self::Tuple { items, .. } => pending.extend(items.iter().rev()),
+                Self::TypeList { items, .. } | Self::Tuple { items, .. } => {
+                    pending.extend(items.iter().rev())
+                }
                 Self::Match { arms, .. } => {
                     for arm in arms.iter().rev() {
                         patterns.push(&arm.pattern);
@@ -325,7 +397,9 @@ impl NormalFormArgument {
         let mut patterns = Vec::new();
         while let Some(input) = pending.pop() {
             match input {
-                Self::TypeList { items, .. } | Self::Tuple { items, .. } => pending.extend(items.iter_mut().rev()),
+                Self::TypeList { items, .. } | Self::Tuple { items, .. } => {
+                    pending.extend(items.iter_mut().rev())
+                }
                 Self::Match { arms, .. } => {
                     for arm in arms.iter_mut().rev() {
                         patterns.push(&mut arm.pattern);
@@ -378,7 +452,9 @@ impl NormalFormArgument {
                     work.push(Work::Any(items.len()));
                     work.extend(items.iter().rev().map(Work::Input));
                 }
-                Work::Input(Self::TypeListSpread(value) | Self::Value(value)) => results.push(never(value)),
+                Work::Input(Self::TypeListSpread(value) | Self::Value(value)) => {
+                    results.push(never(value))
+                }
                 Work::Input(Self::Integer { .. } | Self::Unit { .. }) => results.push(false),
                 Work::Input(Self::If {
                     condition,
@@ -463,12 +539,20 @@ impl fmt::Display for NormalFormArgument {
             }
             Self::TypeList { source, items } => {
                 write!(f, "(type-list-input (source {source}) (items")?;
-                for item in items { write!(f, " {item}")?; }
+                for item in items {
+                    write!(f, " {item}")?;
+                }
                 f.write_str("))")
             }
-            Self::Tuple { source, type_head, items } => {
+            Self::Tuple {
+                source,
+                type_head,
+                items,
+            } => {
                 write!(f, "(contextual-tuple-input (source {source}) (type-head")?;
-                if let Some(head) = type_head { write!(f, " {head}")?; }
+                if let Some(head) = type_head {
+                    write!(f, " {head}")?;
+                }
                 f.write_str(") (items")?;
                 for item in items {
                     write!(f, " {item}")?;
@@ -642,10 +726,18 @@ pub struct EffectHandler {
 }
 impl fmt::Display for EffectHandler {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "(effect-handler {} (abi {}) (signature {}) (fallback", self.operation, self.abi, self.signature)?;
-        if let Some(slot) = self.fallback { write!(f, " {slot}")?; }
+        write!(
+            f,
+            "(effect-handler {} (abi {}) (signature {}) (fallback",
+            self.operation, self.abi, self.signature
+        )?;
+        if let Some(slot) = self.fallback {
+            write!(f, " {slot}")?;
+        }
         f.write_str(") (arms")?;
-        for arm in &self.arms { write!(f, " {arm}")?; }
+        for arm in &self.arms {
+            write!(f, " {arm}")?;
+        }
         f.write_str("))")
     }
 }
@@ -654,14 +746,24 @@ impl fmt::Display for EffectHandler {
 pub enum ExprKind {
     /// Early delivery to the lexically enclosing direct handler branch.
     EffectResume(Box<Expr>),
-    EffectHandle { computation: Box<Expr>, handlers: Vec<EffectHandler>, outer: Vec<crate::effects::Operation> },
+    EffectHandle {
+        computation: Box<Expr>,
+        handlers: Vec<EffectHandler>,
+        outer: Vec<crate::effects::Operation>,
+    },
     /// Discharge the source computation's leading occurrences into slots of
     /// the enclosing allowed row. Instantiating a generic result can leave a
     /// residual computation; those later occurrences are not consumed here.
-    EffectRun { computation: Box<Expr>, slots: Vec<usize> },
+    EffectRun {
+        computation: Box<Expr>,
+        slots: Vec<usize>,
+    },
     /// A body checked in an explicit allowed effect environment. Its outer
     /// type retains this row and the body's result (including bottom coercion).
-    EffectComputation { effects: Vec<crate::effects::Operation>, body: Box<Expr> },
+    EffectComputation {
+        effects: Vec<crate::effects::Operation>,
+        body: Box<Expr>,
+    },
     /// A typed request into the enclosing computation environment. The slot
     /// identifies one occurrence, not a runtime handler activation.
     EffectRequest {
@@ -780,7 +882,9 @@ pub enum ExprKind {
     },
     Tuple(Vec<Expr>),
     /// Named structural construction; field labels and types are retained in ty.
-    AnonymousRecord { fields: Vec<Expr> },
+    AnonymousRecord {
+        fields: Vec<Expr>,
+    },
     Record {
         declaration: DeclarationId,
         fields: Vec<Expr>,
@@ -790,7 +894,11 @@ pub enum ExprKind {
         declaration: DeclarationId,
         index: usize,
     },
-    AnonymousField { value: Box<Expr>, name: String, index: usize },
+    AnonymousField {
+        value: Box<Expr>,
+        name: String,
+        index: usize,
+    },
     Match {
         value: Box<Expr>,
         arms: Vec<MatchArm>,
@@ -872,7 +980,11 @@ pub enum ExprKind {
     BitIndex(Box<Expr>, Box<Expr>),
     /// Dynamic endpoints, evaluated after the value in source order.
     /// The result type fixes the width; program verification proves the difference.
-    BitWindow { value: Box<Expr>, start: Box<Expr>, end: Box<Expr> },
+    BitWindow {
+        value: Box<Expr>,
+        start: Box<Expr>,
+        end: Box<Expr>,
+    },
     BitSlice {
         value: Box<Expr>,
         start: usize,
@@ -882,6 +994,8 @@ pub enum ExprKind {
     /// to fixed signed integers and IEEE floats. Other representations require
     /// separate construction/validity contracts and are not accepted here.
     BitConvert(Box<Expr>),
+    /// Transfer a whole value across exactly one declared newtype representation edge.
+    NewtypeConvert(Box<Expr>),
     BitEqual(Box<Expr>, Box<Expr>),
     /// Explicit representation snapshot; resource checking must prove Copy.
     Snapshot(Box<Expr>),
@@ -1020,9 +1134,14 @@ impl fmt::Display for Pattern {
             }
             Self::AnonymousRecord { names, fields } => {
                 f.write_str("(anonymous-record-pattern (names")?;
-                for name in names { f.write_str(" ")?; crate::display::string(f, name)?; }
+                for name in names {
+                    f.write_str(" ")?;
+                    crate::display::string(f, name)?;
+                }
                 f.write_str(") (fields")?;
-                for field in fields { write!(f, " {field}")?; }
+                for field in fields {
+                    write!(f, " {field}")?;
+                }
                 f.write_str("))")
             }
             Self::Record {
@@ -1164,18 +1283,37 @@ impl Function {
     ) -> Result<Self, crate::TypeError> {
         Term::Tuple(Vec::new()).instantiate_parameters(parameters, arguments)?;
         let mut result = self.clone();
-        result.signature = self.signature.instantiate_parameters(parameters, arguments)?;
-        result.requirements = self.requirements.iter()
-            .map(|p| p.instantiate_parameters(parameters, arguments)).collect::<Result<_, _>>()?;
-        result.capabilities = self.capabilities.iter()
-            .map(|p| p.instantiate_parameters(parameters, arguments)).collect::<Result<_, _>>()?;
+        result.signature = self
+            .signature
+            .instantiate_parameters(parameters, arguments)?;
+        result.requirements = self
+            .requirements
+            .iter()
+            .map(|p| p.instantiate_parameters(parameters, arguments))
+            .collect::<Result<_, _>>()?;
+        result.capabilities = self
+            .capabilities
+            .iter()
+            .map(|p| p.instantiate_parameters(parameters, arguments))
+            .collect::<Result<_, _>>()?;
         result.body = self.body.instantiate_parameters(parameters, arguments)?;
-        result.preconditions = self.preconditions.iter()
-            .map(|e| e.instantiate_parameters(parameters, arguments)).collect::<Result<_, _>>()?;
-        result.postconditions = self.postconditions.iter()
-            .map(|e| e.instantiate_parameters(parameters, arguments)).collect::<Result<_, _>>()?;
-        result.defaults = self.defaults.iter()
-            .map(|(index, e)| e.instantiate_parameters(parameters, arguments).map(|e| (*index, e)))
+        result.preconditions = self
+            .preconditions
+            .iter()
+            .map(|e| e.instantiate_parameters(parameters, arguments))
+            .collect::<Result<_, _>>()?;
+        result.postconditions = self
+            .postconditions
+            .iter()
+            .map(|e| e.instantiate_parameters(parameters, arguments))
+            .collect::<Result<_, _>>()?;
+        result.defaults = self
+            .defaults
+            .iter()
+            .map(|(index, e)| {
+                e.instantiate_parameters(parameters, arguments)
+                    .map(|e| (*index, e))
+            })
             .collect::<Result<_, _>>()?;
         Ok(result)
     }
@@ -1185,9 +1323,13 @@ impl Function {
         parameters: &[DeclarationId],
         arguments: &[Term],
     ) -> Result<Self, crate::TypeError> {
-        let parameters = parameters.iter().map(|&declaration| crate::DeclarationParameter {
-            declaration, sort: crate::Sort::Type,
-        }).collect::<Vec<_>>();
+        let parameters = parameters
+            .iter()
+            .map(|&declaration| crate::DeclarationParameter {
+                declaration,
+                sort: crate::Sort::Type,
+            })
+            .collect::<Vec<_>>();
         self.instantiate_parameters(&parameters, arguments)
     }
 }
@@ -1215,7 +1357,9 @@ impl InterfaceInstance {
         Term::Tuple(Vec::new()).instantiate_parameters_in_scope(parameters, arguments, frames)?;
         Ok(Self {
             declaration: self.declaration,
-            arguments: self.arguments.iter()
+            arguments: self
+                .arguments
+                .iter()
                 .map(|ty| ty.instantiate_parameters_in_scope(parameters, arguments, frames))
                 .collect::<Result<_, _>>()?,
         })
@@ -1226,10 +1370,13 @@ impl InterfaceInstance {
         parameters: &[DeclarationId],
         arguments: &[Term],
     ) -> Result<Self, crate::TypeError> {
-        let parameters = parameters.iter().map(|&declaration| crate::DeclarationParameter {
-            declaration,
-            sort: crate::Sort::Type,
-        }).collect::<Vec<_>>();
+        let parameters = parameters
+            .iter()
+            .map(|&declaration| crate::DeclarationParameter {
+                declaration,
+                sort: crate::Sort::Type,
+            })
+            .collect::<Vec<_>>();
         self.instantiate_parameters(&parameters, arguments)
     }
 
@@ -1274,8 +1421,12 @@ impl TraitRequirement {
     ) -> Result<Self, crate::TypeError> {
         Ok(Self {
             interface: self.interface,
-            subject: self.subject.instantiate_parameters_in_scope(parameters, arguments, frames)?,
-            interface_arguments: self.interface_arguments.iter()
+            subject: self
+                .subject
+                .instantiate_parameters_in_scope(parameters, arguments, frames)?,
+            interface_arguments: self
+                .interface_arguments
+                .iter()
                 .map(|ty| ty.instantiate_parameters_in_scope(parameters, arguments, frames))
                 .collect::<Result<_, _>>()?,
         })
@@ -1299,10 +1450,13 @@ impl TraitRequirement {
         parameters: &[DeclarationId],
         arguments: &[Term],
     ) -> Result<Self, crate::TypeError> {
-        let parameters = parameters.iter().map(|&declaration| crate::DeclarationParameter {
-            declaration,
-            sort: crate::Sort::Type,
-        }).collect::<Vec<_>>();
+        let parameters = parameters
+            .iter()
+            .map(|&declaration| crate::DeclarationParameter {
+                declaration,
+                sort: crate::Sort::Type,
+            })
+            .collect::<Vec<_>>();
         self.instantiate_parameters(&parameters, arguments)
     }
 
@@ -1344,7 +1498,7 @@ pub struct Package {
     pub internal_return_packets: std::collections::BTreeSet<DeclarationId>,
     /// At these generated replacement sites the private packet is still empty:
     /// every successful write immediately exits its logical return boundary.
-    pub internal_return_empty_replacements: std::collections::BTreeMap<(u32,u32),DeclarationId>,
+    pub internal_return_empty_replacements: std::collections::BTreeMap<(u32, u32), DeclarationId>,
     /// Index corresponds to SourceRange::generated(index). Entries retain
     /// both the definition location and the site of each hygienic connection.
     pub expansion_sources: Vec<ExpansionSource>,
@@ -1360,6 +1514,7 @@ pub struct Package {
     pub implementations: Vec<Implementation>,
     pub functions: Vec<Function>,
     pub structs: Vec<Struct>,
+    pub newtypes: Vec<crate::newtypes::Newtype>,
     pub enums: Vec<Enum>,
 }
 
@@ -1374,8 +1529,14 @@ pub struct RuntimeFunctionIdentity {
 }
 impl fmt::Display for RuntimeFunctionIdentity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "(runtime-function-identity {} (type-parameters", self.declaration)?;
-        for parameter in &self.type_parameters { write!(f, " {parameter}")?; }
+        write!(
+            f,
+            "(runtime-function-identity {} (type-parameters",
+            self.declaration
+        )?;
+        for parameter in &self.type_parameters {
+            write!(f, " {parameter}")?;
+        }
         write!(f, ") (signature {}))", self.signature)
     }
 }
@@ -1460,7 +1621,9 @@ impl fmt::Display for MethodInstance {
             write!(f, " {argument}")?;
         }
         write!(f, ") (method-arguments")?;
-        for argument in &self.method_arguments { write!(f, " {argument}")?; }
+        for argument in &self.method_arguments {
+            write!(f, " {argument}")?;
+        }
         write!(f, "))")
     }
 }
@@ -1475,13 +1638,22 @@ pub struct AssociatedContract {
 }
 impl fmt::Display for AssociatedContract {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "(associated {} (name {:?}) (type {}) (default", self.declaration, self.name, self.ty)?;
-        if let Some(value) = &self.default { write!(f, " {value}")?; }
+        write!(
+            f,
+            "(associated {} (name {:?}) (type {}) (default",
+            self.declaration, self.name, self.ty
+        )?;
+        if let Some(value) = &self.default {
+            write!(f, " {value}")?;
+        }
         write!(f, "))")
     }
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Trait {
+    /// Ordered declaration input domains. Empty is the compact all-Type form;
+    /// otherwise there must be exactly one domain per declaration parameter.
+    pub parameter_types: Vec<Term>,
     pub associated: Vec<AssociatedContract>,
     pub requirements: Vec<TypePredicate>,
     pub capabilities: Vec<TraitRequirement>,
@@ -1542,6 +1714,16 @@ impl fmt::Display for Trait {
         for parameter in &self.type_parameters {
             write!(f, " {parameter}")?;
         }
+        write!(f, ") (parameter-types")?;
+        if self.parameter_types.is_empty() {
+            for _ in &self.type_parameters {
+                write!(f, " {}", Term::Primitive(crate::Primitive::Type))?;
+            }
+        } else {
+            for ty in &self.parameter_types {
+                write!(f, " {ty}")?;
+            }
+        }
         write!(f, ") (requires")?;
         for requirement in &self.requirements {
             write!(f, " {requirement}")?;
@@ -1559,7 +1741,9 @@ impl fmt::Display for Trait {
             write!(f, " {method}")?;
         }
         write!(f, ") (associated")?;
-        for item in &self.associated { write!(f, " {item}")?; }
+        for item in &self.associated {
+            write!(f, " {item}")?;
+        }
         write!(f, "))")
     }
 }
@@ -1580,11 +1764,17 @@ impl fmt::Display for MethodContract {
             write!(f, " {requirement}")?;
         }
         write!(f, ") (type-parameters")?;
-        for parameter in &self.type_parameters { write!(f, " {parameter}")?; }
+        for parameter in &self.type_parameters {
+            write!(f, " {parameter}")?;
+        }
         write!(f, ") (type-arguments")?;
-        for argument in &self.type_arguments { write!(f, " {argument}")?; }
+        for argument in &self.type_arguments {
+            write!(f, " {argument}")?;
+        }
         write!(f, ") (capabilities")?;
-        for capability in &self.capabilities { write!(f, " {capability}")?; }
+        for capability in &self.capabilities {
+            write!(f, " {capability}")?;
+        }
         write!(f, ") (parameter-bindings")?;
         for binding in &self.parameter_bindings {
             write!(f, " {binding}")?;
@@ -1626,7 +1816,9 @@ impl fmt::Display for Implementation {
             write!(f, " (method {name:?} {declaration})")?;
         }
         write!(f, ") (associated")?;
-        for (member, value) in &self.associated { write!(f, " (value {member} {value})")?; }
+        for (member, value) in &self.associated {
+            write!(f, " (value {member} {value})")?;
+        }
         write!(f, "))")
     }
 }
@@ -1657,12 +1849,22 @@ pub enum VariantShape {
 }
 impl Enum {
     pub fn validate_encoding(&self) -> Result<(), &'static str> {
-        let groups = self.groups.iter().map(String::as_str).collect::<std::collections::BTreeSet<_>>();
-        if groups.len() != self.groups.len() { return Err("duplicate enum group"); }
+        let groups = self
+            .groups
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        if groups.len() != self.groups.len() {
+            return Err("duplicate enum group");
+        }
         let mut leaves = std::collections::BTreeSet::new();
         for name in &self.groups {
-            if name.is_empty() || name.split('.').any(str::is_empty)
-                || name.rsplit_once('.').is_some_and(|(parent,_)|!groups.contains(parent)) {
+            if name.is_empty()
+                || name.split('.').any(str::is_empty)
+                || name
+                    .rsplit_once('.')
+                    .is_some_and(|(parent, _)| !groups.contains(parent))
+            {
                 return Err("enum group path has no declared parent");
             }
         }
@@ -1670,19 +1872,35 @@ impl Enum {
             if !leaves.insert(&variant.name) || groups.contains(variant.name.as_str()) {
                 return Err("enum leaf and group names are not unique");
             }
-            if variant.name.rsplit_once('.').is_some_and(|(parent,_)|!groups.contains(parent)) {
+            if variant
+                .name
+                .rsplit_once('.')
+                .is_some_and(|(parent, _)| !groups.contains(parent))
+            {
                 return Err("enum leaf path has no declared group");
             }
         }
         if let Some(symbols) = &self.symbol_encoding {
-            if self.encoding.is_some() { return Err("enum has conflicting representation domains"); }
+            if self.encoding.is_some() {
+                return Err("enum has conflicting representation domains");
+            }
             if symbols.variants().len() != self.variants.len()
-                || symbols.variants().iter().zip(&self.variants).any(|(encoded, variant)|
-                    encoded.name != variant.name || variant.shape != VariantShape::Unit || !variant.fields.is_empty()) {
+                || symbols
+                    .variants()
+                    .iter()
+                    .zip(&self.variants)
+                    .any(|(encoded, variant)| {
+                        encoded.name != variant.name
+                            || variant.shape != VariantShape::Unit
+                            || !variant.fields.is_empty()
+                    })
+            {
                 return Err("Symbol enum encoding does not describe the logical variants");
             }
         }
-        let Some(layout) = &self.encoding else { return Ok(()); };
+        let Some(layout) = &self.encoding else {
+            return Ok(());
+        };
         layout.validate()?;
         if layout.variants().len() != self.variants.len() {
             return Err("enum encoding variant count differs from the logical enum");
@@ -1693,30 +1911,62 @@ impl Enum {
             }
             match &variant.shape {
                 VariantShape::Unit if encoded.fields().is_empty() => (),
-                VariantShape::Named(names) if names.len() == encoded.fields().len()
-                    && names.iter().zip(encoded.fields()).all(|(name,field)| *name == field.name) => (),
+                VariantShape::Named(names)
+                    if names.len() == encoded.fields().len()
+                        && names
+                            .iter()
+                            .zip(encoded.fields())
+                            .all(|(name, field)| *name == field.name) =>
+                {
+                    ()
+                }
                 _ => return Err("enum encoding payload names differ from the logical variant"),
             }
             for (ty, field) in variant.fields.iter().zip(encoded.fields()) {
                 let width = match ty {
                     Term::Primitive(crate::Primitive::BitVec(width)) => Some(*width),
-                    Term::Primitive(primitive) => primitive.unrestricted_scalar_width().map(|w|w as usize),
+                    Term::Primitive(primitive) => {
+                        primitive.unrestricted_scalar_width().map(|w| w as usize)
+                    }
                     _ => None,
                 };
-                if width != Some(field.width) { return Err("enum encoding payload type has a different representation"); }
+                if width != Some(field.width) {
+                    return Err("enum encoding payload type has a different representation");
+                }
             }
         }
         Ok(())
     }
     /// A trusted optional representation preserves its single payload intact.
     pub fn is_optional_representation(&self) -> bool {
-        if self.encoding.is_some() || self.symbol_encoding.is_some() || !self.groups.is_empty() { return false; }
-        let [parameter] = self.type_parameters.as_slice() else { return false; };
-        self.variants.len() == 2 && self.variants.iter().filter(|variant|
-            variant.shape == VariantShape::Unit && variant.fields.is_empty()).count() == 1
-            && self.variants.iter().filter(|variant| variant.shape == VariantShape::Tuple
-                && variant.fields == [Term::Rigid { declaration: *parameter, sort: crate::Sort::Type }]).count() == 1
-            && self.requirements.is_empty() && self.capabilities.is_empty()
+        if self.encoding.is_some() || self.symbol_encoding.is_some() || !self.groups.is_empty() {
+            return false;
+        }
+        let [parameter] = self.type_parameters.as_slice() else {
+            return false;
+        };
+        self.variants.len() == 2
+            && self
+                .variants
+                .iter()
+                .filter(|variant| variant.shape == VariantShape::Unit && variant.fields.is_empty())
+                .count()
+                == 1
+            && self
+                .variants
+                .iter()
+                .filter(|variant| {
+                    variant.shape == VariantShape::Tuple
+                        && variant.fields
+                            == [Term::Rigid {
+                                declaration: *parameter,
+                                sort: crate::Sort::Type,
+                            }]
+                })
+                .count()
+                == 1
+            && self.requirements.is_empty()
+            && self.capabilities.is_empty()
     }
     pub fn instantiate_variants(
         &self,
@@ -1726,9 +1976,15 @@ impl Enum {
     }
     /// Instantiate payloads in caller frames, preserving nested binder depths.
     pub fn instantiate_variants_in_scope(
-        &self, arguments: &[Term], frames: &[Vec<crate::Sort>],
+        &self,
+        arguments: &[Term],
+        frames: &[Vec<crate::Sort>],
     ) -> Result<Vec<Variant>, crate::TypeError> {
-        Term::Tuple(Vec::new()).instantiate_types_in_scope(&self.type_parameters, arguments, frames)?;
+        Term::Tuple(Vec::new()).instantiate_types_in_scope(
+            &self.type_parameters,
+            arguments,
+            frames,
+        )?;
         self.variants
             .iter()
             .map(|variant| {
@@ -1738,7 +1994,9 @@ impl Enum {
                     fields: variant
                         .fields
                         .iter()
-                        .map(|ty| ty.instantiate_types_in_scope(&self.type_parameters, arguments, frames))
+                        .map(|ty| {
+                            ty.instantiate_types_in_scope(&self.type_parameters, arguments, frames)
+                        })
                         .collect::<Result<_, _>>()?,
                 })
             })
@@ -1761,11 +2019,18 @@ impl fmt::Display for Enum {
         for requirement in &self.requirements {
             write!(f, " {requirement}")?;
         }
-        if let Some(encoding) = &self.encoding { write!(f, ") (encoding {encoding}")?; }
-        if let Some(encoding) = &self.symbol_encoding { write!(f, ") (encoding {encoding}")?; }
+        if let Some(encoding) = &self.encoding {
+            write!(f, ") (encoding {encoding}")?;
+        }
+        if let Some(encoding) = &self.symbol_encoding {
+            write!(f, ") (encoding {encoding}")?;
+        }
         if !self.groups.is_empty() {
             f.write_str(") (groups")?;
-            for group in &self.groups { f.write_str(" ")?; string(f,group)?; }
+            for group in &self.groups {
+                f.write_str(" ")?;
+                string(f, group)?;
+            }
         }
         f.write_str(") (variants")?;
         for variant in &self.variants {
@@ -1811,9 +2076,15 @@ impl Struct {
     }
     /// Instantiate fields in caller frames; the closed entrypoint stays strict.
     pub fn instantiate_fields_in_scope(
-        &self, arguments: &[Term], frames: &[Vec<crate::Sort>],
+        &self,
+        arguments: &[Term],
+        frames: &[Vec<crate::Sort>],
     ) -> Result<Vec<(String, Term)>, crate::TypeError> {
-        Term::Tuple(Vec::new()).instantiate_types_in_scope(&self.type_parameters, arguments, frames)?;
+        Term::Tuple(Vec::new()).instantiate_types_in_scope(
+            &self.type_parameters,
+            arguments,
+            frames,
+        )?;
         self.fields
             .iter()
             .map(|(name, ty)| {
@@ -1858,8 +2129,11 @@ impl fmt::Display for LocalId {
 }
 impl fmt::Display for SourceRange {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(index) = self.expansion_index() { write!(f, "(generated-source {index})") }
-        else { write!(f, "(source {} {})", self.start, self.end) }
+        if let Some(index) = self.expansion_index() {
+            write!(f, "(generated-source {index})")
+        } else {
+            write!(f, "(source {} {})", self.start, self.end)
+        }
     }
 }
 impl fmt::Display for Literal {
@@ -1878,7 +2152,10 @@ impl fmt::Display for Literal {
             Self::UnsignedInteger(value) => write!(f, "(unsigned-integer {value})"),
             Self::Bool(value) => write!(f, "(bool {value})"),
             Self::Char(value) => write!(f, "(char {})", *value as u32),
-            Self::Symbol(value) | Self::String(value) | Self::Integer(value) | Self::Float(value) => {
+            Self::Symbol(value)
+            | Self::String(value)
+            | Self::Integer(value)
+            | Self::Float(value) => {
                 f.write_str(match self {
                     Self::String(_) => "(string ",
                     Self::Symbol(_) => "(symbol ",
@@ -1900,30 +2177,59 @@ impl fmt::Display for ExprKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EffectResume(value) => write!(f, "(effect-resume {value})"),
-            Self::EffectHandle {computation, handlers, outer} => {
+            Self::EffectHandle {
+                computation,
+                handlers,
+                outer,
+            } => {
                 f.write_str("(effect-handle (outer")?;
-                for operation in outer {write!(f, " {operation}")?;}
+                for operation in outer {
+                    write!(f, " {operation}")?;
+                }
                 f.write_str(") (handlers")?;
-                for handler in handlers {write!(f, " {handler}")?;}
+                for handler in handlers {
+                    write!(f, " {handler}")?;
+                }
                 write!(f, ") (computation {computation}))")
             }
-            Self::EffectRun {computation, slots} => {
+            Self::EffectRun { computation, slots } => {
                 f.write_str("(effect-run (slots")?;
-                for slot in slots {write!(f, " {slot}")?;}
+                for slot in slots {
+                    write!(f, " {slot}")?;
+                }
                 write!(f, ") (computation {computation}))")
             }
-            Self::EffectComputation {effects, body} => {
+            Self::EffectComputation { effects, body } => {
                 f.write_str("(effect-computation (allowed")?;
-                for effect in effects {write!(f, " {effect}")?;}
+                for effect in effects {
+                    write!(f, " {effect}")?;
+                }
                 write!(f, ") (body {body}))")
             }
-            Self::EffectRequest {operation, abi, allowed_index, signature, arguments} => {
-                write!(f, "(effect-request {operation} (abi {abi}) (allowed-index {allowed_index}) (signature {signature}) (arguments")?;
-                for argument in arguments {write!(f, " {argument}")?;}
+            Self::EffectRequest {
+                operation,
+                abi,
+                allowed_index,
+                signature,
+                arguments,
+            } => {
+                write!(
+                    f,
+                    "(effect-request {operation} (abi {abi}) (allowed-index {allowed_index}) (signature {signature}) (arguments"
+                )?;
+                for argument in arguments {
+                    write!(f, " {argument}")?;
+                }
                 f.write_str("))")
             }
-            Self::AssociatedValue { interface, member, subject } => write!(f,
-                "(associated-value (interface {interface}) (member {member}) (subject {subject}))"),
+            Self::AssociatedValue {
+                interface,
+                member,
+                subject,
+            } => write!(
+                f,
+                "(associated-value (interface {interface}) (member {member}) (subject {subject}))"
+            ),
             Self::Literal(x) => x.fmt(f),
             Self::Local(x) => x.fmt(f),
             Self::Function(x) => write!(f, "(function-ref {x})"),
@@ -1942,7 +2248,9 @@ impl fmt::Display for ExprKind {
                     f,
                     "(trait-method (interface {interface}) (member {member}) (subject {subject}) (method-arguments"
                 )?;
-                for argument in method_arguments { write!(f, " {argument}")?; }
+                for argument in method_arguments {
+                    write!(f, " {argument}")?;
+                }
                 write!(f, "))")
             }
             Self::FunctionInstance {
@@ -1984,7 +2292,9 @@ impl fmt::Display for ExprKind {
             }
             Self::AnonymousRecord { fields } => {
                 f.write_str("(anonymous-record (fields")?;
-                for field in fields { write!(f, " {field}")?; }
+                for field in fields {
+                    write!(f, " {field}")?;
+                }
                 f.write_str("))")
             }
             Self::Record {
@@ -2025,7 +2335,11 @@ impl fmt::Display for ExprKind {
                 f.write_str(")")
             }
             Self::Block { statements, result } | Self::CallPreparation { statements, result } => {
-                f.write_str(if matches!(self, Self::CallPreparation { .. }) { "(call-preparation (statements" } else { "(block (statements" })?;
+                f.write_str(if matches!(self, Self::CallPreparation { .. }) {
+                    "(call-preparation (statements"
+                } else {
+                    "(block (statements"
+                })?;
                 for x in statements {
                     write!(f, " {x}")?;
                 }
@@ -2052,15 +2366,31 @@ impl fmt::Display for ExprKind {
                 }
                 f.write_str("))")
             }
-            Self::BitWritePointer {pointer,selections,value} => {
-                write!(f,"(bit-write-pointer (pointer {pointer}) (selections")?;
-                for selection in selections {write!(f," {selection}")?;}
-                write!(f,") (value {value}))")
+            Self::BitWritePointer {
+                pointer,
+                selections,
+                value,
+            } => {
+                write!(f, "(bit-write-pointer (pointer {pointer}) (selections")?;
+                for selection in selections {
+                    write!(f, " {selection}")?;
+                }
+                write!(f, ") (value {value}))")
             }
-            Self::BitUpdate {place, storage_type, selections, value} => {
-                write!(f,"(bit-update (place {place}) (storage-type {storage_type}) (selections")?;
-                for selection in selections {write!(f," {selection}")?;}
-                write!(f,") (value {value}))")
+            Self::BitUpdate {
+                place,
+                storage_type,
+                selections,
+                value,
+            } => {
+                write!(
+                    f,
+                    "(bit-update (place {place}) (storage-type {storage_type}) (selections"
+                )?;
+                for selection in selections {
+                    write!(f, " {selection}")?;
+                }
+                write!(f, ") (value {value}))")
             }
             Self::BitAssign {
                 place,
@@ -2115,24 +2445,37 @@ impl fmt::Display for ExprKind {
                 }
                 f.write_str("))")
             }
-            Self::BitWindow {value, start, end} => write!(f, "(bit-window (value {value}) (start {start}) (end {end}))"),
-            Self::BitIndex(value, index) => write!(f, "(bit-index (value {value}) (index {index}))"),
+            Self::BitWindow { value, start, end } => write!(
+                f,
+                "(bit-window (value {value}) (start {start}) (end {end}))"
+            ),
+            Self::BitIndex(value, index) => {
+                write!(f, "(bit-index (value {value}) (index {index}))")
+            }
             Self::BitSlice { value, start, end } => {
                 write!(f, "(bit-slice (value {value}) (start {start}) (end {end}))")
             }
             Self::TypeValue(ty) => write!(f, "(type-value {ty})"),
             Self::TypeListValue(types) => {
                 f.write_str("(type-list-value")?;
-                for ty in types { write!(f, " {ty}")?; }
+                for ty in types {
+                    write!(f, " {ty}")?;
+                }
                 f.write_str(")")
             }
-            Self::NormalFormType { head, arguments, plan } => {
+            Self::NormalFormType {
+                head,
+                arguments,
+                plan,
+            } => {
                 write!(f, "(normal-form-type-value (head {head}) (arguments")?;
                 for argument in arguments {
                     write!(f, " {argument}")?;
                 }
                 f.write_str(")")?;
-                if let Some(plan) = plan {write!(f," {plan}")?;}
+                if let Some(plan) = plan {
+                    write!(f, " {plan}")?;
+                }
                 f.write_str(")")
             }
             Self::NominalType {
@@ -2163,11 +2506,17 @@ impl fmt::Display for ExprKind {
             Self::ScalarEqual(left, right) => {
                 write!(f, "(scalar-equal (left {left}) (right {right}))")
             }
-            Self::TypeListIndex(values,index) => write!(f,"(type-list-index (values {values}) (index {index}))"),
+            Self::TypeListIndex(values, index) => {
+                write!(f, "(type-list-index (values {values}) (index {index}))")
+            }
             Self::TypeEqual(left, right) => write!(f, "(type-equal (left {left}) (right {right}))"),
             Self::AddressOf(place) => write!(f, "(address-of (place {place}))"),
             Self::ReadPointer(pointer) => write!(f, "(read-pointer (pointer {pointer}))"),
-            Self::PointerAnonymousField { pointer, name, index } => {
+            Self::PointerAnonymousField {
+                pointer,
+                name,
+                index,
+            } => {
                 write!(f, "(pointer-record-field (pointer {pointer}) (name ")?;
                 crate::display::string(f, name)?;
                 write!(f, ") (index {index}))")
@@ -2225,6 +2574,7 @@ impl fmt::Display for ExprKind {
                 write!(f, "(integer-{op} (left {left}) (right {right}))")
             }
             Self::BitConvert(value) => write!(f, "(bit-convert {value})"),
+            Self::NewtypeConvert(value) => write!(f, "(newtype-convert {value})"),
             Self::BitEqual(a, b) => write!(f, "(bit-equal {a} {b})"),
             Self::EnumName(x) => write!(f, "(enum-name {x})"),
             Self::SymbolName(x) => write!(f, "(symbol-name {x})"),
@@ -2287,18 +2637,27 @@ impl fmt::Display for Function {
 impl fmt::Display for Package {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(nir-package")?;
-        if !self.quote_templates.is_empty() {write!(f," (quote-identity-cursor {})",self.quote_identity_cursor)?;}
-        for ((start,end),declaration) in &self.internal_return_empty_replacements {
-            write!(f,"\n (internal-return-empty-replacement (source {start} {end}) (packet {declaration}))")?;
+        if !self.quote_templates.is_empty() {
+            write!(f, " (quote-identity-cursor {})", self.quote_identity_cursor)?;
+        }
+        for ((start, end), declaration) in &self.internal_return_empty_replacements {
+            write!(
+                f,
+                "\n (internal-return-empty-replacement (source {start} {end}) (packet {declaration}))"
+            )?;
         }
         for declaration in &self.internal_return_packets {
-            write!(f,"\n (internal-return-packet {declaration})")?;
+            write!(f, "\n (internal-return-packet {declaration})")?;
         }
         for (index, origin) in self.expansion_sources.iter().enumerate() {
             write!(f, "\n (expansion-source {index} {origin})")?;
         }
-        for effect in &self.effects { write!(f, "\n {effect}")?; }
-        for identity in &self.runtime_function_identities { write!(f, "\n {identity}")?; }
+        for effect in &self.effects {
+            write!(f, "\n {effect}")?;
+        }
+        for identity in &self.runtime_function_identities {
+            write!(f, "\n {identity}")?;
+        }
         for head in &self.normal_forms {
             write!(f, "\n {head}")?;
         }
@@ -2309,6 +2668,9 @@ impl fmt::Display for Package {
             write!(f, "\n {definition}")?;
         }
         for definition in &self.enums {
+            write!(f, "\n {definition}")?;
+        }
+        for definition in &self.newtypes {
             write!(f, "\n {definition}")?;
         }
         for definition in &self.structs {
@@ -2328,15 +2690,27 @@ impl fmt::Display for Package {
 }
 
 impl Expr {
+    /// A discarded void expression has no separate value to retire. Lowering
+    /// commonly gives the statement wrapper and its child the same range; the
+    /// child's full-expression hook owns that boundary exactly once.
+    pub fn shares_discard_temporary_boundary(&self) -> bool {
+        matches!(&self.kind, ExprKind::Discard(inner)
+            if self.source == inner.source && matches!(inner.ty, Term::Primitive(crate::Primitive::Void))
+                && !matches!(inner.kind, ExprKind::Block {..} | ExprKind::CallPreparation {..}
+                    | ExprKind::EffectComputation {..} | ExprKind::EffectRun {..}))
+    }
+
     /// Specialize type-bearing structure using explicitly sorted declaration
     /// inputs. Value locals and runtime erasure remain the instantiation pass's
     /// responsibility; this operation does not invent runtime values.
     pub fn instantiate_parameters(
-        &self, parameters: &[crate::DeclarationParameter], arguments: &[Term],
-    ) -> Result<Self,crate::TypeError> {
-        Term::Tuple(Vec::new()).instantiate_parameters(parameters,arguments)?;
-        let mut value=self.clone();
-        value.rewrite_types(&mut |ty| ty.instantiate_parameters(parameters,arguments))?;
+        &self,
+        parameters: &[crate::DeclarationParameter],
+        arguments: &[Term],
+    ) -> Result<Self, crate::TypeError> {
+        Term::Tuple(Vec::new()).instantiate_parameters(parameters, arguments)?;
+        let mut value = self.clone();
+        value.rewrite_types(&mut |ty| ty.instantiate_parameters(parameters, arguments))?;
         Ok(value)
     }
 
@@ -2353,10 +2727,15 @@ impl Expr {
     }
     /// Substitute annotations with explicit caller frames without changing term identity.
     pub fn instantiate_types_in_scope(
-        &self, parameters: &[DeclarationId], arguments: &[Term], frames: &[Vec<crate::Sort>],
+        &self,
+        parameters: &[DeclarationId],
+        arguments: &[Term],
+        frames: &[Vec<crate::Sort>],
     ) -> Result<Self, crate::TypeError> {
         let mut value = self.clone();
-        value.rewrite_types(&mut |ty| ty.instantiate_types_in_scope(parameters, arguments, frames))?;
+        value.rewrite_types(&mut |ty| {
+            ty.instantiate_types_in_scope(parameters, arguments, frames)
+        })?;
         Ok(value)
     }
     /// Rewrite every type-bearing annotation and operand in deterministic structural order.
@@ -2372,51 +2751,103 @@ impl Expr {
     /// Callbacks run before children. This deliberately shares the exhaustive
     /// traversal used by type substitution so new operations cannot be skipped.
     pub fn rewrite_with<R: Rewriter>(&mut self, rewriter: &mut R) -> Result<(), R::Error> {
-        if !rewriter.expression(self)? { return Ok(()); }
+        if !rewriter.expression(self)? {
+            return Ok(());
+        }
         self.ty = rewriter.ty(&self.ty)?;
         match &mut self.kind {
-            ExprKind::EffectHandle {computation, handlers, outer} => {
+            ExprKind::EffectHandle {
+                computation,
+                handlers,
+                outer,
+            } => {
                 computation.rewrite_with(rewriter)?;
-                for operation in outer {for argument in &mut operation.arguments {*argument = rewriter.ty(argument)?;}}
+                for operation in outer {
+                    for argument in &mut operation.arguments {
+                        *argument = rewriter.ty(argument)?;
+                    }
+                }
                 for handler in handlers {
-                    for argument in &mut handler.operation.arguments {*argument = rewriter.ty(argument)?;}
+                    for argument in &mut handler.operation.arguments {
+                        *argument = rewriter.ty(argument)?;
+                    }
                     handler.signature = rewriter.ty(&handler.signature)?;
                     for arm in &mut handler.arms {
                         arm.pattern.rewrite_with(rewriter)?;
-                        if let Some(guard) = &mut arm.guard {guard.rewrite_with(rewriter)?;}
+                        if let Some(guard) = &mut arm.guard {
+                            guard.rewrite_with(rewriter)?;
+                        }
                         arm.body.rewrite_with(rewriter)?;
                     }
                 }
             }
-            ExprKind::EffectResume(computation) | ExprKind::EffectRun {computation, ..} => computation.rewrite_with(rewriter)?,
-            ExprKind::EffectComputation {effects, body} => {
-                for operation in effects {for argument in &mut operation.arguments {*argument = rewriter.ty(argument)?;}}
+            ExprKind::EffectResume(computation) | ExprKind::EffectRun { computation, .. } => {
+                computation.rewrite_with(rewriter)?
+            }
+            ExprKind::EffectComputation { effects, body } => {
+                for operation in effects {
+                    for argument in &mut operation.arguments {
+                        *argument = rewriter.ty(argument)?;
+                    }
+                }
                 body.rewrite_with(rewriter)?;
             }
-            ExprKind::EffectRequest {operation, signature, arguments, ..} => {
-                for argument in &mut operation.arguments {*argument = rewriter.ty(argument)?;}
+            ExprKind::EffectRequest {
+                operation,
+                signature,
+                arguments,
+                ..
+            } => {
+                for argument in &mut operation.arguments {
+                    *argument = rewriter.ty(argument)?;
+                }
                 **signature = rewriter.ty(signature)?;
-                for argument in arguments {argument.rewrite_with(rewriter)?;}
+                for argument in arguments {
+                    argument.rewrite_with(rewriter)?;
+                }
             }
-            ExprKind::AssociatedValue { interface, subject, .. } => {
+            ExprKind::AssociatedValue {
+                interface, subject, ..
+            } => {
                 *subject = rewriter.ty(subject)?;
-                for argument in &mut interface.arguments { *argument = rewriter.ty(argument)?; }
+                for argument in &mut interface.arguments {
+                    *argument = rewriter.ty(argument)?;
+                }
             }
             ExprKind::TypeValue(ty) => {
                 *ty = rewriter.ty(ty)?;
             }
             ExprKind::TypeListValue(types) => {
-                for ty in types { *ty = rewriter.ty(ty)?; }
+                for ty in types {
+                    *ty = rewriter.ty(ty)?;
+                }
             }
 
-            ExprKind::BitWritePointer {pointer,selections,value} => {
+            ExprKind::BitWritePointer {
+                pointer,
+                selections,
+                value,
+            } => {
                 pointer.rewrite_with(rewriter)?;
-                for input in selections.iter_mut().flat_map(BitSelection::expressions_mut) {input.rewrite_with(rewriter)?;}
+                for input in selections
+                    .iter_mut()
+                    .flat_map(BitSelection::expressions_mut)
+                {
+                    input.rewrite_with(rewriter)?;
+                }
                 value.rewrite_with(rewriter)?;
             }
-            ExprKind::BitUpdate {storage_type, selections, value, ..} => {
+            ExprKind::BitUpdate {
+                storage_type,
+                selections,
+                value,
+                ..
+            } => {
                 *storage_type = rewriter.ty(storage_type)?;
-                for expression in selections.iter_mut().flat_map(BitSelection::expressions_mut) {
+                for expression in selections
+                    .iter_mut()
+                    .flat_map(BitSelection::expressions_mut)
+                {
                     expression.rewrite_with(rewriter)?;
                 }
                 value.rewrite_with(rewriter)?;
@@ -2457,7 +2888,9 @@ impl Expr {
                 Arc::make_mut(body).rewrite_with(rewriter)?;
             }
             ExprKind::NormalFormType {
-                arguments: inputs, plan, ..
+                arguments: inputs,
+                plan,
+                ..
             } => {
                 for preparation in plan.iter_mut().flat_map(|p| &mut p.preparations) {
                     preparation.expression.rewrite_with(rewriter)?;
@@ -2489,17 +2922,21 @@ impl Expr {
             }
             | ExprKind::TupleType(fields)
             | ExprKind::Tuple(fields)
-            | ExprKind::AnonymousRecord { fields } | ExprKind::Record { fields, .. }
+            | ExprKind::AnonymousRecord { fields }
+            | ExprKind::Record { fields, .. }
             | ExprKind::Variant { fields, .. } => {
                 for field in fields {
                     (field).rewrite_with(rewriter)?;
                 }
             }
-            ExprKind::AnonymousField { value, .. } | ExprKind::Field { value, .. }
+            ExprKind::AnonymousField { value, .. }
+            | ExprKind::Field { value, .. }
             | ExprKind::Let { value, .. }
             | ExprKind::Assign { value, .. }
             | ExprKind::Discard(value)
-            | ExprKind::RequirePredicate(value) | ExprKind::EnsurePredicate(value) | ExprKind::CheckPredicate(value)
+            | ExprKind::RequirePredicate(value)
+            | ExprKind::EnsurePredicate(value)
+            | ExprKind::CheckPredicate(value)
             | ExprKind::BitSlice { value, .. }
             | ExprKind::AddressOf(value)
             | ExprKind::ReadPointer(value)
@@ -2510,7 +2947,11 @@ impl Expr {
             | ExprKind::IntegerNegate(value)
             | ExprKind::FloatNegate(value)
             | ExprKind::BitConvert(value)
-            | ExprKind::Snapshot(value) | ExprKind::TakeBits(value) | ExprKind::SymbolName(value) | ExprKind::EnumName(value)
+            | ExprKind::NewtypeConvert(value)
+            | ExprKind::Snapshot(value)
+            | ExprKind::TakeBits(value)
+            | ExprKind::SymbolName(value)
+            | ExprKind::EnumName(value)
             | ExprKind::Not(value)
             | ExprKind::Loop { body: value, .. } => (value).rewrite_with(rewriter)?,
             ExprKind::WritePointer {
@@ -2535,13 +2976,14 @@ impl Expr {
             | ExprKind::TypeEqual(a, b)
             | ExprKind::TypeListIndex(a, b)
             | ExprKind::BitEqual(a, b)
-            | ExprKind::BitConcat(a, b) | ExprKind::BitIndex(a, b)
+            | ExprKind::BitConcat(a, b)
+            | ExprKind::BitIndex(a, b)
             | ExprKind::And(a, b)
             | ExprKind::Or(a, b) => {
                 (a).rewrite_with(rewriter)?;
                 (b).rewrite_with(rewriter)?;
             }
-            ExprKind::BitWindow {value, start, end} => {
+            ExprKind::BitWindow { value, start, end } => {
                 value.rewrite_with(rewriter)?;
                 start.rewrite_with(rewriter)?;
                 end.rewrite_with(rewriter)?;
@@ -2556,7 +2998,8 @@ impl Expr {
                     (&mut arm.body).rewrite_with(rewriter)?;
                 }
             }
-            ExprKind::Block { statements, result } | ExprKind::CallPreparation { statements, result } => {
+            ExprKind::Block { statements, result }
+            | ExprKind::CallPreparation { statements, result } => {
                 for statement in statements {
                     (statement).rewrite_with(rewriter)?;
                 }
@@ -2622,9 +3065,13 @@ impl Term {
             match term {
                 Term::Computation { effects, result } => {
                     terms.push(result);
-                    for operation in effects { terms.extend(&operation.arguments); }
+                    for operation in effects {
+                        terms.extend(&operation.arguments);
+                    }
                 }
-                Term::AssociatedType { arguments, subject, .. } => {
+                Term::AssociatedType {
+                    arguments, subject, ..
+                } => {
                     terms.extend(arguments);
                     terms.push(subject);
                 }
@@ -2633,9 +3080,17 @@ impl Term {
                 } if *id == declaration => return true,
                 Term::Nominal { arguments, .. }
                 | Term::NormalForm { arguments, .. }
-                | Term::Tuple(arguments) | Term::TypeListValue(arguments) | Term::TypeListConcat(arguments) | Term::TupleValue(arguments) => terms.extend(arguments),
-                Term::NominalValue { ty, fields, .. } => { terms.push(ty); terms.extend(fields); },
-                Term::Record(fields) | Term::RecordValue(fields) => terms.extend(fields.iter().map(|(_, ty)| ty)),
+                | Term::Tuple(arguments)
+                | Term::TypeListValue(arguments)
+                | Term::TypeListConcat(arguments)
+                | Term::TupleValue(arguments) => terms.extend(arguments),
+                Term::NominalValue { ty, fields, .. } => {
+                    terms.push(ty);
+                    terms.extend(fields);
+                }
+                Term::Record(fields) | Term::RecordValue(fields) => {
+                    terms.extend(fields.iter().map(|(_, ty)| ty))
+                }
                 Term::Pointer(t) | Term::ComptimeFunction(t) => terms.push(t),
                 Term::Function { parameters, result } => {
                     terms.extend(parameters.iter().map(|p| &p.ty));
@@ -2679,17 +3134,25 @@ impl TypePredicate {
         Ok(match self {
             Self::Bool(value) => Self::Bool(*value),
             Self::Trait(requirement) => Self::Trait(
-                requirement.instantiate_parameters_in_scope(parameters, arguments, frames)?),
+                requirement.instantiate_parameters_in_scope(parameters, arguments, frames)?,
+            ),
             Self::Equal(left, right) => Self::Equal(
                 left.instantiate_parameters_in_scope(parameters, arguments, frames)?,
-                right.instantiate_parameters_in_scope(parameters, arguments, frames)?),
+                right.instantiate_parameters_in_scope(parameters, arguments, frames)?,
+            ),
             Self::Not(inner) => Self::Not(Box::new(
-                inner.instantiate_parameters_in_scope(parameters, arguments, frames)?)),
+                inner.instantiate_parameters_in_scope(parameters, arguments, frames)?,
+            )),
             Self::And(parts) | Self::Or(parts) => {
-                let parts = parts.iter()
+                let parts = parts
+                    .iter()
                     .map(|part| part.instantiate_parameters_in_scope(parameters, arguments, frames))
                     .collect::<Result<_, _>>()?;
-                if matches!(self, Self::And(_)) { Self::And(parts) } else { Self::Or(parts) }
+                if matches!(self, Self::And(_)) {
+                    Self::And(parts)
+                } else {
+                    Self::Or(parts)
+                }
             }
         })
     }
@@ -2751,10 +3214,13 @@ impl TypePredicate {
         parameters: &[DeclarationId],
         arguments: &[Term],
     ) -> Result<Self, crate::TypeError> {
-        let parameters = parameters.iter().map(|&declaration| crate::DeclarationParameter {
-            declaration,
-            sort: crate::Sort::Type,
-        }).collect::<Vec<_>>();
+        let parameters = parameters
+            .iter()
+            .map(|&declaration| crate::DeclarationParameter {
+                declaration,
+                sort: crate::Sort::Type,
+            })
+            .collect::<Vec<_>>();
         self.instantiate_parameters(&parameters, arguments)
     }
 
@@ -2771,8 +3237,14 @@ impl TypePredicate {
             Self::Bool(v) => Self::Bool(*v),
             Self::Trait(requirement) => Self::Trait(TraitRequirement {
                 interface: requirement.interface,
-                subject: requirement.subject.instantiate_parameters(parameters, arguments)?,
-                interface_arguments: requirement.interface_arguments.iter().map(|term| term.instantiate_parameters(parameters, arguments)).collect::<Result<_, _>>()?,
+                subject: requirement
+                    .subject
+                    .instantiate_parameters(parameters, arguments)?,
+                interface_arguments: requirement
+                    .interface_arguments
+                    .iter()
+                    .map(|term| term.instantiate_parameters(parameters, arguments))
+                    .collect::<Result<_, _>>()?,
             }),
             Self::Equal(a, b) => Self::Equal(
                 a.instantiate_parameters(parameters, arguments)?,
@@ -2800,8 +3272,14 @@ impl TypePredicate {
             Self::Bool(v) => Self::Bool(*v),
             Self::Trait(requirement) => Self::Trait(TraitRequirement {
                 interface: requirement.interface,
-                subject: requirement.subject.instantiate_rigids(parameters, arguments)?,
-                interface_arguments: requirement.interface_arguments.iter().map(|term| term.instantiate_rigids(parameters, arguments)).collect::<Result<_, _>>()?,
+                subject: requirement
+                    .subject
+                    .instantiate_rigids(parameters, arguments)?,
+                interface_arguments: requirement
+                    .interface_arguments
+                    .iter()
+                    .map(|term| term.instantiate_rigids(parameters, arguments))
+                    .collect::<Result<_, _>>()?,
             }),
             Self::Equal(a, b) => Self::Equal(
                 a.instantiate_rigids(parameters, arguments)?,
@@ -2849,13 +3327,19 @@ impl fmt::Display for TypePredicate {
 pub trait Rewriter {
     type Error;
     fn ty(&mut self, ty: &Term) -> Result<Term, Self::Error>;
-    fn expression(&mut self, _expression: &mut Expr) -> Result<bool, Self::Error> { Ok(true) }
-    fn pattern(&mut self, _pattern: &mut Pattern) -> Result<(), Self::Error> { Ok(()) }
+    fn expression(&mut self, _expression: &mut Expr) -> Result<bool, Self::Error> {
+        Ok(true)
+    }
+    fn pattern(&mut self, _pattern: &mut Pattern) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 struct TypeRewriter<'a, T>(&'a mut T);
 impl<E, T: FnMut(&Term) -> Result<Term, E>> Rewriter for TypeRewriter<'_, T> {
     type Error = E;
-    fn ty(&mut self, ty: &Term) -> Result<Term, E> { (self.0)(ty) }
+    fn ty(&mut self, ty: &Term) -> Result<Term, E> {
+        (self.0)(ty)
+    }
 }
 
 impl Pattern {
@@ -2888,7 +3372,8 @@ impl Pattern {
             | Self::TypeTuple(fields)
             | Self::Tuple(fields)
             | Self::Or(fields)
-            | Self::Record { fields, .. } | Self::AnonymousRecord { fields, .. }
+            | Self::Record { fields, .. }
+            | Self::AnonymousRecord { fields, .. }
             | Self::Variant { fields, .. } => {
                 for pattern in fields {
                     pattern.rewrite_with(rewriter)?;
@@ -2916,7 +3401,9 @@ pub fn checkable_predicate(expression: &Expr) -> bool {
         }
         remaining -= 1;
         match &expr.kind {
-            ExprKind::BitWindow {value, start, end} => pending.extend([value.as_ref(), start.as_ref(), end.as_ref()]),
+            ExprKind::BitWindow { value, start, end } => {
+                pending.extend([value.as_ref(), start.as_ref(), end.as_ref()])
+            }
             ExprKind::Literal(_) | ExprKind::Local(_) | ExprKind::Unit => {}
             ExprKind::ReadPointer(value) => {
                 if !intrinsic_pointer_value(&expr.ty) || pointer_operation_error(expr).is_some() {
@@ -2924,18 +3411,26 @@ pub fn checkable_predicate(expression: &Expr) -> bool {
                 }
                 pending.push(value);
             }
-            ExprKind::AddressOf(value) | ExprKind::PointerField {pointer:value, ..}
-            | ExprKind::PointerAnonymousField {pointer:value, ..} => {
-                if pointer_operation_error(expr).is_some() { return false; }
+            ExprKind::AddressOf(value)
+            | ExprKind::PointerField { pointer: value, .. }
+            | ExprKind::PointerAnonymousField { pointer: value, .. } => {
+                if pointer_operation_error(expr).is_some() {
+                    return false;
+                }
                 pending.push(value);
             }
             ExprKind::Not(value)
             | ExprKind::IntegerNegate(value)
             | ExprKind::FloatNegate(value)
             | ExprKind::BitConvert(value)
-            | ExprKind::Snapshot(value) | ExprKind::TakeBits(value) | ExprKind::SymbolName(value) | ExprKind::EnumName(value)
+            | ExprKind::NewtypeConvert(value)
+            | ExprKind::Snapshot(value)
+            | ExprKind::TakeBits(value)
+            | ExprKind::SymbolName(value)
+            | ExprKind::EnumName(value)
             | ExprKind::Discard(value)
-            | ExprKind::AnonymousField { value, .. } | ExprKind::Field { value, .. }
+            | ExprKind::AnonymousField { value, .. }
+            | ExprKind::Field { value, .. }
             | ExprKind::BitSlice { value, .. }
             | ExprKind::Let { value, .. } => pending.push(value),
             ExprKind::ScalarEqual(a, b)
@@ -2944,7 +3439,8 @@ pub fn checkable_predicate(expression: &Expr) -> bool {
             | ExprKind::ScalarGreater(a, b)
             | ExprKind::ScalarGreaterEqual(a, b)
             | ExprKind::BitEqual(a, b)
-            | ExprKind::BitConcat(a, b) | ExprKind::BitIndex(a, b)
+            | ExprKind::BitConcat(a, b)
+            | ExprKind::BitIndex(a, b)
             | ExprKind::And(a, b)
             | ExprKind::Or(a, b)
             | ExprKind::IntegerBinary {
@@ -2962,7 +3458,8 @@ pub fn checkable_predicate(expression: &Expr) -> bool {
                 pending.extend([condition.as_ref(), then_branch.as_ref()]);
                 pending.extend(else_branch.as_deref());
             }
-            ExprKind::Block { statements, result } | ExprKind::CallPreparation { statements, result } => {
+            ExprKind::Block { statements, result }
+            | ExprKind::CallPreparation { statements, result } => {
                 pending.extend(statements);
                 pending.extend(result.as_deref());
             }
@@ -3019,13 +3516,27 @@ pub fn pointer_operation_error(expr: &Expr) -> Option<&'static str> {
             Term::Pointer(inner) if **inner == expr.ty => (),
             _ => return Some("pointer read type mismatch"),
         },
-        K::PointerAnonymousField { pointer, name, index } => {
+        K::PointerAnonymousField {
+            pointer,
+            name,
+            index,
+        } => {
             let (Term::Pointer(base), Term::Pointer(result)) = (&pointer.ty, &expr.ty) else {
                 return Some("record field pointer requires pointer operands");
             };
             match base.as_ref() {
-                Term::Record(fields) if fields.get(*index).is_some_and(|(label, ty)| label == name && ty == result.as_ref()) => (),
-                Term::AssociatedType { .. } | Term::Rigid { .. } | Term::NormalForm { .. } | Term::Bound { .. } | Term::Hole { .. } => (),
+                Term::Record(fields)
+                    if fields
+                        .get(*index)
+                        .is_some_and(|(label, ty)| label == name && ty == result.as_ref()) =>
+                {
+                    ()
+                }
+                Term::AssociatedType { .. }
+                | Term::Rigid { .. }
+                | Term::NormalForm { .. }
+                | Term::Bound { .. }
+                | Term::Hole { .. } => (),
                 _ => return Some("record field pointer label, index or type mismatch"),
             }
         }
@@ -3034,10 +3545,18 @@ pub fn pointer_operation_error(expr: &Expr) -> Option<&'static str> {
                 return Some("field pointer requires pointer operands");
             }
         }
-        K::BitWritePointer {pointer,..} => match &pointer.ty {
-            Term::Pointer(inner) if matches!(inner.as_ref(),Term::Primitive(p)
-                if matches!(p,crate::Primitive::BitVec(_)) || p.unrestricted_scalar_width().is_some()) => (),
-            _=>return Some("bit writeback pointer requires an unrestricted scalar representation"),
+        K::BitWritePointer { pointer, .. } => match &pointer.ty {
+            Term::Pointer(inner)
+                if matches!(inner.as_ref(),Term::Primitive(p)
+                if matches!(p,crate::Primitive::BitVec(_)) || p.unrestricted_scalar_width().is_some()) =>
+            {
+                ()
+            }
+            _ => {
+                return Some(
+                    "bit writeback pointer requires an unrestricted scalar representation",
+                );
+            }
         },
         K::WritePointer { pointer, value } => match &pointer.ty {
             Term::Pointer(inner)
@@ -3074,7 +3593,8 @@ pub fn bit_writeback_error(
         return Some("bit writeback requires an unrestricted scalar representation");
     };
     let never = Term::Primitive(Primitive::Never);
-    if start > end || end > width
+    if start > end
+        || end > width
         || (*result != Term::Primitive(Primitive::Void) && !(*result == never && *value == never))
         || (*value != never && *value != Term::Primitive(Primitive::BitVec(end - start)))
     {
@@ -3100,31 +3620,44 @@ pub fn intrinsic_pointer_value(ty: &Term) -> bool {
     ) || matches!(ty,Term::Primitive(p) if p.fixed_integer_layout().is_some())
 }
 
-
-pub fn bit_update_error(storage: &Term, selections: &[BitSelection], value: &Term, result: &Term) -> Option<&'static str> {
+pub fn bit_update_error(
+    storage: &Term,
+    selections: &[BitSelection],
+    value: &Term,
+    result: &Term,
+) -> Option<&'static str> {
     let width = match storage {
         Term::Primitive(crate::Primitive::BitVec(width)) => Some(*width),
-        Term::Primitive(p) => p.unrestricted_scalar_width().map(|n|n as usize),
+        Term::Primitive(p) => p.unrestricted_scalar_width().map(|n| n as usize),
         _ => None,
     };
-    let Some(mut width) = width else {return Some("bit writeback requires an unrestricted scalar representation")};
+    let Some(mut width) = width else {
+        return Some("bit writeback requires an unrestricted scalar representation");
+    };
     let mut divergent = false;
     for selection in selections {
-        let Some(next) = selection.output_width(width) else {return Some("bit writeback selection is out of bounds")};
+        let Some(next) = selection.output_width(width) else {
+            return Some("bit writeback selection is out of bounds");
+        };
         for expression in selection.expressions() {
             divergent |= expression.ty == Term::Primitive(crate::Primitive::Never);
-            if matches!(expression.ty, Term::Primitive(p) if !matches!(p,crate::Primitive::Integer | crate::Primitive::Never) && p.fixed_integer_layout().is_none()) {
+            if matches!(expression.ty, Term::Primitive(p) if !matches!(p,crate::Primitive::Integer | crate::Primitive::Never) && p.fixed_integer_layout().is_none())
+            {
                 return Some("bit writeback index must be an integer");
             }
         }
         width = next;
     }
     if divergent {
-        if *result != Term::Primitive(crate::Primitive::Never) {return Some("divergent bit writeback must have Never type");}
-        if *value != Term::Primitive(crate::Primitive::Never) && *value != Term::Primitive(crate::Primitive::BitVec(width)) {
+        if *result != Term::Primitive(crate::Primitive::Never) {
+            return Some("divergent bit writeback must have Never type");
+        }
+        if *value != Term::Primitive(crate::Primitive::Never)
+            && *value != Term::Primitive(crate::Primitive::BitVec(width))
+        {
             return Some("bit writeback width or result type mismatch");
         }
         return None;
     }
-    bit_writeback_error(storage,0,width,value,result)
+    bit_writeback_error(storage, 0, width, value, result)
 }

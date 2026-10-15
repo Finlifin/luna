@@ -128,24 +128,33 @@ fn standalone_effect_modifiers_are_definition_attributes() {
 fn nested_effect_qualifiers_do_not_parse_the_inner_prefix_as_a_request() {
     let (ast, root) = parse("effect compute() -> #read #read bool;").unwrap();
     let outer = ast.get_children(root)[2];
-    assert_eq!(ast.get_node_kind(outer), Some(NodeKind::EffectQualifiedType));
+    assert_eq!(
+        ast.get_node_kind(outer),
+        Some(NodeKind::EffectQualifiedType)
+    );
     let inner = ast.get_children(outer)[1];
-    assert_eq!(ast.get_node_kind(inner), Some(NodeKind::EffectQualifiedType));
-    assert_ne!(ast.get_node_kind(ast.get_children(outer)[0]), Some(NodeKind::EffectElimination));
+    assert_eq!(
+        ast.get_node_kind(inner),
+        Some(NodeKind::EffectQualifiedType)
+    );
+    assert_ne!(
+        ast.get_node_kind(ast.get_children(outer)[0]),
+        Some(NodeKind::EffectElimination)
+    );
 }
 
 #[test]
 fn inline_functions_are_definition_modifiers_not_inline_statements() {
-    for (source,count) in [
-        ("inline fn f()->bool {true}",1),
-        ("pure inline fn f()->bool {true}",2),
-        ("comptime inline fn f()->bool {true}",2),
+    for (source, count) in [
+        ("inline fn f()->bool {true}", 1),
+        ("pure inline fn f()->bool {true}", 2),
+        ("comptime inline fn f()->bool {true}", 2),
     ] {
-        let (ast,mut node)=parse(source).unwrap();
+        let (ast, mut node) = parse(source).unwrap();
         for _ in 0..count {
-            assert_eq!(ast.get_node_kind(node),Some(NodeKind::AttributeSetTrue));
-            node=ast.get_children(node)[1];
+            assert_eq!(ast.get_node_kind(node), Some(NodeKind::AttributeSetTrue));
+            node = ast.get_children(node)[1];
         }
-        assert_eq!(ast.get_node_kind(node),Some(NodeKind::Function));
+        assert_eq!(ast.get_node_kind(node), Some(NodeKind::Function));
     }
 }

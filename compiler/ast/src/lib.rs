@@ -195,12 +195,12 @@ pub enum NodeKind {
     Wildcard, // _
 
     // exprs
-    LiteralExtension, // a, b
-    Defer, // a: expression retained for instantiation
-    RefinedType, // a: requirement, b: base type
-    QuoteExpr, // a: runtime body, N: context substitutions
-    SpliceExpr, // a: comptime operand, N: context substitutions
-    CodeSubstitution, // a: interface name, b: source binding name
+    LiteralExtension,   // a, b
+    Defer,              // a: expression retained for instantiation
+    RefinedType,        // a: requirement, b: base type
+    QuoteExpr,          // a: runtime body, N: context substitutions
+    SpliceExpr,         // a: comptime operand, N: context substitutions
+    CodeSubstitution,   // a: interface name, b: source binding name
     ContextualExprType, // a: result type, N: ordered runtime bindings
     CodeContextBinding, // a: name, b: type
 
@@ -843,15 +843,19 @@ impl NodeKind {
             Function => NodeType::FunctionDefChildren, // a, N, b, c, N, d
             NormalFormHeadDef | CaseDef => NodeType::NormalFormHeadDefChildren, // a, N, b, N, c
             AlgebraicEffect => NodeType::AlgebraicEffectChildren, // a, N, b, N, c
-            StructDef | EnumDef | EffectEnumDef | UnionDef | ImplDef | ExtendDef => NodeType::TypeDefChildren, // a, N, b
-            TraitDef => NodeType::TraitDefChildren, // a, b, N, c
+            StructDef | EnumDef | EffectEnumDef | UnionDef | ImplDef | ExtendDef => {
+                NodeType::TypeDefChildren
+            } // a, N, b
+            TraitDef => NodeType::TraitDefChildren,    // a, b, N, c
             ImplTraitDef => NodeType::ImplTraitDefChildren, // a, b, N, c
             ExtendTraitDef => NodeType::ExtendTraitDefChildren, // a, b, N, c
             DeriveDef => NodeType::DoubleWithMultiChildren, // a, b, N
             TypealiasDef | NewtypeDef => NodeType::TypeAliasChildren, // a, N, b
-            AssocDecl => NodeType::AssocDeclChildren, // a, N, b, c, N
-            FnType => NodeType::FnTypeChildren,     // flags_u32, abi_node, N
-            ProjectionMultiPath | QuoteExpr | SpliceExpr | ContextualExprType => NodeType::SingleWithMultiChildren, // a, N
+            AssocDecl => NodeType::AssocDeclChildren,  // a, N, b, c, N
+            FnType => NodeType::FnTypeChildren,        // flags_u32, abi_node, N
+            ProjectionMultiPath | QuoteExpr | SpliceExpr | ContextualExprType => {
+                NodeType::SingleWithMultiChildren
+            } // a, N
 
             // TODO items
             FieldMethodBound | DeclarationBound | Outcomes => NodeType::SingleChild,

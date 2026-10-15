@@ -48,6 +48,7 @@ fn trait_package(ids: &[DeclarationId]) -> nir::program::Package {
         traits: ids
             .iter()
             .map(|&declaration| nir::program::Trait {
+                parameter_types: Vec::new(),
                 associated: vec![],
                 declaration,
                 self_parameter: DeclarationId {
@@ -144,57 +145,127 @@ fn malformed_source_targets_do_not_register() {
 
 #[test]
 fn splice_registration_is_explicit_atomic_and_rejects_foreign_identities() {
-    let id = DeclarationId { package: 42, local: 7 };
-    let foreign = DeclarationId { package: 43, local: 7 };
+    let id = DeclarationId {
+        package: 42,
+        local: 7,
+    };
+    let foreign = DeclarationId {
+        package: 43,
+        local: 7,
+    };
     let package = trait_package(&[id]);
     let mut items = LangItems::new();
     assert!(!items.has(LangItem::Splice));
-    assert!(items.bind_source_traits(&package, &[
-        (LangItem::Splice, id), (LangItem::Copy, foreign),
-    ]).is_err());
+    assert!(
+        items
+            .bind_source_traits(
+                &package,
+                &[(LangItem::Splice, id), (LangItem::Copy, foreign),]
+            )
+            .is_err()
+    );
     assert!(items.is_empty());
-    items.bind_source_traits(&package, &[(LangItem::Splice, id)]).unwrap();
+    items
+        .bind_source_traits(&package, &[(LangItem::Splice, id)])
+        .unwrap();
     assert_eq!(items.get(LangItem::Splice), Some(LangItemDef::UserDef(id)));
     assert_eq!(LangItem::Splice.name(), "Splice");
     let before = items.to_string();
-    assert!(items.bind_source_traits(&trait_package(&[foreign]), &[(LangItem::Splice, foreign)]).is_err());
+    assert!(
+        items
+            .bind_source_traits(&trait_package(&[foreign]), &[(LangItem::Splice, foreign)])
+            .is_err()
+    );
     assert_eq!(items.to_string(), before);
 }
 
 #[test]
 fn tuple_head_registration_requires_explicit_package_qualified_identity() {
-    let first = DeclarationId { package: 1, local: 8 };
-    let second = DeclarationId { package: 2, local: 8 };
-    let make = |declaration| nir::normal_forms::Head { role: nir::normal_forms::Role::Opaque,
-        declaration, parameters: vec![], requirements: vec![],
+    let first = DeclarationId {
+        package: 1,
+        local: 8,
+    };
+    let second = DeclarationId {
+        package: 2,
+        local: 8,
+    };
+    let make = |declaration| nir::normal_forms::Head {
+        role: nir::normal_forms::Role::Opaque,
+        declaration,
+        parameters: vec![],
+        requirements: vec![],
     };
     let package = nir::program::Package {
-        normal_forms: vec![make(first), make(second)], ..Default::default()
+        normal_forms: vec![make(first), make(second)],
+        ..Default::default()
     };
     let mut items = LangItems::new();
     assert!(items.get(LangItem::Tuple).is_none());
-    items.bind_source_normal_form_heads(&package, &[(LangItem::Tuple, first)]).unwrap();
-    items.bind_source_normal_form_heads(&package, &[(LangItem::Tuple, first)]).unwrap();
+    items
+        .bind_source_normal_form_heads(&package, &[(LangItem::Tuple, first)])
+        .unwrap();
+    items
+        .bind_source_normal_form_heads(&package, &[(LangItem::Tuple, first)])
+        .unwrap();
     let before = items.to_string();
-    assert!(items.bind_source_normal_form_heads(&package, &[(LangItem::Tuple, second)]).is_err());
+    assert!(
+        items
+            .bind_source_normal_form_heads(&package, &[(LangItem::Tuple, second)])
+            .is_err()
+    );
     assert_eq!(items.to_string(), before);
-    assert_eq!(items.get(LangItem::Tuple), Some(LangItemDef::UserDef(first)));
-    assert!(items.bind_source_traits(&package, &[(LangItem::Tuple, first)]).is_err());
+    assert_eq!(
+        items.get(LangItem::Tuple),
+        Some(LangItemDef::UserDef(first))
+    );
+    assert!(
+        items
+            .bind_source_traits(&package, &[(LangItem::Tuple, first)])
+            .is_err()
+    );
 }
 
 #[test]
 fn normal_form_registration_rolls_back_missing_duplicate_and_wrong_kind_heads() {
-    let id = DeclarationId { package: 1, local: 8 };
-    let metadata = nir::normal_forms::Head { role: nir::normal_forms::Role::Opaque, declaration: id, parameters: vec![], requirements: vec![] };
-    let package = nir::program::Package { normal_forms: vec![metadata.clone()], ..Default::default() };
+    let id = DeclarationId {
+        package: 1,
+        local: 8,
+    };
+    let metadata = nir::normal_forms::Head {
+        role: nir::normal_forms::Role::Opaque,
+        declaration: id,
+        parameters: vec![],
+        requirements: vec![],
+    };
+    let package = nir::program::Package {
+        normal_forms: vec![metadata.clone()],
+        ..Default::default()
+    };
     let mut items = LangItems::new();
     let before = items.to_string();
-    assert!(items.bind_source_normal_form_heads(&package,
-        &[(LangItem::Tuple, id), (LangItem::Copy, id)]).is_err());
+    assert!(
+        items
+            .bind_source_normal_form_heads(&package, &[(LangItem::Tuple, id), (LangItem::Copy, id)])
+            .is_err()
+    );
     assert_eq!(items.to_string(), before);
-    assert!(items.bind_source_normal_form_heads(&nir::program::Package::default(), &[(LangItem::Tuple, id)]).is_err());
-    let duplicate = nir::program::Package { normal_forms: vec![metadata.clone(), metadata], ..Default::default() };
-    assert!(items.bind_source_normal_form_heads(&duplicate, &[(LangItem::Tuple, id)]).is_err());
+    assert!(
+        items
+            .bind_source_normal_form_heads(
+                &nir::program::Package::default(),
+                &[(LangItem::Tuple, id)]
+            )
+            .is_err()
+    );
+    let duplicate = nir::program::Package {
+        normal_forms: vec![metadata.clone(), metadata],
+        ..Default::default()
+    };
+    assert!(
+        items
+            .bind_source_normal_form_heads(&duplicate, &[(LangItem::Tuple, id)])
+            .is_err()
+    );
     assert_eq!(items.to_string(), before);
 }
 
@@ -202,32 +273,75 @@ fn normal_form_registration_rolls_back_missing_duplicate_and_wrong_kind_heads() 
 fn a_function_named_tuple_does_not_supply_a_pure_normal_form_head() {
     use nir::program::{Expr, ExprKind, Function, FunctionPhase, Package, SourceRange};
     use nir::{Primitive, Term};
-    let id = DeclarationId { package: 3, local: 9 };
-    let function = Function {
-        declaration: id, name: "Tuple".into(), phase: FunctionPhase::Runtime, inline: false, pure: false,
-        type_parameters: vec![], requirements: vec![], capabilities: vec![],
-        parameters: vec![], defaults: vec![], preconditions: vec![], postconditions: vec![],
-        result_binding: None, entry_snapshots: vec![],
-        signature: Term::Function { parameters: vec![], result: Box::new(Term::Primitive(Primitive::Type)) },
-        body: Expr { ty: Term::Primitive(Primitive::Type),
-            kind: ExprKind::TypeValue(Term::Primitive(Primitive::Bool)),
-            source: SourceRange { start: 0, end: 0 } },
+    let id = DeclarationId {
+        package: 3,
+        local: 9,
     };
-    let mut package = Package { functions: vec![function], ..Default::default() };
+    let function = Function {
+        declaration: id,
+        name: "Tuple".into(),
+        phase: FunctionPhase::Runtime,
+        inline: false,
+        pure: false,
+        type_parameters: vec![],
+        requirements: vec![],
+        capabilities: vec![],
+        parameters: vec![],
+        defaults: vec![],
+        preconditions: vec![],
+        postconditions: vec![],
+        result_binding: None,
+        entry_snapshots: vec![],
+        signature: Term::Function {
+            parameters: vec![],
+            result: Box::new(Term::Primitive(Primitive::Type)),
+        },
+        body: Expr {
+            ty: Term::Primitive(Primitive::Type),
+            kind: ExprKind::TypeValue(Term::Primitive(Primitive::Bool)),
+            source: SourceRange { start: 0, end: 0 },
+        },
+    };
+    let mut package = Package {
+        functions: vec![function],
+        ..Default::default()
+    };
     let mut items = LangItems::new();
-    assert!(items.bind_source_normal_form_heads(&package, &[(LangItem::Tuple, id)]).is_err());
-    package.normal_forms.push(nir::normal_forms::Head { role: nir::normal_forms::Role::Opaque, declaration: id, parameters: vec![], requirements: vec![] });
-    for (phase, pure) in [(FunctionPhase::Runtime, true), (FunctionPhase::NormalForm, false)] {
+    assert!(
+        items
+            .bind_source_normal_form_heads(&package, &[(LangItem::Tuple, id)])
+            .is_err()
+    );
+    package.normal_forms.push(nir::normal_forms::Head {
+        role: nir::normal_forms::Role::Opaque,
+        declaration: id,
+        parameters: vec![],
+        requirements: vec![],
+    });
+    for (phase, pure) in [
+        (FunctionPhase::Runtime, true),
+        (FunctionPhase::NormalForm, false),
+    ] {
         package.functions[0].phase = phase;
         package.functions[0].pure = pure;
-        assert!(items.bind_source_normal_form_heads(&package, &[(LangItem::Tuple, id)]).is_err());
+        assert!(
+            items
+                .bind_source_normal_form_heads(&package, &[(LangItem::Tuple, id)])
+                .is_err()
+        );
         assert!(items.get(LangItem::Tuple).is_none());
     }
     package.functions[0].phase = FunctionPhase::NormalForm;
     package.functions[0].pure = true;
-    items.bind_source_normal_form_heads(&package, &[(LangItem::Tuple, id)]).unwrap();
+    items
+        .bind_source_normal_form_heads(&package, &[(LangItem::Tuple, id)])
+        .unwrap();
     let before = items.to_string();
     package.functions.push(package.functions[0].clone());
-    assert!(items.bind_source_normal_form_heads(&package, &[(LangItem::Tuple, id)]).is_err());
+    assert!(
+        items
+            .bind_source_normal_form_heads(&package, &[(LangItem::Tuple, id)])
+            .is_err()
+    );
     assert_eq!(items.to_string(), before);
 }

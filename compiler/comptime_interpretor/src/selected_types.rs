@@ -85,11 +85,18 @@ fn normalize(
     };
     Ok(match ty {
         Term::Computation { effects, result } => {
-            *fuel = fuel.checked_sub(effects.len()).ok_or(ErrorKind::StepsExhausted)?;
-            let operations = effects.iter().map(|operation| Ok(nir::effects::Operation {
-                declaration: operation.declaration,
-                arguments: many(&operation.arguments, fuel)?,
-            })).collect::<Result<Vec<_>, ErrorKind>>()?;
+            *fuel = fuel
+                .checked_sub(effects.len())
+                .ok_or(ErrorKind::StepsExhausted)?;
+            let operations = effects
+                .iter()
+                .map(|operation| {
+                    Ok(nir::effects::Operation {
+                        declaration: operation.declaration,
+                        arguments: many(&operation.arguments, fuel)?,
+                    })
+                })
+                .collect::<Result<Vec<_>, ErrorKind>>()?;
             Term::computation(operations, normalize(result, values, fuel, depth + 1)?)
         }
         Term::AssociatedType {
@@ -149,7 +156,15 @@ fn normalize(
                     .collect::<Result<_, ErrorKind>>()?,
             )
         }
-        Term::NominalValue {ty,variant,fields} => Term::NominalValue {ty:Box::new(normalize(ty,values,fuel,depth+1)?),variant:*variant,fields:many(fields,fuel)?},
+        Term::NominalValue {
+            ty,
+            variant,
+            fields,
+        } => Term::NominalValue {
+            ty: Box::new(normalize(ty, values, fuel, depth + 1)?),
+            variant: *variant,
+            fields: many(fields, fuel)?,
+        },
         Term::RecordValue(fields) => {
             if fields.len() > *fuel {
                 return Err(ErrorKind::StepsExhausted);
@@ -198,6 +213,10 @@ fn normalize(
             let work = match ty {
                 Term::String(s) | Term::Symbol(s) => s.len(),
                 Term::Integer(i) => i.bit_len().div_ceil(32),
+                Term::Float(value) => value
+                    .digits()
+                    .len()
+                    .saturating_add(value.exponent().bit_len().div_ceil(32)),
                 Term::BitVec(v) => v.words().len(),
                 _ => 0,
             };

@@ -753,6 +753,31 @@ impl State {
         *self.node_mut(place)? = replacement;
         Ok(())
     }
+    // Project from the state itself, not just a flow's lexical-root list:
+    // borrowed/external positions must remain observable too. Construction
+    // facts are local to their root and follow the same bounded remapping.
+    pub(crate) fn excluding_roots(
+        &self,
+        excluded: &std::collections::BTreeSet<PlaceId>,
+        fuel: &mut usize,
+    ) -> Result<Self, Error> {
+        let mut result = Self::default();
+        for root in self.roots.keys() {
+            *fuel = fuel.checked_sub(1).ok_or(Error::Budget)?;
+            if !excluded.contains(root) {
+                result.import_position(
+                    *root,
+                    self,
+                    &Place {
+                        root: *root,
+                        fields: vec![],
+                    },
+                    fuel,
+                )?;
+            }
+        }
+        Ok(result)
+    }
     pub(crate) fn select_roots(
         &self,
         roots: &std::collections::BTreeSet<PlaceId>,

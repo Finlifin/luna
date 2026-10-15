@@ -1403,25 +1403,32 @@ impl Parser<'_> {
                 if id == 0 {
                     return Err(ParseError::invalid_syntax(
                         "expected an effect group name".into(),
-                        p.peek_next_token().kind, p.next_token_span(),
+                        p.peek_next_token().kind,
+                        p.next_token_span(),
                     ));
                 }
                 let clauses = p.try_clauses()?;
                 if !p.peek(TokenKind::LBrace.as_ref()) {
                     return Err(ParseError::invalid_syntax(
                         "expected `{` after effect group signature".into(),
-                        p.peek_next_token().kind, p.next_token_span(),
+                        p.peek_next_token().kind,
+                        p.next_token_span(),
                     ));
                 }
                 let operations = p.try_multi_with_bracket(
-                    &[Rule::comma("effect operation", |p| p.try_effect_operation(true))],
+                    &[Rule::comma("effect operation", |p| {
+                        p.try_effect_operation(true)
+                    })],
                     (TokenKind::LBrace, TokenKind::RBrace),
                 )?;
                 let block = NodeBuilder::new(NodeKind::Block, p.current_span())
-                    .add_multiple_children(operations).build(&mut p.ast);
+                    .add_multiple_children(operations)
+                    .build(&mut p.ast);
                 Ok(NodeBuilder::new(NodeKind::EffectEnumDef, p.current_span())
-                    .add_single_child(id).add_multiple_children(clauses)
-                    .add_single_child(block).build(&mut p.ast))
+                    .add_single_child(id)
+                    .add_multiple_children(clauses)
+                    .add_single_child(block)
+                    .build(&mut p.ast))
             } else {
                 p.try_effect_operation(false)
             }
@@ -1433,20 +1440,26 @@ impl Parser<'_> {
             if variant && p.peek(TokenKind::RBrace.as_ref()) {
                 return Ok(0);
             }
-            let attributes = if variant { p.try_attribute_prefix_chain()? } else { Vec::new() };
+            let attributes = if variant {
+                p.try_attribute_prefix_chain()?
+            } else {
+                Vec::new()
+            };
             let is_async = variant && p.eat_token(TokenKind::Async);
             let is_inline = variant && p.eat_token(TokenKind::Inline);
             let id = p.try_id()?;
             if id == 0 {
                 return Err(ParseError::invalid_syntax(
                     "expected an effect operation name".into(),
-                    p.peek_next_token().kind, p.next_token_span(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
                 ));
             }
             if !p.peek(TokenKind::LParen.as_ref()) {
                 return Err(ParseError::invalid_syntax(
                     "expected `(` after effect operation name".into(),
-                    p.peek_next_token().kind, p.next_token_span(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
                 ));
             }
             let params = p.try_multi_with_bracket(
@@ -1454,30 +1467,46 @@ impl Parser<'_> {
                 (TokenKind::LParen, TokenKind::RParen),
             )?;
             let return_type = p.try_return_type()?;
-            let clauses = if variant { Vec::new() } else { p.try_clauses()? };
+            let clauses = if variant {
+                Vec::new()
+            } else {
+                p.try_clauses()?
+            };
             if p.peek(TokenKind::LBrace.as_ref()) || p.peek(TokenKind::Eq.as_ref()) {
                 return Err(ParseError::invalid_syntax(
                     "effect operations declare signatures and cannot have bodies".into(),
-                    p.peek_next_token().kind, p.next_token_span(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
                 ));
             }
             if !variant && !p.peek(TokenKind::Semi.as_ref()) {
                 return Err(ParseError::invalid_syntax(
                     "expected `;` after effect operation signature".into(),
-                    p.peek_next_token().kind, p.next_token_span(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
                 ));
             }
             let mut node = NodeBuilder::new(NodeKind::AlgebraicEffect, p.current_span())
-                .add_single_child(id).add_multiple_children(params)
-                .add_single_child(return_type).add_multiple_children(clauses)
-                .add_single_child(0).build(&mut p.ast);
-            for (enabled, name) in [(is_inline, "__flurry_kw_inline"), (is_async, "__flurry_kw_async")] {
+                .add_single_child(id)
+                .add_multiple_children(params)
+                .add_single_child(return_type)
+                .add_multiple_children(clauses)
+                .add_single_child(0)
+                .build(&mut p.ast);
+            for (enabled, name) in [
+                (is_inline, "__flurry_kw_inline"),
+                (is_async, "__flurry_kw_async"),
+            ] {
                 if enabled {
                     let (hi, lo) = lex::Symbol::intern(name).to_raw_parts();
                     let attribute = NodeBuilder::new(NodeKind::Id, p.current_span())
-                        .add_single_child(hi).add_single_child(lo).build(&mut p.ast);
+                        .add_single_child(hi)
+                        .add_single_child(lo)
+                        .build(&mut p.ast);
                     node = NodeBuilder::new(NodeKind::AttributeSetTrue, p.current_span())
-                        .add_single_child(attribute).add_single_child(node).build(&mut p.ast);
+                        .add_single_child(attribute)
+                        .add_single_child(node)
+                        .build(&mut p.ast);
                 }
             }
             Ok(p.wrap_with_attributes(node, &attributes))

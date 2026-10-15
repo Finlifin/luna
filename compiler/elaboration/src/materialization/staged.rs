@@ -71,7 +71,8 @@ impl Builder<'_> {
             declaration: entry,
             name: "<staged-input>".into(),
             phase: n::FunctionPhase::Comptime,
-            inline: false, pure: false,
+            inline: false,
+            pure: false,
             signature: Term::Function {
                 parameters: vec![],
                 result: Box::new(Term::Primitive(nir::Primitive::Void)),
@@ -173,10 +174,12 @@ impl Builder<'_> {
             Value::Unit => K::Unit,
             Value::Bool(v) => K::Literal(n::Literal::Bool(v)),
             Value::Char(v) => K::Literal(n::Literal::Char(v)),
-            Value::Float32(bits) if *ty == Term::Primitive(nir::Primitive::F32) =>
-                K::Literal(n::Literal::Float32(bits)),
-            Value::Float64(bits) if *ty == Term::Primitive(nir::Primitive::F64) =>
-                K::Literal(n::Literal::Float64(bits)),
+            Value::Float32(bits) if *ty == Term::Primitive(nir::Primitive::F32) => {
+                K::Literal(n::Literal::Float32(bits))
+            }
+            Value::Float64(bits) if *ty == Term::Primitive(nir::Primitive::F64) => {
+                K::Literal(n::Literal::Float64(bits))
+            }
             Value::Symbol(v) => {
                 self.fuel = self
                     .fuel
@@ -196,14 +199,20 @@ impl Builder<'_> {
             Value::Type(v) => K::TypeValue(v),
             Value::TypeList(types) => {
                 if !nir::normal_forms::type_list_input_type(ty)
-                    || !self.package.normal_forms.iter().any(|head|head.parameters.iter().any(|parameter|
-                        parameter.kind==nir::normal_forms::Kind::TypeList && parameter.ty==*ty))
+                    || !self.package.normal_forms.iter().any(|head| {
+                        head.parameters.iter().any(|parameter| {
+                            parameter.kind == nir::normal_forms::Kind::TypeList
+                                && parameter.ty == *ty
+                        })
+                    })
                 {
                     return Err("staged type-list result requires trusted meta.List<Type>".into());
                 }
                 for element in &types {
-                    iir::completed_type(element,&BTreeSet::new(),&mut self.fuel)?;
-                    if element.sort()!=nir::Sort::Type {return Err("staged type-list element is not Type".into());}
+                    iir::completed_type(element, &BTreeSet::new(), &mut self.fuel)?;
+                    if element.sort() != nir::Sort::Type {
+                        return Err("staged type-list element is not Type".into());
+                    }
                 }
                 K::TypeListValue(types)
             }
@@ -227,12 +236,21 @@ impl Builder<'_> {
                 K::Literal(n::Literal::Integer(spelling.map_err(|e| e.to_string())?))
             }
             Value::AnonymousRecord(values) => {
-                let Term::Record(types) = ty else { return Err("staged record result type mismatch".into()); };
-                if values.len() != types.len() { return Err("staged record result arity mismatch".into()); }
+                let Term::Record(types) = ty else {
+                    return Err("staged record result type mismatch".into());
+                };
+                if values.len() != types.len() {
+                    return Err("staged record result arity mismatch".into());
+                }
                 let mut fields = Vec::new();
                 for ((name, value), (expected_name, ty)) in values.into_iter().zip(types) {
-                    self.fuel = self.fuel.checked_sub(name.len()).ok_or("staged record budget exhausted")?;
-                    if name != *expected_name { return Err("staged record result label mismatch".into()); }
+                    self.fuel = self
+                        .fuel
+                        .checked_sub(name.len())
+                        .ok_or("staged record budget exhausted")?;
+                    if name != *expected_name {
+                        return Err("staged record result label mismatch".into());
+                    }
                     fields.push(self.freeze_staged_value(value, ty, source, depth + 1)?);
                 }
                 K::AnonymousRecord { fields }

@@ -2,6 +2,35 @@
 
 语言基础文档从 [docs/README.md](../docs/README.md)进入。当前开发规则是根 [AGENTS.md](../AGENTS.md)，默认直接实现并运行相关测试；[任务图协议](graph-workflow.md)已停用，仅供历史查阅。`main` 用于集成产物，开发在 `dev`。
 
+## 无人值守工具入口
+
+默认使用这些脚本，标准输入关闭，不调用 shell，不自动提权或弹出权限请求。每次调用保存独立的 `/tmp/luna-tools-*/result.json`、`stdout.log`、`stderr.log`，终端只输出报告位置。单通道日志最多保存 8 MiB，超出部分继续排空并标记截断；原始命令、工作目录、耗时与退出码保留在报告中。
+
+启动时立即输出 `running` 和报告路径，完成时再输出最终状态；工具调用提前返回时，也能直接用 report.py 检查本次任务，不必重新启动命令。
+
+子进程已输出的数据即时写入日志，不等待输出凑满缓冲区或进程退出；子进程自己的输出缓冲策略仍由它决定。`running` 报告表示尚未记录完成，不能单独作为进程仍存活的依据。会话返回运行句柄时继续等待该句柄，不重复启动同一构建。
+
+| 入口 | 用途与示例 |
+|---|---|
+| `python3 -B development/check.py --timeout 900 -- test -p luna --test instantiation` | 有时限的构建／测试，内部仍调用 cargo.py，复用维护锁、缓存清理及离线配置 |
+| `python3 -B development/reproduce.py --timeout 60 -- input.fl --interpret entry` | 运行已有 Luna 二进制，使用当前工作目录，不自动构建 |
+| `python3 -B development/backtrace.py --timeout 30 -- input.fl --interpret entry` | 可选 GDB 批量诊断，关闭初始化脚本、自动加载与 debuginfo 下载 |
+| `python3 -B development/backtrace.py --core /path/to/core` | 读取已有 core，不启动被调试程序 |
+| `python3 -B development/report.py /tmp/luna-tools-XXX` | 读取报告和每个日志末尾最多 8 KiB，不重新执行命令 |
+| `python3 -B development/command.py --timeout 30 -- python3 -B -m unittest discover -s development` | 其他本地诊断的通用入口，按原样传递参数，不启动 shell；Cargo 仍走 check.py |
+
+选项放在 `--` 前，被调用程序的参数放在后面。reproduce/backtrace 的 `--binary` 可以指定已有二进制；默认 `/tmp/luna-dev-002/target/debug/luna`。缓存被清理后先通过 check.py build 重新构建。工具不会保存输入源码快照，复现依赖报告所指的工作区版本。
+
+普通失败保持退出码；信号退出映射为 128+信号编号，超时返回 124，不可用或日志写入失败返回 125。超时覆盖等待构建锁和继承的输出管道，并终止本次进程组，避免主进程结束后子进程继续挂住入口。它不限制其他独立启动的任务，也不重试普通编译失败。Cargo 的配额恢复仍由 cargo.py 处理。
+
+外层封装收到 SIGTERM 或键盘中断也会清理本次子进程组，并保存 interrupted 报告；SIGKILL 无法被捕获。代理启动这些入口时应使用短工具等待时间（如 1000 ms），取得运行句柄后继续读取，避免一次工具调用长时间占住会话。
+
+报告中的 `exit_code` 是子进程原始退出码，`wrapper_exit_code` 是工具最终返回码；判断是否超时或诊断不可用应读取 `status` 和后者，不能因为主进程提前退出 0 就误报成功。2026-10-14 在 `/home/fin/luna` 执行 `python3 -B -m unittest discover -s development -p 'test_*tools.py'`，退出 0，5 项通过，覆盖无交互输入、失败退出码、日志上限、信号退出与主进程退出后的子进程超时清理。
+
+脚本不能绕过沙箱权限。backtrace 是可选诊断：ptrace 被拒时保存原因、返回 unavailable，继续用复现日志或已有 core，不因缺少回溯启动交互授权。GDB 的退出码只说明调试器状态，不代表被调试程序通过测试。真正必需的受限操作仍遵守环境授权要求，不能用包装脚本规避。
+
+2026-10-14 实测：脚本单元测试与既有 cargo 测试共 14 项通过；check.py 运行 optional_inline_pass 5 项通过（`/tmp/luna-tools-08kxrfgk/result.json`）；reproduce.py 执行 `--help` 退出 0；沙箱拒绝 ptrace 时 backtrace.py 返回 125 并记录 unavailable（`/tmp/luna-tools-4qtx467_/result.json`），没有等待授权。
+
 ## Cargo 与缓存维护
 
 统一通过 `python3 -B development/cargo.py test -p luna --test execution` 或 `python3 -B development/cargo.py run -p luna -- input.fl --emit nir` 构建。入口自动补齐 `-j 1 --locked --offline --target-dir /tmp/luna-dev-002/target`，禁用 incremental 和 dev/test debuginfo，复用现有工作区；参数中的 `--` 及其后应用参数原样保留。无需再手写这些公共选项。历史验证记录中的直接 Cargo 命令仅保留作当时的证据，不作为当前默认入口。
@@ -12737,3 +12766,2213 @@ Validation in `/home/fin/luna`, all exit 0:
 验证目录 `/home/fin/luna`：`python3 -B development/cargo.py test -p luna --test frontend_cli --test drop --test instantiation optional_inlin` 退出 0，1/2/4 项通过（`/tmp/luna-inline-integration.log`）。CLI 整组检查 117 通过、1 失败（`/tmp/luna-inline-cli.log`）：未启用内联的 `optional_branch_probes_reach_later_evidence_through_nested_nulls` 在深层分支测试触发主线程栈溢出，尚未定位；不得视为整组通过。callee/handler 联合展开仍未完成。`git diff --check` 通过，改动保留 dev，未提交。
 
 2026-10-14：上述 CLI 深层分支崩溃已修复。GDB 将故障定位到嵌套 when/块表达式反复保留 `expr_context_inner` 的大宿主栈帧；将块、match、when 递归入口移到已有轻量表达式分派层，保持 comptime callee tail 标记恢复、上下文检查和 computation 运行适配。未增加宿主栈或降低测试嵌套深度。原 32 层 if/match/when 测试通过；统一入口 `test -p luna --test frontend_cli --test quote_functions` 在 `/home/fin/luna` 退出 0，118/83 项通过（`/tmp/luna-control-stack-regression.log`）。这修复已复现的控制流栈放大，不代表所有前端递归路径已有显式执行栈。`git diff --check` 通过，dev 未提交。
+
+2026-10-14：可选内联支持具体 trait 方法调用。转换从原始 checked NIR 快照执行既有受检实现选择，取得 inline 实现体及实例输入，再复用契约合并与卫生展开；接口入口条件、后置条件和快照不因实现体替换而丢失。staged 输入、开放类型选择和间接调用继续保留调用。新增运行事件检查确认实现调用已消除、实参只执行一次；入口及结果契约失败均为 ProgramContractRejected；拥有型 receiver、方法体局部与 caller 的清理顺序保持。
+
+在 `/home/fin/luna` 经 `python3 -B development/cargo.py test -p luna --test instantiation --test drop --test frontend_cli optional_inlin` 退出 0，5/3/1 项通过（`/tmp/luna-inline-method-regression.log`）。`git diff --check` 通过。callee/handler 联合展开仍未实现，改动保留 dev，未提交。
+
+2026-10-14：可选内联的具体 trait 选择加入 pass 内缓存，键包括 interface/member/Self/接口实参/方法实参，使用表示相等，保持 opaque normal-form 头。仅缓存同一不可变包快照的成功选择，复制与散列前计入类型预算；失败不补充预算。S-expression 报告增加 selected-methods/reused-method-selections。新增泛型实现及泛型方法在闭包内的执行检查：四个调用点消除，三种选择各求解一次，一次复用；不同 Self 与方法实参不串用。源阶段检查已禁止 comptime 闭包直接调用 runtime 函数，本轮没有另加阶段转换规则。
+
+在 `/home/fin/luna` 经 `python3 -B development/check.py --timeout 180 -- test -p luna --test instantiation --test drop --test frontend_cli optional_inlin` 退出 0，6/3/1 项通过（`/tmp/luna-tools-_1phd33u/result.json`）；包括先前的接口契约失败、单次实参、资源清理与预算回退。`git diff --check` 通过，dev 未提交。
+
+2026-10-14：可选内联新增封闭 direct inline effect 的联合降码。普通 callee 先展开，再将请求参数与 handler arms 降为局部 tuple match；handler 局部身份卫生重命名，外层捕获身份保持，原请求参数 IR 不重命名或重复求值。删除已消去的 computation/run/installation 边界，转换后仍走受检资源执行。每个 installation 独立事务，失败回滚来源表与身份游标。当前保留外层行、部分转发、非 direct ABI、显式 resume/非局部跳转、handler 循环/闭包/嵌套效应及未展开 effectful callee 的普通路径，不能称完整效应联合优化。
+
+在 `/home/fin/luna` 经 `python3 -B development/check.py --timeout 180 -- test -p luna --test instantiation --test drop --test frontend_cli optional_inlin` 退出 0，11/4/1 项通过（`/tmp/luna-tools-nc14log4/result.json`）。新检查确认优化后的 entry 不含 request/handler 节点、泛型 operation 身份不同、循环内捕获写入正确、请求参数只求值一次、拥有型输入/handler/body/caller 清理与原执行一致，以及部分转换后失败/不同预算下整个包和元数据完全回滚。`git diff --check` 通过；dev 未提交。
+
+配套示例 [inline-effects.fl](examples/inline-effects.fl) 经 `python3 -B development/check.py --timeout 180 -- run -p luna -- development/examples/inline-effects.fl --interpret entry --inline-functions --copy-protocol Duplicate --drop-protocol Retire` 实际执行，退出 0，输出 `(bool true)`（`/tmp/luna-tools-rukrqgo5/result.json`）；Ticket 析构的 runtime 检查同时执行。
+
+2026-10-14：封闭 direct inline handler 支持显式 resume。每次请求先在交付边界之外求值输入，再将 handler 的 resume 降为私有结果包及局部退出；复用既有 inline return 降码、所有权验证与清理发布，普通 caller return 不被此边界捕获。新增合成 Let/Local/Block 各有独立来源身份，避免清理边界重名。installation 事务同时回滚新 enum、结果包标识及空包替换元数据，仍保留非局部 return/break/continue、handler 循环/闭包/嵌套效应及开放行等普通执行路径。
+
+在 `/home/fin/luna` 经 check.py 的 `test -p luna --test instantiation --test drop --test frontend_cli optional_inlin` 退出 0，13/5/1 项通过（`/tmp/luna-tools-r97juv0m/result.json`）；加强参数 return 用例必须实际展开的断言后，针对性测试退出 0（`/tmp/luna-tools-b7mslage/result.json`）。覆盖连续请求、resume 后不可达写入、拥有型交付与所有出口清理，以及已生成 resume 结果包后遇到未展开 callee 的完整回滚。[inline-effects.fl](examples/inline-effects.fl) 改用 resume，经受检 CLI 执行输出 `(bool true)`（`/tmp/luna-tools-dmqgzjpl/result.json`）。`git diff --check` 通过；dev 未提交。
+
+2026-10-14：inline handler 的词法 return/break/continue 接通。共享结果区域降码增加 `lower_resume`，只重写当前 handler 的 EffectResume，普通函数 Return 与循环 transfer 原样保留；不再先将 resume 混同为 Return。卫生重命名显式保留安装位置的外部 loop identity，跨过已展开 callee 和请求结果区域时继续按真实出口清理。handler 自身循环/闭包/嵌套效应和外层转发仍保留普通路径。
+
+在 `/home/fin/luna` 经 check.py：`test -p luna --test drop optional_inline_effect` 4 项通过（`/tmp/luna-tools-bxd9qfra/result.json`），新增混合 resume/return 及 continue 后 break 的实际资源次序对照；`test -p luna --test quote_functions --test instantiation` 83/35 项通过（`/tmp/luna-tools-42w8odmw/result.json`），覆盖共享降码旧调用边界。所有命令退出 0，`git diff --check` 通过，dev 未提交。
+
+2026-10-14：inline handler 支持自身循环及内部已展开的 inline/quote 调用。复制前收集局部 loop identity，局部 loop/transfer 一起卫生重命名，指向 caller 的跳转保留原身份。复制的代码来源若携带 internal-return 空槽替换证据，按新来源身份重新发布到候选事务；失败不污染原包。新增局部 continue/break 与外层 labeled break 的区分、循环内 resume 的每轮析构、两次请求分别执行拥有型 inline/quote 结果交付，并加强部分失败后的完整元数据回滚测试。
+
+在 `/home/fin/luna` 经 `python3 -B development/check.py --timeout 180 -- test -p luna --test instantiation --test drop --test frontend_cli optional_inlin` 退出 0，14/9/1 项通过（`/tmp/luna-tools-1ee4yruv/result.json`）。handler 闭包、嵌套效应及开放效应行仍保留普通执行路径。`git diff --check` 通过，dev 未提交。
+
+2026-10-14：inline effect 联合转换支持 handler 内不含效应的闭包，以及 callee 中不含效应的闭包。复用 CMTT 对捕获/参数/主体的卫生重命名，resume 降码不进入闭包主体；callee 的闭包主体不按安装位置的行重写，仅处理当场求值的捕获初始化。带效应的闭包保持普通路径。新增实际受检执行覆盖通过 effect 结果交付拥有型闭包、未调用时销毁捕获、拒绝重复消费、caller 指针借用写入、拒绝闭包隐藏 handler 局部指针，以及普通 handler/展开后对照的闭包局部 return。
+
+已知范围：前两个新例的普通 handler 路径分别受限于 callable 环境状态传递与 handler 指针捕获分析；原路径目前拒绝，不能记为基线对照通过。转换为局部 IR 后普通资源检查已能处理这些程序。普通 handler 的这些分析缺口仍待补齐。
+
+验证目录 `/home/fin/luna`，统一 check.py：`test -p luna --test instantiation --test drop --test frontend_cli optional_inlin` 退出 0，15/13/1 项通过（`/tmp/luna-tools-nhe_iyka/result.json`）；随后新增 effectful closure 保留用例的针对性检查退出 0（`/tmp/luna-tools-zwd2ekxe/result.json`）。`git diff --check` 通过；dev 未提交。
+
+2026-10-14（进行中，未完成）：普通 handler 的稳定标量指针捕获已加入来源核验与借用帧构造。只考虑已知活跃本地 Copy 标量目标、Copy 指针槽和标量操作结果；全安装函数扫描禁止捕获指针槽改绑或地址暴露，借用目标不进入 handler 的拥有型清理顺序。新拒绝用例已验证 slot assignment/address exposure 诊断。
+
+当前阻塞在实现内部的下一层，不需要用户决定：`scheduled_handler_borrowed_scalar_pointer_supports_nested_closure_writes` 仍失败。handler 来源检查已通过，但 caller 的 memory_exposed 使 `subject()` 必须取得内存摘要；`verification/memory.rs` 的摘要目前既不处理 EffectComputation/EffectRequest，也不把已安装 handler 的内存能力传给被调用计算，因而在 computation 结果上报告 `aggregate pointer dependencies require a richer memory contract`。不能通过清除 memory_exposed 或把未知效应摘要当作空读写来放行。下一步需组合 effect 请求与已安装 handler 的条件内存摘要，并保留默认无上下文摘要对未知效应的拒绝。
+
+验证目录 `/home/fin/luna`，check.py：`test -p luna --test drop scheduled_handler` 为 35 通过、1 失败（上述新增正例，`/tmp/luna-tools-fi8jllvr/result.json`，退出 101）；`test -p luna --test drop scheduled_handler_borrowed_scalar_pointer_rejects` 退出 0（`/tmp/luna-tools-qd0voby4/result.json`）。不要把这轮写成普通 handler 指针捕获已完成；保留正例失败以追踪缺失能力。`git diff --check` 通过，dev 未提交。
+
+2026-10-14：上述普通 handler 的标量指针捕获缺口已接通。`verification/memory/effects.rs` 提供显式 `EffectInput` 条件摘要：完整操作实例、ABI、签名及稳定标量捕获存储前提保留在 Summary 和 S-expression dump 中。处理 EffectComputation、EffectRun、EffectRequest 时检查行身份与路由；请求参数的实际内存访问继续进入摘要，未知 handler 不被当成空访问。默认无上下文推导仍拒绝未知效应，前提仅存在于当前推导事务，复制与查找受预算限制；操作身份的类型参数保持精确实例化，不用结构布局视图改写 normal-form 头。
+
+资源分析只在全部 handler arm 已检查后，为封闭、无 fallback、标量参数/结果的 direct 或 direct-passing 安装建立前提。前提随计算作用域退出而恢复，handler 捕获的本地 Copy 标量指针保留来源及借用帧；直接请求和多层函数调用均可运行，内层无效应闭包也能通过该指针写入。并未清除 memory_exposed，也没有把 handler 的捕获写入声明为纯操作。更一般的聚合字段借用、指针参数/结果交付、开放行与跨安装契约组合仍需实现；独立函数资源检查对带指针参数的未知效应仍可能拒绝，条件内存摘要 API 成功本身不代表整条执行入口已支持它。
+
+在 `/home/fin/luna` 执行 `python3 -B development/check.py --timeout 240 -- test -p luna --test resources --test drop --test instantiation`，退出 0：290 项资源测试、553 项析构测试、38 项实例化测试，共 881 项通过（`/tmp/luna-tools-k30knp8l/result.json`）。新增用例包含请求实参读取足迹、跨调用传递、泛型操作实例区分、错误行索引、指针交付拒绝、预算耗尽后重试、直接请求与闭包借用写入及捕获槽变更拒绝。工作区仍在 dev，未提交。
+
+补齐固定点摘要复用时的效应前提复制计费后，再执行 `python3 -B development/check.py --timeout 180 -- test -p luna --test resources conditional_effect_memory`，退出 0，3 项通过（`/tmp/luna-tools-wexsu7pa/result.json`）；`git diff --check` 通过。
+
+2026-10-14：普通 direct handler 的闭包结果交付已接通，解除前述只能在联合内联后运行的拥有型闭包示例限制。正常分支完成与 EffectResume 单独采集结果来源、嵌套 callable 字段和枚举域；词法 return/break/continue 不作为操作的正常结果。请求恢复这些快照，具名函数的结果分析可在安装上下文中逐层传递它们；未执行的未知结果分支仍保持未知，不用一个已知分支覆盖它。
+
+结果前提按行槽位、完整操作实例、ABI 和签名匹配。EffectRun 重排行时同步重排前提；嵌套安装对外层槽位加偏移，部分 handler 只在对应外层 fallback 结果已知时合并来源。前提离开安装/运行边界后恢复，独立的闭包主体和默认参数分析清空安装前提，防止把构造位置的处理器假定为日后调用位置的处理器。快照共享使用 Arc，类型复制、候选查找及槽位路由继续扣除预算；内部结果前提提供 S-expression Display。
+
+验证包含直接请求与具名调用、显式 resume 与自然完成、从未调用时的捕获析构、操作拥有型实参移入闭包、多个结果的独立捕获、拒绝重复消费、两种操作的行重排、泛型操作身份及部分分支外层转发。所有正例走普通受检执行路径，没有启用 inline 转换。仍不代表任意高阶 effect 都完成：效应产生的 callable 在未知 handler 的独立 callee/闭包主体中直接被调用，需要继续将这类前提纳入完整调用上下文与计划发布；指针结果/捕获逃逸也仍需独立的来源契约。
+
+在 `/home/fin/luna` 执行 `python3 -B development/check.py --timeout 240 -- test -p luna --test drop --test resources --test instantiation --test quote_functions`，退出 0：557 项析构、290 项资源、38 项实例化、83 项 quote 函数测试，共 968 项通过（`/tmp/luna-tools-49ro5bd1/result.json`）。`git diff --check` 通过；dev 工作区未提交。
+
+2026-10-14：补齐普通 handler 闭包结果的聚合与异常清理验收。新增真实执行覆盖 struct 包装的 callable 字段、多层具名结果转发、枚举 none/some 分支域、未调用析构和重复调用拒绝。另验证 handler 内已部分消耗的闭包只清理剩余捕获，然后构造并交付完整的新环境；原 `Callback` 契约仍要求完整捕获，因此直接 resume 已缺字段的旧环境被拒绝，不能借交付恢复已消耗责任。这个判断遵循 moves-and-initialization.md 的整体访问要求和 closure-environments.md 的环境交付规则，不把 Once 简化为至多读取一次。
+
+新增拒绝路径分别发生在 handler 交付之前、以及 subject 已接收闭包之后的 runtime assumption 检查。实际析构顺序分别为 Ticket → Handler → Caller、Handler → Ticket → Caller，每项恰好一次。此阶段主要交付回归证据，没有增加部分环境的新交付契约，也未改变语言语义。
+
+验证目录 `/home/fin/luna`：`python3 -B development/check.py --timeout 180 -- test -p luna --test drop scheduled_handler` 退出 0，45 项通过（`/tmp/luna-tools-x51dclru/result.json`）；随后新增失败路径测试并加强析构顺序断言，`python3 -B development/check.py --timeout 180 -- test -p luna --test drop scheduled_handler_closure_completion_rejection` 退出 0，1 项通过（`/tmp/luna-tools-xk9_i4r5/result.json`）。`git diff --check` 通过；dev 未提交。下一实现缺口仍是将效应结果前提发布为可调用主体的正式上下文，使 callee 内部调用效应产生的闭包也能生成受检清理计划。
+
+2026-10-14：效应返回的 callable 已可在具名 callee 内部调用，而非仅由 callee 转交给安装者后调用。`EffectResultInput` 作为字段不可外部构造的条件证据进入 NamedCall、Report 的 effect parameters 和带上下文的资源分析入口；复制保留共享快照并计费，dump 使用 S-expression。输入槽必须匹配被分析函数的操作行，缺失 callable 结果前提成为待解决义务，不能发布为无条件计划。
+
+清理发布器对操作行中交付 callable 的函数按具体调用建立计划；递归上下文匹配包含效应结果前提。解释器在安装 schedule 时从已验证 IIR 的请求和 handler 签名建立一次操作分类索引，与发布器共同判断哪些函数必须使用调用上下文，不在每次函数调用时扫描 IR。递归重装同一操作时，新 handler 的结果来源不能别名到外层上下文；最终遇到相同前提时仍可形成递归计划别名。源码函数签名和 effect ABI 未增加参数或新语法。
+
+新增真实执行覆盖 callee 调用拥有型捕获闭包、两处安装使用不同结果、递归调用、递归内部重新安装 handler，以及重复消耗捕获拒绝。资源 dump 检查结果前提，公开分析入口拒绝把它们套到不匹配的函数行。后续仍需接通独立 effectful 闭包调用的同类上下文，以及更一般的指针相关结果/内存前提组合。
+
+验证目录 `/home/fin/luna`，统一 check.py：`test -p luna --test drop --test resources --test instantiation --test quote_functions --test frontend_cli` 退出 0，共 1093 项通过（564/290/38/83/118，`/tmp/luna-tools-6hmqsgl_/result.json`）。随后补充递归重新安装测试，`test -p luna --test drop scheduled_effect_result_context` 4 项通过（`/tmp/luna-tools-k87ljq6s/result.json`）；`test -p comptime_interpretor --lib cleanup` 10 项通过（`/tmp/luna-tools-c0mmm1mk/result.json`）。`git diff --check` 通过；dev 未提交。
+
+2026-10-14：effectful 闭包的实际调用接通当前安装的结果上下文。构造/独立主体检查继续隔离安装前提；调用时按闭包签名的操作行筛选当前结果证据，将它们记录到 invocation report，并在调用分析结束后恢复外层上下文。既支持在函数中构造后直接调用，也支持传给具名高阶函数再调用。同一闭包先后在不同 handler 下运行，不复用构造位置的 handler。
+
+已检查、完整覆盖的 handler 若没有正常完成值，资源分析现在把请求的正常后继判为不可达；缺失 handler 证据仍是未知，不能按无返回处理。先记录 effect escape 和 rejection 的清理，再终止正常路径，因此 handler 词法 return 或 runtime assumption 拒绝都保留闭包的实际捕获状态写回。回归验证包含请求前消费 Ticket、仍保留 Held 的闭包：return 路径仅清理 Ticket → Held，拒绝路径按 Ticket（请求前）→ Ticket（handler 局部）→ Handler → Held 清理，无重复消费或恢复责任。
+
+验证目录 `/home/fin/luna`，统一 check.py：`test -p luna --test drop --test resources --test quote_functions --test instantiation --test frontend_cli` 退出 0，共 1099 项通过（570/290/83/38/118，`/tmp/luna-tools-vyvlalz9/result.json`）。随后补充拒绝路径用例，`test -p luna --test drop scheduled_effectful_closure_invocation` 6 项通过（`/tmp/luna-tools-t73r28x1/result.json`）。`git diff --check` 通过，dev 未提交。带指针的 effectful 闭包仍需组合条件内存摘要和实际捕获来源，不能用当前 callable 结果证据替代那部分契约。
+
+### 条件效应闭包的实际指针来源核验（2026-10-14）
+
+`memory::infer_closure_with_effect_inputs` 返回保留 handler 前提的 `ConditionalClosureSummary`，并提供 S-expression Display。直接指针捕获在摘要中映射为普通参数之后的虚拟输入；调用点把它们映射回实际捕获来源，再核验读写足迹。无前提的旧 API 不会把效应主体当成无条件内存安全，预算耗尽也不会发布成功摘要。
+
+构造阶段遇到尚未安装 handler 的指针相关请求，记录待调用核验的义务。实际闭包调用复制当前安装的内存前提，独立验证每个普通指针参数与指针捕获的真实来源。只有经过核验的借用目标才进入该调用帧的稳定标量集合；它们不成为拥有型清理根，分支合流取交集。这支持同一闭包在不同安装下调用、handler 与闭包通过指针访问同一标量，以及拥有型捕获混合指针捕获时的正常／拒绝清理。
+
+handler 仅捕获普通 Copy 标量时，现在也能与已经核验、且不别名到该直接捕获的外部标量存储共存；不再要求其必须额外捕获一个指针才能走同一稳定性检查。直接捕获本身的取址仍要求更丰富的契约，已存在的拒绝用例保留。捕获指针槽取址或重绑定、未建立来源的外部指针仍被拒绝。目前契约仍限于闭合的 scalar direct/direct-passing 操作交付与稳定的局部 Copy 标量；开放／fallback 行、指针或闭包形式的操作交付、一般聚合内存及通过任意高阶接口传递指针捕获仍需要更丰富的契约。
+
+验证目录 `/home/fin/luna`：`python3 -B development/check.py --timeout 240 -- test -p luna --test drop --test resources` 退出 0，577 项析构测试、292 项资源测试，共 869 项通过（`/tmp/luna-tools-q5s4fh3p/result.json`）。新增 6 项可执行闭包测试及 2 项条件摘要测试，覆盖虚拟捕获编号、普通参数和捕获的读写区别、前提缺失、预算恢复、不同安装、别名写入顺序、槽修改拒绝、真实来源拒绝、混合捕获的正常与失败清理。中间回归曾暴露直接标量捕获取址的限制被放宽，已按实际别名关系修复，保留原拒绝测试。`git diff --check` 通过；dev 未提交。
+
+### 部分 handler 与已核验外层行的内存前提组合（2026-10-14）
+
+安装内存前提现在先从进入安装前的上下文解析完整外层操作行，再加入本地 handler。部分处理的 fallback 必须指向对应外层槽，操作身份、ABI 和签名均匹配；同名本地入口不能为自身转发提供证明。外层任一入口缺少前提时，不发布这次安装的成功内存前提。前提复制、查找和转发检查保持预算计费；实际指针来源的稳定标量检查继续执行。
+
+这补齐了前一节限制中的一部分：已有具体安全外层供应的开放行与部分处理可用于带指针捕获的效应闭包。任意未知外层供应、非标量交付与一般聚合内存契约仍不支持。新增用例验证 guard 命中与失败转发、多操作行保留未处理外层入口、转发后恢复当前部分 handler，以及无独立外层前提的同名 fallback 拒绝。
+
+在 `/home/fin/luna` 执行 `python3 -B development/check.py --timeout 180 -- test -p luna --test drop`，退出 0，581 项通过（`/tmp/luna-tools-qc858lbu/result.json`）。`git diff --check` 通过；dev 未提交。
+
+### 嵌套 handler 的稳定指针槽证据（2026-10-14）
+
+handler 帧现在区分非拥有的稳定标量目标与已经对整个词法安装者检查过的稳定指针槽。外层完整扫描确认槽不会重绑定或被取址后，内层 handler 可以复用该槽证据，但仍检查目标当前可用性、标量 Copy 权限及目标类型。分支合流只保留双方共有的槽证据；未核验的局部槽不会因为处于嵌套 handler 中获得证明。借用目标不进入 handler 的清理顺序。
+
+这同时允许持有上述借用指针的 handler 请求已核验的外层标量效应。新增用例覆盖嵌套读写、外层请求、内层槽取址／重绑定拒绝，以及正常与拒绝路径下 Inner → Subject → Outer 的准确析构顺序。仍未支持在 handler 内新建任意指针槽后为它推导完整词法稳定性契约。
+
+在 `/home/fin/luna` 经 `python3 -B development/check.py --timeout 180 -- test -p luna --test drop` 退出 0，585 项通过（`/tmp/luna-tools-olzgcmtm/result.json`）；新增 4 项针对性测试亦通过（`/tmp/luna-tools-rmw9djky/result.json`）。`git diff --check` 通过；dev 未提交。
+
+### handler／闭包局部指针的完整作用域扫描（2026-10-14）
+
+将无函数退出契约的调用帧所需的指针槽稳定性证据独立保存：handler 帧扫描完整安装表达式，闭包构造与实际调用扫描各自闭包定义，收集赋值及取址涉及的根。扫描有预算限制，结果由分支共享；不是从到达安装点的已执行路径推测“以后不会修改”。已有经过完整安装者验证的捕获槽仍复用原证据。
+
+因此 handler 内新建的局部标量指针可以被嵌套 handler 捕获，普通闭包内新建指针与安装 handler 也能独立调用。安装前、handler 分支内、安装之后的槽重绑定及之后的槽取址均继续拒绝。函数自身仍扫描完整 Function（含契约和默认参数）；其他没有完整作用域证据的帧不会自动获得许可。此处仍是稳定标量存储契约，不是任意聚合／指针槽动态更新协议。
+
+新增正例先复现 `nested handler pointer capture requires a memory contract`（`/tmp/luna-tools-uawd_4my/result.json`），实现后该用例通过（`/tmp/luna-tools-iotxu9s6/result.json`）。
+
+在 `/home/fin/luna` 执行 `python3 -B development/check.py --timeout 240 -- test -p luna --test drop --test resources`，退出 0：588 项析构、292 项资源测试，共 880 项通过（`/tmp/luna-tools-t3k11bca/result.json`）。`git diff --check` 通过；dev 未提交。
+
+### Copy 聚合中的稳定标量字段（2026-10-14）
+
+handler 的稳定目标检查不再要求指针直接指向一个标量局部根。现在按完整字段路径取得叶子类型，并要求整个所有者已初始化、具备经检查的 Copy 权限、布局不含数据指针，叶子自身仍为 Copy 标量。借用帧会导入整个根布局，因此不能只凭某个叶子当前初始化就推断其余字段有效。枚举变体路径仍被排除，不能把可随 tag 变化的位置当成固定字段。
+
+handler 捕获指针的目标类型比较也改为字段类型，保留完整实际来源。此路径同时用于效应闭包的真实参数／捕获来源核验，支持嵌套结构字段与不同字段的独立读写。仿射根、嵌入数据指针的根、指向整个聚合的指针仍需要额外契约；不由这次修改自动放行。
+
+新正例先复现原来的 `live local Copy scalar target` 拒绝（`/tmp/luna-tools-n6b5lg5e/result.json`），实现后直接字段用例通过（`/tmp/luna-tools-u6blb8ia/result.json`）。
+
+在 `/home/fin/luna` 执行 `python3 -B development/check.py --timeout 240 -- test -p luna --test drop --test resources`，退出 0：592 项析构、292 项资源测试，共 884 项通过（`/tmp/luna-tools-dkbdtha4/result.json`）。新增 4 项测试覆盖直接／嵌套字段、效应闭包与 handler 分离写入、分支字段来源经过嵌套 handler，以及不满足所有者布局契约的拒绝。`git diff --check` 通过；dev 未提交。
+
+### handler 直接捕获 Copy 标量聚合（2026-10-14）
+
+直接词法捕获现在接受具备完整 Copy 证据、布局递归由标量组成的固定积类型，包括嵌套结构与泛型字段。检查保留名义类型身份，使用字段布局验证而不展开 opaque normal-form 头。捕获仍由安装者拥有，多个请求读取和修改同一存储，嵌套 handler 可以读写字段或按同类型整值替换。
+
+仅有 Copy 不足以允许指针、函数／闭包或枚举字段：它们分别涉及指针来源、可调用证据与变体状态的写回，当前仍拒绝。直接捕获本身在安装前或主体内被取址也保持拒绝。与前一节通过指针访问单个标量字段的契约不同，此处不允许 handler 任意改写携带额外来源信息的聚合。
+
+基线用例先复现 `handler lexical capture requires scalar Copy evidence`（`/tmp/luna-tools-nmt5cz76/result.json`），修改后通过（`/tmp/luna-tools-eretz4ap/result.json`）。随后嵌套泛型替换、来源／仿射拒绝与取址拒绝的 4 项针对性测试全部通过（`/tmp/luna-tools-m76i9529/result.json`）。
+
+在 `/home/fin/luna` 执行 `python3 -B development/check.py --timeout 240 -- test -p luna --test drop --test resources`，退出 0：597 项析构、292 项资源测试，共 889 项通过（`/tmp/luna-tools-ssz5265v/result.json`）。新增的聚合结果快照用例确认交付后的按值副本不跟随原捕获后续修改。`git diff --check` 通过；dev 未提交。
+
+### Copy 枚举捕获与安装作用域内的变体证据失效（2026-10-14）
+
+直接 handler 捕获现在允许 payload 递归为标量数据的 Copy 枚举，以及包含这类枚举的结构。指针／可调用字段与仿射 payload 仍不由此契约授权。布局检查继续保留名义身份和预算计费。
+
+新增安装作用域内的可变捕获根集合：进入主体前删除这些根的旧 enum domain，安装期间的赋值也不把它们重新记录为确定变体；退出安装后恢复外围的可变集合，但不恢复已经失效的旧 tag 事实。独立按值副本不在该集合中，保留自己的域。这样主体在请求前再次赋值、请求后匹配，也不会把 handler 可能产生的分支错误判为不可达。该方式会保守损失安装期间部分变体精度，没有把每次请求的精确写回伪装成已实现。
+
+新增 3 项针对性测试通过（`/tmp/luna-tools-yh4b49ro/result.json`）：请求之间重赋值和 tag 改变、独立旧值副本、变体分支内实际析构、结构内枚举经嵌套安装修改，以及正常／拒绝路径的 Handler → Caller 清理。此前只因含标量枚举而拒绝的限制已由这套失效规则替代；原来源拒绝测试改为含可调用 payload 的枚举，仍要求拒绝。
+
+补齐跨层暂停的证据继承：handler 帧直接引用安装者的捕获槽，因此若外层入口可修改同一枚举，内层 handler 在请求外层期间也必须保持该槽的变体未知。帧建立时继承这些共享捕获的可变标记；新增用例覆盖内层先赋值、请求外层改 tag、恢复后匹配并实际析构选中分支中的局部资源。
+
+最终在 `/home/fin/luna` 执行 `python3 -B development/check.py --timeout 240 -- test -p luna --test drop --test resources`，退出 0：601 项析构、292 项资源测试，共 893 项通过（`/tmp/luna-tools-voxvgqwb/result.json`）。`git diff --check` 通过；dev 未提交。
+
+### direct 效应的数据聚合交付与条件内存契约（2026-10-14）
+
+条件内存推导新增共享的 `effect_data_layout` 检查，接受标量、固定积类型、名义结构和枚举，只要递归布局不携带数据指针或可调用值。检查带预算，保留 opaque normal-form 身份；只对已登记 Tuple 使用字段视图。handler 的直接数据捕获复用同一布局检查，再独立要求 Copy，避免维护两套略有不同的布局规则。
+
+普通 direct 操作的参数与结果不再限于原始标量。参数可以是仿射数据包，接收者是否复制、移动或析构仍由资源检查决定，数据布局检查本身不授予这些权限。条件内存摘要继续记录参数求值中的指针访问、安装前提和可能拒绝。direct-passing 的无参数标量槽边界不变；指针、含指针聚合及可调用载荷仍需要不同的来源契约。
+
+带指针捕获并交付 Packet 的用例先复现原 `handler borrowed capture result requires a scalar contract` 拒绝（`/tmp/luna-tools-bmyoj5li/result.json`），修改后执行成功并观察到输入与结果各析构一次（`/tmp/luna-tools-iazo0c0z/result.json`）。
+
+新增 4 项可执行交付测试与 1 项摘要测试通过（`/tmp/luna-tools-tgnwgnpd/result.json`），覆盖原样转发仿射包只析构一次、拒绝时 Packet → Subject → Caller 清理、枚举 payload 所有权、参数读取足迹、前提保留、预算耗尽后恢复与隐藏指针／可调用载荷拒绝。随后在 `/home/fin/luna` 执行 `python3 -B development/check.py --timeout 240 -- test -p luna --test drop --test resources`，退出 0：605 项析构、293 项资源测试，共 898 项通过（`/tmp/luna-tools-54x274ty/result.json`）。`git diff --check` 通过；dev 未提交。
+
+### 函数内局部 handler 的内存摘要与带前提的固定点键（2026-10-14）
+
+内存摘要现在遍历局部 handler：按独立分支收集 guard／主体读写，验证数据交付、捕获来源、fallback 行和完成类型，再在局部前提作用域中推导 computation。局部 handler 的访问进入函数足迹，但其自建前提不导出为调用方义务。捕获指针槽的重绑定／取址仍被拒绝，含可调用来源的捕获仍需要更丰富的契约。支持数据参数的积／变体模式及普通 `resume`；程序的完整所有权与控制退出检查仍由资源 pass 执行。
+
+固定点工作项的身份增加完整效应前提（操作、ABI、签名），处理工作项时恢复其独立上下文。局部等价前提去重并稳定排序，避免递归重新安装不断增长上下文。callee 摘要不会跨不相同的前提集合复用；ABI 增加 Hash 以支持该键，不改变运行时 ABI。
+
+基线正例先复现“调用方已有指针时，调用内部安装 handler 的函数缺少 memory contract”（`/tmp/luna-tools-zvzhnypk/result.json`），接线后通过（`/tmp/luna-tools-ig30bmvh/result.json`）。递归重新安装、部分转发、resume／return 与捕获足迹及预算恢复的针对性测试通过（`/tmp/luna-tools-qoj07ffo/result.json`）。
+
+在 `/home/fin/luna` 执行 `python3 -B development/check.py --timeout 240 -- test -p luna --test drop --test resources`，退出 0：607 项析构、295 项资源测试，共 902 项通过（`/tmp/luna-tools-y933kss1/result.json`）。随后新增数据变体分支用例，`test -p luna --test drop scheduled_local_handler_summary` 3 项通过（`/tmp/luna-tools-wwxu9rfy/result.json`）。`git diff --check` 通过；dev 未提交。对外部借用参数的 handler 捕获，摘要能够保留参数访问，但完整可执行路径仍需要将真实调用方来源接入 handler 资源帧；不把摘要 API 的成功等同于该调用协议已经完成。
+
+### 局部 handler 使用显式借用参数前提（2026-10-14）
+
+接通已有非入口函数借用协议：清理发布器先取得函数的初始化保持内存足迹，调用点以实际来源核验该足迹，再以显式 borrowed parameter 前提分析函数。标量 Copy pointee 的这份前提现在可供局部 handler 使用；它不是仅凭指针类型产生的事实，也不会把虚拟目标加入拥有型清理根。入口参数没有借用前提时仍保持未知。
+
+`moves::Report` 新增 `borrowed_parameters`，S-expression dump 保留每个 slot 和 pointee 类型。普通与上下文调用的清理发布均核对报告和提供的前提一致。函数级前提允许在调用期间借用活着的仿射所有者中的标量字段，但所有者已移走时，真实调用点的足迹检查仍拒绝；不为仿射整个对象授予 Copy 或任意 handler 捕获权限。
+
+首个执行用例先复现 `handler pointer requires a live local Copy scalar target`（`/tmp/luna-tools-uwreptt1/result.json`），接线后通过（`/tmp/luna-tools-9_ov7ku0/result.json`）。参数传递、跨函数转发和字段来源、已移走所有者拒绝、条件报告与错误前提类型拒绝的针对性测试通过（`/tmp/luna-tools-xanhfjpo/result.json`）。
+
+最终在 `/home/fin/luna` 执行 `python3 -B development/check.py --timeout 240 -- test -p luna --test drop --test resources`，退出 0：613 项析构、296 项资源测试，共 909 项通过（`/tmp/luna-tools-uhjet7rr/result.json`）。补充检查同一目标传入两个借用参数（不产生 no-alias 假设）及 handler 词法返回的 Handler → Callee → Owner 析构顺序。`git diff --check` 通过；dev 未提交。
+
+## 数据匹配的内存摘要（2026-10-14）
+
+数据聚合的 match 现在复用 handler 的数据模式绑定，支持 Tuple、结构、匿名记录、枚举、绑定、guard、or 与重映射；绑定按实际字段类型建立，泛型枚举 payload 在实例化后处理。布局检查只证明没有隐藏的数据指针或可调用载荷，不授予 Copy，也不替代资源验证。匹配返回直接指针时仍合并所有可达分支来源。
+
+执行测试覆盖效应返回仿射枚举后解构、guard 回退、嵌套记录与 or 模式、选中分支的清理，以及移动后读取拒绝。内存测试区分参数入口提前拒绝隐藏指针与局部 match 的布局拒绝，避免将正确的提前诊断误判为回归。computed/Then 等更复杂模式仍未接入这份数据匹配摘要，含指针或 callable 的聚合仍需要更完整的来源契约。
+
+在 `/home/fin/luna` 执行 `python3 -B development/check.py --timeout 240 -- test -p luna --test drop --test resources`，退出 0：617 项析构、298 项资源测试，共 915 项通过（`/tmp/luna-tools-3ukre_fa/result.json`）。dev 工作区未提交。
+
+随后新增泛型枚举／结构 payload 的 guard 读取与分支写入足迹测试，包含预算耗尽后恢复。修正测试源码中 `.*` 与 `=>` 相邻造成的分词错误后，执行 `python3 -B development/check.py --timeout 240 -- test -p luna --test resources data_match`，退出 0，3 项通过（`/tmp/luna-tools-dni6tfbg/result.json`）。`git diff --check` 通过。
+
+## 顺序模式与 let-else 的数据内存摘要（2026-10-14）
+
+`Pattern::Then` 先绑定原主语模式，按正常表达式分析计算值，再用计算值的实际类型绑定后续模式。它收集调用和读取足迹，不伪造原主语字段来源；资源分析继续独立核验观察、失败回退和交付。当前计算结果仍遵循已实现的内建标量边界，指针和资源中间值需要后续来源运输。
+
+数据 `LetPattern` 复用该路径，支持计算绑定及 diverging let-else：失败分支从匹配前的环境分析，成功环境单独恢复，所有返回来源仍参与汇总。非数据的原 callable 绑定路径保持原契约。
+
+新增执行用例检查 or 候选内的函数调用、带局部变量的计算块、失败后第二候选的调用次数、仿射消费拒绝、链式计算 let-else 的单次清理；摘要用例检查候选读取、两个分支的指针来源、失败 return 来源及预算耗尽后的恢复。首批针对性 3 项通过（`/tmp/luna-tools-6fraoss2/result.json`）。最终在 `/home/fin/luna` 执行 `python3 -B development/check.py --timeout 240 -- test -p luna --test drop --test resources`，退出 0（`/tmp/luna-tools-1s_f5dk6/result.json`）。工作区仍在 dev，未提交。
+
+## Guard 调用与局部计算块的内存摘要（2026-10-14）
+
+内存观察分析接通具名函数的显式标量调用及局部标量计算块。调用取得普通摘要并保留参数读取、拒绝可能性；资源分析继续核验候选回退安全。块内赋值只允许当前块声明的标量，外部变量／指针写入、非标量绑定仍拒绝。观察结束恢复局部类型目录的旧记录，支持嵌套调用、嵌套块以及同一表达式在不同分析路径中被访问。
+
+执行测试检查 guard 调用及 let-else 两条路径上 Scratch → Held 的清理顺序和调用次数，并保留拒绝型观察调用的资源错误。摘要测试覆盖嵌套调用、嵌套块读取足迹及三类外部写入／指针绑定拒绝。针对性 3 项通过（`/tmp/luna-tools-egn9quzr/result.json`）。
+
+在 `/home/fin/luna` 执行 `python3 -B development/check.py --timeout 240 -- test -p luna --test drop --test resources`：622 项析构通过；资源 301 项通过、1 项因既有 read-only 诊断标识缺失失败（`/tmp/luna-tools-_djjm92i/result.json`）。仅修正该诊断文案后执行 `python3 -B development/check.py --timeout 240 -- test -p luna --test resources`，退出 0，302 项通过（`/tmp/luna-tools-chkhduwj/result.json`）。`git diff --check` 通过；dev 工作区未提交。
+
+## Handler 模式计算的清理边界（2026-10-14）
+
+新增组合用例复现 guard 局部赋值的清理发布失败：`cleanup site has no unique runtime boundary ... (Replacement)`（`/tmp/luna-tools-usyvzxfa/result.json`）。资源报告已有替换操作，但 handler 子作用域仅遍历 body 与独立 guard，漏掉 Pattern::Guard / Then 内的计算。
+
+NIR 增加带预算的模式计算根提取和携带额外观察根的作用域遍历。清理发布队列显式携带这些观察表达式；handler 的独立 guard 也进入该集合，不再被包装成函数前置条件。每个表达式子树由所属根遍历，嵌套 handler／closure 仍保留自己的运行环境。
+
+执行用例验证连续三次请求中内层接受、外层转发、内层恢复，以及 Scratch → Inner／Outer 的准确清理顺序；另验证操作参数的 computed pattern 局部赋值和失败转发。摘要测试验证 guard 捕获读取、handler 写入、局部效应前提不泄漏、预算耗尽后恢复。修复后针对性 2 项通过（`/tmp/luna-tools-t4zt8z7q/result.json`）。最终在 `/home/fin/luna` 执行 `python3 -B development/check.py --timeout 240 -- test -p luna --test drop --test resources`，退出 0（`/tmp/luna-tools-iarscj_5/result.json`）。dev 工作区未提交。
+
+## 仿射效应参数的 guard 回退验收（2026-10-14）
+
+增加跨函数、带外部指针调用方的完整执行测试，验证仿射 Packet 请求参数在内层 guard 接受、拒绝转发、再次接受的连续请求中始终只有一个清理所有者。实际析构顺序为 Inner → Packet、Outer → Packet、Inner → Packet，失败候选没有提前清理转发参数。
+
+另覆盖外层 handler 合约拒绝，实际清理顺序 Outer → Packet → Subject → Caller，未选中的 Inner 没有构造或清理；枚举载荷中嵌套结构字段的 guard 观察在接受和回退路径均只清理 Packet 一次。此轮补充验收证据，没有为测试改变实现或语言语义。
+
+在 `/home/fin/luna` 执行 `python3 -B development/check.py --timeout 240 -- test -p luna --test drop affine_handler_guard`，退出 0，3 项通过（`/tmp/luna-tools-i2_jc6b3/result.json`）。`git diff --check` 通过；dev 工作区未提交。
+
+## 枚举回调载荷的内存来源传播（2026-10-14）
+
+内存摘要的 owned callable 路径增加 variant 标记，与资源层路径编码一致；路径验证按实际枚举声明、实例化载荷和字段编号检查，Display 使用 `(variant n)` 节点。枚举构造不再丢弃回调来源，参数、返回字段、match／or／let-else 解构与 remap 贯通具名代码及已知闭包捕获。
+
+构造时为不活动 variant 建立 bottom；活动字段缺少来源时保留 Unknown。不同分支合并不会把未知回调伪装成不存在的字段。模式绑定复制身份与局部候选均计入预算。数据指针聚合继续拒绝；effect_data_layout 仍不允许通过效应交付回调，这部分需要独立的跨挂起来源契约。
+
+新增执行测试覆盖不同 variant 的回调跨函数选择和调用、闭包载荷经 let-else 取得或回退；摘要测试覆盖返回身份合并、or 重映射、未知输入拒绝、结构化 dump、预算耗尽后重试。首批针对性通过（`/tmp/luna-tools-hmelzl88/result.json`）。旧拒绝用例改为核验未知回调在调用契约处被拒绝，隐藏指针仍核验布局拒绝。
+
+最终在 `/home/fin/luna` 执行 `python3 -B development/check.py --timeout 240 -- test -p luna --test drop --test resources`，退出 0：629 项析构、305 项资源，共 934 项通过（`/tmp/luna-tools-14d1fc8y/result.json`）。补齐复制计费后执行 `test -p luna --test drop --test resources enum_callable_match`，退出 0，4 项通过（`/tmp/luna-tools-r7gx0aay/result.json`）。`git diff --check` 通过；dev 工作区未提交。
+
+## 枚举回调证据进入实际内存调用（2026-10-14）
+
+真实指针调用复现 `every callable candidate requires a memory contract: dynamic call requires a richer memory contract`（`/tmp/luna-tools-722w83nt/result.json`）。摘要层虽已支持 variant 路径，资源层的 prepared named/code 输入、正式 callable premise 导入、闭包捕获导出仍跳过该类字段。
+
+删除这些过时的路径过滤，保留原有实例化布局、签名及捕获证据验证。具体回调的内存足迹现在能跨枚举参数、匿名回调载荷和闭包捕获的枚举传回实际调用方，仍按真实所有者检查初始化和移动状态。
+
+测试覆盖两个 variant 同号字段的独立写入／读取契约、返回两个指针来源、缺失／非法路径前提拒绝、预算失败恢复；完整执行覆盖移动任一所有者的拒绝、正常两条路径的析构，以及匿名回调经过枚举和外层闭包后写回正确目标。针对性 3 项通过（`/tmp/luna-tools-xced4u8i/result.json`）。最终在 `/home/fin/luna` 执行 `python3 -B development/check.py --timeout 240 -- test -p luna --test drop --test resources`，退出 0（`/tmp/luna-tools-sh88c0zr/result.json`）。`git diff --check` 通过；dev 工作区未提交。
+
+## 闭包捕获枚举的回调更新（2026-10-14）
+
+复现常量初始 variant 的闭包快照遗漏不活动载荷来源，首次读取即被拒绝（`/tmp/luna-tools-kqtmrjsv/result.json`）。PreparedCaptures 现在明确区分缺失的未知证据和 variant 路径上的空候选：后者是载荷不活动的条件前提，生产者只能由构造所得 bottom 或经过验证的 enum domain 导出。普通非 variant 空证据仍拒绝；Display 使用 `(absent-variant)`。
+
+固定代码源检查能识别枚举构造及其活动字段。不活动字段的替换不擦除跨调用不变量中的旧候选；活动字段的新具名或无环境匿名定义加入后续调用候选。闭包内调用读取旧身份、替换 variant、随后调用读取新身份，摘要保守包含两个目标；动态输入回调替换仍拒绝，已移动的后续目标仍在调用点拒绝。
+
+首个执行夹具因 Copy 枚举的函数字段未声明 Copy 被正确拒绝，补齐 Action 的 Duplicate 实现后通过（`/tmp/luna-tools-ucztnmlm/result.json`）。完整资源／析构检查中 631 项析构通过，资源 307 项通过、1 项因拒绝诊断文案不兼容失败（`/tmp/luna-tools-_6zp23tb/result.json`）；保留 empty prepared 标识后，在 `/home/fin/luna` 执行 `python3 -B development/check.py --timeout 240 -- test -p luna --test resources`，退出 0，308 项通过（`/tmp/luna-tools-up42d0p2/result.json`）。`git diff --check` 通过；dev 工作区未提交。
+
+## 返回的可更新闭包使用跨调用捕获候选（2026-10-14）
+
+递归工厂返回枚举捕获闭包的摘要已有完整代码描述，但资源执行准备仍无条件拒绝修改捕获回调的返回代码（`/tmp/luna-tools-py87o7kw/result.json`）。提取现有闭包固定点推断的捕获不变量，返回代码重建使用覆盖初始与后续固定更新的候选集合。地址暴露、无法建立不变量、非 Copy 或不可恢复捕获仍不导入；数据与指针运行时值不从代码描述中复原。返回捕获布局同时接通枚举，固定闭包定义的纯数据捕获改用共用 data-only 布局检查，允许纯数据枚举而不允许指针或回调载荷。
+
+新增测试检查递归返回后的两次调用、absent-variant dump、预算失败恢复、返回前是否已经调用过闭包的不同实际结果、纯数据枚举标签变化后的读取足迹。原 mutable callback 实现限制测试改为验证第二次调用读取新目标。首项完整执行通过（`/tmp/luna-tools-01y6p7ar/result.json`）。
+
+返回前调用最初使用工厂内部局部取址，复现独立的局部地址摘要缺口；本轮未实现该功能。该用例改为借用调用方传入的两个目标，隔离验证返回闭包没有恢复构造前状态（`/tmp/luna-tools-bpxaazil/result.json`）。
+
+验证目录 `/home/fin/luna`，统一 check.py：相关两组检查中 631 项析构通过（`/tmp/luna-tools-473nwq3q/result.json`）；最终 `python3 -B development/check.py --timeout 240 -- test -p luna --test resources` 退出 0，311 项通过（`/tmp/luna-tools-udvbih8r/result.json`）。`git diff --check` 通过；dev 工作区未提交。
+
+
+### 局部存储根与边界内存摘要
+
+memory 内部 PointerPlace 区分 Parameter 与 Local 根，调用契约和返回实参的辅助函数均保留真实根身份。无指针拥有型局部字段的读写在核对布局后不进入外部参数足迹；发布结果拒绝局部指针逃逸，资源检查仍独立拒绝已移动所有者。局部指针槽的间接加载／写入尚需存储内容契约。内部根提供 S-expression Display，并测试同号局部根与参数根不混淆。
+
+验证目录 `/home/fin/luna`，均经 check.py：此前相关组 632 项析构通过，资源组修正两项旧实现限制预期后 313 项通过（`/tmp/luna-tools-w73jxrum/result.json`）。最终字段 owner 校验后 `test -p elaboration --lib pointer_root_tests` 1 项通过（`/tmp/luna-tools-9se68gvv/result.json`），`test -p luna --test drop --test resources local_storage` 4 项通过（`/tmp/luna-tools-qffhrbrx/result.json`）。新增匿名记录嵌套字段取址、经 identity 返回并传给 flip 的完整执行用例后，`python3 -B development/check.py --timeout 240 -- test -p luna --test resources local_storage` 退出 0、3 项通过（`/tmp/luna-tools-v0l9jo2c/result.json`）。dev 工作区未提交。
+
+
+### 默认实参环境切换保留局部存储布局
+
+规范化默认实参读取准备好的指针时，原实现替换 locals 后报 `local memory root is missing`（`/tmp/luna-tools-puu12xhl/result.json`）。局部根现在引用独立的布局表条目，按绑定与已实例化类型在预算内复用；默认环境切换只影响绑定解析，不丢失原存储依据。发布结果仍拒绝局部根，布局不提供资源可用性许可。根 dump 增加 storage 身份。
+
+回归验证实际 true/false 读取、已移动所有者拒绝、预算耗尽后恢复。用例从规范化计划检查到解释执行；源级 pointee-reading 默认表达式仍缺 P3 admission，不声称已实现该纯度证明（首次源级尝试 `/tmp/luna-tools-9fvl6s7q/result.json` 因此被拒绝）。
+
+在 `/home/fin/luna` 执行 `python3 -B development/check.py --timeout 240 -- test -p luna --test resources --test drop`，退出 0，632 项析构、315 项资源，共 947 项通过（`/tmp/luna-tools-atikaiao/result.json`）。`test -p elaboration --lib pointer_root_tests` 退出 0，1 项通过（`/tmp/luna-tools-2uuvg1p5/result.json`）。`git diff --check` 通过；dev 工作区未提交。
+
+
+### 源级默认实参的 P3 指针观测
+
+纯度分析在 finite/default 模式接受可确认 Copy 的普通指针读取及字段投影，递归检查全部子表达式、已知辅助函数和已选择的 trait 方法。稳定范围限定为单次默认求值；只缓存行为判断，不缓存读取结果。runtime pure 的 P4 检查仍拒绝可变 pointee 依赖，写入、未知调用、未证明终止的递归／循环继续拒绝。资源检查继续检查来源、移动及初始化，不能由纯度判断恢复可用性。
+
+此前两个需要手工改写 NIR 的资源用例现在直接从 `p.*` 默认表达式编译，覆盖显式实参移动所有者后的拒绝、显式覆盖跳过读取、调用方局部布局、实际 true/false 与预算恢复。新增执行检查跨调用内容变化、显式实参先写后读、调用次数及顺序、泛型辅助函数和 trait 方法。旧的“一律拒绝读取”预期已改为读写区分，没有放宽写入／P4 拒绝。
+
+在 `/home/fin/luna` 统一经 check.py：`test -p luna --test default_calls --test runtime_purity --test trait_purity --test pure_callbacks --test resources --test elaboration` 中 default_calls 13、elaboration 438、pure_callbacks 58、resources 315、runtime_purity 25 项通过；trait_purity 有 1 项旧读取拒绝预期失败（`/tmp/luna-tools-94gotl65/result.json`）。修正并增加 trait 读取执行用例后 `test -p luna --test trait_purity` 退出 0，16 项通过（`/tmp/luna-tools-pr21yntd/result.json`）。`test -p luna --test trait_purity --test frontend_cli owned_default` 的 CLI 3 项通过，trait 组被筛掉不计验证（`/tmp/luna-tools-c7_c9all/result.json`）。合计这些受影响组 868 项通过；未重跑全 workspace。`git diff --check` 通过；dev 未提交。
+
+
+### 默认实参立即闭包的捕获观测
+
+P3 finite 分析允许新建闭包取得可确认 Copy 的捕获快照，再检查调用体；不为闭包类型推造 Copy，也不对未知回调授予行为依据。源级立即闭包最初因无 P3 证据失败（`/tmp/luna-tools-hpoxgjyg/result.json`）；开放已知捕获后暴露内存层 aggregate pointer dependencies 缺口（`/tmp/luna-tools-hrz8i47r/result.json`）。
+
+memory 对直接闭包调用快照指针捕获来源，再求值普通实参，借已有 borrowed-capture adapter 把捕获变为虚拟输入并重定位访问与结果。共享原 Round，递归保持不动点与预算，不另起无限嵌套分析。支持直接指针／数据捕获与标量／指针实参结果；代码捕获、聚合实参结果及更一般的环境传递仍需对应契约。捕获指针槽改写沿用已有保守校验。
+
+回归覆盖默认读取指针加布尔捕获、捕获指针写入和未知调用拒绝、显式实参移动所有者后拒绝；摘要与执行覆盖捕获快照先于实参中指针重绑定、递归读取、返回来源及预算耗尽后的恢复。在 `/home/fin/luna` 执行 `python3 -B development/check.py --timeout 240 -- test -p luna --test resources --test default_calls --test pure_callbacks --test runtime_purity --test drop`，退出 0：15/632/58/316/25 项，共 1046 项通过（`/tmp/luna-tools-uypqdjhe/result.json`）。`git diff --check` 通过；dev 未提交，观察到远端领先 1 个提交，未改动分支集成状态。
+
+
+### 立即借用闭包的代码实参与捕获
+
+immediate_borrowed_call 现在传递命名 callable inputs 与匿名 prepared code inputs，保留普通实参求值时的代码快照；非指针捕获复用普通闭包的 snapshot_capture_code，携带命名候选及匿名环境依据。指针来源仍独立映射到真实根，未知代码不会按签名猜测。回归覆盖命名／匿名／带环境的回调实参和代码捕获、捕获后重新赋值仍返回原指针来源、缺失代码依据拒绝、预算恢复以及源级默认闭包的已知回调实参。
+
+新增单参数 `%{flag:bool} fn(*bool)->bool` lambda 暴露解析器丢失 stop_at_pipe：闭包类型 qualifier 现在把外层 ExprOption 传给主体，保留结束管道边界；环境花括号内继续使用其自身边界。解析回归覆盖嵌套环境与括号内联合类型。
+
+验证均在 `/home/fin/luna` 经 check.py：最初 transport 用例复现缺少参数契约（`/tmp/luna-tools-m4qr0_fx/result.json`），实现后通过（`/tmp/luna-tools-iiaiulgc/result.json`）。`test -p luna --test resources --test default_calls --test drop` 中 16 项默认、632 项析构、317 项资源通过，1 项新增资源用例因上述解析问题失败（`/tmp/luna-tools-eo0yrk2a/result.json`）。修复后 `test -p luna --test resources immediate_borrowed_closures_transport` 退出 0（`/tmp/luna-tools-x10ppurq/result.json`）；`test -p parse` 退出 0，51 项通过（`/tmp/luna-tools-um61kdb1/result.json`）。`git diff --check` 通过；dev 未提交。一般闭包环境的传递与独立 P3 代码捕获证明仍有未覆盖范围，不把内存摘要能力等同于纯度完成。
+
+
+### 类型限定前缀保留外层解析边界
+
+#、!、& 的上下文及主体现在继承外层 ExprOption，不再丢失 lambda 管道或 CMTT 结束边界。限定上下文的停止规则统一覆盖下一层类型限定前缀，修复 `#IO !Failure T` 被当成 IO 上后缀处理的问题；括号内仍使用自身运算范围。% 的非花括号上下文也采用同一停止规则。没有改动错误结果与效应的语义／ABI。
+
+回归检查完整 AST：lambda 主体保持在参数类型外，混合与嵌套限定保留层次，括号内管道／取模不受外层停止规则影响，CMTT 的 `|-` 和结束 `>` 保持独立；缺少类型操作数仍拒绝。初始 lambda 失败证据 `/tmp/luna-tools-kr3j4mfc/result.json`，混合前缀失败证据 `/tmp/luna-tools-540r6by2/result.json`。
+
+在 `/home/fin/luna` 经 check.py 执行 `test -p luna --test elaboration --test cmtt --test default_calls`，退出 0，131 项 CMTT、16 项默认值、438 项 elaboration 通过（`/tmp/luna-tools-ar850z6_/result.json`）；最终 `test -p parse` 退出 0，54 项通过（`/tmp/luna-tools-52bi0s0t/result.json`）。`git diff --check` 通过；dev 工作区未提交。
+
+
+### 立即借用闭包的聚合与代码结果
+
+移除 immediate_borrowed_call 仅接受标量／直接指针结果的旧限制，改为检查拥有型结果的无指针布局，并发布 code_fields 的匿名环境依据及命名候选。两种代码依据同时保留，避免返回命名函数后再传入普通高阶调用时丢失身份。资源语义仍独立检查仿射转移与清理。
+
+初始用例复现结果契约限制（`/tmp/luna-tools-gpb3gkmg/result.json`）；修复后的检查发现新增枚举夹具误用前缀 match（`/tmp/luna-tools-jqhvgyig/result.json`），改为 Flurry 后缀形式。最终覆盖结构体／元组／枚举、代码字段、直接返回命名回调、返回带数据捕获的匿名回调、返回代码再作高阶实参；拒绝聚合指针、局部地址逃逸和未知返回代码。仿射 Packet 返回后仅析构一次，移动后访问拒绝。
+
+在 `/home/fin/luna` 经 check.py 执行 `test -p luna --test resources --test drop immediate_borrowed` 退出 0，6 项通过（`/tmp/luna-tools-zzy6qcyo/result.json`）。最终 `python3 -B development/check.py --timeout 240 -- test -p luna --test resources --test drop` 退出 0，633 项析构、320 项资源，共 953 项通过（`/tmp/luna-tools-osr8p2k_/result.json`）。`git diff --check` 通过；dev 未提交。
+
+
+### 限定类型作为外层命题操作数
+
+#、!、& 的主体 Pratt 门槛现在与 % 一致：包含函数结果箭头，保留外层比较、trait bound 和布尔命题。修复 `#IO fn()->T == Other` 被整个吞入 EffectQualifiedType 的错误（基线 `/tmp/luna-tools-29jr3lhz/result.json`）。解析回归检查四类限定及混合嵌套在 ==、!=、:- 和 and 下的 AST 层次；源级用例验证相同效应行、可交换不同 labels、函数结果类型等式，并拒绝不同效应行的错误等式。未展开 normal form 或改变效应行相等规则。
+
+在 `/home/fin/luna` 经 check.py 执行 `test -p parse`，退出 0，55 项通过（`/tmp/luna-tools-1o4jx7ma/result.json`）。最终 `python3 -B development/check.py --timeout 240 -- test -p luna --test elaboration --test cmtt` 退出 0，439 项 elaboration、131 项 CMTT 通过（`/tmp/luna-tools-p0o47sa4/result.json`）。`git diff --check` 通过；dev 工作区未提交。
+
+
+### P3／P4 代码捕获的行为快照
+
+纯度 Codes 从裸 Expr 升为 BehaviorCode：定义与构造时捕获的 CodeKey 候选分别保存。匿名代码 intern、候选合并和函数行为缓存保留环境差异；调用闭包时恢复冻结的代码身份，不从已被后续实参／赋值改动的环境重新猜测。循环从候选不动点取得捕获快照。复制、比较与键导入均计预算；BehaviorCode／CodeKey 提供稳定 S-expression Display。元数据只证明行为，不提供资源复制或清理权限。任意工厂返回和结构化代码捕获的行为证据仍有独立待完善范围。
+
+源级默认用例最初因 P3 缺失失败（`/tmp/luna-tools-h77kh9am/result.json`）；现在先捕获 read 再将原变量赋为 write 可以安全调用旧快照，反向情况仍拒绝。P4 用例覆盖命名／匿名／分支候选／循环代码捕获，不纯候选仍拒绝。首次 P4 夹具缺少清理协议，补齐 Copy／Drop；循环夹具又被正确拒绝重复移动函数值（`/tmp/luna-tools-k7ea69lf/result.json`），显式提供函数类型 Copy 实现后通过，未放宽仿射规则。
+
+验证目录 `/home/fin/luna`，统一 check.py：`test -p luna --test default_calls --test pure_callbacks --test runtime_purity --test trait_purity` 退出 0，17/59/25/16 项通过（`/tmp/luna-tools-96atoj_k/result.json`）。扩大检查中 elaboration 439、pure_bitvec 14 项通过（`/tmp/luna-tools-k7ea69lf/result.json`）；修正循环夹具后 `test -p luna --test pure_callbacks --test quote_functions` 退出 0（`/tmp/luna-tools-lh53_8ns/result.json`）。`test -p elaboration --lib behavior_code_snapshot_tests` 退出 0，验证身份区别、预算失败恢复和结构化 dump（`/tmp/luna-tools-iiuim8v8/result.json`）。`git diff --check` 通过；dev 工作区未提交。
+
+
+### 闭包工厂返回代码捕获的行为依据
+
+纯度层将直接代码捕获快照递归导出到内存摘要，再从返回代码候选导入行为身份。转发及嵌套捕获保留实际候选；同签名的不纯回调、混合候选和未知输入不能获得 P4 依据。构造后修改原变量不影响已有捕获。导入导出带深度与复制预算，依据只表示代码身份，调用行为和资源交付仍分别检查。聚合字段路径尚未接入该纯度适配，保守拒绝而非压平成直接捕获。
+
+2026-10-14 在 `/home/fin/luna` 经 `python3 -B development/check.py --timeout 240 -- test -p luna --test pure_callbacks --test default_calls --test runtime_purity --test trait_purity` 退出 0，63/17/25/16 项通过（`/tmp/luna-tools-d4x75h8m/result.json`）。`test -p elaboration --lib behavior_code_snapshot_tests` 退出 0，1 项通过（`/tmp/luna-tools-pa308qgf/result.json`）。新增用例覆盖具名及匿名回调工厂、嵌套转发、构造快照与未知／不纯候选拒绝。dev 工作区未提交。
+
+
+### 聚合字段的代码身份与唯一临时清理边界
+
+纯度输入和捕获快照使用拥有型字段路径，接通结构体／元组构造、投影、结构解构、分支合流、函数参数和返回代码摘要。嵌套捕获及注册 Tuple 的 normal-form 头保留；未知字段不因其他字段已知而获得依据。字段赋值合并候选，循环整块聚合替换在检查首轮前使旧叶依据失效；完整聚合循环方程及枚举／计算模式的代码依据仍待接通。布局复用 memory 的受预算路径检查，不通过 PTC 处理程序状态。
+
+执行用例暴露 `Discard(Assign(...))` 共享源码范围导致重复 TemporaryEnd hook。NIR 提供共享边界判定，计划构建与解释器同时跳过该 void 包装的重复 hook；内部赋值仍执行清理。新增两轮循环执行断言捕获资源逐轮各析构一次，没有放宽清理唯一性检查。
+
+2026-10-14 在 `/home/fin/luna` 经 `python3 -B development/check.py --timeout 240 -- test -p luna --test pure_callbacks --test default_calls --test runtime_purity --test trait_purity --test drop --test resources` 退出 0：66/17/25/16/634/320 项通过（`/tmp/luna-tools-5lynkrvi/result.json`）。统一 P3/P4 字段投影后复验前四组退出 0（`/tmp/luna-tools-r148wlff/result.json`）。新增重复闭包调用拒绝例 1 项通过（`/tmp/luna-tools-iaq759bh/result.json`）；`test -p elaboration --lib behavior_code_snapshot_tests` 的身份、字段路径 dump 和预算恢复检查 1 项通过（`/tmp/luna-tools-hkcfrzq1/result.json`）。相关检查合计覆盖 1080 个独立测试，未执行全 workspace。`git diff --check` 通过；dev 工作区未提交。
+
+
+### 聚合回调的循环字段方程
+
+循环行为分析按拥有型布局枚举代码叶，将整块赋值、字段赋值、局部别名及结构解构映射成字段方程。右侧解释保留构造、投影、分支、嵌套循环以及具名工厂的字段输入／返回依据；未知来源保持未知，不以入口初始回调代替后续迭代候选。完成不动点和有预算的最终复制后一次发布入口字段；预算中途耗尽不发布部分结果。枚举域、计算模式及更一般匿名工厂调用仍未纳入这一身份求解。
+
+2026-10-14 在 `/home/fin/luna` 统一经 check.py：最初新增聚合循环用例复现 P4 拒绝（`/tmp/luna-tools-dg1zd8dp/result.json`），实现后 `test -p luna --test pure_callbacks` 退出 0，70 项通过（最终 `/tmp/luna-tools-o6j5uta4/result.json`）。`test -p luna --test default_calls --test runtime_purity --test trait_purity` 退出 0，17/25/16 项通过（`/tmp/luna-tools-bf8a4__6/result.json`）。`test -p elaboration --lib behavior_code_snapshot_tests` 退出 0，2 项通过（`/tmp/luna-tools-44ndbmkp/result.json`）；新增测试逐步提高预算直至成功，检查每次失败不改变入口依据、恢复后包含新旧候选并保持不动点。相关共 130 项，未重跑全 workspace。dev 未提交。
+
+
+### 枚举代码叶的缺席依据与模式合流
+
+纯度层按带变体标记的拥有型路径保留枚举回调字段；构造只为不活跃变体产生缺席依据，未知活跃字段保持未知。Variant 模式投影字段，Remap 传递绑定身份，or 模式合并所有可达分支的候选。只有当前变体必有的代码叶缺席才能据此排除该匹配；内层变体缺席不会排除外层已存在值。闭包捕获、具名参数及工厂返回继续保留该信息。
+
+memory 的 prepared 参数只在经过拥有型布局验证的变体代码叶上接受空集合前提，调用者负责建立缺席事实。实际返回字段使用 `Known([])` 区分缺席与递归 `NoReturn`，dump 显示 `absent-variant`；结果安装端同步校验路径及叶类型。未知前提不转为缺席。计算模式及部分枚举循环仍保守处理。
+
+2026-10-14 在 `/home/fin/luna` 统一经 check.py：扩大验证发现枚举跨调用的结果安装器仍拒绝缺席集合，已修复（失败证据 `/tmp/luna-tools-0psf5m3a/result.json`，针对性复验 `/tmp/luna-tools-sapuy5m2/result.json`）。最终 `test -p luna --test pure_callbacks --test resources --test drop --test default_calls --test runtime_purity --test trait_purity` 退出 0，72/321/634/17/25/16 项通过（`/tmp/luna-tools-uni1qdqc/result.json`）。`test -p elaboration --lib behavior_code_snapshot_tests` 退出 0，3 项通过（`/tmp/luna-tools-ypkin74s/result.json`）。共 1088 项，覆盖空集合入口拒绝、预算恢复、嵌套缺席边界、匿名回调、工厂返回、or 合流及未知／不纯候选拒绝。`git diff --check` 通过；dev 未提交。
+
+
+### 枚举循环变体转换与待求解状态
+
+循环代码方程接通 Variant 构造和 Variant／Remap／or 模式来源，保留跨迭代的变体限定字段。显式 `LoopCode` 区分 Bottom、Known（包括已证明缺席的空集合）和 Unknown；尚未求出捕获或工厂输入时继续等待方程，不能导出为缺席事实。对应 dump 使用 S-expression。已证明缺席的入口字段可经过具名转发而保留，未知候选仍会阻止 P4 证明。计算模式和更精细的路径关联仍保守处理。
+
+2026-10-14 在 `/home/fin/luna` 经 check.py：新增变体循环初始复现 P4 拒绝（`/tmp/luna-tools-rtpt1jpn/result.json`）。最终 `test -p luna --test pure_callbacks --test default_calls --test runtime_purity --test trait_purity` 退出 0，74/17/25/16 项通过（`/tmp/luna-tools-xspr0_am/result.json`）。`test -p elaboration --lib behavior_code_snapshot_tests` 退出 0，4 项通过（`/tmp/luna-tools-rjwit48d/result.json`）。共 136 项；新增执行覆盖两轮变体切换、保持空变体、工厂／别名转发和模式重组，拒绝例覆盖后续迭代引入未知／不纯回调。预算恢复及 Bottom 不得发布为捕获缺席依据的检查通过。`git diff --check` 通过；dev 未提交。
+
+
+### 计算模式的行为与 Copy 代码结果
+
+纯度层依次检查 Then 的 first／计算表达式／next，把计算结果自己的代码依据交给下一模式。Guard 检查实际表达式；or 候选保留外部局部状态的保守更新，不能把失败候选已经执行的操作回滚。缺席变体剪枝仅用于不含观察计算的结构模式，后面的结构失败不能抹掉前面的计算。
+
+资源观察入口支持有 Copy 依据的无捕获环境代码值，传递具名引用、局部投影、条件／块结果和具名调用的返回身份。已知代码输入可用上下文化内存摘要检查不拒绝性，真正可能拒绝的调用仍要求失败路径交付。计算结果的绑定不消耗原被匹配值的字段；拥有型计算结果及更复杂的计算模式循环仍待接通。
+
+2026-10-14 在 `/home/fin/luna` 经 check.py：初始计算回调用例复现拒绝，定位到资源层仅接收标量的限制（`/tmp/luna-tools-3ddo9yw1/result.json`）。最终 `test -p luna --test pure_callbacks --test default_calls --test runtime_purity --test trait_purity --test resources --test drop` 退出 0，76/18/25/16/321/636 项通过（`/tmp/luna-tools-vt1cxljw/result.json`）。`test -p elaboration --lib behavior_code_snapshot_tests` 退出 0，5 项通过（`/tmp/luna-tools-n9p9l6pm/result.json`）。共 1097 项，包含计算身份、失败候选执行次数、拒绝调用、默认值终止性和后续结构失败不得剪掉前序观察的检查。`git diff --check` 通过；dev 未提交。
+
+### 计算模式循环方程与观察记录
+
+循环绑定方程记录各自的产生表达式：Then 后段绑定来自计算结果，前段仍来自被匹配值。Remap 同时保留候选内部身份和成功后的统一身份，使链式计算及 or 候选可以正确引用前段代码。观察块支持私有 Copy 代码绑定和重赋值；未知新来源不沿用旧身份。
+
+观察预检查不发布稍后普通表达式遍历会再次生成的清理记录，避免重赋值和嵌套实参调用生成重复清理上下文。match 另行积累候选的实际观察记录；恒假 guard 丢弃成功绑定计划时，仍保留已经执行的调用与块内临时清理。执行回归覆盖嵌套生产／转发和失败后重试的精确调用顺序。
+
+重赋值回归先复现重复上下文（`/tmp/luna-tools-q2gyyqi7/result.json`），修复后通过（`/tmp/luna-tools-nv6iz88p/result.json`）。重试执行又复现恒假 guard 丢失计划（`/tmp/luna-tools-n7v2cer0/result.json`）；分离观察记录后 `test -p luna --test drop scheduled_computed_code_patterns` 退出 0（`/tmp/luna-tools-l8awxhdd/result.json`）。
+
+2026-10-14 在 `/home/fin/luna` 最终经 check.py 执行 `test -p luna --test pure_callbacks --test default_calls --test runtime_purity --test trait_purity --test resources --test drop`，退出 0，78/18/25/16/321/636 项通过（`/tmp/luna-tools-rkr2yqf6/result.json`）。`test -p elaboration --lib behavior_code_snapshot_tests` 退出 0，5 项通过（`/tmp/luna-tools-7vpiwhiq/result.json`）。合计 1099 项，未执行全 workspace；`git diff --check` 通过，dev 工作区未提交。
+
+### guard 直接调用已知 Copy 代码
+
+观察调用可解析局部／投影中的具名代码候选，检查 Copy、可用性、每个目标的不拒绝依据及上下文化代码实参，再由普通调用分析生成唯一执行计划。未知来源、可能拒绝的任一候选和捕获环境仍需要完整失败路径契约。没有把函数类型或某个安全候选当作全体目标的依据。
+
+初始执行用例复现直接 `action(false)` guard 被拒（`/tmp/luna-tools-bwzatui5/result.json`）。接通后，`test -p luna --test drop` 637 项通过（`/tmp/luna-tools-wzx5z42f/result.json`），覆盖生产结果用于 guard、两个分支目标的实际调用顺序、未知回调及候选任一方向含拒绝目标的资源诊断。拒绝例直接调用 cleanup_report，避免高阶可执行入口缺少实例参数的预检查遮蔽所测资源规则。
+
+2026-10-14 在 `/home/fin/luna` 经 check.py 完成其余受影响检查：`test -p luna --test pure_callbacks --test default_calls --test runtime_purity --test trait_purity --test resources` 退出 0，78/18/25/16/321 项通过（`/tmp/luna-tools-7izt_vq2/result.json`）。本轮合计 1095 项；`git diff --check` 通过。文档同步已支持的 Copy 代码计算结果和直接 guard 示例，dev 未提交。
+
+### 观察调用的计算代码来源
+
+观察预检查返回实际计算取得的代码依据，同时仍丢弃普通遍历会重新生成的执行记录。callee 和高阶实参复用该依据，使工厂返回、条件与块结果可直接进入 guard 调用。每层分别检查不拒绝性；工厂安全不替代返回目标安全。普通观察调用在自身 FullExpression 边界清理临时被调用值，然后检查调用者资源状态不变。
+
+初始复现工厂 callee 身份丢失（`/tmp/luna-tools-p7pz0qkg/result.json`）；保留身份后暴露临时接收者未结束（`/tmp/luna-tools-iozprmbm/result.json`）。修复后 `test -p luna --test drop` 退出 0，637 项通过（`/tmp/luna-tools-8_xwse68/result.json`）。新增执行分支断言工厂、返回目标和高阶 apply 的顺序与单次执行，资源拒绝例区分工厂拒绝、返回目标拒绝、未知条件结果和未知块结果。
+
+2026-10-14 在 `/home/fin/luna` 经 check.py 执行 `test -p luna --test pure_callbacks --test default_calls --test runtime_purity --test trait_purity --test resources`，退出 0，78/18/25/16/321 项通过（`/tmp/luna-tools-35wunn36/result.json`）。本轮相关合计 1095 项；`git diff --check` 通过，dev 未提交。
+
+### 观察计算中的 match
+
+观察入口支持主语与结果均为标量或 Copy 代码的 match。预检查在每个可达候选自己的绑定环境中验证计算、guard 和分支体；成功与失败候选的执行记录统一由普通 match 分析生成。结果保留普通分支合流所得代码身份，FullExpression 边界清理临时接收者后确认调用者资源状态未改变。外部写入、拒绝和向外层 return 不能隐藏在内层分支中。
+
+初始执行回归复现观察 match 被拒（`/tmp/luna-tools-yo6ldpxp/result.json`）。接通后执行覆盖标量分支选择回调、Copy 主语绑定转发、内层失败候选重试，以及动态条件下生产函数和实际回调的精确调用顺序。`test -p luna --test drop --test pure_callbacks` 638/78 项通过（`/tmp/luna-tools-g2t6mt9b/result.json`）。默认参数新增嵌套 match 的正常执行和递归生产函数的 P3 拒绝用例。
+
+2026-10-14 在 `/home/fin/luna` 最终经 check.py 执行 `test -p luna --test drop --test pure_callbacks --test default_calls --test runtime_purity --test trait_purity --test resources`，退出 0，638/78/18/25/16/321 项通过（`/tmp/luna-tools-kkrfrr_7/result.json`），共 1096 项。`git diff --check` 通过；文档补充动态分支示例与当前资源边界，dev 未提交。
+
+### 观察块的局部模式与 let-else 记录
+
+观察块接受标量／Copy 代码主语的无 else 局部模式绑定，依赖 typed NIR 的不可失败性契约；先验证主语观察，再由普通绑定分析产生唯一计划。局部计算模式沿用既有观察检查，导出代码身份可继续用于链式计算、guard 和块结果。观察块内的 let-else 及向外退出仍未放开。
+
+新增执行用例先复现局部模式被拒（`/tmp/luna-tools-1qqrbtfs/result.json`），接通后暴露普通 let-else 恒假 guard 丢弃已执行观察记录（`/tmp/luna-tools-cnv5tvwm/result.json`）。let_pattern 现在与 match 一样将观察记录与成功绑定记录分别保留；失败分支不会缺少已运行生产／转发调用的计划。针对性执行复验通过（`/tmp/luna-tools-3tcb4goe/result.json`）。回归另覆盖未知代码来源、局部模式内外部写入、观察块 let-else 外层退出，以及默认值的有限完成要求。
+
+2026-10-14 在 `/home/fin/luna` 最终经 check.py 执行 `test -p luna --test drop --test pure_callbacks --test default_calls --test runtime_purity --test trait_purity --test resources`，退出 0，638/78/18/25/16/321 项通过（`/tmp/luna-tools-_wy1lnc8/result.json`），共 1096 项。`git diff --check` 通过；文档补充局部模式示例和失败路径边界，dev 未提交。
+
+### handler 观察与普通内存分析统一
+
+内存 guard 现在先检查观察结构，再由普通 walk 保留求值顺序、读写足迹和代码结果。结构检查不安装代码或指针来源，只允许标量／代码局部绑定及块内私有赋值。数据模式和拥有型模式的 Then 都按计算结果自己的代码来源绑定后段，不能借用原主语的身份。Copy、资源交付和是否允许拒绝仍由资源分析决定。
+
+handler 集成最初在工厂 callee 处被旧标量入口拒绝（`/tmp/luna-tools-nv995i1b/result.json`），接通后又定位到数据模式后段未传递代码结果（`/tmp/luna-tools-vu654tnk/result.json`）。最终三种观察形式的集成执行通过（`/tmp/luna-tools-gxytx5he/result.json`）：三次请求分别选择内层、外层、内层 handler；生产函数与回调各执行三次；每次依次析构 Scratch、所选分支资源、原 Packet，没有在失败候选中消费或重复析构参数。
+
+2026-10-14 在 `/home/fin/luna` 经 check.py 执行 `test -p luna --test drop --test pure_callbacks --test default_calls --test runtime_purity --test trait_purity --test resources`，退出 0，639/78/18/25/16/321 项通过（`/tmp/luna-tools-yyxstaf0/result.json`），共 1097 项。文档增加包含代码工厂和指针观察的示例；dev 未提交。
+
+新增内存摘要用例单独复验 `test -p luna --test resources guard_memory_summary_tracks_nested_call_reads_and_rejects_external_block_writes` 退出 0（`/tmp/luna-tools-njon6us_/result.json`）：工厂调用、局部模式、动态 match 和代码重赋值均保留 gate 读取，无写入足迹；隐藏在 match 或计算模式中的外部写入被拒绝。`git diff --check` 通过。
+
+### 代码 guard 的联合展开对照验收
+
+新增普通执行／联合展开对照：工厂直接调用、局部计算模式、嵌套 match 和 handler 参数计算模式，共四种形式分别搭配普通结果与 resume。8 种组合各运行两个版本，要求实际展开一个 handler、三个请求，比较去除已展开 callee 后的完整调用序列，并断言 Scratch、选中分支资源及 Packet 的析构顺序。另有两种拒绝情况分别验证工厂自身拒绝和返回目标拒绝，展开前后都必须保留失败路径义务。此次对照未发现实现差异，不为通过测试修改实现。
+
+2026-10-14 在 `/home/fin/luna` 经 check.py 执行 `test -p luna --test drop optional_inline_effect_`，退出 0（`/tmp/luna-tools-r7ydz8gc/result.json`）。`git diff --check` 通过；效应文档同步已有支持，dev 工作区未提交。
+
+### 嵌套封闭 inline handler 自内向外展开
+
+安装 pass 先处理主体、参数计算模式、guard 和分支体中的独立内层安装，再尝试外层。允许完整环境行含未使用的词法外层操作，但严格核对行顺序和槽映射；实际请求只能落到当前 handler，外层请求仍触发本次安装回滚。外层尝试的元数据检查点建立在内层成功提交之后，保留有效的内层展开及 resume 清理证据。
+
+初始嵌套用例没有展开任何 handler（`/tmp/luna-tools-34k76mk1/result.json`）。实现后验证主体／handler 分支两种嵌套位置的入口不再残留安装或请求，普通版与展开版的 Caller、Body、Outer、Inner 析构顺序一致。实际请求外层操作时在不同预算下保持原 IR 和元数据；内层成功而外层因普通 callee 保留时，结果可执行且再次运行 pass 保持不变。
+
+2026-10-14 在 `/home/fin/luna` 经 check.py：`test -p luna --test instantiation optional_inline` 19 项通过（`/tmp/luna-tools-0lwlkk_4/result.json`）；`test -p luna --test drop optional_inline_effect_` 13 项通过（`/tmp/luna-tools-mga6mkk7/result.json`），均退出 0。`git diff --check` 通过，文档补充嵌套示例；dev 未提交。
+
+### Inline 调用链与效应行映射
+
+函数 pass 在提交有效展开后继续遍历其主体，用活动声明集合和深度上限截断直接／互递归；预算耗尽保留尚未展开的调用。effect pass 为每层 EffectRun 维护从当前行到安装行的槽映射，逐槽核对操作声明与类型实参，恢复上层映射后继续处理兄弟表达式。允许子集和重排，不用局部槽号直接索引 handler；实际环境外请求仍回滚。
+
+初始子集用例无法展开安装（`/tmp/luna-tools-tq91bw37/result.json`）；行映射接通后定位到原 pass 不展开复制主体内的第二层 inline callee，现已用有界活动链接通。错误操作、越界槽位和行长度不匹配都验证整个候选及元数据不变。资源对照覆盖仿射实参构造次数、不同 handler 身份、resume、参数及 handler 资源的析构次序。
+
+2026-10-14 在 `/home/fin/luna` 经 check.py：`test -p luna --test instantiation optional_inline` 22 项通过（`/tmp/luna-tools-4vkt_kgr/result.json`）；`test -p luna --test drop optional_inline` 通过（`/tmp/luna-tools-r7ept5bz/result.json`），均退出 0。`git diff --check` 通过，临时诊断已移除；函数与效应文档同步调用链和行映射边界，dev 未提交。
+
+### 多层 inline 调用链的契约与默认值验收
+
+新增三层调用链对照矩阵：普通结果／提前返回，两种正常路径及各层前置、后置条件拒绝，共 14 种行为配置；分别运行普通版和 500、2000、1000000 三种展开预算，共 56 次资源受检执行。逐个比较完整可观察调用与析构序列，额外断言输入构造与输入析构恰好一次、仅在到达叶调用时求值一次默认实参、仅在创建了输出时析构一次 Output。所有正常值和 ProgramContractRejected 结果一致；本轮未发现实现差异，没有为测试修改实现。
+
+2026-10-14 在 `/home/fin/luna` 经 check.py 执行 `test -p luna --test drop optional_inline_call_chains`，退出 0，矩阵测试通过（`/tmp/luna-tools-shv9awkp/result.json`）。`git diff --check` 通过；dev 未提交。
+
+### 观察调用中的默认实参
+
+资源观察预检查为默认调用建立独立的已准备参数帧：显式实参在调用者环境验证，默认值按声明顺序在参数帧验证，声明绑定后再提供给后续默认值。标量／Copy 代码输入分别保留实际代码身份；预检查不发布执行记录，普通调用准备负责默认求值与清理一次。内存观察结构检查同步允许默认实参，仍由普通 walk 建立参数环境和读取足迹。P3 与目标不拒绝性独立检查。
+
+初始默认 guard 用例被显式实参限制拒绝（`/tmp/luna-tools-0zlylnf8/result.json`）。接通后默认值单次执行、显式覆盖、两个默认值的依次依赖均通过执行对照（`/tmp/luna-tools-3f2i69ro/result.json`）。默认 Copy 回调能提供自己的已知身份，显式未知覆盖不能借用它的 P4 依据（`/tmp/luna-tools-pmkokv6q/result.json`）。新增 NIR 拒绝例检查默认值读取未准备后续参数时不取得调用者环境中的替代绑定。
+
+2026-10-14 在 `/home/fin/luna` 经 check.py 执行 `test -p luna --test drop --test default_calls --test pure_callbacks --test runtime_purity --test trait_purity --test resources`，退出 0（`/tmp/luna-tools-5wzoin8g/result.json`）。`git diff --check` 通过；模式文档补充默认值及覆盖示例，dev 未提交。
+
+
+### 展开函数的尾表达式交付
+
+修复普通尾表达式函数在 guard 中展开后被资源验证拒绝的问题：quote/inline 共用展开入口只对当前词法边界中的 return 构造返回 packet 与退出循环，闭包主体不计入，捕获初始化仍计入。保留默认值、契约和块作用域；未放宽 guard 的资源限制。含显式早退的 guard 展开仍需后续接入。
+
+2026-10-14 在 /home/fin/luna 经 check.py：drop 646 项、instantiation 44 项通过（/tmp/luna-tools-p8wdm0g3/result.json）；同次 quote_functions 唯一失败为旧测试强制要求尾表达式也生成 packet，已改为分别验证尾表达式与早退两种路径仍保留 opaque normal form，重跑 83 项通过（/tmp/luna-tools-g5rq9dhp/result.json）。NIR 返回边界作用域及预算恢复测试 1 项通过（/tmp/luna-tools-t_z_1b8b/result.json）。新增 guard 矩阵检查 inline/quote、分支、默认参数、成功与失败的实际执行。dev 工作区未提交。
+
+
+### 尾位置显式返回与后置条件顺序
+
+展开入口现在可移除无后置条件函数的尾位置 return，覆盖尾块、if 与 match 分支。转换不进入条件、前序语句、闭包或捕获初始化，不复制 continuation；非尾早退仍按原私有返回边界处理。扫描和类型复制受预算控制。guard 执行矩阵增加显式 return 与分支 return，仍检查默认参数只执行一次及 true/false 候选结果。
+
+扩大验证发现直接简化带后置条件的显式返回会将条件检查推迟到局部析构之后（middle/result/false），已在实现中保留此类返回边界，未放宽析构顺序断言。2026-10-14 在 /home/fin/luna，经 check.py 最终 drop 646、instantiation 44、quote_functions 83 项通过（/tmp/luna-tools-6ptvkr_r/result.json），NIR 边界测试 2 项通过（/tmp/luna-tools-wdf_0ker/result.json）。非尾早退和带后置条件的 guard 展开仍待接入；dev 未提交。
+
+
+### guard 中的非尾返回区域
+
+新增 observation_region 共用结构检查，识别内部返回槽及展开调用的新参数框架，限制局部值、赋值目标、循环出口和运行时条件检查。moves 在该区域仍运行普通资源分析并比较入口/出口调用者状态；每个调用使用当前代码身份重新检查观察与拒绝义务，临时检查不重复发布清理计划。memory 共用结构限制，再按正常顺序累计读取与代码来源。内部纯标量返回槽不再凭构造本身增加 may_reject，输入计算的拒绝信息保留。
+
+新增执行覆盖非尾 return、循环内赋值及返回、分支调用次数、默认值一次求值、返回 Copy 代码指针的实际调用目标、恒真前后置条件；拒绝覆盖嵌套拒绝调用、篡改后的拒绝后置条件、调用者写入与重声明。内存测试检查展开前后保留参数指针读取、不添加写入，以及低预算拒绝。带环境闭包、一般拥有型局部值和需失败路径资源转移的观察仍有限制。
+
+2026-10-14 在 /home/fin/luna，check.py 最终执行 test -p luna --test drop --test resources --test pure_callbacks --test default_calls --test runtime_purity --test trait_purity --test instantiation --test quote_functions，退出 0；650/322/78/19/25/16/44/83，共 1237 项通过（/tmp/luna-tools-dfrx_tk6/result.json）。首次内存针对性检查暴露返回槽造成的伪拒绝，修复后针对性 6 项通过（/tmp/luna-tools-6j2f16z_/result.json）。git diff --check 通过；dev 工作区未提交。
+
+
+### 观察、拒绝和内存分析的可达路径
+
+修复展开 guard 因不可达拒绝条件被误拒的问题。observation_region 按常量 if/布尔短路访问子树；共用有预算的 cannot_complete 语法判断，使区域检查、拒绝摘要和内存 walk 停止扫描必定退出后的块后缀。返回操作数照常检查，未知分支仍保留。内存分支合流、块指针结果及函数隐式结果也采用相同完成性判断，不从已退出路径加入尾结果。该判断不证明任意程序终止，也不进入嵌套闭包体推断外层返回。
+
+新增 guard 矩阵覆盖恒假分支中的拒绝条件及必定 return 后的拒绝条件；内存矩阵覆盖返回来源和写入足迹，确认确定不可达的写入消失、未知条件下仍可达的写入保留。2026-10-14 在 /home/fin/luna，check.py 执行八个相关 luna 测试组，650/323/78/19/25/16/44/83，共 1238 项通过（/tmp/luna-tools-g1lw9y9o/result.json）。elaboration 的 verification::rejection::tests 4 项通过（/tmp/luna-tools-qrvfzxco/result.json），覆盖递归缓存、预算耗尽不发布错误否定结果及后续恢复。git diff --check 通过；dev 工作区未提交。
+
+
+### match 可达分支与先前模式计算
+
+观察区域和拒绝扫描按已知模式结果、按序外层 guard 及首个确定成功候选选择分支体；不匹配或恒假 guard 的分支体不再制造拒绝义务。新增预算化借用式 pattern_observations，先计入模式遍历成本，再依据已知结果决定是否检查其中计算，避免为筛选根节点复制表达式树。
+
+同时修复结构字段及枚举域匹配中的计算遗漏：后面的字段/标签确定不匹配，不能跳过前面未知且可能观察的模式。纯结构未知字段仍允许利用后续确定不匹配剪枝。执行矩阵验证直接构造/局部主语、bool/枚举字段失败前的 mark 调用恰好一次；内存矩阵保留失败候选先前的指针读取。拒绝单元测试确认前序计算拒绝不能消失，先失败再计算时可正确跳过，并保留纯结构匹配精度。
+
+2026-10-14 在 /home/fin/luna 经 check.py：八个相关 luna 组 651/324/78/19/25/16/44/83，共 1240 项通过（/tmp/luna-tools-ewvcmrty/result.json）。随后新增展开 guard 内计算模式矩阵并补齐剪枝预算计数，最终 inline_guard 5 项通过（/tmp/luna-tools-afabtykm/result.json）；verification::rejection::tests 6 项通过（/tmp/luna-tools-cy1qy226/result.json）。git diff --check 通过，文档补充读取示例并修正默认实参与已知代码调用的旧实现说明；dev 未提交。
+
+
+### 展开观察区域中的模式局部与 let-else
+
+observation_region 现在按预算收集局部模式和 match 候选导出的绑定及 Remap 目标，接通 LetPattern 与其 else 分支。赋值仍限于区域新建绑定，普通资源分析负责模式失败、循环退出、交付与清理；函数代码输入继续检查实际 Copy 证据。候选来源及同时重命名仍由原有匹配规则验证，不可借调用者旧变量伪造导出。
+
+执行矩阵新增计算模式绑定、带 guard 的 let-else、循环内 let-else、可变 or 导出以及通过计算模式取得 Copy 回调后早退返回。检查展开前后 true/false 结果、默认值与观测调用次数、实际回调目标；内存矩阵覆盖新增绑定形式的指针读取保持。篡改测试验证直接模式绑定、重命名目标覆盖调用者、旧调用者变量冒充重命名来源均被拒绝。
+
+2026-10-14 在 /home/fin/luna 经 check.py，最终八组 luna 测试 651/324/78/19/25/16/44/83，共 1240 项通过（/tmp/luna-tools-ypgs3ecs/result.json）；针对性 inline_guard 与内存矩阵先行通过（/tmp/luna-tools-3ba2wcyu/result.json）。git diff --check 通过，函数文档补充 let-else 示例。一般拥有型局部值及带环境闭包的展开观察仍未接入；dev 工作区未提交。
+
+### Void observations across expansion boundaries
+
+Guard observations now admit normally completing `void` results, local bindings,
+match results and default arguments. Calls still require known targets and checked
+observation behavior. A conservative syntactic rejection result may be refined
+by the bounded memory summary even when the function has no callable parameters;
+this covers code identities established inside the callee. Summary failure keeps
+the rejection obligation. General owned locals still need destructor behavior
+in the observation contract before their structural envelope can be widened.
+
+Validation in `/home/fin/luna`: `python3 -B development/check.py --timeout 240 --
+test -p luna --test drop --test resources --test pure_callbacks --test default_calls`
+exited 0: 653/324/78/19 tests passed (1074 total), report
+`/tmp/luna-tools-dg5qclk6/result.json`. Coverage includes ordinary/inline/quote
+calls, expanded/unexpanded execution, candidate retry counts, indirect targets,
+default invocation, rejecting bodies and unknown code. The rejecting-default
+case mutates NIR after source certification to test the independent guard check.
+Changed Rust files passed rustfmt check; `git diff --check` passed. Changes remain
+uncommitted on dev.
+
+### Implicit cleanup evidence in observations and generated return regions
+
+A source reproduction showed that a scalar guard helper with a local object
+whose Drop executes `assumes false` was incorrectly accepted. Rejection scanning
+now consults the fixed CleanupPolicy for owned constructors, unused owned
+parameters and captured environments. CleanupSession checks every selected
+component's destructor summary; missing evidence stays conservative. The cache
+is scoped to that immutable selection world and does not publish results after
+cleanup-budget exhaustion. Shape-only analysis now retains additional possible
+call-failure paths, separately from normal-exit ownership candidates.
+
+Generated return regions admit pointer-free owned locals once acquisition proves
+nonrejecting cleanup. The check runs at responsibility acquisition, including
+aggregate initialization paths which bypass the outer expression visitor.
+Ordinary cleanup planning still checks actual access and remaining fields.
+Tests cover structs, nested fields, enums, replacement, let-else, loop exits,
+return, failed candidate retry and reverse field order across inline/quote and
+expanded/unexpanded execution. Rejecting destructors remain rejected. General
+owned observation blocks without generated return storage, pointer-bearing
+locals and capturing closures are still outside this envelope. Drop failure
+remains terminal in the interpreter; no new unwinding semantics were introduced.
+
+Validation in `/home/fin/luna`, all through development/check.py with timeout 240:
+- `test -p elaboration verification::rejection::tests`: 7 passed, exit 0,
+  `/tmp/luna-tools-84wu5_8f/result.json`.
+- `test -p luna --test drop --test resources --test pure_callbacks --test default_calls --test runtime_purity --test trait_purity --test instantiation --test quote_functions`:
+  drop 657, default_calls 19, instantiation 44, pure_callbacks 78 and
+  quote_functions 83 passed; resources exposed 7 assertions which mixed
+  normal-exit candidates with newly required conservative failure paths
+  (`/tmp/luna-tools-hzwyqwiv/result.json`, exit 101).
+- After separating these obligations without changing normal-exit field/order
+  expectations, `test -p luna --test resources`: 324 passed, exit 0,
+  `/tmp/luna-tools-g4xsh5g9/result.json`.
+- Remaining `test -p luna --test runtime_purity --test trait_purity`: exit 0,
+  `/tmp/luna-tools-yg320_4a/result.json`.
+Changed Rust files passed rustfmt check. Changes remain uncommitted on dev.
+
+### Ordinary owned observation blocks share the region checker
+
+Package-backed ordinary blocks now use the same structural and resource checks
+as generated return regions. Pointer-free local owners with captured
+nonrejecting cleanup evidence work in direct guards, tail-expression inline/quote
+bodies and early-return bodies. Removed return-slot recognition as the admission
+criterion. The existing no-package scalar checker remains a limited fallback.
+Candidate failure still runs local cleanup; even constant-false guards check
+rejecting Drop, and moving a caller owner out of an observation is rejected.
+Owned factory-call results, pointer-bearing locals and capturing closures remain
+separate work. Documentation now distinguishes these boundaries.
+
+Validation in `/home/fin/luna`, via development/check.py --timeout 240:
+- `test -p luna --test drop --test resources --test pure_callbacks --test default_calls`:
+  659/78/19 drop/callback/default tests passed; two resource assertions exposed
+  lost diagnostic context (`/tmp/luna-tools-9px_cqwl/result.json`, exit 101).
+- Restored the memory-guard/read-only context around shared-checker diagnostics;
+  `test -p luna --test resources` passed all 324, exit 0,
+  `/tmp/luna-tools-bb2ih5gx/result.json`. Total relevant passing tests: 1080.
+- Changed Rust files passed rustfmt check, report
+  `/tmp/luna-tools-zi8888yj/result.json`; git diff --check passed.
+Changes remain uncommitted on dev.
+
+### Owned factory results inside checked observation regions
+
+Observation call checking is shared by scalar/code calls and region-local owned
+results. A region may obtain a new pointer-free owned result only with captured
+nonrejecting cleanup evidence; arguments still require scalar or Copy-code
+observation, and every known target retains its call/rejection obligations.
+Scratch validation restores executable reports before ordinary evaluation, so
+call and cleanup records are emitted once. Factory calls outside this context
+do not acquire permission to expose tentative owners.
+
+Execution cases cover local binding, replacement, temporary projection/discard,
+default/override calls, known function pointers, enums, nested records, code
+fields and tuples. Replacement preserves create-new-before-retire-old order;
+failed candidates each finish their own result cleanup. Tests reject rejecting
+factories/destructors, unknown targets, caller-owned arguments and pointer-bearing
+results. Internal Tuple product views use the existing layout check; language
+Tuple normal-form heads remain opaque. Documentation includes a factory example.
+
+Validation in `/home/fin/luna` through development/check.py --timeout 240:
+- Initial factory fixture failed with the old result-transfer restriction,
+  `/tmp/luna-tools-j8_5mydz/result.json`, exit 101.
+- `test -p luna --test drop --test resources --test pure_callbacks --test default_calls --test quote_functions`:
+  662/324/78/19/83 passed (1166 total), exit 0,
+  `/tmp/luna-tools-aj2bctbl/result.json`.
+- After including internal tuple product layouts,
+  `test -p luna --test drop owned_observation`: 8 passed, exit 0,
+  `/tmp/luna-tools-jao6zo2u/result.json`.
+Changed Rust files passed rustfmt check; git diff --check passed. No commit.
+
+### Instance-specific rejection and cleanup summaries
+
+Rejection caching now keys completed results and recursive visits by declaration
+and full structural arguments. Work items retain a shared argument substitution
+while borrowing the original body, so nested generic calls substitute their own
+arguments without cloning whole functions or unfolding normal-form heads.
+Parameter retirement and owned constructors query cleanup with instantiated
+types. Type sizes and a conservative substitution expansion bound are charged
+before copies; growing polymorphic recursion fails within the budget and cannot
+publish a partial nonrejection result. Closed same-instance recursion still
+reuses completed evidence. The fixed cleanup-selection world remains part of
+the analysis transaction.
+
+Source coverage includes a direct generic Box factory, a multi-level Tag factory,
+and Safe/Bad phantom instances with identical layouts but different Drop bodies.
+A prior safe-instance query cannot authorize the rejecting instance. Unit tests
+cover both query orders, opaque normal-form arguments, unused owned parameters,
+malformed arity, recursion growth, budget recovery and warmed cache behavior.
+
+Validation in `/home/fin/luna` via development/check.py --timeout 240:
+- Initial generic source case failed under the old declaration-only analysis,
+  `/tmp/luna-tools-d1dwauwx/result.json`, exit 101.
+- `test -p elaboration --lib verification::rejection::tests`: 11 passed, exit 0,
+  `/tmp/luna-tools-6cvha6ag/result.json`.
+- `test -p luna --test drop --test resources --test pure_callbacks --test default_calls --test instantiation --test quote_functions`:
+  663/324/78/19/44/83 passed (1211), exit 0,
+  `/tmp/luna-tools-18y7il7b/result.json`.
+Changed Rust files passed rustfmt check; git diff --check passed. Changes remain
+uncommitted on dev. Owned observation arguments, pointer-bearing layouts and
+captured-code observation still need further implementation.
+
+
+### Private owned arguments in observation regions
+
+Checked observation blocks can transfer pointer-free private owners into known
+helpers, including fresh constructors, factory results and fields of local
+aggregates. Scope identity is preserved across recursive argument checks.
+The ownership comparison retains every non-private state root, including
+borrowed/external positions absent from the lexical root list, and retains
+construction facts. The enclosing guard still requires caller state unchanged.
+Ordinary call preparation remains responsible for actual evaluation, moves and
+cleanup; prechecks publish no duplicate cleanup events. Argument field callable
+identities and enum domains propagate into prepared default frames and callable
+summary inputs. Raw non-Copy code inputs and rejecting or unknown callbacks
+remain inadmissible.
+
+Source regressions check both Boolean outcomes, exact destructor counts, nested
+factory/projection calls, private field moves, scalar defaults reading an earlier
+owned parameter, known callable fields, external consumption, duplicate moves,
+and post-move reads. An owned default factory fixture hit the existing P3
+stability/termination requirement before resource verification; that restriction
+was not weakened and owned-default construction is not claimed covered here.
+
+Validation in `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test drop --test resources --test pure_callbacks --test default_calls`:
+  exit 0; report `/tmp/luna-tools-0rk65ukl/result.json`.
+- The initial broad run exposed a test-entry context error in the new unknown
+  callback rejection fixture, `/tmp/luna-tools-dxz7inun/result.json`, exit 101;
+  it now invokes the resource checker directly to test the intended boundary.
+- Changed Rust files passed rustfmt check,
+  `/tmp/luna-tools-1yj0dayf/result.json`; `git diff --check` passed.
+Changes remain on dev, uncommitted. Pointer-bearing observation inputs and
+captured-code observation require further work.
+
+
+### Expanded argument temporaries retain caller lifetime
+
+Extending the owned-observation matrix to optional inline expansion exposed two
+real issues in the shared quote/inline expander. Generated parameter Lets reused
+argument sources, making projection cleanup boundaries ambiguous. Giving them
+fresh sources exposed an earlier Drop: a projected temporary was retired before
+the next argument and callee, rather than at the caller expression boundary.
+
+Parameter bindings now use fresh generated locations and the existing
+CallPreparation node. Entry snapshots/contracts and the callee body remain in
+lexical blocks; the original application boundary remains available to cleanup.
+Observation-region traversal accepts preparation nodes while retaining its
+ordinary state/ownership checks. No new IR or alternate cleanup ABI was added.
+
+The resource matrix now checks expanded and ordinary execution, including
+owned inputs, defaults reading earlier inputs and callback fields. A separate
+trace regression covers ordinary, inline-expanded and quote functions, both in
+ordinary expressions and repeated match candidates. It asserts the exact
+created/second/called/retired sequence, not only the result or Drop count.
+
+Validation in `/home/fin/luna`:
+- Before fresh binding identities: exit 101, ambiguous TemporaryEnd boundary,
+  `/tmp/luna-tools-msysx40x/result.json`.
+- Before preparation lifetime fix: exit 101, early retirement trace,
+  `/tmp/luna-tools-xbaqrwht/result.json`.
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test drop --test quote_functions --test default_calls --test resources --test pure_callbacks`:
+  exit 0, `/tmp/luna-tools-s17ytc1g/result.json`.
+- Changed Rust files passed rustfmt check,
+  `/tmp/luna-tools-5hdqj745/result.json`; `git diff --check` passed.
+Changes remain uncommitted on dev.
+
+
+### Expanded calls separate preparation from parameter responsibility
+
+Failure-path comparison found that the shared quote/inline expansion retired a
+caller argument projection temporary before a callee-owned parameter when the
+callee rejected. The ordinary call correctly retired body locals and parameters
+before caller temporaries. The initial regression failed with Body/Temp/Arg/Caller
+instead of Body/Arg/Temp/Caller (`/tmp/luna-tools-j4oyf4vy/result.json`, exit 101).
+
+Expansion now first binds prepared inputs in source order, then moves each input
+into a distinct callee parameter in declaration order. Default expressions refer
+to prepared identities; snapshots/contracts/body refer to callee identities.
+This adds no duplicate argument evaluation and uses existing Let/CallPreparation
+representations and ownership transfers. Preparation failure still cleans only
+inputs already acquired. Body failure and early return preserve ordinary frame
+cleanup order. Named implicit inputs supplied in reverse order retain source
+order for evaluation and declaration order for parameter responsibility.
+
+Validation in `/home/fin/luna`:
+- Focused failure/early-return comparison passed after the fix,
+  `/tmp/luna-tools-2i16pfrh/result.json`, exit 0.
+- The first broad run passed 668 drop tests but rejected invalid optional
+  parameter syntax in the new named-input fixture; corrected to explicit named
+  supply of implicit parameters, without changing parser/default rules.
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test drop --test quote_functions --test default_calls --test resources --test pure_callbacks`:
+  exit 0, `/tmp/luna-tools-1yrfeev1/result.json`.
+- Changed Rust files passed rustfmt check,
+  `/tmp/luna-tools-rn23_rj0/result.json`; `git diff --check` passed.
+Changes remain on dev, uncommitted.
+
+
+### Nested local cleanup evidence for observation regions
+
+Captured Drop rejection checks now refine a conservative memory summary using
+the program rejection scan with the same cleanup-selection session. This admits
+safe destructors that construct local owners or call generic helpers that do so.
+The existing memory summary is retained for contextual code identities; unknown
+calls, explicit rejection and unresolved cleanup still block observation.
+The rejection cache accepts direct function-instance identity queries, avoiding
+synthetic ill-typed IR for selected destructor methods.
+
+Nested cleanup queries track complete active types, bound comparisons/clones,
+and limit nesting. A recursive cleanup dependency is conservatively rejecting;
+errors restore the query stack. Method caches are local to the query and immutable
+implementation world. Generic argument substitution remains structural and opaque
+normal-form heads are never unfolded.
+
+Source tests cover exact Outer/Inner Drop events on true and false guards,
+rejecting inner Drop, a recursive destructor dependency, and safe/rejecting
+concrete types passed through a generic helper. An additional ordinary/inline/
+quote matrix checks explicit and tail returned owners on postcondition success
+and injected runtime failure: one predicate evaluation, one cleanup for each
+owner, and matching frame/result cleanup order. Injection occurs only after
+source proof checking, as in existing runtime-contract fixtures.
+
+Validation in `/home/fin/luna`:
+- Nested-owner baseline rejected safe Drop, exit 101,
+  `/tmp/luna-tools-31kplk6g/result.json`.
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test drop --test quote_functions --test default_calls --test resources --test pure_callbacks`:
+  672/83/19/324/78 passed, exit 0,
+  `/tmp/luna-tools-d90p7x_4/result.json`.
+- `python3 -B development/check.py --timeout 240 -- test -p elaboration --lib verification::rejection::tests`:
+  11 passed, exit 0, `/tmp/luna-tools-mp32_o1s/result.json`.
+- Changed Rust files passed rustfmt check,
+  `/tmp/luna-tools-pp7ud49m/result.json`; `git diff --check` passed.
+Changes remain on dev, uncommitted. Cyclic cleanup and unresolved contextual
+callback obligations remain conservatively rejected.
+
+
+### Stable computed fields in nominal constructor defaults
+
+Direct nominal constructor defaults already delivered owned results without
+requiring Copy, but the finite behavior analyzer rejected the same constructors
+when a scalar field used a known finite stable call. Record/variant construction
+now analyzes those fields transitively when every field carries only the existing
+intrinsic/structural Copy representation. The resulting nominal value can remain
+affine and is delivered normally. This does not authorize owned local temporaries,
+owned-returning helper calls, or partial construction cleanup of owned fields.
+Runtime P4 behavior is unchanged.
+
+Tests verify record and enum defaults, exact field evaluation and destructor
+counts, field order, skipped defaults under explicit supply, recursive/unknown/
+writing field computations, and owning-field partial construction rejection.
+The existing owned-observation argument matrix additionally covers constructed
+default owners and explicit overrides, in ordinary and inline-expanded calls.
+
+Validation in `/home/fin/luna` via development/check.py --timeout 240:
+- Initial source regression failed with missing P3 evidence, exit 101,
+  `/tmp/luna-tools-9n3jqp1n/result.json`.
+- `test -p luna --test default_calls --test drop --test pure_callbacks`:
+  21/673/78 passed, exit 0, `/tmp/luna-tools-10bffr4f/result.json`.
+- `test -p luna --test runtime_purity --test trait_purity`:
+  25/16 passed, exit 0, `/tmp/luna-tools-k22sj65h/result.json`.
+- Extended `test -p luna --test drop owned_observation_arguments_transfer_private_resources_once`:
+  1 passed, exit 0, `/tmp/luna-tools-5_f_jrak/result.json`.
+Changed Rust files passed rustfmt check,
+`/tmp/luna-tools-03fzj407/result.json`; `git diff --check` passed.
+Changes remain on dev, uncommitted.
+
+
+### Finite factories can deliver owned default results
+
+Finite default behavior analysis now distinguishes result delivery from local
+retirement. Known named/generic/callback/closure factories can return a fresh
+owned constructor through tail expressions, branches, explicit return and finite
+call chains. Input/capture checks remain unchanged. Owned locals, discarded owned
+statements/results, temporary-owner field projections, recursive work and
+unresolved callbacks are still excluded. Block statement types are checked too,
+so raw normalized statements cannot silently discard an admitted factory result.
+Owned results with nontrivial postconditions remain excluded because rejection
+could retire a result; absent or literal-true postconditions avoid that obligation.
+Runtime P4 analysis and normal-form identity are unchanged.
+
+Tests verify record/enum results and exact computation/Drop counts, generic
+instances, known function pointers, closures, rejection boundaries, and factory
+supplied owned arguments inside ordinary/inline-expanded observation blocks.
+
+Validation in `/home/fin/luna` via development/check.py --timeout 240:
+- Before the change, owned factory defaults lacked P3 evidence,
+  `/tmp/luna-tools-7szpyc65/result.json`, exit 101.
+- `test -p luna --test default_calls --test drop --test runtime_purity --test pure_callbacks --test trait_purity`:
+  23/673/25/78/16 passed, exit 0, `/tmp/luna-tools-njqgko05/result.json`.
+  The preceding run caught missing whitespace between a generic closing `>` and
+  default `=` in a new fixture; corrected without changing lexical rules.
+- Extended `test -p luna --test drop owned_observation_arguments_transfer_private_resources_once`:
+  1 passed, exit 0, `/tmp/luna-tools-uraq5qyo/result.json`.
+Changed Rust files were formatted and checked; `git diff --check` passed.
+Changes remain on dev, uncommitted. Finite cleanup evidence for owned locals and
+postcondition failure remains separate work.
+
+
+### Finite factory bodies acquire local resource evidence
+
+Default behavior validation now receives the configured source protocols.
+Complete helper-function bodies may use private owned locals when a Drop
+protocol is bound, but must then pass the existing move/cleanup report and finite
+behavior checks for every selected destructor, including invoked closures and
+default evaluations. Contracts run outside this permission scope; the scope is
+restored before returning or checking nested cleanup. Top-level default
+expressions and owned inputs/captures retain their previous restrictions.
+
+This admits private construction, result movement, discard, temporary projection
+and replacement. It neither infers Copy for owners nor hides external Drop
+writes or divergence. Without cleanup protocol evidence, the previous finite
+checks remain in force. Program state is not passed to PTC; existing type/trait
+selection is reused only to establish cleanup implementations.
+
+Source coverage includes ordinary and expanded factories, closure-local cleanup,
+external pointer writes in Drop, recursive Drop work and double moves. An
+instrumented interpreter regression checks exact scratch/result cleanup order
+and counts, including replacement before final result delivery.
+
+Validation in `/home/fin/luna` via development/check.py --timeout 240:
+- Baseline private local factory rejected with missing P3 evidence,
+  `/tmp/luna-tools-ntffntug/result.json`, exit 101.
+- `test -p luna --test default_calls --test runtime_purity --test pure_callbacks --test trait_purity --test drop`:
+  25/25/78/16/673 passed, exit 0, `/tmp/luna-tools-dd4a1ccx/result.json`.
+  A new divergence fixture initially used unsupported loop syntax; corrected
+  to an explicit recursive helper before this successful run.
+- `test -p luna --test drop finite_default_factory_cleanup_runs_once_in_each_scope`:
+  1 passed, exit 0, `/tmp/luna-tools-lae_c3s3/result.json`.
+Changed Rust files passed formatting checks; `git diff --check` passed.
+Changes remain on dev, uncommitted. Owned input/capture transfer and nontrivial
+owned-result postconditions still require further finite behavior integration.
+
+
+### Private owned arguments in finite default factories
+
+Finite resource-checked factory bodies can now transfer owned arguments to
+known named/generic helpers, code pointers, closures and higher-order callbacks.
+Each named helper still requires its full resource report and finite selected
+cleanup; closure invocations remain covered by the enclosing report. Call-site
+permission stays restricted to the checked private body, so a default cannot
+consume an earlier caller-owned parameter merely because a callee was proved.
+Signature admission does not infer Copy and does not exempt moved-value checks.
+Owned captures and nontrivial owned-result postconditions remain separate work.
+
+Tests cover forwarding/returned owners, generic parameters, callbacks, ordinary
+and expanded execution, exact destructor counts, direct caller consumption,
+duplicate moves, post-move reads and an effectful destructor of a callee parameter.
+
+Validation in `/home/fin/luna` via development/check.py --timeout 240:
+- Baseline private helper call rejected, exit 101,
+  `/tmp/luna-tools-0pe8u8gv/result.json`.
+- `test -p luna --test default_calls --test drop --test runtime_purity --test pure_callbacks --test trait_purity`:
+  27/674/25/78/16 passed, exit 0, `/tmp/luna-tools-6z4_9tgg/result.json`.
+- Extended `test -p luna --test default_calls finite_factories_transfer_private_owners_to_helpers`:
+  1 passed, exit 0, `/tmp/luna-tools-6o2yvk5r/result.json`.
+Changed Rust files passed rustfmt check,
+`/tmp/luna-tools-tvoawnys/result.json`; `git diff --check` passed.
+Changes remain on dev, uncommitted.
+
+
+### Finite factories retain owned closure environments
+
+Owned captures are now admitted inside finite resource-checked function bodies.
+Capture construction still records code identity snapshots; invocation checks
+actual body behavior, and the enclosing resource report accounts for environment
+retirement even when the closure is never invoked. Outside this checked scope,
+finite capture admission retains its Copy-only rule. Closure Copy is not inferred.
+
+Source cases cover reading or consuming captured owners, code fields inside an
+owned captured aggregate, returned environments from helper factories, and
+uninvoked recursive bodies. Rejection cases cover use after capture, invoking a
+recursive body, and effectful Drop of an uninvoked environment. Instrumented
+ordinary/inline execution verifies exact cleanup counts when captures are read,
+moved into helpers or left uninvoked.
+
+Validation in `/home/fin/luna` via development/check.py --timeout 240:
+- Baseline owned closure invocation rejected, exit 101,
+  `/tmp/luna-tools-w1rsmnid/result.json`.
+- `test -p luna --test default_calls --test drop --test runtime_purity --test pure_callbacks --test trait_purity`:
+  29/674/25/78/16 passed, exit 0, `/tmp/luna-tools-kp1g4n17/result.json`.
+- Extended `test -p luna --test default_calls finite_factories_can_capture_private_owners`:
+  1 passed, exit 0, `/tmp/luna-tools-fs32cgzv/result.json`.
+Changed Rust files passed rustfmt check,
+`/tmp/luna-tools-lhf6x9j6/result.json`; `git diff --check` passed.
+Changes remain on dev, uncommitted. Computed capture initializers and arbitrary
+top-level default resource scopes are not claimed complete.
+
+
+### Finite factories check owned-result postcondition retirement
+
+With a configured Drop protocol, finite helper analysis now accepts nontrivial
+postconditions for owned results only through its mandatory resource report.
+That report retains the undelivered result on rejection, and selected cleanup
+bodies must pass finite stable behavior checks. Without protocol evidence the
+previous absent/literal-true restriction remains. Predicate behavior and source
+contract proof requirements are unchanged.
+
+Tests cover field postconditions, local/explicit/tail result delivery, effectful
+and recursive result Drop rejection, and Safe/Bad phantom instances of the same
+generic factory in both query orders. Instrumented runtime rejection (injected
+after source checking) checks named/unnamed results and ordinary/inline calls:
+each logical predicate executes once, the undelivered result retires once before
+the caller, and the default recipient is never entered on failure.
+
+Validation in `/home/fin/luna` via development/check.py --timeout 240:
+- Baseline safe owned-result postcondition rejected, exit 101,
+  `/tmp/luna-tools-89i7vrek/result.json`.
+- `test -p luna --test default_calls --test drop --test runtime_purity --test pure_callbacks --test trait_purity`:
+  31/675/25/78/16 passed, exit 0, `/tmp/luna-tools-geyi2pmw/result.json`.
+- `test -p luna --test default_calls finite_postcondition_cleanup_keeps_generic_instances_separate`:
+  1 passed, exit 0, `/tmp/luna-tools-0u7yhsg6/result.json`.
+Changed Rust files passed rustfmt check,
+`/tmp/luna-tools-t14rus8u/result.json`; `git diff --check` passed.
+Changes remain on dev, uncommitted.
+
+
+### Sequential computed closure captures in behavior analysis
+
+Closure construction now checks capture initializers in source order and freezes
+code identities immediately after each initializer. Later assignments cannot
+retroactively change an earlier capture, including code returned by a factory.
+Lexical captures retain aggregate field paths and absent-variant evidence.
+Construction checks initializer behavior; invoking the closure separately checks
+its body. Existing resource reports remain responsible for ownership and cleanup;
+this change does not grant Copy or move program predicates into PTC.
+
+The focused regression covers lexical capture, explicit local initialization,
+factory-produced code, subsequent reassignment, and invocation in both P4 and
+finite analysis. A recursive initializer is rejected by finite analysis even when
+the closure is not invoked. Loop fixed-point lookup remains conservative for
+computed initializers without known code evidence.
+
+Validation from `/home/fin/luna`:
+- Focused baseline failed its behavior assertion, exit 101:
+  `/tmp/luna-tools-5_yiydcq/result.json`.
+- `python3 -B development/check.py --timeout 240 -- test -p elaboration --lib behavior_code_snapshot_tests`:
+  exit 0, 6 passed, `/tmp/luna-tools-4_h2nxvh/result.json`.
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test default_calls --test pure_callbacks --test runtime_purity --test drop`:
+  exit 0, `/tmp/luna-tools-mnydcf1u/result.json`; includes runtime computed
+  capture provenance and existing resource cleanup regressions.
+- Modified Rust file formatted; `git diff --check` passed. Changes remain on dev,
+  uncommitted.
+
+
+### Code returned by closure factories
+
+Behavior analysis now recovers closure call result identities through the same
+bounded memory-summary import as named factories. Closure summaries receive the
+construction-time prepared captures and actual code arguments. Explicit returns,
+branch returns, aggregate fields and returned closures therefore survive beyond
+the closure body analysis. This does not treat a returned code identity as a
+purity or termination certificate: invoking it performs its own behavior check.
+
+The source regression calls the result immediately inside a finite default
+supplier. It covers direct and explicit returns, an early-return branch, captured
+code, a returned record field and a returned capturing closure. Replacing the
+returned function with a recursive implementation rejects all six forms.
+The original implementation rejected the simplest valid form with P3 diagnostics:
+`/tmp/luna-tools-sp4_cciw/result.json`, exit 101. The focused test passes after the
+change: `/tmp/luna-tools-b2r79p4t/result.json`, exit 0.
+
+Validation from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test default_calls --test pure_callbacks --test runtime_purity --test drop`:
+  exit 0, 33/78/25/675 passed, `/tmp/luna-tools-yhk3236h/result.json`.
+- `python3 -B development/check.py --timeout 240 -- test -p elaboration --lib behavior_code_snapshot_tests`:
+  exit 0, 6 passed, `/tmp/luna-tools-3kpdqi09/result.json`.
+Changed Rust files formatted; `git diff --check` passed. Changes remain on dev,
+uncommitted. Unknown returned code and exhausted summary budgets remain
+conservative; this change does not certify arbitrary recursive default suppliers.
+
+
+### Closure factories in loop code equations
+
+Loop code fixed-point inference now imports closure result summaries, including
+prepared capture identities, alongside named function instances. It no longer
+loses a known callback merely because a loop update obtains it from a closure.
+The separate behavior walk still checks factory execution and every callback
+candidate. Unknown candidates stay unknown, and this does not prove loop
+termination for runtime defaults.
+
+New source tests cover parameter forwarding, captured code and explicit early
+returns through a closure factory, then execute two iterations to observe the
+updated callback. Negative cases cover external writes and unknown code returned
+directly or through an early return. Capturing fixtures explicitly bind Copy and
+Drop protocols rather than inferring Copy from behavior.
+
+Focused baseline: `/tmp/luna-tools-q0vri3yw/result.json`, exit 101 with P4 rejection.
+Focused updated tests: `/tmp/luna-tools-i9asypcr/result.json`, exit 0, 2 passed.
+Changed Rust files formatted; changes remain on dev, uncommitted.
+
+Validation from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test pure_callbacks --test runtime_purity --test default_calls`:
+  exit 0, 80/25/33 passed, `/tmp/luna-tools-4g06rsqv/result.json`.
+- `python3 -B development/check.py --timeout 240 -- test -p elaboration --lib behavior_code_snapshot_tests`:
+  exit 0, 6 passed, `/tmp/luna-tools-mfshwwkj/result.json`.
+- `git diff --check`: exit 0.
+
+
+### Workspace integration checkpoint after closure behavior work
+
+From `/home/fin/luna`, `python3 -B development/check.py --timeout 240 -- check --workspace --all-targets`
+completed with exit 0 on 2026-10-15. Report:
+`/tmp/luna-tools-u7pdlxjh/result.json`; compiler completion anchor:
+`Finished dev profile` (17.84 seconds). Existing warnings remain. This checks
+compilation of every active workspace target, including tests; it does not execute
+those tests or check disabled backend crates.
+
+A source inspection confirms substantial remaining implementation boundaries:
+`H::For` still rejects executable lowering pending iteration protocol elaboration;
+custom tuple/record pattern views are not connected to executable patterns;
+let declarations without initializers still reject pending initialization analysis.
+The old implementation map contains historical milestones and must not be read
+as current completion evidence. These unresolved features remain part of the
+language implementation objective; the workspace compile result does not close it.
+
+
+### Inline iteration pipelines and ambient effect forwarding
+
+Direct inline handlers can now explicitly request their ambient effects during
+joint expansion. Each handler template is normalized in its installing outer row,
+separately from the handled computation. Ambient requests in the computation are
+remapped after removing the installation; requests copied from a handler keep the
+outer row and cannot recursively select that handler. Unsupported nested effect
+boundaries, fallback handlers and unexpanded effectful calls remain conservative.
+
+`development/examples/inline-iteration.fl` is an executable generic emit pipeline:
+produce 1/2/3, map to 2/3/4, filter to 3/4, and sum to 7. The test executes ordinary
+and expanded forms and verifies that the expanded entry has no remaining effect
+request, run, computation or handler nodes. This is infrastructure for the intended
+inline iterator protocol, not an implementation of source `for`. The old library
+still exposes next-based Iterator; the new protocol interface awaits an explicit
+decision rather than silently adopting that historical interface.
+
+A resource regression forwards an owned Ticket through two installations. Both
+resume and lexical return clean Sink, Ticket, Middle, Producer, Caller exactly once
+and in that order, with identical ordinary and expanded behavior. Existing routing,
+invalid row, low-budget rollback and retained-boundary tests remain active. One old
+expectation that outer requests must never expand was updated to require successful
+expansion when budget permits, while preserving execution and rollback assertions.
+
+Validation from `/home/fin/luna`:
+- Pipeline baseline: exit 101, no handlers expanded,
+  `/tmp/luna-tools-lr2ff375/result.json`.
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test instantiation --test drop --test inline_returns`:
+  drop 676 and inline_returns 2 passed; instantiation found the obsolete retention
+  assertion described above, `/tmp/luna-tools-693u_56r/result.json`.
+- Updated instantiation suite: exit 0, 45 passed,
+  `/tmp/luna-tools-ha1jqvvt/result.json` (723 distinct tests across these suites).
+- Extracted standalone pipeline fixture: focused test exit 0,
+  `/tmp/luna-tools-m2z3apny/result.json`.
+Changed Rust files formatted and `git diff --check` passed. Changes remain on dev,
+uncommitted.
+
+
+### Inline partial handlers and iteration exits
+
+Direct inline installations now support checked fallback slots. Expansion appends
+an ordinary final tuple-binding arm that forwards the prepared request arguments
+to the recorded outer operation. Original arms retain order and candidate rollback;
+the generated fallback does not re-evaluate producers or grant Copy. It validates
+the outer operation identity and charges the copied signature against the shared
+budget. Later requests still pass through the original inner candidate sequence.
+
+New source execution regressions cover:
+- matched/forwarded/matched/forwarded requests, with no residual handler/request
+  in the fully expanded entry;
+- failed structural and guarded candidates carrying an owned Ticket, exactly one
+  producer call, and Sink/Ticket/Producer cleanup exactly once;
+- continue then break through two forwarding installations, each unwinding Sink,
+  Ticket, Middle, Producer and iteration-local resources, finally Caller. Neither
+  the producer suffix nor the post-installation suffix executes after the transfer.
+Every case compares ordinary and expanded execution with resource checks where
+owners are present. This advances inline iteration infrastructure; the source for
+protocol interface is still pending and its executable lowering remains unfinished.
+
+Validation from `/home/fin/luna`:
+- Partial-handler baseline: exit 101 (zero handlers expanded),
+  `/tmp/luna-tools-0ppm2kts/result.json`.
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test instantiation --test drop --test inline_returns`:
+  exit 0, 46/678/2 passed, `/tmp/luna-tools-f2wqxm93/result.json`.
+- After adding signature-copy budget accounting,
+  `python3 -B development/check.py --timeout 240 -- test -p luna --test instantiation --test drop inline_effect`:
+  exit 0, `/tmp/luna-tools-0a06c3x1/result.json`.
+Changed Rust files formatted; `git diff --check` passed. Changes remain on dev,
+uncommitted.
+
+
+### Associated effect rows in generic inline templates
+
+Inline/quote expansion now normalizes type annotations on its private instantiated
+candidate using the existing associated-type selection world before entering the
+callee computation boundary. Signatures, body annotations, defaults and program
+contract annotations share the same normalization view. This resolves the mismatch
+between a concrete call row and a template row retaining `T.as(Producer).Item`.
+It neither interprets a type function nor unfolds opaque normal-form heads. Open
+projections remain definition-side views; normalization does not publish IIR or
+select callable bodies. Failed optional candidates retain the original call and
+consume their work budget. The selection snapshot is also available for packages
+with associated declarations but no TraitMethod expression.
+
+New executable tests use an arbitrary Producer trait with associated Item and
+inline implementation methods. Bool and char instances expand independently into
+the corresponding handlers; entry inspection finds no remaining handler, request
+or trait-method nodes. A separate generic emitter has no method call at all and
+also eliminates its associated effect row. These tests establish the mechanism,
+not the final language-bound Iterator interface.
+
+Validation from `/home/fin/luna`:
+- Baseline after correcting the standalone fixture's builtin Type spelling:
+  exit 101, retained generic invoke, `/tmp/luna-tools-nfgoe_tz/result.json`.
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test instantiation --test quote_functions --test inline_returns`:
+  exit 0, 48/83/2 passed, `/tmp/luna-tools-_iivv2p6/result.json`.
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test drop --test default_calls`:
+  exit 0, 678/33 passed, `/tmp/luna-tools-pg_0rjr4/result.json`.
+Changed Rust files formatted; `git diff --check` passed. Changes remain on dev,
+uncommitted.
+
+
+### Resource-verified generic inline producers
+
+A new end-to-end regression complements the annotation/handler expansion tests:
+Producer has an associated owned Ticket, Batch owns that Ticket, a generic invoke
+forwards it through a Middle scope, and the sink owns a Sink resource. The test
+uses the configured Duplicate/Retire protocols and publishes the cleanup schedule
+before executing ordinary and expanded forms. It covers resume, lexical return,
+and a failed runtime predicate. Every executed path constructs Batch once and
+retires Sink, Ticket, Middle, Batch, Caller exactly once in that order. The failed
+predicate reports ProgramContractRejected after cleanup. A separate reachable
+second transfer of the same item is rejected in both forms with the unavailable
+value diagnostic; this rejection case uses a resuming handler so the suffix is
+actually reachable.
+
+Validation from `/home/fin/luna`:
+`python3 -B development/check.py --timeout 240 -- test -p luna --test drop generic_inline_producers_deliver_owned_associated_items_once`
+exit 0, one parameterized test (six execution configurations and two static
+rejection configurations), `/tmp/luna-tools-3m1w4x76/result.json`.
+Only the new test was needed this round; compiler implementation was unchanged.
+Changed Rust file formatted; `git diff --check` passed. Changes remain on dev,
+uncommitted. This verifies the generic producer mechanism and does not close the
+pending language-bound for protocol interface.
+
+
+### Avoid duplicate inherited predicates during inline/quote expansion
+
+An effectful generic trait producer exposed a duplicate runtime postcondition:
+ordinary execution checked the body assumes and inherited ensures (two events),
+while expansion inserted the same interface ensures again (three events).
+Contract merging now remaps a bounded copy into the implementation's parameter,
+result and entry-snapshot frame before freshening. Only exact inherited predicates
+are skipped; distinct implementation predicates and changed interface predicates
+are still merged. Comparisons and copies consume the expansion budget. This is
+not logical predicate simplification or removal of guarded/nonidentical contracts.
+
+The resource regression covers accepted/rejected sink results and presence/absence
+of a distinct implementation postcondition. Both execution paths agree on predicate
+counts and clean Ticket, Batch, Caller exactly once. The implementation establishes
+the interface guarantee with a checked assumes; it does not bypass definition-side
+postcondition proof. Existing injected-interface-contract failure tests remain green.
+
+Validation from `/home/fin/luna`:
+- Reproduced duplicate count: `/tmp/luna-tools-piz7anyf/result.json`, exit 101.
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test instantiation --test quote_functions --test inline_returns --test drop`:
+  exit 0, 48/83/2/680 passed, `/tmp/luna-tools-o4ljcs1x/result.json`.
+Changed Rust files formatted; `git diff --check` passed. Changes remain on dev,
+uncommitted.
+
+
+### Preserve guarded inherited ensures during inline/quote merging
+
+Contract merging now also recognizes the exact inherited form produced when an
+implementation weakens its interface domain: `not entry_domain or ensures`.
+It reconstructs the entry domain using the implementation's frozen parameter
+snapshots, never mutable exit values. Multiple source preconditions retain their
+ordered conjunction. Only structurally identical inherited forms are skipped;
+this does not add a logical-equivalence solver or erase distinct implementation
+contracts. Snapshot indexing, predicate copies and comparisons are bounded.
+
+The regression changes a parameter after saving its answer, while its own ensures
+uses value'old. Single/multiple interface preconditions and tail/explicit returns
+all agree between ordinary and expanded execution, including runtime predicate
+counts. The baseline duplicated one check (5 rather than 4).
+
+Validation from `/home/fin/luna`:
+- Baseline: `/tmp/luna-tools-eshzk2sf/result.json`, exit 101.
+- Focused four-configuration regression: `/tmp/luna-tools-k5eszt30/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test instantiation --test quote_functions --test inline_returns --test drop`:
+  exit 0, `/tmp/luna-tools-g7ykn971/result.json`.
+Changed Rust files formatted; `git diff --check` passed. Changes remain on dev,
+uncommitted.
+
+
+### Library frontend diagnostic preservation
+
+Lexing, parsing, resolution and HIR failure results now retain plain diagnostic
+messages, error codes, filename/line/character-column locations, labels, notes and
+help. The stage prefix is retained and terminal escape sequences are not introduced
+by the summary formatter. Multi-package lowering and resolution use the same path,
+so dependency parse errors are no longer reduced to an empty resolver error list.
+DiagnosticContext::diagnostics now returns a Ref<[Diagnostic]> borrow guard instead
+of an unsafe reference whose RefCell borrow had already ended; emit_all iterates
+while that guard is alive. Callers needing an owned snapshot can clone its slice.
+
+Tests cover parser and unresolved-reference details, child-file locations, Unicode
+preceding a lexical error, dependency failures and successful retry after fixing
+the dependency. Diagnostic unit tests cover explanatory text, non-consuming
+formatting and storage remaining borrowed while a view is alive.
+
+The CLI suite exposed two historical P3 expectations: a finite factory returning
+an owner and an uninvoked declaration with a pointer observation were expected to
+fail. The fresh factory is now an execution positive; true recursive factories and
+external writes remain finite-behavior negatives. Raw pointer observation inside
+an owned default still lacked an invocation resource contract at this diagnostic
+checkpoint; the follow-up below connects that case.
+
+Validation from `/home/fin/luna`:
+- New library diagnostic baseline: exit 101,
+  `/tmp/luna-tools-21qvctsz/result.json`.
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test modules --test packages --test frontend_cli`:
+  exit 0, 44/28/118 passed, `/tmp/luna-tools-y5yt8682/result.json`.
+- `python3 -B development/check.py --timeout 240 -- test -p diagnostic`:
+  exit 0, 2 unit tests, `/tmp/luna-tools-gqmg4ybt/result.json`.
+Changed Rust files formatted; `git diff --check` passed. Changes remain on dev,
+uncommitted.
+
+### Owned default results with pointer observations
+
+`memory::infer_argument` now accepts aggregate default results whose stored layout
+is proven pointer-free, using the existing bounded layout traversal. Its read
+footprint still maps prepared parameter slots back to actual caller positions.
+The separate default-evaluation resource frame checks moves and cleanup; the
+layout check neither grants Copy nor authorizes escaping aggregate pointers.
+
+Regression coverage includes direct constructors and finite factories reading a
+preceding pointer parameter, cleanup exactly once on success and predicate
+rejection, rejection after moving the pointer's owner, original slot identities,
+exhausted analysis budget, and rejection of aggregate pointer escape without a
+richer contract. CLI coverage also checks that defaults observe writes performed
+by later explicit arguments before default evaluation starts.
+
+Validation from `/home/fin/luna`:
+`python3 -B development/check.py --timeout 240 -- test -p luna --test resources --test drop --test default_calls --test frontend_cli`
+exited 0: 325 resource, 682 cleanup, 33 default-call and 118 CLI tests passed.
+Evidence: `/tmp/luna-tools-x8apneix/result.json`. Changed Rust files formatted;
+changes remain uncommitted on dev.
+
+### Structural matches in loop completion analysis
+
+Loop completion now classifies directly constructed tuple, nominal/anonymous
+record and enum subjects recursively, plus represented scalar literals. This
+allows a known selected `continue` arm to establish divergence despite a later
+unreachable `break`. The subject is still visited; executable patterns, unknown
+fields, guards and analysis exhaustion retain their conservative behavior.
+Float matching uses runtime numeric equality (signed zeros equal, NaN unequal),
+not bit identity. Unnormalized Integer/Float spellings remain unknown. String,
+symbol, bit-vector and field-name comparisons charge their storage to the budget.
+
+Validation from `/home/fin/luna`:
+- `test -p elaboration --lib program::control::tests`: 4 passed,
+  `/tmp/luna-tools-tssvxnvc/result.json`.
+- `test -p luna --test execution --test iteration --test inline_returns`:
+  execution had 1305 passes and one new fixture rejected because an unconditional
+  exit gave its tuple subject type Never before pattern checking;
+  `/tmp/luna-tools-31rntt0v/result.json`. The fixture now uses a runtime conditional
+  break to test subject evaluation and passed its focused rerun:
+  `/tmp/luna-tools-5ji4va1c/result.json`.
+- The remaining iteration/inline-return suites passed separately:
+  `/tmp/luna-tools-kxzfryxq/result.json`.
+All commands used `python3 -B development/check.py --timeout 240 --`.
+Changed Rust files formatted; no commit created.
+
+Uninitialized bindings remain unsupported. The source syntax admits them, but
+the immutable `let` delayed-initialization rule still needs an author decision;
+no Rust-style assignment rule has been silently introduced.
+
+### Value-indexed trait logic and fixed symbol implementation indices
+
+Literal suffixes are `LiteralInto<symbol, Result>` protocol requests, not builtin
+type-name shortcuts. The prerequisite logical layer now admits Type subjects
+with Type/comptime-value interface indices, retaining scope checks and the full
+ordered argument vector. Type equality remains Type-only; this adds no program
+value equations or arithmetic reasoning to PTC. The world adapter still must
+validate each declared interface parameter's domain.
+
+Implementation head matching now supports fixed symbol indices alongside Type
+inputs. Matching symbols require exact identity, while Type inputs use ordinary
+inference and replayable proofs. A distinct symbol produces a dedicated
+`symbol-index-mismatch` assessment/dump. Evidence replay rechecks the symbols;
+coherence rebuilds fixed identity comparisons before proving the residual Type
+overlap formula. Symbol/string input storage is budgeted. General value binders
+and unsupported domains remain pending rather than being discarded as absent.
+
+The source frontend still lacks value-parameter trait declarations and the
+LiteralInto binding/call elaboration path. `9u8` and custom suffix execution are
+not claimed complete by this prerequisite work.
+
+Validation from `/home/fin/luna`:
+`python3 -B development/check.py --timeout 240 -- test -p elaboration --test ptc --test capabilities --test implementation`
+passed 54/30/43 tests, `/tmp/luna-tools-q864xbcd/result.json`. New cases cover
+suffix/result/argument-order identity, scope, proof replay, symbol mismatch,
+coherence proof tampering, rejection of runtime subjects/indices and value
+equality propositions, and budget failure followed by recovery. Changes formatted
+and left uncommitted on dev.
+`python3 -B development/check.py --timeout 240 -- check -p luna` also exited 0,
+`/tmp/luna-tools-mc0y2cbe/result.json`; `git diff --check` passed.
+
+### Declared domains for value-indexed trait queries
+
+NIR Trait now retains ordered `parameter_types`; an empty vector is the compact
+all-Type declaration form. Dumps expand this into an explicit `(parameter-types
+...)` field. Bounded helpers derive declaration binder sorts, reject duplicate
+identities/malformed domain counts, and check completed scalar input domains.
+Domain substitution can use preceding Type arguments. Unknown symbolic/store
+values require additional domain evidence and are not guessed from their sort.
+
+Capability formation, direct instance queries, conditional requirements, given
+evidence and parent/capability propagation now use these domain-aware binders.
+Tests build an immutable implementation world for a symbol-indexed interface:
+the selected symbol succeeds, a different closed symbol is absent, wrong domains
+are rejected, and inherited symbol inputs retain their identities. NIR tests
+also cover dependent scalar domains, compact Type-only metadata, malformed
+metadata and exhausted-budget recovery. Source traits remain Type-only for now;
+source value-parameter registration, associated-member/method substitution and
+LiteralInto call elaboration still need to be connected before suffix execution
+can be claimed supported.
+
+Validation in `/home/fin/luna`, using `python3 -B development/check.py --timeout 240 --`:
+- `check --workspace --all-targets`: exit 0, `/tmp/luna-tools-0f4v1317/result.json`.
+- `test -p elaboration --test capabilities --test associated --test implementation --test ptc`:
+  32/17/43/54 passed, `/tmp/luna-tools-aokx6yvp/result.json`.
+- After adding direct-query domain validation, capabilities/associated passed
+  again: `/tmp/luna-tools-yrte98bg/result.json`.
+- `test -p nir --test trait_parameters`: 2 passed,
+  `/tmp/luna-tools-yvj72s3k/result.json`.
+- Final `test -p luna --test elaboration --test trait_purity`: 439/16 passed,
+  `/tmp/luna-tools-abl62xwi/result.json`.
+Changed Rust files formatted; changes remain uncommitted on dev.
+
+
+### Source trait symbol parameters and inherited instances
+
+Source trait declarations now retain ordered Type/Symbol parameter domains in
+NIR. Explicit arguments are evaluated in source order; omitted defaults use the
+declaration context and earlier inputs. Symbol parameters remain comptime values,
+including in parent interface arguments, and cannot be used as Types. Defaults
+are checked without eagerly invoking them at declaration time; references to the
+current or later input are rejected.
+
+Capability preparation, interface materialization, and interpreter parent and
+capability admission preserve mixed parameter sorts. Concrete interpreter
+instances validate their declared argument domains. ProgramContract now offers
+mixed-sort substitution and validates substitutions even for empty contracts.
+PTC still handles type propositions rather than program-state equations.
+
+In `/home/fin/luna`, targeted checks through `development/check.py` passed:
+- luna elaboration 441 and trait_purity 16 tests:
+  `/tmp/luna-tools-wu32xidr/result.json`.
+- elaboration associated 17, capabilities 32, implementation 43 tests:
+  `/tmp/luna-tools-x6nnc39q/result.json`.
+- nir scoped_contracts 5 and trait_parameters 2 tests:
+  `/tmp/luna-tools-j8r0js6o/result.json`.
+
+Source regressions exercise complete instance selection, inherited constraints
+through a generic call and reference execution, preceding-symbol defaults,
+explicit overrides, mismatched parent indices, wrong argument domains, and
+value-as-Type rejection. This is not yet full LiteralInto support: value-indexed
+trait member paths, mixed input spreads, and literal protocol dispatch remain
+unfinished. Changes remain uncommitted on dev.
+
+Workspace all-targets check also passed (exit 0), report
+`/tmp/luna-tools-s0e__5vs/result.json`. Rust files formatted;
+`git diff --check` passed.
+
+
+### Symbol-indexed trait member calls
+
+Ordinary trait members now carry mixed Type/Symbol substitutions through override
+signature checking, member lookup, inherited member lookup, dispatch contract
+materialization, NIR phase validation, and interpreter admission/execution.
+Declaration binders recover inherited trait parameter domains by identity rather
+than assuming that method-owned input slots are all Types. Staging annotation
+views preserve completed symbol identity inputs under the existing copy budget.
+
+Program contract inheritance and verification summaries use a domain-aware
+substitution API. The interpreter retains those binders in its method-contract
+map; capability and program-requirement checks use them without turning symbol
+indices into Type equalities. This does not change program verification into PTC.
+
+New source tests distinguish two implementations on bool indexed by `.px` and
+`.em`, invoke them directly and under a generic trait bound, and traverse an
+inherited member. Reference execution returns true for the combined selection
+check. A malformed override is rejected. An interface program precondition is
+accepted for a true input and rejected for a false input. NIR summary coverage
+also verifies a symbol-indexed capability and rejects Type-only substitution.
+
+Checks in `/home/fin/luna` through `development/check.py` passed:
+- luna elaboration 443 and trait_purity 16:
+  `/tmp/luna-tools-ow__iqgu/result.json`.
+- nir calls 7, phases 10, scoped_contracts 5, trait_parameters 2:
+  `/tmp/luna-tools-solyrk9r/result.json`.
+- luna execution 1306 and default_calls 33:
+  `/tmp/luna-tools-24dyoxmz/result.json`.
+
+Changed Rust files formatted; `git diff --check` passed. Default trait method
+body instantiation, method-local generic argument paths, associated-member paths,
+and LiteralInto protocol dispatch still require further mixed-input integration;
+these checks do not claim those features complete. No commit created.
+
+Workspace all-targets check passed (exit 0):
+`/tmp/luna-tools-ivb1h_mf/result.json`.
+
+
+### Generic methods on symbol-indexed traits
+
+Method-local Type inference and explicit generic application now substitute
+inherited trait inputs with their declared sorts. The shared input-binder helper
+recovers Symbol domains by declaration identity; ordinary argument defaults use
+it for both closed and scoped substitutions. Capability checking retains the
+same binders for method-local trait constraints and ordinary dependent inputs.
+
+Source coverage exercises inferred and explicit method Type arguments through
+both a generic receiver and an explicit interface view, method-local trait
+bounds, and an ordinary default whose value is returned by the selected method.
+Missing implementations for a method bound and incorrect explicit argument types
+are rejected. These changes do not yet complete default trait body specialization
+or LiteralInto dispatch.
+
+Checks in `/home/fin/luna`, via `development/check.py`, passed:
+- luna default_calls 33, elaboration 444, execution 1306, trait_purity 16:
+  `/tmp/luna-tools-x8aa41bt/result.json`.
+- strengthened default-value behavior in the new generic-method test:
+  `/tmp/luna-tools-bk2o3pr8/result.json`.
+
+Changed Rust files formatted. Changes remain in dev, uncommitted.
+
+Workspace all-targets check passed (exit 0):
+`/tmp/luna-tools-uvxnyhm_/result.json`. `git diff --check` passed.
+
+
+### Default method body instantiation with trait value indices
+
+NIR packages expose a bounded map from declared trait binder identities to sorts;
+duplicate identities across traits are rejected. Materialization and interpreter
+function instantiation use this evidence for inherited inputs of default methods.
+The supplied argument's shape never determines a declaration binder's sort.
+The map's construction is charged to materialization/interpreter admission budgets.
+
+Reference execution now covers selecting a default for `.px` while an `.em`
+implementation overrides the same member, generic calls to the default, default
+methods with method-local Type parameters, and default method program
+preconditions. IIR construction retains two distinct default-body instances for
+two suffixes, validates the graph, and executes it successfully. This does not
+complete symbolic domain-evidence propagation when a default body itself invokes
+another trait member; source member assumptions still need that integration.
+LiteralInto dispatch also remains unfinished.
+
+Validation in `/home/fin/luna` through `development/check.py`:
+- luna default_calls 33, elaboration 445, execution 1306, instantiation 50,
+  trait_purity 16 passed: `/tmp/luna-tools-hn8ophqo/result.json`.
+- nir trait_parameters 3 passed, including duplicate declarations and bounded
+  failure/recovery: `/tmp/luna-tools-hsn21m_q/result.json`.
+
+Changed Rust files formatted; `git diff --check` passed. Uncommitted on dev.
+
+Workspace all-targets check passed (exit 0):
+`/tmp/luna-tools-xr5fjmwa/result.json`.
+
+
+### Symbolic domain evidence inside default trait methods
+
+Default member assumptions now retain inherited Symbol binder sorts. Trait
+argument validation has an explicit declaration-aware path for rigid value
+indices: the binder identity must resolve uniquely to a declared value domain,
+and that domain must equal the interface slot's required domain. The closed-input
+API still rejects symbolic values without evidence. Unknown identities, wrong
+domains, duplicate declaration identities, and exhausted budgets are rejected;
+this is domain formation, not a new PTC program-state proposition.
+
+Capability lookup, inherited subject guarantees, given evidence, direct instance
+queries, and conditional/propositional formation use the declared domain path.
+Source tests execute a default method delegating to its own required member and
+to a parent's member, with distinct `.px` and `.em` implementations. IIR coverage
+now also executes delegated calls and verifies distinct default-body instance
+identities. LiteralInto protocol binding and literal-suffix lowering remain
+unfinished; associated values with mixed indices need separate validation.
+
+Checks in `/home/fin/luna` via `development/check.py` passed:
+- elaboration associated 17, capabilities 32, implementation 43, ptc 54:
+  `/tmp/luna-tools-sbcl2mu0/result.json`.
+- luna elaboration 446, execution 1306, instantiation 50, trait_purity 16:
+  `/tmp/luna-tools-ar3pzbfj/result.json`.
+- nir trait_parameters 4: `/tmp/luna-tools-ymsr4pb8/result.json`.
+
+Changed Rust files formatted; `git diff --check` passed. No commit created.
+
+Workspace all-targets check passed (exit 0):
+`/tmp/luna-tools-6lozfwv3/result.json`.
+
+
+### Contextual LiteralInto source protocol wiring
+
+The trusted elaboration protocol table and source selectors now accept
+`literal_into`. Sysroot language-item configuration supports
+`literal-into-protocol = package::Trait`; explicit source selectors and prebound
+identities retain their existing precedence/conflict rules. A source declaration
+is never selected merely because it is named LiteralInto. The standalone CLI
+does not yet expose a separate selector flag.
+
+The bound trait must declare ordered Symbol and Type inputs and a single
+`literal_into(comptime value: Self) -> R` member without a receiver or method-local
+generic parameters. Phase and effect/result annotations remain part of the
+ordinary method contract. HIR LiteralConversion now forms the complete
+source-type/suffix/result interface and calls the selected method using normal
+call preparation. Integer, char and string sources retain their intrinsic source
+types instead of being defaulted to the destination. Current lowering requires
+an expected result type; candidate-driven result inference is still outstanding.
+Float sources explicitly await exact Real literal support rather than silently
+rounding to a runtime f64. Signed-source composition also needs dedicated coverage.
+
+Tests execute Integer conversion in comptime functions and char/string conversion
+in runtime functions, preserving the literal value. Missing binding, wrong suffix,
+wrong parameter domains and runtime source parameters are rejected. Existing
+unbound numeric-suffix tests still reject and now assert the specific missing
+protocol diagnostic. Runtime calls do not gain permission to invoke comptime
+methods, and Integer-to-runtime numeric conversions remain a separate pending
+conversion capability.
+
+Validation in `/home/fin/luna`, through `development/check.py`, passed:
+- luna elaboration 446, execution 1308, instantiation 50:
+  `/tmp/luna-tools-8yvllend/result.json`.
+- literal-binding configuration precedence/duplicate-key test:
+  `/tmp/luna-tools-8v0dih6r/result.json`.
+
+Changed Rust files formatted; `git diff --check` passed. Uncommitted on dev.
+
+Workspace all-targets check passed (exit 0):
+`/tmp/luna-tools-l91nfc7w/result.json`.
+
+
+### Standalone LiteralInto selector and staged trait calls
+
+The CLI accepts `--literal-into-protocol package::Trait` (including module paths)
+for NIR and execution commands. Options carry this selector through the shared
+frontend; explicit selection overrides sysroot `literal-into-protocol` defaults.
+Missing values, repeated flags, and incompatible output stages are usage errors.
+Unknown/non-trait declarations remain binding errors rather than name fallback.
+
+CLI execution exposed a mixed-sort substitution gap in IIR's staged trait-call
+path. Interface requirements, capabilities, and program contracts now use the
+trait's declared binders, retaining the Symbol suffix while ordinary comptime
+arguments are prepared. The test executes the actual CLI/IIR path, not only the
+NIR reference interpreter. Sysroot selection yields false and an explicit local
+protocol override yields true. Sysroot primitive implementations remain in the
+owning package, preserving implementation ownership rules.
+
+Runnable example: `development/examples/literal-suffix.fl`:
+
+```sh
+python3 -B development/cargo.py run -p luna -- development/examples/literal-suffix.fl --literal-into-protocol input::Convert --interpret run
+```
+
+Expected output: `(bool true)`. The CLI regression reads this exact fixture.
+Result-type inference without context and exact Real literal support are still
+outstanding.
+
+Checks in `/home/fin/luna` through `development/check.py` passed:
+- luna lib 9, execution 1308, frontend_cli 120, instantiation 50:
+  `/tmp/luna-tools-d_rq03va/result.json`.
+- CLI tests after switching to the checked-in example:
+  `/tmp/luna-tools-clj4u9ro/result.json`.
+
+Rust files formatted; `git diff --check` passed. No commit created.
+
+Workspace all-targets check passed (exit 0):
+`/tmp/luna-tools-3fp__opi/result.json`.
+
+
+### Literal suffix result inference
+
+Literal conversion without an expected result now first considers scoped
+interface evidence, then indexed implementation candidates for the exact source
+and suffix. Each candidate uses a fresh call-inference scheme to infer its generic
+inputs from the literal source type and recover its result type. A complete
+interface capability query then checks applicability before accepting that result.
+Multiple distinct results, unresolved generic inputs, conflicts, and pending
+selection do not authorize a guessed conversion. Explicit/outer result context
+continues to select a complete interface directly. Candidate traversal is bounded.
+
+CLI/IIR coverage exercises an unannotated let with one result, a generic subject,
+two ambiguous results, explicit disambiguation, scoped capability disambiguation,
+unrelated suffixes in either declaration order, and a result-only generic that
+remains unresolved. A generic identity call also passes its bool result context
+back to the suffix despite multiple available conversion results. All execute
+through the standalone CLI where appropriate.
+
+This inference currently recovers generic result structure from subject matching;
+result variables determined only by additional implementation predicates still
+need further constraint integration. Exact Real literal sources remain unsupported.
+
+Checks in `/home/fin/luna` through `development/check.py` passed:
+- luna elaboration 446, execution 1308, frontend_cli 121, instantiation 50:
+  `/tmp/luna-tools-l8y_9yup/result.json`.
+- extended outer-generic-context case:
+  `/tmp/luna-tools-30a7u24u/result.json`.
+
+Changed Rust files formatted. Changes remain uncommitted on dev.
+
+Workspace all-targets check and diff whitespace check passed (exit 0):
+`/tmp/luna-tools-d9jzmeaw/result.json`.
+
+
+### Implementation equalities in literal result inference
+
+Literal candidate trials now import positive conjunctive implementation type
+equalities as isolated inference obligations. A result-only binder constrained by
+`R == bool` can therefore settle without a result annotation. This does not add
+facts to the caller context: after trial inference, complete capability selection
+still checks every implementation requirement. Disjunctions, negations, and trait
+predicates are not mined for speculative equality branches.
+
+CallCandidate exposes transactional generic-frame equation constraints with
+bounded term validation. Budget failure preserves the prior candidate. The
+matcher retains opaque normal-form behavior; equal opaque heads do not grant
+injectivity of their arguments.
+
+CLI execution verifies constraint-determined results and excludes contradictory
+alternatives in either declaration order. Rejection cases preserve ambiguity for
+a disjunction and reject an otherwise inferred result whose additional trait
+requirement is absent. Core coverage verifies budget failure/recovery and opaque
+head non-injectivity. This completes conjunctive equality proposals, not arbitrary
+predicate-driven program synthesis or exact Real literal support.
+
+Checks in `/home/fin/luna`, via `development/check.py`, passed:
+- elaboration calls 24, capabilities 32, implementation 43, ptc 54:
+  `/tmp/luna-tools-b9cn4ccv/result.json`.
+- luna elaboration 446 and frontend_cli 122:
+  `/tmp/luna-tools-88rdhykx/result.json`.
+
+Changed Rust files formatted; `git diff --check` passed. No commit created.
+
+Workspace all-targets check passed (exit 0):
+`/tmp/luna-tools-yguw0e62/result.json`.
+
+
+### Exact finite decimal identities and comparisons
+
+Terminology correction: current docs/basics/literals.md and
+comptime/quoting-and-splicing.md name the compile-time literal source `Float`.
+Earlier progress entries used the legacy `Real` spelling; that is not the
+current language contract. The unsupported float-suffix diagnostic now says
+exact comptime Float support.
+
+comptime_runtime::decimal provides DecimalValue as a finite base-ten building
+block. DecimalLiteral::exact_value canonicalizes redundant leading/trailing
+zeroes and exponent spellings without selecting a binary proxy. Identity/hash
+retain signed zero so later IEEE conversion cannot lose sign information;
+explicit numeric comparison treats both zero signs as equal. This internal
+identity policy does not define the complete language Float equality protocol.
+Display emits a nested S-expression with canonical significand and exponent.
+
+Comparison uses arbitrary-width decimal orders and padded significand digits,
+never a power-of-ten buffer proportional to exponent magnitude. Parsing/copying,
+comparison, and exponent arithmetic consume operation budgets; failures preserve
+input values. Tests cover equivalent identities, signed zero, distinctions below
+binary precision, huge positive/negative exponents, allocation/fuel rejection and
+recovery, and 3969 pairwise comparisons against a scaled-integer oracle. Existing
+IEEE rounding/subnormal/overflow tests remain passing.
+
+In `/home/fin/luna`, `development/check.py test -p comptime_runtime --test decimal
+--test integer` passed decimal 9 and integer 8 tests, exit 0:
+`/tmp/luna-tools-gn7dxbb6/result.json`.
+
+This is not yet source Float support: NIR values, interpreter dispatch, staging,
+and literal protocol routing still need integration. Float suffixes remain
+explicitly unsupported. Changed Rust files formatted; `git diff --check` passed.
+Changes remain uncommitted on dev.
+
+Workspace all-targets check passed (exit 0):
+`/tmp/luna-tools-ckzf57ny/result.json`.
+
+### Exact Float interpreter values
+
+The interpreter now carries canonical finite decimal values as `Value::Float`,
+evaluates `Literal::Float` only in the comptime `Float` domain, and preserves
+the exact value through immutable NIR export and normal-input reconstruction.
+Copy/export budgets charge the coefficient and exponent payload; export also
+checks the coefficient against the representation limit. Dumps use the same
+S-expression representation as NIR.
+
+This is storage/evaluation infrastructure, not a claim that source Float
+conversion or arithmetic is complete. Source constant materialization explicitly
+rejects exact Float until a lossless reconstruction path is implemented.
+Existing f32/f64 evaluation remains separate.
+
+Verification from `/home/fin/luna`:
+- Previous NIR full test run confirmed completed with exit 0:
+  `/tmp/luna-tools-dyutui09/result.json`.
+- `python3 -B development/check.py --timeout 240 -- test -p comptime_interpretor --test exact_floats --test normal_values --test scalar_equality`:
+  exit 0, 22 tests; `/tmp/luna-tools-wzma88f9/result.json`.
+  Tests cover decimal precision and canonical identities, invalid domains and
+  spellings, exhausted export, representation limits, and successful retry.
+- `python3 -B development/check.py --timeout 240 -- check --workspace --all-targets`:
+  exit 0; `/tmp/luna-tools-sd0ljpl9/result.json`.
+- Changed Rust files formatted; `git diff --check` passed.
+
+### Exact Float source literals and constant reconstruction
+
+The previously noted exact Float materialization gap is now closed.
+Explicit Float contexts and LiteralInto suffix inputs retain canonical decimal
+values. Module constants reconstruct a compact, lossless scientific spelling;
+negative zero and exponents larger than host integers survive both reconstruction
+and subsequent comptime invocation. Internal signed literal spellings are decoded
+by a shared DecimalValue entry point; source lexing still treats minus as an
+operator. Neither serialization nor reconstruction expands powers of ten.
+Ordinary runtime Float parameters/results remain rejected.
+
+Serialization charges payload and integer division work, checks coefficient and
+exponent representation limits, and can fail without corrupting the input.
+This does not implement the full comptime Float algebra: exact arithmetic and
+source comparison integration remain separate work.
+
+Verification from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test execution --test frontend_cli`:
+  exit 0, 1310 execution + 122 CLI tests;
+  `/tmp/luna-tools-qvbdg464/result.json`.
+- `python3 -B development/check.py --timeout 240 -- test -p comptime_runtime -p comptime_interpretor -p nir --test decimal --test exact_floats --test type_computations --test normal_inputs --test normal_values`:
+  exit 0, 43 tests; `/tmp/luna-tools-tlo_a4n4/result.json`.
+- Changed Rust files formatted via development/command.py;
+  `git diff --check` passed.
+- `python3 -B development/check.py --timeout 240 -- check --workspace --all-targets`: exit 0; `/tmp/luna-tools-o70m74hx/result.json`.
+
+### Exact Float comparisons through source and staging
+
+Source equality/inequality and ordering now lower to scalar comparison nodes
+for the comptime Float domain. The interpreter and IIR staged folder compare
+canonical decimal values using the budgeted decimal comparator; no f32/f64
+rounding intervenes. Signed zeros compare numerically equal without collapsing
+their stored identities. IIR constant extraction accepts only Float-typed exact
+literal spellings. The supported-input analysis admits those comparisons too.
+
+Source tests exercise all six operators over an independent rank table,
+including huge exponents and close decimals, plus module constants and a
+LiteralInto conversion that computes a bool at comptime and uses an explicitly
+bound Splice protocol to produce its runtime result. Runtime Float comparisons
+are still rejected; comptime parameters do not authorize runtime Float storage.
+Normal-form input tests now verify equivalent decimal inputs and reject distinct
+nearby inputs, replacing the old unsupported-Float assertion.
+
+The expanded IIR unit run exposed a stack overflow in nested comparison/block
+folding. Moving scalar folding into a separate non-inlined helper restored the
+existing bounded-depth failure behavior; the complete IIR unit suite passes.
+
+Verification from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test execution --test elaboration`:
+  exit 0, 1312 + 446 tests; `/tmp/luna-tools-rl9cu04u/result.json`.
+- `python3 -B development/check.py --timeout 240 -- test -p iir --lib`:
+  exit 0, 33 tests after the stack fix;
+  `/tmp/luna-tools-ooj4zm4t/result.json`.
+- Changed files formatted; `git diff --check` passed.
+- Post-extraction exact Float source tests: 4 passed; `/tmp/luna-tools-s4u7bxgf/result.json`.
+- `python3 -B development/check.py --timeout 240 -- check --workspace --all-targets`: exit 0; `/tmp/luna-tools-snel5bzc/result.json`.
+
+### Exact Float unary negation
+
+Unary minus now supports exact Float variables and computed operands, not only
+signed source literals. The decimal kernel charges payload work and checks
+coefficient/exponent limits before copying; negation flips only the sign.
+Interpreter evaluation and IIR staged folding preserve all decimal digits and
+both zero signs. Runtime Float storage remains prohibited, and this change does
+not enable exact Float binary arithmetic.
+
+The Float source regressions moved unchanged out of execution.rs into the
+independently runnable `compiler/luna/tests/exact_floats.rs` suite, with new
+negation coverage for parameters, calls, module constants, large exponents and
+double negation. Use `test -p luna --test exact_floats` for this subsystem.
+
+Verification from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test exact_floats`:
+  exit 0, 5 tests; `/tmp/luna-tools-_1qjxdyp/result.json`.
+- `python3 -B development/check.py --timeout 240 -- test -p iir --lib`:
+  exit 0, 34 tests; `/tmp/luna-tools-523lx8mf/result.json`.
+- `python3 -B development/check.py --timeout 240 -- test -p comptime_runtime -p comptime_interpretor --test decimal --test scalar_equality --test exact_floats`:
+  exit 0, 18 tests; `/tmp/luna-tools-q756dpnq/result.json`.
+- Changed Rust files formatted; `git diff --check` passed.
+- `python3 -B development/check.py --timeout 240 -- check --workspace --all-targets`: exit 0; `/tmp/luna-tools-qc_6hbh6/result.json`.
+
+### Exact finite Float addition, subtraction and multiplication
+
+The decimal kernel now implements exact finite addition, subtraction and
+multiplication. Alignment checks exponent distance, allocation width, fuel and
+binary limb limits before expanding significands. Results canonicalize trailing
+zeros without rounding. Cancellation yields positive zero, two negative-zero
+addends retain negative zero, and multiplication combines signs by exclusive-or.
+A budgeted base-1e9 integer-to-decimal transport routine supports result
+construction and replaces repeated division-by-ten exponent serialization.
+
+Source arithmetic, comptime interpretation and IIR folding share these kernels.
+Exact division and remainder remain unsupported unless supplied by a selected
+protocol; no truncation or binary-rounding policy was invented. Exact binary
+arithmetic is foldable but excluded from total structural initializer analysis,
+because valid inputs can exceed the result-size limit. Eager evaluation remains:
+zero multiplication does not hide a failing other operand.
+
+Verification from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 240 -- test -p comptime_runtime -p iir --lib --test decimal --test integer`:
+  exit 0; 14 decimal, 9 integer and 35 IIR tests;
+  `/tmp/luna-tools-rvktsykk/result.json`.
+  Includes 16875 scaled-integer oracle comparisons, signed zeros, huge alignment
+  rejection, result growth limits, failure/retry and decimal transport.
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test exact_floats --test elaboration`:
+  exit 0; 6 exact Float source tests and 446 elaboration tests;
+  `/tmp/luna-tools-h_yksv1c/result.json`.
+  Source cases verify 0.1 + 0.2 = 0.3, tiny differences beyond f64 precision,
+  multiplication, composed calls, module-constant reconstruction and runtime
+  stage rejection.
+- Changed Rust files formatted; `git diff --check` passed.
+- `python3 -B development/check.py --timeout 240 -- check --workspace --all-targets`: exit 0; `/tmp/luna-tools-0lvc0pm5/result.json`.
+
+### Shared target rounding for exact Float values
+
+Computed DecimalValue values now expose budgeted direct f32/f64 conversion.
+DecimalLiteral conversions delegate to the same path, so existing source
+literal proxies and computed exact values use one target-rounding kernel.
+Scientific serialization stays compact for large exponents; each conversion
+parses directly into its target format, reports finite overflow, and preserves
+the sign of underflowed zero. No intermediate f64 is used for f32.
+
+This is conversion-kernel infrastructure and an update to existing source
+literal conversion. General source `.as(...)` conversion protocol wiring is
+still pending; no special source cast behavior was added.
+
+Verification from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 240 -- test -p comptime_runtime --test decimal`:
+  exit 0, 16 tests; `/tmp/luna-tools-xj3vmm_s/result.json`.
+  Computed inputs cover direct-f32 versus double-rounding differences, f64
+  halfway rounding, signed zero, huge positive/negative exponents, overflow,
+  budget/size failures and recovery. Subnormal midpoints are independently
+  constructed as 5^n * 10^-n for n=150 and n=1075 and checked on both signs.
+- Changed Rust files formatted; `git diff --check` passed.
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test exact_floats --test elaboration --test execution float`: exit 0, 28 tests; `/tmp/luna-tools-h8e029wi/result.json`.
+- `python3 -B development/check.py --timeout 240 -- check --workspace --all-targets`: exit 0; `/tmp/luna-tools-fllfxqjy/result.json`.
+
+### Exact Float literal and negated pattern execution
+
+Interpreter literal matching and IIR staged data matching now use budgeted
+numeric decimal comparison for Float patterns. Equivalent spellings match,
+distinct decimals beyond binary precision remain distinct, and signed zeros
+match each other. Float is admitted to negated pattern elaboration; candidate
+alternatives and module-constant invocations use the same matching semantics.
+Staged matching charges the spelling before copying and rejects malformed
+literal/domain combinations. Removing the old interpreter wildcard also makes
+future Literal variants require an explicit matching decision.
+
+Coverage remains conservative for the Float domain: a literal and its negation
+without an unguarded fallback are not yet proved exhaustive. The source suite
+records that implementation limitation separately from positive matching tests;
+it is not a language prohibition. General .as conversion protocol selection was
+investigated but not implemented: the current docs do not establish its complete
+trait signature, and library Into/From declarations were not treated as semantic
+authority.
+
+Verification from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test exact_floats`:
+  exit 0, 8 tests; `/tmp/luna-tools-y7ayzv_q/result.json`.
+- `python3 -B development/check.py --timeout 240 -- test -p iir --lib`:
+  exit 0, 36 tests; `/tmp/luna-tools-pug0avu3/result.json`.
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test execution scalar_negated_patterns`:
+  exit 0; `/tmp/luna-tools-r78nusr2/result.json`.
+- Changed Rust files formatted; `git diff --check` passed.
+- `python3 -B development/check.py --timeout 240 -- check --workspace --all-targets`: exit 0; `/tmp/luna-tools-7498217a/result.json`.
+
+### Exact Float pattern coverage
+
+The prior fallback-only limitation is removed for pure Float literal patterns,
+alternatives and their lowered negations. A dedicated bounded analyzer builds
+Boolean predicates over canonical numeric singleton cells plus the remaining
+domain. Signed zero is normalized only inside coverage; stored normal-input
+identity is unchanged. Matrix specialization retains tail columns, preserving
+tuple/record correlations rather than unioning unrelated projections.
+
+The analyzer recognizes only closed pure Boolean decisions on the same bound
+subject. Calls, unsupported guards, nontrivial binding remaps and unfamiliar
+expressions contribute no proof. No user code is invoked and no program
+coverage facts enter PTC. Literal parsing, payload comparison, binding copies,
+matrix traversal and depth are bounded; resource exhaustion remains Unknown.
+
+Verification from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test exact_floats`:
+  exit 0, 8 tests; `/tmp/luna-tools-wanetrxp/result.json`.
+  Covers complementary patterns without fallback, nested alternatives,
+  signed-zero inputs, tuple correlation holes and executable-guard rejection.
+- `python3 -B development/check.py --timeout 240 -- test -p elaboration --lib coverage`:
+  exit 0, 28 tests; `/tmp/luna-tools-o0y9xopl/result.json`.
+  New cases independently enumerate all 64 subsets of six predicates over
+  three abstract cells, check budget failure/recovery, distinguish nearby exact
+  decimals, and reject complements referring to another local binding.
+- Changed Rust files formatted; `git diff --check` passed.
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test elaboration`: exit 0, 446 tests; `/tmp/luna-tools-reio444g/result.json`.
+- `python3 -B development/check.py --timeout 240 -- check --workspace --all-targets`: exit 0; `/tmp/luna-tools-6vh58tzl/result.json`.
+
+### Pure Float equality guards in coverage
+
+Float coverage now recognizes equality between a pattern-bound subject and a
+typed exact literal in either operand order, subject reflexivity, and constant
+equality. Existing Boolean negation/composition gives inequality and compound
+guards the same singleton-partition semantics. Other locals and executable
+operands remain unrecognized rather than being assumed equal to the subject.
+All decimal decoding and comparisons use the existing bounded paths.
+
+Negative expression patterns were verified through the existing whitespace-
+delimited `< expr >` parser entry, including inside tuples. Bare unary minus
+was not added to pattern syntax. Tests cover negative literals/zero, equivalent
+decimal spellings, nearby distinct values, complementary guards, subject
+reflexivity, and rejection of gaps, other parameters, and function-call guards.
+
+Verification from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test exact_floats --test elaboration`:
+  exit 0, 9 + 446 tests; `/tmp/luna-tools-6pqhl2wa/result.json`.
+- `python3 -B development/check.py --timeout 240 -- test -p elaboration --lib coverage`:
+  exit 0, 28 tests; `/tmp/luna-tools-8srla5p5/result.json`.
+- Changed Rust files formatted; `git diff --check` passed.
+- `python3 -B development/check.py --timeout 240 -- check --workspace --all-targets`: exit 0; `/tmp/luna-tools-7i3n2xxh/result.json`.
+
+### Ordered exact Float guard coverage
+
+Float coverage now handles <, <=, > and >= between the bound subject and
+exact constants, including reversed operands and subject reflexivity.
+The matrix uses sorted, deduplicated exact endpoints, singleton endpoint cells
+and every open interval (including the unbounded ends). No approximate sample,
+midpoint construction or exponent expansion is used. This preserves strict
+boundary holes and intervals narrower than f64 precision.
+
+Sorting, comparisons and cell allocation share the coverage budget.
+User calls and unrelated locals still supply no proof; tuple tail-column
+correlations remain in the existing matrix recursion.
+
+Verification from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 240 -- test -p elaboration --lib coverage`:
+  exit 0, 29 tests; `/tmp/luna-tools-m7ccggjh/result.json`.
+  A separate rank oracle checks all five comparison operators over seven point/
+  interval cells, unsorted duplicate endpoints, signed zero and budget retry.
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test exact_floats --test elaboration`:
+  exit 0, 10 + 446 tests; `/tmp/luna-tools-2q6myedk/result.json`.
+  Source tests cover sign classification, inclusive narrow windows, huge
+  exponents, reversed comparisons and rejection of missing endpoints, open
+  gaps, false reflexive predicates and unrelated parameters.
+- Changed Rust files formatted; `git diff --check` passed.
+- `python3 -B development/check.py --timeout 240 -- check --workspace --all-targets`: exit 0; `/tmp/luna-tools-yweunx_y/result.json`.
+
+### Exact Float range patterns
+
+Range-pattern lowering now admits the comptime Float domain and uses exact
+scalar comparison for exclusive/inclusive and one-sided ranges. The existing
+lowering still evaluates each endpoint once in order before its comparisons.
+Pure endpoint-binding blocks are understood by Float coverage through scoped,
+budgeted subject/constant environments; unsupported statements, duplicate
+binding identities and unknown endpoint producers supply no proof.
+
+Tests cover adjacent high-precision decimal boundaries, empty and negated
+ranges, one-sided partitions, dynamic bounds with fallback, and rejected gaps
+or unknown dynamic coverage. Effectful endpoints verify lower-before-upper,
+exactly-once evaluation, including when the lower bound already excludes the
+subject. Numeric primitive semantics and ordinary runtime Float storage rules
+are unchanged.
+
+Verification from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 240 -- test -p elaboration --lib coverage`:
+  exit 0, 30 tests; `/tmp/luna-tools-ikcexqx7/result.json`.
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test exact_floats --test elaboration`:
+  exit 0, 11 + 446 tests; `/tmp/luna-tools-06vgbfaa/result.json`.
+- Changed Rust files formatted; `git diff --check` passed.
+- `python3 -B development/check.py --timeout 240 -- check --workspace --all-targets`: exit 0; `/tmp/luna-tools-y908gy98/result.json`.
+
+### Float coverage across candidate bindings
+
+Float coverage now tracks simultaneous pattern binding remaps and exports only
+the bindings whose meanings agree across every alternative. Guards after
+or-patterns can therefore use the canonical exported names. Remaps cannot read
+ambient bindings as sources, merge unrelated targets, duplicate a source/target
+or fabricate missing bindings; rejected remaps leave the ambient environment
+unchanged. Common-binding intersection and payload copies share the fuel budget.
+
+Validation from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test exact_floats`:
+  12 passed; `/tmp/luna-tools-u_me0qia/result.json`.
+  Includes nested aliases, overlapping alternatives and guard-induced holes.
+- `python3 -B development/check.py --timeout 240 -- test -p elaboration --lib coverage`:
+  32 passed; `/tmp/luna-tools-wsv4cira/result.json`.
+  Includes cyclic simultaneous remaps, invalid capture/merge cases,
+  failed-budget recovery and candidate-local binding isolation.
+- Changed Rust files formatted; `git diff --check` passed.
+- `python3 -B development/check.py --timeout 240 -- check --workspace --all-targets`: exit 0; `/tmp/luna-tools-xm5tu1gs/result.json`.
+
+### Newtype declaration frontend
+
+The resolver now registers newtype declarations and their parameter telescopes;
+AST lowering preserves a distinct `ItemKind::Newtype` and `DefKind::Newtype`.
+The HIR S-expression records parameters, constraints and a representation edge,
+without converting the declaration into an alias. Module imports and references
+resolve to the declaration, and unknown representations, leaked parameters and
+duplicate declarations are rejected. Shared alias/newtype lowering and scanning
+retain distinct kinds. This is frontend groundwork: NIR nominal descriptors,
+layout delegation, explicit bidirectional casts and resource behavior remain
+unimplemented; the existing elaborator rejects these declarations.
+
+Validation in `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 240 -- check --workspace --all-targets`
+  exited 0: `/tmp/luna-tools-flgmihda/result.json`.
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test newtypes -p hir --test display`
+  exited 0, 14 tests passed: `/tmp/luna-tools-nr_vm2sr/result.json`.
+- Modified Rust files formatted; `git diff --check` passed. Uncommitted on dev.
+
+### Newtype nominal declarations and NIR representation edges
+
+Newtypes now participate in declaration telescope registration, type applications,
+formation contracts and nominal constructor identity. NIR packages carry separate
+newtype descriptors (including required-comptime snapshots); underlying types are
+not substituted for the nominal head. Representation instantiation preserves
+opaque heads and caller scopes. HIR-to-NIR tests cover generic wrappers, aliases,
+distinct declarations over the same representation, own trait implementations,
+and rejection of inherited fields, constructors and underlying trait evidence.
+
+Representation-cycle checking follows newtype edges through existing struct/enum
+layouts. Direct and indirect by-value cycles are rejected; pointer recursion is
+accepted. Descriptor dumps use escaped S-expressions. Normal-form package admission
+also checks newtype declaration collisions, parameter telescopes and representation
+sorts. This supersedes the frontend-only limitation in the preceding entry.
+Explicit newtype casts, executable newtype payloads, backend layout delegation and
+resource-operation integration still need implementation; declaration/signature
+acceptance does not imply that the whole newtype feature is executable.
+
+Validation in `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test newtypes -p nir --test newtypes`
+  exited 0: 9 source and 4 descriptor tests, `/tmp/luna-tools-v2w91zdl/result.json`.
+- Nominal staging (11) and normal input (8) regression suites passed in
+  `/tmp/luna-tools-jlgq3nys/result.json` (exit 0).
+- Instantiation regression suite passed all 50 tests in
+  `/tmp/luna-tools-aus2yh3k/stdout.log`; that combined command exited 101 on a
+  new fixture omitting explicit interface selection. The corrected newtype
+  fixture uses `value.as(Ready).ready()` and passes in the final source suite.
+- Workspace/all-target check exited 0: `/tmp/luna-tools-6je9v3u3/result.json`.
+- Modified Rust formatted; `git diff --check` passed. Changes remain on dev,
+  uncommitted.
+
+### Direct newtype conversion relations and bounded representation queries
+
+`nir::newtypes::conversion` now identifies a single declaration-backed wrapping
+or unwrapping edge and returns an immutable conversion descriptor with explicit
+source, target, owner and direction. It does not infer same-width conversions,
+compose edges, or unfold opaque type heads. Identity conversions belong to the
+general conversion layer. Query failures (scope, telescope, duplicate identity,
+resource budget) are distinct from absence of a direct edge. Formation contracts
+remain a producer obligation; the descriptor does not grant resource traits or
+permission to duplicate a value.
+
+Representation substitution now has a budgeted entrypoint that charges input
+structure, caller frames and a conservative output-expansion bound before copying.
+Newtype package admission and the elaborator's representation-cycle check use it.
+A 36-pair independent adjacency matrix tests siblings, nested wrappers, different
+representations and both directions. Additional tests cover generic/caller-scoped
+inputs, opaque heads, malformed queries, budget exhaustion and recovery, repeated
+argument expansion, and oversized metadata admission. This is the conversion
+relation core, not yet an executable source `.as` operation; dedicated execution
+and ownership-transfer handling are still required.
+
+Validation in `/home/fin/luna`:
+`python3 -B development/check.py --timeout 240 -- test -p nir --test newtypes -p luna --test newtypes`
+exited 0: 10 NIR and 9 source tests passed, evidence
+`/tmp/luna-tools-vogzauol/result.json`. Modified Rust files formatted and
+`git diff --check` passed. Uncommitted on dev.
+
+### Newtype IIR instances and runtime storage phase
+
+Concrete instance closure now emits `iir::NominalDefinition::Newtype` rather than
+losing newtypes at the NIR/IIR boundary. It instantiates and normalizes the direct
+representation and declared formation requirements/capabilities, clears template
+parameters in the instance descriptor, and closes representation dependencies.
+IIR index/type validation checks the instance identity, completed representation
+and referenced nominal instances; S-expression dumps retain the newtype kind.
+Cleanup callable-context discovery inspects the representation without treating it
+as a user-accessible field or inheriting a destructor.
+
+Runtime storage phase inspection now follows the newtype representation. This
+closes a hole where a wrapper could conceal Float/Integer/Type storage. Phantom
+arguments do not become stored fields, and comptime signatures remain legal.
+Tests cover nested generic representations, missing IIR dependency rejection,
+retained template-parameter rejection, nine comptime-storage concealment cases,
+phantom acceptance, and newtype-specific capability formation/instantiation.
+Dedicated cast/value execution and ownership transfer remain unfinished; no
+newtype `.as` execution is claimed by this metadata/phase work.
+
+Validation in `/home/fin/luna`:
+- Workspace/all-target check exited 0: `/tmp/luna-tools-suauw98q/result.json`.
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test newtypes --test instantiation -p nir --test phases`
+  exited 0: 81 tests across source newtypes, instantiation and phase suites;
+  `/tmp/luna-tools-o15hmh5e/result.json`.
+- Final source newtypes suite including capability formation: 12 passed, exit 0,
+  `/tmp/luna-tools-b2u6wgaj/result.json`.
+- Modified Rust files formatted, `git diff --check` passed. Uncommitted on dev.
+
+### Explicit newtype conversions in reference execution
+
+Source `.as` now recognizes direct newtype representation edges and emits the
+independent unary `NewtypeConvert` node. NIR traversal, phase checking, generic
+substitution, constant reconstruction and conservative dependency walks retain
+that node. It is not represented as a record constructor or field access.
+The reference interpreter carries a distinct `Value::Newtype` and evaluates the
+input once. Both endpoints and payload types are checked; IIR also rechecks the
+edge against its concrete instance descriptor before execution. Generic IIR keys
+retain arguments while already-substituted descriptors use empty telescopes.
+
+Source tests execute direct, nested, generic and struct-payload round trips;
+comptime invocation tests count one producer call and check constant reconstruction.
+Host-input tests reject raw underlying values, struct impostors and incorrectly
+stored payloads. S-expression dumps distinguish conversion nodes and wrapped
+values. Cross-stage constant use still requires the established Splice protocol.
+Representation copying/admission walks account for the wrapper and its payload;
+none of this grants Copy or inherits the underlying type's operations.
+
+This completes the reference conversion path, not resource-checked execution:
+the move/observation analyzer still rejects the unmodeled operation. Whole-value
+responsibility transfer, cleanup scheduling, purity/provenance integration and
+stable normal-value freeze/thaw of wrappers remain required. Native layout/lowering
+also remains separate. Do not advertise the newtype feature as complete.
+
+Validation in `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 240 -- test -p luna --test newtypes --test instantiation --test exact_floats --test pure_bitvec -p nir --test newtypes`
+  exited 0, 105 tests passed: `/tmp/luna-tools-a7r57gsu/result.json`.
+- Workspace/all-target check exited 0: `/tmp/luna-tools-r9lo2pz0/result.json`.
+- Modified Rust formatted; `git diff --check` passed. Uncommitted on dev.
+
+### Newtype immutable values and comptime input transport
+
+Newtype values freeze into nominal normal values with their declared identity and
+one representation payload. Reconstruction consults nominal metadata and creates
+`Value::Newtype`, never a struct value; wrong payload arity/type or enum tags are
+rejected. Layout queries for canonical values understand both source newtype
+telescopes and already-instantiated IIR representations. Freezing charges type and
+payload work, enforces depth/size bounds, and rejects executable payloads.
+
+Opaque-head value inputs and CMTT generator data inputs accept newtype domains.
+The declaration category is available before layout demand, so a forward newtype
+declaration is not spuriously rejected. Actual value admission still checks the
+representation and contracts. Generic comptime Type construction also retains
+newtype identity and arguments. Tests exercise nested freeze/thaw, forged values,
+opaque-head retained inputs, code generation after explicit unwrap, forward
+references, and failure/recovery. Distinct opaque inputs are inspected as retained
+data; no inverse/injective equation for opaque result types was introduced.
+
+Validation in `/home/fin/luna`:
+- Final source newtype suite: 24 passed, exit 0,
+  `/tmp/luna-tools-opvlstqc/result.json`.
+- Frozen value tests (17), NIR newtype tests (10), normal input tests (8) passed
+  in `/tmp/luna-tools-hdnnafhw/result.json` (exit 0).
+- CMTT regression suite: 131 passed, exit 0,
+  `/tmp/luna-tools-d7js6sv3/result.json`.
+- Changed Rust formatted; `git diff --check` passed. Uncommitted on dev.
+Resource-checked casts, responsibility transfer and cleanup remain unfinished;
+immutable comptime transport is not Copy evidence for runtime values.
+- Final workspace/all-target check exited 0:
+  `/tmp/luna-tools-jnc1voql/result.json`.

@@ -42,11 +42,22 @@ pub(crate) fn copy_delivery(
                 return Err("Copy language item is not bound to a source trait".into());
             };
             let Some(LangItemDef::UserDef(drop_protocol)) = items.get(LangItem::Drop) else {
-                return Err("Copy representation and resource legality require a bound Drop protocol".into());
+                return Err(
+                    "Copy representation and resource legality require a bound Drop protocol"
+                        .into(),
+                );
             };
             let mut fuel = budget.steps;
-            copy::acquire(package, world, copy_protocol, drop_protocol, ty, budget, &mut fuel)
-                .map_err(|reason| format!("Copy representation and resource legality: {reason}"))?;
+            copy::acquire(
+                package,
+                world,
+                copy_protocol,
+                drop_protocol,
+                ty,
+                budget,
+                &mut fuel,
+            )
+            .map_err(|reason| format!("Copy representation and resource legality: {reason}"))?;
             Ok(Delivery::Copy)
         }
     }
@@ -190,6 +201,31 @@ pub fn analyze_cleanup_with_context(
     callables: &[elaboration::verification::moves::CallableParameter],
     enums: &[elaboration::verification::moves::EnumParameter],
 ) -> Result<elaboration::verification::moves::Report, elaboration::verification::moves::Error> {
+    analyze_cleanup_with_effect_context(
+        package,
+        world,
+        items,
+        function,
+        fuel,
+        query_budget,
+        borrows,
+        callables,
+        enums,
+        vec![],
+    )
+}
+pub fn analyze_cleanup_with_effect_context(
+    package: &nir::program::Package,
+    world: &World<'_>,
+    items: &LangItems,
+    function: &nir::program::Function,
+    fuel: usize,
+    query_budget: Budget,
+    borrows: &[(usize, nir::Term)],
+    callables: &[elaboration::verification::moves::CallableParameter],
+    enums: &[elaboration::verification::moves::EnumParameter],
+    effects: Vec<elaboration::verification::moves::EffectResultInput>,
+) -> Result<elaboration::verification::moves::Report, elaboration::verification::moves::Error> {
     use elaboration::verification::{drop::CleanupSession, moves};
     let Some(LangItemDef::UserDef(protocol)) = items.get(LangItem::Drop) else {
         return Err(moves::Error {
@@ -198,7 +234,7 @@ pub fn analyze_cleanup_with_context(
         });
     };
     let mut session = CleanupSession::new(package, world, protocol, query_budget);
-    moves::analyze_in_package_with_context(
+    moves::analyze_in_package_with_effect_context(
         package,
         function,
         |ty| copy_delivery(package, world, items, ty, query_budget),
@@ -207,6 +243,7 @@ pub fn analyze_cleanup_with_context(
         borrows,
         callables,
         enums,
+        effects,
     )
 }
 
@@ -225,7 +262,9 @@ pub fn select_comptime_key(
         elaboration::key_protocols::Operation::Hash => LangItem::Hash,
     };
     let Some(LangItemDef::UserDef(protocol)) = items.get(item) else {
-        return Err(format!("{operation} language item is not bound to a source trait"));
+        return Err(format!(
+            "{operation} language item is not bound to a source trait"
+        ));
     };
     elaboration::key_protocols::select(package, world, protocol, ty, operation, budget)
 }

@@ -1,0 +1,18 @@
+{- luna literal-suffix.fl --literal-into-protocol input::Convert --interpret run
+The result context selects Convert<.flag, bool> for Char. -}
+typealias Symbol = .Symbol'builtin;
+typealias Char = .char'builtin;
+
+trait Convert where suffix: Symbol, R {
+    fn literal_into(comptime value: Self) -> R;
+}
+
+impl Convert<.flag, bool> for Char {
+    fn literal_into(comptime value: Char) -> bool {
+        value == 'x'
+    }
+}
+
+fn run() -> bool {
+    'x'flag
+}

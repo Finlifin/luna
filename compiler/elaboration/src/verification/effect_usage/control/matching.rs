@@ -75,7 +75,8 @@ fn pure(pattern: &Pattern, fuel: &mut usize, depth: usize) -> Result<bool, Strin
         Pattern::Tuple(fields)
         | Pattern::TypeTuple(fields)
         | Pattern::Or(fields)
-        | Pattern::Record { fields, .. } | Pattern::AnonymousRecord { fields, .. }
+        | Pattern::Record { fields, .. }
+        | Pattern::AnonymousRecord { fields, .. }
         | Pattern::Variant { fields, .. }
         | Pattern::NormalForm {
             arguments: fields, ..
@@ -238,51 +239,53 @@ impl Analyzer<'_, '_, '_, '_> {
             }
             Pattern::Tuple(fields)
             | Pattern::TypeTuple(fields)
-            | Pattern::Record { fields, .. } | Pattern::AnonymousRecord { fields, .. }
+            | Pattern::Record { fields, .. }
+            | Pattern::AnonymousRecord { fields, .. }
             | Pattern::Variant { fields, .. }
             | Pattern::NormalForm {
                 arguments: fields, ..
             } => {
-                let (shape, values): (Option<bool>, Option<&[Expr]>) =
-                    match (pattern, input.map(|e| &e.kind)) {
-                        (Pattern::Tuple(_), Some(K::Tuple(values)))
-                        | (Pattern::TypeTuple(_), Some(K::TupleType(values))) => {
-                            (Some(fields.len() == values.len()), Some(values))
-                        }
-                        (Pattern::AnonymousRecord { names, .. }, Some(K::AnonymousRecord { fields: values })) => {
-                            let labels = input.is_some_and(|expr| matches!(&expr.ty, nir::Term::Record(types)
+                let (shape, values): (Option<bool>, Option<&[Expr]>) = match (
+                    pattern,
+                    input.map(|e| &e.kind),
+                ) {
+                    (Pattern::Tuple(_), Some(K::Tuple(values)))
+                    | (Pattern::TypeTuple(_), Some(K::TupleType(values))) => {
+                        (Some(fields.len() == values.len()), Some(values))
+                    }
+                    (
+                        Pattern::AnonymousRecord { names, .. },
+                        Some(K::AnonymousRecord { fields: values }),
+                    ) => {
+                        let labels = input.is_some_and(|expr| matches!(&expr.ty, nir::Term::Record(types)
                                 if names.len() == types.len() && names.iter().zip(types).all(|(name,(expected,_))|name == expected)));
-                            (Some(labels && fields.len() == values.len()), Some(values))
-                        }
-                        (
-                            Pattern::Record { declaration, .. },
-                            Some(K::Record {
-                                declaration: actual,
-                                fields: values,
-                            }),
-                        ) => (
-                            Some(declaration == actual && fields.len() == values.len()),
-                            Some(values),
-                        ),
-                        (
-                            Pattern::Variant {
-                                declaration, index, ..
-                            },
-                            Some(K::Variant {
-                                declaration: actual,
-                                index: tag,
-                                fields: values,
-                            }),
-                        ) => (
-                            Some(
-                                declaration == actual
-                                    && index == tag
-                                    && fields.len() == values.len(),
-                            ),
-                            Some(values),
-                        ),
-                        _ => (None, None),
-                    };
+                        (Some(labels && fields.len() == values.len()), Some(values))
+                    }
+                    (
+                        Pattern::Record { declaration, .. },
+                        Some(K::Record {
+                            declaration: actual,
+                            fields: values,
+                        }),
+                    ) => (
+                        Some(declaration == actual && fields.len() == values.len()),
+                        Some(values),
+                    ),
+                    (
+                        Pattern::Variant {
+                            declaration, index, ..
+                        },
+                        Some(K::Variant {
+                            declaration: actual,
+                            index: tag,
+                            fields: values,
+                        }),
+                    ) => (
+                        Some(declaration == actual && index == tag && fields.len() == values.len()),
+                        Some(values),
+                    ),
+                    _ => (None, None),
+                };
                 let mut result = Probe::choice(shape, n, fuel)?;
                 for (index, field) in fields.iter().enumerate() {
                     if result.yes.is_none() {

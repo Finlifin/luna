@@ -27,7 +27,8 @@ impl Checker<'_, '_> {
             )
             .map_err(|cause| call_inference_error(span, cause))?;
         if let Some(context) = structural {
-            candidate.constrain_result_context(context, crate::ptc::Budget::default())
+            candidate
+                .constrain_result_context(context, crate::ptc::Budget::default())
                 .map_err(|cause| call_inference_error(span, cause))?;
         }
         candidate
@@ -62,36 +63,89 @@ impl Checker<'_, '_> {
             let layout = self.spread_packet_layout_with_widths(args, &slots, span, &widths)?;
             for (index, fields) in &packet_fields {
                 if let Some(slots) = &layout[*index] {
-                    if slots.len() != fields.len() { return Err(error(span, "spread packet width disagrees with payload")); }
-                    for (slot, ty) in slots.iter().zip(fields) { actual[*slot] = Some(ty.clone()); }
+                    if slots.len() != fields.len() {
+                        return Err(error(span, "spread packet width disagrees with payload"));
+                    }
+                    for (slot, ty) in slots.iter().zip(fields) {
+                        actual[*slot] = Some(ty.clone());
+                    }
                 }
             }
             for (slot, (_, value)) in checked.iter() {
-                if !is_never(&value.ty) { actual[*slot] = Some(value.ty.clone()); }
+                if !is_never(&value.ty) {
+                    actual[*slot] = Some(value.ty.clone());
+                }
             }
-            let candidate = self.infer_spread_inputs(scheme, actual.clone(), args, None, 0,
-                None, None, Some(context), Some(&widths), span, checked)?;
+            let candidate = self.infer_spread_inputs(
+                scheme,
+                actual.clone(),
+                args,
+                None,
+                0,
+                None,
+                None,
+                Some(context),
+                Some(&widths),
+                span,
+                checked,
+            )?;
             let mut progress = false;
             for (index, arg) in args.iter().enumerate() {
-                let Arg::Expand(input) = arg else { continue; };
-                if matches!(input.kind, H::Tuple(_)) || packets.contains_key(&index) { continue; }
+                let Arg::Expand(input) = arg else {
+                    continue;
+                };
+                if matches!(input.kind, H::Tuple(_)) || packets.contains_key(&index) {
+                    continue;
+                }
                 let slots = &layout[index];
-                fuel = fuel.checked_sub(1).ok_or_else(|| error(span, "spread packet inference budget exhausted"))?;
+                fuel = fuel
+                    .checked_sub(1)
+                    .ok_or_else(|| error(span, "spread packet inference budget exhausted"))?;
                 let packet_context = if let Some(slots) = slots {
-                    let fields = slots.iter().map(|slot| candidate.parameter_input_context(*slot)
-                        .map_err(|e| call_inference_error(span, e))).collect::<Result<Vec<_>, _>>()?;
+                    let fields = slots
+                        .iter()
+                        .map(|slot| {
+                            candidate
+                                .parameter_input_context(*slot)
+                                .map_err(|e| call_inference_error(span, e))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
                     match self.protocols.tuple {
                         Some(head) => crate::calls::InputContext::NormalTuple { head, fields },
                         None => crate::calls::InputContext::Tuple(fields),
                     }
-                } else { crate::calls::InputContext::Unknown };
-                let Some(value) = self.argument_attempt_with_input(input, None, None, false, Some(&packet_context))? else { continue; };
-                if is_never(&value.ty) { packets.insert(index, value); progress = true; break; }
-                let Term::Tuple(fields) = self.structural_type(&value.ty, input.span)? else {
-                    return Err(error(input.span, "positional spread requires a tuple value"));
+                } else {
+                    crate::calls::InputContext::Unknown
                 };
-                if slots.as_ref().is_some_and(|slots| fields.len() != slots.len()) {
-                    return Err(error(input.span, "argument count mismatch: spread packet width disagrees with payload"));
+                let Some(value) = self.argument_attempt_with_input(
+                    input,
+                    None,
+                    None,
+                    false,
+                    Some(&packet_context),
+                )?
+                else {
+                    continue;
+                };
+                if is_never(&value.ty) {
+                    packets.insert(index, value);
+                    progress = true;
+                    break;
+                }
+                let Term::Tuple(fields) = self.structural_type(&value.ty, input.span)? else {
+                    return Err(error(
+                        input.span,
+                        "positional spread requires a tuple value",
+                    ));
+                };
+                if slots
+                    .as_ref()
+                    .is_some_and(|slots| fields.len() != slots.len())
+                {
+                    return Err(error(
+                        input.span,
+                        "argument count mismatch: spread packet width disagrees with payload",
+                    ));
                 }
                 widths.insert(index, fields.len());
                 packet_fields.insert(index, fields);
@@ -99,7 +153,9 @@ impl Checker<'_, '_> {
                 progress = true;
                 break;
             }
-            if !progress { return Ok(candidate); }
+            if !progress {
+                return Ok(candidate);
+            }
         }
     }
 
@@ -121,8 +177,15 @@ impl Checker<'_, '_> {
         let mut post_positions = std::collections::BTreeSet::new();
         let mut fuel = 10_000usize;
         let layout = if structural.is_some() {
-            Some(self.spread_packet_layout_with_widths(args, &actual[offset..], span, settled_widths.unwrap_or(&BTreeMap::new()))?)
-        } else { None };
+            Some(self.spread_packet_layout_with_widths(
+                args,
+                &actual[offset..],
+                span,
+                settled_widths.unwrap_or(&BTreeMap::new()),
+            )?)
+        } else {
+            None
+        };
         for (argument_index, arg) in args.iter().enumerate() {
             match arg {
                 Arg::Positional(value) => flat.push((None, (*value).clone(), true)),
@@ -135,15 +198,22 @@ impl Checker<'_, '_> {
                     if let H::Tuple(items) = value.kind {
                         flat.extend(items.iter().cloned().map(|item| (None, item, true)));
                     } else {
-                        let known_width = match settled_widths.and_then(|widths| widths.get(&argument_index).copied()) {
+                        let known_width = match settled_widths
+                            .and_then(|widths| widths.get(&argument_index).copied())
+                        {
                             Some(width) => Some(width),
                             None => self.spread_width(value, &mut fuel, 0)?,
                         };
-                        let Some(width) = known_width
-                            .or_else(|| layout.as_ref().and_then(|layout| layout[argument_index].as_ref().map(Vec::len))) else {
+                        let Some(width) = known_width.or_else(|| {
+                            layout
+                                .as_ref()
+                                .and_then(|layout| layout[argument_index].as_ref().map(Vec::len))
+                        }) else {
                             // Keep the established result-context path when a
                             // partition is not yet known; never invent a width.
-                            return self.spread_candidate(scheme, &actual, expected, partial, structural, span);
+                            return self.spread_candidate(
+                                scheme, &actual, expected, partial, structural, span,
+                            );
                         };
                         fuel = fuel
                             .checked_sub(width)
@@ -177,7 +247,8 @@ impl Checker<'_, '_> {
             .collect();
         let (routes, _) = route_arguments(&routed, declarations, actual.len() - offset, span)?;
         loop {
-            let candidate = self.spread_candidate(scheme, &actual, expected, partial, structural, span)?;
+            let candidate =
+                self.spread_candidate(scheme, &actual, expected, partial, structural, span)?;
             let mut progress = false;
             for route in &routes {
                 let Some(position) = route.single_position() else {
@@ -201,7 +272,8 @@ impl Checker<'_, '_> {
                 } else {
                     None
                 };
-                let input_context = candidate.parameter_input_context(parameter)
+                let input_context = candidate
+                    .parameter_input_context(parameter)
                     .map_err(|e| call_inference_error(span, e))?;
                 if let Some(value) =
                     self.with_staged_input(

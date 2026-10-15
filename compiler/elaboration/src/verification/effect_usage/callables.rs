@@ -87,7 +87,8 @@ fn pattern_binds(
             Pattern::Tuple(fields)
             | Pattern::TypeTuple(fields)
             | Pattern::Or(fields)
-            | Pattern::Record { fields, .. } | Pattern::AnonymousRecord { fields, .. }
+            | Pattern::Record { fields, .. }
+            | Pattern::AnonymousRecord { fields, .. }
             | Pattern::Variant { fields, .. }
             | Pattern::NormalForm {
                 arguments: fields, ..
@@ -352,7 +353,9 @@ impl<'a> Aliases<'a> {
                     step(fuel, parameter_bindings.len())?;
                     exposed.extend(parameter_bindings);
                 }
-                K::Assign { place, .. } | K::BitAssign { place, .. } | K::BitUpdate {place,..} => {
+                K::Assign { place, .. }
+                | K::BitAssign { place, .. }
+                | K::BitUpdate { place, .. } => {
                     exposed.insert(place.root);
                 }
                 K::AddressOf(value) => {

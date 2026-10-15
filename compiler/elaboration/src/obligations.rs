@@ -9,26 +9,43 @@ use std::{
 };
 
 fn scope_frames(scope: &[nir::Parameter]) -> Vec<Vec<Sort>> {
-    if scope.is_empty() {vec![]} else {vec![scope.iter().map(|p|p.sort).collect()]}
+    if scope.is_empty() {
+        vec![]
+    } else {
+        vec![scope.iter().map(|p| p.sort).collect()]
+    }
 }
-fn scoped_equality(a: Term, b: Term, scope: &[nir::Parameter], native_scope: bool) -> Result<Formula,InferenceError> {
+fn scoped_equality(
+    a: Term,
+    b: Term,
+    scope: &[nir::Parameter],
+    native_scope: bool,
+) -> Result<Formula, InferenceError> {
     if native_scope {
         let frames = scope_frames(scope);
-        a.check_scope(&frames).map_err(InferenceError::InvalidSubstitution)?;
-        b.check_scope(&frames).map_err(InferenceError::InvalidSubstitution)?;
-        return Ok(Formula::equal(a,b));
+        a.check_scope(&frames)
+            .map_err(InferenceError::InvalidSubstitution)?;
+        b.check_scope(&frames)
+            .map_err(InferenceError::InvalidSubstitution)?;
+        return Ok(Formula::equal(a, b));
     }
     if !scope.is_empty() && a.check_scope(&[]).is_ok() && b.check_scope(&[]).is_ok() {
-        return Ok(Formula::equal(a,b));
+        return Ok(Formula::equal(a, b));
     }
-    let close=|ty: Term| -> Result<Term,InferenceError> {
-        let ty=if scope.is_empty() {ty} else {
-            Term::Function {parameters:scope.to_vec(),result:Box::new(ty)}
+    let close = |ty: Term| -> Result<Term, InferenceError> {
+        let ty = if scope.is_empty() {
+            ty
+        } else {
+            Term::Function {
+                parameters: scope.to_vec(),
+                result: Box::new(ty),
+            }
         };
-        ty.check_scope(&[]).map_err(InferenceError::InvalidSubstitution)?;
+        ty.check_scope(&[])
+            .map_err(InferenceError::InvalidSubstitution)?;
         Ok(ty)
     };
-    Ok(Formula::equal(close(a)?,close(b)?))
+    Ok(Formula::equal(close(a)?, close(b)?))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -64,10 +81,20 @@ impl Requirement {
         }
         Ok(result)
     }
-    fn freeze(&self, inference: &InferenceContext, scope: &[nir::Parameter], native_scope: bool) -> Result<Formula, InferenceError> {
+    fn freeze(
+        &self,
+        inference: &InferenceContext,
+        scope: &[nir::Parameter],
+        native_scope: bool,
+    ) -> Result<Formula, InferenceError> {
         Ok(match self {
             Self::Stable(formula) => formula.clone(),
-            Self::Equal(a, b) => scoped_equality(inference.freeze(a)?, inference.freeze(b)?, scope, native_scope)?,
+            Self::Equal(a, b) => scoped_equality(
+                inference.freeze(a)?,
+                inference.freeze(b)?,
+                scope,
+                native_scope,
+            )?,
             Self::Kind(ty, kind) => Formula::kind(inference.freeze(ty)?, *kind),
             Self::Not(inner) => inner.freeze(inference, scope, native_scope)?.negate(),
             Self::And(items) => Formula::And(
@@ -145,19 +172,30 @@ impl Default for Engine {
     }
 }
 impl Engine {
-    pub(crate) fn is_tuple_head(&self, head: nir::DeclarationId) -> bool { self.context.is_tuple_head(head) }
+    pub(crate) fn is_tuple_head(&self, head: nir::DeclarationId) -> bool {
+        self.context.is_tuple_head(head)
+    }
     pub(crate) fn is_nominal_constructor(&self, head: nir::DeclarationId) -> bool {
         self.context.is_nominal_constructor(head)
     }
     pub(crate) fn with_call_scope(context: ptc::Context, scope: Vec<nir::Parameter>) -> Self {
-        Self {context, scope, ..Self::default()}
+        Self {
+            context,
+            scope,
+            ..Self::default()
+        }
     }
     pub(crate) fn check_context_type(&self, ty: &Term) -> Result<(), Error> {
         ty.check_scope(&scope_frames(&self.scope))
             .map_err(|error| Error::Inference(InferenceError::InvalidSubstitution(error)))
     }
-    pub(crate) fn assume_type_equality(&mut self, a: Term, b: Term) -> Result<(),Error> {
-        self.assume(scoped_equality(a,b,&self.scope,self.context.scope()==scope_frames(&self.scope).as_slice())?);
+    pub(crate) fn assume_type_equality(&mut self, a: Term, b: Term) -> Result<(), Error> {
+        self.assume(scoped_equality(
+            a,
+            b,
+            &self.scope,
+            self.context.scope() == scope_frames(&self.scope).as_slice(),
+        )?);
         Ok(())
     }
     pub fn with_context(context: ptc::Context) -> Self {
@@ -283,8 +321,9 @@ impl Engine {
     /// A proved counterexample can discard a candidate; waiting or Unknown
     /// obligations cannot. This does not turn refutation into an assumption.
     pub fn has_refuted_obligation(&self) -> bool {
-        self.obligations.values().any(|obligation|
-            matches!(obligation.state,State::Solved(Outcome::NotEntailed(_))))
+        self.obligations
+            .values()
+            .any(|obligation| matches!(obligation.state, State::Solved(Outcome::NotEntailed(_))))
     }
     pub fn attempts(&self, id: ObligationId) -> Option<usize> {
         self.obligations.get(&id).map(|o| o.attempts)
@@ -308,7 +347,11 @@ impl Engine {
                     }
                     State::Waiting(dependencies)
                 }
-                Ok(_) => match obligation.requirement.freeze(&self.inference, &self.scope, self.context.scope()==scope_frames(&self.scope).as_slice()) {
+                Ok(_) => match obligation.requirement.freeze(
+                    &self.inference,
+                    &self.scope,
+                    self.context.scope() == scope_frames(&self.scope).as_slice(),
+                ) {
                     Ok(formula) => State::Solved(self.context.prove(formula, budget)),
                     Err(error) => State::InvalidInference(error.to_string()),
                 },
@@ -429,7 +472,7 @@ impl fmt::Display for Engine {
         if !self.scope.is_empty() {
             f.write_str(" (scope")?;
             for parameter in &self.scope {
-                write!(f," (parameter {} {})",parameter.sort,parameter.ty)?;
+                write!(f, " (parameter {} {})", parameter.sort, parameter.ty)?;
             }
             f.write_str(")")?;
         }

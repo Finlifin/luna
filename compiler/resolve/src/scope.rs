@@ -22,6 +22,8 @@ pub enum ScopeKind {
     FnBody,
     /// A type alias parameter telescope and target.
     TypeAlias,
+    /// A nominal newtype parameter telescope and representation expression.
+    Newtype,
     /// A block expression (`{ ... }`).
     Block,
     /// A struct / enum / union body (for associated items).

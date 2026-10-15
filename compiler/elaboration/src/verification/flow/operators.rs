@@ -31,29 +31,41 @@ impl Walker<'_> {
                 // A nonnegative dividend bounds both its unsigned quotient
                 // and remainder. Keep only current-version evidence: evaluating
                 // the divisor may have mutated the dividend's original place.
-                let upper_bound = if matches!(op, IntegerOp::DivideTrunc | IntegerOp::RemainderTrunc)
-                    && a.range.as_ref().is_some_and(|r| !r.lower.is_negative())
-                    && b.range.as_ref().is_some_and(|r| !r.lower.is_negative() && !r.lower.is_zero()) {
-                    match a.polynomial(self.limits)? {
-                        Some(p) => match p.interval_enclosure(&state.facts, self.limits) {
-                            Ok(_) => Some(p),
-                            Err(Unknown::StaleValue(_) | Unknown::MissingBound(_)) => None,
-                            Err(error) => return Err(error.into()),
-                        },
-                        None => None,
-                    }
-                } else { None };
-                let divisor_bound = if matches!(op, IntegerOp::DivideTrunc | IntegerOp::RemainderTrunc)
-                    && b.range.as_ref().is_some_and(|r| !r.lower.is_negative() && !r.lower.is_zero()) {
-                    match b.polynomial(self.limits)? {
-                        Some(p) => match p.interval_enclosure(&state.facts, self.limits) {
-                            Ok(_) => Some(p),
-                            Err(Unknown::StaleValue(_) | Unknown::MissingBound(_)) => None,
-                            Err(error) => return Err(error.into()),
-                        },
-                        None => None,
-                    }
-                } else { None };
+                let upper_bound =
+                    if matches!(op, IntegerOp::DivideTrunc | IntegerOp::RemainderTrunc)
+                        && a.range.as_ref().is_some_and(|r| !r.lower.is_negative())
+                        && b.range
+                            .as_ref()
+                            .is_some_and(|r| !r.lower.is_negative() && !r.lower.is_zero())
+                    {
+                        match a.polynomial(self.limits)? {
+                            Some(p) => match p.interval_enclosure(&state.facts, self.limits) {
+                                Ok(_) => Some(p),
+                                Err(Unknown::StaleValue(_) | Unknown::MissingBound(_)) => None,
+                                Err(error) => return Err(error.into()),
+                            },
+                            None => None,
+                        }
+                    } else {
+                        None
+                    };
+                let divisor_bound =
+                    if matches!(op, IntegerOp::DivideTrunc | IntegerOp::RemainderTrunc)
+                        && b.range
+                            .as_ref()
+                            .is_some_and(|r| !r.lower.is_negative() && !r.lower.is_zero())
+                    {
+                        match b.polynomial(self.limits)? {
+                            Some(p) => match p.interval_enclosure(&state.facts, self.limits) {
+                                Ok(_) => Some(p),
+                                Err(Unknown::StaleValue(_) | Unknown::MissingBound(_)) => None,
+                                Err(error) => return Err(error.into()),
+                            },
+                            None => None,
+                        }
+                    } else {
+                        None
+                    };
                 result.polynomial = combine_polynomials(&a, &b, *op, self.limits)?;
                 result.range = match (a.range, b.range) {
                     (Some(a), Some(b)) => Some(match op {
@@ -69,17 +81,28 @@ impl Walker<'_> {
                         )?,
                         IntegerOp::Multiply => a.multiply(&b, self.limits)?,
                         IntegerOp::DivideTrunc | IntegerOp::RemainderTrunc => {
-                            let (quotient, remainder) = a.div_rem_trunc(&b, self.limits).map_err(|error| {
-                                if error == Unknown::InsufficientBounds { Reason::MissingDivisionProof } else { error.into() }
-                            })?;
+                            let (quotient, remainder) =
+                                a.div_rem_trunc(&b, self.limits).map_err(|error| {
+                                    if error == Unknown::InsufficientBounds {
+                                        Reason::MissingDivisionProof
+                                    } else {
+                                        error.into()
+                                    }
+                                })?;
                             // The machine kernel requires both results to fit,
                             // including MIN % -1 even though its remainder is zero.
                             self.check_machine(expr, state, Some(&quotient))?;
-                            if *op == IntegerOp::DivideTrunc { quotient } else { remainder }
-                        },
+                            if *op == IntegerOp::DivideTrunc {
+                                quotient
+                            } else {
+                                remainder
+                            }
+                        }
                         _ => return Err(Reason::Unsupported),
                     }),
-                    _ if matches!(op, IntegerOp::DivideTrunc | IntegerOp::RemainderTrunc) => return Err(Reason::MissingDivisionProof),
+                    _ if matches!(op, IntegerOp::DivideTrunc | IntegerOp::RemainderTrunc) => {
+                        return Err(Reason::MissingDivisionProof);
+                    }
                     _ => None,
                 };
                 self.refine_polynomial(&mut result, state)?;
@@ -89,23 +112,46 @@ impl Walker<'_> {
                         self.bind_result(state, root, &expr.ty, result)?;
                         result = self.local_value_at(state, root)?;
                         if *op == IntegerOp::DivideTrunc {
-                            if let (Some(dividend), Some(divisor), Some(quotient)) =
-                                (upper_bound.as_ref(), divisor_bound.as_ref(), result.polynomial(self.limits)?) {
+                            if let (Some(dividend), Some(divisor), Some(quotient)) = (
+                                upper_bound.as_ref(),
+                                divisor_bound.as_ref(),
+                                result.polynomial(self.limits)?,
+                            ) {
                                 match quotient.multiply(divisor, self.limits) {
-                                    Ok(product) => state.facts.assume(&Condition::PolynomialCompare {
-                                        left: product, relation: C::LessEqual, right: dividend.copy(self.limits)?,
-                                    }, true, self.limits)?,
+                                    Ok(product) => state.facts.assume(
+                                        &Condition::PolynomialCompare {
+                                            left: product,
+                                            relation: C::LessEqual,
+                                            right: dividend.copy(self.limits)?,
+                                        },
+                                        true,
+                                        self.limits,
+                                    )?,
                                     Err(Unknown::DegreeLimit | Unknown::TermLimit) => (),
                                     Err(error) => return Err(error.into()),
                                 }
                             }
                         }
-                        let remainder_bound = if *op == IntegerOp::RemainderTrunc { divisor_bound } else { None };
-                        for (bound, relation) in [(upper_bound, C::LessEqual), (remainder_bound, C::Less)] {
-                            if let (Some(upper), Some(lower)) = (bound, result.polynomial(self.limits)?) {
-                                state.facts.assume(&Condition::PolynomialCompare {
-                                    left: lower, relation, right: upper,
-                                }, true, self.limits)?;
+                        let remainder_bound = if *op == IntegerOp::RemainderTrunc {
+                            divisor_bound
+                        } else {
+                            None
+                        };
+                        for (bound, relation) in
+                            [(upper_bound, C::LessEqual), (remainder_bound, C::Less)]
+                        {
+                            if let (Some(upper), Some(lower)) =
+                                (bound, result.polynomial(self.limits)?)
+                            {
+                                state.facts.assume(
+                                    &Condition::PolynomialCompare {
+                                        left: lower,
+                                        relation,
+                                        right: upper,
+                                    },
+                                    true,
+                                    self.limits,
+                                )?;
                             }
                         }
                     }
@@ -191,7 +237,9 @@ impl Walker<'_> {
                 };
                 result.condition = compare_values(a, b, relation, self.limits)?;
             }
-            K::And(a, b) | K::Or(a, b) if matches!(expr.ty, Term::Primitive(nir::Primitive::BitVec(_))) => {
+            K::And(a, b) | K::Or(a, b)
+                if matches!(expr.ty, Term::Primitive(nir::Primitive::BitVec(_))) =>
+            {
                 self.child(a, state, depth)?;
                 self.child(b, state, depth)?;
                 result = self.unknown_value(&expr.ty)?;
@@ -236,8 +284,16 @@ impl Walker<'_> {
                 state.join_paths_and_facts(&short, self.limits)?;
                 result.condition = match (a, b) {
                     (_, None) if !continued => Some(Condition::Bool(!continue_truth)),
-                    (Some(Condition::Bool(a)), Some(b)) => Some(if a == continue_truth {b} else {Condition::Bool(a)}),
-                    (Some(a), Some(Condition::Bool(b))) => Some(if b == continue_truth {a} else {Condition::Bool(b)}),
+                    (Some(Condition::Bool(a)), Some(b)) => Some(if a == continue_truth {
+                        b
+                    } else {
+                        Condition::Bool(a)
+                    }),
+                    (Some(a), Some(Condition::Bool(b))) => Some(if b == continue_truth {
+                        a
+                    } else {
+                        Condition::Bool(b)
+                    }),
                     (Some(a), Some(b)) => Some(if continue_truth {
                         Condition::And(Box::new(a), Box::new(b))
                     } else {

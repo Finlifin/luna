@@ -33,9 +33,7 @@
 use std::sync::Arc;
 
 use hir::hir_id::LocalDefId;
-use query::{
-    QueryCache, QueryDesc, QueryEngine, force_get_with,
-};
+use query::{QueryCache, QueryDesc, QueryEngine, force_get_with};
 
 use crate::hir_package::HirPackageBox;
 use crate::hir_query::HirQueryInput;

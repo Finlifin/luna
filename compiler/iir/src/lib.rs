@@ -1,10 +1,10 @@
 //! Concrete high-level instances. Structured NIR operations are retained; this
 //! stage neither invents SSA names nor erases program contracts or opaque heads.
-mod index;
-pub mod visit;
-pub mod staging;
 pub mod effect_values;
 mod effects;
+mod index;
+pub mod staging;
+pub mod visit;
 use nir::program::{DispatchInstance, Function};
 use nir::{DeclarationId, RuntimeId, Term};
 use std::{collections::BTreeSet, fmt};
@@ -43,12 +43,14 @@ impl fmt::Display for FunctionInstance {
 pub enum NominalDefinition {
     Struct(nir::program::Struct),
     Enum(nir::program::Enum),
+    Newtype(nir::newtypes::Newtype),
 }
 impl fmt::Display for NominalDefinition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Struct(s) => s.fmt(f),
             Self::Enum(e) => e.fmt(f),
+            Self::Newtype(n) => n.fmt(f),
         }
     }
 }
@@ -110,6 +112,7 @@ impl Package {
         for nominal in &self.nominals {
             self.validate_type(&nominal.ty, fuel)?;
             match &nominal.definition {
+                NominalDefinition::Newtype(n) => self.validate_type(&n.representation, fuel)?,
                 NominalDefinition::Struct(s) => {
                     for (_, ty) in &s.fields {
                         self.validate_type(ty, fuel)?;
@@ -131,7 +134,9 @@ impl Package {
             self.validate_type(&interface.subject, fuel)?;
             for method in &interface.methods {
                 self.validate_type(&method.signature, fuel)?;
-                for argument in &method.type_arguments { self.validate_type(argument, fuel)?; }
+                for argument in &method.type_arguments {
+                    self.validate_type(argument, fuel)?;
+                }
                 let summary = method
                     .program_summary(&[], &[])
                     .map_err(|e| e.to_string())?;
@@ -148,7 +153,9 @@ impl Package {
             }
             visit::expressions(&instance.function, fuel, |expr, fuel| {
                 self.validate_expression_types(expr, fuel)?;
-                if let Some(message)=nir::program::pointer_operation_error(expr) {return Err(message.into());}
+                if let Some(message) = nir::program::pointer_operation_error(expr) {
+                    return Err(message.into());
+                }
                 let target = match &expr.kind {
                     K::Function(id) => Some(InstanceKey {
                         declaration: *id,
@@ -168,12 +175,19 @@ impl Package {
                         member,
                         subject,
                     } => {
-                        if self.interfaces.iter().any(|contract|
-                            contract.interface.declaration==*interface
-                            && contract.interface.arguments==*interface_arguments
-                            && contract.subject==*subject
-                            && contract.methods.iter().any(|method|method.declaration==*member && method.is_quote)) {
-                            return Err("IIR quote method requires completed deterministic expansion".into());
+                        if self.interfaces.iter().any(|contract| {
+                            contract.interface.declaration == *interface
+                                && contract.interface.arguments == *interface_arguments
+                                && contract.subject == *subject
+                                && contract
+                                    .methods
+                                    .iter()
+                                    .any(|method| method.declaration == *member && method.is_quote)
+                        }) {
+                            return Err(
+                                "IIR quote method requires completed deterministic expansion"
+                                    .into(),
+                            );
                         }
                         let selected = self
                             .dispatch
@@ -187,7 +201,9 @@ impl Package {
                         let method = selected
                             .methods
                             .iter()
-                            .find(|m| m.member == *member && m.method_arguments == *method_arguments)
+                            .find(|m| {
+                                m.member == *member && m.method_arguments == *method_arguments
+                            })
                             .ok_or("IIR trait reference has no selected method")?;
                         Some(InstanceKey {
                             declaration: method.body,
@@ -195,7 +211,9 @@ impl Package {
                         })
                     }
 
-                    K::AssociatedValue {..} => return Err("IIR requires associated value selection".into()),
+                    K::AssociatedValue { .. } => {
+                        return Err("IIR requires associated value selection".into());
+                    }
                     _ => None,
                 };
                 if let Some(target) = target {
@@ -225,7 +243,8 @@ impl Package {
                         for handler in handlers {
                             if handler.abi != nir::effects::Abi::Direct
                                 && !(handler.abi == nir::effects::Abi::DirectPassing
-                                    && nir::effects::scalar_passing_signature(&handler.signature)) {
+                                    && nir::effects::scalar_passing_signature(&handler.signature))
+                            {
                                 return Err("IIR effect installation requires slot/capture cleanup protocol lowering".into());
                             }
                             // Capture ownership/initialization is discharged by
@@ -237,10 +256,15 @@ impl Package {
                             }
                         }
                     }
-                    K::EffectRequest { abi, signature, .. } if *abi != nir::effects::Abi::Direct
-                        && !(*abi == nir::effects::Abi::DirectPassing
-                            && nir::effects::scalar_passing_signature(signature)) => {
-                        return Err("IIR effect request requires slot/capture cleanup protocol lowering".into());
+                    K::EffectRequest { abi, signature, .. }
+                        if *abi != nir::effects::Abi::Direct
+                            && !(*abi == nir::effects::Abi::DirectPassing
+                                && nir::effects::scalar_passing_signature(signature)) =>
+                    {
+                        return Err(
+                            "IIR effect request requires slot/capture cleanup protocol lowering"
+                                .into(),
+                        );
                     }
                     _ => {}
                 }
@@ -251,30 +275,60 @@ impl Package {
     }
     // Contracts and executable bodies must inspect the same embedded types.
     // Validating only Expr::ty misses constants and capture/storage annotations.
-    fn validate_expression_types(&self, expr: &nir::program::Expr, fuel: &mut usize) -> Result<(), String> {
+    fn validate_expression_types(
+        &self,
+        expr: &nir::program::Expr,
+        fuel: &mut usize,
+    ) -> Result<(), String> {
         use nir::program::ExprKind as K;
         self.validate_type(&expr.ty, fuel)?;
         match &expr.kind {
+            K::NewtypeConvert(value) => {
+                if self
+                    .newtype_conversion(&value.ty, &expr.ty, fuel)
+                    .map_err(|e| e.to_string())?
+                    .is_none()
+                {
+                    return Err("IIR newtype conversion has no direct representation edge".into());
+                }
+            }
             K::TypeListValue(types) => {
                 let mut admitted = false;
                 for head in &self.normal_forms {
-                    *fuel = fuel.checked_sub(1).ok_or("IIR type-list metadata budget exhausted")?;
+                    *fuel = fuel
+                        .checked_sub(1)
+                        .ok_or("IIR type-list metadata budget exhausted")?;
                     for parameter in &head.parameters {
-                        *fuel = fuel.checked_sub(1).ok_or("IIR type-list metadata budget exhausted")?;
-                        admitted |= parameter.kind == nir::normal_forms::Kind::TypeList && parameter.ty == expr.ty;
+                        *fuel = fuel
+                            .checked_sub(1)
+                            .ok_or("IIR type-list metadata budget exhausted")?;
+                        admitted |= parameter.kind == nir::normal_forms::Kind::TypeList
+                            && parameter.ty == expr.ty;
                     }
                 }
                 if !admitted || !nir::normal_forms::type_list_input_type(&expr.ty) {
-                    return Err("IIR type-list constant requires trusted meta.List<Type> metadata".into());
+                    return Err(
+                        "IIR type-list constant requires trusted meta.List<Type> metadata".into(),
+                    );
                 }
                 for ty in types {
                     self.validate_type(ty, fuel)?;
-                    if ty.sort() != nir::Sort::Type { return Err("IIR type-list element is not Type".into()); }
+                    if ty.sort() != nir::Sort::Type {
+                        return Err("IIR type-list element is not Type".into());
+                    }
                 }
             }
-            K::TypeValue(ty) | K::BitAssign {storage_type: ty, ..} | K::BitUpdate {storage_type: ty, ..} => self.validate_type(ty, fuel)?,
-            K::Closure {captures, ..} => {
-                for capture in captures { self.validate_type(&capture.ty, fuel)?; }
+            K::TypeValue(ty)
+            | K::BitAssign {
+                storage_type: ty, ..
+            }
+            | K::BitUpdate {
+                storage_type: ty, ..
+            } => self.validate_type(ty, fuel)?,
+            K::Closure { captures, .. } => {
+                for capture in captures {
+                    self.validate_type(&capture.ty, fuel)?;
+                }
             }
             _ => {}
         }
@@ -292,9 +346,11 @@ impl Package {
             }
             *fuel -= 1;
             match ty {
-                Term::Computation {effects,result} => {
+                Term::Computation { effects, result } => {
                     pending.push(result);
-                    for operation in effects {pending.extend(&operation.arguments);}
+                    for operation in effects {
+                        pending.extend(&operation.arguments);
+                    }
                 }
                 Term::Nominal { arguments, .. } => {
                     if !self.nominals.iter().any(|n| &n.ty == ty) {
@@ -310,9 +366,17 @@ impl Package {
                     }
                     pending.extend(arguments);
                 }
-                Term::Tuple(fields) | Term::TypeListValue(fields) | Term::TypeListConcat(fields) | Term::TupleValue(fields) => pending.extend(fields),
-                Term::NominalValue { ty, fields, .. } => { pending.push(ty); pending.extend(fields); },
-                Term::Record(fields) | Term::RecordValue(fields) => pending.extend(fields.iter().map(|(_, ty)| ty)),
+                Term::Tuple(fields)
+                | Term::TypeListValue(fields)
+                | Term::TypeListConcat(fields)
+                | Term::TupleValue(fields) => pending.extend(fields),
+                Term::NominalValue { ty, fields, .. } => {
+                    pending.push(ty);
+                    pending.extend(fields);
+                }
+                Term::Record(fields) | Term::RecordValue(fields) => {
+                    pending.extend(fields.iter().map(|(_, ty)| ty))
+                }
                 Term::Pointer(inner) | Term::ComptimeFunction(inner) => pending.push(inner),
                 Term::Function { parameters, result } => {
                     pending.extend(parameters.iter().map(|p| &p.ty));
@@ -397,17 +461,21 @@ pub fn completed_dependencies(
         }
         *fuel -= 1;
         match ty {
-            Term::Computation {effects,result} => {
-                    pending.push(result);
-                    for operation in effects {pending.extend(&operation.arguments);}
+            Term::Computation { effects, result } => {
+                pending.push(result);
+                for operation in effects {
+                    pending.extend(&operation.arguments);
                 }
+            }
             Term::AssociatedType { .. } => {
                 return Err("IIR type has an unresolved associated type projection".into());
             }
             Term::Value { .. } => {
                 return Err("IIR value identity lacks retained value-store evidence".into());
             }
-            Term::TypeListConcat(_) => return Err("IIR type retains an unresolved type-list concatenation".into()),
+            Term::TypeListConcat(_) => {
+                return Err("IIR type retains an unresolved type-list concatenation".into());
+            }
             Term::Rigid { .. } | Term::Hole { .. } => {
                 return Err(
                     "IIR type has an unresolved declaration parameter or template hole".into(),
@@ -422,9 +490,15 @@ pub fn completed_dependencies(
             Term::Nominal { arguments, .. }
             | Term::NormalForm { arguments, .. }
             | Term::Tuple(arguments)
-            | Term::TypeListValue(arguments) | Term::TupleValue(arguments) => pending.extend(arguments),
-            Term::NominalValue { ty, fields, .. } => { pending.push(ty); pending.extend(fields); },
-            Term::Record(fields) | Term::RecordValue(fields) => pending.extend(fields.iter().map(|(_, ty)| ty)),
+            | Term::TypeListValue(arguments)
+            | Term::TupleValue(arguments) => pending.extend(arguments),
+            Term::NominalValue { ty, fields, .. } => {
+                pending.push(ty);
+                pending.extend(fields);
+            }
+            Term::Record(fields) | Term::RecordValue(fields) => {
+                pending.extend(fields.iter().map(|(_, ty)| ty))
+            }
             Term::Pointer(inner) | Term::ComptimeFunction(inner) => pending.push(inner),
             Term::Function { parameters, result } => {
                 pending.extend(parameters.iter().map(|p| &p.ty));
@@ -444,3 +518,32 @@ pub fn completed_dependencies(
 }
 
 pub mod cleanup;
+
+impl Package {
+    pub fn newtype_conversion(
+        &self,
+        source: &Term,
+        target: &Term,
+        fuel: &mut usize,
+    ) -> Result<Option<nir::newtypes::Conversion>, nir::newtypes::ConversionError> {
+        for nominal in &self.nominals {
+            nir::type_computations::charge_term(&nominal.ty, fuel)
+                .map_err(|_| nir::newtypes::ConversionError::Budget)?;
+            if nominal.ty != *source && nominal.ty != *target {
+                continue;
+            }
+            if let NominalDefinition::Newtype(definition) = &nominal.definition {
+                if let Some(plan) = nir::newtypes::instance_conversion(
+                    definition,
+                    &nominal.ty,
+                    source,
+                    target,
+                    fuel,
+                )? {
+                    return Ok(Some(plan));
+                }
+            }
+        }
+        Ok(None)
+    }
+}

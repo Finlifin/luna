@@ -16,9 +16,16 @@ impl Checker<'_, '_> {
         } else {
             callee
         };
-        if let H::ResolvedDef {def_id,..}=head.kind {
-            if self.package.definition_owner(def_id).is_some_and(|owner|self.is_code_generator(owner)) {
-                return Err(error(expr.span,"code generator must be invoked in a comptime code position"));
+        if let H::ResolvedDef { def_id, .. } = head.kind {
+            if self
+                .package
+                .definition_owner(def_id)
+                .is_some_and(|owner| self.is_code_generator(owner))
+            {
+                return Err(error(
+                    expr.span,
+                    "code generator must be invoked in a comptime code position",
+                ));
             }
         }
         let callable = match &head.kind {
@@ -104,17 +111,23 @@ impl Checker<'_, '_> {
         let comptime = self.package.item(owner).is_some_and(|item|
             matches!(&item.kind, ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) if sig.modifiers.is_comptime));
         if comptime && self.protocols.splice.is_some() && self.runtime_value_context() {
-            let value = self.with_staged_input(true, |this|
-                this.collect_properties_resolved(expr, callee, args, None, None, resolved, owner))?;
+            let value = self.with_staged_input(true, |this| {
+                this.collect_properties_resolved(expr, callee, args, None, None, resolved, owner)
+            })?;
             return self.deliver_comptime_result(expr, value, expected);
         }
         self.collect_properties_resolved(expr, callee, args, expected, partial, resolved, owner)
     }
 
     fn collect_properties_resolved(
-        &mut self, expr: &Expr<'_>, callee: &Expr<'_>, args: &[Arg<'_>],
-        expected: Option<&Term>, partial: Option<&crate::calls::CallableContext>,
-        resolved: Option<(n::Expr, Vec<n::Expr>)>, owner: OwnerId,
+        &mut self,
+        expr: &Expr<'_>,
+        callee: &Expr<'_>,
+        args: &[Arg<'_>],
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+        resolved: Option<(n::Expr, Vec<n::Expr>)>,
+        owner: OwnerId,
     ) -> Result<n::Expr, Error> {
         let Some(ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
             self.package.item(owner).map(|item| &item.kind)
@@ -183,10 +196,24 @@ impl Checker<'_, '_> {
         }
         if args.iter().any(|arg| matches!(arg, Arg::Expand(_))) {
             return self.prepare_property_spreads(
-                expr, callee, args, &inputs, expected, partial, resolved.as_ref(),
-                |this, flat| this.collect_properties_resolved(
-                    expr, callee, flat, expected, partial, resolved.clone(), owner,
-                ),
+                expr,
+                callee,
+                args,
+                &inputs,
+                expected,
+                partial,
+                resolved.as_ref(),
+                |this, flat| {
+                    this.collect_properties_resolved(
+                        expr,
+                        callee,
+                        flat,
+                        expected,
+                        partial,
+                        resolved.clone(),
+                        owner,
+                    )
+                },
             );
         }
         let receiver_count = resolved.as_ref().map_or(0, |(_, prefix)| prefix.len());
@@ -303,7 +330,11 @@ impl Checker<'_, '_> {
         };
         let fixed = match resolved.map(|value| &value.kind) {
             Some(K::FunctionInstance { arguments, .. }) => arguments.len(),
-            Some(K::TraitMethod { interface_arguments, method_arguments, .. }) => 1 + interface_arguments.len() + method_arguments.len(),
+            Some(K::TraitMethod {
+                interface_arguments,
+                method_arguments,
+                ..
+            }) => 1 + interface_arguments.len() + method_arguments.len(),
             Some(_) => self.type_parameters[&owner].len(),
             None => 0,
         };
@@ -431,9 +462,11 @@ impl Checker<'_, '_> {
                     &mut prepared,
                     expr.span,
                 )?,
-                Arg::Positional(_) | Arg::PostLambda(_) => prepared.push(remaining.next().ok_or_else(|| {
-                    error(expr.span, "positional collection preparation is missing")
-                })?),
+                Arg::Positional(_) | Arg::PostLambda(_) => {
+                    prepared.push(remaining.next().ok_or_else(|| {
+                        error(expr.span, "positional collection preparation is missing")
+                    })?)
+                }
                 _ => unreachable!(),
             }
         }
@@ -567,6 +600,4 @@ impl Checker<'_, '_> {
             kind: K::AnonymousRecord { fields },
         })
     }
-
-
 }

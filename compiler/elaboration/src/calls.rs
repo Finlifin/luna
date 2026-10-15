@@ -34,9 +34,15 @@ pub struct CallableContext {
 pub enum InputContext {
     Known(Term),
     Tuple(Vec<InputContext>),
-    NormalTuple { head: DeclarationId, fields: Vec<InputContext> },
+    NormalTuple {
+        head: DeclarationId,
+        fields: Vec<InputContext>,
+    },
     /// A generative nominal type with partially known Type arguments.
-    Nominal { declaration: DeclarationId, arguments: Vec<InputContext> },
+    Nominal {
+        declaration: DeclarationId,
+        arguments: Vec<InputContext>,
+    },
     Record(Vec<(String, InputContext)>),
     Callable(CallableContext),
     Unknown,
@@ -130,15 +136,27 @@ impl Scheme {
         budget: Budget,
         discharge_effects: bool,
     ) -> Result<CallCandidate, Error> {
-        self.infer_scoped_types_mode(actual,expected,partial,context,budget,discharge_effects,&[])
+        self.infer_scoped_types_mode(
+            actual,
+            expected,
+            partial,
+            context,
+            budget,
+            discharge_effects,
+            &[],
+        )
     }
     /// Infer inside an explicitly supplied caller telescope. Returned terms
     /// remain relative to that scope; the callee's own binders cannot escape.
     pub fn infer_scoped_types(
-        &self, actual: &[Option<Term>], expected: Option<&Term>,
-        context: &crate::ptc::Context, budget: Budget, scope: &[nir::Parameter],
-    ) -> Result<CallCandidate,Error> {
-        self.infer_scoped_types_mode(actual,expected,None,context,budget,false,scope)
+        &self,
+        actual: &[Option<Term>],
+        expected: Option<&Term>,
+        context: &crate::ptc::Context,
+        budget: Budget,
+        scope: &[nir::Parameter],
+    ) -> Result<CallCandidate, Error> {
+        self.infer_scoped_types_mode(actual, expected, None, context, budget, false, scope)
     }
     pub(crate) fn infer_scoped_types_mode(
         &self,
@@ -156,12 +174,20 @@ impl Scheme {
         if parameters.len() != actual.len() {
             return Err(Error::ArgumentCount);
         }
-        Term::Function {parameters:scope.to_vec(),result:Box::new(Term::Primitive(nir::Primitive::Void))}.check_scope(&[])?;
-        let caller_frames=if scope.is_empty() {vec![]} else {vec![scope.iter().map(|p|p.sort).collect()]};
-        let mut frames=caller_frames.clone();
-        frames.push(vec![Sort::Type;self.type_parameters]);
+        Term::Function {
+            parameters: scope.to_vec(),
+            result: Box::new(Term::Primitive(nir::Primitive::Void)),
+        }
+        .check_scope(&[])?;
+        let caller_frames = if scope.is_empty() {
+            vec![]
+        } else {
+            vec![scope.iter().map(|p| p.sort).collect()]
+        };
+        let mut frames = caller_frames.clone();
+        frames.push(vec![Sort::Type; self.type_parameters]);
         self.signature.check_scope(&frames)?;
-        let mut root = Engine::with_call_scope(context.fork(),scope.to_vec());
+        let mut root = Engine::with_call_scope(context.fork(), scope.to_vec());
         let types: Vec<_> = (0..self.type_parameters)
             .map(|_| I::Meta(root.fresh(Sort::Type)))
             .collect();
@@ -294,7 +320,9 @@ impl Scheme {
                 arguments: types,
             },
         };
-        if let Some(partial) = partial.filter(|context| context.result_context.is_some() && !defer_effect_context) {
+        if let Some(partial) =
+            partial.filter(|context| context.result_context.is_some() && !defer_effect_context)
+        {
             candidate.constrain_result_context(&InputContext::Callable(partial.clone()), budget)?;
         }
         Ok(candidate)
@@ -424,13 +452,24 @@ impl CallCandidate {
             match context {
                 InputContext::Known(ty) => leaf(Some(ty), engine, components, nesting, fuel),
                 InputContext::Unknown => leaf(None, engine, components, nesting, fuel),
-                InputContext::Nominal { declaration, arguments } => {
+                InputContext::Nominal {
+                    declaration,
+                    arguments,
+                } => {
                     if !engine.is_nominal_constructor(*declaration) {
-                        return Err(Error::TypeView("unregistered nominal result context".into()));
+                        return Err(Error::TypeView(
+                            "unregistered nominal result context".into(),
+                        ));
                     }
-                    Ok(Term::Nominal { declaration: *declaration, arguments: arguments.iter()
-                        .map(|argument| build(argument, engine, components, nesting, depth + 1, fuel))
-                        .collect::<Result<_, _>>()? })
+                    Ok(Term::Nominal {
+                        declaration: *declaration,
+                        arguments: arguments
+                            .iter()
+                            .map(|argument| {
+                                build(argument, engine, components, nesting, depth + 1, fuel)
+                            })
+                            .collect::<Result<_, _>>()?,
+                    })
                 }
                 InputContext::Tuple(fields) => Ok(Term::Tuple(
                     fields
@@ -442,10 +481,18 @@ impl CallCandidate {
                     if !engine.is_tuple_head(*head) {
                         return Err(Error::TypeView("unbound Tuple result context".into()));
                     }
-                    Ok(Term::NormalForm { head: *head, sort: Sort::Type,
-                        arguments: vec![Term::TypeListValue(fields.iter()
-                            .map(|field| build(field, engine, components, nesting, depth + 1, fuel))
-                            .collect::<Result<_, _>>()?)] })
+                    Ok(Term::NormalForm {
+                        head: *head,
+                        sort: Sort::Type,
+                        arguments: vec![Term::TypeListValue(
+                            fields
+                                .iter()
+                                .map(|field| {
+                                    build(field, engine, components, nesting, depth + 1, fuel)
+                                })
+                                .collect::<Result<_, _>>()?,
+                        )],
+                    })
                 }
                 InputContext::Record(fields) => Ok(Term::Record(
                     fields
@@ -583,7 +630,8 @@ impl CallCandidate {
         if !changes.is_empty() {
             for (before, after) in changes {
                 self.engine
-                    .assume_type_equality(before.clone(), after.clone()).map_err(Error::Obligations)?;
+                    .assume_type_equality(before.clone(), after.clone())
+                    .map_err(Error::Obligations)?;
                 self.views.insert(before, after);
             }
             self.engine.advance(count + 2, budget);
@@ -614,6 +662,50 @@ impl CallCandidate {
             .match_many(&[(input, I::Stable(value.clone()))], budget)
             .map_err(Error::Match)?;
         // Matching can wake every pre-existing relation that used this slot.
+        engine.advance(budget.steps, budget);
+        self.engine = engine;
+        Ok(())
+    }
+    /// Constrain this isolated candidate using equations under its generic
+    /// Type-parameter frame. These are obligations, never caller assumptions.
+    /// Failure leaves the candidate unchanged.
+    pub fn constrain_type_equations(
+        &mut self,
+        equations: &[(Term, Term)],
+        budget: Budget,
+    ) -> Result<(), Error> {
+        let mut fuel = budget.steps;
+        let frames = [vec![Sort::Type; self.types.len()]];
+        for (left, right) in equations {
+            for term in [left, right] {
+                nir::type_computations::charge_term(term, &mut fuel)
+                    .map_err(|_| Error::Match(MatchError::BudgetExhausted))?;
+                term.check_scope(&frames)?;
+            }
+        }
+        let relations = equations
+            .iter()
+            .map(|(left, right)| {
+                (
+                    I::Instantiate {
+                        template: left.clone(),
+                        arguments: self.types.clone(),
+                    },
+                    I::Instantiate {
+                        template: right.clone(),
+                        arguments: self.types.clone(),
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let budget = Budget {
+            steps: fuel,
+            ..budget
+        };
+        let (mut engine, _) = self
+            .engine
+            .match_many(&relations, budget)
+            .map_err(Error::Match)?;
         engine.advance(budget.steps, budget);
         self.engine = engine;
         Ok(())
@@ -666,10 +758,7 @@ impl CallCandidate {
         if let Some(ty) = self.inspect_component(term.clone())? {
             return Ok(InputContext::Known(ty));
         }
-        let shape = self
-            .engine
-            .inspect(&term)
-            .map_err(Error::Obligations)?;
+        let shape = self.engine.inspect(&term).map_err(Error::Obligations)?;
         let (template, arguments) = match shape {
             I::Instantiate {
                 template,
@@ -689,15 +778,38 @@ impl CallCandidate {
             self.input_context(field, fuel, depth + 1)
         };
         match template {
-            Term::Nominal { declaration, arguments } if self.engine.is_nominal_constructor(declaration)
-                && arguments.iter().all(|argument| argument.sort() == Sort::Type) => {
-                Ok(InputContext::Nominal { declaration, arguments: arguments.into_iter()
-                    .map(&mut field_context).collect::<Result<_, _>>()? })
+            Term::Nominal {
+                declaration,
+                arguments,
+            } if self.engine.is_nominal_constructor(declaration)
+                && arguments
+                    .iter()
+                    .all(|argument| argument.sort() == Sort::Type) =>
+            {
+                Ok(InputContext::Nominal {
+                    declaration,
+                    arguments: arguments
+                        .into_iter()
+                        .map(&mut field_context)
+                        .collect::<Result<_, _>>()?,
+                })
             }
-            Term::NormalForm { head, sort: Sort::Type, arguments: inputs } if self.engine.is_tuple_head(head) => {
-                let [Term::TypeListValue(fields)] = inputs.as_slice() else { return Ok(InputContext::Unknown); };
-                Ok(InputContext::NormalTuple { head, fields: fields.iter().cloned()
-                    .map(&mut field_context).collect::<Result<_, _>>()? })
+            Term::NormalForm {
+                head,
+                sort: Sort::Type,
+                arguments: inputs,
+            } if self.engine.is_tuple_head(head) => {
+                let [Term::TypeListValue(fields)] = inputs.as_slice() else {
+                    return Ok(InputContext::Unknown);
+                };
+                Ok(InputContext::NormalTuple {
+                    head,
+                    fields: fields
+                        .iter()
+                        .cloned()
+                        .map(&mut field_context)
+                        .collect::<Result<_, _>>()?,
+                })
             }
             Term::Tuple(fields) => Ok(InputContext::Tuple(
                 fields
@@ -727,15 +839,19 @@ impl CallCandidate {
     fn callable_context(&self, term: &I) -> Result<Option<CallableContext>, Error> {
         self.callable_context_with_budget(term, &mut 100_000, 0)
     }
-    fn callable_context_with_budget(&self, term: &I, fuel: &mut usize, depth: usize) -> Result<Option<CallableContext>, Error> {
+    fn callable_context_with_budget(
+        &self,
+        term: &I,
+        fuel: &mut usize,
+        depth: usize,
+    ) -> Result<Option<CallableContext>, Error> {
         if depth >= 128 || *fuel == 0 {
-            return Err(Error::TypeView("input checking context budget exhausted".into()));
+            return Err(Error::TypeView(
+                "input checking context budget exhausted".into(),
+            ));
         }
         *fuel -= 1;
-        let shape = self
-            .engine
-            .inspect(term)
-            .map_err(Error::Obligations)?;
+        let shape = self.engine.inspect(term).map_err(Error::Obligations)?;
         let (template, arguments) = match shape {
             I::Instantiate {
                 template,
@@ -750,10 +866,13 @@ impl CallCandidate {
         };
         // These callbacks must not depend on their own runtime inputs.
         let component = |ty: &Term| -> Result<Option<Term>, Error> {
-            let template=ty.substitute(&[])?;
+            let template = ty.substitute(&[])?;
             self.inspect_component(match &arguments {
-                Some(arguments)=>I::Instantiate {template,arguments:arguments.clone()},
-                None=>I::Stable(template),
+                Some(arguments) => I::Instantiate {
+                    template,
+                    arguments: arguments.clone(),
+                },
+                None => I::Stable(template),
             })
         };
         let parameters = parameters
@@ -771,8 +890,11 @@ impl CallCandidate {
                     .iter()
                     .map(|ty| {
                         self.inspect_component(match &arguments {
-                            Some(arguments)=>I::Instantiate {template:ty.clone(),arguments:arguments.clone()},
-                            None=>I::Stable(ty.clone()),
+                            Some(arguments) => I::Instantiate {
+                                template: ty.clone(),
+                                arguments: arguments.clone(),
+                            },
+                            None => I::Stable(ty.clone()),
                         })
                     })
                     .collect::<Result<Vec<_>, _>>()?,
@@ -784,14 +906,19 @@ impl CallCandidate {
         let result_context = if result_type.is_none() {
             let template = result.substitute(&[])?;
             let term = match &arguments {
-                Some(arguments) => I::Instantiate { template, arguments: arguments.clone() },
+                Some(arguments) => I::Instantiate {
+                    template,
+                    arguments: arguments.clone(),
+                },
                 None => I::Stable(template),
             };
             match self.input_context(term, fuel, depth + 1)? {
                 InputContext::Unknown => None,
                 context => Some(Box::new(context)),
             }
-        } else { None };
+        } else {
+            None
+        };
         Ok(Some(CallableContext {
             comptime,
             environment,

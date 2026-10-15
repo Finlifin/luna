@@ -57,11 +57,13 @@ impl Responsibility {
     }
 }
 pub(crate) struct CopyContents<'a> {
-    _responsibility:std::sync::MutexGuard<'a,Responsibility>,
-    value:std::sync::MutexGuard<'a,Value>,
+    _responsibility: std::sync::MutexGuard<'a, Responsibility>,
+    value: std::sync::MutexGuard<'a, Value>,
 }
 impl CopyContents<'_> {
-    pub(crate) fn value(&self)->&Value {&self.value}
+    pub(crate) fn value(&self) -> &Value {
+        &self.value
+    }
 }
 
 impl fmt::Debug for Storage {
@@ -81,22 +83,37 @@ impl Storage {
             Arc::new(Mutex::new(Responsibility::new(true))),
         )
     }
-    pub(crate) fn contents_for_copy(&self,fuel:&mut u64,max_depth:usize)->Result<CopyContents<'_>,ErrorKind> {
+    pub(crate) fn contents_for_copy(
+        &self,
+        fuel: &mut u64,
+        max_depth: usize,
+    ) -> Result<CopyContents<'_>, ErrorKind> {
         // Keep ownership and payload stable throughout borrowed copying. A
         // recursive owned-storage cycle fails rather than waiting on itself.
-        let responsibility=self.1.try_lock().map_err(|_|ErrorKind::InvalidPointer)?;
-        let mut pending=vec![(&*responsibility,0usize)];
-        while let Some((node,depth))=pending.pop() {
-            *fuel=fuel.checked_sub(1).ok_or(ErrorKind::StepsExhausted)?;
-            if depth>=max_depth.min(128) {return Err(ErrorKind::DepthExhausted);}
-            if !node.constructed || !node.descendants {return Err(ErrorKind::InvalidPointer);}
+        let responsibility = self.1.try_lock().map_err(|_| ErrorKind::InvalidPointer)?;
+        let mut pending = vec![(&*responsibility, 0usize)];
+        while let Some((node, depth)) = pending.pop() {
+            *fuel = fuel.checked_sub(1).ok_or(ErrorKind::StepsExhausted)?;
+            if depth >= max_depth.min(128) {
+                return Err(ErrorKind::DepthExhausted);
+            }
+            if !node.constructed || !node.descendants {
+                return Err(ErrorKind::InvalidPointer);
+            }
             // Charge width before growing the work list, including absent
             // payload work when a large ownership tree exhausts the budget.
-            *fuel=fuel.checked_sub(u64::try_from(node.children.len()).map_err(|_|ErrorKind::StepsExhausted)?).ok_or(ErrorKind::StepsExhausted)?;
-            pending.extend(node.children.values().map(|child|(child,depth+1)));
+            *fuel = fuel
+                .checked_sub(
+                    u64::try_from(node.children.len()).map_err(|_| ErrorKind::StepsExhausted)?,
+                )
+                .ok_or(ErrorKind::StepsExhausted)?;
+            pending.extend(node.children.values().map(|child| (child, depth + 1)));
         }
-        let value=self.0.try_lock().map_err(|_|ErrorKind::InvalidPointer)?;
-        Ok(CopyContents {_responsibility:responsibility,value})
+        let value = self.0.try_lock().map_err(|_| ErrorKind::InvalidPointer)?;
+        Ok(CopyContents {
+            _responsibility: responsibility,
+            value,
+        })
     }
     pub fn read(&self) -> Result<Value, ErrorKind> {
         Ok(self
@@ -179,6 +196,10 @@ impl Storage {
                 return Ok(pointer);
             }
             match target {
+                Value::Newtype { ty, value } if *index == 0 => {
+                    fields.push(Projection::Newtype(ty.clone()));
+                    target = value;
+                }
                 Value::Record {
                     declaration,
                     fields: values,
@@ -239,6 +260,8 @@ impl Storage {
 }
 #[derive(Clone, PartialEq)]
 pub(crate) enum Projection {
+    /// Cleanup-only descent; ordinary source field projection cannot create it.
+    Newtype(Term),
     Record(DeclarationId, usize),
     Variant(DeclarationId, usize, usize),
     Tuple(usize),
@@ -257,10 +280,21 @@ pub struct PointerValue {
     fields: Vec<Projection>,
 }
 impl PointerValue {
-    pub(crate) fn copy_metadata_work(&self)->Option<usize> {
-        let mut work=self.fields.len().checked_add(self.ownership_guards.len())?;
-        for field in &self.fields {if let Projection::AnonymousRecord(name,_)=field {work=work.checked_add(name.len())?;}}
-        for (_,path) in &self.ownership_guards {work=work.checked_add(path.len())?;}
+    pub(crate) fn copy_metadata_work(&self) -> Option<usize> {
+        let mut work = self.fields.len().checked_add(self.ownership_guards.len())?;
+        for field in &self.fields {
+            if let Projection::AnonymousRecord(name, _) = field {
+                work = work.checked_add(name.len())?;
+            }
+            if let Projection::Newtype(ty) = field {
+                let mut fuel = 100_000;
+                nir::type_computations::charge_term(ty, &mut fuel).ok()?;
+                work = work.checked_add(100_000 - fuel)?;
+            }
+        }
+        for (_, path) in &self.ownership_guards {
+            work = work.checked_add(path.len())?;
+        }
         Some(work)
     }
 }
@@ -293,6 +327,7 @@ impl fmt::Display for PointerValue {
                     write!(f, " (variant-field {declaration} {tag} {index})")?
                 }
                 Projection::Tuple(index) => write!(f, " (tuple-field {index})")?,
+                Projection::Newtype(id) => write!(f, " (newtype-representation {id})")?,
                 Projection::AnonymousRecord(name, index) => write!(
                     f,
                     " (record-field {} {index})",
@@ -327,9 +362,11 @@ impl PointerValue {
                 | Value::Tuple(fields) => fields.len(),
                 Value::AnonymousRecord(fields) => fields.len(),
                 Value::Closure(closure) => closure.capture_order.len(),
+                Value::Newtype { .. } => 1,
                 _ => return Err(ErrorKind::InvalidPointer),
             });
             path.push(match field {
+                Projection::Newtype(_) => 0,
                 Projection::Record(_, index)
                 | Projection::Variant(_, _, index)
                 | Projection::AnonymousRecord(_, index)
@@ -346,6 +383,15 @@ impl PointerValue {
                 }
             });
             target = match field {
+                Projection::Newtype(expected) => {
+                    let Value::Newtype { ty, value } = target else {
+                        return Err(ErrorKind::InvalidPointer);
+                    };
+                    if ty != expected {
+                        return Err(ErrorKind::InvalidPointer);
+                    }
+                    value.as_mut()
+                }
                 Projection::Record(expected, index) => {
                     let Value::Record {
                         declaration,
@@ -733,24 +779,96 @@ mod copy_contents_tests {
     use super::*;
     #[test]
     fn representation_copy_bounds_ownership_tree_before_borrowing_payload() {
-        let storage=Storage::new(Value::Tuple(vec![Value::Bool(true);64]));
+        let storage = Storage::new(Value::Tuple(vec![Value::Bool(true); 64]));
         {
-            let mut responsibility=storage.1.lock().unwrap();
-            for index in 0..64 {responsibility.children.insert(index,Responsibility::new(true));}
+            let mut responsibility = storage.1.lock().unwrap();
+            for index in 0..64 {
+                responsibility
+                    .children
+                    .insert(index, Responsibility::new(true));
+            }
         }
-        let mut fuel=8;
-        assert!(matches!(storage.contents_for_copy(&mut fuel,128),Err(ErrorKind::StepsExhausted)));
-        assert_eq!(fuel,7);
-        let mut fuel=1000;
-        let contents=storage.contents_for_copy(&mut fuel,128).unwrap();
-        let Value::Tuple(fields)=contents.value() else {panic!("tuple")};
-        assert_eq!(fields.len(),64);
+        let mut fuel = 8;
+        assert!(matches!(
+            storage.contents_for_copy(&mut fuel, 128),
+            Err(ErrorKind::StepsExhausted)
+        ));
+        assert_eq!(fuel, 7);
+        let mut fuel = 1000;
+        let contents = storage.contents_for_copy(&mut fuel, 128).unwrap();
+        let Value::Tuple(fields) = contents.value() else {
+            panic!("tuple")
+        };
+        assert_eq!(fields.len(), 64);
         assert!(storage.0.try_lock().is_err());
         assert!(storage.1.try_lock().is_err());
         drop(contents);
         assert!(storage.0.try_lock().is_ok());
         assert!(storage.1.try_lock().is_ok());
-        storage.owned_pointer(Term::Primitive(nir::Primitive::Bool),&[0]).unwrap().transfer().unwrap();
-        assert!(matches!(storage.contents_for_copy(&mut fuel,128),Err(ErrorKind::InvalidPointer)));
+        storage
+            .owned_pointer(Term::Primitive(nir::Primitive::Bool), &[0])
+            .unwrap()
+            .transfer()
+            .unwrap();
+        assert!(matches!(
+            storage.contents_for_copy(&mut fuel, 128),
+            Err(ErrorKind::InvalidPointer)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod newtype_storage_tests {
+    use super::*;
+    fn ty(argument: nir::Primitive) -> Term {
+        Term::Nominal {
+            declaration: DeclarationId {
+                package: 7,
+                local: 1,
+            },
+            arguments: vec![Term::Primitive(argument)],
+        }
+    }
+    #[test]
+    fn cleanup_path_is_private_and_checks_the_complete_wrapper_identity() {
+        let storage = Storage::new(Value::Newtype {
+            ty: ty(nir::Primitive::Bool),
+            value: Box::new(Value::Bool(true)),
+        });
+        let payload = storage
+            .owned_pointer(Term::Primitive(nir::Primitive::Bool), &[0])
+            .unwrap();
+        assert_eq!(payload.read().unwrap(), Value::Bool(true));
+        assert!(
+            storage
+                .owned_pointer(Term::Primitive(nir::Primitive::Bool), &[1])
+                .is_err()
+        );
+        assert!(
+            storage
+                .assignment_pointer(
+                    Term::Primitive(nir::Primitive::Bool),
+                    &[(
+                        nir::program::FieldOwner::Nominal(DeclarationId {
+                            package: 7,
+                            local: 1
+                        }),
+                        0
+                    )]
+                )
+                .is_err()
+        );
+        let root = storage
+            .owned_pointer(ty(nir::Primitive::Bool), &[])
+            .unwrap();
+        root.write(
+            Value::Newtype {
+                ty: ty(nir::Primitive::Char),
+                value: Box::new(Value::Char('x')),
+            },
+            |_| true,
+        )
+        .unwrap();
+        assert_eq!(payload.read(), Err(ErrorKind::InvalidPointer));
     }
 }

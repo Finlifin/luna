@@ -110,6 +110,41 @@ impl Integer {
         }
         Ok(text)
     }
+    /// Budgeted canonical decimal transport spelling, independent of Display.
+    pub fn to_decimal_literal(&self, budget: &mut Budget) -> Result<String, Error> {
+        use std::fmt::Write;
+        budget.size(self.limbs.len())?;
+        budget.charge(self.limbs.len().saturating_add(1))?;
+        let mut magnitude = self.limbs.clone();
+        let mut chunks = Vec::new();
+        while !magnitude.is_empty() {
+            budget.charge(magnitude.len().saturating_add(9))?;
+            let mut remainder = 0u64;
+            for limb in magnitude.iter_mut().rev() {
+                let wide = (remainder << 32) | u64::from(*limb);
+                *limb = (wide / 1_000_000_000) as u32;
+                remainder = wide % 1_000_000_000;
+            }
+            chunks.push(remainder as u32);
+            while magnitude.last() == Some(&0) {
+                magnitude.pop();
+            }
+        }
+        let mut text = String::new();
+        if self.negative {
+            text.push('-');
+        }
+        if let Some(last) = chunks.pop() {
+            write!(&mut text, "{last}").unwrap();
+            for chunk in chunks.into_iter().rev() {
+                write!(&mut text, "{chunk:09}").unwrap();
+            }
+        } else {
+            text.push('0');
+        }
+        Ok(text)
+    }
+
     pub fn is_negative(&self) -> bool {
         self.negative
     }

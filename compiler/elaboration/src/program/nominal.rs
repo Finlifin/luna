@@ -1,20 +1,33 @@
 //! Demand-driven nominal layouts for required computations and forward uses.
 use super::*;
 
-pub(super) fn enum_leaves<'h>(variants: &'h [hir::item::Variant<'h>])
-    -> Result<(Vec<(&'h hir::item::Variant<'h>, String)>, Vec<String>), Error> {
-    let mut pending = variants.iter().rev().map(|variant|(variant,String::new(),0usize)).collect::<Vec<_>>();
-    let (mut leaves,mut groups,mut seen) = (Vec::new(),Vec::new(),BTreeSet::new());
-    while let Some((variant,prefix,depth)) = pending.pop() {
-        if depth >= 64 { return Err(error(variant.span,"enum group nesting limit exceeded")); }
-        let name = format!("{prefix}{}",variant.ident.name);
-        if !seen.insert(name.clone()) { return Err(error(variant.span,"duplicate enum member")); }
+pub(super) fn enum_leaves<'h>(
+    variants: &'h [hir::item::Variant<'h>],
+) -> Result<(Vec<(&'h hir::item::Variant<'h>, String)>, Vec<String>), Error> {
+    let mut pending = variants
+        .iter()
+        .rev()
+        .map(|variant| (variant, String::new(), 0usize))
+        .collect::<Vec<_>>();
+    let (mut leaves, mut groups, mut seen) = (Vec::new(), Vec::new(), BTreeSet::new());
+    while let Some((variant, prefix, depth)) = pending.pop() {
+        if depth >= 64 {
+            return Err(error(variant.span, "enum group nesting limit exceeded"));
+        }
+        let name = format!("{prefix}{}", variant.ident.name);
+        if !seen.insert(name.clone()) {
+            return Err(error(variant.span, "duplicate enum member"));
+        }
         if let hir::item::VariantKind::SubEnum(children) = &variant.kind {
             groups.push(name.clone());
-            for child in children.iter().rev() { pending.push((child,format!("{name}."),depth+1)); }
-        } else { leaves.push((variant,name)); }
+            for child in children.iter().rev() {
+                pending.push((child, format!("{name}."), depth + 1));
+            }
+        } else {
+            leaves.push((variant, name));
+        }
     }
-    Ok((leaves,groups))
+    Ok((leaves, groups))
 }
 
 impl Checker<'_, '_> {
@@ -36,7 +49,10 @@ impl Checker<'_, '_> {
     }
     pub(super) fn ensure_nominal(&mut self, owner: OwnerId, span: Span) -> Result<(), Error> {
         let id = declaration(self.package, &self.package_identities, owner);
-        if self.structs.contains_key(&id) || self.enums.contains_key(&id) {
+        if self.structs.contains_key(&id)
+            || self.enums.contains_key(&id)
+            || self.newtypes.contains_key(&id)
+        {
             return Ok(());
         }
         if self.active_nominals.len() >= 64 || !self.active_nominals.insert(owner) {
@@ -52,8 +68,51 @@ impl Checker<'_, '_> {
         let result = (|| {
             let item = self.package.item(owner).unwrap();
             match &item.kind {
+                ItemKind::Newtype(value, ..) => {
+                    let representation = self.type_expr(value)?;
+                    // Direct representation cycles have no finite underlying value.
+                    // Keep nominal identities intact while checking this edge.
+                    if let Term::Nominal {
+                        declaration: target,
+                        ..
+                    } = &representation
+                    {
+                        if let Some(target_owner) =
+                            self.package.owners().find_map(|(owner, info)| {
+                                (declaration(self.package, &self.package_identities, owner)
+                                    == *target
+                                    && matches!(
+                                        info.node.expect_item().kind,
+                                        ItemKind::Newtype(..)
+                                    ))
+                                .then_some(owner)
+                            })
+                        {
+                            self.ensure_nominal(target_owner, value.span)?;
+                        }
+                    }
+                    self.newtypes.insert(
+                        id,
+                        nir::newtypes::Newtype {
+                            declaration: id,
+                            name: item.ident.name.to_string(),
+                            type_parameters: self.type_parameters[&owner].clone(),
+                            requirements: self
+                                .requirements
+                                .get(&owner)
+                                .cloned()
+                                .unwrap_or_default(),
+                            capabilities: self
+                                .capabilities
+                                .get(&owner)
+                                .cloned()
+                                .unwrap_or_default(),
+                            representation,
+                        },
+                    );
+                }
                 ItemKind::Enum(def) => {
-                    let (leaves,groups) = enum_leaves(def.variants)?;
+                    let (leaves, groups) = enum_leaves(def.variants)?;
                     let encoded = self.enum_encoding(def, &leaves, item.span)?;
                     let mut names = BTreeSet::new();
                     for nested in &def.nested_items {
@@ -62,17 +121,38 @@ impl Checker<'_, '_> {
                         }
                     }
                     for group in &groups {
-                        if !names.insert(group.clone()) { return Err(error(item.span,"duplicate enum member")); }
+                        if !names.insert(group.clone()) {
+                            return Err(error(item.span, "duplicate enum member"));
+                        }
                     }
                     let mut variants = Vec::new();
                     for (variant_index, (variant, full_name)) in leaves.iter().enumerate() {
                         let (shape, fields) = match &variant.kind {
-                            hir::item::VariantKind::Pattern(_) | hir::item::VariantKind::Const(_) if encoded.is_some() => {
+                            hir::item::VariantKind::Pattern(_)
+                            | hir::item::VariantKind::Const(_)
+                                if encoded.is_some() =>
+                            {
                                 let encoding = encoded.as_ref().unwrap();
                                 let fields = encoding.payloads[variant_index].clone();
-                                let names = encoding.bits.as_ref().map(|bits| bits.variants()[variant_index].fields()
-                                    .iter().map(|field|field.name.clone()).collect::<Vec<_>>()).unwrap_or_default();
-                                (if names.is_empty() {n::VariantShape::Unit} else {n::VariantShape::Named(names)}, fields)
+                                let names = encoding
+                                    .bits
+                                    .as_ref()
+                                    .map(|bits| {
+                                        bits.variants()[variant_index]
+                                            .fields()
+                                            .iter()
+                                            .map(|field| field.name.clone())
+                                            .collect::<Vec<_>>()
+                                    })
+                                    .unwrap_or_default();
+                                (
+                                    if names.is_empty() {
+                                        n::VariantShape::Unit
+                                    } else {
+                                        n::VariantShape::Named(names)
+                                    },
+                                    fields,
+                                )
                             }
                             hir::item::VariantKind::Unit => (n::VariantShape::Unit, Vec::new()),
                             hir::item::VariantKind::Tuple(types) => (
@@ -116,7 +196,9 @@ impl Checker<'_, '_> {
                             fields,
                         });
                     }
-                    let (encoding, symbol_encoding) = encoded.map(|encoding| (encoding.bits, encoding.symbols)).unwrap_or_default();
+                    let (encoding, symbol_encoding) = encoded
+                        .map(|encoding| (encoding.bits, encoding.symbols))
+                        .unwrap_or_default();
                     self.enums.insert(
                         declaration(self.package, &self.package_identities, owner),
                         n::Enum {
@@ -139,7 +221,8 @@ impl Checker<'_, '_> {
                             symbol_encoding,
                         },
                     );
-                    self.enum_sources.insert(id, leaves.into_iter().map(|(variant,_)|variant).collect());
+                    self.enum_sources
+                        .insert(id, leaves.into_iter().map(|(variant, _)| variant).collect());
                 }
                 ItemKind::Struct(def) => {
                     let mut names = BTreeSet::new();

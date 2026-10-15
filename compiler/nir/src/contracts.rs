@@ -19,16 +19,31 @@ impl ProgramContract {
         parameters: &[DeclarationId],
         arguments: &[Term],
     ) -> Result<Self, TypeError> {
+        let parameters = parameters
+            .iter()
+            .map(|id| crate::DeclarationParameter {
+                declaration: *id,
+                sort: crate::Sort::Type,
+            })
+            .collect::<Vec<_>>();
+        self.instantiate_parameters(&parameters, arguments)
+    }
+    pub fn instantiate_parameters(
+        &self,
+        parameters: &[crate::DeclarationParameter],
+        arguments: &[Term],
+    ) -> Result<Self, TypeError> {
+        Term::Unit.instantiate_parameters(parameters, arguments)?;
         Ok(Self {
             preconditions: self
                 .preconditions
                 .iter()
-                .map(|e| e.instantiate_types(parameters, arguments))
+                .map(|e| e.instantiate_parameters(parameters, arguments))
                 .collect::<Result<_, _>>()?,
             postconditions: self
                 .postconditions
                 .iter()
-                .map(|e| e.instantiate_types(parameters, arguments))
+                .map(|e| e.instantiate_parameters(parameters, arguments))
                 .collect::<Result<_, _>>()?,
             result_binding: self.result_binding,
             entry_snapshots: self.entry_snapshots.clone(),
@@ -66,8 +81,24 @@ impl MethodContract {
         parameters: &[DeclarationId],
         arguments: &[Term],
     ) -> Result<Function, TypeError> {
-        let signature = self.signature.instantiate_types(parameters, arguments)?;
-        let program = self.program.instantiate_types(parameters, arguments)?;
+        let binders: Vec<_> = parameters
+            .iter()
+            .map(|id| crate::DeclarationParameter {
+                declaration: *id,
+                sort: crate::Sort::Type,
+            })
+            .collect();
+        self.program_summary_parameters(&binders, arguments)
+    }
+    pub fn program_summary_parameters(
+        &self,
+        parameters: &[crate::DeclarationParameter],
+        arguments: &[Term],
+    ) -> Result<Function, TypeError> {
+        let signature = self
+            .signature
+            .instantiate_parameters(parameters, arguments)?;
+        let program = self.program.instantiate_parameters(parameters, arguments)?;
         Ok(Function {
             declaration: self.declaration,
             name: self.name.clone(),
@@ -76,21 +107,34 @@ impl MethodContract {
             } else {
                 FunctionPhase::Runtime
             },
-            inline: false, pure: self.pure,
+            inline: false,
+            pure: self.pure,
             signature: signature.callable_signature().clone(),
             parameters: self.parameter_bindings.clone(),
             preconditions: program.preconditions,
             postconditions: program.postconditions,
             result_binding: program.result_binding,
             entry_snapshots: program.entry_snapshots,
-            capabilities: self.capabilities.iter()
-                .map(|requirement| requirement.instantiate_types(parameters, arguments))
+            capabilities: self
+                .capabilities
+                .iter()
+                .map(|requirement| requirement.instantiate_parameters(parameters, arguments))
                 .collect::<Result<_, _>>()?,
-            requirements: self.requirements.iter()
-                .map(|requirement| requirement.instantiate_types(parameters, arguments))
+            requirements: self
+                .requirements
+                .iter()
+                .map(|requirement| requirement.instantiate_parameters(parameters, arguments))
                 .collect::<Result<_, _>>()?,
-            type_parameters: self.type_parameters.iter().copied()
-                .filter(|parameter| !parameters.contains(parameter)).collect(),
+            type_parameters: self
+                .type_parameters
+                .iter()
+                .copied()
+                .filter(|parameter| {
+                    !parameters
+                        .iter()
+                        .any(|binder| binder.declaration == *parameter)
+                })
+                .collect(),
             defaults: vec![],
             body: Expr {
                 source: SourceRange { start: 0, end: 0 },
@@ -128,15 +172,20 @@ pub fn remap_predicate(
             K::Literal(_) | K::Unit => {}
             K::ReadPointer(v)
             | K::AddressOf(v)
-            | K::PointerField {pointer: v, ..}
-            | K::PointerAnonymousField {pointer: v, ..}
+            | K::PointerField { pointer: v, .. }
+            | K::PointerAnonymousField { pointer: v, .. }
             | K::Not(v)
             | K::IntegerNegate(v)
             | K::FloatNegate(v)
             | K::BitConvert(v)
-            | K::Snapshot(v) | K::TakeBits(v) | K::SymbolName(v) | K::EnumName(v)
+            | K::NewtypeConvert(v)
+            | K::Snapshot(v)
+            | K::TakeBits(v)
+            | K::SymbolName(v)
+            | K::EnumName(v)
             | K::Discard(v)
-            | K::AnonymousField { value: v, .. } | K::Field { value: v, .. }
+            | K::AnonymousField { value: v, .. }
+            | K::Field { value: v, .. }
             | K::BitSlice { value: v, .. } => pending.push(v),
             K::ScalarEqual(a, b)
             | K::ScalarLess(a, b)
@@ -144,7 +193,8 @@ pub fn remap_predicate(
             | K::ScalarGreater(a, b)
             | K::ScalarGreaterEqual(a, b)
             | K::BitEqual(a, b)
-            | K::BitConcat(a, b) | K::BitIndex(a, b)
+            | K::BitConcat(a, b)
+            | K::BitIndex(a, b)
             | K::And(a, b)
             | K::Or(a, b)
             | K::IntegerBinary {
@@ -156,7 +206,11 @@ pub fn remap_predicate(
                 pending.push(a);
                 pending.push(b);
             }
-            K::BitWindow {value, start, end} => {pending.push(value);pending.push(start);pending.push(end);}
+            K::BitWindow { value, start, end } => {
+                pending.push(value);
+                pending.push(start);
+                pending.push(end);
+            }
             K::Tuple(fields) => pending.extend(fields),
             K::If {
                 condition,

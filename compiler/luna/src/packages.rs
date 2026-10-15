@@ -1,7 +1,7 @@
 //! Explicit source-package inputs for the driver. Dependency discovery and build
 //! identities belong to the build tool; this API does not infer them from paths.
-use crate::frontend::{Artifact, discover_sources_excluding};
 use crate::cli::Emit;
+use crate::frontend::{Artifact, discover_sources_excluding};
 use interface::{CompilerConfig, CompilerInstance, Session};
 use std::{
     collections::{BTreeMap, HashSet},
@@ -43,7 +43,16 @@ pub(crate) fn compile_stage(
     emit: Emit,
     output: Option<&std::path::Path>,
 ) -> Result<Artifact, String> {
-    compile_stage_with_protocols(packages, dependencies, primary, builtin, emit, output, &Default::default(), None)
+    compile_stage_with_protocols(
+        packages,
+        dependencies,
+        primary,
+        builtin,
+        emit,
+        output,
+        &Default::default(),
+        None,
+    )
 }
 
 /// Explicit package-set entry with driver-bound language protocols.
@@ -54,17 +63,37 @@ pub fn compile_with_protocols(
     builtin: Option<u32>,
     protocols: &elaboration::program::Protocols,
 ) -> Result<Artifact, String> {
-    compile_stage_with_protocols(packages, dependencies, primary, builtin, Emit::Nir, None, protocols, None)
+    compile_stage_with_protocols(
+        packages,
+        dependencies,
+        primary,
+        builtin,
+        Emit::Nir,
+        None,
+        protocols,
+        None,
+    )
 }
 
 /// Resolve an explicitly designated source protocol in the same compilation.
 /// Qualify with the supplied source package name when trait names collide.
 pub fn compile_with_splice(
-    packages: &[SourcePackage], dependencies: &[resolve::DependencyEdge],
-    primary: u32, builtin: Option<u32>, selector: &str,
+    packages: &[SourcePackage],
+    dependencies: &[resolve::DependencyEdge],
+    primary: u32,
+    builtin: Option<u32>,
+    selector: &str,
 ) -> Result<Artifact, String> {
-    compile_stage_with_protocols(packages, dependencies, primary, builtin, Emit::Nir, None,
-        &Default::default(), Some(selector))
+    compile_stage_with_protocols(
+        packages,
+        dependencies,
+        primary,
+        builtin,
+        Emit::Nir,
+        None,
+        &Default::default(),
+        Some(selector),
+    )
 }
 
 pub(crate) fn compile_stage_with_protocols(
@@ -77,23 +106,50 @@ pub(crate) fn compile_stage_with_protocols(
     protocols: &elaboration::program::Protocols,
     splice_selector: Option<&str>,
 ) -> Result<Artifact, String> {
-    compile_stage_with_selectors(packages, dependencies, primary, builtin, emit, output, protocols,
-        crate::protocols::type_constructors::Selectors { splice: splice_selector, ..Default::default() })
+    compile_stage_with_selectors(
+        packages,
+        dependencies,
+        primary,
+        builtin,
+        emit,
+        output,
+        protocols,
+        crate::protocols::type_constructors::Selectors {
+            splice: splice_selector,
+            ..Default::default()
+        },
+    )
 }
 
 /// Bind driver-selected source protocols after resolution in this compilation.
 /// Selectors are qualified by the supplied package names, not dependency aliases.
 pub fn compile_with_source_protocols(
-    packages: &[SourcePackage], dependencies: &[resolve::DependencyEdge],
-    primary: u32, builtin: Option<u32>, protocols: &elaboration::program::Protocols,
+    packages: &[SourcePackage],
+    dependencies: &[resolve::DependencyEdge],
+    primary: u32,
+    builtin: Option<u32>,
+    protocols: &elaboration::program::Protocols,
     selectors: crate::protocols::type_constructors::Selectors<'_>,
 ) -> Result<Artifact, String> {
-    compile_stage_with_selectors(packages, dependencies, primary, builtin, Emit::Nir, None, protocols, selectors)
+    compile_stage_with_selectors(
+        packages,
+        dependencies,
+        primary,
+        builtin,
+        Emit::Nir,
+        None,
+        protocols,
+        selectors,
+    )
 }
 
 pub(crate) fn compile_stage_with_selectors(
-    packages: &[SourcePackage], dependencies: &[resolve::DependencyEdge],
-    primary: u32, builtin: Option<u32>, emit: Emit, output: Option<&std::path::Path>,
+    packages: &[SourcePackage],
+    dependencies: &[resolve::DependencyEdge],
+    primary: u32,
+    builtin: Option<u32>,
+    emit: Emit,
+    output: Option<&std::path::Path>,
     protocols: &elaboration::program::Protocols,
     selectors: crate::protocols::type_constructors::Selectors<'_>,
 ) -> Result<Artifact, String> {
@@ -119,16 +175,25 @@ pub(crate) fn compile_stage_with_selectors(
     }
     // Ownership comes from the explicit package inputs, not incidental root
     // filenames found while walking another package's directory.
-    let boundaries = packages.iter().map(|package| {
-        let entry = std::fs::canonicalize(&package.entry)
-            .map_err(|e| format!("cannot read package {}: {e}", package.name))?;
-        let path = if matches!(package.entry.file_name().and_then(|n| n.to_str()), Some("lib.fl" | "main.fl")) {
-            entry.parent().ok_or("package entry has no parent")?.to_path_buf()
-        } else {
-            entry
-        };
-        Ok((package.resolution_id, path))
-    }).collect::<Result<Vec<_>, String>>()?;
+    let boundaries = packages
+        .iter()
+        .map(|package| {
+            let entry = std::fs::canonicalize(&package.entry)
+                .map_err(|e| format!("cannot read package {}: {e}", package.name))?;
+            let path = if matches!(
+                package.entry.file_name().and_then(|n| n.to_str()),
+                Some("lib.fl" | "main.fl")
+            ) {
+                entry
+                    .parent()
+                    .ok_or("package entry has no parent")?
+                    .to_path_buf()
+            } else {
+                entry
+            };
+            Ok((package.resolution_id, path))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let session = Session::new(CompilerConfig::new("package-set", cwd));
     let mut instance = CompilerInstance::new(&session);
@@ -151,9 +216,11 @@ pub(crate) fn compile_stage_with_selectors(
         let root = vfs.add_file(filename.into(), source);
         vfs.selected_root = Some(root);
         if matches!(filename.to_str(), Some("lib.fl" | "main.fl")) {
-            let exclusions: Vec<_> = boundaries.iter()
+            let exclusions: Vec<_> = boundaries
+                .iter()
                 .filter(|(id, _)| *id != package.resolution_id)
-                .map(|(_, path)| path.clone()).collect();
+                .map(|(_, path)| path.clone())
+                .collect();
             let (files, directories) = discover_sources_excluding(directory, &exclusions)?;
             vfs.source_directories = directories;
             for relative in files {
@@ -180,10 +247,11 @@ pub(crate) fn compile_stage_with_selectors(
     )
     .map_err(|e| format!("package resolution failed: {e:?}"))?;
     if instance.diag_ctx.has_errors() || !resolved.tree.errors.is_empty() {
-        return Err(format!(
-            "package resolution failed: {:?}",
-            resolved.tree.errors
-        ));
+        let mut message = instance.diag_ctx.failure_summary("package resolution");
+        if !resolved.tree.errors.is_empty() {
+            message.push_str(&format!(": {:?}", resolved.tree.errors));
+        }
+        return Err(message);
     }
     let (_, selected) = inputs.iter().find(|(id, _)| *id == primary).unwrap();
     let selected_file = selected.selected_root.unwrap();
@@ -224,7 +292,9 @@ pub(crate) fn compile_stage_with_selectors(
     instance.set_hir_input(Arc::new(input));
     let hir = instance.enter(|compiler| compiler.hir_package());
     if instance.diag_ctx.has_errors() {
-        return Err("multi-package HIR lowering failed".into());
+        return Err(instance
+            .diag_ctx
+            .failure_summary("multi-package HIR lowering"));
     }
     if emit == Emit::Hir {
         return Ok(Artifact::Hir(hir.package().dump_to_lisp()));
@@ -233,24 +303,49 @@ pub(crate) fn compile_stage_with_selectors(
         .iter()
         .map(|p| (p.resolution_id, p.identity))
         .collect();
-    let protocols = crate::protocols::type_constructors::resolve_source(hir.package(),
-        &packages.iter().map(|p| (p.resolution_id, p.identity, p.name.as_str())).collect::<Vec<_>>(),
-        selectors, protocols)?;
-    let nir = elaboration::program::elaborate_packages_with_protocols(hir.package(), &identities, &protocols)
-        .map_err(|e| format!("multi-package elaboration failed: {e}"))?;
+    let protocols = crate::protocols::type_constructors::resolve_source(
+        hir.package(),
+        &packages
+            .iter()
+            .map(|p| (p.resolution_id, p.identity, p.name.as_str()))
+            .collect::<Vec<_>>(),
+        selectors,
+        protocols,
+    )?;
+    let nir = elaboration::program::elaborate_packages_with_protocols(
+        hir.package(),
+        &identities,
+        &protocols,
+    )
+    .map_err(|e| format!("multi-package elaboration failed: {e}"))?;
     crate::protocols::type_constructors::validate(&nir, &protocols)?;
     Ok(Artifact::Nir(nir))
 }
 
-pub(crate) fn protect_source_output(source: &std::path::Path, output: Option<&std::path::Path>) -> Result<(), String> {
+pub(crate) fn protect_source_output(
+    source: &std::path::Path,
+    output: Option<&std::path::Path>,
+) -> Result<(), String> {
     let Some(output) = output else { return Ok(()) };
-    let (Ok(source_metadata), Ok(output_metadata)) = (std::fs::metadata(source), std::fs::metadata(output)) else { return Ok(()) };
+    let (Ok(source_metadata), Ok(output_metadata)) =
+        (std::fs::metadata(source), std::fs::metadata(output))
+    else {
+        return Ok(());
+    };
     #[cfg(unix)]
     let same = {
         use std::os::unix::fs::MetadataExt;
-        source_metadata.dev() == output_metadata.dev() && source_metadata.ino() == output_metadata.ino()
+        source_metadata.dev() == output_metadata.dev()
+            && source_metadata.ino() == output_metadata.ino()
     };
     #[cfg(not(unix))]
     let same = source.canonicalize().ok() == output.canonicalize().ok();
-    if same { Err(format!("output must not refer to source file '{}'", source.display())) } else { Ok(()) }
+    if same {
+        Err(format!(
+            "output must not refer to source file '{}'",
+            source.display()
+        ))
+    } else {
+        Ok(())
+    }
 }

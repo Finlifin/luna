@@ -390,8 +390,8 @@ impl fmt::Display for InferenceError {
 }
 impl std::error::Error for InferenceError {}
 
-pub mod capabilities;
 pub mod associated;
+pub mod capabilities;
 pub mod materialization;
 pub mod program;
 
@@ -404,6 +404,7 @@ pub mod ptc;
 mod coverage;
 
 mod bit_coverage;
+mod float_coverage;
 mod interval_coverage;
 
 /// Program-state arithmetic reasoning, separate from the type proposition engine.
@@ -415,10 +416,12 @@ pub mod splice;
 
 pub mod key_protocols;
 
-pub mod type_computations;
 pub mod arithmetic;
 pub mod gradual;
+pub mod type_computations;
 
 mod inference_budget;
 
 pub mod indexing;
+
+pub mod literal_conversion;

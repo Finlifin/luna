@@ -120,12 +120,19 @@ impl Solver<'_, '_> {
         if contract.type_parameters.len() != query.arguments.len() {
             return Err("conditional requirement interface argument count mismatch".into());
         }
+        contract.validate_arguments_in_declarations(
+            &query.arguments,
+            &[],
+            self.world.traits,
+            &mut self.remaining,
+        )?;
+        let parameter_binders = contract.parameter_binders(&mut self.remaining)?;
         for requirement in &contract.requirements {
             if requirement.mentions_rigid(contract.self_parameter) {
                 continue;
             }
             let requirement = requirement
-                .instantiate_types(&contract.type_parameters, &query.arguments)
+                .instantiate_parameters(&parameter_binders, &query.arguments)
                 .map_err(|error| error.to_string())?;
             if !matches!(
                 self.world
@@ -142,7 +149,7 @@ impl Solver<'_, '_> {
                 continue;
             }
             let capability = capability
-                .instantiate_types(&contract.type_parameters, &query.arguments)
+                .instantiate_parameters(&parameter_binders, &query.arguments)
                 .map_err(|error| error.to_string())?;
             if self.given(&capability, budget).is_none() {
                 let Ok(resolution) = self.resolve(
@@ -191,9 +198,7 @@ impl Solver<'_, '_> {
             {
                 true
             }
-            Selection::NoApplicableCandidate
-                if self.world.closed_trait_inputs(query, budget) =>
-            {
+            Selection::NoApplicableCandidate if self.world.closed_trait_inputs(query, budget) => {
                 false
             }
             _ => return Ok(None),

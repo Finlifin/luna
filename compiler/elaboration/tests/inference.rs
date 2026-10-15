@@ -286,53 +286,127 @@ fn iterative_freezing_preserves_sparse_slot_order_and_shared_subgraphs() {
 #[test]
 fn metered_freezing_bounds_expansion_and_can_retry_without_assignments() {
     use nir::DeclarationId;
-    let context=InferenceContext::default();
-    let bound=Term::Bound {depth:0,index:0,sort:Sort::Type};
-    let head=DeclarationId {package:99,local:1};
-    let input=Term::NormalForm {head,sort:Sort::Type,arguments:vec![Term::TypeListValue(vec![Term::Primitive(Primitive::Bool);256])]};
-    let expression=InferenceTerm::Instantiate {
-        template:Term::NormalForm {head,sort:Sort::Type,arguments:vec![Term::TypeListValue(vec![bound;64])]},
-        arguments:vec![InferenceTerm::Stable(input.clone())],
+    let context = InferenceContext::default();
+    let bound = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
     };
-    assert_eq!(context.freeze_metered(&expression,&mut 1000),Err(InferenceError::Budget));
-    let frozen=context.freeze_metered(&expression,&mut 100_000).unwrap();
-    let Term::NormalForm {head:actual,arguments,..}=frozen else {panic!("opaque head")};
-    assert_eq!(actual,head);
-    assert_eq!(arguments,vec![Term::TypeListValue(vec![input;64])]);
+    let head = DeclarationId {
+        package: 99,
+        local: 1,
+    };
+    let input = Term::NormalForm {
+        head,
+        sort: Sort::Type,
+        arguments: vec![Term::TypeListValue(vec![
+            Term::Primitive(Primitive::Bool);
+            256
+        ])],
+    };
+    let expression = InferenceTerm::Instantiate {
+        template: Term::NormalForm {
+            head,
+            sort: Sort::Type,
+            arguments: vec![Term::TypeListValue(vec![bound; 64])],
+        },
+        arguments: vec![InferenceTerm::Stable(input.clone())],
+    };
+    assert_eq!(
+        context.freeze_metered(&expression, &mut 1000),
+        Err(InferenceError::Budget)
+    );
+    let frozen = context.freeze_metered(&expression, &mut 100_000).unwrap();
+    let Term::NormalForm {
+        head: actual,
+        arguments,
+        ..
+    } = frozen
+    else {
+        panic!("opaque head")
+    };
+    assert_eq!(actual, head);
+    assert_eq!(arguments, vec![Term::TypeListValue(vec![input; 64])]);
 }
 
 #[test]
 fn metered_inference_reads_only_referenced_slots_and_bounds_aliases() {
-    let mut context=InferenceContext::default();
-    let unused=context.fresh(Sort::Type);
-    let mut last=context.fresh(Sort::Type);
-    context.assign(last,boolean()).unwrap();
+    let mut context = InferenceContext::default();
+    let unused = context.fresh(Sort::Type);
+    let mut last = context.fresh(Sort::Type);
+    context.assign(last, boolean()).unwrap();
     for _ in 0..128 {
-        let next=context.fresh(Sort::Type);
-        context.assign(next,InferenceTerm::Meta(last)).unwrap();
-        last=next;
+        let next = context.fresh(Sort::Type);
+        context.assign(next, InferenceTerm::Meta(last)).unwrap();
+        last = next;
     }
-    let expression=InferenceTerm::Instantiate {
-        template:Term::Bound {depth:0,index:0,sort:Sort::Type},
-        arguments:vec![InferenceTerm::Meta(last),InferenceTerm::Meta(unused)],
+    let expression = InferenceTerm::Instantiate {
+        template: Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: Sort::Type,
+        },
+        arguments: vec![InferenceTerm::Meta(last), InferenceTerm::Meta(unused)],
     };
-    assert_eq!(context.unresolved_metered(&expression,&mut 10),Err(InferenceError::Budget));
-    assert_eq!(context.freeze_metered(&expression,&mut 10),Err(InferenceError::Budget));
-    assert!(context.unresolved_metered(&expression,&mut 1000).unwrap().is_empty());
-    assert_eq!(context.freeze_metered(&expression,&mut 1000).unwrap(),Term::Primitive(Primitive::Bool));
-    assert_eq!(context.freeze(&InferenceTerm::Meta(unused)),Err(InferenceError::Unresolved(unused)));
+    assert_eq!(
+        context.unresolved_metered(&expression, &mut 10),
+        Err(InferenceError::Budget)
+    );
+    assert_eq!(
+        context.freeze_metered(&expression, &mut 10),
+        Err(InferenceError::Budget)
+    );
+    assert!(
+        context
+            .unresolved_metered(&expression, &mut 1000)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        context.freeze_metered(&expression, &mut 1000).unwrap(),
+        Term::Primitive(Primitive::Bool)
+    );
+    assert_eq!(
+        context.freeze(&InferenceTerm::Meta(unused)),
+        Err(InferenceError::Unresolved(unused))
+    );
 }
 
 #[test]
 fn explicit_depth_limits_follow_aliases_and_ignore_unused_arguments() {
-    let mut context=InferenceContext::default();
-    let input=context.fresh(Sort::Type);
-    let nested=Term::Pointer(Box::new(Term::Pointer(Box::new(Term::Primitive(Primitive::Bool)))));
-    context.assign(input,InferenceTerm::Stable(nested)).unwrap();
-    assert_eq!(context.unresolved_with_limits(&InferenceTerm::Meta(input),&mut 1000,2),Err(InferenceError::Budget));
-    assert_eq!(context.freeze_with_limits(&InferenceTerm::Meta(input),&mut 1000,2),Err(InferenceError::Budget));
-    assert!(context.freeze_with_limits(&InferenceTerm::Meta(input),&mut 1000,3).is_ok());
-    let unused=InferenceTerm::Instantiate {template:Term::Primitive(Primitive::Bool),arguments:vec![InferenceTerm::Meta(input)]};
-    assert!(context.unresolved_with_limits(&unused,&mut 1000,1).unwrap().is_empty());
-    assert_eq!(context.freeze_with_limits(&unused,&mut 1000,1).unwrap(),Term::Primitive(Primitive::Bool));
+    let mut context = InferenceContext::default();
+    let input = context.fresh(Sort::Type);
+    let nested = Term::Pointer(Box::new(Term::Pointer(Box::new(Term::Primitive(
+        Primitive::Bool,
+    )))));
+    context
+        .assign(input, InferenceTerm::Stable(nested))
+        .unwrap();
+    assert_eq!(
+        context.unresolved_with_limits(&InferenceTerm::Meta(input), &mut 1000, 2),
+        Err(InferenceError::Budget)
+    );
+    assert_eq!(
+        context.freeze_with_limits(&InferenceTerm::Meta(input), &mut 1000, 2),
+        Err(InferenceError::Budget)
+    );
+    assert!(
+        context
+            .freeze_with_limits(&InferenceTerm::Meta(input), &mut 1000, 3)
+            .is_ok()
+    );
+    let unused = InferenceTerm::Instantiate {
+        template: Term::Primitive(Primitive::Bool),
+        arguments: vec![InferenceTerm::Meta(input)],
+    };
+    assert!(
+        context
+            .unresolved_with_limits(&unused, &mut 1000, 1)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        context.freeze_with_limits(&unused, &mut 1000, 1).unwrap(),
+        Term::Primitive(Primitive::Bool)
+    );
 }

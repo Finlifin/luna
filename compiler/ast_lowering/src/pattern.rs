@@ -19,8 +19,11 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         match kind {
             NodeKind::OptionSomePattern => {
                 let inner = self.lower_pattern(children[0]);
-                Pattern { hir_id: self.next_hir_id(), span,
-                    kind: PatternKind::OptionSome(self.arena.alloc_pattern(inner)) }
+                Pattern {
+                    hir_id: self.next_hir_id(),
+                    span,
+                    kind: PatternKind::OptionSome(self.arena.alloc_pattern(inner)),
+                }
             }
             NodeKind::NotPattern => {
                 let inner = self.lower_pattern(children[0]);

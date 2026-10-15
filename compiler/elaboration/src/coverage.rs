@@ -45,8 +45,12 @@ pub(crate) fn check_in_context(
 }
 
 pub(crate) fn check_in_context_with_tuple_head(
-    structs: &BTreeMap<DeclarationId, Struct>, enums: &BTreeMap<DeclarationId, Enum>,
-    ty: &Term, patterns: &[&Pattern], steps: usize, context: &Context,
+    structs: &BTreeMap<DeclarationId, Struct>,
+    enums: &BTreeMap<DeclarationId, Enum>,
+    ty: &Term,
+    patterns: &[&Pattern],
+    steps: usize,
+    context: &Context,
     tuple_head: Option<DeclarationId>,
 ) -> Coverage {
     let mut engine = Engine {
@@ -94,10 +98,16 @@ impl Engine<'_> {
     // Runtime patterns, guards and coverage propositions never enter PTC.
     // The cache is local to one matrix/context; no assumptions escape its scope.
     fn domain(&mut self, ty: &Term) -> Result<Term, ()> {
-        if let Term::NormalForm {head, sort: nir::Sort::Type, arguments} = ty {
+        if let Term::NormalForm {
+            head,
+            sort: nir::Sort::Type,
+            arguments,
+        } = ty
+        {
             if Some(*head) == self.tuple_head {
                 if let [Term::TypeListValue(elements)] = arguments.as_slice() {
-                    crate::associated::charge_projection_copy(ty, &mut self.steps).map_err(|_| ())?;
+                    crate::associated::charge_projection_copy(ty, &mut self.steps)
+                        .map_err(|_| ())?;
                     return Ok(Term::Tuple(elements.clone()));
                 }
             }
@@ -106,7 +116,8 @@ impl Engine<'_> {
             ty,
             Term::Primitive(_)
                 | Term::Nominal { .. }
-                | Term::Tuple(_) | Term::Record(_)
+                | Term::Tuple(_)
+                | Term::Record(_)
                 | Term::Function { .. }
                 | Term::ComptimeFunction(_)
                 | Term::Closure { .. }
@@ -120,26 +131,42 @@ impl Engine<'_> {
         // Reserve all subsolver work from the enclosing matrix budget.
         const ALLOWANCE: usize = 16384;
         self.spend(ALLOWANCE)?;
-        let domain = match self.context.structural_view_with_heads_metered(
-            ty,
-            Budget {
-                steps: ALLOWANCE,
-                max_depth: 128,
-            },
-            |head| Some(head) == self.tuple_head,
-        ).0 {
+        let domain = match self
+            .context
+            .structural_view_with_heads_metered(
+                ty,
+                Budget {
+                    steps: ALLOWANCE,
+                    max_depth: 128,
+                },
+                |head| Some(head) == self.tuple_head,
+            )
+            .0
+        {
             Ok(Some((shape, _))) => shape,
             Ok(None) | Err(crate::ptc::UnknownReason::UnvalidatedModel) => ty.clone(),
             Err(_) => return Err(()),
         };
-        let domain = if let Term::NormalForm { head, sort: nir::Sort::Type, arguments } = &domain {
+        let domain = if let Term::NormalForm {
+            head,
+            sort: nir::Sort::Type,
+            arguments,
+        } = &domain
+        {
             if Some(*head) == self.tuple_head {
                 if let [Term::TypeListValue(elements)] = arguments.as_slice() {
-                    crate::associated::charge_projection_copy(&domain, &mut self.steps).map_err(|_| ())?;
+                    crate::associated::charge_projection_copy(&domain, &mut self.steps)
+                        .map_err(|_| ())?;
                     Term::Tuple(elements.clone())
-                } else { domain }
-            } else { domain }
-        } else { domain };
+                } else {
+                    domain
+                }
+            } else {
+                domain
+            }
+        } else {
+            domain
+        };
         self.domains.insert(ty.clone(), domain.clone());
         Ok(domain)
     }
@@ -235,6 +262,9 @@ impl Engine<'_> {
         let domain = self.domain(types[0])?;
         let mut types = types;
         types[0] = &domain;
+        if *types[0] == Term::Primitive(Primitive::Float) {
+            return self.float_matrix(&types[1..], rows, depth);
+        }
         if let Term::Primitive(Primitive::BitVec(width)) = types[0] {
             return self.bit_matrix(*width, &types[1..], rows, depth);
         }
@@ -249,7 +279,7 @@ impl Engine<'_> {
                 arguments,
             } if self.enums.contains_key(declaration) => Some(
                 self.enums[declaration]
-                    .instantiate_variants_in_scope(arguments,self.context.scope())
+                    .instantiate_variants_in_scope(arguments, self.context.scope())
                     .map_err(|_| ())?,
             ),
             _ => None,
@@ -260,14 +290,17 @@ impl Engine<'_> {
                 arguments,
             } if self.structs.contains_key(declaration) => Some(
                 self.structs[declaration]
-                    .instantiate_fields_in_scope(arguments,self.context.scope())
+                    .instantiate_fields_in_scope(arguments, self.context.scope())
                     .map_err(|_| ())?,
             ),
             _ => None,
         };
         let mut branches = Vec::new();
         match types[0] {
-            Term::Record(fields) => branches.push((Head::AnonymousRecord(fields), fields.iter().map(|(_,ty)|ty).collect())),
+            Term::Record(fields) => branches.push((
+                Head::AnonymousRecord(fields),
+                fields.iter().map(|(_, ty)| ty).collect(),
+            )),
             Term::Tuple(fields) => branches.push((Head::Tuple, fields.iter().collect())),
             Term::Nominal { declaration, .. } if self.structs.contains_key(declaration) => {
                 branches.push((
@@ -322,6 +355,39 @@ impl Engine<'_> {
         }
         Ok(true)
     }
+    fn float_matrix<'a>(
+        &mut self,
+        tail_types: &[&'a Term],
+        rows: Vec<Vec<&'a Pattern>>,
+        depth: usize,
+    ) -> Result<bool, ()> {
+        let mut predicates = Vec::new();
+        for row in &rows {
+            predicates.push(crate::float_coverage::extract(row[0], &mut self.steps)?);
+        }
+        let mut atoms = Vec::new();
+        for predicate in predicates.iter().flatten() {
+            predicate.atoms(&mut atoms, &mut self.steps)?;
+        }
+        // Preserve each endpoint and every open interval separately, so
+        // strict comparisons cannot accidentally cover a missing boundary.
+        for cell in crate::float_coverage::cells(atoms, &mut self.steps)? {
+            let mut next = Vec::new();
+            for (row, predicate) in rows.iter().zip(&predicates) {
+                if let Some(predicate) = predicate {
+                    if predicate.matches(cell, &mut self.steps)? {
+                        self.spend(row.len())?;
+                        next.push(row[1..].to_vec());
+                    }
+                }
+            }
+            if !self.matrix(tail_types.to_vec(), next, depth + 1)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     fn interval_matrix<'a>(
         &mut self,
         domain: &[crate::interval_coverage::Interval],
@@ -457,13 +523,20 @@ impl Engine<'_> {
             }
             let prefix: Vec<_> = match (pat, head) {
                 (Pattern::AnonymousRecord { names, fields }, Head::AnonymousRecord(types))
-                    if fields.len() == arity && names.len() == types.len() => {
+                    if fields.len() == arity && names.len() == types.len() =>
+                {
                     for (name, (expected, _)) in names.iter().zip(types) {
                         self.spend(name.len().saturating_add(expected.len()))?;
                     }
-                    if !names.iter().zip(types).all(|(name,(expected,_))|name == expected) { continue; }
+                    if !names
+                        .iter()
+                        .zip(types)
+                        .all(|(name, (expected, _))| name == expected)
+                    {
+                        continue;
+                    }
                     fields.iter().collect()
-                },
+                }
                 (Pattern::Tuple(fields), Head::Tuple) if fields.len() == arity => {
                     fields.iter().collect()
                 }
@@ -514,20 +587,39 @@ mod tests {
     }
     #[test]
     fn anonymous_record_matrix_preserves_labels_and_correlated_fields() {
-        let ty=Term::Record(vec![("left".into(),Term::Primitive(Primitive::Bool)),("right".into(),Term::Primitive(Primitive::Bool))]);
-        let pattern=|name:&str,left,right| Pattern::AnonymousRecord {
-            names:vec![name.into(),"right".into()],fields:vec![left,right],
+        let ty = Term::Record(vec![
+            ("left".into(), Term::Primitive(Primitive::Bool)),
+            ("right".into(), Term::Primitive(Primitive::Bool)),
+        ]);
+        let pattern = |name: &str, left, right| Pattern::AnonymousRecord {
+            names: vec![name.into(), "right".into()],
+            fields: vec![left, right],
         };
-        let yes=pattern("left",Pattern::Literal(Literal::Bool(true)),Pattern::Wild);
-        let no=pattern("left",Pattern::Literal(Literal::Bool(false)),Pattern::Wild);
-        let bad=pattern("wrong",Pattern::Wild,Pattern::Wild);
-        let enums=BTreeMap::new();
-        assert_eq!(check(&enums,&ty,&[&yes,&no],10_000),Coverage::Exhaustive);
-        assert_eq!(check(&enums,&ty,&[&yes],10_000),Coverage::Missing);
-        assert_eq!(check(&enums,&ty,&[&bad],10_000),Coverage::Missing);
-        let tt=pattern("left",Pattern::Literal(Literal::Bool(true)),Pattern::Literal(Literal::Bool(true)));
-        let ff=pattern("left",Pattern::Literal(Literal::Bool(false)),Pattern::Literal(Literal::Bool(false)));
-        assert_eq!(check(&enums,&ty,&[&tt,&ff],10_000),Coverage::Missing);
+        let yes = pattern("left", Pattern::Literal(Literal::Bool(true)), Pattern::Wild);
+        let no = pattern(
+            "left",
+            Pattern::Literal(Literal::Bool(false)),
+            Pattern::Wild,
+        );
+        let bad = pattern("wrong", Pattern::Wild, Pattern::Wild);
+        let enums = BTreeMap::new();
+        assert_eq!(
+            check(&enums, &ty, &[&yes, &no], 10_000),
+            Coverage::Exhaustive
+        );
+        assert_eq!(check(&enums, &ty, &[&yes], 10_000), Coverage::Missing);
+        assert_eq!(check(&enums, &ty, &[&bad], 10_000), Coverage::Missing);
+        let tt = pattern(
+            "left",
+            Pattern::Literal(Literal::Bool(true)),
+            Pattern::Literal(Literal::Bool(true)),
+        );
+        let ff = pattern(
+            "left",
+            Pattern::Literal(Literal::Bool(false)),
+            Pattern::Literal(Literal::Bool(false)),
+        );
+        assert_eq!(check(&enums, &ty, &[&tt, &ff], 10_000), Coverage::Missing);
     }
 
     fn id() -> DeclarationId {
@@ -542,7 +634,8 @@ mod tests {
                 id(),
                 Enum {
                     groups: vec![],
-                    encoding: None, symbol_encoding: None,
+                    encoding: None,
+                    symbol_encoding: None,
                     capabilities: Vec::new(),
                     requirements: vec![],
                     type_parameters: vec![],
@@ -1081,6 +1174,142 @@ mod bit_tests {
         assert_eq!(
             check(&BTreeMap::new(), &ty, &[&Pattern::Wild], 100_000),
             Coverage::Exhaustive
+        );
+    }
+}
+
+#[cfg(test)]
+mod exact_float_tests {
+    use super::*;
+    use nir::program::{Expr, ExprKind as K, LocalId, MatchArm, SourceRange};
+    fn lit(text: &str) -> Pattern {
+        Pattern::Literal(Literal::Float(text.into()))
+    }
+    fn negate(pattern: Pattern) -> Pattern {
+        let binding = LocalId { owner: 1, index: 0 };
+        let boolean = |value| Expr {
+            source: SourceRange { start: 0, end: 1 },
+            ty: Term::Primitive(Primitive::Bool),
+            kind: K::Literal(Literal::Bool(value)),
+        };
+        Pattern::Guard {
+            pattern: Box::new(Pattern::Binding {
+                binding,
+                inner: Box::new(Pattern::Wild),
+            }),
+            condition: Box::new(Expr {
+                source: boolean(true).source,
+                ty: boolean(true).ty,
+                kind: K::Match {
+                    value: Box::new(Expr {
+                        source: boolean(true).source,
+                        ty: Term::Primitive(Primitive::Float),
+                        kind: K::Local(binding),
+                    }),
+                    arms: vec![
+                        MatchArm {
+                            pattern,
+                            guard: None,
+                            body: boolean(false),
+                        },
+                        MatchArm {
+                            pattern: Pattern::Wild,
+                            guard: None,
+                            body: boolean(true),
+                        },
+                    ],
+                },
+            }),
+        }
+    }
+    #[test]
+    fn singleton_partitions_agree_with_independent_three_cell_oracle() {
+        let patterns = [
+            (lit("0.0"), 1u8),
+            (lit("1.0"), 2),
+            (negate(lit("-0.0")), 6),
+            (negate(lit("10.0e-1")), 5),
+            (Pattern::Or(vec![lit("0.0"), lit("1.0")]), 3),
+            (negate(Pattern::Or(vec![lit("0.0"), lit("1.0")])), 4),
+        ];
+        for subset in 0..64 {
+            let mut selected = Vec::new();
+            let mut covered = 0;
+            for (index, (pattern, mask)) in patterns.iter().enumerate() {
+                if subset & (1 << index) != 0 {
+                    selected.push(pattern);
+                    covered |= mask;
+                }
+            }
+            let result = check(
+                &BTreeMap::new(),
+                &Term::Primitive(Primitive::Float),
+                &selected,
+                100_000,
+            );
+            assert_eq!(
+                result,
+                if covered == 7 {
+                    Coverage::Exhaustive
+                } else {
+                    Coverage::Missing
+                },
+                "subset={subset}"
+            );
+        }
+        let complete = [negate(lit("0.0")), lit("-0.0")];
+        let refs = complete.iter().collect::<Vec<_>>();
+        assert_eq!(
+            check(
+                &BTreeMap::new(),
+                &Term::Primitive(Primitive::Float),
+                &refs,
+                0
+            ),
+            Coverage::Unknown
+        );
+        assert_eq!(
+            check(
+                &BTreeMap::new(),
+                &Term::Primitive(Primitive::Float),
+                &refs,
+                100_000
+            ),
+            Coverage::Exhaustive
+        );
+    }
+    #[test]
+    fn float_complements_require_the_same_subject_and_exact_numeric_identity() {
+        let excluded = negate(lit("1.0000000000000000000000000000001"));
+        let adjacent = lit("1.0000000000000000000000000000002");
+        assert_eq!(
+            check(
+                &BTreeMap::new(),
+                &Term::Primitive(Primitive::Float),
+                &[&excluded, &adjacent],
+                100_000
+            ),
+            Coverage::Missing
+        );
+        let mut wrong_subject = negate(lit("0.0"));
+        let Pattern::Guard { condition, .. } = &mut wrong_subject else {
+            unreachable!()
+        };
+        let K::Match { value, .. } = &mut condition.kind else {
+            unreachable!()
+        };
+        value.kind = K::Local(LocalId {
+            owner: 99,
+            index: 99,
+        });
+        assert_eq!(
+            check(
+                &BTreeMap::new(),
+                &Term::Primitive(Primitive::Float),
+                &[&wrong_subject, &lit("0.0")],
+                100_000
+            ),
+            Coverage::Missing
         );
     }
 }

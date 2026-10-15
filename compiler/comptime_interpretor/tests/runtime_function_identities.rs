@@ -28,7 +28,8 @@ fn package() -> Package {
             declaration: id(1),
             name: "obtain".into(),
             phase: FunctionPhase::Comptime,
-            inline: false, pure: false,
+            inline: false,
+            pure: false,
             preconditions: vec![],
             postconditions: vec![],
             result_binding: None,
@@ -116,6 +117,7 @@ fn an_identity_cannot_be_called_even_without_the_comptime_entry_gate() {
 fn trait_package() -> Package {
     let mut package = package();
     package.traits.push(nir::program::Trait {
+        parameter_types: Vec::new(),
         associated: vec![],
         requirements: vec![],
         capabilities: vec![],

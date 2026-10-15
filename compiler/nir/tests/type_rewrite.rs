@@ -83,56 +83,128 @@ fn closure_rewrite_preserves_shared_template_and_capture_identity() {
 
 #[test]
 fn symbolic_type_lists_concatenate_after_substitution_without_changing_heads() {
-    use nir::{DeclarationId,DeclarationParameter,Primitive,Sort,Term};
-    let input=DeclarationId {package:91,local:1};
-    let head=DeclarationId {package:91,local:2};
-    let boolean=Term::Primitive(Primitive::Bool);
-    let byte=Term::Primitive(Primitive::U8);
-    let list=Term::type_list_concat(vec![Term::TypeListValue(vec![boolean.clone()]),
-        Term::Rigid {declaration:input,sort:Sort::ComptimeValue},Term::TypeListValue(vec![byte.clone()])]);
+    use nir::{DeclarationId, DeclarationParameter, Primitive, Sort, Term};
+    let input = DeclarationId {
+        package: 91,
+        local: 1,
+    };
+    let head = DeclarationId {
+        package: 91,
+        local: 2,
+    };
+    let boolean = Term::Primitive(Primitive::Bool);
+    let byte = Term::Primitive(Primitive::U8);
+    let list = Term::type_list_concat(vec![
+        Term::TypeListValue(vec![boolean.clone()]),
+        Term::Rigid {
+            declaration: input,
+            sort: Sort::ComptimeValue,
+        },
+        Term::TypeListValue(vec![byte.clone()]),
+    ]);
     list.check_scope(&[]).unwrap();
     assert!(list.to_string().contains("type-list-concat"));
-    let template=Term::NormalForm {head,sort:Sort::Type,arguments:vec![list]};
-    for middle in [vec![],vec![byte.clone(),boolean.clone()]] {
-        let actual=template.instantiate_parameters(&[DeclarationParameter {declaration:input,sort:Sort::ComptimeValue}],
-            &[Term::TypeListValue(middle.clone())]).unwrap();
-        let mut elements=vec![boolean.clone()];elements.extend(middle);elements.push(byte.clone());
-        assert_eq!(actual,Term::NormalForm {head,sort:Sort::Type,arguments:vec![Term::TypeListValue(elements)]});
+    let template = Term::NormalForm {
+        head,
+        sort: Sort::Type,
+        arguments: vec![list],
+    };
+    for middle in [vec![], vec![byte.clone(), boolean.clone()]] {
+        let actual = template
+            .instantiate_parameters(
+                &[DeclarationParameter {
+                    declaration: input,
+                    sort: Sort::ComptimeValue,
+                }],
+                &[Term::TypeListValue(middle.clone())],
+            )
+            .unwrap();
+        let mut elements = vec![boolean.clone()];
+        elements.extend(middle);
+        elements.push(byte.clone());
+        assert_eq!(
+            actual,
+            Term::NormalForm {
+                head,
+                sort: Sort::Type,
+                arguments: vec![Term::TypeListValue(elements)]
+            }
+        );
     }
-    assert!(template.instantiate_parameters(&[DeclarationParameter {declaration:input,sort:Sort::ComptimeValue}],&[Term::Bool(true)]).is_err());
-    assert_eq!(Term::type_list_concat(vec![]),Term::TypeListValue(vec![]));
+    assert!(
+        template
+            .instantiate_parameters(
+                &[DeclarationParameter {
+                    declaration: input,
+                    sort: Sort::ComptimeValue
+                }],
+                &[Term::Bool(true)]
+            )
+            .is_err()
+    );
+    assert_eq!(Term::type_list_concat(vec![]), Term::TypeListValue(vec![]));
 }
 
 #[test]
 fn type_list_index_rewriting_reaches_both_operands_and_keeps_head_identity() {
-    let list_head=id(40);
-    let tuple_head=id(41);
-    let list_type=Term::NormalForm {head:list_head,sort:Sort::Type,
-        arguments:vec![Term::Primitive(Primitive::Type)]};
-    let nested=Term::NormalForm {head:tuple_head,sort:Sort::Type,
-        arguments:vec![Term::TypeListValue(vec![rigid()])]};
-    let mut index=Expr {
-        ty:Term::Primitive(Primitive::Type),source:SourceRange {start:10,end:20},
-        kind:K::TypeListIndex(Box::new(Expr {
-            ty:list_type.clone(),source:SourceRange {start:11,end:12},
-            kind:K::TypeListValue(vec![nested]),
-        }),Box::new(Expr {
-            ty:Term::Primitive(Primitive::Integer),source:SourceRange {start:13,end:14},
-            kind:K::Local(LocalId {owner:2,index:0}),
-        })),
+    let list_head = id(40);
+    let tuple_head = id(41);
+    let list_type = Term::NormalForm {
+        head: list_head,
+        sort: Sort::Type,
+        arguments: vec![Term::Primitive(Primitive::Type)],
     };
-    index=index.instantiate_types(&[id(1)],&[Term::Primitive(Primitive::U8)]).unwrap();
-    let mut sources=Vec::new();
-    nir::visit::expression(&index,&mut 100,|expr,_| {sources.push(expr.source.start);Ok(())}).unwrap();
-    sources.sort();assert_eq!(sources,[10,11,13]);
-    nir::visit::expression_mut(&mut index,&mut 100,|expr,_| {
-        if matches!(expr.kind,K::Local(_)) {expr.kind=K::Literal(nir::program::Literal::Integer("0".into()));}
+    let nested = Term::NormalForm {
+        head: tuple_head,
+        sort: Sort::Type,
+        arguments: vec![Term::TypeListValue(vec![rigid()])],
+    };
+    let mut index = Expr {
+        ty: Term::Primitive(Primitive::Type),
+        source: SourceRange { start: 10, end: 20 },
+        kind: K::TypeListIndex(
+            Box::new(Expr {
+                ty: list_type.clone(),
+                source: SourceRange { start: 11, end: 12 },
+                kind: K::TypeListValue(vec![nested]),
+            }),
+            Box::new(Expr {
+                ty: Term::Primitive(Primitive::Integer),
+                source: SourceRange { start: 13, end: 14 },
+                kind: K::Local(LocalId { owner: 2, index: 0 }),
+            }),
+        ),
+    };
+    index = index
+        .instantiate_types(&[id(1)], &[Term::Primitive(Primitive::U8)])
+        .unwrap();
+    let mut sources = Vec::new();
+    nir::visit::expression(&index, &mut 100, |expr, _| {
+        sources.push(expr.source.start);
         Ok(())
-    }).unwrap();
-    let K::TypeListIndex(list,position)=&index.kind else {panic!("index")};
-    assert_eq!(list.ty,list_type);
-    assert_eq!(list.kind,K::TypeListValue(vec![Term::NormalForm {head:tuple_head,sort:Sort::Type,
-        arguments:vec![Term::TypeListValue(vec![Term::Primitive(Primitive::U8)])]}]));
-    assert!(matches!(position.kind,K::Literal(_)));
+    })
+    .unwrap();
+    sources.sort();
+    assert_eq!(sources, [10, 11, 13]);
+    nir::visit::expression_mut(&mut index, &mut 100, |expr, _| {
+        if matches!(expr.kind, K::Local(_)) {
+            expr.kind = K::Literal(nir::program::Literal::Integer("0".into()));
+        }
+        Ok(())
+    })
+    .unwrap();
+    let K::TypeListIndex(list, position) = &index.kind else {
+        panic!("index")
+    };
+    assert_eq!(list.ty, list_type);
+    assert_eq!(
+        list.kind,
+        K::TypeListValue(vec![Term::NormalForm {
+            head: tuple_head,
+            sort: Sort::Type,
+            arguments: vec![Term::TypeListValue(vec![Term::Primitive(Primitive::U8)])]
+        }])
+    );
+    assert!(matches!(position.kind, K::Literal(_)));
     assert!(index.to_string().contains("(type-list-index (values"));
 }

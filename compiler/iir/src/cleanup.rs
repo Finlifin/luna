@@ -19,10 +19,14 @@ impl fmt::Display for VariantCase {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(variant-case (guards")?;
         for (fields, tag) in &self.guards {
-            f.write_str(" (guard ")?; path(f, fields)?; write!(f, " (tag {tag}))")?;
+            f.write_str(" (guard ")?;
+            path(f, fields)?;
+            write!(f, " (tag {tag}))")?;
         }
         f.write_str(") (steps")?;
-        for step in &self.steps { write!(f, " {step}")?; }
+        for step in &self.steps {
+            write!(f, " {step}")?;
+        }
         f.write_str("))")
     }
 }
@@ -30,7 +34,9 @@ impl fmt::Display for VariantCase {
 pub enum Step {
     /// Exactly one case must match, before any case executes. Guards are
     /// ordered from enclosing tags to tags inside their active payloads.
-    Select { cases: Vec<VariantCase> },
+    Select {
+        cases: Vec<VariantCase>,
+    },
     IfConstructed {
         path: Vec<usize>,
         steps: Vec<Step>,
@@ -61,7 +67,9 @@ impl fmt::Display for Step {
         match self {
             Self::Select { cases } => {
                 f.write_str("(cleanup-select")?;
-                for case in cases { write!(f, " {case}")?; }
+                for case in cases {
+                    write!(f, " {case}")?;
+                }
                 f.write_str(")")
             }
             Self::IfConstructed {
@@ -150,7 +158,11 @@ pub enum Boundary {
 impl fmt::Display for Boundary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Self::EffectBreak(id) | Self::EffectContinue(id) = self {
-            let kind = if matches!(self, Self::EffectBreak(_)) { "effect-break" } else { "effect-continue" };
+            let kind = if matches!(self, Self::EffectBreak(_)) {
+                "effect-break"
+            } else {
+                "effect-continue"
+            };
             return write!(f, "({kind} (loop {} {}))", id.owner, id.index);
         }
         if let Self::PostconditionFailure(origin) = self {
@@ -228,8 +240,13 @@ pub enum ContextKey {
 impl fmt::Display for ContextKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::EffectHandler { installation, handler, arm } => write!(
-                f, "(effect-handler-context (installation {installation}) (handler {handler}) (arm {arm}))"
+            Self::EffectHandler {
+                installation,
+                handler,
+                arm,
+            } => write!(
+                f,
+                "(effect-handler-context (installation {installation}) (handler {handler}) (arm {arm}))"
             ),
             Self::Default {
                 construction,
@@ -270,7 +287,9 @@ impl fmt::Display for BindingOrder {
         write!(f, "(pattern-order (source {})", self.source)?;
         for order in &self.alternatives {
             f.write_str(" (bindings")?;
-            for binding in order { write!(f, " {binding}")?; }
+            for binding in order {
+                write!(f, " {binding}")?;
+            }
             f.write_str(")")?;
         }
         f.write_str(")")
@@ -391,13 +410,21 @@ impl fmt::Display for FunctionSchedule {
             write!(f, " {transfer}")?;
         }
         f.write_str(") (pattern-orders")?;
-        for order in &self.pattern_orders { write!(f, " {order}")?; }
+        for order in &self.pattern_orders {
+            write!(f, " {order}")?;
+        }
         f.write_str(") (pattern-transfers")?;
-        for transfer in &self.pattern_transfers { write!(f, " {transfer}")?; }
+        for transfer in &self.pattern_transfers {
+            write!(f, " {transfer}")?;
+        }
         f.write_str(") (copies")?;
         for copy in &self.copies {
-            write!(f," (representation-copy (source {}) (binding {}) ",copy.source,copy.binding)?;
-            path(f,&copy.fields)?;
+            write!(
+                f,
+                " (representation-copy (source {}) (binding {}) ",
+                copy.source, copy.binding
+            )?;
+            path(f, &copy.fields)?;
             f.write_str(")")?;
         }
         f.write_str(") (sites")?;

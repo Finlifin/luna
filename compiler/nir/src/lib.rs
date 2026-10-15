@@ -7,8 +7,9 @@
 pub mod types;
 pub use types::*;
 
-pub mod program;
 pub mod enum_encoding;
+pub mod program;
+mod trait_parameters;
 
 pub mod phases;
 
@@ -22,11 +23,13 @@ pub mod completed_values;
 
 pub mod effects;
 
-pub mod visit;
+pub mod free_bindings;
 pub mod preparation;
 pub mod type_computations;
-pub mod free_bindings;
+pub mod visit;
 
 pub mod deferred_signatures;
 
 pub mod inline_return;
+
+pub mod newtypes;

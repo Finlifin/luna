@@ -68,7 +68,11 @@
 
 ## 6. 验证与完成标准
 
+开发过程中适时格式化已修改的 Rust 文件；阶段性整理或用户要求时执行全 workspace 格式化。通过 `python3 -B development/command.py --timeout 120 -- cargo fmt --all` 运行全量格式化，追加 `-- --check` 检查格式。格式化不启动构建，不必因此重复全量测试。
+
 Cargo 构建与测试统一使用 `python3 -B development/cargo.py <test|check|build|run> ...`，不再直接启动使用旧调试配置的 Cargo 命令。入口固定复用 `/tmp/luna-dev-002/target`，自动添加 `-j 1 --locked --offline`、禁用 incremental 和 dev/test debuginfo，并在构建前后控制缓存大小。用户已授权自动 `cargo clean`：优先清理 elaboration/luna 产物，必要时清理该 target 全部可重建产物；不为此重复请求确认。配额错误由仍在沙箱内的构建入口就地清理并最多重试一次，不能等到沙箱无法启动才清理。入口使用共享维护锁，不与直接 Cargo 命令并发执行。源码、Cargo.lock、registry 下载缓存和工作区已有修改不属于清理对象。
+
+无人值守时优先通过 `python3 -B development/check.py --timeout 900 -- test ...` 调用上述 cargo.py；已有二进制复现使用 `development/reproduce.py`，可选批量回溯使用 `development/backtrace.py`，证据读取使用 `development/report.py`。入口关闭标准输入，设置超时并保存日志。可选回溯遇到 ptrace 限制时保存 unavailable 后继续独立工作，不为可选诊断反复等待用户；脚本不提供权限绕过，真正必需的受限操作仍遵守环境授权规则。详见 development/README.md。
 
 按变更选择最小充分检查：局部行为测试、相关 crate 检查、接口／端到端验收。检查通过后，只有新改动、失败或尚未解除的疑点才扩大或重复测试。
 

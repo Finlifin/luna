@@ -94,16 +94,16 @@ pub enum UnknownReason {
     UnvalidatedModel,
     ArithmeticRange,
 }
-#[derive(Clone,Debug,PartialEq,Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ValidationError {
     BudgetExhausted,
     IllFormed(String),
 }
 impl fmt::Display for ValidationError {
-    fn fmt(&self,f:&mut fmt::Formatter<'_>)->fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::BudgetExhausted=>write!(f,"(type-proposition-validation-budget-exhausted)"),
-            Self::IllFormed(message)=>write!(f,"(ill-formed-type-proposition {message:?})"),
+            Self::BudgetExhausted => write!(f, "(type-proposition-validation-budget-exhausted)"),
+            Self::IllFormed(message) => write!(f, "(ill-formed-type-proposition {message:?})"),
         }
     }
 }
@@ -161,25 +161,41 @@ impl Context {
     /// Each frame lists its binding sorts, outermost first. Proofs retain these
     /// frames and cannot be replayed after changing or removing them.
     pub fn with_scope(scope: Vec<Vec<Sort>>) -> Self {
-        Self { scope, ..Self::default() }
+        Self {
+            scope,
+            ..Self::default()
+        }
     }
     /// Copy admitted global theory into a newly declared lexical scope.
     /// Local assumptions must be supplied explicitly in that scope.
     pub fn theory_in_scope(&self, scope: Vec<Vec<Sort>>) -> Self {
-        Self { scope, assumptions: Vec::new(), congruence_heads: self.congruence_heads.clone(),
-            nominal_constructors: self.nominal_constructors.clone(), tuple_heads: self.tuple_heads.clone() }
+        Self {
+            scope,
+            assumptions: Vec::new(),
+            congruence_heads: self.congruence_heads.clone(),
+            nominal_constructors: self.nominal_constructors.clone(),
+            tuple_heads: self.tuple_heads.clone(),
+        }
     }
-    pub fn scope(&self) -> &[Vec<Sort>] { &self.scope }
-    pub(crate) fn admit_tuple_head(&mut self, head: DeclarationId) { self.tuple_heads.insert(head); }
-    pub(crate) fn is_tuple_head(&self, head: DeclarationId) -> bool { self.tuple_heads.contains(&head) }
+    pub fn scope(&self) -> &[Vec<Sort>] {
+        &self.scope
+    }
+    pub(crate) fn admit_tuple_head(&mut self, head: DeclarationId) {
+        self.tuple_heads.insert(head);
+    }
+    pub(crate) fn is_tuple_head(&self, head: DeclarationId) -> bool {
+        self.tuple_heads.contains(&head)
+    }
     pub(crate) fn is_tuple_type(&self, ty: &Term) -> bool {
         matches!(ty, Term::NormalForm { head, sort: Sort::Type, arguments }
             if self.is_tuple_head(*head) && arguments.len() == 1 && arguments[0].sort() == Sort::ComptimeValue)
     }
     fn evaluate_kind(&self, kind: TypeKind, ty: &Term) -> Option<bool> {
-        evaluate_kind_with_heads(kind,ty,&self.nominal_constructors,&self.tuple_heads)
+        evaluate_kind_with_heads(kind, ty, &self.nominal_constructors, &self.tuple_heads)
     }
-    pub(crate) fn assumptions(&self) -> &[Formula] { &self.assumptions }
+    pub(crate) fn assumptions(&self) -> &[Formula] {
+        &self.assumptions
+    }
     /// Restore declaration theory from checked owned NIR, without importing any
     /// caller assumptions or equations from function bodies. External head
     /// descriptors are compiler-issued contracts, as in required computation.
@@ -230,13 +246,15 @@ impl Context {
         let formula = Formula::And(formulas);
         let mut atoms = Vec::new();
         let mut terms = Terms::default();
-        collect(&formula, &mut atoms, &mut terms, 0, max_depth, &self.scope).map_err(|message| {
-            if message == "depth budget" {
-                ProofError::BudgetExhausted
-            } else {
-                ProofError::Invalid
-            }
-        })?;
+        collect(&formula, &mut atoms, &mut terms, 0, max_depth, &self.scope).map_err(
+            |message| {
+                if message == "depth budget" {
+                    ProofError::BudgetExhausted
+                } else {
+                    ProofError::Invalid
+                }
+            },
+        )?;
         let mut search = Search {
             context: self,
             formula: &formula,
@@ -288,7 +306,8 @@ impl Context {
             .iter()
             .chain(std::iter::once(&witness.goal))
         {
-            collect(formula, &mut atoms, &mut terms, 0, limit, &self.scope).map_err(|_| ProofError::Invalid)?;
+            collect(formula, &mut atoms, &mut terms, 0, limit, &self.scope)
+                .map_err(|_| ProofError::Invalid)?;
         }
         if atoms.iter().any(|atom| {
             model_atom(
@@ -385,7 +404,8 @@ impl Context {
                         // A named product is also a usable structural shape when
                         // equality is proven. This does not grant constructor
                         // injectivity or decide field-permutation identity.
-                        if (constructor(term).is_some() || matches!(term, Term::Record(_))
+                        if (constructor(term).is_some()
+                            || matches!(term, Term::Record(_))
                             || matches!(term, Term::NormalForm { head, sort: Sort::Type, .. } if accepts_head(*head)))
                             && term.check_scope(&self.scope).is_ok()
                             && seen.insert(term)
@@ -463,16 +483,22 @@ impl Context {
     /// Check the proposition language and lexical scope without proving the
     /// goal or adding it as an assumption. Deferred requirements need this
     /// check even when no instance exists yet.
-    pub fn validate_formula(&self,goal:&Formula,budget:&mut Budget)->Result<(),ValidationError> {
-        let limit=budget.max_depth.min(128);
-        if !within_limits(goal,limit,&mut budget.steps) {return Err(ValidationError::BudgetExhausted);}
-        let mut work=vec![goal];
-        while let Some(formula)=work.pop() {
-            validate_atom_inputs(formula,&self.scope).map_err(ValidationError::IllFormed)?;
+    pub fn validate_formula(
+        &self,
+        goal: &Formula,
+        budget: &mut Budget,
+    ) -> Result<(), ValidationError> {
+        let limit = budget.max_depth.min(128);
+        if !within_limits(goal, limit, &mut budget.steps) {
+            return Err(ValidationError::BudgetExhausted);
+        }
+        let mut work = vec![goal];
+        while let Some(formula) = work.pop() {
+            validate_atom_inputs(formula, &self.scope).map_err(ValidationError::IllFormed)?;
             match formula {
-                Formula::Not(inner)=>work.push(inner),
-                Formula::And(parts) | Formula::Or(parts)=>work.extend(parts),
-                _=>{},
+                Formula::Not(inner) => work.push(inner),
+                Formula::And(parts) | Formula::Or(parts) => work.extend(parts),
+                _ => {}
             }
         }
         Ok(())
@@ -500,7 +526,8 @@ impl Context {
         let mut formulas = self.assumptions.clone();
         formulas.push(goal.clone().negate());
         let residual = Formula::And(formulas);
-        if let Err(message) = collect(&residual, &mut atoms, &mut terms, 0, max_depth, &self.scope) {
+        if let Err(message) = collect(&residual, &mut atoms, &mut terms, 0, max_depth, &self.scope)
+        {
             return if message == "depth budget" {
                 Outcome::Unknown {
                     reason: UnknownReason::BudgetExhausted,
@@ -567,7 +594,7 @@ fn within_input_limits(input: Input<'_>, limit: usize, fuel: &mut usize) -> bool
         // Pending roots already require at least one step each. Check width
         // before pushing children so a tiny budget cannot allocate a huge work
         // list merely to discover exhaustion on the next iteration.
-        let room=fuel.saturating_sub(pending.len());
+        let room = fuel.saturating_sub(pending.len());
         match input {
             Input::Formula(Formula::Equal(Equality(a, b))) => {
                 pending.push((Input::Term(a), depth + 1));
@@ -577,27 +604,48 @@ fn within_input_limits(input: Input<'_>, limit: usize, fuel: &mut usize) -> bool
                 pending.push((Input::Term(&query.ty), depth + 1))
             }
             Input::Formula(Formula::Trait(query)) => {
-                if query.arguments.len().saturating_add(1)>room {return false;}
+                if query.arguments.len().saturating_add(1) > room {
+                    return false;
+                }
                 pending.extend(query.inputs().map(|term| (Input::Term(term), depth + 1)));
             }
             Input::Formula(Formula::Not(inner)) => pending.push((Input::Formula(inner), depth + 1)),
             Input::Formula(Formula::And(items) | Formula::Or(items)) => {
-                if items.len()>room {return false;}
+                if items.len() > room {
+                    return false;
+                }
                 for item in items {
                     pending.push((Input::Formula(item), depth + 1));
                 }
             }
             Input::Term(term) => match term {
                 Term::Computation { effects, result } => {
-                    if effects.len() > *fuel { return false; }
+                    if effects.len() > *fuel {
+                        return false;
+                    }
                     *fuel -= effects.len();
-                    let width = effects.iter().try_fold(1usize, |n, operation| n.checked_add(operation.arguments.len()));
-                    if width.is_none_or(|n| n > fuel.saturating_sub(pending.len())) { return false; }
+                    let width = effects.iter().try_fold(1usize, |n, operation| {
+                        n.checked_add(operation.arguments.len())
+                    });
+                    if width.is_none_or(|n| n > fuel.saturating_sub(pending.len())) {
+                        return false;
+                    }
                     pending.push((Input::Term(result), depth + 1));
-                    for operation in effects { pending.extend(operation.arguments.iter().map(|t| (Input::Term(t), depth + 1))); }
+                    for operation in effects {
+                        pending.extend(
+                            operation
+                                .arguments
+                                .iter()
+                                .map(|t| (Input::Term(t), depth + 1)),
+                        );
+                    }
                 }
-                Term::AssociatedType { arguments, subject, .. } => {
-                    if arguments.len().saturating_add(1)>room {return false;}
+                Term::AssociatedType {
+                    arguments, subject, ..
+                } => {
+                    if arguments.len().saturating_add(1) > room {
+                        return false;
+                    }
                     pending.push((Input::Term(subject), depth + 1));
                     for argument in arguments {
                         pending.push((Input::Term(argument), depth + 1));
@@ -606,30 +654,46 @@ fn within_input_limits(input: Input<'_>, limit: usize, fuel: &mut usize) -> bool
                 Term::Pointer(inner) | Term::ComptimeFunction(inner) => {
                     pending.push((Input::Term(inner), depth + 1))
                 }
-                Term::NominalValue {ty,fields,..} => { if fields.len().saturating_add(1)>room {return false;} pending.push((Input::Term(ty),depth+1));pending.extend(fields.iter().map(|field|(Input::Term(field),depth+1))); },
+                Term::NominalValue { ty, fields, .. } => {
+                    if fields.len().saturating_add(1) > room {
+                        return false;
+                    }
+                    pending.push((Input::Term(ty), depth + 1));
+                    pending.extend(fields.iter().map(|field| (Input::Term(field), depth + 1)));
+                }
                 Term::Record(fields) | Term::RecordValue(fields) => {
-                    if fields.len() > room { return false; }
+                    if fields.len() > room {
+                        return false;
+                    }
                     for (name, ty) in fields {
-                        let Some(remaining) = fuel.checked_sub(name.len()) else { return false; };
+                        let Some(remaining) = fuel.checked_sub(name.len()) else {
+                            return false;
+                        };
                         *fuel = remaining;
                         pending.push((Input::Term(ty), depth + 1));
                     }
                 }
                 Term::Tuple(items)
-                | Term::TypeListValue(items) | Term::TypeListConcat(items) | Term::TupleValue(items)
+                | Term::TypeListValue(items)
+                | Term::TypeListConcat(items)
+                | Term::TupleValue(items)
                 | Term::Nominal {
                     arguments: items, ..
                 }
                 | Term::NormalForm {
                     arguments: items, ..
                 } => {
-                    if items.len()>room {return false;}
+                    if items.len() > room {
+                        return false;
+                    }
                     for item in items {
                         pending.push((Input::Term(item), depth + 1));
                     }
                 }
                 Term::Function { parameters, result } => {
-                    if parameters.len().saturating_add(1)>room {return false;}
+                    if parameters.len().saturating_add(1) > room {
+                        return false;
+                    }
                     pending.push((Input::Term(result), depth + 1));
                     for parameter in parameters {
                         pending.push((Input::Term(&parameter.ty), depth + 1));
@@ -639,7 +703,9 @@ fn within_input_limits(input: Input<'_>, limit: usize, fuel: &mut usize) -> bool
                     environment,
                     signature,
                 } => {
-                    if environment.len().saturating_add(1)>room {return false;}
+                    if environment.len().saturating_add(1) > room {
+                        return false;
+                    }
                     pending.push((Input::Term(signature), depth + 1));
                     for item in environment {
                         pending.push((Input::Term(item), depth + 1));
@@ -677,12 +743,27 @@ impl Terms {
 }
 fn subterms(term: &Term) -> Vec<&Term> {
     match term {
-        Term::Computation { effects, result } if !has_bound(term) => effects.iter().flat_map(|operation| operation.arguments.iter()).chain(std::iter::once(result.as_ref())).collect(),
-        Term::AssociatedType { arguments, subject, .. } => arguments.iter().chain(std::iter::once(subject.as_ref())).collect(),
-        Term::NominalValue {ty,fields,..} => std::iter::once(ty.as_ref()).chain(fields.iter()).collect(),
-        Term::Record(fields) | Term::RecordValue(fields) => fields.iter().map(|(_, ty)| ty).collect(),
+        Term::Computation { effects, result } if !has_bound(term) => effects
+            .iter()
+            .flat_map(|operation| operation.arguments.iter())
+            .chain(std::iter::once(result.as_ref()))
+            .collect(),
+        Term::AssociatedType {
+            arguments, subject, ..
+        } => arguments
+            .iter()
+            .chain(std::iter::once(subject.as_ref()))
+            .collect(),
+        Term::NominalValue { ty, fields, .. } => {
+            std::iter::once(ty.as_ref()).chain(fields.iter()).collect()
+        }
+        Term::Record(fields) | Term::RecordValue(fields) => {
+            fields.iter().map(|(_, ty)| ty).collect()
+        }
         Term::Tuple(items)
-        | Term::TypeListValue(items) | Term::TypeListConcat(items) | Term::TupleValue(items)
+        | Term::TypeListValue(items)
+        | Term::TypeListConcat(items)
+        | Term::TupleValue(items)
         | Term::Nominal {
             arguments: items, ..
         }
@@ -707,10 +788,19 @@ fn subterms(term: &Term) -> Vec<&Term> {
 }
 fn has_bound(term: &Term) -> bool {
     match term {
-        Term::Computation { effects, result } => has_bound(result) || effects.iter().any(|operation| operation.arguments.iter().any(has_bound)),
-        Term::AssociatedType { arguments, subject, .. } => arguments.iter().any(has_bound) || has_bound(subject),
-        Term::NominalValue {ty,fields,..} => has_bound(ty) || fields.iter().any(has_bound),
-        Term::Record(fields) | Term::RecordValue(fields) => fields.iter().any(|(_, ty)| has_bound(ty)),
+        Term::Computation { effects, result } => {
+            has_bound(result)
+                || effects
+                    .iter()
+                    .any(|operation| operation.arguments.iter().any(has_bound))
+        }
+        Term::AssociatedType {
+            arguments, subject, ..
+        } => arguments.iter().any(has_bound) || has_bound(subject),
+        Term::NominalValue { ty, fields, .. } => has_bound(ty) || fields.iter().any(has_bound),
+        Term::Record(fields) | Term::RecordValue(fields) => {
+            fields.iter().any(|(_, ty)| has_bound(ty))
+        }
         Term::Bound { .. } | Term::Hole { .. } => true,
         Term::Function { parameters, result } => {
             parameters.iter().any(|p| has_bound(&p.ty)) || has_bound(result)
@@ -720,7 +810,9 @@ fn has_bound(term: &Term) -> bool {
             signature,
         } => environment.iter().any(has_bound) || has_bound(signature),
         Term::Tuple(items)
-        | Term::TypeListValue(items) | Term::TypeListConcat(items) | Term::TupleValue(items)
+        | Term::TypeListValue(items)
+        | Term::TypeListConcat(items)
+        | Term::TupleValue(items)
         | Term::Nominal {
             arguments: items, ..
         }
@@ -732,25 +824,30 @@ fn has_bound(term: &Term) -> bool {
     }
 }
 // Shared admission rules for validation-only checks and proof collection.
-fn validate_atom_inputs(formula:&Formula,scope:&[Vec<Sort>])->Result<(),String> {
+fn validate_atom_inputs(formula: &Formula, scope: &[Vec<Sort>]) -> Result<(), String> {
     match formula {
-        Formula::Equal(atom)=>{
-            for term in [&atom.0,&atom.1] {
-                if term.sort()!=Sort::Type {return Err("type equality requires two Type terms".into());}
-                term.check_scope(scope).map_err(|e|format!("invalid type term: {e:?}"))?;
+        Formula::Equal(atom) => {
+            for term in [&atom.0, &atom.1] {
+                if term.sort() != Sort::Type {
+                    return Err("type equality requires two Type terms".into());
+                }
+                term.check_scope(scope)
+                    .map_err(|e| format!("invalid type term: {e:?}"))?;
             }
-        },
-        Formula::Kind(query)=>{
-            if query.ty.sort()!=Sort::Type {return Err("type classification requires a Type term".into());}
-            query.ty.check_scope(scope).map_err(|e|format!("invalid classified type: {e:?}"))?;
-        },
-        Formula::Trait(query)=>{
-            for term in query.inputs() {
-                if term.sort()!=Sort::Type {return Err("trait proposition requires Type inputs".into());}
-                term.check_scope(scope).map_err(|e|format!("invalid trait type input: {e:?}"))?;
+        }
+        Formula::Kind(query) => {
+            if query.ty.sort() != Sort::Type {
+                return Err("type classification requires a Type term".into());
             }
-        },
-        _=>{},
+            query
+                .ty
+                .check_scope(scope)
+                .map_err(|e| format!("invalid classified type: {e:?}"))?;
+        }
+        Formula::Trait(query) => {
+            query.validate_inputs(scope)?;
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -765,7 +862,7 @@ fn collect(
     if depth >= limit {
         return Err("depth budget".into());
     }
-    validate_atom_inputs(formula,scope)?;
+    validate_atom_inputs(formula, scope)?;
     match formula {
         Formula::Equal(atom) => {
             for term in [&atom.0, &atom.1] {
@@ -788,7 +885,9 @@ fn collect(
                 terms.insert(term);
             }
             let atom = Atom::Trait(query.clone());
-            if !atoms.contains(&atom) { atoms.push(atom); }
+            if !atoms.contains(&atom) {
+                atoms.push(atom);
+            }
         }
         Formula::IntLe(atom) => {
             let atom = Atom::IntLe(atom.clone());
@@ -903,9 +1002,14 @@ impl Context {
     /// Forward congruence premises for an admitted pair of heads. Consumers
     /// must prove every returned pair equal; this does not grant injectivity or
     /// unfold opaque heads. Function binders still require scope-aware handling.
-    pub(crate) fn congruence_arguments<'a>(&self, left: &'a Term, right: &'a Term)
-        -> Option<Vec<(&'a Term, &'a Term)>> {
-        if !same_congruent_head(left, right, self) { return None; }
+    pub(crate) fn congruence_arguments<'a>(
+        &self,
+        left: &'a Term,
+        right: &'a Term,
+    ) -> Option<Vec<(&'a Term, &'a Term)>> {
+        if !same_congruent_head(left, right, self) {
+            return None;
+        }
         let a = subterms(left);
         let b = subterms(right);
         (a.len() == b.len()).then(|| a.into_iter().zip(b).collect())
@@ -913,31 +1017,59 @@ impl Context {
 }
 
 fn same_congruent_head(a: &Term, b: &Term, context: &Context) -> bool {
-    if let (Term::Computation { effects: left, .. }, Term::Computation { effects: right, .. }) = (a, b) {
+    if let (Term::Computation { effects: left, .. }, Term::Computation { effects: right, .. }) =
+        (a, b)
+    {
         // Only lift equality through an identical occurrence layout. This does
         // not assert injectivity, disjointness or unproved row commutations.
-        return !has_bound(a) && !has_bound(b) && left.len() == right.len()
-            && left.iter().zip(right).all(|(a, b)| a.declaration == b.declaration && a.arguments.len() == b.arguments.len());
+        return !has_bound(a)
+            && !has_bound(b)
+            && left.len() == right.len()
+            && left.iter().zip(right).all(|(a, b)| {
+                a.declaration == b.declaration && a.arguments.len() == b.arguments.len()
+            });
     }
     if let (
-        Term::AssociatedType { origin: a, arguments: aa, .. },
-        Term::AssociatedType { origin: b, arguments: ba, .. },
-    ) = (a, b) {
+        Term::AssociatedType {
+            origin: a,
+            arguments: aa,
+            ..
+        },
+        Term::AssociatedType {
+            origin: b,
+            arguments: ba,
+            ..
+        },
+    ) = (a, b)
+    {
         // A projection is a query with fixed origin, not an injective constructor.
         return a == b && aa.len() == ba.len();
     }
     // Type identity changes inside immutable tuple inputs lift forward through
     // the tuple. This does not admit a standalone value proposition, or make
     // an enclosing opaque normal-form application injective.
-    if let (Term::NominalValue {variant:a,fields:af,..}, Term::NominalValue {variant:b,fields:bf,..}) = (a,b) {
+    if let (
+        Term::NominalValue {
+            variant: a,
+            fields: af,
+            ..
+        },
+        Term::NominalValue {
+            variant: b,
+            fields: bf,
+            ..
+        },
+    ) = (a, b)
+    {
         return a == b && af.len() == bf.len();
     }
     if let (Term::RecordValue(a), Term::RecordValue(b)) = (a, b) {
-        return a.len() == b.len() && a.iter().zip(b).all(|((a,_),(b,_))| a == b);
+        return a.len() == b.len() && a.iter().zip(b).all(|((a, _), (b, _))| a == b);
     }
     if let (Term::TypeListValue(a), Term::TypeListValue(b))
-        | (Term::TypeListConcat(a), Term::TypeListConcat(b))
-        | (Term::TupleValue(a), Term::TupleValue(b)) = (a, b) {
+    | (Term::TypeListConcat(a), Term::TypeListConcat(b))
+    | (Term::TupleValue(a), Term::TupleValue(b)) = (a, b)
+    {
         return a.len() == b.len();
     }
     if let (Some(a), Some(b)) = (constructor(a), constructor(b)) {
@@ -1114,8 +1246,10 @@ impl Search<'_> {
                     if classes.root(a) == classes.root(b) {
                         // A trusted Tuple descriptor grants classification,
                         // not unfolding, injectivity or arbitrary head disjointness.
-                        if (self.context.is_tuple_type(ta) && self.context.evaluate_kind(TypeKind::Tuple,tb) == Some(false))
-                            || (self.context.is_tuple_type(tb) && self.context.evaluate_kind(TypeKind::Tuple,ta) == Some(false))
+                        if (self.context.is_tuple_type(ta)
+                            && self.context.evaluate_kind(TypeKind::Tuple, tb) == Some(false))
+                            || (self.context.is_tuple_type(tb)
+                                && self.context.evaluate_kind(TypeKind::Tuple, ta) == Some(false))
                         {
                             return Ok(None);
                         }
@@ -1171,17 +1305,23 @@ impl Search<'_> {
                 }
             }
         }
-        // Equal Type inputs denote the same trait proposition. This is
-        // congruence only: equal truth values never imply equal subjects.
+        // Equal inputs denote the same trait proposition, including retained
+        // comptime indices. This is congruence only: equal truth values never
+        // imply equal subjects or equal indices, and introduce no value equations.
         let mut trait_truths = BTreeMap::new();
         for (atom, value) in self.atoms.iter().zip(assignment) {
-            let (Atom::Trait(query), Some(value)) = (atom, value) else { continue; };
+            let (Atom::Trait(query), Some(value)) = (atom, value) else {
+                continue;
+            };
             let mut inputs = Vec::new();
             for term in query.inputs() {
                 self.tick().map_err(|()| UnknownReason::BudgetExhausted)?;
                 inputs.push(classes.root(self.terms.ids[term]));
             }
-            if trait_truths.insert((query.interface, inputs), *value).is_some_and(|old| old != *value) {
+            if trait_truths
+                .insert((query.interface, inputs), *value)
+                .is_some_and(|old| old != *value)
+            {
                 return Ok(None);
             }
         }
@@ -1194,7 +1334,9 @@ impl Search<'_> {
             for (id, term) in self.terms.nodes.iter().enumerate() {
                 self.tick().map_err(|()| UnknownReason::BudgetExhausted)?;
                 if classes.root(id) == root
-                    && self.context.evaluate_kind(query.kind,term)
+                    && self
+                        .context
+                        .evaluate_kind(query.kind, term)
                         .is_some_and(|actual| actual != *value)
                 {
                     return Ok(None);
@@ -1303,12 +1445,19 @@ impl Search<'_> {
         })
     }
 }
-fn evaluate_kind_with_heads(kind: TypeKind, ty: &Term, nominal: &BTreeSet<DeclarationId>, tuple_heads: &BTreeSet<DeclarationId>) -> Option<bool> {
+fn evaluate_kind_with_heads(
+    kind: TypeKind,
+    ty: &Term,
+    nominal: &BTreeSet<DeclarationId>,
+    tuple_heads: &BTreeSet<DeclarationId>,
+) -> Option<bool> {
     if matches!(ty, Term::NormalForm {head,sort:Sort::Type,arguments}
         if tuple_heads.contains(head) && arguments.len()==1 && arguments[0].sort()==Sort::ComptimeValue)
     {
         Some(TypeKind::Tuple.implies(kind))
-    } else if kind==TypeKind::Tuple && matches!(ty,Term::Nominal {declaration,..} if nominal.contains(declaration)) {
+    } else if kind == TypeKind::Tuple
+        && matches!(ty,Term::Nominal {declaration,..} if nominal.contains(declaration))
+    {
         Some(false)
     } else {
         kind.evaluate(ty)
@@ -1322,7 +1471,9 @@ fn evaluate_model(
     nominal: &BTreeSet<DeclarationId>,
     tuple_heads: &BTreeSet<DeclarationId>,
 ) -> Option<bool> {
-    evaluate(formula, &|atom| model_atom(atom, types, integers, nominal, tuple_heads))
+    evaluate(formula, &|atom| {
+        model_atom(atom, types, integers, nominal, tuple_heads)
+    })
 }
 fn model_atom(
     atom: &Atom,
@@ -1338,13 +1489,18 @@ fn model_atom(
         Atom::Kind(query) => {
             // Classification is independent of Tuple elements, but a concrete
             // counterexample must not hide unresolved value-list inputs.
-            let closed_tuple=matches!(&query.ty,Term::NormalForm {head,sort:Sort::Type,arguments}
+            let closed_tuple = matches!(&query.ty,Term::NormalForm {head,sort:Sort::Type,arguments}
                 if tuple_heads.contains(head) && matches!(arguments.as_slice(),[Term::TypeListValue(fields)]
                     if fields.iter().all(|field|closed_type(field,nominal))));
             if closed_tuple {
-                evaluate_kind_with_heads(query.kind,&query.ty,nominal,tuple_heads)
+                evaluate_kind_with_heads(query.kind, &query.ty, nominal, tuple_heads)
             } else {
-                evaluate_kind_with_heads(query.kind,&substitute_types(&query.ty,types,nominal)?,nominal,tuple_heads)
+                evaluate_kind_with_heads(
+                    query.kind,
+                    &substitute_types(&query.ty, types, nominal)?,
+                    nominal,
+                    tuple_heads,
+                )
             }
         }
         Atom::TypeEqual(atom) => {
@@ -1555,7 +1711,9 @@ impl fmt::Display for Outcome {
                     write!(f, " {head}")?;
                 }
                 f.write_str(") (tuple-heads")?;
-                for head in &witness.tuple_heads { write!(f, " {head}")?; }
+                for head in &witness.tuple_heads {
+                    write!(f, " {head}")?;
+                }
                 f.write_str(")")?;
                 display_scope(f, &witness.scope)?;
                 f.write_str(")")
@@ -1572,7 +1730,9 @@ fn display_scope(f: &mut fmt::Formatter<'_>, scope: &[Vec<Sort>]) -> fmt::Result
     f.write_str(" (scope")?;
     for frame in scope {
         f.write_str(" (frame")?;
-        for sort in frame { write!(f, " {sort}")?; }
+        for sort in frame {
+            write!(f, " {sort}")?;
+        }
         f.write_str(")")?;
     }
     f.write_str(")")
@@ -1583,13 +1743,21 @@ impl fmt::Display for Context {
         f.write_str("(type-context")?;
         display_scope(f, &self.scope)?;
         f.write_str(" (assumptions")?;
-        for assumption in &self.assumptions { write!(f, " {assumption}")?; }
+        for assumption in &self.assumptions {
+            write!(f, " {assumption}")?;
+        }
         f.write_str(") (congruence-heads")?;
-        for declaration in &self.congruence_heads { write!(f, " {declaration}")?; }
+        for declaration in &self.congruence_heads {
+            write!(f, " {declaration}")?;
+        }
         f.write_str(") (nominal-constructors")?;
-        for declaration in &self.nominal_constructors { write!(f, " {declaration}")?; }
+        for declaration in &self.nominal_constructors {
+            write!(f, " {declaration}")?;
+        }
         f.write_str(") (tuple-heads")?;
-        for declaration in &self.tuple_heads { write!(f, " {declaration}")?; }
+        for declaration in &self.tuple_heads {
+            write!(f, " {declaration}")?;
+        }
         f.write_str("))")
     }
 }
@@ -1611,7 +1779,9 @@ impl fmt::Display for Proof {
             write!(f, " {head}")?;
         }
         f.write_str(") (tuple-heads")?;
-        for head in &proof.tuple_heads { write!(f, " {head}")?; }
+        for head in &proof.tuple_heads {
+            write!(f, " {head}")?;
+        }
         f.write_str(")")?;
         display_scope(f, &proof.scope)?;
         write!(f, " (proof {}))", proof.tree)
@@ -1624,67 +1794,169 @@ mod tuple_classification_tests {
 
     #[test]
     fn tuple_classification_counterexamples_retain_their_authority() {
-        let head=DeclarationId {package:82,local:0};
-        let nominal_head=DeclarationId {package:82,local:1};
-        let tuple=Term::NormalForm {head,sort:Sort::Type,arguments:vec![Term::TypeListValue(vec![])]};
-        let nominal=Term::Nominal {declaration:nominal_head,arguments:vec![]};
-        let mut context=Context::default();
+        let head = DeclarationId {
+            package: 82,
+            local: 0,
+        };
+        let nominal_head = DeclarationId {
+            package: 82,
+            local: 1,
+        };
+        let tuple = Term::NormalForm {
+            head,
+            sort: Sort::Type,
+            arguments: vec![Term::TypeListValue(vec![])],
+        };
+        let nominal = Term::Nominal {
+            declaration: nominal_head,
+            arguments: vec![],
+        };
+        let mut context = Context::default();
         context.admit_tuple_head(head);
         context.admit_nominal_constructor(nominal_head);
-        for goal in [Formula::kind(tuple.clone(),TypeKind::Boolean),Formula::kind(nominal,TypeKind::Tuple),
-            Formula::kind(tuple.clone(),TypeKind::Tuple).negate()] {
-            let outcome=context.prove(goal,Budget::default());
-            let Outcome::NotEntailed(witness)=&outcome else {panic!("{outcome}")};
-            context.verify_witness(witness,Budget::default()).unwrap();
+        for goal in [
+            Formula::kind(tuple.clone(), TypeKind::Boolean),
+            Formula::kind(nominal, TypeKind::Tuple),
+            Formula::kind(tuple.clone(), TypeKind::Tuple).negate(),
+        ] {
+            let outcome = context.prove(goal, Budget::default());
+            let Outcome::NotEntailed(witness) = &outcome else {
+                panic!("{outcome}")
+            };
+            context.verify_witness(witness, Budget::default()).unwrap();
             assert!(outcome.to_string().contains("(tuple-heads"));
-            let mut removed=context.fork();removed.tuple_heads.clear();
-            assert!(removed.verify_witness(witness,Budget::default()).is_err());
-            let mut altered=witness.clone();altered.goal=Formula::kind(tuple.clone(),TypeKind::Tuple);
-            assert!(context.verify_witness(&altered,Budget::default()).is_err());
+            let mut removed = context.fork();
+            removed.tuple_heads.clear();
+            assert!(removed.verify_witness(witness, Budget::default()).is_err());
+            let mut altered = witness.clone();
+            altered.goal = Formula::kind(tuple.clone(), TypeKind::Tuple);
+            assert!(context.verify_witness(&altered, Budget::default()).is_err());
         }
-        assert!(matches!(Context::default().prove(Formula::kind(tuple,TypeKind::Boolean),Budget::default()),Outcome::Unknown {..}));
-        let open=Term::NormalForm {head,sort:Sort::Type,arguments:vec![Term::Rigid {
-            declaration:DeclarationId {package:82,local:2},sort:Sort::ComptimeValue}]};
-        assert!(matches!(context.prove(Formula::kind(open,TypeKind::Boolean),Budget::default()),Outcome::Unknown {..}));
+        assert!(matches!(
+            Context::default().prove(Formula::kind(tuple, TypeKind::Boolean), Budget::default()),
+            Outcome::Unknown { .. }
+        ));
+        let open = Term::NormalForm {
+            head,
+            sort: Sort::Type,
+            arguments: vec![Term::Rigid {
+                declaration: DeclarationId {
+                    package: 82,
+                    local: 2,
+                },
+                sort: Sort::ComptimeValue,
+            }],
+        };
+        assert!(matches!(
+            context.prove(Formula::kind(open, TypeKind::Boolean), Budget::default()),
+            Outcome::Unknown { .. }
+        ));
     }
 
     #[test]
     fn tuple_classification_is_replayable_without_unfolding_or_injectivity() {
-        let head=DeclarationId {package:81,local:0};
-        let boolean=Term::Primitive(Primitive::Bool);
-        let tuple=|field|Term::NormalForm {head,sort:Sort::Type,arguments:vec![Term::TypeListValue(vec![field])]};
-        let value=tuple(boolean.clone());
-        let mut context=Context::default();
-        let unrelated=Formula::equal(value.clone(),boolean.clone()).negate();
-        assert!(!matches!(context.prove(unrelated.clone(),Budget::default()),Outcome::Entailed(_)));
+        let head = DeclarationId {
+            package: 81,
+            local: 0,
+        };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let tuple = |field| Term::NormalForm {
+            head,
+            sort: Sort::Type,
+            arguments: vec![Term::TypeListValue(vec![field])],
+        };
+        let value = tuple(boolean.clone());
+        let mut context = Context::default();
+        let unrelated = Formula::equal(value.clone(), boolean.clone()).negate();
+        assert!(!matches!(
+            context.prove(unrelated.clone(), Budget::default()),
+            Outcome::Entailed(_)
+        ));
         context.admit_tuple_head(head);
-        for goal in [unrelated,Formula::kind(value.clone(),TypeKind::Tuple),Formula::kind(value.clone(),TypeKind::Boolean).negate()] {
-            let Outcome::Entailed(proof)=context.prove(goal.clone(),Budget::default()) else {panic!("{goal}")};
-            context.verify_proof(&proof,Budget::default()).unwrap();
-            assert!(Context::default().verify_proof(&proof,Budget::default()).is_err());
+        for goal in [
+            unrelated,
+            Formula::kind(value.clone(), TypeKind::Tuple),
+            Formula::kind(value.clone(), TypeKind::Boolean).negate(),
+        ] {
+            let Outcome::Entailed(proof) = context.prove(goal.clone(), Budget::default()) else {
+                panic!("{goal}")
+            };
+            context.verify_proof(&proof, Budget::default()).unwrap();
+            assert!(
+                Context::default()
+                    .verify_proof(&proof, Budget::default())
+                    .is_err()
+            );
             assert!(proof.to_string().contains("(tuple-heads"));
         }
-        let rigid=Term::Rigid {declaration:DeclarationId {package:81,local:1},sort:Sort::Type};
-        let mut linked=context.fork();
-        linked.assume(Formula::equal(rigid.clone(),value.clone()));
-        assert!(matches!(linked.prove(Formula::kind(rigid,TypeKind::Tuple),Budget::default()),Outcome::Entailed(_)));
+        let rigid = Term::Rigid {
+            declaration: DeclarationId {
+                package: 81,
+                local: 1,
+            },
+            sort: Sort::Type,
+        };
+        let mut linked = context.fork();
+        linked.assume(Formula::equal(rigid.clone(), value.clone()));
+        assert!(matches!(
+            linked.prove(Formula::kind(rigid, TypeKind::Tuple), Budget::default()),
+            Outcome::Entailed(_)
+        ));
         // No element injectivity, representation equality, or unregistered nominal exclusion.
-        let byte=Term::Primitive(Primitive::U8);
-        for goal in [Formula::equal(value.clone(),Term::Tuple(vec![boolean.clone()])),
-            Formula::equal(value.clone(),Term::Nominal {declaration:DeclarationId {package:81,local:2},arguments:vec![]}).negate(),
-            Formula::equal(value.clone(),tuple(byte)).negate()] {
-            assert!(!matches!(context.prove(goal,Budget::default()),Outcome::Entailed(_)));
+        let byte = Term::Primitive(Primitive::U8);
+        for goal in [
+            Formula::equal(value.clone(), Term::Tuple(vec![boolean.clone()])),
+            Formula::equal(
+                value.clone(),
+                Term::Nominal {
+                    declaration: DeclarationId {
+                        package: 81,
+                        local: 2,
+                    },
+                    arguments: vec![],
+                },
+            )
+            .negate(),
+            Formula::equal(value.clone(), tuple(byte)).negate(),
+        ] {
+            assert!(!matches!(
+                context.prove(goal, Budget::default()),
+                Outcome::Entailed(_)
+            ));
         }
-        let nominal_head=DeclarationId {package:81,local:2};
-        let nominal=Term::Nominal {declaration:nominal_head,arguments:vec![]};
-        let mut registered=context.fork();
+        let nominal_head = DeclarationId {
+            package: 81,
+            local: 2,
+        };
+        let nominal = Term::Nominal {
+            declaration: nominal_head,
+            arguments: vec![],
+        };
+        let mut registered = context.fork();
         registered.admit_nominal_constructor(nominal_head);
-        for goal in [Formula::equal(value.clone(),nominal.clone()).negate(),Formula::kind(nominal,TypeKind::Tuple).negate()] {
-            let Outcome::Entailed(proof)=registered.prove(goal,Budget::default()) else {panic!("nominal distinction")};
-            registered.verify_proof(&proof,Budget::default()).unwrap();
-            assert!(context.verify_proof(&proof,Budget::default()).is_err());
+        for goal in [
+            Formula::equal(value.clone(), nominal.clone()).negate(),
+            Formula::kind(nominal, TypeKind::Tuple).negate(),
+        ] {
+            let Outcome::Entailed(proof) = registered.prove(goal, Budget::default()) else {
+                panic!("nominal distinction")
+            };
+            registered.verify_proof(&proof, Budget::default()).unwrap();
+            assert!(context.verify_proof(&proof, Budget::default()).is_err());
         }
-        assert!(matches!(context.prove(Formula::kind(value.clone(),TypeKind::Tuple),Budget {steps:0,..Default::default()}),Outcome::Unknown {..}));
-        assert!(matches!(context.prove(Formula::kind(value,TypeKind::Tuple),Budget::default()),Outcome::Entailed(_)));
+        assert!(matches!(
+            context.prove(
+                Formula::kind(value.clone(), TypeKind::Tuple),
+                Budget {
+                    steps: 0,
+                    ..Default::default()
+                }
+            ),
+            Outcome::Unknown { .. }
+        ));
+        assert!(matches!(
+            context.prove(Formula::kind(value, TypeKind::Tuple), Budget::default()),
+            Outcome::Entailed(_)
+        ));
     }
 }

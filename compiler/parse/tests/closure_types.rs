@@ -97,3 +97,144 @@ fn closure_qualification_contains_arrows_but_not_outer_type_propositions() {
         );
     }
 }
+
+#[test]
+fn closure_parameter_types_preserve_the_lambda_pipe_boundary() {
+    for source in [
+        "|callback:%{flag:bool} fn(*bool)->bool|callback(pointer)",
+        "|callback:%{flag:bool} fn(*bool)->(A | B)|callback(pointer)",
+        "|callback:%{inner:%{flag:bool} fn()->bool} fn()->bool|callback()",
+    ] {
+        let (ast, root, next) = parse(source).unwrap_or_else(|error| panic!("{source}: {error}"));
+        assert_eq!(next, TokenKind::Eof, "{source}");
+        assert_eq!(ast.get_node_kind(root), Some(NodeKind::Lambda), "{source}");
+    }
+}
+
+#[test]
+fn qualified_lambda_parameters_leave_the_body_outside_the_type() {
+    for (ty, kind) in [
+        ("#IO bool", NodeKind::EffectQualifiedType),
+        ("!Failure bool", NodeKind::ErrorQualifiedType),
+        ("&Reach bool", NodeKind::ReachabilityQualifiedType),
+        ("#IO !Failure bool", NodeKind::EffectQualifiedType),
+        (
+            "!Failure %{flag:bool} fn()->bool",
+            NodeKind::ErrorQualifiedType,
+        ),
+        (
+            "&Reach %{flag:bool} fn()->bool",
+            NodeKind::ReachabilityQualifiedType,
+        ),
+        ("!Failure #IO bool", NodeKind::ErrorQualifiedType),
+        (
+            "#IO &Reach %{flag:bool} fn()->bool",
+            NodeKind::EffectQualifiedType,
+        ),
+        (
+            "%Context !Failure fn()->bool",
+            NodeKind::ClosureQualifiedType,
+        ),
+    ] {
+        let source = format!("|value:{ty}|value");
+        let (ast, root, next) = parse(&source).unwrap_or_else(|error| panic!("{source}: {error}"));
+        assert_eq!(next, TokenKind::Eof, "{source}");
+        assert_eq!(ast.get_node_kind(root), Some(NodeKind::Lambda), "{source}");
+        let children = ast.get_children(root);
+        let parameters = ast.get_multi_child_slice(children[2]).unwrap();
+        assert_eq!(parameters.len(), 1, "{source}");
+        assert_eq!(
+            ast.get_node_kind(ast.get_children(parameters[0])[1]),
+            Some(kind),
+            "{source}"
+        );
+        assert_eq!(
+            ast.get_node_kind(children[1]),
+            Some(NodeKind::Id),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn qualifier_context_parentheses_keep_inner_operators_and_cmtt_boundaries() {
+    for (source, outer, context) in [
+        (
+            "&(Left | Right) bool",
+            NodeKind::ReachabilityQualifiedType,
+            NodeKind::Pipe,
+        ),
+        (
+            "#(Left % Right) bool",
+            NodeKind::EffectQualifiedType,
+            NodeKind::Mod,
+        ),
+    ] {
+        let (ast, root, next) = parse(source).unwrap();
+        assert_eq!(next, TokenKind::Eof, "{source}");
+        assert_eq!(ast.get_node_kind(root), Some(outer), "{source}");
+        assert_eq!(
+            ast.get_node_kind(ast.get_children(root)[0]),
+            Some(context),
+            "{source}"
+        );
+    }
+    for source in [
+        "<value: !Failure bool |- #IO bool >",
+        "<value: &Reach bool |- %{flag:bool} fn()->bool >",
+    ] {
+        let (ast, root, next) = parse(source).unwrap_or_else(|error| panic!("{source}: {error}"));
+        assert_eq!(next, TokenKind::Eof, "{source}");
+        assert_eq!(
+            ast.get_node_kind(root),
+            Some(NodeKind::ContextualExprType),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn qualifier_boundaries_do_not_supply_missing_operands() {
+    for source in [
+        "|value:#IO|value",
+        "|value:!Failure|value",
+        "|value:&Reach|value",
+        "|value:#IO !Failure|value",
+        "<value:bool |- #IO >",
+    ] {
+        assert!(parse(source).is_err(), "{source}");
+    }
+}
+
+#[test]
+fn qualified_types_leave_comparisons_and_bounds_outside_their_body() {
+    for (qualified, kind) in [
+        ("#IO fn()->T", NodeKind::EffectQualifiedType),
+        ("!Failure fn()->T", NodeKind::ErrorQualifiedType),
+        ("&Reach fn()->T", NodeKind::ReachabilityQualifiedType),
+        ("%Context fn()->T", NodeKind::ClosureQualifiedType),
+        ("#IO !Failure fn()->T", NodeKind::EffectQualifiedType),
+    ] {
+        for (operator, outer) in [
+            ("==", NodeKind::BoolEq),
+            ("!=", NodeKind::BoolNotEq),
+            (":-", NodeKind::TraitBound),
+        ] {
+            let source = format!("{qualified} {operator} Other");
+            let (ast, root, next) = parse(&source).unwrap();
+            assert_eq!(next, TokenKind::Eof, "{source}");
+            assert_eq!(ast.get_node_kind(root), Some(outer), "{source}");
+            assert_eq!(
+                ast.get_node_kind(ast.get_children(root)[0]),
+                Some(kind),
+                "{source}"
+            );
+        }
+    }
+    let (ast, root, next) = parse("#IO A == #IO B and !Failure C != !Failure D").unwrap();
+    assert_eq!(next, TokenKind::Eof);
+    assert_eq!(ast.get_node_kind(root), Some(NodeKind::BoolAnd));
+    let sides = ast.get_children(root);
+    assert_eq!(ast.get_node_kind(sides[0]), Some(NodeKind::BoolEq));
+    assert_eq!(ast.get_node_kind(sides[1]), Some(NodeKind::BoolNotEq));
+}

@@ -50,6 +50,12 @@ pub enum ItemKind<'hir> {
         &'hir [ClauseParam<'hir>],
         &'hir [ClauseConstraint<'hir>],
     ),
+    /// A nominal identity with an explicit representation edge, never an alias.
+    Newtype(
+        &'hir Expr<'hir>,
+        &'hir [ClauseParam<'hir>],
+        &'hir [ClauseConstraint<'hir>],
+    ),
     Use(UsePath<'hir>),
     Const(&'hir Expr<'hir>, &'hir Expr<'hir>),
     Invalid,
@@ -229,6 +235,7 @@ pub enum DefKind {
     Trait,
     Associated,
     TypeAlias,
+    Newtype,
     Use,
     Const,
     Invalid,
@@ -247,6 +254,7 @@ impl DefKind {
             ItemKind::Trait(..) => DefKind::Trait,
             ItemKind::Associated(..) => DefKind::Associated,
             ItemKind::TypeAlias(..) => DefKind::TypeAlias,
+            ItemKind::Newtype(..) => DefKind::Newtype,
             ItemKind::Use(..) => DefKind::Use,
             ItemKind::Const(..) => DefKind::Const,
             ItemKind::Invalid => DefKind::Invalid,

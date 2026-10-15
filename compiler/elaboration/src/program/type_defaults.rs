@@ -3,27 +3,54 @@ use super::*;
 use comptime_interpretor::Value;
 
 impl<'h> Checker<'_, 'h> {
-    fn type_packet_contexts(&mut self, args: &[Arg<'_>], count: usize, span: Span)
-        -> Result<Vec<Option<Term>>, Error> {
-        if !args.iter().any(|arg| matches!(arg, Arg::Expand(_))) { return Ok(vec![None; args.len()]); }
-        let empty = args.iter().enumerate().filter_map(|(index, arg)|
-            matches!(arg, Arg::Expand(value) if matches!(value.kind, H::Unit)).then_some((index, 0)))
+    fn type_packet_contexts(
+        &mut self,
+        args: &[Arg<'_>],
+        count: usize,
+        span: Span,
+    ) -> Result<Vec<Option<Term>>, Error> {
+        if !args.iter().any(|arg| matches!(arg, Arg::Expand(_))) {
+            return Ok(vec![None; args.len()]);
+        }
+        let empty = args
+            .iter()
+            .enumerate()
+            .filter_map(|(index, arg)| {
+                matches!(arg, Arg::Expand(value) if matches!(value.kind, H::Unit))
+                    .then_some((index, 0))
+            })
             .collect();
         self.spread_packet_layout_with_widths(args, &vec![p(P::Type); count], span, &empty)?
-            .into_iter().map(|fields| fields.map(|fields| self.tuple_value_type(fields, span)).transpose()).collect()
+            .into_iter()
+            .map(|fields| {
+                fields
+                    .map(|fields| self.tuple_value_type(fields, span))
+                    .transpose()
+            })
+            .collect()
     }
 
     fn type_input_slot(
-        clauses: &[hir::clause::ClauseParam<'_>], name: Option<hir::common::Ident>,
-        positional: &mut usize, span: Span,
+        clauses: &[hir::clause::ClauseParam<'_>],
+        name: Option<hir::common::Ident>,
+        positional: &mut usize,
+        span: Span,
     ) -> Result<usize, Error> {
         if let Some(name) = name {
-            return clauses.iter().position(|clause| clause.name.name == name.name
-                && matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..)))
+            return clauses
+                .iter()
+                .position(|clause| {
+                    clause.name.name == name.name
+                        && matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..))
+                })
                 .ok_or_else(|| error(span, "unknown named type argument"));
         }
         while *positional < clauses.len()
-            && matches!(clauses[*positional].kind, hir::clause::ClauseParamKind::Optional(..)) {
+            && matches!(
+                clauses[*positional].kind,
+                hir::clause::ClauseParamKind::Optional(..)
+            )
+        {
             *positional += 1;
         }
         let slot = *positional;
@@ -35,7 +62,10 @@ impl<'h> Checker<'_, 'h> {
     /// producer executes once, including an empty packet; its fields must be
     /// Type values. Literal packets keep symbolic declaration binders intact.
     pub(super) fn expanded_type_inputs(
-        &mut self, args: &[Arg<'_>], count: usize, span: Span,
+        &mut self,
+        args: &[Arg<'_>],
+        count: usize,
+        span: Span,
     ) -> Result<Vec<(Option<hir::common::Ident>, Term)>, Error> {
         let mut inputs = Vec::new();
         let contexts = self.type_packet_contexts(args, count, span)?;
@@ -44,23 +74,44 @@ impl<'h> Checker<'_, 'h> {
                 Arg::Positional(value) => inputs.push((None, self.type_expr(value)?)),
                 Arg::Named(name, value) => inputs.push((Some(*name), self.type_expr(value)?)),
                 Arg::Expand(value) => {
-                    if matches!(value.kind, H::Unit) { continue; }
+                    if matches!(value.kind, H::Unit) {
+                        continue;
+                    }
                     if let H::Tuple(fields) = value.kind {
-                        for field in fields { inputs.push((None, self.type_expr(field)?)); }
+                        for field in fields {
+                            inputs.push((None, self.type_expr(field)?));
+                        }
                     } else {
-                        let (packet, ty) = self.required_typed_expression(value, contexts[index].as_ref())?;
+                        let (packet, ty) =
+                            self.required_typed_expression(value, contexts[index].as_ref())?;
                         let Term::Tuple(fields) = self.structural_type(&ty, value.span)? else {
-                            return Err(error(value.span, "type argument spread requires a tuple of Type values"));
+                            return Err(error(
+                                value.span,
+                                "type argument spread requires a tuple of Type values",
+                            ));
                         };
-                        for field in &fields { self.require(field, &p(P::Type), value.span)?; }
+                        for field in &fields {
+                            self.require(field, &p(P::Type), value.span)?;
+                        }
                         let Value::Tuple(values) = packet else {
-                            return Err(error(value.span, "type argument spread did not produce a tuple"));
+                            return Err(error(
+                                value.span,
+                                "type argument spread did not produce a tuple",
+                            ));
                         };
                         for value in values {
                             let ty = match value {
                                 Value::Type(ty) => ty,
-                                Value::TypeParameter(declaration) => Term::Rigid { declaration, sort: Sort::Type },
-                                _ => return Err(error(span, "type argument spread element must be a Type value")),
+                                Value::TypeParameter(declaration) => Term::Rigid {
+                                    declaration,
+                                    sort: Sort::Type,
+                                },
+                                _ => {
+                                    return Err(error(
+                                        span,
+                                        "type argument spread element must be a Type value",
+                                    ));
+                                }
                             };
                             inputs.push((None, ty));
                         }
@@ -75,19 +126,28 @@ impl<'h> Checker<'_, 'h> {
     /// Invocation-time Type computations retain packet preparation in NIR.
     /// Unpacking once also preserves empty producers and early control exits.
     fn prepared_type_inputs(
-        &mut self, args: &[Arg<'_>], count: usize, statements: &mut Vec<n::Expr>, span: Span,
+        &mut self,
+        args: &[Arg<'_>],
+        count: usize,
+        statements: &mut Vec<n::Expr>,
+        span: Span,
     ) -> Result<Vec<(Option<hir::common::Ident>, n::Expr)>, Error> {
         let mut inputs = Vec::new();
         let contexts = self.type_packet_contexts(args, count, span)?;
         for (index, arg) in args.iter().enumerate() {
             match arg {
                 Arg::Positional(value) | Arg::Named(_, value) => {
-                    let name = match arg { Arg::Named(name, _) => Some(*name), _ => None };
+                    let name = match arg {
+                        Arg::Named(name, _) => Some(*name),
+                        _ => None,
+                    };
                     let value = self.expr(value, Some(&p(P::Type)))?;
                     inputs.push((name, self.bind_type_input(value, statements, span)?));
                 }
                 Arg::Expand(value) => {
-                    if matches!(value.kind, H::Unit) { continue; }
+                    if matches!(value.kind, H::Unit) {
+                        continue;
+                    }
                     if let H::Tuple(fields) = value.kind {
                         for field in fields {
                             let value = self.expr(field, Some(&p(P::Type)))?;
@@ -97,20 +157,41 @@ impl<'h> Checker<'_, 'h> {
                     }
                     let value = self.expr(value, contexts[index].as_ref())?;
                     let Term::Tuple(fields) = self.structural_type(&value.ty, span)? else {
-                        return Err(error(span, "type argument spread requires a tuple of Type values"));
+                        return Err(error(
+                            span,
+                            "type argument spread requires a tuple of Type values",
+                        ));
                     };
                     let mut pattern = Vec::new();
                     for field in fields {
                         self.require(&field, &p(P::Type), span)?;
                         let binding = self.spread_binding(span)?;
                         self.locals.insert(binding, p(P::Type));
-                        pattern.push(n::Pattern::Binding { binding, inner: Box::new(n::Pattern::Wild) });
-                        inputs.push((None, n::Expr { source: value.source, ty: p(P::Type), kind: K::Local(binding) }));
+                        pattern.push(n::Pattern::Binding {
+                            binding,
+                            inner: Box::new(n::Pattern::Wild),
+                        });
+                        inputs.push((
+                            None,
+                            n::Expr {
+                                source: value.source,
+                                ty: p(P::Type),
+                                kind: K::Local(binding),
+                            },
+                        ));
                     }
                     statements.push(n::Expr {
-                        source: n::SourceRange { start: value.source.end, end: value.source.end },
+                        source: n::SourceRange {
+                            start: value.source.end,
+                            end: value.source.end,
+                        },
                         ty: p(P::Void),
-                        kind: K::LetPattern { pattern: n::Pattern::Tuple(pattern), value: Box::new(value), guard: None, otherwise: None },
+                        kind: K::LetPattern {
+                            pattern: n::Pattern::Tuple(pattern),
+                            value: Box::new(value),
+                            guard: None,
+                            otherwise: None,
+                        },
                     });
                 }
                 _ => return Err(error(span, "unsupported type argument routing protocol")),
@@ -124,7 +205,9 @@ impl<'h> Checker<'_, 'h> {
             ItemKind::Trait(def) => def.clause_params.to_vec(),
             ItemKind::Struct(def) => def.clause_params.to_vec(),
             ItemKind::Enum(def) => def.clause_params.to_vec(),
-            ItemKind::TypeAlias(_, clauses, _) => clauses.to_vec(),
+            ItemKind::TypeAlias(_, clauses, _) | ItemKind::Newtype(_, clauses, _) => {
+                clauses.to_vec()
+            }
             ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) => sig.clause_params.to_vec(),
             _ => Vec::new(),
         }
@@ -157,10 +240,14 @@ impl<'h> Checker<'_, 'h> {
             let mut values: Vec<Option<n::Expr>> = vec![None; clauses.len()];
             let mut statements = Vec::new();
             let mut positional = 0;
-            let count = clauses.iter().filter(|clause| !matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..))).count();
+            let count = clauses
+                .iter()
+                .filter(|clause| !matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..)))
+                .count();
             for (name, value) in self.prepared_type_inputs(args, count, &mut statements, span)? {
                 let slot = Self::type_input_slot(&clauses, name, &mut positional, span)?;
-                let cell = values.get_mut(slot)
+                let cell = values
+                    .get_mut(slot)
                     .ok_or_else(|| error(span, "type argument count mismatch"))?;
                 if cell.replace(value).is_some() {
                     return Err(error(span, "duplicate type argument"));
@@ -489,9 +576,7 @@ impl<'h> Checker<'_, 'h> {
             }
             let inputs = template[..*slot]
                 .iter()
-                .map(|ty| {
-                    self.instantiate_input_types(ty, &substitutions, &available, span)
-                })
+                .map(|ty| self.instantiate_input_types(ty, &substitutions, &available, span))
                 .collect::<Result<Vec<_>, _>>()?;
             let value = self.type_clause_default(owner, *slot - inherited, &inputs, None, span)?;
             let index = parameters.iter().position(|id| *id == all[*slot]).unwrap();
@@ -542,12 +627,26 @@ impl<'h> Checker<'_, 'h> {
         prefix: Vec<Term>,
     ) -> Result<Vec<Term>, Error> {
         let clauses = self.type_clause_params(owner);
+        let domains = self.trait_domains(owner)?;
+        if domains.iter().any(|ty| *ty != p(P::Type)) {
+            if !prefix.is_empty() {
+                return Err(error(
+                    span,
+                    "mixed trait inputs cannot use a method type prefix",
+                ));
+            }
+            return self.trait_clause_arguments(owner, args, subject, span, &domains);
+        }
         let mut supplied = vec![None; clauses.len()];
         let mut positional = 0;
-        let count = clauses.iter().filter(|clause| !matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..))).count();
+        let count = clauses
+            .iter()
+            .filter(|clause| !matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..)))
+            .count();
         for (name, value) in self.expanded_type_inputs(args, count, span)? {
             let slot = Self::type_input_slot(&clauses, name, &mut positional, span)?;
-            let cell = supplied.get_mut(slot)
+            let cell = supplied
+                .get_mut(slot)
                 .ok_or_else(|| error(span, "type argument count mismatch"))?;
             if cell.replace(value).is_some() {
                 return Err(error(span, "duplicate type argument"));
@@ -565,6 +664,10 @@ impl<'h> Checker<'_, 'h> {
     /// Validate a default under its declaration binders without invoking it.
     /// Concrete normalization is performed separately when the slot is omitted.
     pub(super) fn check_type_defaults(&mut self, owner: OwnerId) -> Result<(), Error> {
+        let domains = self.trait_domains(owner)?;
+        if domains.iter().any(|ty| *ty != p(P::Type)) {
+            return self.check_trait_defaults(owner, &domains);
+        }
         if self
             .normal_parameters
             .get(&owner)
@@ -626,8 +729,12 @@ impl<'h> Checker<'_, 'h> {
         {
             return Err(error(span, "cyclic or excessively deep type default"));
         }
-        let caller=self.call_inference_scope();
-        let caller_frames=if caller.is_empty() {vec![]} else {vec![caller.iter().map(|p|p.sort).collect()]};
+        let caller = self.call_inference_scope();
+        let caller_frames = if caller.is_empty() {
+            vec![]
+        } else {
+            vec![caller.iter().map(|p| p.sort).collect()]
+        };
         let saved_owner = self.signature_owner.replace(owner);
         let context = self.definition_context(owner);
         let saved_context = std::mem::replace(&mut self.context, context);
@@ -665,7 +772,7 @@ impl<'h> Checker<'_, 'h> {
                 ));
             }
             default
-                .instantiate_types_in_scope(&parameters, &arguments,&caller_frames)
+                .instantiate_types_in_scope(&parameters, &arguments, &caller_frames)
                 .map_err(|e| error(span, e.to_string()))
         })();
         self.alias_substitution = saved_substitution;

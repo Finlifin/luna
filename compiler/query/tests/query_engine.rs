@@ -17,14 +17,28 @@ fn memoises_compute() {
     let cache = QueryCache::<u32, u32>::new();
     let hits = Cell::new(0);
 
-    let r1 = force_get_with(&engine, &cache, A, 1, |k| k.to_string(), || {
-        hits.set(hits.get() + 1);
-        42
-    });
-    let r2 = force_get_with(&engine, &cache, A, 1, |k| k.to_string(), || {
-        hits.set(hits.get() + 1);
-        42
-    });
+    let r1 = force_get_with(
+        &engine,
+        &cache,
+        A,
+        1,
+        |k| k.to_string(),
+        || {
+            hits.set(hits.get() + 1);
+            42
+        },
+    );
+    let r2 = force_get_with(
+        &engine,
+        &cache,
+        A,
+        1,
+        |k| k.to_string(),
+        || {
+            hits.set(hits.get() + 1);
+            42
+        },
+    );
     assert_eq!(r1, 42);
     assert_eq!(r2, 42);
     assert_eq!(hits.get(), 1);
@@ -50,26 +64,14 @@ fn detects_cycle() {
                 B,
                 "b",
                 |k| (*k).to_string(),
-                || {
-                    match try_get_with(
-                        &engine,
-                        &cache_a,
-                        A,
-                        "a",
-                        |k| (*k).to_string(),
-                        || 0,
-                    ) {
-                        QueryResult::Cycle(err) => {
-                            cycle_frames.set(Some(
-                                err.frames
-                                    .iter()
-                                    .map(|f| f.desc.name)
-                                    .collect::<Vec<_>>(),
-                            ));
-                            0
-                        }
-                        other => panic!("expected Cycle, got {other:?}"),
+                || match try_get_with(&engine, &cache_a, A, "a", |k| (*k).to_string(), || 0) {
+                    QueryResult::Cycle(err) => {
+                        cycle_frames.set(Some(
+                            err.frames.iter().map(|f| f.desc.name).collect::<Vec<_>>(),
+                        ));
+                        0
                     }
+                    other => panic!("expected Cycle, got {other:?}"),
                 },
             );
             match inner {
@@ -92,9 +94,16 @@ fn poison_on_panic() {
     let cache = QueryCache::<u32, u32>::new();
 
     let panicked = catch_unwind(AssertUnwindSafe(|| {
-        force_get_with(&engine, &cache, A, 7, |k| k.to_string(), || {
-            panic!("boom");
-        });
+        force_get_with(
+            &engine,
+            &cache,
+            A,
+            7,
+            |k| k.to_string(),
+            || {
+                panic!("boom");
+            },
+        );
     }));
     assert!(panicked.is_err());
 
@@ -116,15 +125,29 @@ fn different_keys_independent() {
     let hits = Rc::new(Cell::new(0));
 
     let h = hits.clone();
-    force_get_with(&engine, &cache, A, 1, |k| k.to_string(), || {
-        h.set(h.get() + 1);
-        10
-    });
+    force_get_with(
+        &engine,
+        &cache,
+        A,
+        1,
+        |k| k.to_string(),
+        || {
+            h.set(h.get() + 1);
+            10
+        },
+    );
     let h = hits.clone();
-    force_get_with(&engine, &cache, A, 2, |k| k.to_string(), || {
-        h.set(h.get() + 1);
-        20
-    });
+    force_get_with(
+        &engine,
+        &cache,
+        A,
+        2,
+        |k| k.to_string(),
+        || {
+            h.set(h.get() + 1);
+            20
+        },
+    );
     assert_eq!(hits.get(), 2);
     assert_eq!(
         force_get_with(&engine, &cache, A, 1, |k| k.to_string(), || 99),

@@ -9,7 +9,12 @@ fn inert_input(expression: &n::Expr, fuel: &mut usize) -> Result<bool, String> {
     iir::visit::expression(expression, fuel, |node, _| {
         inert &= matches!(
             node.kind,
-            K::TypeValue(_) | K::TypeListValue(_) | K::Literal(_) | K::Unit | K::Tuple(_) | K::AnonymousRecord { .. }
+            K::TypeValue(_)
+                | K::TypeListValue(_)
+                | K::Literal(_)
+                | K::Unit
+                | K::Tuple(_)
+                | K::AnonymousRecord { .. }
         );
         Ok(())
     })?;

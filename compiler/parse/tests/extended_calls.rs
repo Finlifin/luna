@@ -6,9 +6,18 @@ use rustc_span::{FileName, SourceMap, source_map::FilePathMapping};
 #[test]
 fn extended_calls_keep_spread_operands_and_properties_distinct() {
     for (source, expected) in [
-        ("f {first:true,...packet(),last:false}", vec![NodeKind::Property, NodeKind::ExpandArg, NodeKind::Property]),
-        ("f {...(1,true),flag:false}", vec![NodeKind::ExpandArg, NodeKind::Property]),
-        ("f {flag:true,...do {(1,true)}}", vec![NodeKind::Property, NodeKind::ExpandArg]),
+        (
+            "f {first:true,...packet(),last:false}",
+            vec![NodeKind::Property, NodeKind::ExpandArg, NodeKind::Property],
+        ),
+        (
+            "f {...(1,true),flag:false}",
+            vec![NodeKind::ExpandArg, NodeKind::Property],
+        ),
+        (
+            "f {flag:true,...do {(1,true)}}",
+            vec![NodeKind::Property, NodeKind::ExpandArg],
+        ),
         ("f {...packet()}", vec![NodeKind::ExpandArg]),
     ] {
         let map = SourceMap::new(FilePathMapping::empty());
@@ -20,8 +29,16 @@ fn extended_calls_keep_spread_operands_and_properties_distinct() {
         assert_eq!(parser.peek_next_token().kind, TokenKind::Eof, "{source}");
         let ast = parser.finalize();
         assert_eq!(ast.get_node_kind(root), Some(NodeKind::ExtendedApplication));
-        let inputs = ast.get_multi_child_slice(ast.get_children(root)[1]).unwrap();
-        assert_eq!(inputs.iter().map(|node| ast.get_node_kind(*node).unwrap()).collect::<Vec<_>>(), expected);
+        let inputs = ast
+            .get_multi_child_slice(ast.get_children(root)[1])
+            .unwrap();
+        assert_eq!(
+            inputs
+                .iter()
+                .map(|node| ast.get_node_kind(*node).unwrap())
+                .collect::<Vec<_>>(),
+            expected
+        );
     }
 }
 

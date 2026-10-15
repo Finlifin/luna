@@ -1,0 +1,719 @@
+//! Exact comptime Float source semantics, independently runnable.
+use comptime_interpretor::{Budget, Interpreter, Value};
+#[path = "support/execution.rs"]
+#[allow(dead_code)]
+mod execution_support;
+use execution_support::{compile, compile_with_protocols, compile_with_source_bindings, id};
+
+#[test]
+fn exact_float_literals_flow_through_comptime_calls_and_suffix_protocols() {
+    let package = compile_with_source_bindings(
+        r#"
+        typealias Float = .Float'builtin;
+        typealias Symbol = .Symbol'builtin;
+        comptime fn identity(value:Float)->Float {value}
+        comptime fn run()->Float {identity(1.0000000000000000000000000000001)}
+        trait Convert where suffix:Symbol,R {comptime fn literal_into(comptime value:Self)->R;}
+        impl Convert<.exact,Float> for Float {
+            comptime fn literal_into(comptime value:Float)->Float {identity(value)}
+        }
+        comptime fn suffix()->Float {1.0000000000000000000000000000002exact}
+        comptime fn negative()->Float { -0.0 }
+        const SAVED = identity(1.0000000000000000000000000000003);
+        const NEGATIVE_ZERO = identity(-0.0);
+        const HUGE = identity(1.0e9999999999999999999999999999999999999999);
+        comptime fn saved()->Float {SAVED}
+        comptime fn saved_zero()->Float {NEGATIVE_ZERO}
+        comptime fn huge()->Float {HUGE}
+    "#,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            literal_into: Some("input::Convert"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for (name, text) in [
+        ("run", "1.0000000000000000000000000000001"),
+        ("suffix", "1.0000000000000000000000000000002"),
+        ("negative", "-0.0"),
+        ("saved", "1.0000000000000000000000000000003"),
+        ("saved_zero", "-0.0"),
+        ("huge", "1.0e9999999999999999999999999999999999999999"),
+    ] {
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let actual = vm.invoke(id(&package, name), vec![]).unwrap();
+        let expected = comptime_runtime::decimal::DecimalValue::parse_literal(
+            text,
+            &mut comptime_runtime::Budget::default(),
+        )
+        .unwrap();
+        assert_eq!(actual, Value::Float(expected), "{name}");
+    }
+}
+
+#[test]
+fn exact_float_source_values_cannot_leak_into_runtime_storage() {
+    for source in [
+        "typealias Float=.Float'builtin;fn leak()->Float {1.0}",
+        "typealias Float=.Float'builtin;fn leak(value:Float)->bool {true}",
+        "typealias Float=.Float'builtin;fn leak(comptime value:Float)->bool {value < 1.0}",
+        "typealias Float=.Float'builtin;const SAVED:Float=1.0;fn leak()->Float {SAVED}",
+    ] {
+        assert!(
+            compile_with_protocols(source, &Default::default()).is_err(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn exact_float_source_comparisons_use_decimal_values() {
+    let package = compile(
+        r#"
+        typealias Float=.Float'builtin;
+        comptime fn eq(a:Float,b:Float)->bool {a == b}
+        comptime fn ne(a:Float,b:Float)->bool {a != b}
+        comptime fn lt(a:Float,b:Float)->bool {a < b}
+        comptime fn le(a:Float,b:Float)->bool {a <= b}
+        comptime fn gt(a:Float,b:Float)->bool {a > b}
+        comptime fn ge(a:Float,b:Float)->bool {a >= b}
+        const LEFT:Float=1.0000000000000000000000000000001;
+        const RIGHT:Float=1.0000000000000000000000000000002;
+        comptime fn staged()->bool {lt(LEFT,RIGHT) and ne(LEFT,RIGHT)}
+    "#,
+    );
+    let cases = [
+        ("-1.0e9999999999999999999999999999999999999999", -3),
+        ("-0.000000000000000000000001", -2),
+        ("-0.0", 0),
+        ("0.0", 0),
+        ("1.0000000000000000000000000000001", 1),
+        ("10.000000000000000000000000000001e-1", 1),
+        ("1.0000000000000000000000000000002", 2),
+        ("1.0e9999999999999999999999999999999999999999", 3),
+    ];
+    for (a, rank_a) in cases {
+        for (b, rank_b) in cases {
+            for (name, expected) in [
+                ("eq", rank_a == rank_b),
+                ("ne", rank_a != rank_b),
+                ("lt", rank_a < rank_b),
+                ("le", rank_a <= rank_b),
+                ("gt", rank_a > rank_b),
+                ("ge", rank_a >= rank_b),
+            ] {
+                let value = |text| {
+                    Value::Float(
+                        comptime_runtime::decimal::DecimalValue::parse_literal(
+                            text,
+                            &mut comptime_runtime::Budget::default(),
+                        )
+                        .unwrap(),
+                    )
+                };
+                let actual = Interpreter::for_comptime(&package, Budget::default())
+                    .unwrap()
+                    .invoke(id(&package, name), vec![value(a), value(b)])
+                    .unwrap();
+                assert_eq!(actual, Value::Bool(expected), "{a} {name} {b}");
+            }
+        }
+    }
+    assert_eq!(
+        Interpreter::for_comptime(&package, Budget::default())
+            .unwrap()
+            .invoke(id(&package, "staged"), vec![])
+            .unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn exact_float_suffix_can_generate_runtime_results_from_precise_comparisons() {
+    let package = compile_with_source_bindings(
+        r#"
+        typealias Type=.Type'builtin;
+        trait Splice {assoc RuntimeTarget:Type;fn splice(comptime data:Self)->RuntimeTarget;}
+        impl Splice for bool {assoc RuntimeTarget:Type=bool;fn splice(comptime data:bool)->bool {data}}
+        typealias Float=.Float'builtin;
+        typealias Symbol=.Symbol'builtin;
+        trait Convert where suffix:Symbol,R {comptime fn literal_into(comptime value:Self)->R;}
+        impl Convert<.below,bool> for Float {
+            comptime fn literal_into(comptime value:Float)->bool {
+                value < 1.0000000000000000000000000000002
+            }
+        }
+        fn below()->bool {1.0000000000000000000000000000001below}
+        fn equal()->bool {1.0000000000000000000000000000002below}
+        fn above()->bool {1.0000000000000000000000000000003below}
+    "#,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            literal_into: Some("input::Convert"),
+            splice: Some("Splice"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for (name, expected) in [("below", true), ("equal", false), ("above", false)] {
+        let value = luna::execution::interpret(&package, name, 100_000).unwrap();
+        assert_eq!(value, Value::Bool(expected), "{name}");
+    }
+}
+
+#[test]
+fn exact_float_negation_preserves_values_through_calls_constants_and_zero_signs() {
+    let package = compile(
+        r#"
+        typealias Float=.Float'builtin;
+        comptime fn negate(value:Float)->Float { -value }
+        comptime fn twice(value:Float)->Float { -negate(value) }
+        comptime fn identity(value:Float)->Float {value}
+        const NEGATIVE=negate(1.0000000000000000000000000000001);
+        const ZERO=negate(0.0);
+        comptime fn saved()->Float {NEGATIVE}
+        comptime fn zero()->Float {ZERO}
+        comptime fn call()->Float { -identity(1.0e9999999999999999999999999999999999999999) }
+    "#,
+    );
+    let value = |text| {
+        Value::Float(
+            comptime_runtime::decimal::DecimalValue::parse_literal(
+                text,
+                &mut comptime_runtime::Budget::default(),
+            )
+            .unwrap(),
+        )
+    };
+    for (positive, negative) in [
+        ("0.0", "-0.0"),
+        ("0.000000000000001", "-0.000000000000001"),
+        (
+            "1.0000000000000000000000000000001",
+            "-1.0000000000000000000000000000001",
+        ),
+        (
+            "1.0e9999999999999999999999999999999999999999",
+            "-1.0e9999999999999999999999999999999999999999",
+        ),
+    ] {
+        for (input, expected) in [(positive, negative), (negative, positive)] {
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            assert_eq!(
+                vm.invoke(id(&package, "negate"), vec![value(input)])
+                    .unwrap(),
+                value(expected)
+            );
+            assert_eq!(
+                vm.invoke(id(&package, "twice"), vec![value(input)])
+                    .unwrap(),
+                value(input)
+            );
+        }
+    }
+    for (name, expected) in [
+        ("saved", "-1.0000000000000000000000000000001"),
+        ("zero", "-0.0"),
+        ("call", "-1.0e9999999999999999999999999999999999999999"),
+    ] {
+        assert_eq!(
+            Interpreter::for_comptime(&package, Budget::default())
+                .unwrap()
+                .invoke(id(&package, name), vec![])
+                .unwrap(),
+            value(expected)
+        );
+    }
+    assert!(
+        compile_with_protocols(
+            "typealias Float=.Float'builtin;fn bad(comptime value:Float)->Float { -value }",
+            &Default::default()
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn exact_float_arithmetic_preserves_small_differences_and_constant_results() {
+    let package = compile(
+        r#"
+        typealias Float=.Float'builtin;
+        comptime fn add(a:Float,b:Float)->Float {a + b}
+        comptime fn subtract(a:Float,b:Float)->Float {a - b}
+        comptime fn multiply(a:Float,b:Float)->Float {a * b}
+        const SUM=add(0.1,0.2);
+        const DIFFERENCE=subtract(1.0000000000000000000000000000001,1.0);
+        const PRODUCT=multiply(1.0000000000000000000000000000001,10.0);
+        comptime fn sum()->Float {SUM}
+        comptime fn literal_sum()->Float {0.1 + 0.2}
+        comptime fn difference()->Float {DIFFERENCE}
+        comptime fn product()->Float {PRODUCT}
+        comptime fn combined(a:Float,b:Float)->Float {(a + b) * (a - b)}
+    "#,
+    );
+    let value = |text| {
+        Value::Float(
+            comptime_runtime::decimal::DecimalValue::parse_literal(
+                text,
+                &mut comptime_runtime::Budget::default(),
+            )
+            .unwrap(),
+        )
+    };
+    for (name, expected) in [
+        ("sum", "0.3"),
+        ("literal_sum", "0.3"),
+        ("difference", "0.0000000000000000000000000000001"),
+        ("product", "10.000000000000000000000000000001"),
+    ] {
+        assert_eq!(
+            Interpreter::for_comptime(&package, Budget::default())
+                .unwrap()
+                .invoke(id(&package, name), vec![])
+                .unwrap(),
+            value(expected)
+        );
+    }
+    assert_eq!(
+        Interpreter::for_comptime(&package, Budget::default())
+            .unwrap()
+            .invoke(id(&package, "combined"), vec![value("2.5"), value("1.5")])
+            .unwrap(),
+        value("4.0")
+    );
+    for operation in ["/", "%"] {
+        let source = format!(
+            "typealias Float=.Float'builtin;comptime fn bad(a:Float,b:Float)->Float {{a {operation} b}}"
+        );
+        assert!(compile_with_protocols(&source, &Default::default()).is_err());
+    }
+    assert!(
+        compile_with_protocols(
+            "typealias Float=.Float'builtin;fn bad(comptime a:Float)->Float {a + 1.0}",
+            &Default::default()
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn exact_float_patterns_use_numeric_equality_and_support_negation() {
+    let package = compile(
+        r#"
+        typealias Float=.Float'builtin;
+        comptime fn precise(value:Float)->bool {value match {
+            1.0000000000000000000000000000001 => true,
+            _ => false,
+        }}
+        comptime fn nonzero(value:Float)->bool {value match {not 0.0=>true,0.0=>false}}
+        comptime fn alternative(value:Float)->bool {value match {
+            0.0 or 1.0000000000000000000000000000001 => true,
+            _ => false,
+        }}
+        const RESULT=precise(10.000000000000000000000000000001e-1);
+        comptime fn saved()->bool {RESULT}
+    "#,
+    );
+    let value = |text: &str| {
+        Value::Float(
+            comptime_runtime::decimal::DecimalValue::parse_literal(
+                text,
+                &mut comptime_runtime::Budget::default(),
+            )
+            .unwrap(),
+        )
+    };
+    for (input, precise, nonzero, alternative) in [
+        ("0.0", false, false, true),
+        ("-0.0", false, false, true),
+        ("1.0000000000000000000000000000001", true, true, true),
+        ("10.000000000000000000000000000001e-1", true, true, true),
+        ("1.0000000000000000000000000000002", false, true, false),
+    ] {
+        for (name, expected) in [
+            ("precise", precise),
+            ("nonzero", nonzero),
+            ("alternative", alternative),
+        ] {
+            assert_eq!(
+                Interpreter::for_comptime(&package, Budget::default())
+                    .unwrap()
+                    .invoke(id(&package, name), vec![value(input)])
+                    .unwrap(),
+                Value::Bool(expected),
+                "{name} {input}"
+            );
+        }
+    }
+    assert_eq!(
+        Interpreter::for_comptime(&package, Budget::default())
+            .unwrap()
+            .invoke(id(&package, "saved"), vec![])
+            .unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn exact_float_coverage_preserves_tuple_correlations_and_rejects_executable_guards() {
+    let package = compile(
+        r#"
+        typealias Float=.Float'builtin;
+        comptime fn classify(value:(Float,bool))->bool {value match {
+            (0.0,true)=>true,(not 0.0,_)=>true,(0.0,false)=>true,
+        }}
+        comptime fn nested(value:Float)->bool {value match {
+            not (0.0 or 1.0)=>true,0.0=>true,1.0=>true,
+        }}
+    "#,
+    );
+    for text in ["0.0", "-0.0", "1.0", "1.0000000000000000000000000000001"] {
+        let value = Value::Float(
+            comptime_runtime::decimal::DecimalValue::parse_literal(
+                text,
+                &mut comptime_runtime::Budget::default(),
+            )
+            .unwrap(),
+        );
+        for flag in [false, true] {
+            assert_eq!(
+                Interpreter::for_comptime(&package, Budget::default())
+                    .unwrap()
+                    .invoke(
+                        id(&package, "classify"),
+                        vec![Value::Tuple(vec![value.clone(), Value::Bool(flag)])]
+                    )
+                    .unwrap(),
+                Value::Bool(true)
+            );
+        }
+        assert_eq!(
+            Interpreter::for_comptime(&package, Budget::default())
+                .unwrap()
+                .invoke(id(&package, "nested"), vec![value])
+                .unwrap(),
+            Value::Bool(true)
+        );
+    }
+    for body in ["value match {(0.0,true)=>true,(not 0.0,_)=>false}"] {
+        let source = format!(
+            "typealias Float=.Float'builtin;comptime fn bad(value:(Float,bool))->bool {{{body}}}"
+        );
+        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(error.contains("non-exhaustive match"), "{error}");
+    }
+    for pattern in [
+        "not (_ if accepts(value))",
+        "not (0.0 or (_ if accepts(value)))",
+    ] {
+        let source = format!(
+            "typealias Float=.Float'builtin;comptime fn accepts(value:Float)->bool {{true}} comptime fn bad(value:Float)->bool {{value match {{{pattern}=>true,0.0=>false}}}}"
+        );
+        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(error.contains("non-exhaustive match"), "{error}");
+    }
+}
+
+#[test]
+fn exact_float_pure_equality_guards_cover_complements_and_keep_subject_identity() {
+    let package = compile(
+        r#"
+        typealias Float=.Float'builtin;
+        comptime fn reflexive(value:Float)->bool {value match {_ as x if x == x => true}}
+        comptime fn guard(value:Float)->bool {value match {
+            _ as x if x == -0.0 => true,
+            _ as y if 0.0 != y => false,
+        }}
+        comptime fn close(value:Float)->bool {value match {
+            _ as x if x == 1.0000000000000000000000000000001 => true,
+            _ as y if y != 10.000000000000000000000000000001e-1 => false,
+        }}
+        comptime fn negative(value:Float)->bool {value match {
+            < -1.25 > => true, not < -1.25 > => false,
+        }}
+        comptime fn negative_tuple(value:(Float,bool))->bool {value match {
+            ( < -0.0 > ,true)=>true,(not < -0.0 > ,_)=>false,(0.0,false)=>true,
+        }}
+    "#,
+    );
+    let value = |text: &str| {
+        Value::Float(
+            comptime_runtime::decimal::DecimalValue::parse_literal(
+                text,
+                &mut comptime_runtime::Budget::default(),
+            )
+            .unwrap(),
+        )
+    };
+    for (name, input, expected) in [
+        ("reflexive", "-0.0", true),
+        ("reflexive", "1.0000000000000000000000000000002", true),
+        ("guard", "0.0", true),
+        ("guard", "-0.0", true),
+        ("guard", "1.0", false),
+        ("close", "1.0000000000000000000000000000001", true),
+        ("close", "1.0000000000000000000000000000002", false),
+        ("negative", "-1.25", true),
+        ("negative", "1.25", false),
+    ] {
+        assert_eq!(
+            Interpreter::for_comptime(&package, Budget::default())
+                .unwrap()
+                .invoke(id(&package, name), vec![value(input)])
+                .unwrap(),
+            Value::Bool(expected)
+        );
+    }
+    for flag in [false, true] {
+        assert_eq!(
+            Interpreter::for_comptime(&package, Budget::default())
+                .unwrap()
+                .invoke(
+                    id(&package, "negative_tuple"),
+                    vec![Value::Tuple(vec![value("-0.0"), Value::Bool(flag)])]
+                )
+                .unwrap(),
+            Value::Bool(true)
+        );
+    }
+    for guards in [
+        "_ as x if x == 0.0 => true, _ as y if y != 1.0 => false",
+        "_ as x if x == 0.0 => true, _ as y if other != 0.0 => false",
+        "_ as x if x == 0.0 => true, _ as y if accepts(y) => false",
+    ] {
+        let source = format!(
+            "typealias Float=.Float'builtin;comptime fn accepts(value:Float)->bool {{true}} comptime fn bad(value:Float,other:Float)->bool {{value match {{{guards}}}}}"
+        );
+        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(error.contains("non-exhaustive match"), "{error}");
+    }
+}
+
+#[test]
+fn exact_float_ordered_guards_cover_intervals_without_rounding_endpoints() {
+    let package = compile(
+        r#"
+        typealias Float=.Float'builtin;
+        comptime fn sign(value:Float)->.u8'builtin {value match {
+            _ as x if x < 0.0 => 0,
+            _ as x if x == -0.0 => 1,
+            _ as x if 0.0 < x => 2,
+        }}
+        comptime fn window(value:Float)->bool {value match {
+            _ as x if x < 1.0000000000000000000000000000001 => false,
+            _ as x if x >= 1.0000000000000000000000000000001 and x <= 1.0000000000000000000000000000002 => true,
+            _ as x if 1.0000000000000000000000000000002 < x => false,
+        }}
+        comptime fn extreme(value:Float)->bool {value match {
+            _ as x if x <= 1.0e9999999999999999999999999999999999999999 => true,
+            _ as x if x > 1.0e9999999999999999999999999999999999999999 => false,
+        }}
+    "#,
+    );
+    let value = |text: &str| {
+        Value::Float(
+            comptime_runtime::decimal::DecimalValue::parse_literal(
+                text,
+                &mut comptime_runtime::Budget::default(),
+            )
+            .unwrap(),
+        )
+    };
+    for (input, expected) in [("-1.0", 0), ("-0.0", 1), ("0.0", 1), ("1.0", 2)] {
+        assert_eq!(
+            Interpreter::for_comptime(&package, Budget::default())
+                .unwrap()
+                .invoke(id(&package, "sign"), vec![value(input)])
+                .unwrap(),
+            Value::UnsignedInteger(expected)
+        );
+    }
+    for (input, expected) in [
+        ("1.0", false),
+        ("1.0000000000000000000000000000001", true),
+        ("1.00000000000000000000000000000015", true),
+        ("1.0000000000000000000000000000002", true),
+        ("1.0000000000000000000000000000003", false),
+    ] {
+        assert_eq!(
+            Interpreter::for_comptime(&package, Budget::default())
+                .unwrap()
+                .invoke(id(&package, "window"), vec![value(input)])
+                .unwrap(),
+            Value::Bool(expected)
+        );
+    }
+    assert_eq!(
+        Interpreter::for_comptime(&package, Budget::default())
+            .unwrap()
+            .invoke(id(&package, "extreme"), vec![value("2.0")])
+            .unwrap(),
+        Value::Bool(true)
+    );
+    for arms in [
+        "_ as x if x < 0.0=>true,_ as x if x > 0.0=>false",
+        "_ as x if x <= 0.0=>true,_ as x if x >= 1.0=>false",
+        "_ as x if x < x=>true",
+        "_ as x if x <= 0.0=>true,_ as x if other > 0.0=>false",
+    ] {
+        let source = format!(
+            "typealias Float=.Float'builtin;comptime fn bad(value:Float,other:Float)->bool {{value match {{{arms}}}}}"
+        );
+        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(error.contains("non-exhaustive match"), "{error}");
+    }
+}
+
+#[test]
+fn exact_float_range_patterns_preserve_endpoints_negation_and_evaluation_order() {
+    let package = compile(
+        r#"
+        typealias Float=.Float'builtin;
+        comptime fn closed(value:Float)->bool {value match {
+            1.0000000000000000000000000000001..=1.0000000000000000000000000000002=>true,
+            not (1.0000000000000000000000000000001..=1.0000000000000000000000000000002)=>false,
+        }}
+        comptime fn open(value:Float)->bool {value match {0.0..1.0=>true,not (0.0..1.0)=>false}}
+        comptime fn one_sided(value:Float)->.u8'builtin {value match {..0.0=>0,0.0..=>1}}
+        comptime fn empty(value:Float)->bool {value match {1.0..1.0=>true,not (1.0..1.0)=>false}}
+        comptime fn dynamic(value:Float,lower:Float,upper:Float)->bool {value match {lower..=upper=>true,_=>false}}
+        comptime fn ordered(sample:Float)->bool {
+            var count:.u8'builtin=0;
+            let result:bool=sample match {
+                < do {count += 1;0.0} > .. < do {assumes count == 1;count += 2;1.0} > => true,
+                _=>false,
+            };
+            (result == (sample >= 0.0 and sample < 1.0)) and count == 3
+        }
+    "#,
+    );
+    let value = |text: &str| {
+        Value::Float(
+            comptime_runtime::decimal::DecimalValue::parse_literal(
+                text,
+                &mut comptime_runtime::Budget::default(),
+            )
+            .unwrap(),
+        )
+    };
+    for (name, input, expected) in [
+        ("closed", "1.0", false),
+        ("closed", "1.0000000000000000000000000000001", true),
+        ("closed", "1.00000000000000000000000000000015", true),
+        ("closed", "1.0000000000000000000000000000002", true),
+        ("closed", "1.0000000000000000000000000000003", false),
+        ("open", "-0.0", true),
+        ("open", "1.0", false),
+        ("empty", "1.0", false),
+    ] {
+        assert_eq!(
+            Interpreter::for_comptime(&package, Budget::default())
+                .unwrap()
+                .invoke(id(&package, name), vec![value(input)])
+                .unwrap(),
+            Value::Bool(expected),
+            "{name} {input}"
+        );
+    }
+    for (input, expected) in [("-1.0", 0), ("-0.0", 1), ("1.0", 1)] {
+        assert_eq!(
+            Interpreter::for_comptime(&package, Budget::default())
+                .unwrap()
+                .invoke(id(&package, "one_sided"), vec![value(input)])
+                .unwrap(),
+            Value::UnsignedInteger(expected)
+        );
+    }
+    assert_eq!(
+        Interpreter::for_comptime(&package, Budget::default())
+            .unwrap()
+            .invoke(
+                id(&package, "dynamic"),
+                vec![value("0.5"), value("0.0"), value("1.0")]
+            )
+            .unwrap(),
+        Value::Bool(true)
+    );
+    for input in ["-1.0", "0.5", "2.0"] {
+        assert_eq!(
+            Interpreter::for_comptime(&package, Budget::default())
+                .unwrap()
+                .invoke(id(&package, "ordered"), vec![value(input)])
+                .unwrap(),
+            Value::Bool(true)
+        );
+    }
+    for arms in [
+        "..0.0=>true,0.0000000000000000000000000000001..=>false",
+        "lower..=upper=>true",
+    ] {
+        let source = format!(
+            "typealias Float=.Float'builtin;comptime fn bad(value:Float,lower:Float,upper:Float)->bool {{value match {{{arms}}}}}"
+        );
+        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(error.contains("non-exhaustive match"), "{error}");
+    }
+}
+
+#[test]
+fn exact_float_alternatives_export_common_bindings_to_coverage_guards() {
+    let package = compile(
+        r#"
+        typealias Float=.Float'builtin;
+        comptime fn selected(value:Float)->bool {value match {
+            ((0.0 as x) or (1.0 as x)) if x >= 0.0 => true,
+            not (0.0 or 1.0) => false,
+        }}
+        comptime fn overlapping(value:Float)->bool {value match {
+            ((_ as x) or (1.0 as x)) if x < 0.0 => true,
+            _ as x if x >= 0.0 => false,
+        }}
+        comptime fn nested(value:Float)->bool {value match {
+            (((0.0 as a) as b) or (((1.0 as b) or (2.0 as b)) as a)) if a == b => true,
+            not (0.0 or 1.0 or 2.0) => false,
+        }}
+    "#,
+    );
+    let value = |text: &str| {
+        Value::Float(
+            comptime_runtime::decimal::DecimalValue::parse_literal(
+                text,
+                &mut comptime_runtime::Budget::default(),
+            )
+            .unwrap(),
+        )
+    };
+    for (input, selected, overlapping, nested) in [
+        ("-1.0", false, true, false),
+        ("-0.0", true, false, true),
+        ("1.0", true, false, true),
+        ("2.0", false, false, true),
+        ("1.0000000000000000000000000000001", false, false, false),
+    ] {
+        for (name, expected) in [
+            ("selected", selected),
+            ("overlapping", overlapping),
+            ("nested", nested),
+        ] {
+            assert_eq!(
+                Interpreter::for_comptime(&package, Budget::default())
+                    .unwrap()
+                    .invoke(id(&package, name), vec![value(input)])
+                    .unwrap(),
+                Value::Bool(expected),
+                "{name} {input}"
+            );
+        }
+    }
+    for arms in [
+        "((0.0 as x) or (1.0 as x)) if x > 0.0=>true,not (0.0 or 1.0)=>false",
+        "((0.0 as x) or (1.0 as x)) if accepts(x)=>true,not (0.0 or 1.0)=>false",
+    ] {
+        let source = format!(
+            "typealias Float=.Float'builtin;comptime fn accepts(value:Float)->bool {{true}} comptime fn bad(value:Float)->bool {{value match {{{arms}}}}}"
+        );
+        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(error.contains("non-exhaustive match"), "{error}");
+    }
+}

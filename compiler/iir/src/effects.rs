@@ -38,7 +38,9 @@ fn data_type(package: &Package, ty: &Term, fuel: &mut usize, depth: usize) -> Re
             }
             data_type(package, row_result(result).1, fuel, depth + 1)?;
         }
-        Term::ComptimeFunction(inner) | Term::Pointer(inner) => data_type(package, inner, fuel, depth + 1)?,
+        Term::ComptimeFunction(inner) | Term::Pointer(inner) => {
+            data_type(package, inner, fuel, depth + 1)?
+        }
         Term::Tuple(_) | Term::Record(_) => {
             if let Term::Tuple(items) = ty {
                 for item in items {
@@ -63,7 +65,9 @@ fn data_type(package: &Package, ty: &Term, fuel: &mut usize, depth: usize) -> Re
         Term::NormalForm { head, .. } => {
             // Only an explicitly registered Tuple head grants a field layout.
             // Other normal-form arguments remain opaque type metadata.
-            if let Some(fields) = package.normal_forms.iter()
+            if let Some(fields) = package
+                .normal_forms
+                .iter()
                 .find(|definition| definition.declaration == *head)
                 .and_then(|definition| definition.tuple_elements(ty))
             {
@@ -167,7 +171,8 @@ fn pattern(
         Pattern::Tuple(items)
         | Pattern::TypeTuple(items)
         | Pattern::Or(items)
-        | Pattern::Record { fields: items, .. } | Pattern::AnonymousRecord { fields: items, .. }
+        | Pattern::Record { fields: items, .. }
+        | Pattern::AnonymousRecord { fields: items, .. }
         | Pattern::Variant { fields: items, .. }
         | Pattern::NormalForm {
             arguments: items, ..
@@ -646,29 +651,59 @@ pub(crate) fn validate_contracts(package: &Package, fuel: &mut usize) -> Result<
 #[cfg(test)]
 mod tuple_tests {
     use super::*;
+    use nir::DeclarationId;
     use nir::normal_forms::{Head, Kind, Parameter, Role};
     use nir::program::LocalId;
-    use nir::DeclarationId;
 
     #[test]
     fn tuple_storage_checks_fields_without_unfolding_opaque_heads() {
-        let id = DeclarationId {package: 1, local: 0};
-        let mut package = Package { normal_forms: vec![Head {
-            declaration: id, role: Role::Tuple,
-            parameters: vec![Parameter {
-                declaration: DeclarationId {package: 1, local: 1},
-                binding: LocalId {owner: 0, index: 0}, kind: Kind::TypeList,
-                ty: Term::Nominal {declaration: DeclarationId {package: 1, local: 2},
-                    arguments: vec![Term::Primitive(Primitive::Type)]},
-            }], requirements: vec![],
-        }], ..Default::default() };
-        let tuple = |field| Term::NormalForm {head: id, sort: Sort::Type,
-            arguments: vec![Term::TypeListValue(vec![field])]};
+        let id = DeclarationId {
+            package: 1,
+            local: 0,
+        };
+        let mut package = Package {
+            normal_forms: vec![Head {
+                declaration: id,
+                role: Role::Tuple,
+                parameters: vec![Parameter {
+                    declaration: DeclarationId {
+                        package: 1,
+                        local: 1,
+                    },
+                    binding: LocalId { owner: 0, index: 0 },
+                    kind: Kind::TypeList,
+                    ty: Term::Nominal {
+                        declaration: DeclarationId {
+                            package: 1,
+                            local: 2,
+                        },
+                        arguments: vec![Term::Primitive(Primitive::Type)],
+                    },
+                }],
+                requirements: vec![],
+            }],
+            ..Default::default()
+        };
+        let tuple = |field| Term::NormalForm {
+            head: id,
+            sort: Sort::Type,
+            arguments: vec![Term::TypeListValue(vec![field])],
+        };
         let scalar = Term::Primitive(Primitive::Bool);
-        let computation = Term::Computation {effects: vec![], result: Box::new(scalar.clone())};
+        let computation = Term::Computation {
+            effects: vec![],
+            result: Box::new(scalar.clone()),
+        };
         let stored = tuple(tuple(computation.clone()));
-        assert!(data_type(&package, &stored, &mut 100, 0).unwrap_err().contains("stored computation"));
-        let callable = tuple(Term::Function {parameters: vec![], result: Box::new(computation)});
+        assert!(
+            data_type(&package, &stored, &mut 100, 0)
+                .unwrap_err()
+                .contains("stored computation")
+        );
+        let callable = tuple(Term::Function {
+            parameters: vec![],
+            result: Box::new(computation),
+        });
         data_type(&package, &callable, &mut 100, 0).unwrap();
         let valid = tuple(tuple(scalar));
         assert!(data_type(&package, &valid, &mut 1, 0).is_err());

@@ -22,10 +22,18 @@ impl Parser<'_> {
                 TokenKind::Break => p.try_break_statement(),
                 TokenKind::Continue => p.try_continue_statement(),
                 TokenKind::LBrace => p.try_block(),
-                TokenKind::Inline if [
-                    TokenKind::Effect, TokenKind::Fn, TokenKind::Unsafe,
-                    TokenKind::Spec, TokenKind::Verified, TokenKind::Atomic,
-                ].iter().any(|next| p.peek(&[TokenKind::Inline, *next])) => {
+                TokenKind::Inline
+                    if [
+                        TokenKind::Effect,
+                        TokenKind::Fn,
+                        TokenKind::Unsafe,
+                        TokenKind::Spec,
+                        TokenKind::Verified,
+                        TokenKind::Atomic,
+                    ]
+                    .iter()
+                    .any(|next| p.peek(&[TokenKind::Inline, *next])) =>
+                {
                     p.try_keyword_modified_definition()
                 }
                 TokenKind::Inline => p.try_inline_statement(),

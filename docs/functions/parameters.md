@@ -63,6 +63,84 @@ runtime 默认计算必须达到 **P3 稳定观测，并在合法入口下有限
 
 稳定性只在取得依据的范围内成立。同一个指针在两次调用中的内容可能不同，默认值不能只以指针位值为键永久缓存。默认值的纯度也不准许复制非 Copy 责任。
 
+当前实现可检查默认计算中普通指针的 Copy 内容读取，包括字段投影和有限辅助调用。稳定范围是本次默认求值：分析器检查整段计算及已知调用，拒绝指针写入、未知调用和未证明有限的递归／循环；实际读取的位置仍由资源与内存检查确认可用。此依据不把读取辅助函数提升为 `pure fn`，也不授权跨调用复用读取结果。
+
+立即构造并调用的闭包也可以捕获可确认 Copy 的值，例如默认表达式 `(|| pointer.* and enabled)()`。构造时取得捕获快照，随后检查实际调用体；指针捕获仍指向原来的受检位置，不因被装入闭包而失去依赖。此支持不赋予闭包类型 Copy，也不把来自未知参数的闭包当作已知的纯计算。立即调用还可以显式接收具有已知行为依据的回调实参；纯度与内存检查分别确认回调行为和真实指针来源。更一般的环境传递仍需完整的捕获契约。
+
+若捕获的是已有代码身份依据的局部回调，行为分析也保存构造时的候选快照。之后给原变量重新赋值，不会更改已有闭包捕获的回调；多个可能候选则必须逐个满足调用位置的要求。行为缓存区分同一闭包定义的不同代码捕获环境，不能只按函数签名或代码文本复用结论。资源层的捕获交付和清理仍单独核验。
+
+快照也可以跨越工厂函数的返回边界：工厂将回调捕获进闭包，再经其他函数转发，调用者仍根据实际候选检查其行为。嵌套代码捕获逐层携带依据，返回一个闭包本身不构成纯度承诺。结构体和元组中的代码依据按字段路径传递，投影、结构解构与工厂返回不能把两个同类型字段的回调混为一谈。这里只检查拥有型字段，不据此穿透指针读取。
+
+例如，runtime P4 检查可以沿着 `Ops.action` 进入捕获环境，再检查返回闭包的实际调用：
+
+```flurry
+typealias Action = fn(bool) -> bool;
+impl Copy for Action {}
+struct Ops {action: Action}
+
+fn invert(value: bool) -> bool {not value}
+fn make(ops: Ops) -> %{ops: Ops} fn(bool) -> bool {
+    |value| ops.action(value)
+}
+pure fn run() -> bool {
+    let action = make(Ops {action: invert});
+    action(false)
+}
+```
+
+若分支可能交付不同回调，所有候选都必须满足调用要求；更新字段时不能沿用旧候选的证明。循环中的整块聚合替换按拥有型字段求解候选不动点，包括局部别名、结构解构和工厂返回。检查首轮之前就必须计入后续迭代可能写入的回调，不能只验证循环入口的初始值。未知来源保持未知。缺少依据会拒绝证明，不以字段类型代替行为依据。P3 默认计算的 Copy、稳定观测及有限完成要求仍独立适用。
+
+枚举里的代码字段另外带有变体前提。例如 `.none` 没有 `.some(action)` 的回调，与一个存在但身份未知的 `action` 不同。构造、分支合流、传参及闭包捕获保留这个区别；匹配 `.some(action)` 时才把该变体字段的依据交给绑定。`or` 模式合并所有可达分支的候选，不能只取第一个分支。内层某个变体缺席，也不能据此忽略外层已存在值的行为。
+
+循环内的变体切换、模式解构重组和具名转发也沿用这些前提。求解尚未取得候选只是暂时状态，不是缺席证明，不能提前导出到工厂输入或闭包捕获；循环中的未知输入则始终保留为未知。
+
+计算模式 `first and expr is next` 按顺序检查 `first`、`expr` 和 `next`。`expr` 产生的代码身份属于新结果，不能从原被匹配值借用。模式里的调用、guard 和失败候选都属于所在表达式的行为；后面的结构匹配失败，不能抹掉前面已经执行的计算。当前实现支持标量及有 Copy 依据的无捕获环境代码值，因而默认参数也可通过计算模式取得已知、有限完成的回调。循环内的计算模式按每段计算自己的结果建立绑定方程；链式计算可引用前段绑定，`or` 候选内部的绑定与匹配成功后统一的绑定分别保留。观察块可以建立和改写块内私有的 Copy 代码局部变量，不能借此改写外部资源。带拥有型资源的计算结果及可能拒绝的观察调用仍需要独立的失败路径交付支持。
+
+下面的计算模式在每轮建立新的 `next`，再将它交付给下一轮。
+
+```flurry
+trait Copy {}
+typealias Action = fn(bool) -> bool;
+impl Copy for Action {}
+
+fn invert(value: bool) -> bool { not value }
+fn forward(action: Action) -> Action { action }
+
+pure fn run() -> bool {
+    var action = invert;
+    var remaining: .u8'builtin = 2;
+    while remaining > 0 {
+        action = false match {
+            _ and do {
+                var local = invert;
+                local = forward(action);
+                local
+            } is next => next
+        };
+        remaining -= 1;
+    }
+    action(false)
+}
+```
+
+`forward(action)` 在一次匹配尝试中执行一次。检查观察是否允许调用它，不构成第二次执行，也不产生第二套清理计划。若将 `local` 改写为来自未知参数的回调，原来的 `invert` 依据不能继续证明最终调用纯净。
+
+```flurry
+fn observed(pointer: *bool, .value: bool = pointer.*) -> bool {
+    value
+}
+
+fn example() -> bool {
+    var flag = false;
+    let first = observed(flag.ref);
+    flag = true;
+    let second = observed(flag.ref);
+    not first and second
+}
+```
+
+两次调用各自读取当时内容，结果为 `true`。写入发生在两次默认求值之间；若将写入放进默认表达式，就不满足稳定观测要求。
+
 运行检查失败是调用准备的失败路径；总性不能作为删除前提检查的依据。comptime 与子句默认值遵守[编译时求值政策](../comptime/purity-and-normal-form.md)，不套用 runtime P3 的限制。
 
 默认值也可以调用满足上述要求的普通辅助函数。供应仍发生在 runtime；显式覆盖会跳过相应默认表达式，后续默认值读取覆盖后的参数。
@@ -290,6 +368,95 @@ fn misspelled_limit() -> u32 {
 ~~~
 
 前者为同一个位置提供两份值；后者没有可绑定的名字。都不能用“后一个覆盖前一个”或“忽略不认识的配置”解释。
+
+### 构造带计算字段的默认值
+
+默认配置可以由结构体或枚举构造式给出，字段可调用已证明有限且稳定的函数：
+
+```flurry
+struct Config { enabled: bool }
+
+fn default_enabled(disabled: bool) -> bool { not disabled }
+
+fn select_config(disabled: bool,
+    .config: Config = (Config { enabled: default_enabled(disabled) })
+) -> bool {
+    config.enabled
+}
+
+test {
+    println("{}", select_config(false));
+    println("{}", select_config(false, .config = Config { enabled: false }));
+}
+```
+
+输出 true、false。第一次调用计算默认字段一次；第二次显式供应 config，不执行 default_enabled。字段仍按源码顺序计算，构造结果按普通参数规则交付和清理；不会因为整个 Config 没有 Copy 就要求复制它。
+
+相同的构造也可封装成有限、稳定的工厂函数：
+
+```flurry
+fn make_config(disabled: bool) -> Config {
+    Config { enabled: default_enabled(disabled) }
+}
+
+fn select_factory(disabled: bool,
+    .config: Config = make_config(disabled)
+) -> bool {
+    config.enabled
+}
+```
+
+工厂交付结果不等于在默认计算中销毁结果。当前检查支持这类结果经调用链、分支和显式 return 交付，也会检查已知函数值与闭包的实际主体。泛型实例使用实际类型实参。默认计算内将拥有值绑定为局部变量、丢弃它或取临时父对象的字段，可能触发清理，仍需要额外依据；拥有型结果的非平凡后置条件也可能在失败时清理结果，需要同样的有限清理依据。这些行为分析不会把拥有值推导为 Copy。
+
+对于已绑定清理协议的完整工厂函数，这份额外依据现在可以由移动与清理分析取得：私有拥有型局部值允许绑定、交付、丢弃、字段投影和替换，每条实际清理路径所选中的 Drop 都必须通过有限、稳定的行为检查。
+
+```flurry
+fn make_local_config(disabled: bool) -> Config {
+    let config = Config { enabled: default_enabled(disabled) };
+    config
+}
+```
+
+这里的 config 仍按移动规则交付；再次使用已移动值会被拒绝。工厂还可以将这些私有资源传给有限、稳定的辅助函数或已知回调：
+
+```flurry
+fn take_enabled(config: Config) -> bool { config.enabled }
+
+fn default_flag(disabled: bool) -> bool {
+    let config = make_local_config(disabled);
+    take_enabled(config)
+}
+```
+
+传参取得和交付责任仍由普通移动检查处理。普通函数、泛型实例、已知函数指针、闭包和高阶回调都需要实际的主体与清理证据，不能仅凭签名认定稳定。默认表达式直接消费调用者已有的 Config 仍会被拒绝；这里获准传递的是工厂内部取得的私有责任。工厂内部调用的闭包所执行的清理也纳入报告。Drop 写入外部存储、递归不终止或选择依据不足时，不能获得默认计算所需的保证。该接入针对有完整参数与资源报告的函数主体，不自动放宽调用处默认表达式的任意局部资源操作，也不允许消耗调用者原有的拥有型输入。
+
+工厂也可把私有拥有值移动进闭包环境：
+
+```flurry
+fn default_through_closure(disabled: bool) -> bool {
+    let config = make_local_config(disabled);
+    let read_enabled = || config.enabled;
+    read_enabled()
+}
+```
+
+捕获、调用和环境销毁分别验证。捕获之后不能继续使用已移动的 config；调用时检查闭包实际主体，退出时检查环境剩余责任的清理。未调用的闭包不会执行主体，但其捕获资源仍须正确清理，因此不能通过“不调用闭包”隐藏有副作用的 Drop。捕获对象中的代码字段保留具体来源；辅助工厂返回的环境也遵循同一检查。这不授予闭包 Copy，也不放宽调用处直接捕获外部拥有值的限制。
+
+工厂可声明关于拥有型结果的后置条件：
+
+```flurry
+fn checked_config() -> result: Config where ensures result.enabled {
+    Config { enabled: true }
+}
+
+fn select_checked(.config: Config = checked_config()) -> bool {
+    config.enabled
+}
+```
+
+绑定清理协议后，有限行为检查会把“后置条件失败时销毁尚未交付的结果”纳入完整资源报告，验证实际选中的 Drop。后置条件本身仍须有限、稳定，并遵守原有程序契约规则；这不会把契约失败变成默认值回退。失败时清理结果及调用者相应资源，不执行接收默认实参的 callee。具名与无名结果、普通返回与展开后的返回都遵循这一顺序。缺少协议依据，或结果清理会写外部状态、递归不终止时，仍不能通过该检查。
+
+当前有限行为分析支持这类不携带清理责任的标量字段计算。若先取得拥有型字段、再计算可能失败的字段，失败可能触发部分构造对象的 Drop，必须另行证明这些行为。稳定性不能代替这份清理依据，也不能把未知回调、递归或外部写入隐藏在字段表达式中。
 
 ### 输出不能隐藏在默认计算里
 

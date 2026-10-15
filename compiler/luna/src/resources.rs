@@ -63,17 +63,35 @@ pub fn analyze_with_protocols(
 }
 
 pub fn analyze_with_protocols_in_package(
-    package: &Package, identity: u64, entry: &str, copy_protocol: &str,
-    drop_protocol: Option<&str>, fuel: u64,
+    package: &Package,
+    identity: u64,
+    entry: &str,
+    copy_protocol: &str,
+    drop_protocol: Option<&str>,
+    fuel: u64,
 ) -> Result<Analysis, String> {
-    analyze_selected(package, entry, Some(identity), copy_protocol, drop_protocol, fuel)
+    analyze_selected(
+        package,
+        entry,
+        Some(identity),
+        copy_protocol,
+        drop_protocol,
+        fuel,
+    )
 }
 
 fn analyze_selected(
-    package: &Package, entry: &str, identity: Option<u64>, copy_protocol: &str,
-    drop_protocol: Option<&str>, fuel: u64,
+    package: &Package,
+    entry: &str,
+    identity: Option<u64>,
+    copy_protocol: &str,
+    drop_protocol: Option<&str>,
+    fuel: u64,
 ) -> Result<Analysis, String> {
-    let mut entries = package.functions.iter().filter(|f| f.name == entry && identity.is_none_or(|id| f.declaration.package == id));
+    let mut entries = package
+        .functions
+        .iter()
+        .filter(|f| f.name == entry && identity.is_none_or(|id| f.declaration.package == id));
     let function = entries
         .next()
         .ok_or_else(|| format!("resource entry `{entry}` was not found"))?;
@@ -161,7 +179,11 @@ impl ProtocolContext {
         let mut index = Index::default();
         // Finalized inherent implementations belong to the member index, not
         // the provisional open-interface bucket of trait selection.
-        for implementation in package.implementations.iter().filter(|implementation| implementation.interface.is_some()) {
+        for implementation in package
+            .implementations
+            .iter()
+            .filter(|implementation| implementation.interface.is_some())
+        {
             index
                 .insert(
                     ImplementationHead {

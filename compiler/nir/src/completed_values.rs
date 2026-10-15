@@ -21,13 +21,17 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), &'static str> {
         let width = match ty {
             Term::Computation { effects, .. } => {
                 charge(fuel, effects.len())?;
-                effects.iter().fold(1usize, |width, operation| width.saturating_add(operation.arguments.len()))
+                effects.iter().fold(1usize, |width, operation| {
+                    width.saturating_add(operation.arguments.len())
+                })
             }
             Term::AssociatedType { arguments, .. } => arguments.len().saturating_add(1),
             Term::Nominal { arguments, .. }
             | Term::NormalForm { arguments, .. }
             | Term::Tuple(arguments)
-            | Term::TypeListValue(arguments) | Term::TypeListConcat(arguments) | Term::TupleValue(arguments) => arguments.len(),
+            | Term::TypeListValue(arguments)
+            | Term::TypeListConcat(arguments)
+            | Term::TupleValue(arguments) => arguments.len(),
             Term::Closure { environment, .. } => environment.len().saturating_add(1),
             Term::Function { parameters, .. } => parameters.len().saturating_add(1),
             Term::NominalValue { fields, .. } => fields.len().saturating_add(1),
@@ -40,7 +44,9 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), &'static str> {
         match ty {
             Term::Computation { effects, result } => {
                 children.push(result.as_ref());
-                for operation in effects { children.extend(&operation.arguments); }
+                for operation in effects {
+                    children.extend(&operation.arguments);
+                }
             }
             Term::AssociatedType {
                 subject, arguments, ..
@@ -51,7 +57,9 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), &'static str> {
             Term::Nominal { arguments, .. }
             | Term::NormalForm { arguments, .. }
             | Term::Tuple(arguments)
-            | Term::TypeListValue(arguments) | Term::TypeListConcat(arguments) | Term::TupleValue(arguments) => children.extend(arguments),
+            | Term::TypeListValue(arguments)
+            | Term::TypeListConcat(arguments)
+            | Term::TupleValue(arguments) => children.extend(arguments),
             Term::Closure {
                 environment,
                 signature,
@@ -64,7 +72,10 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), &'static str> {
                 children.extend(parameters.iter().map(|p| &p.ty));
                 children.push(result);
             }
-            Term::NominalValue { ty, fields, .. } => { children.push(ty); children.extend(fields); },
+            Term::NominalValue { ty, fields, .. } => {
+                children.push(ty);
+                children.extend(fields);
+            }
             Term::Record(fields) | Term::RecordValue(fields) => {
                 for (name, field) in fields {
                     charge(fuel, name.len())?;
@@ -73,6 +84,13 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), &'static str> {
             }
             Term::String(value) | Term::Symbol(value) => charge(fuel, value.len())?,
             Term::Integer(value) => charge(fuel, value.bit_len().div_ceil(32))?,
+            Term::Float(value) => charge(
+                fuel,
+                value
+                    .digits()
+                    .len()
+                    .saturating_add(value.exponent().bit_len().div_ceil(32)),
+            )?,
             Term::BitVec(value) => charge(fuel, value.words().len())?,
             _ => {}
         }
@@ -99,16 +117,18 @@ fn value_in<'a>(
     charge(fuel, 1)?;
     ty(&value.ty, fuel)?;
     match &value.kind {
-        K::Literal(Literal::Symbol(s) | Literal::String(s) | Literal::Integer(s) | Literal::Float(s)) => {
-            charge(fuel, s.len())
-        }
+        K::Literal(
+            Literal::Symbol(s) | Literal::String(s) | Literal::Integer(s) | Literal::Float(s),
+        ) => charge(fuel, s.len()),
         K::Literal(Literal::BitVec { words, .. }) => charge(fuel, words.len()),
         K::Literal(_) | K::Unit | K::Function(_) => Ok(()),
         K::TypeValue(t) => ty(t, fuel),
         K::TypeListValue(types) => {
             for element in types {
                 ty(element, fuel)?;
-                if element.sort()!=crate::Sort::Type {return Err("completed type-list element is not Type");}
+                if element.sort() != crate::Sort::Type {
+                    return Err("completed type-list element is not Type");
+                }
             }
             Ok(())
         }

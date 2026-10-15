@@ -24,7 +24,9 @@ impl Package {
             let Term::Function { parameters, .. } = function.signature.callable_signature() else {
                 return Err("IIR function signature is not callable".into());
             };
-            if function.phase == nir::program::FunctionPhase::Runtime && parameters.iter().any(|p|p.sort!=nir::Sort::Runtime) {
+            if function.phase == nir::program::FunctionPhase::Runtime
+                && parameters.iter().any(|p| p.sort != nir::Sort::Runtime)
+            {
                 return Err("IIR runtime function retains staged inputs".into());
             }
             if parameters.len() != function.parameters.len()
@@ -49,10 +51,11 @@ impl Package {
             };
             let (actual, parameters) = match &nominal.definition {
                 NominalDefinition::Struct(s) => (s.declaration, &s.type_parameters),
+                NominalDefinition::Newtype(n) => (n.declaration, &n.type_parameters),
                 NominalDefinition::Enum(e) => {
                     e.validate_encoding().map_err(str::to_owned)?;
                     (e.declaration, &e.type_parameters)
-                },
+                }
             };
             if *declaration != actual || !parameters.is_empty() {
                 return Err("IIR nominal definition disagrees with its instance key".into());
@@ -118,7 +121,10 @@ impl Package {
                 let declared = contract
                     .methods
                     .iter()
-                    .find(|m| m.declaration == method.member && m.type_arguments == method.method_arguments)
+                    .find(|m| {
+                        m.declaration == method.member
+                            && m.type_arguments == method.method_arguments
+                    })
                     .ok_or("IIR dispatch member is absent from its interface")?;
                 let function = functions
                     .get(&InstanceKey {

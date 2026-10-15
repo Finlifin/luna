@@ -1,27 +1,37 @@
-//! An optional, bounded pass over original call sites. Expanded bodies are not
-//! visited again in this pass, so recursive definitions retain recursive calls.
+//! Optional bounded expansion, including acyclic calls in expanded bodies.
+//! Active declarations retain recursive calls rather than unfolding forever.
 //! Resource checks and cleanup publication must run after this transformation.
 use super::*;
 use n::Rewriter;
+mod effects;
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Report {
     pub expanded: usize,
+    pub expanded_handlers: usize,
+    pub expanded_requests: usize,
     pub retained: usize,
+    pub selected_methods: usize,
+    pub reused_method_selections: usize,
 }
 impl std::fmt::Display for Report {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "(inline-report (expanded {}) (retained {}))",
-            self.expanded, self.retained
+            "(inline-report (expanded {}) (retained {}) (selected-methods {}) (reused-method-selections {}) (expanded-handlers {}) (expanded-requests {}))",
+            self.expanded,
+            self.retained,
+            self.selected_methods,
+            self.reused_method_selections,
+            self.expanded_handlers,
+            self.expanded_requests
         )
     }
 }
 
 /// The input is typed NIR. Failed optional expansions leave the original call
 /// and metadata intact. Staged calls await input completion; indirect calls and
-/// method selection are left to their existing invocation paths.
+/// open method selections are left to their existing invocation paths.
 pub fn expand(package: &mut n::Package, fuel: &mut usize) -> Result<Report, String> {
     let mut templates = BTreeMap::new();
     for function in &package.functions {
@@ -35,10 +45,36 @@ pub fn expand(package: &mut n::Package, fuel: &mut usize) -> Result<Report, Stri
             .map_err(|e| e.to_string())?;
         templates.insert(function.declaration, function.clone());
     }
-    if templates.is_empty() {
-        return Ok(Report::default());
+    // Selection observes the original checked package while expansion mutates
+    // bodies and private return metadata. Charge the retained executable trees.
+    let mut has_methods = false;
+    for function in &package.functions {
+        nir::visit::expressions(function, fuel, |expr, fuel| {
+            has_methods |= matches!(expr.kind, K::TraitMethod { .. });
+            nir::type_computations::charge_term(&expr.ty, fuel).map_err(|e| e.to_string())
+        })?;
     }
+    // Associated annotations can require the same checked world even when
+    // the expanded helper never invokes a trait method.
+    let selection = if has_methods
+        || package
+            .traits
+            .iter()
+            .any(|item| !item.associated.is_empty())
+    {
+        for function in &package.quote_templates {
+            nir::visit::expressions(function, fuel, |expr, fuel| {
+                nir::type_computations::charge_term(&expr.ty, fuel).map_err(|e| e.to_string())
+            })?;
+        }
+        Some(package.clone())
+    } else {
+        None
+    };
     let mut pass = Pass {
+        selection: selection.as_ref(),
+        methods: std::collections::HashMap::new(),
+        active: BTreeSet::new(),
         templates: &templates,
         next: &mut package.quote_identity_cursor,
         sources: &mut package.expansion_sources,
@@ -63,10 +99,29 @@ pub fn expand(package: &mut n::Package, fuel: &mut usize) -> Result<Report, Stri
         }
         function.body.rewrite_with(&mut pass)?;
     }
-    Ok(pass.report)
+    let mut report = pass.report;
+    let (handlers, requests) = effects::expand(package, fuel)?;
+    report.expanded_handlers = handlers;
+    report.expanded_requests = requests;
+    Ok(report)
+}
+
+// Representation equality is deliberately conservative: no opaque head is
+// unfolded to make a cache hit. The immutable selection snapshot fixes all
+// implementation and contract evidence for this pass.
+#[derive(PartialEq, Eq, Hash)]
+struct MethodKey {
+    interface: DeclarationId,
+    member: DeclarationId,
+    subject: Term,
+    interface_arguments: Vec<Term>,
+    method_arguments: Vec<Term>,
 }
 
 struct Pass<'a> {
+    active: BTreeSet<DeclarationId>,
+    methods: std::collections::HashMap<MethodKey, n::MethodInstance>,
+    selection: Option<&'a n::Package>,
     templates: &'a BTreeMap<DeclarationId, n::Function>,
     next: &'a mut u32,
     sources: &'a mut Vec<n::ExpansionSource>,
@@ -95,11 +150,80 @@ impl n::Rewriter for Pass<'_> {
                 declaration,
                 arguments,
             } => (*declaration, arguments.as_slice()),
+            K::TraitMethod {
+                interface,
+                member,
+                subject,
+                interface_arguments,
+                method_arguments,
+            } => {
+                let Some(package) = self.selection else {
+                    return Ok(true);
+                };
+                // Staged and still-open selections remain ordinary calls.
+                if !matches!(callee.ty.callable_signature(), Term::Function {parameters, ..}
+                    if parameters.iter().all(|parameter| parameter.sort == Sort::Runtime))
+                {
+                    return Ok(true);
+                }
+                // Bound hashing, key copies, and the rigid-input inspection.
+                for ty in std::iter::once(subject)
+                    .chain(interface_arguments)
+                    .chain(method_arguments)
+                {
+                    if nir::type_computations::charge_term(ty, self.fuel).is_err() {
+                        self.report.retained += 1;
+                        return Ok(false);
+                    }
+                }
+                let concrete = std::iter::once(subject)
+                    .chain(interface_arguments)
+                    .chain(method_arguments)
+                    .all(|ty| {
+                        ty.rigid_parameters()
+                            .is_ok_and(|parameters| parameters.is_empty())
+                    });
+                if !concrete {
+                    return Ok(true);
+                }
+                let key = MethodKey {
+                    interface: *interface,
+                    member: *member,
+                    subject: subject.clone(),
+                    interface_arguments: interface_arguments.clone(),
+                    method_arguments: method_arguments.clone(),
+                };
+                let selected = match self.methods.entry(key) {
+                    std::collections::hash_map::Entry::Occupied(slot) => {
+                        self.report.reused_method_selections += 1;
+                        slot.into_mut()
+                    }
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        match crate::materialization::resolve_method_instance(
+                            package, callee, self.fuel,
+                        ) {
+                            Ok(selected) => {
+                                self.report.selected_methods += 1;
+                                slot.insert(selected)
+                            }
+                            Err(_) => {
+                                self.report.retained += 1;
+                                return Ok(false);
+                            }
+                        }
+                    }
+                };
+                (selected.body, selected.arguments.as_slice())
+            }
             _ => return Ok(true),
         };
         let Some(template) = self.templates.get(&id) else {
             return Ok(true);
         };
+        if self.active.contains(&id) || self.active.len() >= 64 {
+            self.report.retained += 1;
+            return Ok(false);
+        }
         if !matches!(template.signature.callable_signature(),Term::Function {parameters,..}
             if parameters.iter().all(|parameter|parameter.sort==Sort::Runtime))
         {
@@ -129,6 +253,7 @@ impl n::Rewriter for Pass<'_> {
         let mut packets = BTreeSet::new();
         let mut empty = BTreeMap::new();
         let result = cmtt::inline_template(
+            self.selection,
             template,
             &mut candidate,
             types,
@@ -144,6 +269,18 @@ impl n::Rewriter for Pass<'_> {
             self.empty.extend(empty);
             *expression = candidate;
             self.report.expanded += 1;
+            // The outer expansion is already a valid committed replacement.
+            // Further budget exhaustion retains its remaining ordinary calls.
+            if nir::visit::expression(expression, self.fuel, |expr, fuel| {
+                nir::type_computations::charge_term(&expr.ty, fuel).map_err(|e| e.to_string())
+            })
+            .is_ok()
+            {
+                self.active.insert(id);
+                let nested = expression.rewrite_with(self);
+                self.active.remove(&id);
+                nested?;
+            }
         } else {
             self.sources.truncate(source_end);
             self.enums.truncate(enum_end);

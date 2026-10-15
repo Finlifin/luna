@@ -45,6 +45,7 @@ fn projection(t: Term, args: Vec<Term>) -> Term {
 }
 fn contract() -> Trait {
     Trait {
+        parameter_types: Vec::new(),
         declaration: id(1),
         self_parameter: id(3),
         name: "Source".into(),
@@ -540,7 +541,9 @@ fn capability_projection_qualification_shares_cycles_and_recovers_after_failure(
     target.interface = Some(id(101));
     target.associated.clear();
     target.capabilities = vec![TraitRequirement {
-        interface: id(102), subject: projection(ty(P::Bool), vec![]), interface_arguments: vec![],
+        interface: id(102),
+        subject: projection(ty(P::Bool), vec![]),
+        interface_arguments: vec![],
     }];
     let mut allowed = source.clone();
     allowed.declaration = id(103);
@@ -549,24 +552,53 @@ fn capability_projection_qualification_shares_cycles_and_recovers_after_failure(
     let traits = [contract()];
     let mut cyclic = source.clone();
     cyclic.capabilities = vec![TraitRequirement {
-        interface: id(101), subject: ty(P::Bool), interface_arguments: vec![],
+        interface: id(101),
+        subject: ty(P::Bool),
+        interface_arguments: vec![],
     }];
     let mut excluded = target.clone();
-    excluded.capabilities.push(TraitRequirement { interface: id(104), subject: ty(P::Bool), interface_arguments: vec![] });
-    with_world(&traits, &[cyclic.clone(), excluded, allowed.clone()], |world| {
-        let result = world.resolve(id(101), &ty(P::Bool), Budget::default()).unwrap();
-        assert_eq!(result.types.selection, Selection::NoApplicableCandidate);
+    excluded.capabilities.push(TraitRequirement {
+        interface: id(104),
+        subject: ty(P::Bool),
+        interface_arguments: vec![],
     });
-    with_world(&traits, &[cyclic, target.clone(), allowed.clone()], |world| {
-        let result = world.resolve(id(101), &ty(P::Bool), Budget::default()).unwrap();
-        assert!(!matches!(result.types.selection, Selection::Selected(_)));
-        assert!(result.qualifications.values().any(|q| matches!(q,
+    with_world(
+        &traits,
+        &[cyclic.clone(), excluded, allowed.clone()],
+        |world| {
+            let result = world
+                .resolve(id(101), &ty(P::Bool), Budget::default())
+                .unwrap();
+            assert_eq!(result.types.selection, Selection::NoApplicableCandidate);
+        },
+    );
+    with_world(
+        &traits,
+        &[cyclic, target.clone(), allowed.clone()],
+        |world| {
+            let result = world
+                .resolve(id(101), &ty(P::Bool), Budget::default())
+                .unwrap();
+            assert!(!matches!(result.types.selection, Selection::Selected(_)));
+            assert!(result.qualifications.values().any(|q| matches!(q,
             elaboration::capabilities::Qualification::Pending(reason) if reason.contains("recursive") || reason.contains("pending"))));
-    });
+        },
+    );
     with_world(&traits, &[source, target, allowed], |world| {
-        let limited = world.resolve(id(101), &ty(P::Bool), Budget {steps: 1, ..Budget::default()});
-        assert!(limited.is_err() || !matches!(limited.unwrap().types.selection, Selection::Selected(_)));
-        let result = world.resolve(id(101), &ty(P::Bool), Budget::default()).unwrap();
+        let limited = world.resolve(
+            id(101),
+            &ty(P::Bool),
+            Budget {
+                steps: 1,
+                ..Budget::default()
+            },
+        );
+        assert!(
+            limited.is_err() || !matches!(limited.unwrap().types.selection, Selection::Selected(_))
+        );
+        let result = world
+            .resolve(id(101), &ty(P::Bool), Budget::default())
+            .unwrap();
         assert_eq!(result.types.selection, Selection::Selected(id(100)));
     });
 }
@@ -575,11 +607,17 @@ fn capability_projection_qualification_shares_cycles_and_recovers_after_failure(
 fn type_list_inputs_resolve_associated_elements_without_changing_the_head() {
     let subject = holder(ty(P::Bool));
     let wrap = |item| Term::NormalForm {
-        head: id(88), sort: Sort::Type,
+        head: id(88),
+        sort: Sort::Type,
         arguments: vec![Term::TypeListValue(vec![item])],
     };
-    let result = normalize(&[contract()], &[implementation(subject.clone(), ty(P::Char))],
-        &wrap(projection(subject, vec![])), Budget::default()).unwrap();
+    let result = normalize(
+        &[contract()],
+        &[implementation(subject.clone(), ty(P::Char))],
+        &wrap(projection(subject, vec![])),
+        Budget::default(),
+    )
+    .unwrap();
     assert_eq!(result.value, wrap(ty(P::Char)));
     assert_eq!(result.steps.len(), 1);
 }

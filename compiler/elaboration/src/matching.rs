@@ -167,8 +167,31 @@ fn decompose(
                 }
             }
         }
-        (Term::Computation {effects: a, result: ar}, Term::Computation {effects: b, result: br}) => {
-            effects::computations(a, ar, b, br, arguments, actual_arguments, nesting, depth + 1, fuel, limit, context, scope, work)?;
+        (
+            Term::Computation {
+                effects: a,
+                result: ar,
+            },
+            Term::Computation {
+                effects: b,
+                result: br,
+            },
+        ) => {
+            effects::computations(
+                a,
+                ar,
+                b,
+                br,
+                arguments,
+                actual_arguments,
+                nesting,
+                depth + 1,
+                fuel,
+                limit,
+                context,
+                scope,
+                work,
+            )?;
         }
         (Term::Pointer(a), Term::Pointer(b))
         | (Term::ComptimeFunction(a), Term::ComptimeFunction(b)) => decompose(
@@ -189,21 +212,52 @@ fn decompose(
         {
             for ((_, a), (_, b)) in a.iter().zip(b) {
                 decompose(
-                    a, b, arguments, actual_arguments, nesting, depth + 1,
-                    fuel, limit, context, scope, work,
+                    a,
+                    b,
+                    arguments,
+                    actual_arguments,
+                    nesting,
+                    depth + 1,
+                    fuel,
+                    limit,
+                    context,
+                    scope,
+                    work,
                 )?;
             }
         }
-        (Term::NormalForm {head: a, arguments: left, sort: Sort::Type},
-         Term::NormalForm {head: b, arguments: right, sort: Sort::Type})
-            if a == b && context.is_tuple_head(*a) => {
+        (
+            Term::NormalForm {
+                head: a,
+                arguments: left,
+                sort: Sort::Type,
+            },
+            Term::NormalForm {
+                head: b,
+                arguments: right,
+                sort: Sort::Type,
+            },
+        ) if a == b && context.is_tuple_head(*a) => {
             // Syntactic candidate substitutions only. The original application
             // equality remains an obligation; no inverse theorem is asserted.
-            if let ([Term::TypeListValue(left)], [Term::TypeListValue(right)]) = (left.as_slice(), right.as_slice()) {
+            if let ([Term::TypeListValue(left)], [Term::TypeListValue(right)]) =
+                (left.as_slice(), right.as_slice())
+            {
                 if left.len() == right.len() {
                     for (left, right) in left.iter().zip(right) {
-                        decompose(left, right, arguments, actual_arguments, nesting, depth + 1,
-                            fuel, limit, context, scope, work)?;
+                        decompose(
+                            left,
+                            right,
+                            arguments,
+                            actual_arguments,
+                            nesting,
+                            depth + 1,
+                            fuel,
+                            limit,
+                            context,
+                            scope,
+                            work,
+                        )?;
                     }
                 }
             }
@@ -338,7 +392,12 @@ fn decompose(
 
 // Each removed frame is an actual local binder, not the substitution frame.
 // Missing local arguments mean a dependent component cannot be extracted.
-fn extract(term: &Term, arguments: Option<&[I]>, nesting: u32, scope: &[Vec<Sort>]) -> Result<Option<I>, MatchError> {
+fn extract(
+    term: &Term,
+    arguments: Option<&[I]>,
+    nesting: u32,
+    scope: &[Vec<Sort>],
+) -> Result<Option<I>, MatchError> {
     let mut term = term.clone();
     for _ in 0..nesting {
         match term.substitute(&[]) {

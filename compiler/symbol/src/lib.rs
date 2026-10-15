@@ -159,7 +159,10 @@ pub struct DefId {
 }
 
 impl DefId {
-    pub const INVALID: DefId = DefId { pkg: u32::MAX, index: u32::MAX };
+    pub const INVALID: DefId = DefId {
+        pkg: u32::MAX,
+        index: u32::MAX,
+    };
 
     #[inline]
     pub fn new(pkg: u32, index: u32) -> Self {

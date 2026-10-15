@@ -51,7 +51,10 @@ impl Interpreter<'_> {
                 A::TypeList { items, .. } => {
                     let mut values = Vec::new();
                     for item in items {
-                        values.push((matches!(item, A::TypeListSpread(_)), staged_input!(self.stage_normal_argument(item, environment, depth + 1))));
+                        values.push((
+                            matches!(item, A::TypeListSpread(_)),
+                            staged_input!(self.stage_normal_argument(item, environment, depth + 1)),
+                        ));
                     }
                     StagedNormalInput::TypeList(values)
                 }
@@ -167,10 +170,13 @@ impl Interpreter<'_> {
             StagedNormalInput::TypeList(items) => {
                 let mut types = Vec::new();
                 for (spread, item) in items {
-                    let value = self.finish_staged_normal_argument(item, literals, source, depth + 1)?;
+                    let value =
+                        self.finish_staged_normal_argument(item, literals, source, depth + 1)?;
                     match (spread, value) {
                         (true, Value::TypeList(elements)) => {
-                            self.integer_operation(Some(source), |budget| budget.consume(elements.len()))?;
+                            self.integer_operation(Some(source), |budget| {
+                                budget.consume(elements.len())
+                            })?;
                             types.extend(elements);
                         }
                         (false, Value::Type(ty)) => types.push(ty),

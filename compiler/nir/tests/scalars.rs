@@ -155,54 +155,132 @@ fn exact_integer_transport_spelling_is_bounded_and_distinct_from_dump() {
 
 #[test]
 fn completed_float_values_have_bit_identity_and_stable_dumps() {
-    use nir::{Primitive,Sort};
-    let values=[Term::Float32(0),Term::Float32(1<<31),Term::Float32(0x7fc00042),Term::Float32(0x7fc00043),
-        Term::Float64(0),Term::Float64(1<<63),Term::Float64(0x7ff8000000000042)];
-    for (i,value) in values.iter().enumerate() {
-        assert_eq!(value.sort(),Sort::ComptimeValue);
+    use nir::{Primitive, Sort};
+    let values = [
+        Term::Float32(0),
+        Term::Float32(1 << 31),
+        Term::Float32(0x7fc00042),
+        Term::Float32(0x7fc00043),
+        Term::Float64(0),
+        Term::Float64(1 << 63),
+        Term::Float64(0x7ff8000000000042),
+    ];
+    for (i, value) in values.iter().enumerate() {
+        assert_eq!(value.sort(), Sort::ComptimeValue);
         value.check_scope(&[]).unwrap();
-        assert_eq!(&value.abstract_parameters(&[]).unwrap(),value);
-        for (j,other) in values.iter().enumerate() {assert_eq!(value==other,i==j);}
+        assert_eq!(&value.abstract_parameters(&[]).unwrap(), value);
+        for (j, other) in values.iter().enumerate() {
+            assert_eq!(value == other, i == j);
+        }
     }
-    assert_eq!(Term::Float32(0x7fc00042).to_string(),"(float32-bits 0x7fc00042)");
-    assert_eq!(Term::Float64(1<<63).to_string(),"(float64-bits 0x8000000000000000)");
-    assert_ne!(Term::Float32(0),Term::Primitive(Primitive::F32));
+    assert_eq!(
+        Term::Float32(0x7fc00042).to_string(),
+        "(float32-bits 0x7fc00042)"
+    );
+    assert_eq!(
+        Term::Float64(1 << 63).to_string(),
+        "(float64-bits 0x8000000000000000)"
+    );
+    assert_ne!(Term::Float32(0), Term::Primitive(Primitive::F32));
 }
 
 #[test]
 fn completed_records_keep_labels_scope_and_escaped_dumps() {
     use nir::Sort;
     let name = "x\"\n".to_string();
-    let value = Term::RecordValue(vec![(name.clone(), Term::Bound { depth: 0, index: 0, sort: Sort::Type })]);
+    let value = Term::RecordValue(vec![(
+        name.clone(),
+        Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: Sort::Type,
+        },
+    )]);
     assert_eq!(value.sort(), Sort::ComptimeValue);
     assert!(value.check_scope(&[vec![Sort::Type]]).is_ok());
     assert!(value.check_scope(&[]).is_err());
-    let closed = value.substitute(&[Term::Primitive(nir::Primitive::Bool)]).unwrap();
-    assert_eq!(closed, Term::RecordValue(vec![(name, Term::Primitive(nir::Primitive::Bool))]));
-    assert_eq!(closed.to_string(), "(record-value (fields (field \"x\\\"\\n\" (primitive bool))))");
-    assert_ne!(closed, Term::RecordValue(vec![("different".into(), Term::Primitive(nir::Primitive::Bool))]));
-    assert!(Term::RecordValue(vec![("x".into(),Term::Bool(true)),("x".into(),Term::Bool(false))]).check_scope(&[]).is_err());
+    let closed = value
+        .substitute(&[Term::Primitive(nir::Primitive::Bool)])
+        .unwrap();
+    assert_eq!(
+        closed,
+        Term::RecordValue(vec![(name, Term::Primitive(nir::Primitive::Bool))])
+    );
+    assert_eq!(
+        closed.to_string(),
+        "(record-value (fields (field \"x\\\"\\n\" (primitive bool))))"
+    );
+    assert_ne!(
+        closed,
+        Term::RecordValue(vec![(
+            "different".into(),
+            Term::Primitive(nir::Primitive::Bool)
+        )])
+    );
+    assert!(
+        Term::RecordValue(vec![
+            ("x".into(), Term::Bool(true)),
+            ("x".into(), Term::Bool(false))
+        ])
+        .check_scope(&[])
+        .is_err()
+    );
 }
 
 #[test]
 fn nominal_values_rewrite_scope_without_erasing_identity_or_variant() {
-    use nir::{DeclarationId,Sort,Primitive};
-    let variable=Term::Bound {depth:0,index:0,sort:Sort::Type};
-    let value=Term::NominalValue {
-        ty:Box::new(Term::Nominal {declaration:DeclarationId {package:3,local:7},arguments:vec![variable.clone()]}),
-        variant:Some(2),fields:vec![variable],
+    use nir::{DeclarationId, Primitive, Sort};
+    let variable = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    };
+    let value = Term::NominalValue {
+        ty: Box::new(Term::Nominal {
+            declaration: DeclarationId {
+                package: 3,
+                local: 7,
+            },
+            arguments: vec![variable.clone()],
+        }),
+        variant: Some(2),
+        fields: vec![variable],
     };
     value.check_scope(&[vec![Sort::Type]]).unwrap();
     assert!(value.check_scope(&[]).is_err());
-    let closed=value.substitute(&[Term::Primitive(Primitive::Bool)]).unwrap();
+    let closed = value
+        .substitute(&[Term::Primitive(Primitive::Bool)])
+        .unwrap();
     closed.check_scope(&[]).unwrap();
-    let Term::NominalValue {ty,variant,fields}=&closed else {panic!()};
-    assert_eq!(*variant,Some(2));
-    assert_eq!(fields,&vec![Term::Primitive(Primitive::Bool)]);
+    let Term::NominalValue {
+        ty,
+        variant,
+        fields,
+    } = &closed
+    else {
+        panic!()
+    };
+    assert_eq!(*variant, Some(2));
+    assert_eq!(fields, &vec![Term::Primitive(Primitive::Bool)]);
     assert!(matches!(ty.as_ref(),Term::Nominal {arguments,..} if arguments==fields));
-    assert_ne!(closed,Term::NominalValue {ty:ty.clone(),variant:None,fields:fields.clone()});
-    let mut fuel=2;
-    assert!(nir::type_computations::charge_term(&closed,&mut fuel).is_err());
-    nir::type_computations::charge_term(&closed,&mut 100).unwrap();
-    assert!(Term::NominalValue {ty:Box::new(Term::Primitive(Primitive::Bool)),variant:None,fields:vec![]}.check_scope(&[]).is_err());
+    assert_ne!(
+        closed,
+        Term::NominalValue {
+            ty: ty.clone(),
+            variant: None,
+            fields: fields.clone()
+        }
+    );
+    let mut fuel = 2;
+    assert!(nir::type_computations::charge_term(&closed, &mut fuel).is_err());
+    nir::type_computations::charge_term(&closed, &mut 100).unwrap();
+    assert!(
+        Term::NominalValue {
+            ty: Box::new(Term::Primitive(Primitive::Bool)),
+            variant: None,
+            fields: vec![]
+        }
+        .check_scope(&[])
+        .is_err()
+    );
 }

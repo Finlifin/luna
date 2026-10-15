@@ -23,7 +23,11 @@ pub fn compile(options: &Options) -> Result<Artifact, String> {
 }
 
 /// Resource protocol selectors must reach elaboration before pure bodies are checked.
-pub fn compile_with_resource_protocols(options: &Options, copy: Option<&str>, drop: Option<&str>) -> Result<Artifact, String> {
+pub fn compile_with_resource_protocols(
+    options: &Options,
+    copy: Option<&str>,
+    drop: Option<&str>,
+) -> Result<Artifact, String> {
     let mut selectors = source_protocols(options);
     selectors.copy = copy;
     selectors.drop = drop;
@@ -42,7 +46,12 @@ pub fn compile_in_package_with_protocols(
     package_identity: u64,
     protocols: &elaboration::program::Protocols,
 ) -> Result<Artifact, String> {
-    compile_in_package_with_source_protocols(options, package_identity, protocols, source_protocols(options))
+    compile_in_package_with_source_protocols(
+        options,
+        package_identity,
+        protocols,
+        source_protocols(options),
+    )
 }
 
 /// Resolve explicit protocol selectors before behavior validation.
@@ -52,13 +61,20 @@ pub fn compile_in_package_with_source_protocols(
     protocols: &elaboration::program::Protocols,
     selectors: crate::protocols::type_constructors::Selectors<'_>,
 ) -> Result<Artifact, String> {
+    if options.literal_into_protocol.is_some() && options.emit != Emit::Nir {
+        return Err("LiteralInto protocol binding requires NIR elaboration".into());
+    }
     if options.index_protocol.is_some() && options.emit != Emit::Nir {
         return Err("Index protocol binding requires NIR elaboration".into());
     }
     if options.splice_protocol.is_some() && options.emit != Emit::Nir {
         return Err("Splice protocol binding requires NIR elaboration".into());
     }
-    if (options.meta_list_type.is_some() || options.tuple_type.is_some() || options.optional_type.is_some()) && options.emit != Emit::Nir {
+    if (options.meta_list_type.is_some()
+        || options.tuple_type.is_some()
+        || options.optional_type.is_some())
+        && options.emit != Emit::Nir
+    {
         return Err("type constructor binding requires NIR elaboration".into());
     }
     let cwd = std::env::current_dir()
@@ -99,13 +115,13 @@ pub fn compile_in_package_with_source_protocols(
         error.emit(&instance.diag_ctx, source_file.start_pos);
     }
     if instance.diag_ctx.has_errors() {
-        return Err("lexing failed".into());
+        return Err(instance.diag_ctx.failure_summary("lexing"));
     }
 
     let mut parser = Parser::new(&sess.source_map, tokens, symbols, source_file.start_pos);
     parser.parse(&instance.diag_ctx);
     if instance.diag_ctx.has_errors() {
-        return Err("parsing failed".into());
+        return Err(instance.diag_ctx.failure_summary("parsing"));
     }
     let ast = parser.finalize();
     if options.emit == Emit::Ast {
@@ -164,7 +180,7 @@ pub fn compile_in_package_with_source_protocols(
         error.emit(&instance.diag_ctx, source_file.start_pos);
     }
     if instance.diag_ctx.has_errors() {
-        return Err("name resolution failed".into());
+        return Err(instance.diag_ctx.failure_summary("name resolution"));
     }
     let file_scope = module_tree
         .file_scopes
@@ -208,15 +224,21 @@ pub fn compile_in_package_with_source_protocols(
     instance.set_hir_input(Arc::new(hir_input));
     let package = instance.enter(|compiler| compiler.hir_package());
     if instance.diag_ctx.has_errors() {
-        return Err("HIR lowering failed".into());
+        return Err(instance.diag_ctx.failure_summary("HIR lowering"));
     }
     if options.emit == Emit::Nir {
         let protocols = crate::protocols::type_constructors::resolve_source(
-            package.package(), &[(0, package_identity, "input")], selectors, protocols,
+            package.package(),
+            &[(0, package_identity, "input")],
+            selectors,
+            protocols,
         )?;
-        let program =
-            elaboration::program::elaborate_packages_with_protocols(package.package(), &std::collections::BTreeMap::from([(0, package_identity)]), &protocols)
-                .map_err(|error| format!("elaboration failed: {error}"))?;
+        let program = elaboration::program::elaborate_packages_with_protocols(
+            package.package(),
+            &std::collections::BTreeMap::from([(0, package_identity)]),
+            &protocols,
+        )
+        .map_err(|error| format!("elaboration failed: {error}"))?;
         crate::protocols::type_constructors::validate(&program, &protocols)?;
         return Ok(Artifact::Nir(program));
     }
@@ -227,8 +249,9 @@ fn source_protocols(options: &Options) -> crate::protocols::type_constructors::S
     crate::protocols::type_constructors::Selectors {
         copy: None,
         drop: None,
-        index:options.index_protocol.as_deref(),
-        arithmetic:std::array::from_fn(|index|options.arithmetic_protocols[index].as_deref()),
+        index: options.index_protocol.as_deref(),
+        literal_into: options.literal_into_protocol.as_deref(),
+        arithmetic: std::array::from_fn(|index| options.arithmetic_protocols[index].as_deref()),
         splice: options.splice_protocol.as_deref(),
         meta_list: options.meta_list_type.as_deref(),
         tuple: options.tuple_type.as_deref(),
@@ -236,22 +259,38 @@ fn source_protocols(options: &Options) -> crate::protocols::type_constructors::S
     }
 }
 
-fn compile_sysroot(options: &Options, identity: u64, root: &std::path::Path, protocols: &elaboration::program::Protocols, selectors: crate::protocols::type_constructors::Selectors<'_>) -> Result<Artifact, String> {
+fn compile_sysroot(
+    options: &Options,
+    identity: u64,
+    root: &std::path::Path,
+    protocols: &elaboration::program::Protocols,
+    selectors: crate::protocols::type_constructors::Selectors<'_>,
+) -> Result<Artifact, String> {
     use crate::packages::SourcePackage;
     let mut packages = vec![SourcePackage {
-        resolution_id: 0, identity, name: "input".into(), entry: options.input.clone(),
+        resolution_id: 0,
+        identity,
+        name: "input".into(),
+        entry: options.input.clone(),
     }];
     // Standalone-driver identities are local to this package set. Build tools
     // needing persistent identities use packages::compile_with_builtin instead.
     let mut next_identity = 1u64;
     for name in ["builtin", "std", "meta", "build", "attrs", "verification"] {
         let directory = root.join(name);
-        if !directory.exists() && name != "builtin" && name != "std" { continue; }
+        if !directory.exists() && name != "builtin" && name != "std" {
+            continue;
+        }
         let entry = directory.join("lib.fl");
         if !entry.is_file() {
-            return Err(format!("sysroot package '{name}' requires '{}'", entry.display()));
+            return Err(format!(
+                "sysroot package '{name}' requires '{}'",
+                entry.display()
+            ));
         }
-        while next_identity == identity { next_identity += 1; }
+        while next_identity == identity {
+            next_identity += 1;
+        }
         packages.push(SourcePackage {
             resolution_id: packages.len() as u32,
             identity: next_identity,
@@ -265,17 +304,33 @@ fn compile_sysroot(options: &Options, identity: u64, root: &std::path::Path, pro
         for provider in packages.iter().skip(1) {
             if requester.resolution_id != provider.resolution_id {
                 dependencies.push(resolve::DependencyEdge {
-                    requester: requester.resolution_id, alias: provider.name.clone(), provider: provider.resolution_id,
+                    requester: requester.resolution_id,
+                    alias: provider.name.clone(),
+                    provider: provider.resolution_id,
                 });
             }
         }
     }
-    let defaults=if options.emit==Emit::Nir {
-        crate::packages::protect_source_output(&root.join("language-items.conf"),options.output.as_deref())?;
+    let defaults = if options.emit == Emit::Nir {
+        crate::packages::protect_source_output(
+            &root.join("language-items.conf"),
+            options.output.as_deref(),
+        )?;
         crate::protocols::type_constructors::SysrootBindings::load(root)?
-    } else {Default::default()};
-    let selectors=defaults.apply(selectors,protocols);
-    crate::packages::compile_stage_with_selectors(&packages, &dependencies, 0, Some(1), options.emit, options.output.as_deref(), protocols, selectors)
+    } else {
+        Default::default()
+    };
+    let selectors = defaults.apply(selectors, protocols);
+    crate::packages::compile_stage_with_selectors(
+        &packages,
+        &dependencies,
+        0,
+        Some(1),
+        options.emit,
+        options.output.as_deref(),
+        protocols,
+        selectors,
+    )
 }
 
 pub(crate) fn discover_sources(
@@ -307,8 +362,9 @@ pub(crate) fn discover_sources_excluding(
             let kind = entry.file_type().map_err(|e| e.to_string())?;
             let path = relative.join(entry.file_name());
             if !exclusions.is_empty() {
-                let absolute = std::fs::canonicalize(entry.path())
-                    .map_err(|e| format!("cannot resolve source '{}': {e}", entry.path().display()))?;
+                let absolute = std::fs::canonicalize(entry.path()).map_err(|e| {
+                    format!("cannot resolve source '{}': {e}", entry.path().display())
+                })?;
                 if exclusions.contains(&absolute) {
                     continue;
                 }
@@ -330,6 +386,12 @@ pub(crate) fn discover_sources_excluding(
     }
     let mut files = Vec::new();
     let mut directories = Vec::new();
-    visit(root, std::path::Path::new(""), exclusions, &mut files, &mut directories)?;
+    visit(
+        root,
+        std::path::Path::new(""),
+        exclusions,
+        &mut files,
+        &mut directories,
+    )?;
     Ok((files, directories))
 }

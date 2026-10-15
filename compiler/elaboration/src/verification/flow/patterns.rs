@@ -11,8 +11,14 @@ impl State {
         Ok(self)
     }
     fn keep(&mut self, existing: &BTreeSet<PlaceId>, limits: &mut Limits) -> Result<(), Unknown> {
-        limits.step(self.domains.len().saturating_add(self.reads.len()).saturating_add(existing.len()))?;
-        self.reads.retain(|address, _| existing.contains(&address.root));
+        limits.step(
+            self.domains
+                .len()
+                .saturating_add(self.reads.len())
+                .saturating_add(existing.len()),
+        )?;
+        self.reads
+            .retain(|address, _| existing.contains(&address.root));
         // A read's ghost value outlives the pattern candidate when the address
         // binding remains in scope. It is not a newly exposed source binding.
         let mut retained = existing.clone();
@@ -155,13 +161,27 @@ impl Walker<'_> {
                 self.fields_pattern(patterns, &types, input, AggregateKind::Tuple, state, depth)
             }
             Pattern::AnonymousRecord { names, fields } => {
-                let Term::Record(types) = ty else { return Err(Reason::InvalidSignature); };
-                if names.len() != fields.len() || names.len() != types.len()
-                    || names.iter().zip(types).any(|(name,(expected,_))|name != expected) {
+                let Term::Record(types) = ty else {
+                    return Err(Reason::InvalidSignature);
+                };
+                if names.len() != fields.len()
+                    || names.len() != types.len()
+                    || names
+                        .iter()
+                        .zip(types)
+                        .any(|(name, (expected, _))| name != expected)
+                {
                     return Err(Reason::InvalidSignature);
                 }
-                let types = types.iter().map(|(_,ty)|ty.clone()).collect::<Vec<_>>();
-                self.fields_pattern(fields, &types, input, AggregateKind::AnonymousRecord, state, depth)
+                let types = types.iter().map(|(_, ty)| ty.clone()).collect::<Vec<_>>();
+                self.fields_pattern(
+                    fields,
+                    &types,
+                    input,
+                    AggregateKind::AnonymousRecord,
+                    state,
+                    depth,
+                )
             }
             Pattern::Record {
                 declaration,
@@ -448,7 +468,7 @@ impl Walker<'_> {
         state: &State,
         depth: usize,
     ) -> Result<(), Reason> {
-        let Term::Function {parameters, ..} = &handler.signature else {
+        let Term::Function { parameters, .. } = &handler.signature else {
             return Err(Reason::InvalidSignature);
         };
         let ty = Term::Tuple(parameters.iter().map(|p| p.ty.clone()).collect());
@@ -458,7 +478,8 @@ impl Walker<'_> {
         let input = self.materialize_aggregate(input, &ty, &mut pending)?;
         let existing: BTreeSet<_> = pending.domains.keys().copied().collect();
         for arm in &handler.arms {
-            let (mut candidate, mut failure) = self.pattern(&arm.pattern, &input, &ty, pending, depth)?;
+            let (mut candidate, mut failure) =
+                self.pattern(&arm.pattern, &input, &ty, pending, depth)?;
             if let Some(guard) = &arm.guard {
                 let condition = self.child(guard, &mut candidate, depth)?.condition;
                 let (yes, no) = self.split_condition(candidate, condition.as_ref())?;

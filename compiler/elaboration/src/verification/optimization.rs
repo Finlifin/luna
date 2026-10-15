@@ -147,17 +147,31 @@ fn visit(
     action(expr, limits)?;
     let depth = depth + 1;
     match &mut expr.kind {
-        K::EffectHandle {computation, handlers, ..} => {
+        K::EffectHandle {
+            computation,
+            handlers,
+            ..
+        } => {
             visit(computation, limits, depth, action)?;
-            for handler in handlers {for arm in &mut handler.arms {
-                visit_pattern(&mut arm.pattern, limits, depth, action)?;
-                if let Some(g) = &mut arm.guard {visit(g, limits, depth, action)?;}
-                visit(&mut arm.body, limits, depth, action)?;
-            }}
+            for handler in handlers {
+                for arm in &mut handler.arms {
+                    visit_pattern(&mut arm.pattern, limits, depth, action)?;
+                    if let Some(g) = &mut arm.guard {
+                        visit(g, limits, depth, action)?;
+                    }
+                    visit(&mut arm.body, limits, depth, action)?;
+                }
+            }
         }
-        K::EffectResume(body) | K::EffectComputation {body, ..} | K::EffectRun {computation:body, ..} => visit(body, limits, depth, action)?,
-        K::EffectRequest {arguments, ..} => {
-            for argument in arguments {visit(argument, limits, depth, action)?;}
+        K::EffectResume(body)
+        | K::EffectComputation { body, .. }
+        | K::EffectRun {
+            computation: body, ..
+        } => visit(body, limits, depth, action)?,
+        K::EffectRequest { arguments, .. } => {
+            for argument in arguments {
+                visit(argument, limits, depth, action)?;
+            }
         }
         K::Closure { captures, body, .. } => {
             for capture in captures {
@@ -167,8 +181,12 @@ fn visit(
             }
             visit(Arc::make_mut(body), limits, depth, action)?;
         }
-        K::NormalFormType { arguments, plan, .. } => {
-            for p in plan.iter_mut().flat_map(|p| &mut p.preparations) { visit(&mut p.expression, limits, depth, action)?; }
+        K::NormalFormType {
+            arguments, plan, ..
+        } => {
+            for p in plan.iter_mut().flat_map(|p| &mut p.preparations) {
+                visit(&mut p.expression, limits, depth, action)?;
+            }
             for argument in arguments {
                 for pattern in argument.patterns_mut() {
                     visit_pattern(pattern, limits, depth, action)?;
@@ -195,18 +213,22 @@ fn visit(
         }
         | K::TupleType(fields)
         | K::Tuple(fields)
-        | K::AnonymousRecord { fields } | K::Record { fields, .. }
+        | K::AnonymousRecord { fields }
+        | K::Record { fields, .. }
         | K::Variant { fields, .. } => {
             for field in fields {
                 visit(field, limits, depth, action)?;
             }
         }
-        K::AnonymousField { value, .. } | K::Field { value, .. }
+        K::AnonymousField { value, .. }
+        | K::Field { value, .. }
         | K::Let { value, .. }
         | K::Assign { value, .. }
         | K::BitAssign { value, .. }
         | K::Discard(value)
-        | K::RequirePredicate(value) | K::EnsurePredicate(value) | K::CheckPredicate(value)
+        | K::RequirePredicate(value)
+        | K::EnsurePredicate(value)
+        | K::CheckPredicate(value)
         | K::BitSlice { value, .. }
         | K::AddressOf(value)
         | K::ReadPointer(value)
@@ -217,7 +239,11 @@ fn visit(
         | K::IntegerNegate(value)
         | K::FloatNegate(value)
         | K::BitConvert(value)
-        | K::Snapshot(value) | K::TakeBits(value) | K::SymbolName(value) | K::EnumName(value)
+        | K::NewtypeConvert(value)
+        | K::Snapshot(value)
+        | K::TakeBits(value)
+        | K::SymbolName(value)
+        | K::EnumName(value)
         | K::Not(value)
         | K::Loop { body: value, .. } => visit(value, limits, depth, action)?,
         K::WritePointer {
@@ -242,22 +268,39 @@ fn visit(
         | K::TypeEqual(a, b)
         | K::TypeListIndex(a, b)
         | K::BitEqual(a, b)
-        | K::BitConcat(a, b) | K::BitIndex(a, b)
+        | K::BitConcat(a, b)
+        | K::BitIndex(a, b)
         | K::And(a, b)
         | K::Or(a, b) => {
             visit(a, limits, depth, action)?;
             visit(b, limits, depth, action)?;
         }
-        K::BitWritePointer {pointer,selections,value} => {
-            visit(pointer,limits,depth,action)?;
-            for input in selections.iter_mut().flat_map(nir::program::BitSelection::expressions_mut) {visit(input,limits,depth,action)?;}
-            visit(value,limits,depth,action)?;
+        K::BitWritePointer {
+            pointer,
+            selections,
+            value,
+        } => {
+            visit(pointer, limits, depth, action)?;
+            for input in selections
+                .iter_mut()
+                .flat_map(nir::program::BitSelection::expressions_mut)
+            {
+                visit(input, limits, depth, action)?;
+            }
+            visit(value, limits, depth, action)?;
         }
-        K::BitUpdate {selections,value,..} => {
-            for input in selections.iter_mut().flat_map(nir::program::BitSelection::expressions_mut) {visit(input,limits,depth,action)?;}
-            visit(value,limits,depth,action)?;
+        K::BitUpdate {
+            selections, value, ..
+        } => {
+            for input in selections
+                .iter_mut()
+                .flat_map(nir::program::BitSelection::expressions_mut)
+            {
+                visit(input, limits, depth, action)?;
+            }
+            visit(value, limits, depth, action)?;
         }
-        K::BitWindow {value, start, end} => {
+        K::BitWindow { value, start, end } => {
             visit(value, limits, depth, action)?;
             visit(start, limits, depth, action)?;
             visit(end, limits, depth, action)?;
@@ -319,8 +362,9 @@ fn visit(
                 visit(&mut argument.value, limits, depth, action)?;
             }
         }
-        K::AssociatedValue {..}
-        | K::TypeValue(_) | K::TypeListValue(_)
+        K::AssociatedValue { .. }
+        | K::TypeValue(_)
+        | K::TypeListValue(_)
         | K::TraitMethod { .. }
         | K::FunctionInstance { .. }
         | K::Literal(_)
@@ -356,7 +400,8 @@ fn visit_pattern(
         Pattern::Remap { pattern, .. } | Pattern::Binding { inner: pattern, .. } => {
             visit_pattern(pattern, limits, depth, action)?
         }
-        Pattern::Record { fields, .. } | Pattern::AnonymousRecord { fields, .. }
+        Pattern::Record { fields, .. }
+        | Pattern::AnonymousRecord { fields, .. }
         | Pattern::Variant { fields, .. }
         | Pattern::NormalForm {
             arguments: fields, ..

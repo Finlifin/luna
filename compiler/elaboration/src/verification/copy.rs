@@ -88,7 +88,11 @@ pub fn acquire(
             && nir::normal_forms::tuple_fields(Some(package), ty).is_none()
             && !matches!(
                 ty,
-                Term::Nominal { .. } | Term::Tuple(_) | Term::Record(_) | Term::Function { .. } | Term::Closure { .. }
+                Term::Nominal { .. }
+                    | Term::Tuple(_)
+                    | Term::Record(_)
+                    | Term::Function { .. }
+                    | Term::Closure { .. }
             )
         {
             return Err("Copy representation is not established for this value category".into());

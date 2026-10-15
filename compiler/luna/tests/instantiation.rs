@@ -23,7 +23,11 @@ fn compile_in(source: &str, identity: u64) -> nir::program::Package {
             sysroot: None,
             splice_protocol: None,
             meta_list_type: None,
-            index_protocol: None, arithmetic_protocols:Default::default(), tuple_type: None, optional_type: None,
+            index_protocol: None,
+            literal_into_protocol: None,
+            arithmetic_protocols: Default::default(),
+            tuple_type: None,
+            optional_type: None,
         },
         identity,
     );
@@ -426,6 +430,7 @@ fn retained_definition_integrity_is_checked_before_execution() {
         |p| match &mut p.nominals[0].definition {
             iir::NominalDefinition::Struct(s) => s.declaration.local += 1000,
             iir::NominalDefinition::Enum(e) => e.declaration.local += 1000,
+            iir::NominalDefinition::Newtype(n) => n.declaration.local += 1000,
         },
         "disagrees with its instance key",
     );
@@ -922,130 +927,1029 @@ fn associated_value_nodes_validate_member_identity_type_and_selection() {
 #[test]
 fn inline_function_intent_survives_generic_and_staged_instantiation() {
     use comptime_interpretor::{Interpreter, Value};
-    let package=compile("inline fn identity(value:T)->T where T {value}
+    let package = compile(
+        "inline fn identity(value:T)->T where T {value}
         inline fn select(comptime choose:bool,value:bool)->bool {if choose {value} else {not value}}
-        fn entry()->bool {select(true,identity(true))}");
-    for name in ["identity","select"] {
-        let function=package.functions.iter().find(|f|f.name==name).unwrap();
+        fn entry()->bool {select(true,identity(true))}",
+    );
+    for name in ["identity", "select"] {
+        let function = package.functions.iter().find(|f| f.name == name).unwrap();
         assert!(function.inline);
-        assert_eq!(function.phase,nir::program::FunctionPhase::Runtime);
+        assert_eq!(function.phase, nir::program::FunctionPhase::Runtime);
         assert!(!function.pure);
         assert!(function.to_string().contains("(inline true)"));
     }
-    assert!(!package.functions.iter().find(|f|f.name=="entry").unwrap().inline);
-    let graph=luna::instantiation::instantiate(&package,"entry",100_000).unwrap();
-    for name in ["identity","select"] {
-        let instances:Vec<_>=graph.functions.iter().filter(|f|f.function.name==name).collect();
-        assert!(!instances.is_empty(),"{name}");
-        assert!(instances.iter().all(|f|f.function.inline),"{name}");
+    assert!(
+        !package
+            .functions
+            .iter()
+            .find(|f| f.name == "entry")
+            .unwrap()
+            .inline
+    );
+    let graph = luna::instantiation::instantiate(&package, "entry", 100_000).unwrap();
+    for name in ["identity", "select"] {
+        let instances: Vec<_> = graph
+            .functions
+            .iter()
+            .filter(|f| f.function.name == name)
+            .collect();
+        assert!(!instances.is_empty(), "{name}");
+        assert!(instances.iter().all(|f| f.function.inline), "{name}");
     }
-    let mut vm=Interpreter::from_iir(&graph,Default::default()).unwrap();
-    assert_eq!(vm.invoke_instance(&graph.roots[0],vec![]).unwrap(),Value::Bool(true));
+    let mut vm = Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn inline_function_calls_preserve_argument_order_and_effects() {
-    use comptime_interpretor::{Interpreter,Value};
+    use comptime_interpretor::{Interpreter, Value};
     let package=compile("struct Counter {value:.u8'builtin}
         fn tick(counter:*Counter)->.u8'builtin {assumes counter.*.value < 255;counter.*.value = counter.*.value + 1;counter.*.value}
         inline fn use_twice(.left:.u8'builtin=0,.right:.u8'builtin=0)->bool {left == 2 and right == 1 and left == 2}
         fn entry()->bool {let counter=Counter {value:0};use_twice(.right=tick(counter.ref),.left=tick(counter.ref)) and counter.value == 2}");
-    let graph=luna::instantiation::instantiate(&package,"entry",100_000).unwrap();
-    let mut vm=Interpreter::from_iir(&graph,Default::default()).unwrap();
-    assert_eq!(vm.invoke_instance(&graph.roots[0],vec![]).unwrap(),Value::Bool(true));
+    let graph = luna::instantiation::instantiate(&package, "entry", 100_000).unwrap();
+    let mut vm = Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn inline_function_deferred_signature_preserves_intent() {
-    let package=compile("typealias Type=.Type'builtin;
+    let package = compile(
+        "typealias Type=.Type'builtin;
         comptime fn Pick(flag:bool)->Type {if flag {bool} else {.u8'builtin}}
         inline fn identity(comptime flag:bool,value:defer Pick(flag))->defer Pick(flag) {value}
-        fn entry()->bool {identity(true,true)}");
-    let graph=luna::instantiation::instantiate(&package,"entry",100_000).unwrap();
-    assert!(graph.functions.iter().any(|f|f.function.name=="identity" && f.function.inline));
-    assert_eq!(luna::execution::interpret(&package,"entry",100_000).unwrap(),comptime_interpretor::Value::Bool(true));
+        fn entry()->bool {identity(true,true)}",
+    );
+    let graph = luna::instantiation::instantiate(&package, "entry", 100_000).unwrap();
+    assert!(
+        graph
+            .functions
+            .iter()
+            .any(|f| f.function.name == "identity" && f.function.inline)
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "entry", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
 }
 
 #[test]
 fn inline_function_preserves_phase_purity_and_selected_methods() {
     use comptime_interpretor::Value;
-    let package=compile("comptime inline fn invert(value:bool)->bool {not value}
+    let package = compile(
+        "comptime inline fn invert(value:bool)->bool {not value}
         pure inline fn stable(value:bool)->bool {value}
         trait Read {fn read(self)->bool;}
         struct Reader {}
         impl Read for Reader {inline fn read(self)->bool {true}}
         const FLAG=invert(false);
-        fn entry()->bool {stable(true) and Reader {}.as(Read).read()}");
-    let invert=package.functions.iter().find(|f|f.name=="invert").unwrap();
+        fn entry()->bool {stable(true) and Reader {}.as(Read).read()}",
+    );
+    let invert = package
+        .functions
+        .iter()
+        .find(|f| f.name == "invert")
+        .unwrap();
     assert!(invert.inline);
-    assert_eq!(invert.phase,nir::program::FunctionPhase::Comptime);
-    let stable=package.functions.iter().find(|f|f.name=="stable").unwrap();
+    assert_eq!(invert.phase, nir::program::FunctionPhase::Comptime);
+    let stable = package
+        .functions
+        .iter()
+        .find(|f| f.name == "stable")
+        .unwrap();
     assert!(stable.inline && stable.pure);
-    let graph=luna::instantiation::instantiate(&package,"entry",100_000).unwrap();
-    assert!(graph.functions.iter().any(|f|f.function.name=="read" && f.function.inline));
-    assert_eq!(luna::execution::interpret(&package,"entry",100_000).unwrap(),Value::Bool(true));
+    let graph = luna::instantiation::instantiate(&package, "entry", 100_000).unwrap();
+    assert!(
+        graph
+            .functions
+            .iter()
+            .any(|f| f.function.name == "read" && f.function.inline)
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "entry", 100_000).unwrap(),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn optional_inline_pass_expands_calls_with_hygienic_returns_and_defaults() {
-    use comptime_interpretor::{Interpreter,Value};
-    let mut package=compile("inline fn identity(value:T)->T where T {return value;}
+    use comptime_interpretor::{Interpreter, Value};
+    let mut package = compile(
+        "inline fn identity(value:T)->T where T {return value;}
         inline fn pick(value:bool,.fallback:bool=not value)->bool {
             if value {return identity(value);}fallback
         }
-        fn entry()->bool {pick(true) and pick(false)}");
-    let report=elaboration::program::inlining::expand(&mut package,&mut 100_000).unwrap();
-    assert!(report.expanded>=3,"{report}");
+        fn entry()->bool {pick(true) and pick(false)}",
+    );
+    let report = elaboration::program::inlining::expand(&mut package, &mut 100_000).unwrap();
+    assert!(report.expanded >= 3, "{report}");
     assert!(report.to_string().starts_with("(inline-report "));
     assert!(!package.internal_return_packets.is_empty());
-    let graph=luna::instantiation::instantiate(&package,"entry",100_000).unwrap();
-    let mut vm=Interpreter::from_iir(&graph,Default::default()).unwrap();
-    assert_eq!(vm.invoke_instance(&graph.roots[0],vec![]).unwrap(),Value::Bool(true));
+    let graph = luna::instantiation::instantiate(&package, "entry", 100_000).unwrap();
+    let mut vm = Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn optional_inline_pass_retains_recursive_and_indirect_calls() {
-    use comptime_interpretor::{Interpreter,Value};
-    let mut package=compile("inline fn recur(stop:bool)->bool {if stop {true} else {recur(true)}}
-        fn entry()->bool {let callback=recur;callback(false) and recur(false)}");
-    let report=elaboration::program::inlining::expand(&mut package,&mut 100_000).unwrap();
-    assert!(report.expanded>0);
-    let graph=luna::instantiation::instantiate(&package,"entry",100_000).unwrap();
-    let mut vm=Interpreter::from_iir(&graph,Default::default()).unwrap();
-    assert_eq!(vm.invoke_instance(&graph.roots[0],vec![]).unwrap(),Value::Bool(true));
+    use comptime_interpretor::{Interpreter, Value};
+    let mut package = compile(
+        "inline fn recur(stop:bool)->bool {if stop {true} else {recur(true)}}
+        fn entry()->bool {let callback=recur;callback(false) and recur(false)}",
+    );
+    let report = elaboration::program::inlining::expand(&mut package, &mut 100_000).unwrap();
+    assert!(report.expanded > 0);
+    let graph = luna::instantiation::instantiate(&package, "entry", 100_000).unwrap();
+    let mut vm = Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
 }
 
 #[test]
 fn optional_inline_pass_small_budget_keeps_original_program_usable() {
-    let original=compile("inline fn invert(value:bool)->bool {not value}
-        fn entry()->bool {invert(false)}");
-    for budget in [0,1,10,30,60,100] {
-        let mut package=original.clone();
-        let report=elaboration::program::inlining::expand(&mut package,&mut {budget});
+    let original = compile(
+        "inline fn invert(value:bool)->bool {not value}
+        fn entry()->bool {invert(false)}",
+    );
+    for budget in [0, 1, 10, 30, 60, 100] {
+        let mut package = original.clone();
+        let report = elaboration::program::inlining::expand(&mut package, &mut { budget });
         if !matches!(report,Ok(report) if report.expanded>0) {
-            assert_eq!(package.expansion_sources,original.expansion_sources);
-            assert_eq!(package.enums,original.enums);
-            assert_eq!(package.internal_return_packets,original.internal_return_packets);
-            assert_eq!(package.internal_return_empty_replacements,original.internal_return_empty_replacements);
-            assert_eq!(package.quote_identity_cursor,original.quote_identity_cursor);
+            assert_eq!(package.expansion_sources, original.expansion_sources);
+            assert_eq!(package.enums, original.enums);
+            assert_eq!(
+                package.internal_return_packets,
+                original.internal_return_packets
+            );
+            assert_eq!(
+                package.internal_return_empty_replacements,
+                original.internal_return_empty_replacements
+            );
+            assert_eq!(
+                package.quote_identity_cursor,
+                original.quote_identity_cursor
+            );
         }
         // Regardless of whether preparation or a candidate ran out of budget,
         // no half-expanded call or leaked private packet may escape.
-        assert_eq!(luna::execution::interpret(&package,"entry",100_000).unwrap(),comptime_interpretor::Value::Bool(true),"{budget}");
+        assert_eq!(
+            luna::execution::interpret(&package, "entry", 100_000).unwrap(),
+            comptime_interpretor::Value::Bool(true),
+            "{budget}"
+        );
+    }
+}
+
+#[test]
+fn optional_inline_pass_mutual_recursion_remains_bounded() {
+    let original = compile(
+        "inline fn first(stop:bool)->bool {if stop {true} else {second(true)}}
+        inline fn second(stop:bool)->bool {if stop {first(true)} else {first(false)}}
+        fn entry()->bool {first(false)}",
+    );
+    for budget in [1000, 10000, 100000] {
+        let mut package = original.clone();
+        if let Ok(report) = elaboration::program::inlining::expand(&mut package, &mut { budget }) {
+            assert!(report.expanded <= 9, "{report}");
+        }
+        assert_eq!(
+            luna::execution::interpret(&package, "entry", 1000000).unwrap(),
+            comptime_interpretor::Value::Bool(true)
+        );
     }
 }
 
 #[test]
 fn optional_inline_pass_evaluates_even_unused_inputs_once() {
-    use comptime_interpretor::{Interpreter,Value,Event};
+    use comptime_interpretor::{Event, Interpreter, Value};
     let mut package=compile("fn mark(slot:*bool)->bool {slot.* = not slot.*;slot.*}
         inline fn twice(value:bool,.fallback:bool=not value)->bool {value == value and fallback}
         inline fn ignore(value:bool)->bool {true}
         fn entry()->bool {var flag=false;let first=twice(mark(flag.ref));let second=ignore(mark(flag.ref));not first and second and not flag}");
-    elaboration::program::inlining::expand(&mut package,&mut 100_000).unwrap();
-    let graph=luna::instantiation::instantiate(&package,"entry",100_000).unwrap();
-    let mut vm=Interpreter::from_iir(&graph,Default::default()).unwrap();
-    assert_eq!(vm.invoke_instance(&graph.roots[0],vec![]).unwrap(),Value::Bool(true));
-    let mark=package.functions.iter().find(|f|f.name=="mark").unwrap().declaration;
-    assert_eq!(vm.events().iter().filter(|event|matches!(event,Event::EnterFunction(id) if *id==mark)).count(),2);
+    elaboration::program::inlining::expand(&mut package, &mut 100_000).unwrap();
+    let graph = luna::instantiation::instantiate(&package, "entry", 100_000).unwrap();
+    let mut vm = Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    let mark = package
+        .functions
+        .iter()
+        .find(|f| f.name == "mark")
+        .unwrap()
+        .declaration;
+    assert_eq!(
+        vm.events()
+            .iter()
+            .filter(|event| matches!(event,Event::EnterFunction(id) if *id==mark))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn optional_inline_pass_selects_trait_bodies_and_keeps_interface_contracts() {
+    use comptime_interpretor::{ErrorKind, Event, Interpreter, Value};
+    let original = compile(
+        "trait Check {fn check(self,value:bool)->bool where requires value == value, ensures true;}
+        struct Reader {} impl Check for Reader {inline fn check(self,value:bool)->bool {value}}
+        fn mark(slot:*bool)->bool {slot.* = not slot.*;slot.*}
+        fn entry()->bool {var flag=false;Reader {}.as(Check).check(mark(flag.ref))}",
+    );
+    let body = original
+        .functions
+        .iter()
+        .find(|f| f.name == "check")
+        .unwrap()
+        .declaration;
+    for failure in ["none", "entry", "result"] {
+        let mut package = original.clone();
+        if failure != "none" {
+            let contract = &mut package
+                .traits
+                .iter_mut()
+                .find(|t| t.name == "Check")
+                .unwrap()
+                .methods[0]
+                .program;
+            let predicates = if failure == "entry" {
+                &mut contract.preconditions
+            } else {
+                &mut contract.postconditions
+            };
+            assert!(!predicates.is_empty());
+            predicates[0].kind =
+                nir::program::ExprKind::Literal(nir::program::Literal::Bool(false));
+        }
+        let report = elaboration::program::inlining::expand(&mut package, &mut 100_000).unwrap();
+        assert_eq!(report.expanded, 1, "{report}");
+        let graph = luna::instantiation::instantiate(&package, "entry", 100_000).unwrap();
+        let mut vm = Interpreter::from_iir(&graph, Default::default()).unwrap();
+        let result = vm.invoke_instance(&graph.roots[0], vec![]);
+        if failure != "none" {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::ProgramContractRejected);
+        } else {
+            assert_eq!(result.unwrap(), Value::Bool(true));
+        }
+        assert!(
+            !vm.events()
+                .iter()
+                .any(|event| matches!(event, Event::EnterFunction(id) if *id == body))
+        );
+        let mark = package
+            .functions
+            .iter()
+            .find(|f| f.name == "mark")
+            .unwrap()
+            .declaration;
+        assert_eq!(
+            vm.events()
+                .iter()
+                .filter(|event| matches!(event, Event::EnterFunction(id) if *id == mark))
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn optional_inline_pass_specializes_generic_trait_methods_inside_closures() {
+    use comptime_interpretor::{Event, Interpreter, Value};
+    let mut package = compile("trait Identity {fn keep(self,value:U)->U where U;}
+        struct Holder where T {value:T}
+        impl Identity for Holder<T> where T {
+            inline fn keep(self,value:U)->U where U {return value;}
+        }
+        fn entry()->bool {
+            let choose=|value:bool| {Holder<bool> {value:false}.as(Identity).keep(value)};
+            choose(true) and Holder<bool> {value:false}.as(Identity).keep(true) and Holder<bool> {value:false}.as(Identity).keep('a') == 'a' and Holder<.char'builtin> {value:'z'}.as(Identity).keep(true)
+        }");
+    let method = package
+        .functions
+        .iter()
+        .find(|f| f.name == "keep")
+        .unwrap()
+        .declaration;
+    let report = elaboration::program::inlining::expand(&mut package, &mut 100_000).unwrap();
+    assert_eq!(report.expanded, 4, "{report}");
+    assert_eq!(report.selected_methods, 3, "{report}");
+    assert_eq!(report.reused_method_selections, 1, "{report}");
+    let graph = luna::instantiation::instantiate(&package, "entry", 100_000).unwrap();
+    let mut vm = Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert!(
+        !vm.events()
+            .iter()
+            .any(|event| matches!(event, Event::EnterFunction(id) if *id == method))
+    );
+}
+
+#[test]
+fn optional_inline_effect_replaces_requests_with_local_matching() {
+    use comptime_interpretor::Value;
+    let original = compile(
+        "inline effect ask(value:bool)->bool;
+        inline fn subject(value:bool)->#ask bool {ask(value)# or ask(false)#}
+        fn entry()->bool {var observed=false;let result=subject(true)# {
+            ask(true)=>{observed=true;false},ask(false)=>observed,
+        };result and observed}",
+    );
+    let mut package = original.clone();
+    let report = elaboration::program::inlining::expand(&mut package, &mut 100_000).unwrap();
+    assert_eq!(report.expanded_handlers, 1, "{report}");
+    assert_eq!(report.expanded_requests, 2, "{report}");
+    let entry = package
+        .functions
+        .iter()
+        .find(|f| f.name == "entry")
+        .unwrap();
+    nir::visit::expressions(entry, &mut 100_000, |expr, _| {
+        assert!(!matches!(
+            expr.kind,
+            nir::program::ExprKind::EffectRequest { .. }
+                | nir::program::ExprKind::EffectHandle { .. }
+        ));
+        Ok(())
+    })
+    .unwrap();
+    for source in [&original, &package] {
+        assert_eq!(
+            luna::execution::interpret(source, "entry", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn optional_inline_effect_retains_unsupported_control_and_unexpanded_calls() {
+    use comptime_interpretor::Value;
+    for (modifier, arm) in [("", "true")] {
+        let mut package = compile(&format!(
+            "inline effect ask()->bool;
+            {modifier} fn subject()->#ask bool {{ask()#}}
+            fn entry()->bool {{subject()# {{ask()=>{arm},}}}}"
+        ));
+        let report = elaboration::program::inlining::expand(&mut package, &mut 100_000).unwrap();
+        assert_eq!(report.expanded_handlers, 0, "{report}");
+        assert_eq!(report.expanded_requests, 0, "{report}");
+        assert_eq!(
+            luna::execution::interpret(&package, "entry", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn optional_inline_effect_without_inline_callee_evaluates_request_inputs_once() {
+    use comptime_interpretor::{Event, Interpreter, Value};
+    let mut package = compile(
+        "inline effect ask(value:bool)->bool;
+        fn mark(pointer:*bool)->bool {pointer.* = not pointer.*;pointer.*}
+        fn subject()->#ask bool {true}
+        fn entry()->bool {var flag=false;let result=(do {ask(mark(flag.ref))#})# {
+            ask(value)=>value and value,
+        };result and flag}",
+    );
+    let report = elaboration::program::inlining::expand(&mut package, &mut 100_000).unwrap();
+    assert_eq!(report.expanded_handlers, 1, "{report}");
+    let graph = luna::instantiation::instantiate(&package, "entry", 100_000).unwrap();
+    let mut vm = Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    let mark = package
+        .functions
+        .iter()
+        .find(|f| f.name == "mark")
+        .unwrap()
+        .declaration;
+    assert_eq!(
+        vm.events()
+            .iter()
+            .filter(|event| matches!(event,Event::EnterFunction(id) if *id==mark))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn optional_inline_effect_keeps_operation_instances_and_loop_requests_distinct() {
+    use comptime_interpretor::Value;
+    let original = compile(
+        "inline effect choose()->T where T;
+        inline fn subject()->#[choose<bool>,choose<.char'builtin>] bool {
+            (choose<bool>()#) and (choose<.char'builtin>()#)=='x'
+        }
+        fn entry()->bool {var flag=false;var result=false;
+            while not flag {result=subject()# {
+                choose<bool>()=>{flag=true;true},choose<.char'builtin>()=>'x',
+            };}result and flag}",
+    );
+    let mut package = original.clone();
+    let report = elaboration::program::inlining::expand(&mut package, &mut 100_000).unwrap();
+    assert_eq!(report.expanded_handlers, 1, "{report}");
+    assert_eq!(report.expanded_requests, 2, "{report}");
+    for source in [&original, &package] {
+        assert_eq!(
+            luna::execution::interpret(source, "entry", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn optional_inline_effect_expands_independent_nested_installations() {
+    use comptime_interpretor::Value;
+    for nested in [
+        "let inside=read()# {read()=>true,};inside and (poll()#)",
+        "poll()#",
+    ] {
+        let handler = if nested == "poll()#" {
+            "read()# {read()=>do {resume true;},}"
+        } else {
+            "true"
+        };
+        let original = compile(&format!(
+            "inline effect read()->bool;inline effect poll()->bool;
+            inline fn subject()->#poll bool {{{nested}}}
+            fn entry()->bool {{subject()# {{poll()=>{handler},}}}}"
+        ));
+        let mut package = original.clone();
+        let report = elaboration::program::inlining::expand(&mut package, &mut 1000000).unwrap();
+        let entry = package
+            .functions
+            .iter()
+            .find(|f| f.name == "entry")
+            .unwrap();
+        assert!(
+            report.expanded_handlers >= 2,
+            "{nested}: {report}\n{}",
+            entry.body
+        );
+        let mut remaining = 0;
+        nir::visit::expression(&entry.body, &mut 100000, |expr, _| {
+            if matches!(
+                expr.kind,
+                nir::program::ExprKind::EffectHandle { .. }
+                    | nir::program::ExprKind::EffectRequest { .. }
+            ) {
+                remaining += 1;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(remaining, 0, "{nested}: {report}");
+        for package in [&original, &package] {
+            assert_eq!(
+                luna::execution::interpret(package, "entry", 1000000).unwrap(),
+                Value::Bool(true)
+            );
+        }
+    }
+}
+
+#[test]
+fn optional_inline_effect_maps_subset_and_reordered_callee_rows() {
+    use comptime_interpretor::Value;
+    for (row, body, requests) in [
+        ("poll", "not (poll()#)", 1),
+        ("[poll,read]", "not (poll()#) and (read()#)", 2),
+    ] {
+        let original = compile(&format!(
+            "inline effect read()->bool;inline effect poll()->bool;
+            inline fn inner()->#{row} bool {{{body}}}
+            inline fn subject()->#[read,poll] bool {{inner()}}
+            fn entry()->bool {{subject()# {{read()=>true,poll()=>false,}}}}"
+        ));
+        let mut package = original.clone();
+        let report = elaboration::program::inlining::expand(&mut package, &mut 1000000).unwrap();
+        assert_eq!(report.expanded_handlers, 1, "{row}: {report}");
+        assert_eq!(report.expanded_requests, requests, "{row}: {report}");
+        for package in [&original, &package] {
+            assert_eq!(
+                luna::execution::interpret(package, "entry", 1000000).unwrap(),
+                Value::Bool(true)
+            );
+        }
+    }
+}
+
+#[test]
+fn optional_inline_effect_rolls_back_a_partially_transformed_installation() {
+    use comptime_interpretor::Value;
+    let mut original = compile(
+        "inline effect ask()->bool;
+        fn ordinary()->#ask bool {ask()#}
+        inline fn yes()->bool {return true;}
+        inline fn partially()->#ask bool {let first=ask()#;ordinary()}
+        fn entry()->bool {partially()# {ask()=>do {resume yes();},}}",
+    );
+    original.effects[0].inline = false;
+    elaboration::program::inlining::expand(&mut original, &mut 100_000).unwrap();
+    original.effects[0].inline = true;
+    for function in &mut original.functions {
+        function.inline = false;
+    }
+    for budget in [100_000, 500, 200, 50] {
+        let mut package = original.clone();
+        if let Ok(report) = elaboration::program::inlining::expand(&mut package, &mut { budget }) {
+            assert_eq!(report.expanded_handlers, 0, "{report}");
+            assert_eq!(report.expanded_requests, 0, "{report}");
+        }
+        assert_eq!(
+            package, original,
+            "failed installation changed IR or metadata at budget {budget}"
+        );
+        assert_eq!(
+            luna::execution::interpret(&package, "entry", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn optional_inline_effect_nested_outer_requests_keep_routing_and_rollback() {
+    use comptime_interpretor::Value;
+    let mut original = compile(
+        "inline effect read()->bool;inline effect poll()->bool;
+        inline fn inside()->#[read,poll] bool {let first=read()#;first and (poll()#)}
+        fn entry()->bool {(inside()# {read()=>do {resume true;},})# {poll()=>true,}}",
+    );
+    for effect in &mut original.effects {
+        effect.inline = false;
+    }
+    elaboration::program::inlining::expand(&mut original, &mut 1000000).unwrap();
+    for effect in &mut original.effects {
+        effect.inline = true;
+    }
+    for function in &mut original.functions {
+        function.inline = false;
+    }
+    for budget in [1000000, 1000, 200, 1] {
+        let mut package = original.clone();
+        let report = match elaboration::program::inlining::expand(&mut package, &mut { budget }) {
+            Ok(report) => report,
+            Err(error) => {
+                assert!(error.contains("budget exhausted"), "{error}");
+                assert_eq!(package, original, "failed preparation at budget {budget}");
+                Default::default()
+            }
+        };
+        if budget == 1000000 {
+            assert_eq!(report.expanded_handlers, 2, "{report}");
+            assert_eq!(report.expanded_requests, 2, "{report}");
+        }
+        if report.expanded_handlers == 0 {
+            assert_eq!(
+                package, original,
+                "rollback metadata changed at budget {budget}"
+            );
+        }
+        assert_eq!(
+            luna::execution::interpret(&package, "entry", 1000000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn optional_inline_effect_invalid_row_maps_do_not_publish_partial_rewrites() {
+    let mut original = compile(
+        "inline effect read()->bool;inline effect poll()->bool;
+        inline fn inner()->#poll bool {poll()#}
+        inline fn subject()->#[read,poll] bool {inner()}
+        fn entry()->bool {subject()# {read()=>false,poll()=>true,}}",
+    );
+    for effect in &mut original.effects {
+        effect.inline = false;
+    }
+    elaboration::program::inlining::expand(&mut original, &mut 1000000).unwrap();
+    for effect in &mut original.effects {
+        effect.inline = true;
+    }
+    for function in &mut original.functions {
+        function.inline = false;
+    }
+    for invalid in [vec![0], vec![usize::MAX], vec![]] {
+        let mut package = original.clone();
+        let entry = package
+            .functions
+            .iter_mut()
+            .find(|f| f.name == "entry")
+            .unwrap();
+        let mut changed = false;
+        nir::visit::expression_mut(&mut entry.body, &mut 100000, |expr, _| {
+            if let nir::program::ExprKind::EffectRun { slots, .. } = &mut expr.kind {
+                if slots.as_slice() == [1] {
+                    *slots = invalid.clone();
+                    changed = true;
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert!(changed);
+        let before = package.clone();
+        let report = elaboration::program::inlining::expand(&mut package, &mut 1000000).unwrap();
+        assert_eq!(report.expanded_handlers, 0, "{invalid:?}: {report}");
+        assert_eq!(package, before, "{invalid:?}");
+    }
+}
+
+#[test]
+fn optional_inline_effect_inner_commit_survives_outer_retention() {
+    use comptime_interpretor::Value;
+    let mut original = compile(
+        "inline effect read()->bool;inline effect poll()->bool;
+        fn ordinary()->#poll bool {poll()#}
+        inline fn subject()->#poll bool {
+            let inside=read()# {read()=>do {resume true;},};
+            ordinary()
+        }
+        fn entry()->bool {subject()# {poll()=>true,}}",
+    );
+    for effect in &mut original.effects {
+        effect.inline = false;
+    }
+    elaboration::program::inlining::expand(&mut original, &mut 1000000).unwrap();
+    for effect in &mut original.effects {
+        effect.inline = true;
+    }
+    for function in &mut original.functions {
+        function.inline = false;
+    }
+    let mut package = original.clone();
+    let report = elaboration::program::inlining::expand(&mut package, &mut 1000000).unwrap();
+    assert!(report.expanded_handlers > 0, "{report}");
+    let entry = package
+        .functions
+        .iter()
+        .find(|f| f.name == "entry")
+        .unwrap();
+    let mut handlers = 0;
+    nir::visit::expression(&entry.body, &mut 100000, |expr, _| {
+        if matches!(expr.kind, nir::program::ExprKind::EffectHandle { .. }) {
+            handlers += 1;
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(handlers, 1, "{report}");
+    assert_eq!(
+        luna::execution::interpret(&package, "entry", 1000000).unwrap(),
+        Value::Bool(true)
+    );
+    let previous = package.clone();
+    let repeated = elaboration::program::inlining::expand(&mut package, &mut 1000000).unwrap();
+    assert_eq!(repeated.expanded_handlers, 0, "{repeated}");
+    assert_eq!(package, previous);
+}
+
+#[test]
+fn optional_inline_effect_resume_returns_to_each_request_not_the_caller() {
+    use comptime_interpretor::Value;
+    let original=compile("inline effect ask(value:bool)->bool;
+        inline fn subject()->#ask bool {let first=ask(true)#;let second=ask(false)#;first and second}
+        fn entry()->bool {var seen=false;let result=subject()# {
+            ask(value)=>{if value {seen=true;resume true;}resume seen;seen=false;false},
+        };result and seen}");
+    let mut package = original.clone();
+    let report = elaboration::program::inlining::expand(&mut package, &mut 100_000).unwrap();
+    assert_eq!(report.expanded_handlers, 1, "{report}");
+    assert_eq!(report.expanded_requests, 2, "{report}");
+    let entry = package
+        .functions
+        .iter()
+        .find(|f| f.name == "entry")
+        .unwrap();
+    nir::visit::expressions(entry, &mut 100_000, |expr, _| {
+        assert!(!matches!(
+            expr.kind,
+            nir::program::ExprKind::EffectResume(_)
+                | nir::program::ExprKind::EffectRequest { .. }
+                | nir::program::ExprKind::EffectHandle { .. }
+        ));
+        Ok(())
+    })
+    .unwrap();
+    for source in [&original, &package] {
+        assert_eq!(
+            luna::execution::interpret(source, "entry", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn optional_inline_effect_does_not_capture_returns_from_request_arguments() {
+    use comptime_interpretor::Value;
+    let original = compile(
+        "inline effect ask(value:bool)->bool;
+        fn entry()->bool {(do {ask(do {return true;false})#})# {
+            ask(value)=>do {resume false;},
+        }}",
+    );
+    let mut package = original.clone();
+    let report = elaboration::program::inlining::expand(&mut package, &mut 100_000).unwrap();
+    assert_eq!(report.expanded_handlers, 1, "{report}");
+    for source in [&original, &package] {
+        assert_eq!(
+            luna::execution::interpret(source, "entry", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn optional_inline_effect_handler_loops_keep_local_and_caller_targets_separate() {
+    use comptime_interpretor::Value;
+    let original = compile(
+        "inline effect poll()->bool;
+        inline fn subject()->#poll bool {poll()#}
+        fn entry()->bool {var finished=false;while:outside true {
+            subject()# {poll()=>do {
+                var first=true;while:inside true {
+                    if first {first=false;continue inside;}break inside;
+                }
+                finished=not first;break outside;
+            },};assumes false;
+        }finished}",
+    );
+    let mut package = original.clone();
+    let report = elaboration::program::inlining::expand(&mut package, &mut 100_000).unwrap();
+    assert_eq!(report.expanded_handlers, 1, "{report}");
+    for source in [&original, &package] {
+        assert_eq!(
+            luna::execution::interpret(source, "entry", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn optional_inline_effect_keeps_callee_closure_invocation_separate() {
+    use comptime_interpretor::Value;
+    let original = compile(
+        "inline effect poll()->bool;
+        inline fn subject(value:bool)->#poll bool {
+            let callback=|input:bool| {return input and value;};
+            let answer=poll()#;callback(answer)
+        }
+        fn entry()->bool {subject(true)# {poll()=>true,}}",
+    );
+    let mut package = original.clone();
+    let report = elaboration::program::inlining::expand(&mut package, &mut 100_000).unwrap();
+    assert_eq!(report.expanded_handlers, 1, "{report}");
+    for source in [&original, &package] {
+        assert_eq!(
+            luna::execution::interpret(source, "entry", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn optional_inline_effect_retains_a_closure_with_its_own_effect_row() {
+    use comptime_interpretor::Value;
+    let mut package = compile(
+        "inline effect poll()->bool;
+        typealias Callback=%{value:bool} fn()->#poll bool;
+        inline fn subject(value:bool)->#poll bool {
+            let callback:Callback=|| {poll()# and value};callback()
+        }
+        fn entry()->bool {subject(true)# {poll()=>true,}}",
+    );
+    let report = elaboration::program::inlining::expand(&mut package, &mut 100_000).unwrap();
+    assert_eq!(report.expanded_handlers, 0, "{report}");
+    assert_eq!(
+        luna::execution::interpret(&package, "entry", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn inline_effect_iteration_pipeline_forwards_each_item_once() {
+    use comptime_interpretor::Value;
+    let original = compile(include_str!(
+        "../../../development/examples/inline-iteration.fl"
+    ));
+    let mut expanded = original.clone();
+    let report = elaboration::program::inlining::expand(&mut expanded, &mut 100_000).unwrap();
+    assert!(report.expanded_handlers >= 3, "{report}");
+    let entry = expanded
+        .functions
+        .iter()
+        .find(|function| function.name == "entry")
+        .unwrap();
+    nir::visit::expressions(entry, &mut 100_000, |expr, _| {
+        assert!(!matches!(
+            expr.kind,
+            nir::program::ExprKind::EffectHandle { .. }
+                | nir::program::ExprKind::EffectRequest { .. }
+                | nir::program::ExprKind::EffectRun { .. }
+                | nir::program::ExprKind::EffectComputation { .. }
+        ));
+        Ok(())
+    })
+    .unwrap();
+    for package in [&original, &expanded] {
+        assert_eq!(
+            luna::execution::interpret(package, "entry", 100_000).unwrap(),
+            Value::UnsignedInteger(7)
+        );
+    }
+}
+
+#[test]
+fn inline_effect_partial_handlers_forward_without_removing_the_inner_layer() {
+    use comptime_interpretor::Value;
+    let original=compile("inline effect ask(value:bool)->bool;
+        inline fn produce()->#ask bool {
+            let a=ask(true)#;let b=ask(false)#;let c=ask(true)#;let d=ask(false)#;
+            not a and b and not c and d
+        }
+        inline fn filtered()->#ask bool {produce()# {ask(true)=>false,}}
+        fn entry()->bool {var flag=false;let result=filtered()# {ask(value)=>{flag=not flag;not value},};result and not flag}");
+    let mut expanded = original.clone();
+    let report = elaboration::program::inlining::expand(&mut expanded, &mut 1000000).unwrap();
+    assert!(report.expanded_handlers >= 2, "{report}");
+    let entry = expanded
+        .functions
+        .iter()
+        .find(|f| f.name == "entry")
+        .unwrap();
+    nir::visit::expressions(entry, &mut 100000, |expr, _| {
+        assert!(!matches!(
+            expr.kind,
+            nir::program::ExprKind::EffectHandle { .. }
+                | nir::program::ExprKind::EffectRequest { .. }
+        ));
+        Ok(())
+    })
+    .unwrap();
+    for package in [&original, &expanded] {
+        assert_eq!(
+            luna::execution::interpret(package, "entry", 1000000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn generic_trait_inline_producers_specialize_associated_effect_inputs() {
+    use comptime_interpretor::Value;
+    let original=compile("typealias Unit=.void'builtin;
+        inline effect emit(value:T) where T;
+        trait Producer {assoc Item:.Type'builtin;fn produce(self)->#emit<Item> Unit;}
+        struct Flag {value:bool}
+        impl Producer for Flag {
+            assoc Item:.Type'builtin=bool;
+            inline fn produce(self)->#emit<bool> Unit {emit<bool>(self.value)#;}
+        }
+        struct Letter {value:.char'builtin}
+        impl Producer for Letter {
+            assoc Item:.Type'builtin=.char'builtin;
+            inline fn produce(self)->#emit<.char'builtin> Unit {emit<.char'builtin>(self.value)#;}
+        }
+        inline fn invoke(value:T)->#emit<T.as(Producer).Item> Unit where T:-Producer {value.produce()}
+        fn entry()->bool {var result=false;invoke(Flag {value:true})# {emit<bool>(value)=>{result=value;},};var letter=false;invoke(Letter {value:'x'})# {emit<.char'builtin>(value)=>{letter=value=='x';},};result and letter}");
+    let mut expanded = original.clone();
+    let report = elaboration::program::inlining::expand(&mut expanded, &mut 1000000).unwrap();
+    assert!(report.selected_methods > 0, "{report}");
+    assert_eq!(report.expanded_handlers, 2, "{report}");
+    let entry = expanded
+        .functions
+        .iter()
+        .find(|f| f.name == "entry")
+        .unwrap();
+    nir::visit::expressions(entry, &mut 100000, |expr, _| {
+        assert!(!matches!(
+            expr.kind,
+            nir::program::ExprKind::EffectHandle { .. }
+                | nir::program::ExprKind::EffectRequest { .. }
+                | nir::program::ExprKind::TraitMethod { .. }
+        ));
+        Ok(())
+    })
+    .unwrap();
+    for package in [&original, &expanded] {
+        assert_eq!(
+            luna::execution::interpret(package, "entry", 1000000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn inline_effect_associated_rows_do_not_require_a_method_call() {
+    use comptime_interpretor::Value;
+    let original=compile("typealias Unit=.void'builtin;
+        inline effect emit(value:T) where T;
+        trait Source {assoc Item:.Type'builtin;}
+        impl Source for bool {assoc Item:.Type'builtin=bool;}
+        inline fn send(value:T.as(Source).Item)->#emit<T.as(Source).Item> Unit where T:-Source {emit<T.as(Source).Item>(value)#;}
+        fn entry()->bool {var result=false;send<bool>(true)# {emit<bool>(value)=>{result=value;},};result}");
+    let mut expanded = original.clone();
+    let report = elaboration::program::inlining::expand(&mut expanded, &mut 1000000).unwrap();
+    assert_eq!(report.selected_methods, 0, "{report}");
+    assert_eq!(report.expanded_handlers, 1, "{report}");
+    assert_eq!(report.expanded_requests, 1, "{report}");
+    for package in [&original, &expanded] {
+        assert_eq!(
+            luna::execution::interpret(package, "entry", 1000000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn inline_weakened_trait_contracts_preserve_entry_guards_and_check_counts() {
+    use comptime_interpretor::{Event, Interpreter, Value};
+    for domain in ["requires value", "requires value, requires other"] {
+        for tail in ["answer", "return answer;"] {
+            let source="trait Gate {fn apply(self,value:bool,other:bool)->result:bool where requires value, ensures result;}
+        impl Gate for bool {inline fn apply(self,value:bool,other:bool)->result:bool where requires value == value, ensures result == value'old {let answer=value;value=false;answer}}
+        fn entry()->bool {let receiver=true;receiver.as(Gate).apply(true,true)}";
+            let original = compile(
+                &source
+                    .replace(
+                        "requires value, ensures result",
+                        &format!("{domain}, ensures result"),
+                    )
+                    .replace("value=false;answer", &format!("value=false;{tail}")),
+            );
+            let mut expected = None;
+            for expanded in [false, true] {
+                let mut package = original.clone();
+                if expanded {
+                    let report =
+                        elaboration::program::inlining::expand(&mut package, &mut 1000000).unwrap();
+                    assert!(
+                        report.selected_methods > 0 && report.expanded > 0,
+                        "{report}"
+                    );
+                }
+                let graph = luna::instantiation::instantiate(&package, "entry", 1000000).unwrap();
+                let mut vm = Interpreter::from_iir(&graph, Default::default()).unwrap();
+                assert_eq!(
+                    vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+                    Value::Bool(true)
+                );
+                let count = vm
+                    .events()
+                    .iter()
+                    .filter(|event| matches!(event, Event::CheckPredicate { .. }))
+                    .count();
+                if let Some(expected) = expected {
+                    assert_eq!(count, expected, "expanded={expanded}");
+                } else {
+                    expected = Some(count);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn symbol_indexed_default_trait_method_has_a_complete_instance_key() {
+    let package = compile(
+        "typealias Symbol=.Symbol'builtin;
+        trait Choose where suffix:Symbol {fn flag(self)->bool;fn choose(self)->bool {self.flag()}}
+        impl Choose<.px> for bool {fn flag(self)->bool {self}} impl Choose<.em> for bool {fn flag(self)->bool {not self}}
+        fn run()->bool {true.as(Choose<.px>).choose() and false.as(Choose<.em>).choose()}",
+    );
+    let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
+    graph.validate(&mut 100_000).unwrap();
+    assert_eq!(
+        graph
+            .functions
+            .iter()
+            .filter(|f| f.function.name == "choose")
+            .count(),
+        2
+    );
+    let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    let dump = graph.to_string();
+    assert!(dump.contains("px") && dump.contains("em"), "{dump}");
 }

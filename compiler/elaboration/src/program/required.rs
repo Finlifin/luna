@@ -98,9 +98,13 @@ impl Checker<'_, '_> {
         self.context = self.binder_context(owner);
         let result = (|| {
             let clauses = match &self.package.item(owner).unwrap().kind {
-                ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) | ItemKind::Effect(sig, _) => sig.clause_constraints,
+                ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) | ItemKind::Effect(sig, _) => {
+                    sig.clause_constraints
+                }
                 ItemKind::EffectGroup(group) => group.clause_constraints,
-                ItemKind::TypeAlias(_, _, constraints) => *constraints,
+                ItemKind::TypeAlias(_, _, constraints) | ItemKind::Newtype(_, _, constraints) => {
+                    *constraints
+                }
                 ItemKind::Struct(def) => def.clause_constraints,
                 ItemKind::Enum(def) => def.clause_constraints,
                 ItemKind::Impl(def) => def.clause_constraints,
@@ -111,13 +115,17 @@ impl Checker<'_, '_> {
             let mut requirements = if let Some(parent) = self.effect_parents.get(&owner).copied() {
                 self.ensure_contract(parent, span)?;
                 self.requirements[&parent].clone()
-            } else { Vec::new() };
+            } else {
+                Vec::new()
+            };
             // Admission uses the same prerequisite discipline as signatures.
             // Only positive type atoms may become declaration assumptions.
             let mut pending_capabilities = Vec::new();
             for clause in clauses {
                 if let hir::clause::ClauseConstraintKind::Requires(value) = &clause.kind {
-                    if !mentions_value_parameter(value, 0, &|id| self.type_input_bindings.contains_key(&local(id)))? {
+                    if !mentions_value_parameter(value, 0, &|id| {
+                        self.type_input_bindings.contains_key(&local(id))
+                    })? {
                         signature_capability_atoms(value, &mut pending_capabilities, 0)?;
                     }
                 }
@@ -139,7 +147,9 @@ impl Checker<'_, '_> {
                         "program specification elaboration is not implemented",
                     ));
                 };
-                if mentions_value_parameter(value, 0, &|id| self.type_input_bindings.contains_key(&local(id)))? {
+                if mentions_value_parameter(value, 0, &|id| {
+                    self.type_input_bindings.contains_key(&local(id))
+                })? {
                     if !matches!(&self.package.item(owner).unwrap().kind, ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) if !sig.modifiers.is_normal_form_head)
                     {
                         return Err(error(
@@ -164,8 +174,12 @@ impl Checker<'_, '_> {
         self.active_contracts.remove(&owner);
         if result.is_err() {
             match saved_capabilities {
-                Some(capabilities) => { self.capabilities.insert(owner, capabilities); }
-                None => { self.capabilities.remove(&owner); }
+                Some(capabilities) => {
+                    self.capabilities.insert(owner, capabilities);
+                }
+                None => {
+                    self.capabilities.remove(&owner);
+                }
             }
         }
         let requirements = result?;
@@ -185,20 +199,38 @@ impl Checker<'_, '_> {
             def.requirements = requirements.clone();
             def.capabilities = self.capabilities.get(&owner).cloned().unwrap_or_default();
         }
+        if let Some(def) =
+            self.newtypes
+                .get_mut(&declaration(self.package, &self.package_identities, owner))
+        {
+            def.requirements = requirements.clone();
+            def.capabilities = self.capabilities.get(&owner).cloned().unwrap_or_default();
+        }
         self.requirements.insert(owner, requirements);
         Ok(())
     }
 
-    pub(super) fn prepare_parameter_capabilities(&mut self, owner: OwnerId, parameters: &[hir::clause::ClauseParam<'_>]) -> Result<(), Error> {
+    pub(super) fn prepare_parameter_capabilities(
+        &mut self,
+        owner: OwnerId,
+        parameters: &[hir::clause::ClauseParam<'_>],
+    ) -> Result<(), Error> {
         let subjects = parameter_capability_subjects(parameters)?;
-        if subjects.is_empty() { return Ok(()); }
+        if subjects.is_empty() {
+            return Ok(());
+        }
         let mut pending = Vec::new();
         for (subject, bound) in &subjects {
-            let atom = Expr { kind: H::TraitBound(subject, bound), ..subject.clone() };
+            let atom = Expr {
+                kind: H::TraitBound(subject, bound),
+                ..subject.clone()
+            };
             signature_capability_atoms(&atom, &mut pending, 0)?;
         }
         let constraints = match &self.package.item(owner).unwrap().kind {
-            ItemKind::TypeAlias(_, _, constraints) => *constraints,
+            ItemKind::TypeAlias(_, _, constraints) | ItemKind::Newtype(_, _, constraints) => {
+                *constraints
+            }
             ItemKind::Struct(def) => def.clause_constraints,
             ItemKind::Enum(def) => def.clause_constraints,
             ItemKind::Impl(def) => def.clause_constraints,
@@ -219,19 +251,30 @@ impl Checker<'_, '_> {
     // declaration or turn failure to select into negative evidence.
     /// Publish each ready positive bound once, keeping later inputs pending.
     pub(super) fn ready_signature_capabilities<'h>(
-        &mut self, owner: OwnerId, pending: &mut Vec<Expr<'h>>, complete: bool,
+        &mut self,
+        owner: OwnerId,
+        pending: &mut Vec<Expr<'h>>,
+        complete: bool,
     ) -> Result<(), Error> {
         loop {
             let mut progress = false;
             let mut waiting = None;
             for value in std::mem::take(pending) {
-                self.required_steps = self.required_steps.checked_sub(1)
-                    .ok_or_else(|| error(value.span, "signature capability preparation budget exhausted"))?;
-                let ready = complete || signature_inputs_ready(&value, 0, &|id| {
-                    self.type_input_bindings.contains_key(&local(id))
-                        || self.value_input_bindings.contains_key(&local(id))
+                self.required_steps = self.required_steps.checked_sub(1).ok_or_else(|| {
+                    error(
+                        value.span,
+                        "signature capability preparation budget exhausted",
+                    )
                 })?;
-                if !ready { pending.push(value); continue; }
+                let ready = complete
+                    || signature_inputs_ready(&value, 0, &|id| {
+                        self.type_input_bindings.contains_key(&local(id))
+                            || self.value_input_bindings.contains_key(&local(id))
+                    })?;
+                if !ready {
+                    pending.push(value);
+                    continue;
+                }
                 // A failed atom must not publish partial assumptions or uses.
                 // Completed declaration caches remain reusable across retries.
                 let capabilities = self.capabilities.get(&owner).cloned();
@@ -242,22 +285,33 @@ impl Checker<'_, '_> {
                     Err(failure) => {
                         self.context = context;
                         match capabilities {
-                            Some(capabilities) => { self.capabilities.insert(owner, capabilities); }
-                            None => { self.capabilities.remove(&owner); }
+                            Some(capabilities) => {
+                                self.capabilities.insert(owner, capabilities);
+                            }
+                            None => {
+                                self.capabilities.remove(&owner);
+                            }
                         }
-                        if let (Some(uses), Some(len)) = (&mut self.pending_type_uses, pending_len) {
+                        if let (Some(uses), Some(len)) = (&mut self.pending_type_uses, pending_len)
+                        {
                             uses.truncate(len);
                         }
-                        if !failure.needs_capability { return Err(failure); }
+                        if !failure.needs_capability {
+                            return Err(failure);
+                        }
                         waiting.get_or_insert(failure);
                         pending.push(value);
                     }
                 }
             }
-            if pending.is_empty() { break; }
+            if pending.is_empty() {
+                break;
+            }
             if !progress {
                 if complete {
-                    if let Some(failure) = waiting { return Err(failure); }
+                    if let Some(failure) = waiting {
+                        return Err(failure);
+                    }
                 }
                 break;
             }
@@ -346,11 +400,17 @@ impl Checker<'_, '_> {
     /// binding supplies no result evidence, while predicates over known inputs
     /// can still be checked without inventing a placeholder Type.
     pub(super) fn program_postconditions_with_result(
-        &mut self, owner: OwnerId, result: Option<(n::LocalId, &Term)>,
+        &mut self,
+        owner: OwnerId,
+        result: Option<(n::LocalId, &Term)>,
     ) -> Result<(Vec<n::Expr>, Vec<n::EntrySnapshot>), Error> {
-        let result=result.map(|(binding,ty)| {
-            let ty=if let Term::Computation {result,..}=ty {result.as_ref()} else {ty};
-            (binding,ty)
+        let result = result.map(|(binding, ty)| {
+            let ty = if let Term::Computation { result, .. } = ty {
+                result.as_ref()
+            } else {
+                ty
+            };
+            (binding, ty)
         });
         let old_scope = self.old_scope.replace(OldScope {
             owner,
@@ -661,28 +721,37 @@ impl Checker<'_, '_> {
         expr: &Expr<'_>,
         expected: Option<&Term>,
     ) -> Result<(Value, Term), Error> {
-        self.required_expression_with_inputs(expr,expected,None,Vec::new())
+        self.required_expression_with_inputs(expr, expected, None, Vec::new())
     }
 
     pub(super) fn required_normal_input(
-        &mut self, source: &Expr<'_>, root: n::Expr,
-        inputs: Vec<(n::LocalId,Term,Term)>,
-    ) -> Result<(Value,Term),Error> {
-        self.required_expression_with_inputs(source,None,Some(root),inputs)
+        &mut self,
+        source: &Expr<'_>,
+        root: n::Expr,
+        inputs: Vec<(n::LocalId, Term, Term)>,
+    ) -> Result<(Value, Term), Error> {
+        self.required_expression_with_inputs(source, None, Some(root), inputs)
     }
 
     fn required_expression_with_inputs(
-        &mut self, expr: &Expr<'_>, expected: Option<&Term>,
-        checked: Option<n::Expr>, inputs: Vec<(n::LocalId,Term,Term)>,
-    ) -> Result<(Value,Term),Error> {
+        &mut self,
+        expr: &Expr<'_>,
+        expected: Option<&Term>,
+        checked: Option<n::Expr>,
+        inputs: Vec<(n::LocalId, Term, Term)>,
+    ) -> Result<(Value, Term), Error> {
         let prepared = self.prepare_required_expression(expr, expected, checked, inputs, false)?;
         prepared.invoke(&mut self.required_steps, expr.span)
     }
 
     pub(super) fn prepare_required_expression(
-        &mut self, expr: &Expr<'_>, expected: Option<&Term>,
-        checked: Option<n::Expr>, inputs: Vec<(n::LocalId,Term,Term)>, defer_inputs: bool,
-    ) -> Result<PreparedRequired,Error> {
+        &mut self,
+        expr: &Expr<'_>,
+        expected: Option<&Term>,
+        checked: Option<n::Expr>,
+        inputs: Vec<(n::LocalId, Term, Term)>,
+        defer_inputs: bool,
+    ) -> Result<PreparedRequired, Error> {
         if self.active_required.len() >= 32 || !self.active_required.insert(local(expr.hir_id)) {
             return Err(error(
                 expr.span,
@@ -700,21 +769,28 @@ impl Checker<'_, '_> {
         let saved_pending = self.pending_type_uses.replace(Vec::new());
         let signature_start = self.signature_type_uses.len();
         let result = (|| {
-            let mut root = checked.map(Ok).unwrap_or_else(|| self.expr(expr, expected)).map_err(|mut e| {
-                if e.message == "local binding is unavailable in this scope" {
-                    e.message =
-                        "required comptime input is not yet available in this definition".into();
-                }
-                e
-            })?;
-            if let Some((parameters,arguments))=self.initializer_substitution() {
-                root=root.instantiate_types(parameters,arguments)
-                    .map_err(|e|error(expr.span,e.to_string()))?;
+            let mut root = checked
+                .map(Ok)
+                .unwrap_or_else(|| self.expr(expr, expected))
+                .map_err(|mut e| {
+                    if e.message == "local binding is unavailable in this scope" {
+                        e.message =
+                            "required comptime input is not yet available in this definition"
+                                .into();
+                    }
+                    e
+                })?;
+            if let Some((parameters, arguments)) = self.initializer_substitution() {
+                root = root
+                    .instantiate_types(parameters, arguments)
+                    .map_err(|e| error(expr.span, e.to_string()))?;
             }
             let result_type = root.ty.clone();
             let mut inputs = inputs;
             for input in &self.specialization_inputs {
-                if !inputs.iter().any(|(id, _, _)| *id == input.0) { inputs.push(input.clone()); }
+                if !inputs.iter().any(|(id, _, _)| *id == input.0) {
+                    inputs.push(input.clone());
+                }
             }
             let mut scoped_parameters = Vec::new();
             let mut scoped_arguments = Vec::new();
@@ -724,56 +800,98 @@ impl Checker<'_, '_> {
             // the original telescope slots before returning to normalization.
             let type_packet = match &result_type {
                 Term::Tuple(fields) => fields.iter().all(|ty| *ty == p(P::Type)),
-                Term::NormalForm { head, .. } if Some(*head) == self.protocols.tuple =>
+                Term::NormalForm { head, .. } if Some(*head) == self.protocols.tuple => {
                     matches!(self.structural_type(&result_type, expr.span)?, Term::Tuple(fields)
-                        if fields.iter().all(|ty| *ty == p(P::Type))),
+                        if fields.iter().all(|ty| *ty == p(P::Type)))
+                }
                 _ => false,
             };
-            if !defer_inputs && (result_type == p(P::Type) || result_type == p(P::Bool) || self.is_type_list_type(&result_type) || type_packet)
+            if !defer_inputs
+                && (result_type == p(P::Type)
+                    || result_type == p(P::Bool)
+                    || self.is_type_list_type(&result_type)
+                    || type_packet)
                 && self.signature_owner.is_some()
-                && input_frames.last().is_some_and(|frame|frame.contains(&Sort::Type)) {
+                && input_frames
+                    .last()
+                    .is_some_and(|frame| frame.contains(&Sort::Type))
+            {
                 let frame = input_frames.last().cloned().unwrap_or_default();
-                self.required_steps = self.required_steps.checked_sub(frame.len() as u64)
-                    .ok_or_else(||error(expr.span,"scoped Type input preparation budget exhausted"))?;
-                let mut mapping = frame.iter().enumerate().map(|(index,sort)|
-                    Term::Bound {depth:0,index,sort:*sort}).collect::<Vec<_>>();
+                self.required_steps = self
+                    .required_steps
+                    .checked_sub(frame.len() as u64)
+                    .ok_or_else(|| {
+                        error(expr.span, "scoped Type input preparation budget exhausted")
+                    })?;
+                let mut mapping = frame
+                    .iter()
+                    .enumerate()
+                    .map(|(index, sort)| Term::Bound {
+                        depth: 0,
+                        index,
+                        sort: *sort,
+                    })
+                    .collect::<Vec<_>>();
                 let owner = self.signature_owner.unwrap();
                 let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
                 let before = fuel;
-                let free = nir::free_bindings::collect(&root,&mut fuel)
-                    .map_err(|message|error(expr.span,message));
-                self.required_steps -= (before-fuel) as u64;
+                let free = nir::free_bindings::collect(&root, &mut fuel)
+                    .map_err(|message| error(expr.span, message));
+                self.required_steps -= (before - fuel) as u64;
                 let free = free?;
                 for (binding, symbol) in &self.type_input_bindings {
-                    if binding.owner != owner.def_id.raw() { continue; }
-                    let Term::Bound {depth:0,index,sort:Sort::Type} = symbol else {continue;};
-                    if frame.get(*index) != Some(&Sort::Type) {continue;}
-                    let local = u32::try_from(*index).ok().filter(|index|*index!=u32::MAX)
-                        .ok_or_else(||error(expr.span,"too many scoped Type inputs"))?;
-                    let declaration = DeclarationId {package:u64::MAX,local};
-                    mapping[*index] = Term::Rigid {declaration,sort:Sort::Type};
-                    scoped_parameters.push(nir::DeclarationParameter {declaration,sort:Sort::Type});
+                    if binding.owner != owner.def_id.raw() {
+                        continue;
+                    }
+                    let Term::Bound {
+                        depth: 0,
+                        index,
+                        sort: Sort::Type,
+                    } = symbol
+                    else {
+                        continue;
+                    };
+                    if frame.get(*index) != Some(&Sort::Type) {
+                        continue;
+                    }
+                    let local = u32::try_from(*index)
+                        .ok()
+                        .filter(|index| *index != u32::MAX)
+                        .ok_or_else(|| error(expr.span, "too many scoped Type inputs"))?;
+                    let declaration = DeclarationId {
+                        package: u64::MAX,
+                        local,
+                    };
+                    mapping[*index] = Term::Rigid {
+                        declaration,
+                        sort: Sort::Type,
+                    };
+                    scoped_parameters.push(nir::DeclarationParameter {
+                        declaration,
+                        sort: Sort::Type,
+                    });
                     scoped_arguments.push(symbol.clone());
-                    if free.contains(binding) && !inputs.iter().any(|(id,_,_)|id==binding) {
-                        inputs.push((*binding,p(P::Type),mapping[*index].clone()));
+                    if free.contains(binding) && !inputs.iter().any(|(id, _, _)| id == binding) {
+                        inputs.push((*binding, p(P::Type), mapping[*index].clone()));
                     }
                 }
                 if !scoped_parameters.is_empty() {
-                    let mut rebind=|ty:&Term| {
-                        let mut fuel=usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                        let before=fuel;
-                        let bounded=nir::type_computations::charge_term(ty,&mut fuel);
-                        self.required_steps-=(before-fuel) as u64;
-                        bounded.map_err(|e|error(expr.span,e.to_string()))?;
-                        ty.rebind_scope(&mapping).map_err(|e|error(expr.span,e.to_string()))
+                    let mut rebind = |ty: &Term| {
+                        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                        let before = fuel;
+                        let bounded = nir::type_computations::charge_term(ty, &mut fuel);
+                        self.required_steps -= (before - fuel) as u64;
+                        bounded.map_err(|e| error(expr.span, e.to_string()))?;
+                        ty.rebind_scope(&mapping)
+                            .map_err(|e| error(expr.span, e.to_string()))
                     };
                     root.rewrite_types(&mut rebind)?;
                     // Supplied environment values belong to the caller's frame
                     // too. Local-value binding and Type-slot binding are distinct:
                     // a supplied value must not replace the caller's Type identity.
-                    for (_,ty,value) in &mut inputs {
-                        *ty=rebind(ty)?;
-                        *value=rebind(value)?;
+                    for (_, ty, value) in &mut inputs {
+                        *ty = rebind(ty)?;
+                        *value = rebind(value)?;
                     }
                 }
             }
@@ -789,19 +907,30 @@ impl Checker<'_, '_> {
                 // Abstract associated values can carry runtime code identities.
                 // Retain their declaration metadata without checking or executing
                 // unrelated runtime function bodies in this comptime snapshot.
-                let pending:Vec<_>=associated.difference(&expanded_associated).copied().collect();
+                let pending: Vec<_> = associated
+                    .difference(&expanded_associated)
+                    .copied()
+                    .collect();
                 for member in pending {
                     expanded_associated.insert(member);
                     // A generic comptime body may discover a member dependency
                     // that the enclosing initializer has not demanded yet.
-                    let implementations:Vec<_>=self.associated_initializers.keys()
-                        .filter(|(_,id)|*id==member).map(|(implementation,_)|*implementation).collect();
+                    let implementations: Vec<_> = self
+                        .associated_initializers
+                        .keys()
+                        .filter(|(_, id)| *id == member)
+                        .map(|(implementation, _)| *implementation)
+                        .collect();
                     for implementation in implementations {
-                        self.selected_associated_value(implementation,member,expr.span)?;
+                        self.selected_associated_value(implementation, member, expr.span)?;
                     }
                     for implementation in &self.checked_implementations {
-                        for (_,value) in implementation.associated.iter().filter(|(id,_)|*id==member) {
-                            queue.extend(references(value,&mut members,&mut associated));
+                        for (_, value) in implementation
+                            .associated
+                            .iter()
+                            .filter(|(id, _)| *id == member)
+                        {
+                            queue.extend(references(value, &mut members, &mut associated));
                         }
                     }
                 }
@@ -825,7 +954,9 @@ impl Checker<'_, '_> {
                         .ok_or_else(|| {
                             error(expr.span, "required comptime method contract is missing")
                         })?;
-                    if !contract.signature.is_comptime_callable() && !contract.program.preconditions.is_empty() {
+                    if !contract.signature.is_comptime_callable()
+                        && !contract.program.preconditions.is_empty()
+                    {
                         return Err(error(
                             expr.span,
                             "trait method value would erase program preconditions; callable program contracts are not implemented",
@@ -952,49 +1083,85 @@ impl Checker<'_, '_> {
             self.context = saved_context;
             self.signature_owner = saved_owner;
             checked?;
-            if !self.interfaces_ready && self.pending_refinements.iter().any(|pending| {
-                let id=declaration(self.package,&self.package_identities,pending.owner);
-                seen.contains(&id) || members.contains(&id)
-            }) {
-                return Err(error(expr.span,"required comptime evaluation is waiting for a signature type refinement"));
+            if !self.interfaces_ready
+                && self.pending_refinements.iter().any(|pending| {
+                    let id = declaration(self.package, &self.package_identities, pending.owner);
+                    seen.contains(&id) || members.contains(&id)
+                })
+            {
+                return Err(error(
+                    expr.span,
+                    "required comptime evaluation is waiting for a signature type refinement",
+                ));
             }
             let entry = DeclarationId {
                 package: u64::MAX,
                 local: u32::MAX,
             };
-            let mut entry_fuel=usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-            let before=entry_fuel;
+            let mut entry_fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+            let before = entry_fuel;
             // Retain the source telescope, including unused runtime slots:
             // type annotations refer to these original positions. Capture
             // compaction will reject a runtime read and prune unused inputs.
             // Completed caller values and pending staged inputs are distinct.
             let mut available = Vec::new();
-            if let Some(owner) = self.signature_owner.filter(|owner| self.active_signatures.contains(owner)) {
+            if let Some(owner) = self
+                .signature_owner
+                .filter(|owner| self.active_signatures.contains(owner))
+            {
                 if let Some(ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
-                    self.package.item(owner).map(|item| &item.kind) {
-                    for (parameter, domain) in signature.params.iter().zip(self.signature_prefixes.get(&owner).into_iter().flatten()) {
+                    self.package.item(owner).map(|item| &item.kind)
+                {
+                    for (parameter, domain) in signature
+                        .params
+                        .iter()
+                        .zip(self.signature_prefixes.get(&owner).into_iter().flatten())
+                    {
                         let binding = local(parameter.hir_id);
-                        let supplied = inputs.iter().position(|(id, _, _)| *id == binding)
+                        let supplied = inputs
+                            .iter()
+                            .position(|(id, _, _)| *id == binding)
                             .map(|index| inputs.remove(index));
                         let (ty, value) = match supplied {
                             Some((_, ty, value)) => (ty, Some(value)),
                             None => (domain.ty.clone(), None),
                         };
-                        available.push((binding, Parameter { sort: domain.sort, ty }, value));
+                        available.push((
+                            binding,
+                            Parameter {
+                                sort: domain.sort,
+                                ty,
+                            },
+                            value,
+                        ));
                     }
                 }
             }
             for (binding, ty, value) in inputs {
-                available.push((binding, Parameter {
-                    sort: if ty == p(P::Type) { Sort::Type } else { Sort::ComptimeValue }, ty,
-                }, Some(value)));
+                available.push((
+                    binding,
+                    Parameter {
+                        sort: if ty == p(P::Type) {
+                            Sort::Type
+                        } else {
+                            Sort::ComptimeValue
+                        },
+                        ty,
+                    },
+                    Some(value),
+                ));
             }
-            let captured=nir::type_computations::capture_entry(
-                entry,"<required-comptime>".into(),root,
-                &available.iter().map(|(binding, parameter, _)| (*binding, parameter.clone())).collect::<Vec<_>>(),
+            let captured = nir::type_computations::capture_entry(
+                entry,
+                "<required-comptime>".into(),
+                root,
+                &available
+                    .iter()
+                    .map(|(binding, parameter, _)| (*binding, parameter.clone()))
+                    .collect::<Vec<_>>(),
                 &mut entry_fuel,
             );
-            self.required_steps-=(before-entry_fuel) as u64;
+            self.required_steps -= (before - entry_fuel) as u64;
             let captured=captured.map_err(|failure| error(expr.span, match failure {
                 nir::type_computations::Error::MissingCapture(binding) if self.required_runtime_parameter(binding) =>
                     "required comptime computation cannot read a runtime parameter; defer does not change the parameter's phase".into(),
@@ -1002,9 +1169,16 @@ impl Checker<'_, '_> {
                     format!("required comptime input {binding} is not available in this invocation"),
                 other => other.to_string(),
             }))?;
-            let selected=captured.slots.iter().copied().collect::<BTreeSet<_>>();
-            let inputs=available.into_iter().enumerate().filter_map(|(slot,(binding,parameter,value))|
-                selected.contains(&slot).then_some((binding,parameter.ty,value))).collect();
+            let selected = captured.slots.iter().copied().collect::<BTreeSet<_>>();
+            let inputs = available
+                .into_iter()
+                .enumerate()
+                .filter_map(|(slot, (binding, parameter, value))| {
+                    selected
+                        .contains(&slot)
+                        .then_some((binding, parameter.ty, value))
+                })
+                .collect();
             functions.push(captured.function);
             // Preserve the checked implementation world, projecting only its
             // method tables to the members this invocation can reference. This
@@ -1041,15 +1215,23 @@ impl Checker<'_, '_> {
                 normal_forms: self.normal_form_metadata(),
                 functions,
                 structs: self.structs.values().cloned().collect(),
+                newtypes: self.newtypes.values().cloned().collect(),
                 enums: self.enums.values().cloned().collect(),
                 ..Default::default()
             };
             crate::verification::contracts::inherit(&mut package, &mut self.next_temporary_binding)
                 .map_err(|failure| error(expr.span, failure.to_string()))?;
-            let invocation_assumptions=if let Some(implementation)=self.initializer_implementation() {
-                crate::capabilities::capability_sources(&package.traits,&implementation.capabilities,crate::ptc::Budget::default())
-                    .map_err(|message|error(expr.span,message))?
-            } else {vec![]};
+            let invocation_assumptions =
+                if let Some(implementation) = self.initializer_implementation() {
+                    crate::capabilities::capability_sources(
+                        &package.traits,
+                        &implementation.capabilities,
+                        crate::ptc::Budget::default(),
+                    )
+                    .map_err(|message| error(expr.span, message))?
+                } else {
+                    vec![]
+                };
             // The snapshot contains demanded layouts only. Nominal identities
             // are admitted from source declarations even when no value/layout
             // of that type is needed by this comptime invocation.
@@ -1058,22 +1240,36 @@ impl Checker<'_, '_> {
             } else {
                 self.nominal_context()
             };
-            package.dispatch_instances =
-                crate::materialization::dispatch_instances_in_context(
-                    &package, &type_context, &invocation_assumptions,
-                    crate::ptc::Budget::default(),
-                )
-                .map_err(|failure| error(
+            package.dispatch_instances = crate::materialization::dispatch_instances_in_context(
+                &package,
+                &type_context,
+                &invocation_assumptions,
+                crate::ptc::Budget::default(),
+            )
+            .map_err(|failure| {
+                error(
                     expr.span,
                     format!("required comptime dispatch preparation failed: {failure}"),
-                ))?;
-            let mut abstract_parameters=self.signature_owner.and_then(|owner|self.type_parameters.get(&owner))
-                .cloned().unwrap_or_default();
-            abstract_parameters.extend(scoped_parameters.iter().map(|parameter|parameter.declaration));
+                )
+            })?;
+            let mut abstract_parameters = self
+                .signature_owner
+                .and_then(|owner| self.type_parameters.get(&owner))
+                .cloned()
+                .unwrap_or_default();
+            abstract_parameters.extend(
+                scoped_parameters
+                    .iter()
+                    .map(|parameter| parameter.declaration),
+            );
             // Equality observations of opaque caller Type inputs need their
             // declaration facts. Dispatch preparation above still uses its
             // own world; these facts are supplied only to this invocation.
-            let invocation_type_context=if abstract_parameters.is_empty() {&type_context} else {&self.context};
+            let invocation_type_context = if abstract_parameters.is_empty() {
+                &type_context
+            } else {
+                &self.context
+            };
             crate::verification::flow::validate_machine_operations(&package)
                 .map_err(|failure| {
                     if matches!(failure.reason, crate::verification::flow::Reason::Phase("runtime function is unavailable during comptime execution")) {
@@ -1082,10 +1278,20 @@ impl Checker<'_, '_> {
                 })?;
             let implementation_index = prepared::implementation_index(&package, expr.span)?;
             let prepared = PreparedRequired {
-                package, implementation_index, entry, inputs, result_type, scoped_parameters, scoped_arguments,
-                input_frames, invocation_assumptions, abstract_parameters,
+                package,
+                implementation_index,
+                entry,
+                inputs,
+                result_type,
+                scoped_parameters,
+                scoped_arguments,
+                input_frames,
+                invocation_assumptions,
+                abstract_parameters,
                 context: invocation_type_context.clone(),
-                in_signature: self.signature_owner.is_some_and(|owner| self.active_signatures.contains(&owner)),
+                in_signature: self
+                    .signature_owner
+                    .is_some_and(|owner| self.active_signatures.contains(&owner)),
             };
             Ok(prepared)
         })();
@@ -1105,7 +1311,11 @@ impl Checker<'_, '_> {
         result
     }
 
-    pub(super) fn required_function(&mut self, owner: OwnerId, span: Span) -> Result<n::Function, Error> {
+    pub(super) fn required_function(
+        &mut self,
+        owner: OwnerId,
+        span: Span,
+    ) -> Result<n::Function, Error> {
         let item = self.package.item(owner).unwrap();
         let ItemKind::Fn(sig, body_id) = &item.kind else {
             return Err(error(span, "required comptime call needs a function body"));
@@ -1153,7 +1363,8 @@ impl Checker<'_, '_> {
                 declaration: declaration(self.package, &self.package_identities, owner),
                 name: item.ident.name.as_str().into(),
                 phase: n::FunctionPhase::Comptime,
-                inline: sig.modifiers.is_inline, pure: sig.modifiers.is_pure,
+                inline: sig.modifiers.is_inline,
+                pure: sig.modifiers.is_pure,
                 preconditions,
                 postconditions,
                 entry_snapshots,
@@ -1189,7 +1400,11 @@ impl Checker<'_, '_> {
 
 // The traversal includes guards and pattern computations; a function hidden in
 // one of those positions must not escape phase/dependency checks.
-pub(super) fn references(root: &n::Expr, members: &mut BTreeSet<DeclarationId>, associated: &mut BTreeSet<DeclarationId>) -> BTreeSet<DeclarationId> {
+pub(super) fn references(
+    root: &n::Expr,
+    members: &mut BTreeSet<DeclarationId>,
+    associated: &mut BTreeSet<DeclarationId>,
+) -> BTreeSet<DeclarationId> {
     enum Node<'a> {
         Expr(&'a n::Expr),
         Pattern(&'a n::Pattern),
@@ -1211,7 +1426,8 @@ pub(super) fn references(root: &n::Expr, members: &mut BTreeSet<DeclarationId>, 
                 n::Pattern::Remap { pattern, .. } | n::Pattern::Binding { inner: pattern, .. } => {
                     pending.push(Node::Pattern(pattern))
                 }
-                n::Pattern::Record { fields, .. } | n::Pattern::AnonymousRecord { fields, .. }
+                n::Pattern::Record { fields, .. }
+                | n::Pattern::AnonymousRecord { fields, .. }
                 | n::Pattern::Variant { fields, .. }
                 | n::Pattern::NormalForm {
                     arguments: fields, ..
@@ -1222,16 +1438,30 @@ pub(super) fn references(root: &n::Expr, members: &mut BTreeSet<DeclarationId>, 
                 n::Pattern::Wild | n::Pattern::Unit | n::Pattern::Literal(_) => {}
             },
             Node::Expr(e) => match &e.kind {
-                K::EffectHandle {computation, handlers, ..} => {
+                K::EffectHandle {
+                    computation,
+                    handlers,
+                    ..
+                } => {
                     pending.push(Node::Expr(computation));
-                    for handler in handlers {for arm in &handler.arms {
-                        pending.push(Node::Pattern(&arm.pattern));
-                        if let Some(g) = &arm.guard {pending.push(Node::Expr(g));}
-                        pending.push(Node::Expr(&arm.body));
-                    }}
+                    for handler in handlers {
+                        for arm in &handler.arms {
+                            pending.push(Node::Pattern(&arm.pattern));
+                            if let Some(g) = &arm.guard {
+                                pending.push(Node::Expr(g));
+                            }
+                            pending.push(Node::Expr(&arm.body));
+                        }
+                    }
                 }
-                K::EffectResume(body) | K::EffectComputation {body, ..} | K::EffectRun {computation:body, ..} => pending.push(Node::Expr(body)),
-                K::EffectRequest {arguments, ..} => pending.extend(arguments.iter().map(Node::Expr)),
+                K::EffectResume(body)
+                | K::EffectComputation { body, .. }
+                | K::EffectRun {
+                    computation: body, ..
+                } => pending.push(Node::Expr(body)),
+                K::EffectRequest { arguments, .. } => {
+                    pending.extend(arguments.iter().map(Node::Expr))
+                }
                 K::Function(id)
                 | K::FunctionInstance {
                     declaration: id, ..
@@ -1253,8 +1483,14 @@ pub(super) fn references(root: &n::Expr, members: &mut BTreeSet<DeclarationId>, 
                     pending.push(Node::Expr(callee));
                     pending.extend(arguments.iter().map(|a| Node::Expr(&a.value)));
                 }
-                K::NormalFormType { arguments, plan, .. } => {
-                    pending.extend(plan.iter().flat_map(|p| &p.preparations).map(|p| Node::Expr(&p.expression)));
+                K::NormalFormType {
+                    arguments, plan, ..
+                } => {
+                    pending.extend(
+                        plan.iter()
+                            .flat_map(|p| &p.preparations)
+                            .map(|p| Node::Expr(&p.expression)),
+                    );
                     pending.extend(
                         arguments
                             .iter()
@@ -1283,17 +1519,25 @@ pub(super) fn references(root: &n::Expr, members: &mut BTreeSet<DeclarationId>, 
                 }
                 | K::TupleType(fields)
                 | K::Tuple(fields)
-                | K::AnonymousRecord { fields } | K::Record { fields, .. }
+                | K::AnonymousRecord { fields }
+                | K::Record { fields, .. }
                 | K::Variant { fields, .. } => pending.extend(fields.iter().map(Node::Expr)),
-                K::AnonymousField { value, .. } | K::Field { value, .. }
+                K::AnonymousField { value, .. }
+                | K::Field { value, .. }
                 | K::Let { value, .. }
                 | K::Assign { value, .. }
                 | K::BitAssign { value, .. }
                 | K::Discard(value)
-                | K::RequirePredicate(value) | K::EnsurePredicate(value) | K::CheckPredicate(value)
+                | K::RequirePredicate(value)
+                | K::EnsurePredicate(value)
+                | K::CheckPredicate(value)
                 | K::BitSlice { value, .. }
                 | K::BitConvert(value)
-                | K::Snapshot(value) | K::TakeBits(value) | K::SymbolName(value) | K::EnumName(value)
+                | K::NewtypeConvert(value)
+                | K::Snapshot(value)
+                | K::TakeBits(value)
+                | K::SymbolName(value)
+                | K::EnumName(value)
                 | K::Not(value)
                 | K::IntegerNegate(value)
                 | K::FloatNegate(value)
@@ -1312,7 +1556,8 @@ pub(super) fn references(root: &n::Expr, members: &mut BTreeSet<DeclarationId>, 
                 | K::TypeEqual(a, b)
                 | K::TypeListIndex(a, b)
                 | K::BitEqual(a, b)
-                | K::BitConcat(a, b) | K::BitIndex(a, b)
+                | K::BitConcat(a, b)
+                | K::BitIndex(a, b)
                 | K::And(a, b)
                 | K::Or(a, b)
                 | K::WritePointer {
@@ -1332,21 +1577,37 @@ pub(super) fn references(root: &n::Expr, members: &mut BTreeSet<DeclarationId>, 
                     pending.push(Node::Expr(a));
                     pending.push(Node::Expr(b));
                 }
-                K::BitWritePointer {pointer,selections,value} => {
-                        pending.push(Node::Expr(pointer));
-                        pending.extend(selections.iter().flat_map(n::BitSelection::expressions).map(Node::Expr));
-                        pending.push(Node::Expr(value));
-                    }
-                    K::BitUpdate {selections, value, ..} => {
-                        pending.extend(selections.iter().flat_map(n::BitSelection::expressions).map(Node::Expr));
-                        pending.push(Node::Expr(value));
-                    }
-                    K::BitWindow {value, start, end} => {
-                        pending.push(Node::Expr(value));
-                        pending.push(Node::Expr(start));
-                        pending.push(Node::Expr(end));
-                    }
-                    K::Match { value, arms } => {
+                K::BitWritePointer {
+                    pointer,
+                    selections,
+                    value,
+                } => {
+                    pending.push(Node::Expr(pointer));
+                    pending.extend(
+                        selections
+                            .iter()
+                            .flat_map(n::BitSelection::expressions)
+                            .map(Node::Expr),
+                    );
+                    pending.push(Node::Expr(value));
+                }
+                K::BitUpdate {
+                    selections, value, ..
+                } => {
+                    pending.extend(
+                        selections
+                            .iter()
+                            .flat_map(n::BitSelection::expressions)
+                            .map(Node::Expr),
+                    );
+                    pending.push(Node::Expr(value));
+                }
+                K::BitWindow { value, start, end } => {
+                    pending.push(Node::Expr(value));
+                    pending.push(Node::Expr(start));
+                    pending.push(Node::Expr(end));
+                }
+                K::Match { value, arms } => {
                     pending.push(Node::Expr(value));
                     for arm in arms {
                         pending.push(Node::Pattern(&arm.pattern));
@@ -1396,8 +1657,11 @@ pub(super) fn references(root: &n::Expr, members: &mut BTreeSet<DeclarationId>, 
                 K::TraitMethod { member, .. } => {
                     members.insert(*member);
                 }
-                K::AssociatedValue {member,..} => {associated.insert(*member);}
-                K::TypeValue(_) | K::TypeListValue(_)
+                K::AssociatedValue { member, .. } => {
+                    associated.insert(*member);
+                }
+                K::TypeValue(_)
+                | K::TypeListValue(_)
                 | K::Literal(_)
                 | K::Local(_)
                 | K::Unit
@@ -1412,7 +1676,11 @@ pub(super) fn references(root: &n::Expr, members: &mut BTreeSet<DeclarationId>, 
 // Classification follows resolved value binders, never a failed PTC attempt.
 // Unsupported mixed/specification forms retain their diagnostic rather than
 // silently acquiring a different solver meaning.
-pub(super) fn mentions_value_parameter(value: &Expr<'_>, depth: usize, is_type: &impl Fn(hir::HirId) -> bool) -> Result<bool, Error> {
+pub(super) fn mentions_value_parameter(
+    value: &Expr<'_>,
+    depth: usize,
+    is_type: &impl Fn(hir::HirId) -> bool,
+) -> Result<bool, Error> {
     if depth >= 128 {
         return Err(error(
             value.span,
@@ -1422,17 +1690,20 @@ pub(super) fn mentions_value_parameter(value: &Expr<'_>, depth: usize, is_type: 
     Ok(match &value.kind {
         H::ResolvedFnParam(_, id) => !is_type(*id),
         H::SelfValue => true,
-        H::RefinedType {requirement,base} => {
-            mentions_value_parameter(requirement,depth+1,is_type)? || mentions_value_parameter(base,depth+1,is_type)?
+        H::RefinedType { requirement, base } => {
+            mentions_value_parameter(requirement, depth + 1, is_type)?
+                || mentions_value_parameter(base, depth + 1, is_type)?
         }
         H::Binary(_, a, b) | H::Index(a, b) | H::Cast(a, b) | H::TraitBound(a, b) => {
-            mentions_value_parameter(a, depth + 1, is_type)? || mentions_value_parameter(b, depth + 1, is_type)?
+            mentions_value_parameter(a, depth + 1, is_type)?
+                || mentions_value_parameter(b, depth + 1, is_type)?
         }
         H::TakeOld(value)
         | H::Deref(value)
         | H::Ref(value)
         | H::MultiDeref(value)
-        | H::TakeBitVec(value) | H::TakeTagName(value)
+        | H::TakeBitVec(value)
+        | H::TakeTagName(value)
         | H::Defer(value)
         | H::Unary(_, value)
         | H::Projection(value, _)
@@ -1446,9 +1717,13 @@ pub(super) fn mentions_value_parameter(value: &Expr<'_>, depth: usize, is_type: 
 // Only conjunction exposes individual positive capabilities. Do not extract
 // assumptions from beneath negation or disjunction.
 pub(super) fn signature_capability_atoms<'h>(
-    value: &Expr<'h>, pending: &mut Vec<Expr<'h>>, depth: usize,
+    value: &Expr<'h>,
+    pending: &mut Vec<Expr<'h>>,
+    depth: usize,
 ) -> Result<(), Error> {
-    if depth >= 128 { return Err(error(value.span, "signature capability depth exhausted")); }
+    if depth >= 128 {
+        return Err(error(value.span, "signature capability depth exhausted"));
+    }
     match value.kind {
         H::Binary(BinOp::And, left, right) => {
             signature_capability_atoms(left, pending, depth + 1)?;
@@ -1457,7 +1732,10 @@ pub(super) fn signature_capability_atoms<'h>(
         H::TraitBound(subject, bound) => {
             if let H::Binary(BinOp::Add, left, right) = bound.kind {
                 for bound in [left, right] {
-                    let atom = Expr { kind: H::TraitBound(subject, bound), ..value.clone() };
+                    let atom = Expr {
+                        kind: H::TraitBound(subject, bound),
+                        ..value.clone()
+                    };
                     signature_capability_atoms(&atom, pending, depth + 1)?;
                 }
             } else {
@@ -1472,28 +1750,59 @@ pub(super) fn signature_capability_atoms<'h>(
 // This is readiness, not type checking. Unknown expression forms wait for the
 // final signature pass, where normal elaboration supplies their diagnostics.
 fn signature_inputs_ready(
-    value: &Expr<'_>, depth: usize, available: &impl Fn(hir::HirId) -> bool,
+    value: &Expr<'_>,
+    depth: usize,
+    available: &impl Fn(hir::HirId) -> bool,
 ) -> Result<bool, Error> {
-    if depth >= 128 { return Err(error(value.span, "signature input dependency depth exhausted")); }
+    if depth >= 128 {
+        return Err(error(
+            value.span,
+            "signature input dependency depth exhausted",
+        ));
+    }
     let ready = |value| signature_inputs_ready(value, depth + 1, available);
     Ok(match &value.kind {
         H::ResolvedFnParam(_, id) => available(*id),
-        H::Lit(_) | H::ResolvedClauseParam(..) | H::ResolvedDef {..} | H::Builtin(_)
-        | H::TyType | H::TyAny | H::TyVoid | H::TyNoReturn | H::TySelf | H::Unit => true,
-        H::TraitBound(a,b) | H::Binary(_,a,b) | H::Cast(a,b) | H::Index(a,b)
-        | H::TyFnArrow(a,b) | H::TyClosure(a,b) | H::EffectQualifiedType(a,b) => ready(a)? && ready(b)?,
-        H::Projection(value,_) | H::TyPtr(value) | H::TyOptional(value)
-        | H::Unary(_,value) | H::LiteralConversion {literal:value,..} | H::TypeOf(value) => ready(value)?,
+        H::Lit(_)
+        | H::ResolvedClauseParam(..)
+        | H::ResolvedDef { .. }
+        | H::Builtin(_)
+        | H::TyType
+        | H::TyAny
+        | H::TyVoid
+        | H::TyNoReturn
+        | H::TySelf
+        | H::Unit => true,
+        H::TraitBound(a, b)
+        | H::Binary(_, a, b)
+        | H::Cast(a, b)
+        | H::Index(a, b)
+        | H::TyFnArrow(a, b)
+        | H::TyClosure(a, b)
+        | H::EffectQualifiedType(a, b) => ready(a)? && ready(b)?,
+        H::Projection(value, _)
+        | H::TyPtr(value)
+        | H::TyOptional(value)
+        | H::Unary(_, value)
+        | H::LiteralConversion { literal: value, .. }
+        | H::TypeOf(value) => ready(value)?,
         H::Tuple(values) | H::List(values) => {
             let mut all = true;
-            for value in *values { all &= ready(value)?; }
+            for value in *values {
+                all &= ready(value)?;
+            }
             all
         }
-        H::NFApplication(head,args) | H::Application(head,args) | H::ExtendedApplication(head,args) => {
+        H::NFApplication(head, args)
+        | H::Application(head, args)
+        | H::ExtendedApplication(head, args) => {
             let mut all = ready(head)?;
             for arg in *args {
-                let (Arg::Positional(value) | Arg::Named(_,value) | Arg::Expand(value)
-                    | Arg::Implicit(value) | Arg::PostLambda(value)) = arg;
+                let (Arg::Positional(value)
+                | Arg::Named(_, value)
+                | Arg::Expand(value)
+                | Arg::Implicit(value)
+                | Arg::PostLambda(value)) = arg;
                 all &= ready(value)?;
             }
             all
@@ -1502,10 +1811,15 @@ fn signature_inputs_ready(
             let mut all = true;
             for parameter in *parameters {
                 match parameter.kind {
-                    TyParamKind::Optional(_,ty,default) => { all &= ready(ty)? && ready(default)?; }
-                    TyParamKind::Positional(ty) | TyParamKind::PositionalDependencyCatched(_,ty)
-                    | TyParamKind::Varadic(_,ty) => { all &= ready(ty)?; }
-                    TyParamKind::Itself {..} => {}
+                    TyParamKind::Optional(_, ty, default) => {
+                        all &= ready(ty)? && ready(default)?;
+                    }
+                    TyParamKind::Positional(ty)
+                    | TyParamKind::PositionalDependencyCatched(_, ty)
+                    | TyParamKind::Varadic(_, ty) => {
+                        all &= ready(ty)?;
+                    }
+                    TyParamKind::Itself { .. } => {}
                 }
             }
             all
@@ -1515,49 +1829,93 @@ fn signature_inputs_ready(
 }
 
 /// Own the synthetic subjects while atoms borrow their declaration identities.
-pub(super) fn parameter_capability_subjects<'h>(parameters: &[hir::clause::ClauseParam<'h>]) -> Result<Vec<(Expr<'h>, &'h Expr<'h>)>, Error> {
+pub(super) fn parameter_capability_subjects<'h>(
+    parameters: &[hir::clause::ClauseParam<'h>],
+) -> Result<Vec<(Expr<'h>, &'h Expr<'h>)>, Error> {
     let mut subjects = Vec::new();
     for parameter in parameters {
         if let hir::clause::ClauseParamKind::TraitBound(_, bound) = parameter.kind {
-            let id = parameter.definition.ok_or_else(|| error(parameter.span, "missing clause parameter identity"))?;
-            subjects.push((Expr { hir_id: parameter.hir_id, span: parameter.span,
-                kind: H::ResolvedClauseParam(parameter.name.name, id) }, bound));
+            let id = parameter
+                .definition
+                .ok_or_else(|| error(parameter.span, "missing clause parameter identity"))?;
+            subjects.push((
+                Expr {
+                    hir_id: parameter.hir_id,
+                    span: parameter.span,
+                    kind: H::ResolvedClauseParam(parameter.name.name, id),
+                },
+                bound,
+            ));
         }
     }
     Ok(subjects)
 }
 
 /// Predicate terms remain type propositions, including Type-valued ordinary inputs.
-pub(super) fn requirement_terms<'a>(value: &'a n::TypePredicate, span: Span) -> Result<Vec<&'a Term>, Error> {
+pub(super) fn requirement_terms<'a>(
+    value: &'a n::TypePredicate,
+    span: Span,
+) -> Result<Vec<&'a Term>, Error> {
     let mut pending = vec![(value, 0usize)];
     let mut terms = Vec::new();
     let mut fuel = 10_000usize;
     while let Some((value, depth)) = pending.pop() {
-        if depth >= 128 || fuel == 0 { return Err(error(span, "type requirement traversal budget exhausted")); }
+        if depth >= 128 || fuel == 0 {
+            return Err(error(span, "type requirement traversal budget exhausted"));
+        }
         fuel -= 1;
         match value {
-            n::TypePredicate::Bool(_) => {},
-            n::TypePredicate::Trait(r) => { terms.push(&r.subject); terms.extend(&r.interface_arguments); },
-            n::TypePredicate::Equal(a,b) => { terms.push(a); terms.push(b); },
-            n::TypePredicate::Not(p) => pending.push((p,depth+1)),
-            n::TypePredicate::And(ps) | n::TypePredicate::Or(ps) => pending.extend(ps.iter().map(|p|(p,depth+1))),
+            n::TypePredicate::Bool(_) => {}
+            n::TypePredicate::Trait(r) => {
+                terms.push(&r.subject);
+                terms.extend(&r.interface_arguments);
+            }
+            n::TypePredicate::Equal(a, b) => {
+                terms.push(a);
+                terms.push(b);
+            }
+            n::TypePredicate::Not(p) => pending.push((p, depth + 1)),
+            n::TypePredicate::And(ps) | n::TypePredicate::Or(ps) => {
+                pending.extend(ps.iter().map(|p| (p, depth + 1)))
+            }
         }
     }
     Ok(terms)
 }
 
-pub(super) fn map_requirement(value: &n::TypePredicate, map: &mut impl FnMut(&Term)->Result<Term,Error>, span:Span, depth:usize) -> Result<n::TypePredicate,Error> {
+pub(super) fn map_requirement(
+    value: &n::TypePredicate,
+    map: &mut impl FnMut(&Term) -> Result<Term, Error>,
+    span: Span,
+    depth: usize,
+) -> Result<n::TypePredicate, Error> {
     use n::TypePredicate as Q;
-    if depth >= 128 { return Err(error(span,"type requirement mapping depth exhausted")); }
+    if depth >= 128 {
+        return Err(error(span, "type requirement mapping depth exhausted"));
+    }
     Ok(match value {
         Q::Bool(v) => Q::Bool(*v),
-        Q::Trait(r) => Q::Trait(n::TraitRequirement {interface:r.interface, subject:map(&r.subject)?,
-            interface_arguments:r.interface_arguments.iter().map(&mut *map).collect::<Result<_,_>>()?}),
-        Q::Equal(a,b) => Q::Equal(map(a)?,map(b)?),
-        Q::Not(p) => Q::Not(Box::new(map_requirement(p,map,span,depth+1)?)),
+        Q::Trait(r) => Q::Trait(n::TraitRequirement {
+            interface: r.interface,
+            subject: map(&r.subject)?,
+            interface_arguments: r
+                .interface_arguments
+                .iter()
+                .map(&mut *map)
+                .collect::<Result<_, _>>()?,
+        }),
+        Q::Equal(a, b) => Q::Equal(map(a)?, map(b)?),
+        Q::Not(p) => Q::Not(Box::new(map_requirement(p, map, span, depth + 1)?)),
         Q::And(ps) | Q::Or(ps) => {
-            let parts=ps.iter().map(|p|map_requirement(p,map,span,depth+1)).collect::<Result<_,_>>()?;
-            if matches!(value,Q::And(_)) {Q::And(parts)} else {Q::Or(parts)}
+            let parts = ps
+                .iter()
+                .map(|p| map_requirement(p, map, span, depth + 1))
+                .collect::<Result<_, _>>()?;
+            if matches!(value, Q::And(_)) {
+                Q::And(parts)
+            } else {
+                Q::Or(parts)
+            }
         }
     })
 }

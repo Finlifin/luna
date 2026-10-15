@@ -271,3 +271,54 @@ fn wide_arithmetic_matches_independent_arbitrary_precision_oracle() {
         assert_eq!(r, values[6], "remainder at {line}");
     }
 }
+
+#[test]
+fn decimal_transport_round_trips_signed_and_large_magnitudes() {
+    for n in [
+        i128::MIN,
+        -1_000_000_001,
+        -1,
+        0,
+        1,
+        1_000_000_001,
+        i128::MAX,
+    ] {
+        assert_eq!(
+            Integer::from_i128(n)
+                .to_decimal_literal(&mut Budget::default())
+                .unwrap(),
+            n.to_string()
+        );
+    }
+    let text = "115792089237316195423570985008687907853269984665640564039457584007913129639936";
+    let value = parse(text);
+    assert_eq!(
+        value.to_decimal_literal(&mut Budget::default()).unwrap(),
+        text
+    );
+    assert_eq!(
+        value
+            .negated()
+            .to_decimal_literal(&mut Budget::default())
+            .unwrap(),
+        format!("-{text}")
+    );
+    assert_eq!(
+        value.to_decimal_literal(&mut Budget {
+            steps: 0,
+            max_limbs: 4096
+        }),
+        Err(Error::BudgetExhausted)
+    );
+    assert_eq!(
+        value.to_decimal_literal(&mut Budget {
+            steps: 10000,
+            max_limbs: 1
+        }),
+        Err(Error::SizeLimit)
+    );
+    assert_eq!(
+        value.to_decimal_literal(&mut Budget::default()).unwrap(),
+        text
+    );
+}

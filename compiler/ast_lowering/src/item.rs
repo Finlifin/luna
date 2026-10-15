@@ -114,7 +114,11 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
         match kind {
             NodeKind::Function => self.lower_function(node, FnModifiers::default()),
-            NodeKind::AlgebraicEffect => self.lower_callable(node, FnModifiers::default(), Some(EffectModifiers::default())),
+            NodeKind::AlgebraicEffect => self.lower_callable(
+                node,
+                FnModifiers::default(),
+                Some(EffectModifiers::default()),
+            ),
             NodeKind::EffectEnumDef => self.lower_effect_group(node),
             NodeKind::AssocDecl => self.lower_associated(node),
             NodeKind::NormalFormHeadDef => self.lower_normal_form_head_def(node),
@@ -123,7 +127,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             NodeKind::TraitDef => self.lower_trait_def(node),
             NodeKind::ImplDef => self.lower_impl_def(node),
             NodeKind::ImplTraitDef => self.lower_impl_trait_def(node),
-            NodeKind::TypealiasDef => self.lower_type_alias(node),
+            NodeKind::TypealiasDef | NodeKind::NewtypeDef => self.lower_named_type(node),
             NodeKind::ModuleDef => self.lower_module_def(node),
             NodeKind::UseStatement => self.lower_use_statement(node),
 
@@ -134,7 +138,12 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 let mut cursor = node;
                 let mut modifiers = FnModifiers::default();
                 let mut effect_modifiers = EffectModifiers::default();
-                while let Some((kind @ (NodeKind::AttributeSetTrue | NodeKind::Attribute), _, parts)) = self.ast.get_node(cursor) {
+                while let Some((
+                    kind @ (NodeKind::AttributeSetTrue | NodeKind::Attribute),
+                    _,
+                    parts,
+                )) = self.ast.get_node(cursor)
+                {
                     if kind == NodeKind::Attribute {
                         let mut path = parts[0];
                         let mut matches = true;
@@ -145,14 +154,17 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                             }
                             let fields = self.ast.get_children(path);
                             if self.ast.get_node_kind(fields[1]) != Some(NodeKind::Id)
-                                || self.node_to_ident(fields[1]).name.as_str() != name {
+                                || self.node_to_ident(fields[1]).name.as_str() != name
+                            {
                                 matches = false;
                                 break;
                             }
                             path = fields[0];
                         }
-                        if !matches || self.ast.get_node_kind(path) != Some(NodeKind::Id)
-                            || self.node_to_ident(path).name.as_str() != "attrs" {
+                        if !matches
+                            || self.ast.get_node_kind(path) != Some(NodeKind::Id)
+                            || self.node_to_ident(path).name.as_str() != "attrs"
+                        {
                             break;
                         }
                         effect_modifiers.is_direct_passing = true;
@@ -174,10 +186,22 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     cursor = parts[1];
                 }
                 if self.ast.get_node_kind(cursor) == Some(NodeKind::AlgebraicEffect)
-                    && !modifiers.is_comptime && !modifiers.is_pure && !modifiers.is_quote {
-                    return self.lower_callable(cursor, FnModifiers::default(), Some(effect_modifiers));
+                    && !modifiers.is_comptime
+                    && !modifiers.is_pure
+                    && !modifiers.is_quote
+                {
+                    return self.lower_callable(
+                        cursor,
+                        FnModifiers::default(),
+                        Some(effect_modifiers),
+                    );
                 }
-                if (modifiers.is_comptime || modifiers.is_pure || modifiers.is_quote || effect_modifiers.is_inline) && !effect_modifiers.is_async && !effect_modifiers.is_direct_passing
+                if (modifiers.is_comptime
+                    || modifiers.is_pure
+                    || modifiers.is_quote
+                    || effect_modifiers.is_inline)
+                    && !effect_modifiers.is_async
+                    && !effect_modifiers.is_direct_passing
                     && self.ast.get_node_kind(cursor) == Some(NodeKind::Function)
                 {
                     if modifiers.is_quote && modifiers.is_comptime {
@@ -329,7 +353,12 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         self.lower_callable(node, modifiers, None)
     }
 
-    fn lower_callable(&mut self, node: NodeIndex, modifiers: FnModifiers, effect: Option<EffectModifiers>) -> OwnerId {
+    fn lower_callable(
+        &mut self,
+        node: NodeIndex,
+        modifiers: FnModifiers,
+        effect: Option<EffectModifiers>,
+    ) -> OwnerId {
         let Some((kind, span, children)) = self.ast.get_node(node) else {
             unreachable!("invalid function node or no such node index {:?}", node);
         };
@@ -337,7 +366,10 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let id_node = children[0];
         let params_multi = children[1];
         let return_type_node = children[2];
-        debug_assert!(matches!(kind, NodeKind::Function | NodeKind::AlgebraicEffect));
+        debug_assert!(matches!(
+            kind,
+            NodeKind::Function | NodeKind::AlgebraicEffect
+        ));
         let clauses_multi = children[if effect.is_some() { 3 } else { 4 }];
         let body_node = children[if effect.is_some() { 4 } else { 5 }];
 
@@ -441,9 +473,16 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         }
 
         // A code result provides virtual runtime names to quoted bodies.
-        if let Some(hir::Expr {kind: ExprKind::ContextualExprType(bindings, _), ..}) = return_ty {
+        if let Some(hir::Expr {
+            kind: ExprKind::ContextualExprType(bindings, _),
+            ..
+        }) = return_ty
+        {
             let parts = self.ast.get_children(return_type_node);
-            for (binding, &node) in bindings.iter().zip(self.ast.get_multi_child_slice(parts[1]).unwrap_or(&[])) {
+            for (binding, &node) in bindings
+                .iter()
+                .zip(self.ast.get_multi_child_slice(parts[1]).unwrap_or(&[]))
+            {
                 self.define_local(binding.name, node, binding.hir_id);
             }
         }
@@ -676,11 +715,15 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             match self.ast.get_node_kind(node) {
                 Some(NodeKind::Function | NodeKind::NormalFormHeadDef) => return true,
                 Some(NodeKind::Pub) => {
-                    let Some(inner) = self.ast.get_children(node).first() else { return false; };
+                    let Some(inner) = self.ast.get_children(node).first() else {
+                        return false;
+                    };
                     node = *inner;
                 }
                 Some(NodeKind::Attribute | NodeKind::AttributeSetTrue) => {
-                    let Some(inner) = self.ast.get_children(node).get(1) else { return false; };
+                    let Some(inner) = self.ast.get_children(node).get(1) else {
+                        return false;
+                    };
                     node = *inner;
                 }
                 _ => return false,
@@ -723,6 +766,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     NodeKind::Function
                     | NodeKind::NormalFormHeadDef
                     | NodeKind::TypealiasDef
+                    | NodeKind::NewtypeDef
                     | NodeKind::ConstDef
                     | NodeKind::ConstDecl
                     | NodeKind::ImplDef
@@ -731,10 +775,23 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     let owner = self.lower_top_level_node(elem);
                     nested_items.push(owner);
                 }
-                Some(NodeKind::Pub) if self.ast.get_children(elem).first().is_some_and(|inner|
-                    matches!(self.ast.get_node_kind(*inner), Some(NodeKind::Function
-                        | NodeKind::NormalFormHeadDef | NodeKind::TypealiasDef | NodeKind::ConstDef | NodeKind::ConstDecl
-                        | NodeKind::ImplDef | NodeKind::ImplTraitDef))) => {
+                Some(NodeKind::Pub)
+                    if self.ast.get_children(elem).first().is_some_and(|inner| {
+                        matches!(
+                            self.ast.get_node_kind(*inner),
+                            Some(
+                                NodeKind::Function
+                                    | NodeKind::NormalFormHeadDef
+                                    | NodeKind::TypealiasDef
+                                    | NodeKind::NewtypeDef
+                                    | NodeKind::ConstDef
+                                    | NodeKind::ConstDecl
+                                    | NodeKind::ImplDef
+                                    | NodeKind::ImplTraitDef
+                            )
+                        )
+                    }) =>
+                {
                     nested_items.push(self.lower_top_level_node(elem));
                 }
                 Some(NodeKind::Attribute | NodeKind::AttributeSetTrue) => {
@@ -837,10 +894,20 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let clause_params = self.arena.alloc_clause_param_slice(lowered.params);
         let clause_constraints = self.arena.alloc_clause_slice(lowered.constraints);
 
-        let entries = self.ast.get_multi_child_slice(self.ast.get_children(body_node)[0])
-            .unwrap_or(&[]).to_vec();
-        let operations = entries.into_iter().map(|entry| self.lower_top_level_node(entry)).collect();
-        let group = EffectGroupDef { operations, clause_params, clause_constraints };
+        let entries = self
+            .ast
+            .get_multi_child_slice(self.ast.get_children(body_node)[0])
+            .unwrap_or(&[])
+            .to_vec();
+        let operations = entries
+            .into_iter()
+            .map(|entry| self.lower_top_level_node(entry))
+            .collect();
+        let group = EffectGroupDef {
+            operations,
+            clause_params,
+            clause_constraints,
+        };
 
         let item = Item {
             owner_id,
@@ -923,7 +990,10 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         owner_id
     }
 
-    fn lower_enum_body(&mut self, body_node: NodeIndex) -> (Vec<Variant<'hir>>, Vec<OwnerId>, Vec<Configuration<'hir>>) {
+    fn lower_enum_body(
+        &mut self,
+        body_node: NodeIndex,
+    ) -> (Vec<Variant<'hir>>, Vec<OwnerId>, Vec<Configuration<'hir>>) {
         let mut variants = Vec::new();
         let mut nested_items = Vec::new();
         let mut configurations = Vec::new();
@@ -953,7 +1023,8 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     let ident = self.node_to_ident(children[0]);
                     let value = self.lower_expr(ExprContext::Configuration, children[1]);
                     configurations.push(Configuration {
-                        ident, value: self.arena.alloc_expr(value),
+                        ident,
+                        value: self.arena.alloc_expr(value),
                         span: self.ast.get_span(elem).unwrap_or_default(),
                     });
                 }
@@ -979,13 +1050,30 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                         span,
                     });
                 }
-                Some(NodeKind::Function | NodeKind::TypealiasDef | NodeKind::ConstDef | NodeKind::ConstDecl) => {
+                Some(
+                    NodeKind::Function
+                    | NodeKind::TypealiasDef
+                    | NodeKind::NewtypeDef
+                    | NodeKind::ConstDef
+                    | NodeKind::ConstDecl,
+                ) => {
                     let owner = self.lower_top_level_node(elem);
                     nested_items.push(owner);
                 }
-                Some(NodeKind::Pub) if self.ast.get_children(elem).first().is_some_and(|inner|
-                    matches!(self.ast.get_node_kind(*inner), Some(NodeKind::Function
-                        | NodeKind::TypealiasDef | NodeKind::ConstDef | NodeKind::ConstDecl))) => {
+                Some(NodeKind::Pub)
+                    if self.ast.get_children(elem).first().is_some_and(|inner| {
+                        matches!(
+                            self.ast.get_node_kind(*inner),
+                            Some(
+                                NodeKind::Function
+                                    | NodeKind::TypealiasDef
+                                    | NodeKind::NewtypeDef
+                                    | NodeKind::ConstDef
+                                    | NodeKind::ConstDecl
+                            )
+                        )
+                    }) =>
+                {
                     nested_items.push(self.lower_top_level_node(elem));
                 }
                 _ => {
@@ -1007,8 +1095,10 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
         match kind {
             NodeKind::Id => Some(Variant {
-                hir_id: self.next_hir_id(), ident: self.node_to_ident(node),
-                kind: VariantKind::Unit, span,
+                hir_id: self.next_hir_id(),
+                ident: self.node_to_ident(node),
+                kind: VariantKind::Unit,
+                span,
             }),
             NodeKind::PatternEnumVariant => {
                 let ident = self.node_to_ident(children[0]);
@@ -1081,9 +1171,11 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 })
             }
             _ => {
-                self.package.pending_semantics.push((span,"enum group member attribute or declaration".into()));
+                self.package
+                    .pending_semantics
+                    .push((span, "enum group member attribute or declaration".into()));
                 None
-            },
+            }
         }
     }
 
@@ -1182,6 +1274,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     | NodeKind::NormalFormHeadDef
                     | NodeKind::AssocDecl
                     | NodeKind::TypealiasDef
+                    | NodeKind::NewtypeDef
                     | NodeKind::ConstDef
                     | NodeKind::ConstDecl,
                 ) => {
@@ -1414,9 +1507,11 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         owner_id
     }
 
-    /// Lower `TypealiasDef`: a, N, b  (id, type_params, type_expr)
-    fn lower_type_alias(&mut self, node: NodeIndex) -> OwnerId {
-        let Some((NodeKind::TypealiasDef, span, children)) = self.ast.get_node(node) else {
+    /// Lower an alias or newtype telescope, preserving the declaration kind.
+    fn lower_named_type(&mut self, node: NodeIndex) -> OwnerId {
+        let Some((kind @ (NodeKind::TypealiasDef | NodeKind::NewtypeDef), span, children)) =
+            self.ast.get_node(node)
+        else {
             unreachable!("invalid type alias node or no such node index {:?}", node);
         };
 
@@ -1454,7 +1549,11 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let item = Item {
             owner_id,
             ident,
-            kind: ItemKind::TypeAlias(type_expr_ref, parameters, constraints),
+            kind: if kind == NodeKind::NewtypeDef {
+                ItemKind::Newtype(type_expr_ref, parameters, constraints)
+            } else {
+                ItemKind::TypeAlias(type_expr_ref, parameters, constraints)
+            },
             span,
         };
         let item_ref = self.arena.alloc_item(item);
@@ -1580,13 +1679,20 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 let code_scope = if let ExprKind::ContextualExprType(bindings, _) = &ty_ref.kind {
                     let scope = self.local_enter(resolve::RibKind::MatchBody);
                     let parts = self.ast.get_children(children[1]);
-                    for (binding, &node) in bindings.iter().zip(self.ast.get_multi_child_slice(parts[1]).unwrap_or(&[])) {
+                    for (binding, &node) in bindings
+                        .iter()
+                        .zip(self.ast.get_multi_child_slice(parts[1]).unwrap_or(&[]))
+                    {
                         self.define_local(binding.name, node, binding.hir_id);
                     }
                     Some(scope)
-                } else { None };
+                } else {
+                    None
+                };
                 let default = self.lower_expr(ExprContext::OptionalParameterDefault, children[2]);
-                if let Some(scope) = code_scope { self.local_exit(scope); }
+                if let Some(scope) = code_scope {
+                    self.local_exit(scope);
+                }
                 let default_ref = self.arena.alloc_expr(default);
                 let tp = TyParam::new(
                     self.next_hir_id(),

@@ -79,7 +79,9 @@ fn separation_goal(
         }
         while let Some(term) = terms.pop() {
             match term {
-                Term::AssociatedType { arguments, subject, .. } => {
+                Term::AssociatedType {
+                    arguments, subject, ..
+                } => {
                     terms.extend(arguments);
                     terms.push(subject);
                 }
@@ -89,9 +91,16 @@ fn separation_goal(
                 Term::Nominal { arguments, .. }
                 | Term::NormalForm { arguments, .. }
                 | Term::Tuple(arguments)
-                | Term::TypeListValue(arguments) | Term::TypeListConcat(arguments) | Term::TupleValue(arguments) => terms.extend(arguments),
-                Term::NominalValue { ty, fields, .. } => { terms.push(ty); terms.extend(fields); },
-                Term::Record(fields) | Term::RecordValue(fields) => terms.extend(fields.iter().map(|(_, ty)| ty)),
+                | Term::TypeListValue(arguments)
+                | Term::TypeListConcat(arguments)
+                | Term::TupleValue(arguments) => terms.extend(arguments),
+                Term::NominalValue { ty, fields, .. } => {
+                    terms.push(ty);
+                    terms.extend(fields);
+                }
+                Term::Record(fields) | Term::RecordValue(fields) => {
+                    terms.extend(fields.iter().map(|(_, ty)| ty))
+                }
                 Term::Pointer(inner) | Term::ComptimeFunction(inner) => terms.push(inner),
                 Term::Function { parameters, result } => {
                     terms.extend(parameters.iter().map(|p| &p.ty));
@@ -99,7 +108,9 @@ fn separation_goal(
                 }
                 Term::Computation { effects, result } => {
                     terms.push(result);
-                    for operation in effects { terms.extend(&operation.arguments); }
+                    for operation in effects {
+                        terms.extend(&operation.arguments);
+                    }
                 }
                 Term::Closure {
                     environment,
@@ -164,7 +175,21 @@ fn separation_goal(
         return Err("inconsistent interface arity".into());
     }
     let mut overlap = vec![Formula::equal(a, b)];
-    overlap.extend(aa.into_iter().zip(ba).map(|(a, b)| Formula::equal(a, b)));
+    for (a, b) in aa.into_iter().zip(ba) {
+        match (&a, &b) {
+            (Term::Symbol(left), Term::Symbol(right)) => {
+                overlap.push(if left == right {
+                    Formula::True
+                } else {
+                    Formula::False
+                });
+            }
+            _ if a.sort() == Sort::Type && b.sort() == Sort::Type => {
+                overlap.push(Formula::equal(a, b))
+            }
+            _ => return Err("interface index overlap requires a declared supported domain".into()),
+        }
+    }
     overlap.extend(ar);
     overlap.extend(br);
     Ok((

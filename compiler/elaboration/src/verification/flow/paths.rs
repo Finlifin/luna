@@ -82,8 +82,10 @@ impl State {
             self.reads = other.reads.clone();
             self.read_aliases = other.read_aliases.clone();
         } else if other.facts.is_reachable() {
-            self.reads.retain(|address, observation| other.reads.get(address) == Some(observation));
-            self.read_aliases.retain(|address, alias| other.read_aliases.get(address) == Some(alias));
+            self.reads
+                .retain(|address, observation| other.reads.get(address) == Some(observation));
+            self.read_aliases
+                .retain(|address, alias| other.read_aliases.get(address) == Some(alias));
         }
         let mut paths = BTreeMap::new();
         let mut left_mapping = BTreeMap::new();

@@ -74,7 +74,9 @@ impl<'a> AstScanner<'a> {
                 NodeKind::UnionDef => {
                     self.scan_adt_def(parent_scope, inner, ScopeKind::AdtBody, vis)?;
                 }
-                NodeKind::TypealiasDef => self.scan_type_alias(parent_scope, inner, vis)?,
+                NodeKind::TypealiasDef | NodeKind::NewtypeDef => {
+                    self.scan_named_type(parent_scope, inner, vis)?
+                }
                 NodeKind::ConstDef | NodeKind::ConstDecl => {
                     let name = self.extract_name(self.ast.get_children(inner)[0])?;
                     let def_id = self.def_gen.next();
@@ -87,7 +89,10 @@ impl<'a> AstScanner<'a> {
                     )?;
                     self.def_names.push((def_id, name));
                 }
-                NodeKind::Function | NodeKind::AssocDecl | NodeKind::NormalFormHeadDef | NodeKind::AlgebraicEffect => {
+                NodeKind::Function
+                | NodeKind::AssocDecl
+                | NodeKind::NormalFormHeadDef
+                | NodeKind::AlgebraicEffect => {
                     self.scan_function_def(parent_scope, inner, vis)?;
                 }
                 NodeKind::ImplDef => {
@@ -220,7 +225,7 @@ impl<'a> AstScanner<'a> {
         Ok(())
     }
 
-    fn scan_type_alias(
+    fn scan_named_type(
         &mut self,
         parent: ScopeId,
         item: NodeIndex,
@@ -231,7 +236,11 @@ impl<'a> AstScanner<'a> {
         let scope = self.scope_gen.next();
         self.scope_tree.add_scope(Scope::new(
             scope,
-            ScopeKind::TypeAlias,
+            if self.ast.get_node_kind(item) == Some(NodeKind::NewtypeDef) {
+                ScopeKind::Newtype
+            } else {
+                ScopeKind::TypeAlias
+            },
             Some(parent),
             None,
             definition,

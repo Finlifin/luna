@@ -1,13 +1,13 @@
 //! Ordered scalar-range analysis of the supported NIR control-flow fragment.
 //! This observes checked program facts; it is not a type solver or an effect
 //! verifier. Unsupported constructs return an explicit analysis limitation.
+mod bit_indices;
 mod copies;
+mod memory_contracts;
 mod nominal;
+mod operators;
 mod paths;
 mod patterns;
-mod operators;
-mod bit_indices;
-mod memory_contracts;
 use paths::{Component, FieldPath, Projection, record_path};
 
 use super::{
@@ -102,12 +102,21 @@ impl fmt::Display for Error {
             Reason::Unsupported => f.write_str("unsupported-construct")?,
             Reason::DepthLimit => f.write_str("depth-limit")?,
             Reason::InvalidSignature => f.write_str("invalid-signature")?,
-            Reason::MissingBitWindowProof => write!(f, "{:?}",
-                "BitVec slice bounds or constant width are not proven; add an earlier checked assumes or a stronger contract")?,
-            Reason::MissingBitIndexProof => write!(f, "{:?}",
-                "BitVec index is not proven in bounds; add an earlier checked assumes or a stronger contract")?,
-            Reason::MissingDivisionProof => write!(f, "{:?}",
-                "integer divisor is not proven nonzero; establish a positive or negative range before division")?,
+            Reason::MissingBitWindowProof => write!(
+                f,
+                "{:?}",
+                "BitVec slice bounds or constant width are not proven; add an earlier checked assumes or a stronger contract"
+            )?,
+            Reason::MissingBitIndexProof => write!(
+                f,
+                "{:?}",
+                "BitVec index is not proven in bounds; add an earlier checked assumes or a stronger contract"
+            )?,
+            Reason::MissingDivisionProof => write!(
+                f,
+                "{:?}",
+                "integer divisor is not proven nonzero; establish a positive or negative range before division"
+            )?,
             Reason::MissingMachineProof => write!(
                 f,
                 "{:?}",
@@ -265,7 +274,9 @@ impl State {
         self.havoc_with_private_scalars(None, limits)
     }
     fn havoc_with_private_scalars(
-        &mut self, addressed: Option<&BTreeSet<LocalId>>, limits: &mut Limits,
+        &mut self,
+        addressed: Option<&BTreeSet<LocalId>>,
+        limits: &mut Limits,
     ) -> Result<(), Unknown> {
         self.forget_reads(limits)?;
         if !self.facts.is_reachable() {
@@ -292,9 +303,16 @@ impl State {
             limits.step(1)?;
             // Synthetic observations are not lexical locals. Preserve only
             // scalar by-value storage that has never had its address exposed.
-            if domain.is_some() && addressed.is_some_and(|addressed|
-                u32::try_from(place.owner).ok().is_some_and(|owner|
-                    !addressed.contains(&LocalId { owner, index: place.local }))) {
+            if domain.is_some()
+                && addressed.is_some_and(|addressed| {
+                    u32::try_from(place.owner).ok().is_some_and(|owner| {
+                        !addressed.contains(&LocalId {
+                            owner,
+                            index: place.local,
+                        })
+                    })
+                })
+            {
                 continue;
             }
             match domain {
@@ -328,7 +346,9 @@ fn mutable_capture_paths(
             Term::Primitive(_) | Term::Function { .. } | Term::ComptimeFunction(_) => Ok(false),
             Term::Record(fields) => {
                 for (_, ty) in fields {
-                    if may_alias(ty, limits, depth + 1)? { return Ok(true); }
+                    if may_alias(ty, limits, depth + 1)? {
+                        return Ok(true);
+                    }
                 }
                 Ok(false)
             }
@@ -360,7 +380,9 @@ fn mutable_capture_paths(
     let mut fuel = limits.arithmetic.steps;
     let result = iir::visit::expression(body, &mut fuel, |expression, fuel| {
         match &expression.kind {
-            K::Assign { place, .. } | K::BitAssign { place, .. } | K::BitUpdate {place,..} if roots.contains(&place.root) => {
+            K::Assign { place, .. } | K::BitAssign { place, .. } | K::BitUpdate { place, .. }
+                if roots.contains(&place.root) =>
+            {
                 *fuel = fuel
                     .checked_sub(place.fields.len())
                     .ok_or("capture path budget exhausted")?;
@@ -369,8 +391,17 @@ fn mutable_capture_paths(
                     .or_default()
                     .insert(place.fields.clone());
             }
-            K::AddressOf(_) | K::WritePointer { .. } | K::BitWritePointer {..} => unknown_write = true,
-            K::Call { .. } | K::EffectHandle { .. } | K::EffectRequest { .. } | K::EffectRun { .. } if aliases => unknown_write = true,
+            K::AddressOf(_) | K::WritePointer { .. } | K::BitWritePointer { .. } => {
+                unknown_write = true
+            }
+            K::Call { .. }
+            | K::EffectHandle { .. }
+            | K::EffectRequest { .. }
+            | K::EffectRun { .. }
+                if aliases =>
+            {
+                unknown_write = true
+            }
             _ => {}
         }
         Ok(())
@@ -461,7 +492,14 @@ fn syntactic_place(
                 fields.push((nir::program::FieldOwner::Nominal(*declaration), *index));
                 current = base;
             }
-            (K::PointerAnonymousField { pointer: base, index, .. }, true) => {
+            (
+                K::PointerAnonymousField {
+                    pointer: base,
+                    index,
+                    ..
+                },
+                true,
+            ) => {
                 fields.push((nir::program::FieldOwner::Anonymous, *index));
                 current = base;
             }
@@ -546,7 +584,10 @@ fn bind_place(
     // including malformed/reused IR bindings and pattern-delivered parameters.
     if let Ok(owner) = u32::try_from(place.owner) {
         limits.step(state.reads.len())?;
-        let root = self::place(LocalId {owner, index: place.local});
+        let root = self::place(LocalId {
+            owner,
+            index: place.local,
+        });
         state.reads.retain(|address, _| address.root != root);
     }
     state.invalidate_paths(Some(place), &[], limits)?;
@@ -602,76 +643,119 @@ fn analyze_impl(
         aggregates: BTreeMap::new(),
         paths: BTreeMap::new(),
         frozen: BTreeMap::new(),
-        reads: BTreeMap::new(), read_aliases: BTreeMap::new(),
+        reads: BTreeMap::new(),
+        read_aliases: BTreeMap::new(),
     };
     // Type premises determine scalar domains; value premises below determine
     // facts within those domains. Never send program predicates to PTC.
-    let mut type_context = crate::ptc::Context::with_scope(
-        vec![parameters.iter().map(|parameter| parameter.sort).collect()],
-    );
+    let mut type_context = crate::ptc::Context::with_scope(vec![
+        parameters.iter().map(|parameter| parameter.sort).collect(),
+    ]);
     let mut contract_budget = 4096;
     for requirement in &function.requirements {
         let formula = crate::ptc::Formula::from_predicate(requirement);
         let before = contract_budget;
         let admitted = crate::ptc::within_limits(&formula, 128, &mut contract_budget);
-        limits.step(before - contract_budget).map_err(|e| error(Reason::Unknown(e)))?;
-        if !admitted { return Err(error(Reason::Unsupported)); }
+        limits
+            .step(before - contract_budget)
+            .map_err(|e| error(Reason::Unknown(e)))?;
+        if !admitted {
+            return Err(error(Reason::Unsupported));
+        }
         type_context.assume(formula);
     }
     for (binding, ty) in function.parameters.iter().zip(parameters) {
         let mut view = None;
-        if matches!(ty.ty, Term::Bound { .. } | Term::Rigid { .. } | Term::NormalForm { .. } | Term::AssociatedType { .. } | Term::Hole { .. }) {
+        if matches!(
+            ty.ty,
+            Term::Bound { .. }
+                | Term::Rigid { .. }
+                | Term::NormalForm { .. }
+                | Term::AssociatedType { .. }
+                | Term::Hole { .. }
+        ) {
             limits.step(4096).map_err(|e| error(Reason::Unknown(e)))?;
-            view = type_context.structural_view(&ty.ty, crate::ptc::Budget { steps: 4096, ..Default::default() })
-                .ok().flatten().map(|(ty, _)| ty)
+            view = type_context
+                .structural_view(
+                    &ty.ty,
+                    crate::ptc::Budget {
+                        steps: 4096,
+                        ..Default::default()
+                    },
+                )
+                .ok()
+                .flatten()
+                .map(|(ty, _)| ty)
                 .filter(|ty| matches!(ty, Term::Primitive(_)));
         }
-        bind(&mut state, *binding, view.as_ref().unwrap_or(&ty.ty), None, limits)
-            .map_err(|e| error(Reason::Unknown(e)))?;
+        bind(
+            &mut state,
+            *binding,
+            view.as_ref().unwrap_or(&ty.ty),
+            None,
+            limits,
+        )
+        .map_err(|e| error(Reason::Unknown(e)))?;
     }
     // Only explicit address formation can expose a by-value local to pointer
     // aliases. Scan the complete checked function, including nested closures,
     // contracts and defaults; future address-taking is conservatively included.
     let mut addressed_locals = BTreeSet::new();
     iir::visit::expressions(function, &mut limits.arithmetic.steps, |expr, fuel| {
-        if let K::EffectHandle {handlers,..}=&expr.kind {
-            for handler in handlers {for arm in &handler.arms {
-                for value in arm.guard.iter().chain(std::iter::once(&arm.body)) {
-                    nir::visit::expression(value,fuel,|expr,_| {
-                        if let K::Assign {place,..} | K::BitAssign {place,..} | K::BitUpdate {place,..}=&expr.kind {
-                            addressed_locals.insert(place.root);
-                        }
-                        Ok(())
-                    })?;
+        if let K::EffectHandle { handlers, .. } = &expr.kind {
+            for handler in handlers {
+                for arm in &handler.arms {
+                    for value in arm.guard.iter().chain(std::iter::once(&arm.body)) {
+                        nir::visit::expression(value, fuel, |expr, _| {
+                            if let K::Assign { place, .. }
+                            | K::BitAssign { place, .. }
+                            | K::BitUpdate { place, .. } = &expr.kind
+                            {
+                                addressed_locals.insert(place.root);
+                            }
+                            Ok(())
+                        })?;
+                    }
                 }
-            }}
+            }
         }
         if let K::AddressOf(value) = &expr.kind {
             iir::visit::expression(value, fuel, |operand, _| {
-                if let K::Local(binding) = operand.kind { addressed_locals.insert(binding); }
+                if let K::Local(binding) = operand.kind {
+                    addressed_locals.insert(binding);
+                }
                 Ok(())
             })?;
         }
         Ok(())
-    }).map_err(|_| error(Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into())))?;
+    })
+    .map_err(|_| {
+        error(Reason::Unknown(
+            comptime_runtime::Error::BudgetExhausted.into(),
+        ))
+    })?;
     let mut walker = Walker {
         addressed_locals,
         type_context,
-        input_frames: vec![parameters.iter().map(|p|p.sort).collect()],
+        input_frames: vec![parameters.iter().map(|p| p.sort).collect()],
         next_frame: 1,
         limits,
         package,
         points: vec![],
         failure_source: None,
         closure_context: vec![],
-        single_pass_exits:BTreeMap::new(),
+        single_pass_exits: BTreeMap::new(),
         next_field: 0,
         assuming_postcondition: false,
         memory_summaries: std::collections::HashMap::new(),
         exit_contract: Some(ExitContract {
             conditions: &function.postconditions,
             binding: function.result_binding,
-            ty: if let Term::Computation {result,..}=result.as_ref() {result.as_ref()} else {result.as_ref()},
+            ty: if let Term::Computation { result, .. } = result.as_ref() {
+                result.as_ref()
+            } else {
+                result.as_ref()
+            },
         }),
     };
     // Publish aggregate field domains before preconditions and entry snapshots.
@@ -752,7 +836,7 @@ struct Walker<'a> {
     points: Vec<Point>,
     failure_source: Option<SourceRange>,
     closure_context: Vec<SourceRange>,
-    single_pass_exits:BTreeMap<LocalId,Vec<State>>,
+    single_pass_exits: BTreeMap<LocalId, Vec<State>>,
 }
 impl Walker<'_> {
     fn unknown_value(&mut self, ty: &Term) -> Result<Value, Reason> {
@@ -761,12 +845,18 @@ impl Walker<'_> {
 
     fn unknown_value_at(&mut self, ty: &Term, depth: usize) -> Result<Value, Reason> {
         self.limits.step(1)?;
-        if depth >= 128 { return Err(Reason::DepthLimit); }
+        if depth >= 128 {
+            return Err(Reason::DepthLimit);
+        }
         if let Some(fields) = self.tuple_field_types(ty)? {
             return Ok(Value {
                 aggregate_kind: Some(AggregateKind::Tuple),
-                fields: Some(fields.iter().map(|ty| self.unknown_value_at(ty, depth + 1))
-                    .collect::<Result<_, _>>()?),
+                fields: Some(
+                    fields
+                        .iter()
+                        .map(|ty| self.unknown_value_at(ty, depth + 1))
+                        .collect::<Result<_, _>>()?,
+                ),
                 ..Value::default()
             });
         }
@@ -774,8 +864,12 @@ impl Walker<'_> {
             return Ok(Value {
                 nominal_type: Some(std::sync::Arc::new(ty.clone())),
                 aggregate_kind: Some(AggregateKind::AnonymousRecord),
-                fields: Some(fields.iter().map(|(_, ty)| self.unknown_value_at(ty, depth + 1))
-                    .collect::<Result<_, _>>()?),
+                fields: Some(
+                    fields
+                        .iter()
+                        .map(|(_, ty)| self.unknown_value_at(ty, depth + 1))
+                        .collect::<Result<_, _>>()?,
+                ),
                 ..Value::default()
             });
         }
@@ -784,73 +878,151 @@ impl Walker<'_> {
     }
 
     fn tuple_field_types(&mut self, ty: &Term) -> Result<Option<Vec<Term>>, Reason> {
-        if !matches!(ty, Term::Tuple(_) | Term::NormalForm { .. } | Term::Bound { .. }
-            | Term::Rigid { .. } | Term::AssociatedType { .. } | Term::Hole { .. }) {
+        if !matches!(
+            ty,
+            Term::Tuple(_)
+                | Term::NormalForm { .. }
+                | Term::Bound { .. }
+                | Term::Rigid { .. }
+                | Term::AssociatedType { .. }
+                | Term::Hole { .. }
+        ) {
             return Ok(None);
         }
         crate::associated::charge_projection_copy(ty, &mut self.limits.arithmetic.steps)
             .map_err(|_| Reason::Unsupported)?;
-        if let Term::Tuple(fields) = ty { return Ok(Some(fields.clone())); }
-        let Some(package) = self.package else { return Ok(None); };
-        let is_tuple = |id| package.normal_forms.iter().any(|head|
-            head.declaration == id && head.role == nir::normal_forms::Role::Tuple);
+        if let Term::Tuple(fields) = ty {
+            return Ok(Some(fields.clone()));
+        }
+        let Some(package) = self.package else {
+            return Ok(None);
+        };
+        let is_tuple = |id| {
+            package
+                .normal_forms
+                .iter()
+                .any(|head| head.declaration == id && head.role == nir::normal_forms::Role::Tuple)
+        };
         if let Term::NormalForm { head, .. } = ty {
-            if let Some(fields) = package.normal_forms.iter().find(|metadata| metadata.declaration == *head)
-                .and_then(|metadata| metadata.tuple_elements(ty)) {
+            if let Some(fields) = package
+                .normal_forms
+                .iter()
+                .find(|metadata| metadata.declaration == *head)
+                .and_then(|metadata| metadata.tuple_elements(ty))
+            {
                 return Ok(Some(fields.to_vec()));
             }
         }
         let (view, used) = self.type_context.structural_view_with_heads_metered(
-            ty, crate::ptc::Budget { steps: self.limits.arithmetic.steps.min(4096), ..Default::default() }, is_tuple,
+            ty,
+            crate::ptc::Budget {
+                steps: self.limits.arithmetic.steps.min(4096),
+                ..Default::default()
+            },
+            is_tuple,
         );
         self.limits.step(used)?;
-        let Some((view, _)) = view.ok().flatten() else { return Ok(None); };
+        let Some((view, _)) = view.ok().flatten() else {
+            return Ok(None);
+        };
         crate::associated::charge_projection_copy(&view, &mut self.limits.arithmetic.steps)
             .map_err(|_| Reason::Unsupported)?;
-        if let Term::Tuple(fields) = view { return Ok(Some(fields)); }
-        let Term::NormalForm { head, .. } = &view else { return Ok(None); };
-        let Some(fields) = package.normal_forms.iter().find(|metadata| metadata.declaration == *head)
-            .and_then(|metadata| metadata.tuple_elements(&view)) else { return Ok(None); };
+        if let Term::Tuple(fields) = view {
+            return Ok(Some(fields));
+        }
+        let Term::NormalForm { head, .. } = &view else {
+            return Ok(None);
+        };
+        let Some(fields) = package
+            .normal_forms
+            .iter()
+            .find(|metadata| metadata.declaration == *head)
+            .and_then(|metadata| metadata.tuple_elements(&view))
+        else {
+            return Ok(None);
+        };
         Ok(Some(fields.to_vec()))
     }
 
     fn scalar_type_view(&mut self, ty: &Term) -> Result<Term, Reason> {
-        if !matches!(ty,
-            Term::Bound {..} | Term::Rigid {..} | Term::NormalForm {..}
-            | Term::AssociatedType {..} | Term::Hole {..}) {
+        if !matches!(
+            ty,
+            Term::Bound { .. }
+                | Term::Rigid { .. }
+                | Term::NormalForm { .. }
+                | Term::AssociatedType { .. }
+                | Term::Hole { .. }
+        ) {
             return Ok(ty.clone());
         }
         self.limits.step(4096)?;
-        Ok(self.type_context.structural_view(ty, crate::ptc::Budget {steps:4096,..Default::default()})
-            .ok().flatten().map(|(view,_)| view)
+        Ok(self
+            .type_context
+            .structural_view(
+                ty,
+                crate::ptc::Budget {
+                    steps: 4096,
+                    ..Default::default()
+                },
+            )
+            .ok()
+            .flatten()
+            .map(|(view, _)| view)
             .filter(|view| matches!(view, Term::Primitive(_)))
             .unwrap_or_else(|| ty.clone()))
     }
     fn external_read_path(&mut self, pointer: &Expr) -> Result<Option<FieldPath>, Reason> {
         Ok(external_read_path(pointer, self.limits)?)
     }
-    fn aliased_read_path(&mut self, pointer: &Expr, state: &State) -> Result<Option<FieldPath>, Reason> {
-        let Some(mut path) = self.external_read_path(pointer)? else { return Ok(None); };
-        if let Some((original, source_version, alias_version)) = state.read_aliases.get(&path.root) {
-            self.limits.step(original.fields.len().saturating_add(path.fields.len()).saturating_add(1))?;
+    fn aliased_read_path(
+        &mut self,
+        pointer: &Expr,
+        state: &State,
+    ) -> Result<Option<FieldPath>, Reason> {
+        let Some(mut path) = self.external_read_path(pointer)? else {
+            return Ok(None);
+        };
+        if let Some((original, source_version, alias_version)) = state.read_aliases.get(&path.root)
+        {
+            self.limits.step(
+                original
+                    .fields
+                    .len()
+                    .saturating_add(path.fields.len())
+                    .saturating_add(1),
+            )?;
             if state.facts.value(path.root) == Some(*alias_version)
-                && state.facts.value(original.root) == Some(*source_version) {
+                && state.facts.value(original.root) == Some(*source_version)
+            {
                 let mut fields = original.fields.clone();
                 fields.extend(path.fields);
-                path = FieldPath { root: original.root, fields };
+                path = FieldPath {
+                    root: original.root,
+                    fields,
+                };
             }
         }
         Ok(Some(path))
     }
-    fn observe_external_read(&mut self, pointer: &Expr, ty: &Term, state: &mut State) -> Result<Value, Reason> {
-        let Some(address) = self.aliased_read_path(pointer, state)? else {return self.unknown_value(ty);};
+    fn observe_external_read(
+        &mut self,
+        pointer: &Expr,
+        ty: &Term,
+        state: &mut State,
+    ) -> Result<Value, Reason> {
+        let Some(address) = self.aliased_read_path(pointer, state)? else {
+            return self.unknown_value(ty);
+        };
         let view = self.scalar_type_view(ty)?;
-        if !matches!(view, Term::Primitive(p) if p == nir::Primitive::Bool || p.fixed_integer_layout().is_some()) {
+        if !matches!(view, Term::Primitive(p) if p == nir::Primitive::Bool || p.fixed_integer_layout().is_some())
+        {
             return self.unknown_value(ty);
         }
         self.limits.step(1)?;
         if let Some((previous, root)) = state.reads.get(&address) {
-            if previous == &view {return self.local_value_at(state, *root);}
+            if previous == &view {
+                return self.local_value_at(state, *root);
+            }
         }
         let root = self.result_root(&view)?.ok_or(Reason::Unsupported)?;
         let value = self.unknown_value(&view)?;
@@ -871,8 +1043,12 @@ impl Walker<'_> {
                 .clone()
                 .ok_or(Reason::InvalidSignature)?;
             current = match declaration {
-                nir::program::FieldOwner::Nominal(id) => self.read_record_field(current, &ty, *id, *index, state)?,
-                nir::program::FieldOwner::Anonymous => self.read_anonymous_field(current, &ty, *index, state)?,
+                nir::program::FieldOwner::Nominal(id) => {
+                    self.read_record_field(current, &ty, *id, *index, state)?
+                }
+                nir::program::FieldOwner::Anonymous => {
+                    self.read_anonymous_field(current, &ty, *index, state)?
+                }
             };
         }
         Ok(current)
@@ -925,16 +1101,25 @@ impl Walker<'_> {
                         let mut stable = true;
                         iir::visit::expression(&argument.value, &mut fuel, |expr, fuel| {
                             match &expr.kind {
-                                K::Assign {place,..} | K::BitAssign {place,..} | K::BitUpdate {place,..} => {
-                                    *fuel = fuel.checked_sub(bindings.len()).ok_or("default frame budget exhausted")?;
-                                    if bindings.contains(&place.root) {stable = false;}
+                                K::Assign { place, .. }
+                                | K::BitAssign { place, .. }
+                                | K::BitUpdate { place, .. } => {
+                                    *fuel = fuel
+                                        .checked_sub(bindings.len())
+                                        .ok_or("default frame budget exhausted")?;
+                                    if bindings.contains(&place.root) {
+                                        stable = false;
+                                    }
                                 }
                                 K::AddressOf(_) => stable = false,
                                 _ => {}
                             }
                             Ok(())
-                        }).ok()?;
-                        if !stable {return None;}
+                        })
+                        .ok()?;
+                        if !stable {
+                            return None;
+                        }
                     }
                     let summary = super::memory::infer_argument(
                         package,
@@ -1026,7 +1211,9 @@ impl Walker<'_> {
         ) -> Option<Vec<nir::program::Place>> {
             // This analysis has no stored-pointer provenance. Indirect writes
             // must invalidate conservatively rather than masquerade as fields.
-            if !target.through.is_empty() { return None; }
+            if !target.through.is_empty() {
+                return None;
+            }
             let bases = targets.get(&target.parameter)?.as_ref()?;
             let mut resolved = Vec::new();
             for base in bases {
@@ -1079,7 +1266,9 @@ impl Walker<'_> {
                     let mut stable_frame = true;
                     iir::visit::expression(&argument.value, &mut fuel, |expression, fuel| {
                         match &expression.kind {
-                            K::Assign { place, .. } | K::BitAssign { place, .. } | K::BitUpdate {place,..} => {
+                            K::Assign { place, .. }
+                            | K::BitAssign { place, .. }
+                            | K::BitUpdate { place, .. } => {
                                 *fuel = fuel
                                     .checked_sub(prepared.len())
                                     .ok_or("default frame budget exhausted")?;
@@ -1188,7 +1377,9 @@ impl Walker<'_> {
                 let mut projected = Vec::new();
                 for mut target in targets {
                     self.limits.step(1)?;
-                    target.fields.push((nir::program::FieldOwner::Nominal(*declaration), *index));
+                    target
+                        .fields
+                        .push((nir::program::FieldOwner::Nominal(*declaration), *index));
                     insert_pointer_target(
                         &mut projected,
                         target,
@@ -1206,7 +1397,9 @@ impl Walker<'_> {
                 let mut projected = Vec::new();
                 for mut target in targets {
                     self.limits.step(1)?;
-                    target.fields.push((nir::program::FieldOwner::Anonymous, *index));
+                    target
+                        .fields
+                        .push((nir::program::FieldOwner::Anonymous, *index));
                     insert_pointer_target(
                         &mut projected,
                         target,
@@ -1337,12 +1530,17 @@ impl Walker<'_> {
                 self.limits.arithmetic.steps = *fuel;
                 let scanned = (|| -> Result<(), String> {
                     match &expression.kind {
-                        K::EffectHandle {..} | K::EffectRequest {..} | K::EffectRun {..} => unknown_write = true,
-                        K::Assign { place: target, .. } | K::BitAssign { place: target, .. } | K::BitUpdate {place: target,..} => {
+                        K::EffectHandle { .. } | K::EffectRequest { .. } | K::EffectRun { .. } => {
+                            unknown_write = true
+                        }
+                        K::Assign { place: target, .. }
+                        | K::BitAssign { place: target, .. }
+                        | K::BitUpdate { place: target, .. } => {
                             self.limits
                                 .step(target.fields.len())
                                 .map_err(|_| "loop path budget exhausted")?;
-                            invalidates_external_reads |= self.addressed_locals.contains(&target.root);
+                            invalidates_external_reads |=
+                                self.addressed_locals.contains(&target.root);
                             if state.domains.contains_key(&place(target.root)) {
                                 changed.insert((target.root, target.fields.clone()));
                             }
@@ -1384,7 +1582,7 @@ impl Walker<'_> {
                                 }
                             }
                         }
-                        K::WritePointer { pointer, .. } | K::BitWritePointer {pointer,..} => {
+                        K::WritePointer { pointer, .. } | K::BitWritePointer { pointer, .. } => {
                             invalidates_external_reads = true;
                             if let Some(targets) = self
                                 .invariant_pointer_targets(pointer, state, &changed, 0)
@@ -1422,7 +1620,8 @@ impl Walker<'_> {
         } else {
             // Memory is unchanged, but a reassigned pointer name no longer
             // denotes its entry address, including at the loop header.
-            self.limits.step(changed.len().saturating_add(state.reads.len()))?;
+            self.limits
+                .step(changed.len().saturating_add(state.reads.len()))?;
             let roots: BTreeSet<_> = changed.iter().map(|(binding, _)| place(*binding)).collect();
             state.reads.retain(|path, _| !roots.contains(&path.root));
         }
@@ -1487,7 +1686,7 @@ impl Walker<'_> {
             return Ok(());
         }
         match &expr.kind {
-            K::EffectComputation {body,..} => self.tail(body,state,depth+1)?,
+            K::EffectComputation { body, .. } => self.tail(body, state, depth + 1)?,
             K::Block { statements, result } | K::CallPreparation { statements, result } => {
                 for statement in statements {
                     self.child(statement, state, depth + 1)?;
@@ -1628,23 +1827,44 @@ impl Walker<'_> {
         }
         let depth = depth + 1;
         let mut result = match &expr.kind {
-            K::Literal(_) | K::Local(_) | K::Unit | K::TypeValue(_) | K::TypeListValue(_) | K::Function(_) | K::FunctionInstance {..}
-            | K::TraitMethod {..} | K::Block {..} | K::CallPreparation {..} | K::Let {..} => self.binding_expression(expr,state,depth)?,
-            K::IntegerBinary {..} | K::IntegerNegate(_) => self.integer_expression(expr,state,depth)?,
-            K::Not(_) | K::And(..) | K::Or(..)
-            | K::ScalarEqual(..) | K::ScalarLess(..) | K::ScalarLessEqual(..)
-            | K::ScalarGreater(..) | K::ScalarGreaterEqual(..) => self.logical_expression(expr,state,depth)?,
-            _=>self.general_expression(expr,state,depth)?,
+            K::Literal(_)
+            | K::Local(_)
+            | K::Unit
+            | K::TypeValue(_)
+            | K::TypeListValue(_)
+            | K::Function(_)
+            | K::FunctionInstance { .. }
+            | K::TraitMethod { .. }
+            | K::Block { .. }
+            | K::CallPreparation { .. }
+            | K::Let { .. } => self.binding_expression(expr, state, depth)?,
+            K::IntegerBinary { .. } | K::IntegerNegate(_) => {
+                self.integer_expression(expr, state, depth)?
+            }
+            K::Not(_)
+            | K::And(..)
+            | K::Or(..)
+            | K::ScalarEqual(..)
+            | K::ScalarLess(..)
+            | K::ScalarLessEqual(..)
+            | K::ScalarGreater(..)
+            | K::ScalarGreaterEqual(..) => self.logical_expression(expr, state, depth)?,
+            _ => self.general_expression(expr, state, depth)?,
         };
         let invalidates_external_reads = match &expr.kind {
-            K::Assign {place, ..} | K::BitAssign {place, ..} | K::BitUpdate {place, ..} => {
+            K::Assign { place, .. } | K::BitAssign { place, .. } | K::BitUpdate { place, .. } => {
                 self.limits.step(1)?;
                 self.addressed_locals.contains(&place.root)
             }
-            K::BitWritePointer {..} | K::EffectRequest {..} | K::EffectRun {..} | K::EffectHandle {..} => true,
+            K::BitWritePointer { .. }
+            | K::EffectRequest { .. }
+            | K::EffectRun { .. }
+            | K::EffectHandle { .. } => true,
             _ => false,
         };
-        if invalidates_external_reads { state.forget_reads(self.limits)?; }
+        if invalidates_external_reads {
+            state.forget_reads(self.limits)?;
+        }
         if expr.ty == Term::Primitive(nir::Primitive::Bool) && result.condition.is_none() {
             if let Some(Scalar::Local(value)) = result.scalar {
                 result.condition = Some(Condition::Compare {
@@ -1672,457 +1892,583 @@ impl Walker<'_> {
                 },
             };
             if let Some(truth) = truth {
-                result.range = Some(Interval::singleton(&Integer::from_u128(u128::from(truth)), self.limits)?);
+                result.range = Some(Interval::singleton(
+                    &Integer::from_u128(u128::from(truth)),
+                    self.limits,
+                )?);
                 result.condition = Some(Condition::Bool(truth));
             }
         }
         Ok(result)
     }
     #[inline(never)]
-    fn call_expression(&mut self,expr:&Expr,callee:&Expr,arguments:&[nir::program::CallArgument],
-        parameter_bindings:&[nir::program::LocalId],state:&mut State,depth:usize)->Result<Value,Reason> {
+    fn call_expression(
+        &mut self,
+        expr: &Expr,
+        callee: &Expr,
+        arguments: &[nir::program::CallArgument],
+        parameter_bindings: &[nir::program::LocalId],
+        state: &mut State,
+        depth: usize,
+    ) -> Result<Value, Reason> {
         let mut result;
-                self.child(callee, state, depth)?;
-                let method_summary = if let K::TraitMethod {
-                    method_arguments,
-                    interface,
-                    interface_arguments,
-                    member,
-                    subject,
-                } = &callee.kind
-                {
-                    let definition = self
-                        .package
-                        .and_then(|p| p.traits.iter().find(|t| t.declaration == *interface))
-                        .ok_or(Reason::InvalidSignature)?;
-                    let method = definition
-                        .methods
+        self.child(callee, state, depth)?;
+        let method_summary = if let K::TraitMethod {
+            method_arguments,
+            interface,
+            interface_arguments,
+            member,
+            subject,
+        } = &callee.kind
+        {
+            let definition = self
+                .package
+                .and_then(|p| p.traits.iter().find(|t| t.declaration == *interface))
+                .ok_or(Reason::InvalidSignature)?;
+            let method = definition
+                .methods
+                .iter()
+                .find(|m| m.declaration == *member)
+                .ok_or(Reason::InvalidSignature)?;
+            let parameters: Vec<_> = definition
+                .binders_with_self(&mut 100_000)
+                .map_err(|_| Reason::InvalidSignature)?
+                .into_iter()
+                .chain(
+                    method
+                        .type_parameters
                         .iter()
-                        .find(|m| m.declaration == *member)
-                        .ok_or(Reason::InvalidSignature)?;
-                    let parameters: Vec<_> = definition.parameters_with_self().into_iter()
-                        .chain(method.type_parameters.iter().copied()).collect();
-                    let arguments: Vec<_> = std::iter::once(subject.clone())
-                        .chain(interface_arguments.clone())
-                        .chain(method_arguments.clone())
-                        .collect();
-                    Some(
-                        method
-                            .program_summary(&parameters, &arguments)
-                            .map_err(|_| Reason::InvalidSignature)?,
-                    )
+                        .map(|id| nir::DeclarationParameter {
+                            declaration: *id,
+                            sort: nir::Sort::Type,
+                        }),
+                )
+                .collect();
+            let arguments: Vec<_> = std::iter::once(subject.clone())
+                .chain(interface_arguments.clone())
+                .chain(method_arguments.clone())
+                .collect();
+            Some(
+                method
+                    .program_summary_parameters(&parameters, &arguments)
+                    .map_err(|_| Reason::InvalidSignature)?,
+            )
+        } else {
+            None
+        };
+        let target = match &callee.kind {
+            K::Function(id)
+            | K::FunctionInstance {
+                declaration: id, ..
+            } => self.package.and_then(|p| {
+                p.functions
+                    .iter()
+                    .chain(&p.quote_templates)
+                    .find(|f| f.declaration == *id)
+            }),
+            K::TraitMethod { .. } => method_summary.as_ref(),
+            _ => None,
+        };
+        let mut preconditions = Vec::new();
+        let mut postconditions = Vec::new();
+        let result_binding = target.and_then(|f| f.result_binding);
+        let snapshots = target
+            .map(|f| f.entry_snapshots.as_slice())
+            .unwrap_or_default();
+        let needs_arguments =
+            target.is_some_and(|f| !f.preconditions.is_empty() || !f.entry_snapshots.is_empty());
+        if let Some(target) = target {
+            if needs_arguments && parameter_bindings != &target.parameters {
+                return Err(Reason::InvalidSignature);
+            }
+            for condition in &target.preconditions {
+                let condition = if let K::FunctionInstance { arguments, .. } = &callee.kind {
+                    if arguments.iter().any(|ty| ty.check_scope(&[]).is_err()) {
+                        condition.instantiate_types_in_scope(
+                            &target.type_parameters,
+                            arguments,
+                            &self.input_frames,
+                        )
+                    } else {
+                        condition.instantiate_types(&target.type_parameters, arguments)
+                    }
+                    .map_err(|_| Reason::InvalidSignature)?
+                } else {
+                    condition.clone()
+                };
+                preconditions.push(condition);
+            }
+            for condition in &target.postconditions {
+                let condition = if let K::FunctionInstance { arguments, .. } = &callee.kind {
+                    if arguments.iter().any(|ty| ty.check_scope(&[]).is_err()) {
+                        condition.instantiate_types_in_scope(
+                            &target.type_parameters,
+                            arguments,
+                            &self.input_frames,
+                        )
+                    } else {
+                        condition.instantiate_types(&target.type_parameters, arguments)
+                    }
+                    .map_err(|_| Reason::InvalidSignature)?
+                } else {
+                    condition.clone()
+                };
+                postconditions.push(condition);
+            }
+        }
+        let mut transfers = Vec::new();
+        let mut pointer_postconditions = false;
+        for predicate in &postconditions {
+            iir::visit::expression(predicate, &mut self.limits.arithmetic.steps, |expr, _| {
+                pointer_postconditions |= matches!(expr.kind, K::ReadPointer(_));
+                Ok(())
+            })
+            .map_err(|_| Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into()))?;
+        }
+        let mut stable_postcondition_parameters = pointer_postconditions;
+        if stable_postcondition_parameters {
+            if let Some(target) = target {
+                iir::visit::expression(
+                    &target.body,
+                    &mut self.limits.arithmetic.steps,
+                    |expr, fuel| {
+                        *fuel = fuel
+                            .checked_sub(target.parameters.len())
+                            .ok_or("parameter stability budget exhausted")?;
+                        match &expr.kind {
+                            K::Assign { place, .. }
+                            | K::BitAssign { place, .. }
+                            | K::BitUpdate { place, .. }
+                                if target.parameters.contains(&place.root) =>
+                            {
+                                stable_postcondition_parameters = false
+                            }
+                            K::AddressOf(_) => stable_postcondition_parameters = false,
+                            _ => {}
+                        }
+                        Ok(())
+                    },
+                )
+                .map_err(|_| Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into()))?;
+            } else {
+                stable_postcondition_parameters = false;
+            }
+        }
+        let readonly_postconditions = stable_postcondition_parameters
+            && self.call_preserves_memory(callee, arguments, parameter_bindings);
+        let mut evaluated_targets = BTreeMap::new();
+        let mut observed_inputs = BTreeMap::new();
+        let mut evaluated_addresses = BTreeMap::new();
+        let mut defaults = State {
+            frame: self.fresh_frame()?,
+            facts: Facts::default(),
+            domains: BTreeMap::new(),
+            aggregates: BTreeMap::new(),
+            paths: BTreeMap::new(),
+            frozen: BTreeMap::new(),
+            reads: BTreeMap::new(),
+            read_aliases: BTreeMap::new(),
+        };
+        if !postconditions.is_empty() {
+            transfers = self.copy_frozen_frame(state, &mut defaults)?;
+        }
+        self.limits.step(arguments.len())?;
+        let has_defaults = arguments.iter().any(|argument| argument.is_default);
+        let stable_defaults = !has_defaults
+            || ((!preconditions.is_empty()
+                || stable_postcondition_parameters
+                || !state.reads.is_empty())
+                && self.defaults_preserve_memory(callee, arguments, parameter_bindings, true));
+        for argument in arguments {
+            if !state.facts.is_reachable() {
+                break;
+            }
+            // Argument evaluation alternates caller/default frames;
+            // neither frame's cached reads can survive effects in the other.
+            defaults.forget_reads(self.limits)?;
+            if argument.is_default && !stable_defaults {
+                state.forget_reads(self.limits)?;
+            }
+            let mut value = if argument.is_default {
+                self.child(&argument.value, &mut defaults, depth)?
+            } else {
+                self.child(&argument.value, state, depth)?
+            };
+            {
+                let target = value
+                    .copy_pointer_target(self.limits)?
+                    .filter(|(frame, _)| *frame == state.frame)
+                    .map(|(_, target)| target);
+                evaluated_targets.insert(argument.parameter, target);
+                if !argument.is_default {
+                    if let Some(address) = self.external_read_path(&argument.value)? {
+                        if stable_postcondition_parameters {
+                            if let Some(version) = state.facts.value(address.root) {
+                                self.limits.step(address.fields.len().saturating_add(1))?;
+                                evaluated_addresses
+                                    .insert(argument.parameter, (address.clone(), version));
+                            }
+                        }
+                        let mut observations = Vec::new();
+                        for (path, observation) in &state.reads {
+                            self.limits.step(path.fields.len().saturating_add(1))?;
+                            if path.root == address.root && path.fields.starts_with(&address.fields)
+                            {
+                                observations.push((
+                                    path.fields[address.fields.len()..].to_vec(),
+                                    path.clone(),
+                                    observation.clone(),
+                                ));
+                            }
+                        }
+                        observed_inputs.insert(argument.parameter, observations);
+                    }
+                } else if stable_defaults {
+                    if let K::Local(address) = argument.value.kind {
+                        self.limits.step(parameter_bindings.len())?;
+                        if let Some(index) = parameter_bindings
+                            .iter()
+                            .position(|binding| *binding == address)
+                        {
+                            if let Some((path, version)) = evaluated_addresses.get(&index) {
+                                self.limits.step(path.fields.len().saturating_add(1))?;
+                                evaluated_addresses
+                                    .insert(argument.parameter, (path.clone(), *version));
+                            }
+                            if let Some(observations) = observed_inputs.get(&index) {
+                                for (fields, path, _) in observations {
+                                    self.limits.step(
+                                        fields
+                                            .len()
+                                            .saturating_add(path.fields.len())
+                                            .saturating_add(1),
+                                    )?;
+                                }
+                                observed_inputs.insert(argument.parameter, observations.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            if needs_arguments
+                && argument.value.ty == Term::Primitive(nir::Primitive::Bool)
+                && value.range.is_none()
+            {
+                if let Some(condition) = &value.condition {
+                    let source = if argument.is_default {
+                        &defaults.facts
+                    } else {
+                        &state.facts
+                    };
+                    if let Some(truth) = condition.truth_by_enclosure(source, self.limits, 0)? {
+                        let bit = Integer::from_u128(u128::from(truth));
+                        value.range = Some(Interval::new(bit.clone(), bit.clone(), self.limits)?);
+                        value.scalar = Some(Scalar::Constant(bit));
+                    }
+                }
+            }
+            let transfer = if !needs_arguments {
+                None
+            } else {
+                self.prepare_copy(
+                    &value,
+                    if argument.is_default {
+                        &defaults
+                    } else {
+                        state
+                    },
+                )?
+            };
+            if let Some(binding) = parameter_bindings.get(argument.parameter) {
+                bind_value(
+                    &mut defaults,
+                    *binding,
+                    &argument.value.ty,
+                    value,
+                    self.limits,
+                )?;
+                if let Some(transfer) = transfer {
+                    transfers.extend(self.install_copy(&mut defaults, *binding, transfer)?);
+                    self.finish_copy_batch(&mut defaults, &transfers)?;
+                }
+            } else if has_defaults || needs_arguments {
+                return Err(Reason::InvalidSignature);
+            }
+        }
+        if state.facts.is_reachable()
+            && stable_defaults
+            && (!preconditions.is_empty() || readonly_postconditions)
+        {
+            // Import pointee observations only after every actual argument
+            // has run. Captured targets preserve address evaluation order;
+            // unknown-pointer evidence must still be current in the caller.
+            let mut reads = Vec::new();
+            for predicate in preconditions
+                .iter()
+                .chain(postconditions.iter().filter(|_| readonly_postconditions))
+            {
+                iir::visit::expression(predicate, &mut self.limits.arithmetic.steps, |expr, _| {
+                    if let K::ReadPointer(pointer) = &expr.kind {
+                        reads.push((pointer.as_ref(), &expr.ty));
+                    }
+                    Ok(())
+                })
+                .map_err(|_| Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into()))?;
+            }
+            for (pointer, ty) in reads {
+                let Some(path) = self.external_read_path(pointer)? else {
+                    continue;
+                };
+                self.limits.step(parameter_bindings.len())?;
+                let Some(parameter) = parameter_bindings
+                    .iter()
+                    .position(|binding| place(*binding) == path.root)
+                else {
+                    continue;
+                };
+                if defaults.reads.contains_key(&path) {
+                    continue;
+                }
+                let view = self.scalar_type_view(ty)?;
+                if !matches!(view, Term::Primitive(p) if p == nir::Primitive::Bool || p.fixed_integer_layout().is_some())
+                {
+                    continue;
+                }
+                let observed = if let Some(Some(targets)) = evaluated_targets.get(&parameter) {
+                    let mut joined: Option<Value> = None;
+                    for target in targets {
+                        self.limits.step(
+                            target
+                                .fields
+                                .len()
+                                .saturating_add(path.fields.len())
+                                .saturating_add(1),
+                        )?;
+                        let mut target = target.clone();
+                        for (owner, index) in &path.fields {
+                            let owner = match owner {
+                                AggregateKind::Record(id) => nir::program::FieldOwner::Nominal(*id),
+                                AggregateKind::AnonymousRecord => {
+                                    nir::program::FieldOwner::Anonymous
+                                }
+                                _ => return Err(Reason::InvalidSignature),
+                            };
+                            target.fields.push((owner, *index));
+                        }
+                        let value = self.read_pointer_place(state, &target)?;
+                        joined = Some(match joined {
+                            Some(old) => old.join(&value, self.limits, 0)?,
+                            None => value,
+                        });
+                    }
+                    joined
+                } else if let Some(observations) = observed_inputs.get(&parameter) {
+                    let mut value = None;
+                    for (fields, address, observation) in observations {
+                        self.limits.step(fields.len().saturating_add(1))?;
+                        if fields == &path.fields
+                            && observation.0 == view
+                            && state.reads.get(address) == Some(observation)
+                        {
+                            value = Some(self.local_value_at(state, observation.1)?);
+                            break;
+                        }
+                    }
+                    value
                 } else {
                     None
                 };
-                let target = match &callee.kind {
-                    K::Function(id)
-                    | K::FunctionInstance {
-                        declaration: id, ..
-                    } => self
-                        .package
-                        .and_then(|p| p.functions.iter().chain(&p.quote_templates).find(|f| f.declaration == *id)),
-                    K::TraitMethod { .. } => method_summary.as_ref(),
-                    _ => None,
+                let Some(value) = observed else {
+                    continue;
                 };
-                let mut preconditions = Vec::new();
-                let mut postconditions = Vec::new();
-                let result_binding = target.and_then(|f| f.result_binding);
-                let snapshots = target
-                    .map(|f| f.entry_snapshots.as_slice())
-                    .unwrap_or_default();
-                let needs_arguments = target
-                    .is_some_and(|f| !f.preconditions.is_empty() || !f.entry_snapshots.is_empty());
-                if let Some(target) = target {
-                    if needs_arguments && parameter_bindings != &target.parameters {
-                        return Err(Reason::InvalidSignature);
-                    }
-                    for condition in &target.preconditions {
-                        let condition = if let K::FunctionInstance { arguments, .. } = &callee.kind
-                        {
-                            if arguments.iter().any(|ty| ty.check_scope(&[]).is_err()) {
-                                condition.instantiate_types_in_scope(
-                                    &target.type_parameters, arguments, &self.input_frames,
-                                )
-                            } else {
-                                condition.instantiate_types(&target.type_parameters, arguments)
-                            }.map_err(|_| Reason::InvalidSignature)?
-                        } else {
-                            condition.clone()
-                        };
-                        preconditions.push(condition);
-                    }
-                    for condition in &target.postconditions {
-                        let condition = if let K::FunctionInstance { arguments, .. } = &callee.kind
-                        {
-                            if arguments.iter().any(|ty| ty.check_scope(&[]).is_err()) {
-                                condition.instantiate_types_in_scope(
-                                    &target.type_parameters, arguments, &self.input_frames,
-                                )
-                            } else {
-                                condition.instantiate_types(&target.type_parameters, arguments)
-                            }.map_err(|_| Reason::InvalidSignature)?
-                        } else {
-                            condition.clone()
-                        };
-                        postconditions.push(condition);
-                    }
+                let root = self.result_root(&view)?.ok_or(Reason::Unsupported)?;
+                let transfer = self.prepare_copy(&value, state)?;
+                bind_value_place(&mut defaults, root, &view, value, self.limits)?;
+                if let Some(transfer) = transfer {
+                    transfers.extend(self.install_copy_at(&mut defaults, root, &[], transfer)?);
                 }
-                let mut transfers = Vec::new();
-                let mut pointer_postconditions = false;
-                for predicate in &postconditions {
-                    iir::visit::expression(predicate, &mut self.limits.arithmetic.steps, |expr, _| {
-                        pointer_postconditions |= matches!(expr.kind, K::ReadPointer(_));
-                        Ok(())
-                    }).map_err(|_| Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into()))?;
+                defaults.reads.insert(path, (view, root));
+            }
+            self.finish_copy_batch(&mut defaults, &transfers)?;
+        }
+        if state.facts.is_reachable() {
+            for predicate in &preconditions {
+                let checked = self.child(predicate, &mut defaults, depth)?;
+                let condition = checked.condition.ok_or(Reason::MissingPreconditionProof)?;
+                let proof = defaults
+                    .facts
+                    .prove_condition(&condition, true, self.limits)
+                    .map_err(|_| Reason::MissingPreconditionProof)?;
+                proof
+                    .replay(&defaults.facts, self.limits)
+                    .map_err(|_| Reason::MissingPreconditionProof)?;
+                defaults.facts.assume(&condition, true, self.limits)?;
+            }
+        }
+        for snapshot in snapshots {
+            let index = parameter_bindings
+                .iter()
+                .position(|p| *p == snapshot.parameter)
+                .ok_or(Reason::InvalidSignature)?;
+            let argument = arguments
+                .iter()
+                .find(|a| a.parameter == index)
+                .ok_or(Reason::InvalidSignature)?;
+            self.materialize_entry_fields(&mut defaults, snapshot.parameter)?;
+            let value = self.local_value(&defaults, snapshot.parameter)?;
+            self.bind_related_value(&mut defaults, snapshot.binding, &argument.value.ty, value)?;
+            defaults
+                .frozen
+                .insert(place(snapshot.binding), argument.value.ty.clone());
+        }
+        // Recheck after all argument evaluation, before call havoc retires
+        // scalar facts. Only a complete scalar-write footprint guarantees
+        // that the call cannot replace these pointer-valued bindings.
+        let mut stable_addresses = BTreeMap::new();
+        if stable_postcondition_parameters
+            && stable_defaults
+            && self.call_preserves_pointer_bindings(callee)?
+        {
+            for (parameter, (path, version)) in evaluated_addresses {
+                self.limits.step(path.fields.len().saturating_add(1))?;
+                if state.facts.value(path.root) == Some(version) {
+                    stable_addresses.insert(parameter, path);
                 }
-                let mut stable_postcondition_parameters = pointer_postconditions;
-                if stable_postcondition_parameters {
-                    if let Some(target) = target {
-                        iir::visit::expression(&target.body, &mut self.limits.arithmetic.steps, |expr, fuel| {
-                            *fuel = fuel.checked_sub(target.parameters.len()).ok_or("parameter stability budget exhausted")?;
-                            match &expr.kind {
-                                K::Assign {place,..} | K::BitAssign {place,..} | K::BitUpdate {place,..}
-                                    if target.parameters.contains(&place.root) => stable_postcondition_parameters = false,
-                                K::AddressOf(_) => stable_postcondition_parameters = false,
-                                _ => {}
-                            }
-                            Ok(())
-                        }).map_err(|_| Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into()))?;
-                    } else {stable_postcondition_parameters = false;}
+            }
+        }
+        // Include selected defaults and map both writes and returned
+        // aliases using argument values captured before later effects.
+        let mut returned_pointer = None;
+        if state.facts.is_reachable() {
+            if let Some(plan) = self.call_memory_plan(
+                callee,
+                arguments,
+                parameter_bindings,
+                Some(&evaluated_targets),
+            ) {
+                returned_pointer = plan.returned;
+                // Known destinations do not imply disjointness from an
+                // external pointer. Any write invalidates its cached
+                // reads; a proved empty write set preserves them.
+                if !plan.writes.is_empty() {
+                    state.forget_reads(self.limits)?;
                 }
-                let readonly_postconditions = stable_postcondition_parameters
-                    && self.call_preserves_memory(callee, arguments, parameter_bindings);
-                let mut evaluated_targets = BTreeMap::new();
-                let mut observed_inputs = BTreeMap::new();
-                let mut evaluated_addresses = BTreeMap::new();
-                let mut defaults = State {
-                    frame: self.fresh_frame()?,
-                    facts: Facts::default(),
-                    domains: BTreeMap::new(),
-                    aggregates: BTreeMap::new(),
-                    paths: BTreeMap::new(),
-                    frozen: BTreeMap::new(),
-                    reads: BTreeMap::new(), read_aliases: BTreeMap::new(),
-                };
-                if !postconditions.is_empty() {
-                    transfers = self.copy_frozen_frame(state, &mut defaults)?;
-                }
-                self.limits.step(arguments.len())?;
-                let has_defaults = arguments.iter().any(|argument| argument.is_default);
-                let stable_defaults = !has_defaults || ((!preconditions.is_empty() || stable_postcondition_parameters || !state.reads.is_empty())
-                    && self.defaults_preserve_memory(callee, arguments, parameter_bindings, true));
-                for argument in arguments {
-                    if !state.facts.is_reachable() {
-                        break;
-                    }
-                    // Argument evaluation alternates caller/default frames;
-                    // neither frame's cached reads can survive effects in the other.
-                    defaults.forget_reads(self.limits)?;
-                    if argument.is_default && !stable_defaults {state.forget_reads(self.limits)?;}
-                    let mut value = if argument.is_default {
-                        self.child(&argument.value, &mut defaults, depth)?
+                for (target, ty) in plan.writes {
+                    let unknown = self.unknown_value(&ty)?;
+                    if target.is_root() {
+                        bind_value(state, target.root, &ty, unknown, self.limits)?;
                     } else {
-                        self.child(&argument.value, state, depth)?
-                    };
-                    {
-                        let target = value
-                            .copy_pointer_target(self.limits)?
-                            .filter(|(frame, _)| *frame == state.frame)
-                            .map(|(_, target)| target);
-                        evaluated_targets.insert(argument.parameter, target);
-                        if !argument.is_default {
-                            if let Some(address) = self.external_read_path(&argument.value)? {
-                                if stable_postcondition_parameters {
-                                    if let Some(version) = state.facts.value(address.root) {
-                                        self.limits.step(address.fields.len().saturating_add(1))?;
-                                        evaluated_addresses.insert(argument.parameter, (address.clone(), version));
-                                    }
-                                }
-                                let mut observations = Vec::new();
-                                for (path, observation) in &state.reads {
-                                    self.limits.step(path.fields.len().saturating_add(1))?;
-                                    if path.root == address.root && path.fields.starts_with(&address.fields) {
-                                        observations.push((path.fields[address.fields.len()..].to_vec(), path.clone(), observation.clone()));
-                                    }
-                                }
-                                observed_inputs.insert(argument.parameter, observations);
-                            }
-                        } else if stable_defaults {
-                            if let K::Local(address) = argument.value.kind {
-                                self.limits.step(parameter_bindings.len())?;
-                                if let Some(index) = parameter_bindings.iter().position(|binding| *binding == address) {
-                                    if let Some((path, version)) = evaluated_addresses.get(&index) {
-                                        self.limits.step(path.fields.len().saturating_add(1))?;
-                                        evaluated_addresses.insert(argument.parameter, (path.clone(), *version));
-                                    }
-                                    if let Some(observations) = observed_inputs.get(&index) {
-                                        for (fields, path, _) in observations {
-                                            self.limits.step(fields.len().saturating_add(path.fields.len()).saturating_add(1))?;
-                                        }
-                                        observed_inputs.insert(argument.parameter, observations.clone());
-                                    }
-                                }
-                            }
-                        }
+                        self.write_field(state, &target, unknown)?;
                     }
-                    if needs_arguments
-                        && argument.value.ty == Term::Primitive(nir::Primitive::Bool)
-                        && value.range.is_none()
-                    {
-                        if let Some(condition) = &value.condition {
-                            let source = if argument.is_default {
-                                &defaults.facts
-                            } else {
-                                &state.facts
-                            };
-                            if let Some(truth) =
-                                condition.truth_by_enclosure(source, self.limits, 0)?
-                            {
-                                let bit = Integer::from_u128(u128::from(truth));
-                                value.range =
-                                    Some(Interval::new(bit.clone(), bit.clone(), self.limits)?);
-                                value.scalar = Some(Scalar::Constant(bit));
-                            }
-                        }
-                    }
-                    let transfer = if !needs_arguments {
+                }
+            } else if !self.call_preserves_memory(callee, arguments, parameter_bindings) {
+                // Even an opaque callee cannot replace a scalar local
+                // whose address is never exposed. Pointer identities,
+                // pointee reads and addressed storage are still havoced;
+                // this is a storage fact, not a purity assumption.
+                state.havoc_with_private_scalars(Some(&self.addressed_locals), self.limits)?;
+            }
+        }
+        let delivered = if let Term::Computation { result, .. } = &expr.ty {
+            result.as_ref()
+        } else {
+            &expr.ty
+        };
+        let result_ty = self.scalar_type_view(delivered)?;
+        let memory_result =
+            if stable_postcondition_parameters && stable_defaults && state.facts.is_reachable() {
+                self.apply_memory_postconditions(
+                    state,
+                    &defaults,
+                    &postconditions,
+                    snapshots,
+                    parameter_bindings,
+                    &evaluated_targets,
+                    &stable_addresses,
+                    if readonly_postconditions {
                         None
                     } else {
-                        self.prepare_copy(
-                            &value,
-                            if argument.is_default {
-                                &defaults
-                            } else {
-                                state
-                            },
-                        )?
-                    };
-                    if let Some(binding) = parameter_bindings.get(argument.parameter) {
-                        bind_value(
-                            &mut defaults,
-                            *binding,
-                            &argument.value.ty,
-                            value,
-                            self.limits,
-                        )?;
-                        if let Some(transfer) = transfer {
-                            transfers.extend(self.install_copy(
-                                &mut defaults,
-                                *binding,
-                                transfer,
-                            )?);
-                            self.finish_copy_batch(&mut defaults, &transfers)?;
-                        }
-                    } else if has_defaults || needs_arguments {
-                        return Err(Reason::InvalidSignature);
+                        result_binding
+                    },
+                    &result_ty,
+                    // Include ordinary argument copies, not only frozen
+                    // entry ghosts. Export validates their caller versions
+                    // after all argument evaluation and memory invalidation.
+                    &transfers,
+                    depth,
+                )?
+            } else {
+                None
+            };
+        let has_memory_result = memory_result.is_some();
+        result = match memory_result {
+            Some(value) => value,
+            None => self.unknown_value(&result_ty)?,
+        };
+        if matches!(expr.ty, Term::Pointer(_)) {
+            result.pointer_target = returned_pointer.map(|target| (state.frame, target));
+        }
+        if let Some(binding) = result_binding.filter(|_| !has_memory_result) {
+            if state.facts.is_reachable()
+                && !postconditions.is_empty()
+                && let Some(root) = self.result_root(&result_ty)?
+            {
+                let mut returned = defaults;
+                bind_value(&mut returned, binding, &result_ty, result, self.limits)?;
+                for predicate in &postconditions {
+                    if !exportable_postcondition(
+                        predicate,
+                        Some(binding),
+                        snapshots,
+                        (readonly_postconditions && stable_defaults).then_some(&returned.reads),
+                        self.limits,
+                    )? {
+                        continue;
+                    }
+                    // These predicates were proved on every callee return.
+                    // The caller observes their mathematical consequence;
+                    // it does not re-execute predicate arithmetic here.
+                    let old = std::mem::replace(&mut self.assuming_postcondition, true);
+                    let checked = self.child(predicate, &mut returned, depth);
+                    self.assuming_postcondition = old;
+                    if let Some(condition) = checked?.condition {
+                        returned.facts.assume(&condition, true, self.limits)?;
                     }
                 }
-                if state.facts.is_reachable() && stable_defaults && (!preconditions.is_empty() || readonly_postconditions) {
-                    // Import pointee observations only after every actual argument
-                    // has run. Captured targets preserve address evaluation order;
-                    // unknown-pointer evidence must still be current in the caller.
-                    let mut reads = Vec::new();
-                    for predicate in preconditions.iter().chain(postconditions.iter().filter(|_| readonly_postconditions)) {
-                        iir::visit::expression(predicate, &mut self.limits.arithmetic.steps, |expr, _| {
-                            if let K::ReadPointer(pointer) = &expr.kind {reads.push((pointer.as_ref(), &expr.ty));}
-                            Ok(())
-                        }).map_err(|_| Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into()))?;
-                    }
-                    for (pointer, ty) in reads {
-                        let Some(path) = self.external_read_path(pointer)? else {continue;};
-                        self.limits.step(parameter_bindings.len())?;
-                        let Some(parameter) = parameter_bindings.iter().position(|binding| place(*binding) == path.root) else {continue;};
-                        if defaults.reads.contains_key(&path) {continue;}
-                        let view = self.scalar_type_view(ty)?;
-                        if !matches!(view, Term::Primitive(p) if p == nir::Primitive::Bool || p.fixed_integer_layout().is_some()) {continue;}
-                        let observed = if let Some(Some(targets)) = evaluated_targets.get(&parameter) {
-                            let mut joined: Option<Value> = None;
-                            for target in targets {
-                                self.limits.step(target.fields.len().saturating_add(path.fields.len()).saturating_add(1))?;
-                                let mut target = target.clone();
-                                for (owner, index) in &path.fields {
-                                    let owner = match owner {
-                                        AggregateKind::Record(id) => nir::program::FieldOwner::Nominal(*id),
-                                        AggregateKind::AnonymousRecord => nir::program::FieldOwner::Anonymous,
-                                        _ => return Err(Reason::InvalidSignature),
-                                    };
-                                    target.fields.push((owner,*index));
-                                }
-                                let value = self.read_pointer_place(state, &target)?;
-                                joined = Some(match joined {Some(old)=>old.join(&value,self.limits,0)?,None=>value});
-                            }
-                            joined
-                        } else if let Some(observations) = observed_inputs.get(&parameter) {
-                            let mut value = None;
-                            for (fields, address, observation) in observations {
-                                self.limits.step(fields.len().saturating_add(1))?;
-                                if fields == &path.fields && observation.0 == view && state.reads.get(address) == Some(observation) {
-                                    value = Some(self.local_value_at(state, observation.1)?);
-                                    break;
-                                }
-                            }
-                            value
-                        } else {None};
-                        let Some(value) = observed else {continue;};
-                        let root = self.result_root(&view)?.ok_or(Reason::Unsupported)?;
-                        let transfer = self.prepare_copy(&value,state)?;
-                        bind_value_place(&mut defaults,root,&view,value,self.limits)?;
-                        if let Some(transfer) = transfer {
-                            transfers.extend(self.install_copy_at(&mut defaults,root,&[],transfer)?);
-                        }
-                        defaults.reads.insert(path,(view,root));
-                    }
-                    self.finish_copy_batch(&mut defaults,&transfers)?;
-                }
-                if state.facts.is_reachable() {
-                    for predicate in &preconditions {
-                        let checked = self.child(predicate, &mut defaults, depth)?;
-                        let condition =
-                            checked.condition.ok_or(Reason::MissingPreconditionProof)?;
-                        let proof = defaults
-                            .facts
-                            .prove_condition(&condition, true, self.limits)
-                            .map_err(|_| Reason::MissingPreconditionProof)?;
-                        proof
-                            .replay(&defaults.facts, self.limits)
-                            .map_err(|_| Reason::MissingPreconditionProof)?;
-                        defaults.facts.assume(&condition, true, self.limits)?;
-                    }
-                }
-                for snapshot in snapshots {
-                    let index = parameter_bindings
-                        .iter()
-                        .position(|p| *p == snapshot.parameter)
-                        .ok_or(Reason::InvalidSignature)?;
-                    let argument = arguments
-                        .iter()
-                        .find(|a| a.parameter == index)
-                        .ok_or(Reason::InvalidSignature)?;
-                    self.materialize_entry_fields(&mut defaults, snapshot.parameter)?;
-                    let value = self.local_value(&defaults, snapshot.parameter)?;
-                    self.bind_related_value(
-                        &mut defaults,
-                        snapshot.binding,
-                        &argument.value.ty,
-                        value,
+                if !returned.facts.is_reachable() {
+                    state
+                        .facts
+                        .assume(&Condition::Bool(false), true, self.limits)?;
+                    result = Value::default();
+                } else {
+                    result = self.local_value(&returned, binding)?;
+                    result.evidence = self.prepare_copy(&result, &returned)?;
+                    self.bind_call_result(
+                        state,
+                        root,
+                        &result_ty,
+                        result,
+                        &returned,
+                        // Current caller versions decide which input
+                        // relations survive, independently of writes to
+                        // other storage or the presence of pointer posts.
+                        &transfers,
+                        &[],
                     )?;
-                    defaults
-                        .frozen
-                        .insert(place(snapshot.binding), argument.value.ty.clone());
+                    result = self.local_value_at(state, root)?;
                 }
-                // Recheck after all argument evaluation, before call havoc retires
-                // scalar facts. Only a complete scalar-write footprint guarantees
-                // that the call cannot replace these pointer-valued bindings.
-                let mut stable_addresses = BTreeMap::new();
-                if stable_postcondition_parameters && stable_defaults
-                    && self.call_preserves_pointer_bindings(callee)? {
-                    for (parameter, (path, version)) in evaluated_addresses {
-                        self.limits.step(path.fields.len().saturating_add(1))?;
-                        if state.facts.value(path.root) == Some(version) {
-                            stable_addresses.insert(parameter, path);
-                        }
-                    }
-                }
-                // Include selected defaults and map both writes and returned
-                // aliases using argument values captured before later effects.
-                let mut returned_pointer = None;
-                if state.facts.is_reachable() {
-                    if let Some(plan) = self.call_memory_plan(
-                        callee,
-                        arguments,
-                        parameter_bindings,
-                        Some(&evaluated_targets),
-                    ) {
-                        returned_pointer = plan.returned;
-                        // Known destinations do not imply disjointness from an
-                        // external pointer. Any write invalidates its cached
-                        // reads; a proved empty write set preserves them.
-                        if !plan.writes.is_empty() {
-                            state.forget_reads(self.limits)?;
-                        }
-                        for (target, ty) in plan.writes {
-                            let unknown = self.unknown_value(&ty)?;
-                            if target.is_root() {
-                                bind_value(state, target.root, &ty, unknown, self.limits)?;
-                            } else {
-                                self.write_field(state, &target, unknown)?;
-                            }
-                        }
-                    } else if !self.call_preserves_memory(callee, arguments, parameter_bindings) {
-                        // Even an opaque callee cannot replace a scalar local
-                        // whose address is never exposed. Pointer identities,
-                        // pointee reads and addressed storage are still havoced;
-                        // this is a storage fact, not a purity assumption.
-                        state.havoc_with_private_scalars(Some(&self.addressed_locals), self.limits)?;
-                    }
-                }
-                let delivered=if let Term::Computation {result,..}=&expr.ty {result.as_ref()} else {&expr.ty};
-                let result_ty = self.scalar_type_view(delivered)?;
-                let memory_result = if stable_postcondition_parameters && stable_defaults && state.facts.is_reachable() {
-                    self.apply_memory_postconditions(state, &defaults, &postconditions, snapshots,
-                        parameter_bindings, &evaluated_targets, &stable_addresses,
-                        if readonly_postconditions {None} else {result_binding}, &result_ty,
-                        // Include ordinary argument copies, not only frozen
-                        // entry ghosts. Export validates their caller versions
-                        // after all argument evaluation and memory invalidation.
-                        &transfers, depth)?
-                } else {None};
-                let has_memory_result = memory_result.is_some();
-                result = match memory_result {Some(value) => value, None => self.unknown_value(&result_ty)?};
-                if matches!(expr.ty, Term::Pointer(_)) {
-                    result.pointer_target = returned_pointer.map(|target| (state.frame, target));
-                }
-                if let Some(binding) = result_binding.filter(|_| !has_memory_result) {
-                    if state.facts.is_reachable()
-                        && !postconditions.is_empty()
-                        && let Some(root) = self.result_root(&result_ty)?
-                    {
-                        let mut returned = defaults;
-                        bind_value(&mut returned, binding, &result_ty, result, self.limits)?;
-                        for predicate in &postconditions {
-                            if !exportable_postcondition(predicate, Some(binding), snapshots,
-                                (readonly_postconditions && stable_defaults).then_some(&returned.reads), self.limits)? {
-                                continue;
-                            }
-                            // These predicates were proved on every callee return.
-                            // The caller observes their mathematical consequence;
-                            // it does not re-execute predicate arithmetic here.
-                            let old = std::mem::replace(&mut self.assuming_postcondition, true);
-                            let checked = self.child(predicate, &mut returned, depth);
-                            self.assuming_postcondition = old;
-                            if let Some(condition) = checked?.condition {
-                                returned.facts.assume(&condition, true, self.limits)?;
-                            }
-                        }
-                        if !returned.facts.is_reachable() {
-                            state
-                                .facts
-                                .assume(&Condition::Bool(false), true, self.limits)?;
-                            result = Value::default();
-                        } else {
-                            result = self.local_value(&returned, binding)?;
-                            result.evidence = self.prepare_copy(&result, &returned)?;
-                            self.bind_call_result(
-                                state,
-                                root,
-                                &result_ty,
-                                result,
-                                &returned,
-                                // Current caller versions decide which input
-                                // relations survive, independently of writes to
-                                // other storage or the presence of pointer posts.
-                                &transfers,
-                                &[],
-                            )?;
-                            result = self.local_value_at(state, root)?;
-                        }
-                    }
-                }
+            }
+        }
         Ok(result)
     }
     #[inline(never)]
-    fn closure_expression(&mut self,expr:&Expr,state:&mut State,depth:usize)->Result<Value,Reason> {
-        let result=Value::default();
+    fn closure_expression(
+        &mut self,
+        expr: &Expr,
+        state: &mut State,
+        depth: usize,
+    ) -> Result<Value, Reason> {
+        let result = Value::default();
         match &expr.kind {
             K::Closure {
                 parameters,
@@ -2145,7 +2491,8 @@ impl Walker<'_> {
                     aggregates: BTreeMap::new(),
                     paths: BTreeMap::new(),
                     frozen: BTreeMap::new(),
-                    reads: BTreeMap::new(), read_aliases: BTreeMap::new(),
+                    reads: BTreeMap::new(),
+                    read_aliases: BTreeMap::new(),
                 };
                 let mutable_captures = mutable_capture_paths(body, captures, self.limits)?;
                 let mut copied_relations = Vec::new();
@@ -2225,7 +2572,9 @@ impl Walker<'_> {
                     // Closure signatures introduce a callable binder; their
                     // body annotations stay in the enclosing type-input scope.
                     // Lambda parameters are runtime values, not type binders.
-                    let ty = parameter.ty.substitute_partial(&[])
+                    let ty = parameter
+                        .ty
+                        .substitute_partial(&[])
                         .map_err(|_| Reason::InvalidSignature)?;
                     let ty = self.scalar_type_view(&ty)?;
                     bind(&mut invocation, *binding, &ty, None, self.limits)?;
@@ -2239,13 +2588,18 @@ impl Walker<'_> {
                 self.closure_context.pop();
                 checked?;
             }
-            _=>unreachable!(),
+            _ => unreachable!(),
         }
         Ok(result)
     }
     #[inline(never)]
-    fn branch_expression(&mut self,expr:&Expr,state:&mut State,depth:usize)->Result<Value,Reason> {
-        let mut result=Value::default();
+    fn branch_expression(
+        &mut self,
+        expr: &Expr,
+        state: &mut State,
+        depth: usize,
+    ) -> Result<Value, Reason> {
+        let mut result = Value::default();
         match &expr.kind {
             K::If {
                 condition,
@@ -2283,49 +2637,82 @@ impl Walker<'_> {
                     *state = yes.merge(no, self.limits)?;
                 }
             }
-            _=>unreachable!(),
+            _ => unreachable!(),
         }
         Ok(result)
     }
     #[inline(never)]
-    fn loop_expression(&mut self,identity:LocalId,body:&Expr,state:&mut State,depth:usize)->Result<(),Reason> {
-        let mut tail=body;
+    fn loop_expression(
+        &mut self,
+        identity: LocalId,
+        body: &Expr,
+        state: &mut State,
+        depth: usize,
+    ) -> Result<(), Reason> {
+        let mut tail = body;
         loop {
             self.limits.step(1)?;
             match &tail.kind {
-                K::Block {result:Some(result),..} | K::CallPreparation {result:Some(result),..}=>tail=result,
-                _=>break,
+                K::Block {
+                    result: Some(result),
+                    ..
+                }
+                | K::CallPreparation {
+                    result: Some(result),
+                    ..
+                } => tail = result,
+                _ => break,
             }
         }
-        let mut single=matches!(tail.kind,K::Break(target) if target==identity);
+        let mut single = matches!(tail.kind,K::Break(target) if target==identity);
         if single {
-            nir::visit::expression(body,&mut self.limits.arithmetic.steps,|expr,_| {
-                if matches!(expr.kind,K::Continue(target) if target==identity) {single=false;}
+            nir::visit::expression(body, &mut self.limits.arithmetic.steps, |expr, _| {
+                if matches!(expr.kind,K::Continue(target) if target==identity) {
+                    single = false;
+                }
                 Ok(())
-            }).map_err(|_|Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into()))?;
+            })
+            .map_err(|_| Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into()))?;
         }
         if single {
-            if self.single_pass_exits.insert(identity,vec![]).is_some() {return Err(Reason::InvalidSignature);}
-            let mut iteration=state.fork(self.limits)?;
-            let checked=self.child(body,&mut iteration,depth);
-            let exits=self.single_pass_exits.remove(&identity).unwrap();
-            checked?;
-            let mut merged:Option<State>=None;
-            for exit in exits {
-                merged=Some(if let Some(previous)=merged {previous.merge(exit,self.limits)?} else {exit});
+            if self.single_pass_exits.insert(identity, vec![]).is_some() {
+                return Err(Reason::InvalidSignature);
             }
-            if let Some(exit)=merged {*state=exit;} else {state.facts.assume(&Condition::Bool(false),true,self.limits)?;}
+            let mut iteration = state.fork(self.limits)?;
+            let checked = self.child(body, &mut iteration, depth);
+            let exits = self.single_pass_exits.remove(&identity).unwrap();
+            checked?;
+            let mut merged: Option<State> = None;
+            for exit in exits {
+                merged = Some(if let Some(previous) = merged {
+                    previous.merge(exit, self.limits)?
+                } else {
+                    exit
+                });
+            }
+            if let Some(exit) = merged {
+                *state = exit;
+            } else {
+                state
+                    .facts
+                    .assume(&Condition::Bool(false), true, self.limits)?;
+            }
         } else {
-            self.forget_loop_writes(body,state)?;
-            let mut iteration=state.fork(self.limits)?;
-            self.child(body,&mut iteration,depth)?;
-            self.forget_loop_writes(body,state)?;
+            self.forget_loop_writes(body, state)?;
+            let mut iteration = state.fork(self.limits)?;
+            self.child(body, &mut iteration, depth)?;
+            self.forget_loop_writes(body, state)?;
         }
         Ok(())
     }
     #[inline(never)]
-    fn binding_expression(&mut self,expr:&Expr,state:&mut State,depth:usize)->Result<Value,Reason> {
-        let mut result=Value::default();
+    fn binding_expression(
+        &mut self,
+        expr: &Expr,
+        state: &mut State,
+        depth: usize,
+    ) -> Result<Value, Reason> {
+        let mut result = Value::default();
         match &expr.kind {
             K::Literal(literal) => {
                 let number = match literal {
@@ -2360,9 +2747,16 @@ impl Walker<'_> {
             | K::Function(_)
             | K::FunctionInstance { .. }
             | K::TraitMethod { .. }
-            | K::TypeValue(_) | K::TypeListValue(_) => {}
-            K::Block { statements, result: tail }
-            | K::CallPreparation { statements, result: tail } => {
+            | K::TypeValue(_)
+            | K::TypeListValue(_) => {}
+            K::Block {
+                statements,
+                result: tail,
+            }
+            | K::CallPreparation {
+                statements,
+                result: tail,
+            } => {
                 for statement in statements {
                     self.child(statement, state, depth)?;
                 }
@@ -2374,44 +2768,73 @@ impl Walker<'_> {
                 let value_result = self.child(value, state, depth)?;
                 if state.facts.is_reachable() {
                     let alias = if matches!(value.ty, Term::Pointer(_)) {
-                        self.aliased_read_path(value, state)?.and_then(|path|
-                            state.facts.value(path.root).map(|version| (path, version)))
-                    } else { None };
+                        self.aliased_read_path(value, state)?.and_then(|path| {
+                            state.facts.value(path.root).map(|version| (path, version))
+                        })
+                    } else {
+                        None
+                    };
                     self.bind_related_value(state, *binding, &value.ty, value_result)?;
                     state.read_aliases.remove(&place(*binding));
                     if let Some((path, source_version)) = alias {
                         if let Some(alias_version) = state.facts.value(place(*binding)) {
-                            state.read_aliases.insert(place(*binding), (path, source_version, alias_version));
+                            state
+                                .read_aliases
+                                .insert(place(*binding), (path, source_version, alias_version));
                         }
                     }
                 }
             }
-            _=>unreachable!(),
+            _ => unreachable!(),
         }
         Ok(result)
     }
-    fn completed_effect_result(&mut self,mut value:Value,ty:&Term,state:&mut State)->Result<Value,Reason> {
-        if !state.facts.is_reachable() {return Ok(value);}
-        let ty=if let Term::Computation {result,..}=ty {result.as_ref()} else {ty};
+    fn completed_effect_result(
+        &mut self,
+        mut value: Value,
+        ty: &Term,
+        state: &mut State,
+    ) -> Result<Value, Reason> {
+        if !state.facts.is_reachable() {
+            return Ok(value);
+        }
+        let ty = if let Term::Computation { result, .. } = ty {
+            result.as_ref()
+        } else {
+            ty
+        };
         // The returned value is already complete. Retain its immutable evidence
         // while invalidating mutable storage reachable by the handled effects.
-        value.evidence=self.prepare_copy(&value,state)?;
-        state.havoc_with_private_scalars(Some(&self.addressed_locals),self.limits)?;
-        if let Some(root)=self.result_root(ty)? {
-            self.bind_result(state,root,ty,value)?;
-            self.local_value_at(state,root)
-        } else {Ok(value)}
+        value.evidence = self.prepare_copy(&value, state)?;
+        state.havoc_with_private_scalars(Some(&self.addressed_locals), self.limits)?;
+        if let Some(root) = self.result_root(ty)? {
+            self.bind_result(state, root, ty, value)?;
+            self.local_value_at(state, root)
+        } else {
+            Ok(value)
+        }
     }
     #[inline(never)]
-    fn general_expression(&mut self, expr: &Expr, state: &mut State, depth: usize) -> Result<Value, Reason> {
+    fn general_expression(
+        &mut self,
+        expr: &Expr,
+        state: &mut State,
+        depth: usize,
+    ) -> Result<Value, Reason> {
         let mut result = Value::default();
         match &expr.kind {
-            K::BitWindow {value, start, end} => {
+            K::BitWindow { value, start, end } => {
                 self.bit_window(expr, value, start, end, state, depth)?;
             }
-            K::BitIndex(value, index) => self.bit_index(expr,value,index,state,depth)?,
-            K::Snapshot(value) => { result = self.child(value, state, depth)?; }
-            K::BitSlice {value, ..} | K::TakeBits(value) | K::SymbolName(value) | K::EnumName(value) | K::BitConvert(value) => {
+            K::BitIndex(value, index) => self.bit_index(expr, value, index, state, depth)?,
+            K::Snapshot(value) => {
+                result = self.child(value, state, depth)?;
+            }
+            K::BitSlice { value, .. }
+            | K::TakeBits(value)
+            | K::SymbolName(value)
+            | K::EnumName(value)
+            | K::BitConvert(value) => {
                 self.child(value, state, depth)?;
                 result = self.unknown_value(&expr.ty)?;
             }
@@ -2422,29 +2845,42 @@ impl Walker<'_> {
             }
             K::EffectResume(value) => {
                 self.child(value, state, depth)?;
-                state.facts.assume(&Condition::Bool(false), true, self.limits)?;
+                state
+                    .facts
+                    .assume(&Condition::Bool(false), true, self.limits)?;
             }
-            K::EffectHandle {computation, handlers, ..} => {
-                for handler in handlers {self.effect_handler_arms(handler, state, depth)?;}
+            K::EffectHandle {
+                computation,
+                handlers,
+                ..
+            } => {
+                for handler in handlers {
+                    self.effect_handler_arms(handler, state, depth)?;
+                }
                 // Installation-time providers can mutate captured storage even
                 // when the subject never requests an operation. Entry facts
                 // therefore cannot flow into that subject unchanged.
-                if handlers.iter().any(|handler| handler.abi == nir::effects::Abi::DirectPassing) {
+                if handlers
+                    .iter()
+                    .any(|handler| handler.abi == nir::effects::Abi::DirectPassing)
+                {
                     state.havoc(self.limits)?;
                 }
-                let completed=self.child(computation,state,depth)?;
-                result=self.completed_effect_result(completed,&expr.ty,state)?;
+                let completed = self.child(computation, state, depth)?;
+                result = self.completed_effect_result(completed, &expr.ty, state)?;
             }
-            K::EffectComputation {body, ..} => {
-                result=self.child(body,state,depth)?;
+            K::EffectComputation { body, .. } => {
+                result = self.child(body, state, depth)?;
             }
-            K::EffectRun {computation, ..} => {
-                let completed=self.child(computation,state,depth)?;
-                result=self.completed_effect_result(completed,&expr.ty,state)?;
+            K::EffectRun { computation, .. } => {
+                let completed = self.child(computation, state, depth)?;
+                result = self.completed_effect_result(completed, &expr.ty, state)?;
             }
-            K::EffectRequest {arguments, ..} => {
-                for argument in arguments {self.child(argument,state,depth)?;}
-                state.havoc_with_private_scalars(Some(&self.addressed_locals),self.limits)?;
+            K::EffectRequest { arguments, .. } => {
+                for argument in arguments {
+                    self.child(argument, state, depth)?;
+                }
+                state.havoc_with_private_scalars(Some(&self.addressed_locals), self.limits)?;
                 result = self.unknown_value(&expr.ty)?;
             }
             K::LetPattern {
@@ -2465,8 +2901,17 @@ impl Walker<'_> {
             K::Match { value, arms } => {
                 result = self.match_expression(value, arms, &expr.ty, state, depth, false)?;
             }
-            K::Literal(_) | K::Local(_) | K::Unit | K::TypeValue(_) | K::TypeListValue(_) | K::Function(_) | K::FunctionInstance {..}
-            | K::TraitMethod {..} | K::Block {..} | K::CallPreparation {..} | K::Let {..} => unreachable!(),
+            K::Literal(_)
+            | K::Local(_)
+            | K::Unit
+            | K::TypeValue(_)
+            | K::TypeListValue(_)
+            | K::Function(_)
+            | K::FunctionInstance { .. }
+            | K::TraitMethod { .. }
+            | K::Block { .. }
+            | K::CallPreparation { .. }
+            | K::Let { .. } => unreachable!(),
             K::AddressOf(_) => {
                 result.pointer_target =
                     direct_pointer_place(expr, &mut self.limits.arithmetic.steps)
@@ -2484,7 +2929,9 @@ impl Walker<'_> {
                     let mut projected = Vec::new();
                     for mut target in targets {
                         self.limits.step(1)?;
-                        target.fields.push((nir::program::FieldOwner::Nominal(*declaration), *index));
+                        target
+                            .fields
+                            .push((nir::program::FieldOwner::Nominal(*declaration), *index));
                         insert_pointer_target(
                             &mut projected,
                             target,
@@ -2499,7 +2946,9 @@ impl Walker<'_> {
                     let mut projected = Vec::new();
                     for mut target in targets {
                         self.limits.step(1)?;
-                        target.fields.push((nir::program::FieldOwner::Anonymous, *index));
+                        target
+                            .fields
+                            .push((nir::program::FieldOwner::Anonymous, *index));
                         insert_pointer_target(
                             &mut projected,
                             target,
@@ -2532,20 +2981,34 @@ impl Walker<'_> {
                     self.observe_external_read(pointer, &expr.ty, state)?
                 };
             }
-            K::BitWritePointer {pointer,selections,value} => {
-                let Term::Pointer(storage) = &pointer.ty else {return Err(Reason::Unsupported)};
-                let targets = self.child(pointer,state,depth)?.pointer_target
-                    .filter(|(frame,_)|*frame==state.frame).map(|(_,targets)|targets);
-                self.bit_selections(expr,storage,selections,state,depth)?;
-                self.child(value,state,depth)?;
+            K::BitWritePointer {
+                pointer,
+                selections,
+                value,
+            } => {
+                let Term::Pointer(storage) = &pointer.ty else {
+                    return Err(Reason::Unsupported);
+                };
+                let targets = self
+                    .child(pointer, state, depth)?
+                    .pointer_target
+                    .filter(|(frame, _)| *frame == state.frame)
+                    .map(|(_, targets)| targets);
+                self.bit_selections(expr, storage, selections, state, depth)?;
+                self.child(value, state, depth)?;
                 if state.facts.is_reachable() {
                     if let Some(targets) = targets {
                         for target in targets {
                             let unknown = self.unknown_value(storage)?;
-                            if target.is_root() {self.bind_related_value(state,target.root,storage,unknown)?;}
-                            else {self.write_field(state,&target,unknown)?;}
+                            if target.is_root() {
+                                self.bind_related_value(state, target.root, storage, unknown)?;
+                            } else {
+                                self.write_field(state, &target, unknown)?;
+                            }
                         }
-                    } else {state.havoc(self.limits)?;}
+                    } else {
+                        state.havoc(self.limits)?;
+                    }
                 }
             }
             K::WritePointer { pointer, value } => {
@@ -2554,7 +3017,8 @@ impl Walker<'_> {
                     .pointer_target
                     .filter(|(frame, _)| *frame == state.frame)
                     .map(|(_, targets)| targets);
-                let address = self.aliased_read_path(pointer, state)?
+                let address = self
+                    .aliased_read_path(pointer, state)?
                     .and_then(|path| state.facts.value(path.root).map(|version| (path, version)));
                 let mut replacement = self.child(value, state, depth)?;
                 if state.facts.is_reachable() {
@@ -2590,12 +3054,20 @@ impl Walker<'_> {
                         let view = self.scalar_type_view(&value.ty)?;
                         let observed = if let Some((path, version)) = address {
                             if state.facts.value(path.root) == Some(version)
-                                && matches!(view, Term::Primitive(p) if p == nir::Primitive::Bool || p.fixed_integer_layout().is_some()) {
+                                && matches!(view, Term::Primitive(p) if p == nir::Primitive::Bool || p.fixed_integer_layout().is_some())
+                            {
                                 let transfer = self.prepare_copy(&replacement, state)?;
                                 Some((path, transfer))
-                            } else {None}
-                        } else {None};
-                        state.havoc_with_private_scalars(Some(&self.addressed_locals), self.limits)?;
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        state.havoc_with_private_scalars(
+                            Some(&self.addressed_locals),
+                            self.limits,
+                        )?;
                         if let Some((path, transfer)) = observed {
                             let root = self.result_root(&view)?.ok_or(Reason::Unsupported)?;
                             bind_value_place(state, root, &view, replacement, self.limits)?;
@@ -2621,10 +3093,20 @@ impl Walker<'_> {
                     }
                 }
             }
-            K::BitAssign {place: target,storage_type,value,..}
-            | K::BitUpdate {place: target,storage_type,value,..} => {
-                if let K::BitUpdate {selections,..} = &expr.kind {
-                    self.bit_selections(expr,storage_type,selections,state,depth)?;
+            K::BitAssign {
+                place: target,
+                storage_type,
+                value,
+                ..
+            }
+            | K::BitUpdate {
+                place: target,
+                storage_type,
+                value,
+                ..
+            } => {
+                if let K::BitUpdate { selections, .. } = &expr.kind {
+                    self.bit_selections(expr, storage_type, selections, state, depth)?;
                 }
                 self.child(value, state, depth)?;
                 if state.facts.is_reachable() {
@@ -2638,20 +3120,31 @@ impl Walker<'_> {
                     }
                 }
             }
-            K::Closure {..} => { result=self.closure_expression(expr,state,depth)?; }
+            K::Closure { .. } => {
+                result = self.closure_expression(expr, state, depth)?;
+            }
             K::Discard(value) => {
                 self.child(value, state, depth)?;
             }
             K::RequirePredicate(predicate) | K::EnsurePredicate(predicate) => {
                 if state.facts.is_reachable() {
-                    let failure=|| if matches!(expr.kind,K::RequirePredicate(_)) {
-                        Reason::MissingPreconditionProof
-                    } else {Reason::MissingPostconditionProof};
-                    let checked=self.child(predicate,state,depth)?;
-                    let condition=checked.condition.ok_or_else(&failure)?;
-                    let proof=state.facts.prove_condition(&condition,true,self.limits).map_err(|_|failure())?;
-                    proof.replay(&state.facts,self.limits).map_err(|_|failure())?;
-                    state.facts.assume(&condition,true,self.limits)?;
+                    let failure = || {
+                        if matches!(expr.kind, K::RequirePredicate(_)) {
+                            Reason::MissingPreconditionProof
+                        } else {
+                            Reason::MissingPostconditionProof
+                        }
+                    };
+                    let checked = self.child(predicate, state, depth)?;
+                    let condition = checked.condition.ok_or_else(&failure)?;
+                    let proof = state
+                        .facts
+                        .prove_condition(&condition, true, self.limits)
+                        .map_err(|_| failure())?;
+                    proof
+                        .replay(&state.facts, self.limits)
+                        .map_err(|_| failure())?;
+                    state.facts.assume(&condition, true, self.limits)?;
                 }
             }
             K::CheckPredicate(condition) => {
@@ -2670,7 +3163,9 @@ impl Walker<'_> {
                 self.record(expr, state, PointKind::Check, None)?;
                 self.points.last_mut().unwrap().check_input = check_input;
             }
-            K::If {..} => { result=self.branch_expression(expr,state,depth)?; }
+            K::If { .. } => {
+                result = self.branch_expression(expr, state, depth)?;
+            }
             K::Return(value) => {
                 if let Some(value) = value {
                     self.tail(value, state, depth)?;
@@ -2681,21 +3176,36 @@ impl Walker<'_> {
                     .facts
                     .assume(&Condition::Bool(false), true, self.limits)?;
             }
-            K::Loop {identity,body} => { self.loop_expression(*identity,body,state,depth)?; }
+            K::Loop { identity, body } => {
+                self.loop_expression(*identity, body, state, depth)?;
+            }
             K::Break(identity) | K::Continue(identity) => {
-                if matches!(expr.kind,K::Break(_)) && self.single_pass_exits.contains_key(identity) {
-                    let exit=state.fork(self.limits)?;
+                if matches!(expr.kind, K::Break(_)) && self.single_pass_exits.contains_key(identity)
+                {
+                    let exit = state.fork(self.limits)?;
                     self.single_pass_exits.get_mut(identity).unwrap().push(exit);
                 }
-                state.facts.assume(&Condition::Bool(false),true,self.limits)?;
+                state
+                    .facts
+                    .assume(&Condition::Bool(false), true, self.limits)?;
             }
             K::Call {
                 callee,
                 arguments,
                 parameter_bindings,
-            } => { result=self.call_expression(expr,callee,arguments,parameter_bindings,state,depth)?; }
+            } => {
+                result = self.call_expression(
+                    expr,
+                    callee,
+                    arguments,
+                    parameter_bindings,
+                    state,
+                    depth,
+                )?;
+            }
             K::Tuple(values)
-            | K::AnonymousRecord { fields: values } | K::Record { fields: values, .. }
+            | K::AnonymousRecord { fields: values }
+            | K::Record { fields: values, .. }
             | K::Variant { fields: values, .. } => {
                 let mut fields = Vec::new();
                 for value in values {
@@ -2763,11 +3273,17 @@ fn compare_values(
             C::Greater if !high_low.is_gt() => Some(false),
             C::GreaterEqual if !low_high.is_lt() => Some(true),
             C::GreaterEqual if high_low.is_lt() => Some(false),
-            C::Equal | C::NotEqual if high_low.is_lt() || low_high.is_gt() => Some(relation == C::NotEqual),
-            C::Equal | C::NotEqual if high_low.is_eq() && low_high.is_eq() => Some(relation == C::Equal),
+            C::Equal | C::NotEqual if high_low.is_lt() || low_high.is_gt() => {
+                Some(relation == C::NotEqual)
+            }
+            C::Equal | C::NotEqual if high_low.is_eq() && low_high.is_eq() => {
+                Some(relation == C::Equal)
+            }
             _ => None,
         };
-        if let Some(truth) = truth {return Ok(Some(Condition::Bool(truth)));}
+        if let Some(truth) = truth {
+            return Ok(Some(Condition::Bool(truth)));
+        }
     }
     let polynomial = match (a.polynomial(limits)?, b.polynomial(limits)?) {
         (Some(left), Some(right)) => Some(Condition::PolynomialCompare {
@@ -2867,7 +3383,12 @@ impl Value {
                 None
             },
             fields: if let Term::Record(fields) = ty {
-                Some(fields.iter().map(|(_, ty)| Self::unknown_at(ty, limits, depth + 1)).collect::<Result<_, _>>()?)
+                Some(
+                    fields
+                        .iter()
+                        .map(|(_, ty)| Self::unknown_at(ty, limits, depth + 1))
+                        .collect::<Result<_, _>>()?,
+                )
             } else if let Term::Tuple(types) = ty {
                 Some(
                     types
@@ -3227,20 +3748,34 @@ impl Walker<'_> {
 
 // Export result and explicit entry-snapshot guarantees. Bare parameter names
 // denote exit-state bindings and cannot stand for original caller arguments.
-fn external_read_path(mut pointer: &Expr, limits: &mut Limits) -> Result<Option<FieldPath>, Unknown> {
+fn external_read_path(
+    mut pointer: &Expr,
+    limits: &mut Limits,
+) -> Result<Option<FieldPath>, Unknown> {
     let mut fields = Vec::new();
     loop {
         limits.step(1)?;
         match &pointer.kind {
             K::Local(address) => {
                 fields.reverse();
-                return Ok(Some(FieldPath {root: place(*address), fields: record_path(&fields)}));
+                return Ok(Some(FieldPath {
+                    root: place(*address),
+                    fields: record_path(&fields),
+                }));
             }
-            K::PointerField {pointer: base, declaration, index} => {
+            K::PointerField {
+                pointer: base,
+                declaration,
+                index,
+            } => {
                 fields.push((nir::program::FieldOwner::Nominal(*declaration), *index));
                 pointer = base;
             }
-            K::PointerAnonymousField {pointer: base, index, ..} => {
+            K::PointerAnonymousField {
+                pointer: base,
+                index,
+                ..
+            } => {
                 fields.push((nir::program::FieldOwner::Anonymous, *index));
                 pointer = base;
             }
@@ -3261,17 +3796,25 @@ fn exportable_postcondition(
         limits.step(1)?;
         match &expr.kind {
             K::ReadPointer(pointer) => {
-                let Some(path) = external_read_path(pointer, limits)? else {return Ok(false);};
-                if !reads.is_some_and(|reads| reads.contains_key(&path)) {return Ok(false);}
+                let Some(path) = external_read_path(pointer, limits)? else {
+                    return Ok(false);
+                };
+                if !reads.is_some_and(|reads| reads.contains_key(&path)) {
+                    return Ok(false);
+                }
             }
             K::Local(id) if Some(*id) == binding || snapshots.iter().any(|s| s.binding == *id) => {}
             K::Literal(_) | K::Unit => {}
             K::Not(a)
             | K::IntegerNegate(a)
             | K::FloatNegate(a)
-            | K::AnonymousField { value: a, .. } | K::Field { value: a, .. }
+            | K::AnonymousField { value: a, .. }
+            | K::Field { value: a, .. }
             | K::BitSlice { value: a, .. }
-            | K::Snapshot(a) | K::TakeBits(a) | K::SymbolName(a) | K::EnumName(a)
+            | K::Snapshot(a)
+            | K::TakeBits(a)
+            | K::SymbolName(a)
+            | K::EnumName(a)
             | K::BitConvert(a)
             | K::Discard(a) => work.push(a),
             K::IntegerBinary {
@@ -3327,23 +3870,57 @@ mod interval_observation_tests {
                 for lo_b in -2..=2 {
                     for hi_b in lo_b..=2 {
                         // Two singletons already use the polynomial path.
-                        if lo_a == hi_a && lo_b == hi_b {continue;}
-                        for relation in [C::Equal,C::NotEqual,C::Less,C::LessEqual,C::Greater,C::GreaterEqual] {
-                            let mut limits=Limits::default();
-                            let value=|lo,hi,limits:&mut Limits| Value {
-                                range:Some(Interval::new(Integer::from_i128(lo),Integer::from_i128(hi),limits).unwrap()),
+                        if lo_a == hi_a && lo_b == hi_b {
+                            continue;
+                        }
+                        for relation in [
+                            C::Equal,
+                            C::NotEqual,
+                            C::Less,
+                            C::LessEqual,
+                            C::Greater,
+                            C::GreaterEqual,
+                        ] {
+                            let mut limits = Limits::default();
+                            let value = |lo, hi, limits: &mut Limits| Value {
+                                range: Some(
+                                    Interval::new(
+                                        Integer::from_i128(lo),
+                                        Integer::from_i128(hi),
+                                        limits,
+                                    )
+                                    .unwrap(),
+                                ),
                                 ..Value::default()
                             };
-                            let a=value(lo_a,hi_a,&mut limits);
-                            let b=value(lo_b,hi_b,&mut limits);
-                            let decision=compare_values(a,b,relation,&mut limits).unwrap();
-                            let observations=(lo_a..=hi_a).flat_map(|a|(lo_b..=hi_b).map(move |b|match relation {
-                                C::Equal=>a==b,C::NotEqual=>a!=b,C::Less=>a<b,C::LessEqual=>a<=b,
-                                C::Greater=>a>b,C::GreaterEqual=>a>=b,
-                            })).collect::<Vec<_>>();
-                            let expected=observations.iter().all(|truth|*truth==observations[0]).then_some(observations[0]);
-                            let actual=match decision {Some(Condition::Bool(truth))=>Some(truth),None=>None,_=>panic!("unexpected symbolic identity")};
-                            assert_eq!(actual,expected,"[{lo_a},{hi_a}] {relation:?} [{lo_b},{hi_b}]");
+                            let a = value(lo_a, hi_a, &mut limits);
+                            let b = value(lo_b, hi_b, &mut limits);
+                            let decision = compare_values(a, b, relation, &mut limits).unwrap();
+                            let observations = (lo_a..=hi_a)
+                                .flat_map(|a| {
+                                    (lo_b..=hi_b).map(move |b| match relation {
+                                        C::Equal => a == b,
+                                        C::NotEqual => a != b,
+                                        C::Less => a < b,
+                                        C::LessEqual => a <= b,
+                                        C::Greater => a > b,
+                                        C::GreaterEqual => a >= b,
+                                    })
+                                })
+                                .collect::<Vec<_>>();
+                            let expected = observations
+                                .iter()
+                                .all(|truth| *truth == observations[0])
+                                .then_some(observations[0]);
+                            let actual = match decision {
+                                Some(Condition::Bool(truth)) => Some(truth),
+                                None => None,
+                                _ => panic!("unexpected symbolic identity"),
+                            };
+                            assert_eq!(
+                                actual, expected,
+                                "[{lo_a},{hi_a}] {relation:?} [{lo_b},{hi_b}]"
+                            );
                         }
                     }
                 }

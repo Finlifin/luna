@@ -35,9 +35,18 @@ fn proved(context: &Context, goal: F) {
 
 fn associated(subject: Term, arguments: Vec<Term>, member: u32) -> Term {
     Term::AssociatedType {
-        origin: Box::new(nir::AssociatedTypeOrigin { interface: DeclarationId { package: 9, local: 1 },
-        member: DeclarationId { package: 9, local: member } }),
-        subject: Box::new(subject), arguments,
+        origin: Box::new(nir::AssociatedTypeOrigin {
+            interface: DeclarationId {
+                package: 9,
+                local: 1,
+            },
+            member: DeclarationId {
+                package: 9,
+                local: member,
+            },
+        }),
+        subject: Box::new(subject),
+        arguments,
     }
 }
 
@@ -46,26 +55,59 @@ fn associated_type_congruence_preserves_origin_without_injectivity() {
     let mut context = Context::default();
     context.assume(eq(variable(1), ty(P::Bool)));
     context.assume(eq(variable(2), ty(P::Char)));
-    proved(&context, eq(associated(variable(1), vec![variable(2)], 2), associated(ty(P::Bool), vec![ty(P::Char)], 2)));
-    assert!(!matches!(context.prove(eq(associated(variable(1), vec![], 2), associated(variable(1), vec![], 3)), Budget::default()), Outcome::Entailed(_)));
+    proved(
+        &context,
+        eq(
+            associated(variable(1), vec![variable(2)], 2),
+            associated(ty(P::Bool), vec![ty(P::Char)], 2),
+        ),
+    );
+    assert!(!matches!(
+        context.prove(
+            eq(
+                associated(variable(1), vec![], 2),
+                associated(variable(1), vec![], 3)
+            ),
+            Budget::default()
+        ),
+        Outcome::Entailed(_)
+    ));
 
     let mut reverse = Context::default();
-    reverse.assume(eq(associated(variable(1), vec![variable(2)], 2), associated(variable(3), vec![variable(4)], 2)));
+    reverse.assume(eq(
+        associated(variable(1), vec![variable(2)], 2),
+        associated(variable(3), vec![variable(4)], 2),
+    ));
     for (a, b) in [(1, 3), (2, 4)] {
-        assert!(!matches!(reverse.prove(eq(variable(a), variable(b)), Budget::default()), Outcome::Entailed(_)));
+        assert!(!matches!(
+            reverse.prove(eq(variable(a), variable(b)), Budget::default()),
+            Outcome::Entailed(_)
+        ));
     }
     // An associated result may equal any concrete type. Neither a primitive
     // nor a distinct projection is automatically disjoint from it.
     let unresolved = associated(ty(P::Bool), vec![], 2);
     for concrete in [ty(P::Bool), ty(P::Char)] {
-        assert!(!matches!(Context::default().prove(F::Not(Box::new(eq(unresolved.clone(), concrete))), Budget::default()), Outcome::Entailed(_)));
+        assert!(!matches!(
+            Context::default().prove(
+                F::Not(Box::new(eq(unresolved.clone(), concrete))),
+                Budget::default()
+            ),
+            Outcome::Entailed(_)
+        ));
     }
 }
 
 #[test]
 fn associated_type_inputs_cannot_hide_from_solver_budgets() {
     let wide = associated(ty(P::Bool), vec![ty(P::Char); 100], 2);
-    let result = Context::default().prove(eq(wide.clone(), wide), Budget { steps: 20, max_depth: 128 });
+    let result = Context::default().prove(
+        eq(wide.clone(), wide),
+        Budget {
+            steps: 20,
+            max_depth: 128,
+        },
+    );
     assert!(matches!(result, Outcome::Unknown { .. }), "{result}");
 }
 
@@ -678,33 +720,75 @@ fn structural_views_follow_proved_transitivity_not_disjunctive_choices() {
 
 #[test]
 fn structural_views_of_designated_heads_require_equality_without_injectivity() {
-    let identity = DeclarationId { package: 1, local: 990 };
+    let identity = DeclarationId {
+        package: 1,
+        local: 990,
+    };
     let accepts = |id| id == identity;
     let subject = variable(990);
     let tuple = head(990, vec![Term::TypeListValue(vec![ty(P::Bool), ty(P::U8)])]);
     let mut context = Context::default();
     context.assume(eq(subject.clone(), tuple.clone()));
-    let (found, used) = context.structural_view_with_heads_metered(&subject, Budget::default(), accepts);
+    let (found, used) =
+        context.structural_view_with_heads_metered(&subject, Budget::default(), accepts);
     let (found, proof) = found.unwrap().unwrap();
     assert_eq!(found, tuple);
     assert!(used > 0);
     context.verify_proof(&proof, Budget::default()).unwrap();
     assert_eq!(proof.goal, eq(subject.clone(), tuple.clone()));
-    assert!(!matches!(context.structural_view(&subject, Budget::default()), Ok(Some(_))));
-    assert!(Context::default().verify_proof(&proof, Budget::default()).is_err());
+    assert!(!matches!(
+        context.structural_view(&subject, Budget::default()),
+        Ok(Some(_))
+    ));
+    assert!(
+        Context::default()
+            .verify_proof(&proof, Budget::default())
+            .is_err()
+    );
     let mut alternative = Context::default();
-    alternative.assume(F::Or(vec![eq(subject.clone(), tuple.clone()), eq(subject.clone(), ty(P::Bool))]));
-    assert!(!matches!(alternative.structural_view_with_heads_metered(&subject, Budget::default(), accepts).0, Ok(Some(_))));
-    assert!(context.structural_view_with_heads_metered(&subject, Budget { steps: 0, max_depth: 128 }, accepts).0.is_err());
-    assert!(context.structural_view_with_heads_metered(&subject, Budget::default(), accepts).0.unwrap().is_some());
+    alternative.assume(F::Or(vec![
+        eq(subject.clone(), tuple.clone()),
+        eq(subject.clone(), ty(P::Bool)),
+    ]));
+    assert!(!matches!(
+        alternative
+            .structural_view_with_heads_metered(&subject, Budget::default(), accepts)
+            .0,
+        Ok(Some(_))
+    ));
+    assert!(
+        context
+            .structural_view_with_heads_metered(
+                &subject,
+                Budget {
+                    steps: 0,
+                    max_depth: 128
+                },
+                accepts
+            )
+            .0
+            .is_err()
+    );
+    assert!(
+        context
+            .structural_view_with_heads_metered(&subject, Budget::default(), accepts)
+            .0
+            .unwrap()
+            .is_some()
+    );
 
     let left = variable(991);
     let right = variable(992);
     let mut equality = Context::default();
     equality.admit_congruence(identity);
-    equality.assume(eq(head(990, vec![Term::TypeListValue(vec![left.clone()])]),
-        head(990, vec![Term::TypeListValue(vec![right.clone()])])));
-    assert!(!matches!(equality.prove(eq(left, right), Budget::default()), Outcome::Entailed(_)));
+    equality.assume(eq(
+        head(990, vec![Term::TypeListValue(vec![left.clone()])]),
+        head(990, vec![Term::TypeListValue(vec![right.clone()])]),
+    ));
+    assert!(!matches!(
+        equality.prove(eq(left, right), Budget::default()),
+        Outcome::Entailed(_)
+    ));
 }
 
 #[test]
@@ -804,7 +888,8 @@ fn owned_package_context_restores_only_valid_declaration_theory() {
         local: 7,
     };
     let mut package = Package::default();
-    package.normal_forms.push(Head { role: nir::normal_forms::Role::Opaque,
+    package.normal_forms.push(Head {
+        role: nir::normal_forms::Role::Opaque,
         declaration,
         parameters: vec![Parameter {
             declaration: DeclarationId {
@@ -863,44 +948,112 @@ fn comptime_callable_equality_preserves_phase_and_component_evidence() {
 
 #[test]
 fn record_fields_obey_type_input_budgets_and_queries_recover() {
-    let mut deep=ty(P::Bool);
-    for _ in 0..32 {deep=Term::Record(vec![("nested".into(),deep)]);}
-    let context=Context::default();
-    assert!(matches!(context.prove(eq(deep.clone(),deep),Budget {steps:100_000,max_depth:8}),Outcome::Unknown {reason:UnknownReason::BudgetExhausted,..}));
-    let record=Term::Record(vec![("flag".into(),ty(P::Bool))]);
-    proved(&context,eq(record.clone(),record));
+    let mut deep = ty(P::Bool);
+    for _ in 0..32 {
+        deep = Term::Record(vec![("nested".into(), deep)]);
+    }
+    let context = Context::default();
+    assert!(matches!(
+        context.prove(
+            eq(deep.clone(), deep),
+            Budget {
+                steps: 100_000,
+                max_depth: 8
+            }
+        ),
+        Outcome::Unknown {
+            reason: UnknownReason::BudgetExhausted,
+            ..
+        }
+    ));
+    let record = Term::Record(vec![("flag".into(), ty(P::Bool))]);
+    proved(&context, eq(record.clone(), record));
 }
 
 #[test]
 fn records_are_distinct_from_other_type_families_without_deciding_permutations() {
-    let record=Term::Record(vec![("flag".into(),ty(P::Bool)),("count".into(),ty(P::U8))]);
-    let context=Context::default();
-    for other in [ty(P::Bool),Term::Tuple(vec![ty(P::Bool),ty(P::U8)]),Term::Pointer(Box::new(ty(P::Bool))),Term::Nominal {declaration:DeclarationId {package:0,local:2},arguments:vec![]}] {
-        proved(&context,F::Not(Box::new(eq(record.clone(),other))));
+    let record = Term::Record(vec![
+        ("flag".into(), ty(P::Bool)),
+        ("count".into(), ty(P::U8)),
+    ]);
+    let context = Context::default();
+    for other in [
+        ty(P::Bool),
+        Term::Tuple(vec![ty(P::Bool), ty(P::U8)]),
+        Term::Pointer(Box::new(ty(P::Bool))),
+        Term::Nominal {
+            declaration: DeclarationId {
+                package: 0,
+                local: 2,
+            },
+            arguments: vec![],
+        },
+    ] {
+        proved(&context, F::Not(Box::new(eq(record.clone(), other))));
     }
-    let permuted=Term::Record(vec![("count".into(),ty(P::U8)),("flag".into(),ty(P::Bool))]);
-    assert!(matches!(context.prove(eq(record.clone(),permuted.clone()),Budget::default()),Outcome::Unknown {..}));
-    assert!(matches!(context.prove(F::Not(Box::new(eq(record,permuted))),Budget::default()),Outcome::Unknown {..}));
+    let permuted = Term::Record(vec![
+        ("count".into(), ty(P::U8)),
+        ("flag".into(), ty(P::Bool)),
+    ]);
+    assert!(matches!(
+        context.prove(eq(record.clone(), permuted.clone()), Budget::default()),
+        Outcome::Unknown { .. }
+    ));
+    assert!(matches!(
+        context.prove(F::Not(Box::new(eq(record, permuted))), Budget::default()),
+        Outcome::Unknown { .. }
+    ));
 }
 
 #[test]
 fn record_structural_views_require_scoped_equality_evidence() {
-    let subject=variable(901);
-    let opaque=head(902,vec![]);
-    let shape=Term::Record(vec![("width".into(),ty(P::U8))]);
-    assert!(Context::default().structural_view(&subject,Budget::default()).unwrap().is_none());
-    let mut context=Context::default();
-    context.assume(eq(subject.clone(),opaque.clone()));
-    context.assume(eq(opaque,shape.clone()));
-    let (found,proof)=context.structural_view(&subject,Budget::default()).unwrap().unwrap();
-    assert_eq!(found,shape);
-    context.verify_proof(&proof,Budget::default()).unwrap();
-    assert!(Context::default().verify_proof(&proof,Budget::default()).is_err());
-    assert!(context.structural_view(&subject,Budget {steps:0,max_depth:128}).is_err());
+    let subject = variable(901);
+    let opaque = head(902, vec![]);
+    let shape = Term::Record(vec![("width".into(), ty(P::U8))]);
+    assert!(
+        Context::default()
+            .structural_view(&subject, Budget::default())
+            .unwrap()
+            .is_none()
+    );
+    let mut context = Context::default();
+    context.assume(eq(subject.clone(), opaque.clone()));
+    context.assume(eq(opaque, shape.clone()));
+    let (found, proof) = context
+        .structural_view(&subject, Budget::default())
+        .unwrap()
+        .unwrap();
+    assert_eq!(found, shape);
+    context.verify_proof(&proof, Budget::default()).unwrap();
+    assert!(
+        Context::default()
+            .verify_proof(&proof, Budget::default())
+            .is_err()
+    );
+    assert!(
+        context
+            .structural_view(
+                &subject,
+                Budget {
+                    steps: 0,
+                    max_depth: 128
+                }
+            )
+            .is_err()
+    );
     // A disjunction supplies candidates, not permission to choose one.
-    let mut alternatives=Context::default();
-    alternatives.assume(F::Or(vec![eq(subject.clone(),shape),eq(subject.clone(),Term::Record(vec![("width".into(),ty(P::U16))]))]));
-    assert!(!matches!(alternatives.structural_view(&subject,Budget::default()),Ok(Some(_))));
+    let mut alternatives = Context::default();
+    alternatives.assume(F::Or(vec![
+        eq(subject.clone(), shape),
+        eq(
+            subject.clone(),
+            Term::Record(vec![("width".into(), ty(P::U16))]),
+        ),
+    ]));
+    assert!(!matches!(
+        alternatives.structural_view(&subject, Budget::default()),
+        Ok(Some(_))
+    ));
 }
 
 fn trait_atom(interface: u32, subject: Term, arguments: Vec<Term>) -> F {
@@ -1062,6 +1215,94 @@ fn trait_logic_agrees_with_finite_boolean_oracle() {
 }
 
 #[test]
+fn trait_value_indices_preserve_suffix_identity_and_type_congruence() {
+    let px = Term::Symbol("px".into());
+    let em = Term::Symbol("em".into());
+    let mut context = Context::default();
+    context.assume(eq(variable(1), ty(P::U32)));
+    context.assume(trait_atom(
+        20,
+        ty(P::Integer),
+        vec![px.clone(), variable(1)],
+    ));
+    let goal = trait_atom(20, ty(P::Integer), vec![px.clone(), ty(P::U32)]);
+    proved(&context, goal.clone());
+    for other in [
+        trait_atom(20, ty(P::Integer), vec![em, ty(P::U32)]),
+        trait_atom(20, ty(P::Integer), vec![px.clone(), ty(P::U64)]),
+        trait_atom(20, ty(P::Integer), vec![ty(P::U32), px.clone()]),
+        trait_atom(21, ty(P::Integer), vec![px.clone(), ty(P::U32)]),
+    ] {
+        assert!(!matches!(
+            context.prove(other, Budget::default()),
+            Outcome::Entailed(_)
+        ));
+    }
+    assert!(matches!(
+        Context::default().prove(goal.clone(), Budget::default()),
+        Outcome::Unknown { .. }
+    ));
+    assert!(matches!(
+        context.prove(eq(px.clone(), px), Budget::default()),
+        Outcome::IllFormed(_)
+    ));
+    assert!(matches!(
+        context.prove(
+            goal.clone(),
+            Budget {
+                steps: 1,
+                ..Budget::default()
+            }
+        ),
+        Outcome::Unknown { .. }
+    ));
+    proved(&context, goal);
+}
+
+#[test]
+fn trait_value_indices_validate_scope_and_do_not_admit_runtime_propositions() {
+    let index = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::ComptimeValue,
+    };
+    let goal = trait_atom(20, ty(P::Integer), vec![index]);
+    let mut context = Context::with_scope(vec![vec![Sort::ComptimeValue]]);
+    context.assume(goal.clone());
+    proved(&context, goal.clone());
+    for other in [
+        Context::default(),
+        Context::with_scope(vec![vec![Sort::Type]]),
+    ] {
+        assert!(matches!(
+            other.prove(goal.clone(), Budget::default()),
+            Outcome::IllFormed(_)
+        ));
+    }
+    let runtime = Term::Rigid {
+        declaration: DeclarationId {
+            package: 1,
+            local: 99,
+        },
+        sort: Sort::Runtime,
+    };
+    assert!(matches!(
+        Context::default().prove(
+            trait_atom(20, ty(P::Integer), vec![runtime]),
+            Budget::default()
+        ),
+        Outcome::IllFormed(_)
+    ));
+    assert!(matches!(
+        Context::default().prove(
+            trait_atom(20, Term::Symbol("px".into()), vec![]),
+            Budget::default()
+        ),
+        Outcome::IllFormed(_)
+    ));
+}
+
+#[test]
 fn trait_logic_rejects_non_type_inputs_and_preserves_argument_order() {
     let invalid = trait_atom(1, Term::Bool(true), vec![]);
     assert!(matches!(
@@ -1094,63 +1335,160 @@ fn trait_logic_dump_preserves_logical_and_interface_structure() {
 
 #[test]
 fn computation_type_congruence_keeps_operation_layout_and_result() {
-    let operation = |local, argument| nir::effects::Operation { declaration: nir::DeclarationId { package: 8, local }, arguments: vec![argument] };
-    let left = Term::computation(vec![operation(1, variable(1)), operation(1, ty(P::Char))], variable(2));
-    let right = Term::computation(vec![operation(1, ty(P::Bool)), operation(1, ty(P::Char))], ty(P::Bool));
+    let operation = |local, argument| nir::effects::Operation {
+        declaration: nir::DeclarationId { package: 8, local },
+        arguments: vec![argument],
+    };
+    let left = Term::computation(
+        vec![operation(1, variable(1)), operation(1, ty(P::Char))],
+        variable(2),
+    );
+    let right = Term::computation(
+        vec![operation(1, ty(P::Bool)), operation(1, ty(P::Char))],
+        ty(P::Bool),
+    );
     let mut context = Context::default();
     context.assume(eq(variable(1), ty(P::Bool)));
     context.assume(eq(variable(2), ty(P::Bool)));
     proved(&context, eq(left, right.clone()));
     let missing_layer = Term::computation(vec![operation(1, ty(P::Bool))], ty(P::Bool));
-    assert!(!matches!(context.prove(eq(right, missing_layer), Budget::default()), Outcome::Entailed(_)));
+    assert!(!matches!(
+        context.prove(eq(right, missing_layer), Budget::default()),
+        Outcome::Entailed(_)
+    ));
     // Distinct occurrence layouts require row reasoning. Generic constructor
     // disjointness must not invent a proof that commuting rows are different.
-    let a = Term::computation(vec![operation(1, ty(P::Bool)), operation(2, ty(P::Bool))], ty(P::Bool));
-    let b = Term::computation(vec![operation(2, ty(P::Bool)), operation(1, ty(P::Bool))], ty(P::Bool));
-    assert!(!matches!(context.prove(eq(a, b).negate(), Budget::default()), Outcome::Entailed(_)));
+    let a = Term::computation(
+        vec![operation(1, ty(P::Bool)), operation(2, ty(P::Bool))],
+        ty(P::Bool),
+    );
+    let b = Term::computation(
+        vec![operation(2, ty(P::Bool)), operation(1, ty(P::Bool))],
+        ty(P::Bool),
+    );
+    assert!(!matches!(
+        context.prove(eq(a, b).negate(), Budget::default()),
+        Outcome::Entailed(_)
+    ));
 }
 
 #[test]
 fn computation_type_proofs_bound_occurrences_and_nested_arguments() {
-    let operation = nir::effects::Operation { declaration: nir::DeclarationId { package: 8, local: 1 }, arguments: vec![] };
+    let operation = nir::effects::Operation {
+        declaration: nir::DeclarationId {
+            package: 8,
+            local: 1,
+        },
+        arguments: vec![],
+    };
     let wide = Term::computation(vec![operation; 1000], ty(P::Bool));
     let context = Context::default();
-    assert!(matches!(context.prove(eq(wide.clone(), wide), Budget { steps: 10, max_depth: 64 }), Outcome::Unknown { reason: UnknownReason::BudgetExhausted, .. }));
+    assert!(matches!(
+        context.prove(
+            eq(wide.clone(), wide),
+            Budget {
+                steps: 10,
+                max_depth: 64
+            }
+        ),
+        Outcome::Unknown {
+            reason: UnknownReason::BudgetExhausted,
+            ..
+        }
+    ));
 }
 
 #[test]
 fn scoped_type_propositions_preserve_bound_identity_and_opaque_congruence() {
-    let a = Term::Bound {depth: 0, index: 0, sort: Sort::Type};
-    let b = Term::Bound {depth: 0, index: 1, sort: Sort::Type};
-    let mut context = Context::with_scope(vec![vec![Sort::Type, Sort::Type]]);
-    context.admit_congruence(DeclarationId {package: 1, local: 7});
-    context.assume(eq(a.clone(), ty(P::Bool)));
-    proved(&context, eq(head(7, vec![a.clone()]), head(7, vec![ty(P::Bool)])));
-    assert!(!matches!(context.prove(eq(b.clone(), ty(P::Bool)), Budget::default()), Outcome::Entailed(_)));
-    assert!(!matches!(context.prove(eq(head(7, vec![a.clone()]), a.clone()), Budget::default()), Outcome::Entailed(_)));
-    let nested = |outer| Term::Function {
-        parameters: vec![Parameter {sort: Sort::Type, ty: ty(P::Type)}],
-        result: Box::new(Term::Tuple(vec![outer, Term::Bound {depth: 0, index: 0, sort: Sort::Type}])),
+    let a = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
     };
-    let nested_input = nested(Term::Bound {depth: 1, index: 0, sort: Sort::Type});
+    let b = Term::Bound {
+        depth: 0,
+        index: 1,
+        sort: Sort::Type,
+    };
+    let mut context = Context::with_scope(vec![vec![Sort::Type, Sort::Type]]);
+    context.admit_congruence(DeclarationId {
+        package: 1,
+        local: 7,
+    });
+    context.assume(eq(a.clone(), ty(P::Bool)));
+    proved(
+        &context,
+        eq(head(7, vec![a.clone()]), head(7, vec![ty(P::Bool)])),
+    );
+    assert!(!matches!(
+        context.prove(eq(b.clone(), ty(P::Bool)), Budget::default()),
+        Outcome::Entailed(_)
+    ));
+    assert!(!matches!(
+        context.prove(eq(head(7, vec![a.clone()]), a.clone()), Budget::default()),
+        Outcome::Entailed(_)
+    ));
+    let nested = |outer| Term::Function {
+        parameters: vec![Parameter {
+            sort: Sort::Type,
+            ty: ty(P::Type),
+        }],
+        result: Box::new(Term::Tuple(vec![
+            outer,
+            Term::Bound {
+                depth: 0,
+                index: 0,
+                sort: Sort::Type,
+            },
+        ])),
+    };
+    let nested_input = nested(Term::Bound {
+        depth: 1,
+        index: 0,
+        sort: Sort::Type,
+    });
     proved(&context, eq(nested_input.clone(), nested_input));
-    assert!(matches!(Context::default().prove(eq(a.clone(), a), Budget::default()), Outcome::IllFormed(_)));
+    assert!(matches!(
+        Context::default().prove(eq(a.clone(), a), Budget::default()),
+        Outcome::IllFormed(_)
+    ));
     assert!(context.to_string().contains("(scope (frame type type))"));
 }
 
 #[test]
 fn scoped_trait_boolean_assumptions_do_not_strengthen_disjunctions() {
-    let input = Term::Bound {depth: 0, index: 0, sort: Sort::Type};
-    let left = F::from_predicate(&nir::program::TypePredicate::Trait(nir::program::TraitRequirement {
-        interface: DeclarationId {package: 3, local: 1}, subject: input.clone(), interface_arguments: vec![],
-    }));
-    let right = F::from_predicate(&nir::program::TypePredicate::Trait(nir::program::TraitRequirement {
-        interface: DeclarationId {package: 3, local: 2}, subject: input, interface_arguments: vec![],
-    }));
+    let input = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    };
+    let left = F::from_predicate(&nir::program::TypePredicate::Trait(
+        nir::program::TraitRequirement {
+            interface: DeclarationId {
+                package: 3,
+                local: 1,
+            },
+            subject: input.clone(),
+            interface_arguments: vec![],
+        },
+    ));
+    let right = F::from_predicate(&nir::program::TypePredicate::Trait(
+        nir::program::TraitRequirement {
+            interface: DeclarationId {
+                package: 3,
+                local: 2,
+            },
+            subject: input,
+            interface_arguments: vec![],
+        },
+    ));
     let mut context = Context::with_scope(vec![vec![Sort::Type]]);
     context.assume(F::Or(vec![left.clone(), right.clone()]));
     proved(&context, F::Or(vec![right.clone(), left.clone()]));
-    assert!(!matches!(context.prove(left.clone(), Budget::default()), Outcome::Entailed(_)));
+    assert!(!matches!(
+        context.prove(left.clone(), Budget::default()),
+        Outcome::Entailed(_)
+    ));
     context.assume(left.clone().negate());
     proved(&context, right);
     proved(&context, left.negate());
@@ -1159,92 +1497,209 @@ fn scoped_trait_boolean_assumptions_do_not_strengthen_disjunctions() {
 #[test]
 fn scoped_proofs_and_counterexamples_are_bound_to_the_exact_frame() {
     use elaboration::ptc::ProofError;
-    let input = Term::Bound {depth: 0, index: 0, sort: Sort::Type};
+    let input = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    };
     let context = Context::with_scope(vec![vec![Sort::Type]]);
-    let Outcome::Entailed(proof) = context.prove(eq(input.clone(), input), Budget::default()) else {panic!("reflexivity")};
+    let Outcome::Entailed(proof) = context.prove(eq(input.clone(), input), Budget::default())
+    else {
+        panic!("reflexivity")
+    };
     assert_eq!(context.verify_proof(&proof, Budget::default()), Ok(()));
-    for wrong in [Context::default(), Context::with_scope(vec![vec![Sort::Runtime]]), Context::with_scope(vec![vec![Sort::Type, Sort::Type]])] {
-        assert_eq!(wrong.verify_proof(&proof, Budget::default()), Err(ProofError::Invalid));
+    for wrong in [
+        Context::default(),
+        Context::with_scope(vec![vec![Sort::Runtime]]),
+        Context::with_scope(vec![vec![Sort::Type, Sort::Type]]),
+    ] {
+        assert_eq!(
+            wrong.verify_proof(&proof, Budget::default()),
+            Err(ProofError::Invalid)
+        );
     }
     assert!(proof.to_string().contains("(scope (frame type))"));
-    let Outcome::NotEntailed(witness) = context.prove(F::False, Budget::default()) else {panic!("constant false")};
+    let Outcome::NotEntailed(witness) = context.prove(F::False, Budget::default()) else {
+        panic!("constant false")
+    };
     assert_eq!(context.verify_witness(&witness, Budget::default()), Ok(()));
-    assert_eq!(Context::default().verify_witness(&witness, Budget::default()), Err(ProofError::Invalid));
+    assert_eq!(
+        Context::default().verify_witness(&witness, Budget::default()),
+        Err(ProofError::Invalid)
+    );
     assert!(context.theory_context().scope().is_empty());
     for invalid in [
-        Term::Bound {depth: 1, index: 0, sort: Sort::Type},
-        Term::Bound {depth: 0, index: 1, sort: Sort::Type},
-        Term::Bound {depth: 0, index: 0, sort: Sort::Runtime},
+        Term::Bound {
+            depth: 1,
+            index: 0,
+            sort: Sort::Type,
+        },
+        Term::Bound {
+            depth: 0,
+            index: 1,
+            sort: Sort::Type,
+        },
+        Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: Sort::Runtime,
+        },
     ] {
-        assert!(matches!(context.prove(eq(invalid.clone(), invalid), Budget::default()), Outcome::IllFormed(_)));
+        assert!(matches!(
+            context.prove(eq(invalid.clone(), invalid), Budget::default()),
+            Outcome::IllFormed(_)
+        ));
     }
 }
 
 #[test]
 fn scoped_structural_views_keep_outer_and_inner_frames_distinct() {
-    let outer = Term::Bound {depth: 1, index: 0, sort: Sort::Type};
-    let inner = Term::Bound {depth: 0, index: 0, sort: Sort::Type};
+    let outer = Term::Bound {
+        depth: 1,
+        index: 0,
+        sort: Sort::Type,
+    };
+    let inner = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    };
     let shape = Term::Tuple(vec![ty(P::Bool), inner.clone()]);
     let mut context = Context::with_scope(vec![vec![Sort::Type], vec![Sort::Type]]);
     context.assume(eq(outer.clone(), shape.clone()));
-    let (view, proof) = context.structural_view(&outer, Budget::default()).unwrap().expect("outer structural evidence");
+    let (view, proof) = context
+        .structural_view(&outer, Budget::default())
+        .unwrap()
+        .expect("outer structural evidence");
     assert_eq!(view, shape);
     assert_eq!(context.verify_proof(&proof, Budget::default()), Ok(()));
-    assert!(!matches!(context.prove(eq(inner, shape), Budget::default()), Outcome::Entailed(_)));
+    assert!(!matches!(
+        context.prove(eq(inner, shape), Budget::default()),
+        Outcome::Entailed(_)
+    ));
     let mut wrong = Context::with_scope(vec![vec![Sort::Type, Sort::Type]]);
-    for assumption in &proof.assumptions { wrong.assume(assumption.clone()); }
+    for assumption in &proof.assumptions {
+        wrong.assume(assumption.clone());
+    }
     assert!(wrong.verify_proof(&proof, Budget::default()).is_err());
 }
 
 #[test]
 fn record_value_congruence_retains_labels_and_type_only_boundary() {
-    let (a,b)=(variable(1),variable(2));
-    let wrap=|label:&str,value| head(7,vec![Term::RecordValue(vec![(label.into(),value)])]);
-    let mut context=Context::default();
-    context.admit_congruence(DeclarationId {package:1,local:7});
-    context.assume(eq(a.clone(),b.clone()));
-    proved(&context,eq(wrap("item",a.clone()),wrap("item",b.clone())));
-    assert!(!matches!(context.prove(eq(wrap("left",a.clone()),wrap("right",b.clone())),Budget::default()),Outcome::Entailed(_)));
-    assert!(matches!(context.prove(eq(Term::RecordValue(vec![]),Term::RecordValue(vec![])),Budget::default()),Outcome::IllFormed(_)));
-    let mut reverse=Context::default();
-    reverse.admit_congruence(DeclarationId {package:1,local:7});
-    reverse.assume(eq(wrap("item",a.clone()),wrap("item",b.clone())));
-    assert!(!matches!(reverse.prove(eq(a,b),Budget::default()),Outcome::Entailed(_)));
+    let (a, b) = (variable(1), variable(2));
+    let wrap = |label: &str, value| head(7, vec![Term::RecordValue(vec![(label.into(), value)])]);
+    let mut context = Context::default();
+    context.admit_congruence(DeclarationId {
+        package: 1,
+        local: 7,
+    });
+    context.assume(eq(a.clone(), b.clone()));
+    proved(
+        &context,
+        eq(wrap("item", a.clone()), wrap("item", b.clone())),
+    );
+    assert!(!matches!(
+        context.prove(
+            eq(wrap("left", a.clone()), wrap("right", b.clone())),
+            Budget::default()
+        ),
+        Outcome::Entailed(_)
+    ));
+    assert!(matches!(
+        context.prove(
+            eq(Term::RecordValue(vec![]), Term::RecordValue(vec![])),
+            Budget::default()
+        ),
+        Outcome::IllFormed(_)
+    ));
+    let mut reverse = Context::default();
+    reverse.admit_congruence(DeclarationId {
+        package: 1,
+        local: 7,
+    });
+    reverse.assume(eq(wrap("item", a.clone()), wrap("item", b.clone())));
+    assert!(!matches!(
+        reverse.prove(eq(a, b), Budget::default()),
+        Outcome::Entailed(_)
+    ));
 }
 
 #[test]
 fn nominal_value_congruence_preserves_variant_and_type_only_boundary() {
-    let (a,b)=(variable(1),variable(2));
-    let value=|variant,field| Term::NominalValue {
-        ty:Box::new(Term::Nominal {declaration:DeclarationId {package:1,local:50},arguments:vec![]}),
-        variant,fields:vec![field],
+    let (a, b) = (variable(1), variable(2));
+    let value = |variant, field| Term::NominalValue {
+        ty: Box::new(Term::Nominal {
+            declaration: DeclarationId {
+                package: 1,
+                local: 50,
+            },
+            arguments: vec![],
+        }),
+        variant,
+        fields: vec![field],
     };
-    let wrap=|variant,field| head(7,vec![value(variant,field)]);
-    let mut context=Context::default();
-    context.admit_congruence(DeclarationId {package:1,local:7});
-    context.assume(eq(a.clone(),b.clone()));
-    proved(&context,eq(wrap(Some(0),a.clone()),wrap(Some(0),b.clone())));
-    for variant in [None,Some(1)] {
-        assert!(!matches!(context.prove(eq(wrap(Some(0),a.clone()),wrap(variant,b.clone())),Budget::default()),Outcome::Entailed(_)));
+    let wrap = |variant, field| head(7, vec![value(variant, field)]);
+    let mut context = Context::default();
+    context.admit_congruence(DeclarationId {
+        package: 1,
+        local: 7,
+    });
+    context.assume(eq(a.clone(), b.clone()));
+    proved(
+        &context,
+        eq(wrap(Some(0), a.clone()), wrap(Some(0), b.clone())),
+    );
+    for variant in [None, Some(1)] {
+        assert!(!matches!(
+            context.prove(
+                eq(wrap(Some(0), a.clone()), wrap(variant, b.clone())),
+                Budget::default()
+            ),
+            Outcome::Entailed(_)
+        ));
     }
-    assert!(matches!(context.prove(eq(value(Some(0),a.clone()),value(Some(0),a.clone())),Budget::default()),Outcome::IllFormed(_)));
-    let mut reverse=Context::default();
-    reverse.admit_congruence(DeclarationId {package:1,local:7});
-    reverse.assume(eq(wrap(Some(0),a.clone()),wrap(Some(0),b.clone())));
-    assert!(!matches!(reverse.prove(eq(a,b),Budget::default()),Outcome::Entailed(_)));
+    assert!(matches!(
+        context.prove(
+            eq(value(Some(0), a.clone()), value(Some(0), a.clone())),
+            Budget::default()
+        ),
+        Outcome::IllFormed(_)
+    ));
+    let mut reverse = Context::default();
+    reverse.admit_congruence(DeclarationId {
+        package: 1,
+        local: 7,
+    });
+    reverse.assume(eq(wrap(Some(0), a.clone()), wrap(Some(0), b.clone())));
+    assert!(!matches!(
+        reverse.prove(eq(a, b), Budget::default()),
+        Outcome::Entailed(_)
+    ));
 }
 
 #[test]
 fn record_labels_are_bounded_before_ptc_cloning_and_retry_is_clean() {
     for record in [
-        Term::Record(vec![("x".repeat(512),ty(P::Bool))]),
-        Term::RecordValue(vec![("x".repeat(512),Term::Bool(true))]),
+        Term::Record(vec![("x".repeat(512), ty(P::Bool))]),
+        Term::RecordValue(vec![("x".repeat(512), Term::Bool(true))]),
     ] {
-        let term=head(7,vec![record]);
-        let formula=eq(term.clone(),term);
-        let context=Context::default();
-        assert!(matches!(context.prove(formula.clone(),Budget {steps:128,max_depth:128}),Outcome::Unknown {reason:UnknownReason::BudgetExhausted,..}));
-        proved(&context,formula);
+        let term = head(7, vec![record]);
+        let formula = eq(term.clone(), term);
+        let context = Context::default();
+        assert!(matches!(
+            context.prove(
+                formula.clone(),
+                Budget {
+                    steps: 128,
+                    max_depth: 128
+                }
+            ),
+            Outcome::Unknown {
+                reason: UnknownReason::BudgetExhausted,
+                ..
+            }
+        ));
+        proved(&context, formula);
     }
 }
 
@@ -1314,7 +1769,10 @@ fn metered_proofs_preserve_remaining_work_on_all_outcomes() {
 fn type_list_inputs_lift_type_equalities_without_inverting_normal_forms() {
     let (a, b) = (variable(1), variable(2));
     let wrap = |value| head(7, vec![Term::TypeListValue(vec![value])]);
-    let declaration = DeclarationId { package: 1, local: 7 };
+    let declaration = DeclarationId {
+        package: 1,
+        local: 7,
+    };
     let mut context = Context::default();
     context.admit_congruence(declaration);
     context.assume(eq(a.clone(), b.clone()));
@@ -1323,39 +1781,107 @@ fn type_list_inputs_lift_type_equalities_without_inverting_normal_forms() {
     let mut reverse = Context::default();
     reverse.admit_congruence(declaration);
     reverse.assume(eq(wrap(a.clone()), wrap(b.clone())));
-    assert!(!matches!(reverse.prove(eq(a.clone(), b), Budget::default()), Outcome::Entailed(_)));
-    assert!(!matches!(context.prove(eq(wrap(a.clone()), a), Budget::default()), Outcome::Entailed(_)));
-    assert!(matches!(context.prove(eq(Term::TypeListValue(vec![]), Term::TypeListValue(vec![])), Budget::default()), Outcome::IllFormed(_)));
-    assert!(matches!(context.prove(eq(wrap(Term::Bool(true)), wrap(Term::Bool(true))), Budget::default()), Outcome::IllFormed(_)));
+    assert!(!matches!(
+        reverse.prove(eq(a.clone(), b), Budget::default()),
+        Outcome::Entailed(_)
+    ));
+    assert!(!matches!(
+        context.prove(eq(wrap(a.clone()), a), Budget::default()),
+        Outcome::Entailed(_)
+    ));
+    assert!(matches!(
+        context.prove(
+            eq(Term::TypeListValue(vec![]), Term::TypeListValue(vec![])),
+            Budget::default()
+        ),
+        Outcome::IllFormed(_)
+    ));
+    assert!(matches!(
+        context.prove(
+            eq(wrap(Term::Bool(true)), wrap(Term::Bool(true))),
+            Budget::default()
+        ),
+        Outcome::IllFormed(_)
+    ));
 }
 
 #[test]
 fn type_list_input_budget_failure_does_not_poison_later_proofs() {
     let mut context = Context::default();
-    context.admit_congruence(DeclarationId { package: 1, local: 7 });
+    context.admit_congruence(DeclarationId {
+        package: 1,
+        local: 7,
+    });
     let application = head(7, vec![Term::TypeListValue(vec![ty(P::U8); 64])]);
     let proposition = eq(application.clone(), application);
-    assert!(matches!(context.prove(proposition.clone(), Budget { steps: 8, max_depth: 128 }),
-        Outcome::Unknown { reason: UnknownReason::BudgetExhausted, .. }));
+    assert!(matches!(
+        context.prove(
+            proposition.clone(),
+            Budget {
+                steps: 8,
+                max_depth: 128
+            }
+        ),
+        Outcome::Unknown {
+            reason: UnknownReason::BudgetExhausted,
+            ..
+        }
+    ));
     proved(&context, proposition);
 }
 
 #[test]
 fn proposition_validation_is_bounded_and_does_not_establish_the_goal() {
     use elaboration::ptc::ValidationError;
-    let context=Context::default();
-    let before=context.to_string();
-    let goal=eq(ty(P::Bool),ty(P::U8));
-    context.validate_formula(&goal,&mut Budget::default()).unwrap();
-    context.validate_formula(&F::False,&mut Budget::default()).unwrap();
-    assert!(matches!(context.prove(goal,Budget::default()),Outcome::NotEntailed(_)));
-    assert_eq!(context.to_string(),before);
-    assert!(matches!(context.validate_formula(&eq(Term::Bool(true),ty(P::Bool)),&mut Budget::default()),Err(ValidationError::IllFormed(_))));
-    let scoped=eq(Term::Bound {depth:0,index:0,sort:Sort::Type},ty(P::Bool));
-    assert!(matches!(context.validate_formula(&scoped,&mut Budget::default()),Err(ValidationError::IllFormed(_))));
-    Context::with_scope(vec![vec![Sort::Type]]).validate_formula(&scoped,&mut Budget::default()).unwrap();
-    let mut deep=F::True;
-    for _ in 0..140 {deep=deep.negate();}
-    assert!(matches!(context.validate_formula(&deep,&mut Budget::default()),Err(ValidationError::BudgetExhausted)));
-    assert!(matches!(context.validate_formula(&F::And(vec![F::True;100]),&mut Budget {steps:4,max_depth:128}),Err(ValidationError::BudgetExhausted)));
+    let context = Context::default();
+    let before = context.to_string();
+    let goal = eq(ty(P::Bool), ty(P::U8));
+    context
+        .validate_formula(&goal, &mut Budget::default())
+        .unwrap();
+    context
+        .validate_formula(&F::False, &mut Budget::default())
+        .unwrap();
+    assert!(matches!(
+        context.prove(goal, Budget::default()),
+        Outcome::NotEntailed(_)
+    ));
+    assert_eq!(context.to_string(), before);
+    assert!(matches!(
+        context.validate_formula(&eq(Term::Bool(true), ty(P::Bool)), &mut Budget::default()),
+        Err(ValidationError::IllFormed(_))
+    ));
+    let scoped = eq(
+        Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: Sort::Type,
+        },
+        ty(P::Bool),
+    );
+    assert!(matches!(
+        context.validate_formula(&scoped, &mut Budget::default()),
+        Err(ValidationError::IllFormed(_))
+    ));
+    Context::with_scope(vec![vec![Sort::Type]])
+        .validate_formula(&scoped, &mut Budget::default())
+        .unwrap();
+    let mut deep = F::True;
+    for _ in 0..140 {
+        deep = deep.negate();
+    }
+    assert!(matches!(
+        context.validate_formula(&deep, &mut Budget::default()),
+        Err(ValidationError::BudgetExhausted)
+    ));
+    assert!(matches!(
+        context.validate_formula(
+            &F::And(vec![F::True; 100]),
+            &mut Budget {
+                steps: 4,
+                max_depth: 128
+            }
+        ),
+        Err(ValidationError::BudgetExhausted)
+    ));
 }

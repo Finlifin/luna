@@ -62,7 +62,8 @@ impl FunctionInputBinding {
             return Err(TypeError::ArgumentCount {
                 expected: parameters.len(),
                 actual: inputs.len(),
-            }.into());
+            }
+            .into());
         }
         signature.check_scope(&[])?;
         let mut replacements = Vec::with_capacity(inputs.len());
@@ -172,25 +173,38 @@ impl FunctionCallBinding {
         };
         if inputs.len() != parameters.len() {
             return Err(CallError::Shape(TypeError::ArgumentCount {
-                expected: parameters.len(), actual: inputs.len(),
+                expected: parameters.len(),
+                actual: inputs.len(),
             }));
         }
-        signature.check_scope(caller_frames).map_err(CallError::Shape)?;
+        signature
+            .check_scope(caller_frames)
+            .map_err(CallError::Shape)?;
         let mut binding = Self {
-            arguments: inputs.to_vec(), type_slots: BTreeSet::new(),
+            arguments: inputs.to_vec(),
+            type_slots: BTreeSet::new(),
             caller_frames: caller_frames.to_vec(),
             callee_sorts: parameters.iter().map(|p| p.sort).collect(),
         };
         for (index, (parameter, input)) in parameters.iter().zip(inputs).enumerate() {
             let Some(input) = input else { continue };
             input.check_scope(caller_frames).map_err(CallError::Shape)?;
-            let domain = binding.substitute(&parameter.ty).map_err(CallError::Shape)?;
-            let domain = view(&domain).map_err(|error| CallError::Contract { parameter: index, error })?;
+            let domain = binding
+                .substitute(&parameter.ty)
+                .map_err(CallError::Shape)?;
+            let domain = view(&domain).map_err(|error| CallError::Contract {
+                parameter: index,
+                error,
+            })?;
             require_sort(&domain, Sort::Type).map_err(CallError::Shape)?;
-            domain.check_scope(caller_frames).map_err(CallError::Shape)?;
+            domain
+                .check_scope(caller_frames)
+                .map_err(CallError::Shape)?;
             let sort = input_sort(parameter, &domain);
             require_sort(input, sort).map_err(CallError::Shape)?;
-            if sort != parameter.sort { binding.type_slots.insert(index); }
+            if sort != parameter.sort {
+                binding.type_slots.insert(index);
+            }
         }
         Ok(binding)
     }
@@ -201,16 +215,23 @@ impl FunctionCallBinding {
         term.check_scope(&source_frames)?;
         let result = term.rewrite(0, &mut |term, nesting| match term {
             Term::Bound { depth, index, sort } if *depth == nesting => {
-                let argument = self.arguments.get(*index).and_then(Option::as_ref)
+                let argument = self
+                    .arguments
+                    .get(*index)
+                    .and_then(Option::as_ref)
                     .ok_or(TypeError::MissingArgument(*index))?;
                 let expected = if *sort == Sort::ComptimeValue && self.type_slots.contains(index) {
                     Sort::Type
-                } else { *sort };
+                } else {
+                    *sort
+                };
                 require_sort(argument, expected)?;
                 argument.shift(nesting, 0)
             }
             Term::Bound { depth, index, sort } if *depth > nesting => Ok(Term::Bound {
-                depth: depth - 1, index: *index, sort: *sort,
+                depth: depth - 1,
+                index: *index,
+                sort: *sort,
             }),
             _ => Ok(term.clone()),
         })?;
@@ -231,13 +252,19 @@ impl fmt::Display for FunctionCallBinding {
         f.write_str(") (caller-frames")?;
         for frame in &self.caller_frames {
             f.write_str(" (frame")?;
-            for sort in frame { write!(f, " {sort}")?; }
+            for sort in frame {
+                write!(f, " {sort}")?;
+            }
             f.write_str(")")?;
         }
         f.write_str(") (callee-sorts")?;
-        for sort in &self.callee_sorts { write!(f, " {sort}")?; }
+        for sort in &self.callee_sorts {
+            write!(f, " {sort}")?;
+        }
         f.write_str(") (type-slots")?;
-        for slot in &self.type_slots { write!(f, " {slot}")?; }
+        for slot in &self.type_slots {
+            write!(f, " {slot}")?;
+        }
         f.write_str("))")
     }
 }

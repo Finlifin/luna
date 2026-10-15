@@ -3,7 +3,7 @@
 use crate::{DeclarationId, Term};
 use std::fmt;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Abi {
     Direct,
     DirectPassing,

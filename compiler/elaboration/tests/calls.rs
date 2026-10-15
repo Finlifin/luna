@@ -40,51 +40,199 @@ fn primitive(p: P) -> Term {
 
 #[test]
 fn scoped_inference_keeps_caller_bindings_and_rejects_escape() {
-    let caller=vec![Parameter {sort:Sort::Type,ty:primitive(P::Type)}];
-    let local=Term::Bound {depth:0,index:0,sort:Sort::Type};
-    let identity=scheme(vec![generic(0)],generic(0),1);
-    let context=elaboration::ptc::Context::default();
-    let candidate=identity.infer_scoped_types(&[Some(local.clone())],Some(&local),&context,Budget::default(),&caller).unwrap();
-    assert!(candidate.engine().to_string().contains("(scope (parameter type "));
-    let instance=candidate.finish().unwrap();
-    assert_eq!(instance.type_arguments,vec![local.clone()]);
-    assert_eq!(instance.result,local.clone());
+    let caller = vec![Parameter {
+        sort: Sort::Type,
+        ty: primitive(P::Type),
+    }];
+    let local = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    };
+    let identity = scheme(vec![generic(0)], generic(0), 1);
+    let context = elaboration::ptc::Context::default();
+    let candidate = identity
+        .infer_scoped_types(
+            &[Some(local.clone())],
+            Some(&local),
+            &context,
+            Budget::default(),
+            &caller,
+        )
+        .unwrap();
+    assert!(
+        candidate
+            .engine()
+            .to_string()
+            .contains("(scope (parameter type ")
+    );
+    let instance = candidate.finish().unwrap();
+    assert_eq!(instance.type_arguments, vec![local.clone()]);
+    assert_eq!(instance.result, local.clone());
     assert!(instance.signature.check_scope(&[vec![Sort::Type]]).is_ok());
     assert!(instance.signature.check_scope(&[]).is_err());
-    assert!(identity.infer_types(&[local.clone()],None,Budget::default()).is_err());
-    let outside=Term::Bound {depth:1,index:0,sort:Sort::Type};
-    assert!(identity.infer_scoped_types(&[Some(outside)],None,&context,Budget::default(),&caller).is_err());
-    let wrong_sort=Term::Bound {depth:0,index:0,sort:Sort::Runtime};
-    assert!(identity.infer_scoped_types(&[Some(wrong_sort)],None,&context,Budget::default(),&caller).is_err());
-    assert!(identity.infer_scoped_types(&[Some(local.clone())],Some(&primitive(P::Bool)),&context,Budget::default(),&caller)
-        .and_then(|candidate|candidate.finish()).is_err());
-    assert_eq!(identity.infer_scoped_types(&[Some(local.clone())],None,&context,Budget::default(),&caller)
-        .unwrap().finish().unwrap().result,local);
+    assert!(
+        identity
+            .infer_types(&[local.clone()], None, Budget::default())
+            .is_err()
+    );
+    let outside = Term::Bound {
+        depth: 1,
+        index: 0,
+        sort: Sort::Type,
+    };
+    assert!(
+        identity
+            .infer_scoped_types(&[Some(outside)], None, &context, Budget::default(), &caller)
+            .is_err()
+    );
+    let wrong_sort = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Runtime,
+    };
+    assert!(
+        identity
+            .infer_scoped_types(
+                &[Some(wrong_sort)],
+                None,
+                &context,
+                Budget::default(),
+                &caller
+            )
+            .is_err()
+    );
+    assert!(
+        identity
+            .infer_scoped_types(
+                &[Some(local.clone())],
+                Some(&primitive(P::Bool)),
+                &context,
+                Budget::default(),
+                &caller
+            )
+            .and_then(|candidate| candidate.finish())
+            .is_err()
+    );
+    assert_eq!(
+        identity
+            .infer_scoped_types(
+                &[Some(local.clone())],
+                None,
+                &context,
+                Budget::default(),
+                &caller
+            )
+            .unwrap()
+            .finish()
+            .unwrap()
+            .result,
+        local
+    );
 }
 
 #[test]
 fn scoped_inference_distinguishes_callback_local_and_enclosing_bindings() {
-    let caller=vec![Parameter {sort:Sort::Type,ty:primitive(P::Type)}];
-    let context=elaboration::ptc::Context::default();
-    let callback=|result| Term::Function {parameters:vec![Parameter {sort:Sort::Type,ty:primitive(P::Type)}],result:Box::new(result)};
-    let generic_callback=callback(Term::Bound {depth:2,index:0,sort:Sort::Type});
-    let s=scheme(vec![generic_callback],generic(0),1);
-    let caller_callback=callback(Term::Bound {depth:1,index:0,sort:Sort::Type});
-    let instance=s.infer_scoped_types(&[Some(caller_callback)],None,&context,Budget::default(),&caller)
-        .unwrap().finish().unwrap();
-    assert_eq!(instance.type_arguments,vec![Term::Bound {depth:0,index:0,sort:Sort::Type}]);
-    let own_callback=callback(Term::Bound {depth:0,index:0,sort:Sort::Type});
-    assert!(s.infer_scoped_types(&[Some(own_callback)],None,&context,Budget::default(),&caller)
-        .and_then(|candidate|candidate.finish()).is_err());
-    let ordinary_callback=Term::Function {
-        parameters:vec![Parameter {sort:Sort::Runtime,ty:Term::Bound {depth:1,index:0,sort:Sort::Type}}],
-        result:Box::new(Term::Bound {depth:1,index:0,sort:Sort::Type}),
+    let caller = vec![Parameter {
+        sort: Sort::Type,
+        ty: primitive(P::Type),
+    }];
+    let context = elaboration::ptc::Context::default();
+    let callback = |result| Term::Function {
+        parameters: vec![Parameter {
+            sort: Sort::Type,
+            ty: primitive(P::Type),
+        }],
+        result: Box::new(result),
     };
-    let identity=scheme(vec![generic(0)],generic(0),1);
-    let candidate=identity.infer_scoped_types(&[Some(ordinary_callback)],None,&context,Budget::default(),&caller).unwrap();
-    let view=candidate.parameter_callable_context(0).unwrap().unwrap();
-    assert_eq!(view.parameters,vec![Some(Term::Bound {depth:0,index:0,sort:Sort::Type})]);
-    assert_eq!(view.result,Some(Term::Bound {depth:0,index:0,sort:Sort::Type}));
+    let generic_callback = callback(Term::Bound {
+        depth: 2,
+        index: 0,
+        sort: Sort::Type,
+    });
+    let s = scheme(vec![generic_callback], generic(0), 1);
+    let caller_callback = callback(Term::Bound {
+        depth: 1,
+        index: 0,
+        sort: Sort::Type,
+    });
+    let instance = s
+        .infer_scoped_types(
+            &[Some(caller_callback)],
+            None,
+            &context,
+            Budget::default(),
+            &caller,
+        )
+        .unwrap()
+        .finish()
+        .unwrap();
+    assert_eq!(
+        instance.type_arguments,
+        vec![Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: Sort::Type
+        }]
+    );
+    let own_callback = callback(Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    });
+    assert!(
+        s.infer_scoped_types(
+            &[Some(own_callback)],
+            None,
+            &context,
+            Budget::default(),
+            &caller
+        )
+        .and_then(|candidate| candidate.finish())
+        .is_err()
+    );
+    let ordinary_callback = Term::Function {
+        parameters: vec![Parameter {
+            sort: Sort::Runtime,
+            ty: Term::Bound {
+                depth: 1,
+                index: 0,
+                sort: Sort::Type,
+            },
+        }],
+        result: Box::new(Term::Bound {
+            depth: 1,
+            index: 0,
+            sort: Sort::Type,
+        }),
+    };
+    let identity = scheme(vec![generic(0)], generic(0), 1);
+    let candidate = identity
+        .infer_scoped_types(
+            &[Some(ordinary_callback)],
+            None,
+            &context,
+            Budget::default(),
+            &caller,
+        )
+        .unwrap();
+    let view = candidate.parameter_callable_context(0).unwrap().unwrap();
+    assert_eq!(
+        view.parameters,
+        vec![Some(Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: Sort::Type
+        })]
+    );
+    assert_eq!(
+        view.result,
+        Some(Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: Sort::Type
+        })
+    );
 }
 
 #[test]
@@ -846,112 +994,346 @@ fn stable_type_views_resume_obligations_transactionally_and_remain_candidate_loc
 fn bound_tuple_inference_proposes_fields_and_preserves_context_identity() {
     use elaboration::{calls::InputContext as C, ptc::Context};
     use nir::normal_forms::{Head, Kind, Parameter as Input, Role};
-    let head = DeclarationId { package: 55, local: 1 };
-    let tuple = |fields| Term::NormalForm { head, sort: Sort::Type, arguments: vec![Term::TypeListValue(fields)] };
-    let mut package = nir::program::Package { normal_forms: vec![Head {
-        declaration: head, role: Role::Tuple, requirements: vec![], parameters: vec![Input {
-            declaration: DeclarationId { package: 55, local: 2 },
-            binding: nir::program::LocalId { owner: 1, index: 0 }, kind: Kind::TypeList,
-            ty: Term::Nominal { declaration: DeclarationId { package: 55, local: 3 }, arguments: vec![primitive(P::Type)] },
+    let head = DeclarationId {
+        package: 55,
+        local: 1,
+    };
+    let tuple = |fields| Term::NormalForm {
+        head,
+        sort: Sort::Type,
+        arguments: vec![Term::TypeListValue(fields)],
+    };
+    let mut package = nir::program::Package {
+        normal_forms: vec![Head {
+            declaration: head,
+            role: Role::Tuple,
+            requirements: vec![],
+            parameters: vec![Input {
+                declaration: DeclarationId {
+                    package: 55,
+                    local: 2,
+                },
+                binding: nir::program::LocalId { owner: 1, index: 0 },
+                kind: Kind::TypeList,
+                ty: Term::Nominal {
+                    declaration: DeclarationId {
+                        package: 55,
+                        local: 3,
+                    },
+                    arguments: vec![primitive(P::Type)],
+                },
+            }],
         }],
-    }], ..Default::default() };
+        ..Default::default()
+    };
     let context = Context::from_package(&package).unwrap();
-    let definition = scheme(vec![tuple(vec![generic(0), primitive(P::U8)])], generic(0), 1);
-    let pending = definition.infer_partial_types_in_context(&[None], None, &context, Budget::default()).unwrap();
-    let C::NormalTuple { head: actual, fields } = pending.parameter_input_context(0).unwrap() else { panic!("normal tuple context"); };
+    let definition = scheme(
+        vec![tuple(vec![generic(0), primitive(P::U8)])],
+        generic(0),
+        1,
+    );
+    let pending = definition
+        .infer_partial_types_in_context(&[None], None, &context, Budget::default())
+        .unwrap();
+    let C::NormalTuple {
+        head: actual,
+        fields,
+    } = pending.parameter_input_context(0).unwrap()
+    else {
+        panic!("normal tuple context");
+    };
     assert_eq!(actual, head);
     assert!(matches!(&fields[0], C::Unknown));
     assert!(matches!(&fields[1], C::Known(ty) if *ty == primitive(P::U8)));
     let actual = tuple(vec![primitive(P::Bool), primitive(P::U8)]);
-    let instance = definition.infer_partial_types_in_context(&[Some(actual.clone())], None, &context, Budget::default()).unwrap().finish().unwrap();
+    let instance = definition
+        .infer_partial_types_in_context(&[Some(actual.clone())], None, &context, Budget::default())
+        .unwrap()
+        .finish()
+        .unwrap();
     assert_eq!(instance.type_arguments, vec![primitive(P::Bool)]);
     assert_eq!(instance.result, primitive(P::Bool));
     let producer = scheme(vec![generic(0)], generic(0), 1);
-    let mut candidate = producer.infer_partial_types_in_context(&[None], None, &context, Budget::default()).unwrap();
-    let partial = C::NormalTuple { head, fields: vec![C::Known(primitive(P::U8)), C::Unknown] };
-    assert!(candidate.constrain_result_context(&partial, Budget { steps: 1, ..Budget::default() }).is_err());
-    candidate.constrain_result_context(&partial, Budget::default()).unwrap();
-    let C::NormalTuple { head: retained, fields } = candidate.parameter_input_context(0).unwrap() else { panic!("retained tuple head"); };
+    let mut candidate = producer
+        .infer_partial_types_in_context(&[None], None, &context, Budget::default())
+        .unwrap();
+    let partial = C::NormalTuple {
+        head,
+        fields: vec![C::Known(primitive(P::U8)), C::Unknown],
+    };
+    assert!(
+        candidate
+            .constrain_result_context(
+                &partial,
+                Budget {
+                    steps: 1,
+                    ..Budget::default()
+                }
+            )
+            .is_err()
+    );
+    candidate
+        .constrain_result_context(&partial, Budget::default())
+        .unwrap();
+    let C::NormalTuple {
+        head: retained,
+        fields,
+    } = candidate.parameter_input_context(0).unwrap()
+    else {
+        panic!("retained tuple head");
+    };
     assert_eq!(retained, head);
     assert!(matches!(&fields[0], C::Known(ty) if *ty == primitive(P::U8)));
     assert!(matches!(&fields[1], C::Unknown));
     assert!(candidate.finish().is_err());
     let invalid = tuple(vec![primitive(P::Bool), primitive(P::Char)]);
-    assert!(definition.infer_partial_types_in_context(&[Some(invalid)], None, &context, Budget::default()).and_then(|candidate| candidate.finish()).is_err());
+    assert!(
+        definition
+            .infer_partial_types_in_context(&[Some(invalid)], None, &context, Budget::default())
+            .and_then(|candidate| candidate.finish())
+            .is_err()
+    );
     package.normal_forms[0].role = Role::Opaque;
     let opaque = Context::from_package(&package).unwrap();
-    assert!(definition.infer_partial_types_in_context(&[Some(actual)], None, &opaque, Budget::default()).and_then(|candidate| candidate.finish()).is_err());
+    assert!(
+        definition
+            .infer_partial_types_in_context(&[Some(actual)], None, &opaque, Budget::default())
+            .and_then(|candidate| candidate.finish())
+            .is_err()
+    );
 }
 
 #[test]
 fn partial_nominal_contexts_preserve_known_arguments_without_exporting_holes() {
     use elaboration::{calls::InputContext as C, ptc::Context};
-    let id=DeclarationId {package:77,local:1};
-    let nominal=|arguments|Term::Nominal {declaration:id,arguments};
-    let mut world=Context::default();
+    let id = DeclarationId {
+        package: 77,
+        local: 1,
+    };
+    let nominal = |arguments| Term::Nominal {
+        declaration: id,
+        arguments,
+    };
+    let mut world = Context::default();
     world.admit_nominal_constructor(id);
-    let consumer=scheme(vec![nominal(vec![generic(0),primitive(P::U8)])],generic(0),1);
-    let pending=consumer.infer_partial_types_in_context(&[None],None,&world,Budget::default()).unwrap();
-    let shape=pending.parameter_input_context(0).unwrap();
-    let C::Nominal {declaration,arguments}=&shape else {panic!("partial nominal context")};
-    assert_eq!(*declaration,id);
+    let consumer = scheme(
+        vec![nominal(vec![generic(0), primitive(P::U8)])],
+        generic(0),
+        1,
+    );
+    let pending = consumer
+        .infer_partial_types_in_context(&[None], None, &world, Budget::default())
+        .unwrap();
+    let shape = pending.parameter_input_context(0).unwrap();
+    let C::Nominal {
+        declaration,
+        arguments,
+    } = &shape
+    else {
+        panic!("partial nominal context")
+    };
+    assert_eq!(*declaration, id);
     assert!(matches!(&arguments[..],[C::Unknown,C::Known(ty)] if *ty==primitive(P::U8)));
     assert!(pending.finish().is_err());
 
-    let producer=scheme(vec![generic(0)],generic(0),1);
-    let mut trial=producer.infer_partial_types_in_context(&[None],None,&world,Budget::default()).unwrap();
-    assert!(trial.constrain_result_context(&shape,Budget {steps:1,..Budget::default()}).is_err());
-    trial.constrain_result_context(&shape,Budget::default()).unwrap();
-    assert!(matches!(trial.parameter_input_context(0).unwrap(),C::Nominal {declaration,..} if declaration==id));
+    let producer = scheme(vec![generic(0)], generic(0), 1);
+    let mut trial = producer
+        .infer_partial_types_in_context(&[None], None, &world, Budget::default())
+        .unwrap();
+    assert!(
+        trial
+            .constrain_result_context(
+                &shape,
+                Budget {
+                    steps: 1,
+                    ..Budget::default()
+                }
+            )
+            .is_err()
+    );
+    trial
+        .constrain_result_context(&shape, Budget::default())
+        .unwrap();
+    assert!(
+        matches!(trial.parameter_input_context(0).unwrap(),C::Nominal {declaration,..} if declaration==id)
+    );
     assert!(trial.finish().is_err());
 
-    let completed=nominal(vec![primitive(P::Bool),primitive(P::U8)]);
-    let mut trial=producer.infer_partial_types_in_context(&[Some(completed.clone())],None,&world,Budget::default()).unwrap();
-    trial.constrain_result_context(&shape,Budget::default()).unwrap();
-    assert_eq!(trial.finish().unwrap().result,completed);
-    let mut mismatch=producer.infer_partial_types_in_context(&[Some(nominal(vec![primitive(P::Bool),primitive(P::Char)]))],None,&world,Budget::default()).unwrap();
-    assert!(mismatch.constrain_result_context(&shape,Budget::default()).and_then(|_|mismatch.finish()).is_err());
+    let completed = nominal(vec![primitive(P::Bool), primitive(P::U8)]);
+    let mut trial = producer
+        .infer_partial_types_in_context(&[Some(completed.clone())], None, &world, Budget::default())
+        .unwrap();
+    trial
+        .constrain_result_context(&shape, Budget::default())
+        .unwrap();
+    assert_eq!(trial.finish().unwrap().result, completed);
+    let mut mismatch = producer
+        .infer_partial_types_in_context(
+            &[Some(nominal(vec![primitive(P::Bool), primitive(P::Char)]))],
+            None,
+            &world,
+            Budget::default(),
+        )
+        .unwrap();
+    assert!(
+        mismatch
+            .constrain_result_context(&shape, Budget::default())
+            .and_then(|_| mismatch.finish())
+            .is_err()
+    );
 
-    let unknown=Context::default();
-    let pending=consumer.infer_partial_types_in_context(&[None],None,&unknown,Budget::default()).unwrap();
-    assert!(matches!(pending.parameter_input_context(0).unwrap(),C::Unknown));
-    let mut trial=producer.infer_partial_types_in_context(&[None],None,&unknown,Budget::default()).unwrap();
-    assert!(trial.constrain_result_context(&shape,Budget::default()).is_err());
+    let unknown = Context::default();
+    let pending = consumer
+        .infer_partial_types_in_context(&[None], None, &unknown, Budget::default())
+        .unwrap();
+    assert!(matches!(
+        pending.parameter_input_context(0).unwrap(),
+        C::Unknown
+    ));
+    let mut trial = producer
+        .infer_partial_types_in_context(&[None], None, &unknown, Budget::default())
+        .unwrap();
+    assert!(
+        trial
+            .constrain_result_context(&shape, Budget::default())
+            .is_err()
+    );
 }
 
 #[test]
 fn partial_callable_nominal_results_survive_forwarding_and_reject_conflicts() {
     use elaboration::{calls::InputContext as C, ptc::Context};
-    let id=DeclarationId {package:78,local:1};
-    let nominal=|arguments|Term::Nominal {declaration:id,arguments};
-    let callback=|result|Term::Function {
-        parameters:vec![Parameter {sort:Sort::Runtime,ty:primitive(P::Bool)}],
-        result:Box::new(result),
+    let id = DeclarationId {
+        package: 78,
+        local: 1,
     };
-    let mut world=Context::default();
+    let nominal = |arguments| Term::Nominal {
+        declaration: id,
+        arguments,
+    };
+    let callback = |result| Term::Function {
+        parameters: vec![Parameter {
+            sort: Sort::Runtime,
+            ty: primitive(P::Bool),
+        }],
+        result: Box::new(result),
+    };
+    let mut world = Context::default();
     world.admit_nominal_constructor(id);
-    let consumer=scheme(vec![callback(nominal(vec![Term::Bound {depth:2,index:0,sort:Sort::Type},primitive(P::U8)]))],generic(0),1);
-    let pending=consumer.infer_partial_types_in_context(&[None],None,&world,Budget::default()).unwrap();
-    let shape=pending.parameter_input_context(0).unwrap();
-    let C::Callable(context)=&shape else {panic!("callable shape")};
-    assert_eq!(context.parameters,vec![Some(primitive(P::Bool))]);
+    let consumer = scheme(
+        vec![callback(nominal(vec![
+            Term::Bound {
+                depth: 2,
+                index: 0,
+                sort: Sort::Type,
+            },
+            primitive(P::U8),
+        ]))],
+        generic(0),
+        1,
+    );
+    let pending = consumer
+        .infer_partial_types_in_context(&[None], None, &world, Budget::default())
+        .unwrap();
+    let shape = pending.parameter_input_context(0).unwrap();
+    let C::Callable(context) = &shape else {
+        panic!("callable shape")
+    };
+    assert_eq!(context.parameters, vec![Some(primitive(P::Bool))]);
     assert!(context.result.is_none());
-    let Some(C::Nominal {declaration,arguments})=context.result_context.as_deref() else {panic!("nominal result")};
-    assert_eq!(*declaration,id);
+    let Some(C::Nominal {
+        declaration,
+        arguments,
+    }) = context.result_context.as_deref()
+    else {
+        panic!("nominal result")
+    };
+    assert_eq!(*declaration, id);
     assert!(matches!(&arguments[..],[C::Unknown,C::Known(ty)] if *ty==primitive(P::U8)));
     assert!(pending.finish().is_err());
-    let identity=scheme(vec![generic(0)],generic(0),1);
-    let mut forwarding=identity.infer_partial_types_in_context(&[None],None,&world,Budget::default()).unwrap();
-    assert!(forwarding.constrain_result_context(&shape,Budget {steps:1,..Budget::default()}).is_err());
-    forwarding.constrain_result_context(&shape,Budget::default()).unwrap();
-    let C::Callable(forwarded)=forwarding.parameter_input_context(0).unwrap() else {panic!("forwarded callable")};
-    assert!(matches!(forwarded.result_context.as_deref(),Some(C::Nominal {declaration,..}) if *declaration==id));
+    let identity = scheme(vec![generic(0)], generic(0), 1);
+    let mut forwarding = identity
+        .infer_partial_types_in_context(&[None], None, &world, Budget::default())
+        .unwrap();
+    assert!(
+        forwarding
+            .constrain_result_context(
+                &shape,
+                Budget {
+                    steps: 1,
+                    ..Budget::default()
+                }
+            )
+            .is_err()
+    );
+    forwarding
+        .constrain_result_context(&shape, Budget::default())
+        .unwrap();
+    let C::Callable(forwarded) = forwarding.parameter_input_context(0).unwrap() else {
+        panic!("forwarded callable")
+    };
+    assert!(
+        matches!(forwarded.result_context.as_deref(),Some(C::Nominal {declaration,..}) if *declaration==id)
+    );
     assert!(forwarding.finish().is_err());
-    for (error_type,accepted) in [(P::U8,true),(P::Char,false)] {
-        let completed=callback(nominal(vec![primitive(P::Bool),primitive(error_type)]));
-        let mut candidate=identity.infer_partial_types_in_context(&[Some(completed.clone())],None,&world,Budget::default()).unwrap();
-        let result=candidate.constrain_result_context(&shape,Budget::default()).and_then(|_|candidate.finish());
-        assert_eq!(result.is_ok(),accepted);
-        if let Ok(instance)=result {assert_eq!(instance.result,completed);}
+    for (error_type, accepted) in [(P::U8, true), (P::Char, false)] {
+        let completed = callback(nominal(vec![primitive(P::Bool), primitive(error_type)]));
+        let mut candidate = identity
+            .infer_partial_types_in_context(
+                &[Some(completed.clone())],
+                None,
+                &world,
+                Budget::default(),
+            )
+            .unwrap();
+        let result = candidate
+            .constrain_result_context(&shape, Budget::default())
+            .and_then(|_| candidate.finish());
+        assert_eq!(result.is_ok(), accepted);
+        if let Ok(instance) = result {
+            assert_eq!(instance.result, completed);
+        }
     }
+}
+
+#[test]
+fn candidate_type_equations_are_transactional_and_do_not_invert_opaque_heads() {
+    let template = scheme(vec![], generic(0), 1);
+    let bound = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    };
+    let mut candidate = template.infer_types(&[], None, Budget::default()).unwrap();
+    assert!(
+        candidate
+            .constrain_type_equations(
+                &[(bound.clone(), primitive(P::Bool))],
+                Budget {
+                    steps: 0,
+                    ..Budget::default()
+                }
+            )
+            .is_err()
+    );
+    candidate
+        .constrain_type_equations(&[(bound.clone(), primitive(P::Char))], Budget::default())
+        .unwrap();
+    assert_eq!(candidate.finish().unwrap().result, primitive(P::Char));
+    let opaque = |argument| Term::NormalForm {
+        head: DeclarationId {
+            package: 77,
+            local: 0,
+        },
+        arguments: vec![argument],
+        sort: Sort::Type,
+    };
+    let mut candidate = template.infer_types(&[], None, Budget::default()).unwrap();
+    candidate
+        .constrain_type_equations(
+            &[(opaque(bound), opaque(primitive(P::Bool)))],
+            Budget::default(),
+        )
+        .unwrap();
+    assert!(candidate.finish().is_err());
 }

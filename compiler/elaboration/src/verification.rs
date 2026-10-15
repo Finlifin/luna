@@ -1,21 +1,22 @@
 //! Bounded mathematical integer reasoning about versioned program values.
 //! Independent of PTC; this module grants neither memory access nor ownership.
-mod retained_conditions;
-mod division;
 pub mod contracts;
 pub mod copy;
-pub mod effect_usage;
-pub mod drop;
 mod differences;
+mod division;
+pub mod drop;
+pub mod effect_usage;
 pub mod flow;
+pub mod memory;
+pub mod moves;
+mod observation_region;
 pub mod optimization;
 pub mod ownership;
-pub mod moves;
-pub mod memory;
-mod predicates;
 mod pattern_facts;
+mod predicates;
 mod rejection;
 mod relations;
+mod retained_conditions;
 pub use predicates::PredicateProof;
 
 use comptime_runtime::{Budget, Error as ArithmeticError, Integer};
@@ -462,7 +463,9 @@ impl Facts {
             return Ok(());
         }
         if let Some(known) = self.known_condition(condition, limits)? {
-            if known != truth { self.reachable = false; }
+            if known != truth {
+                self.reachable = false;
+            }
             return Ok(());
         }
         match condition {
@@ -987,7 +990,6 @@ impl fmt::Display for Outcome {
     }
 }
 
-
 /// Infer a candidate constant endpoint difference from the side-effect-free
 /// integer fragment. This is not a safety proof: actual evaluation, overflow,
 /// versions and bounds must still be checked by program flow.
@@ -997,26 +999,49 @@ pub fn constant_integer_difference(
     limits: &mut Limits,
 ) -> Result<Option<Integer>, Unknown> {
     use nir::program::{Expr, ExprKind as K, IntegerOp, Literal};
-    fn expression(expr: &Expr, limits: &mut Limits, depth: usize) -> Result<Option<Polynomial>, Unknown> {
+    fn expression(
+        expr: &Expr,
+        limits: &mut Limits,
+        depth: usize,
+    ) -> Result<Option<Polynomial>, Unknown> {
         limits.step(1)?;
-        if depth >= 128 {return Err(Unknown::ConditionDepthLimit);}
+        if depth >= 128 {
+            return Err(Unknown::ConditionDepthLimit);
+        }
         let value = match &expr.kind {
-            K::Literal(Literal::UnsignedInteger(n)) => Polynomial::constant(Integer::from_u128(*n), limits)?,
-            K::Literal(Literal::SignedInteger(n)) => Polynomial::constant(Integer::from_i128(*n), limits)?,
+            K::Literal(Literal::UnsignedInteger(n)) => {
+                Polynomial::constant(Integer::from_u128(*n), limits)?
+            }
+            K::Literal(Literal::SignedInteger(n)) => {
+                Polynomial::constant(Integer::from_i128(*n), limits)?
+            }
             K::Literal(Literal::Integer(n)) => {
                 let n = Integer::parse_literal(n, &mut limits.arithmetic)?;
                 Polynomial::constant(n, limits)?
             }
-            K::Local(id) => Polynomial::variable(ValueId {
-                place: PlaceId {owner: u64::from(id.owner), local: id.index}, version: 0,
-            }, limits)?,
+            K::Local(id) => Polynomial::variable(
+                ValueId {
+                    place: PlaceId {
+                        owner: u64::from(id.owner),
+                        local: id.index,
+                    },
+                    version: 0,
+                },
+                limits,
+            )?,
             K::IntegerNegate(value) => {
-                let Some(value) = expression(value, limits, depth + 1)? else {return Ok(None)};
+                let Some(value) = expression(value, limits, depth + 1)? else {
+                    return Ok(None);
+                };
                 Polynomial::default().subtract(&value, limits)?
             }
-            K::IntegerBinary {op, left, right} => {
-                let Some(left) = expression(left, limits, depth + 1)? else {return Ok(None)};
-                let Some(right) = expression(right, limits, depth + 1)? else {return Ok(None)};
+            K::IntegerBinary { op, left, right } => {
+                let Some(left) = expression(left, limits, depth + 1)? else {
+                    return Ok(None);
+                };
+                let Some(right) = expression(right, limits, depth + 1)? else {
+                    return Ok(None);
+                };
                 match op {
                     IntegerOp::Add => left.add(&right, limits)?,
                     IntegerOp::Subtract => left.subtract(&right, limits)?,
@@ -1028,10 +1053,20 @@ pub fn constant_integer_difference(
         };
         Ok(Some(value))
     }
-    let Some(start) = expression(start, limits, 0)? else {return Ok(None)};
-    let Some(end) = expression(end, limits, 0)? else {return Ok(None)};
+    let Some(start) = expression(start, limits, 0)? else {
+        return Ok(None);
+    };
+    let Some(end) = expression(end, limits, 0)? else {
+        return Ok(None);
+    };
     let difference = end.subtract(&start, limits)?;
-    if difference.terms.keys().any(|factors| !factors.is_empty()) {return Ok(None);}
-    difference.terms.get(&Vec::new()).map(|n|limits.integer(n)).transpose()
-        .map(|n|Some(n.unwrap_or_else(Integer::zero)))
+    if difference.terms.keys().any(|factors| !factors.is_empty()) {
+        return Ok(None);
+    }
+    difference
+        .terms
+        .get(&Vec::new())
+        .map(|n| limits.integer(n))
+        .transpose()
+        .map(|n| Some(n.unwrap_or_else(Integer::zero)))
 }

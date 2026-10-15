@@ -10,8 +10,8 @@
 use nir::program::{Expr, ExprKind as K, Function, Literal, LocalId};
 use nir::{Primitive, Sort, Term};
 use std::collections::BTreeSet;
-mod preparation;
 mod patterns;
+mod preparation;
 pub use preparation::preparation;
 
 /// Remove supplied staged inputs from the callable signature and local input
@@ -21,7 +21,8 @@ pub use preparation::preparation;
 /// This preserves addressability,
 /// closure capture and parameter mutation semantics without re-evaluating the
 /// original comptime expression. Remaining default indices are renumbered.
-pub fn bind_inputs_with_layouts(heads: &[nir::normal_forms::Head],
+pub fn bind_inputs_with_layouts(
+    heads: &[nir::normal_forms::Head],
     template: &Function,
     inputs: &[Option<Expr>],
     fuel: &mut usize,
@@ -29,7 +30,8 @@ pub fn bind_inputs_with_layouts(heads: &[nir::normal_forms::Head],
     bind_inputs_with_type_view(heads, template, inputs, fuel, |ty, _| Ok(ty.clone()))
 }
 
-fn bind_inputs_with_type_view(heads: &[nir::normal_forms::Head],
+fn bind_inputs_with_type_view(
+    heads: &[nir::normal_forms::Head],
     template: &Function,
     inputs: &[Option<Expr>],
     fuel: &mut usize,
@@ -57,13 +59,12 @@ fn bind_inputs_with_type_view(heads: &[nir::normal_forms::Head],
         };
         symbols.push(symbol);
     }
-    let scope = prepare_binding_with_type_view(&template.signature, &symbols, fuel, &mut type_view)?;
+    let scope =
+        prepare_binding_with_type_view(&template.signature, &symbols, fuel, &mut type_view)?;
     let mut bindings = Vec::new();
     for ((parameter, binding), input) in parameters.iter().zip(&template.parameters).zip(inputs) {
         if let Some(value) = input {
-            let expected = scope
-                .rebind(&parameter.ty)
-                .map_err(|e| e.to_string())?;
+            let expected = scope.rebind(&parameter.ty).map_err(|e| e.to_string())?;
             let expected = binding_type_view(&expected, scope.signature(), fuel, &mut type_view)?;
             if value.ty != expected {
                 return Err("staged value type differs from parameter type".into());
@@ -75,31 +76,32 @@ fn bind_inputs_with_type_view(heads: &[nir::normal_forms::Head],
     let mut result = template.clone();
     result.signature = scope.signature().clone();
     for root in std::iter::once(&mut result.body)
-        .chain(&mut result.preconditions).chain(&mut result.postconditions)
-        .chain(result.defaults.iter_mut().map(|(_,value)|value))
+        .chain(&mut result.preconditions)
+        .chain(&mut result.postconditions)
+        .chain(result.defaults.iter_mut().map(|(_, value)| value))
     {
         root.rewrite_types(&mut |ty| {
-            charge(fuel,1)?;
-            let ty = scope.rebind(ty).map_err(|error|error.to_string())?;
+            charge(fuel, 1)?;
+            let ty = scope.rebind(ty).map_err(|error| error.to_string())?;
             binding_type_view(&ty, scope.signature(), fuel, &mut type_view)
         })?;
     }
     for requirement in &mut result.capabilities {
-        rebind_requirement(requirement,&scope,fuel)?;
+        rebind_requirement(requirement, &scope, fuel)?;
     }
-    let mut predicates=result.requirements.iter_mut().collect::<Vec<_>>();
-    while let Some(predicate)=predicates.pop() {
-        charge(fuel,1)?;
+    let mut predicates = result.requirements.iter_mut().collect::<Vec<_>>();
+    while let Some(predicate) = predicates.pop() {
+        charge(fuel, 1)?;
         use nir::program::TypePredicate as P;
         match predicate {
-            P::Bool(_)=>{},
-            P::Trait(requirement)=>rebind_requirement(requirement,&scope,fuel)?,
-            P::Equal(left,right)=>{
-                *left=scope.rebind(left).map_err(|e|e.to_string())?;
-                *right=scope.rebind(right).map_err(|e|e.to_string())?;
-            },
-            P::Not(value)=>predicates.push(value),
-            P::And(values) | P::Or(values)=>predicates.extend(values),
+            P::Bool(_) => {}
+            P::Trait(requirement) => rebind_requirement(requirement, &scope, fuel)?,
+            P::Equal(left, right) => {
+                *left = scope.rebind(left).map_err(|e| e.to_string())?;
+                *right = scope.rebind(right).map_err(|e| e.to_string())?;
+            }
+            P::Not(value) => predicates.push(value),
+            P::And(values) | P::Or(values) => predicates.extend(values),
         }
     }
     let mut slots = Vec::new();
@@ -156,7 +158,9 @@ fn bind_inputs_with_type_view(heads: &[nir::normal_forms::Head],
 }
 
 fn binding_type_view(
-    ty: &Term, signature: &Term, fuel: &mut usize,
+    ty: &Term,
+    signature: &Term,
+    fuel: &mut usize,
     view: &mut impl FnMut(&Term, &mut usize) -> Result<Term, String>,
 ) -> Result<Term, String> {
     let Term::Function { parameters, .. } = signature.callable_signature() else {
@@ -166,14 +170,23 @@ fn binding_type_view(
 }
 
 fn view_in_input_scope(
-    ty: &Term, parameters: &[nir::Parameter], fuel: &mut usize,
+    ty: &Term,
+    parameters: &[nir::Parameter],
+    fuel: &mut usize,
     view: &mut impl FnMut(&Term, &mut usize) -> Result<Term, String>,
 ) -> Result<Term, String> {
-    if ty.substitution_parameters().map_err(|e| e.to_string())?.is_empty() {
+    if ty
+        .substitution_parameters()
+        .map_err(|e| e.to_string())?
+        .is_empty()
+    {
         return view(ty, fuel);
     }
     charge(fuel, parameters.len() + 1)?;
-    let scoped = Term::Function { parameters: parameters.to_vec(), result: Box::new(ty.clone()) };
+    let scoped = Term::Function {
+        parameters: parameters.to_vec(),
+        result: Box::new(ty.clone()),
+    };
     let Term::Function { result, .. } = view(&scoped, fuel)? else {
         return Err("staged annotation view lost its callable frame".into());
     };
@@ -182,22 +195,33 @@ fn view_in_input_scope(
 
 struct InputViewError(String);
 impl From<nir::TypeError> for InputViewError {
-    fn from(error: nir::TypeError) -> Self { Self(error.to_string()) }
+    fn from(error: nir::TypeError) -> Self {
+        Self(error.to_string())
+    }
 }
 
 fn prepare_binding_with_type_view(
-    signature: &Term, inputs: &[Option<Term>], fuel: &mut usize,
+    signature: &Term,
+    inputs: &[Option<Term>],
+    fuel: &mut usize,
     view: &mut impl FnMut(&Term, &mut usize) -> Result<Term, String>,
 ) -> Result<nir::FunctionInputBinding, String> {
-    signature.prepare_function_inputs_with_type_view(inputs, |ty, parameters| {
-        view_in_input_scope(ty, parameters, fuel, view).map_err(InputViewError)
-    }).map_err(|error: InputViewError| error.0)
+    signature
+        .prepare_function_inputs_with_type_view(inputs, |ty, parameters| {
+            view_in_input_scope(ty, parameters, fuel, view).map_err(InputViewError)
+        })
+        .map_err(|error: InputViewError| error.0)
 }
 
-fn rebind_requirement(requirement:&mut nir::program::TraitRequirement,scope:&nir::FunctionInputBinding,fuel:&mut usize)->Result<(),String> {
-    for ty in std::iter::once(&mut requirement.subject).chain(&mut requirement.interface_arguments) {
-        charge(fuel,1)?;
-        *ty=scope.rebind(ty).map_err(|e|e.to_string())?;
+fn rebind_requirement(
+    requirement: &mut nir::program::TraitRequirement,
+    scope: &nir::FunctionInputBinding,
+    fuel: &mut usize,
+) -> Result<(), String> {
+    for ty in std::iter::once(&mut requirement.subject).chain(&mut requirement.interface_arguments)
+    {
+        charge(fuel, 1)?;
+        *ty = scope.rebind(ty).map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -207,11 +231,16 @@ fn rebind_requirement(requirement:&mut nir::program::TraitRequirement,scope:&nir
 // flow analysis can establish a finer fact, conservatively reject those cases.
 /// Resolve closed immutable local producers before specializing calls in an
 /// ordinary function that has no erased input frame of its own.
-pub fn forward_closed_locals_with_layouts(heads: &[nir::normal_forms::Head], function: &mut Function, fuel: &mut usize) -> Result<(), String> {
+pub fn forward_closed_locals_with_layouts(
+    heads: &[nir::normal_forms::Head],
+    function: &mut Function,
+    fuel: &mut usize,
+) -> Result<(), String> {
     substitute_forwarded_inputs(heads, function, &[], fuel)
 }
 
-fn substitute_forwarded_inputs(heads: &[nir::normal_forms::Head],
+fn substitute_forwarded_inputs(
+    heads: &[nir::normal_forms::Head],
     function: &mut Function,
     bindings: &[(LocalId, Expr)],
     fuel: &mut usize,
@@ -245,7 +274,8 @@ fn substitute_forwarded_inputs(heads: &[nir::normal_forms::Head],
         .chain(&mut function.postconditions)
         .chain(function.defaults.iter_mut().map(|(_, expr)| expr))
     {
-        substitute_forwarded_expression(heads,
+        substitute_forwarded_expression(
+            heads,
             root,
             &values,
             &unavailable,
@@ -262,7 +292,8 @@ fn substitute_forwarded_inputs(heads: &[nir::normal_forms::Head],
 // inputs, including total Boolean/structural compositions. Never invoke a
 // producer or cross a separate callable/default environment. Writes/escapes
 // still invalidate every subsequent substitution.
-fn collect_forwarded_locals(heads: &[nir::normal_forms::Head],
+fn collect_forwarded_locals(
+    heads: &[nir::normal_forms::Head],
     root: &Expr,
     values: &mut std::collections::BTreeMap<LocalId, Expr>,
     unavailable: &BTreeSet<LocalId>,
@@ -298,7 +329,7 @@ fn collect_forwarded_locals(heads: &[nir::normal_forms::Head],
             };
             let mut origin = initializer.as_ref();
             let mut projections = Vec::new();
-            while let K::AnonymousField { value, .. } | K::Field {value,..} = &origin.kind {
+            while let K::AnonymousField { value, .. } | K::Field { value, .. } = &origin.kind {
                 charge(fuel, 1)?;
                 projections.push(origin);
                 origin = value;
@@ -320,8 +351,7 @@ fn collect_forwarded_locals(heads: &[nir::normal_forms::Head],
                 let Some(dependencies) = structural_boolean_dependencies(initializer, fuel)? else {
                     continue;
                 };
-                if dependencies.iter().any(|id| unavailable.contains(id))
-                {
+                if dependencies.iter().any(|id| unavailable.contains(id)) {
                     continue;
                 }
                 if dependencies.iter().any(|id| !values.contains_key(id)) {
@@ -343,7 +373,8 @@ fn collect_forwarded_locals(heads: &[nir::normal_forms::Head],
                             nir::program::Pattern::Wild => {}
                             nir::program::Pattern::Binding { inner, .. } => patterns.push(inner),
                             nir::program::Pattern::Tuple(fields)
-                            | nir::program::Pattern::AnonymousRecord { fields, .. } | nir::program::Pattern::Record {fields,..} => {
+                            | nir::program::Pattern::AnonymousRecord { fields, .. }
+                            | nir::program::Pattern::Record { fields, .. } => {
                                 patterns.extend(fields)
                             }
                             _ => {
@@ -391,8 +422,11 @@ pub fn structural_boolean_dependencies(
             | K::TypeListValue(_)
             | K::Unit
             | K::Tuple(_)
-            | K::AnonymousRecord { .. } | K::Record { .. } | K::Variant { .. }
-            | K::AnonymousField { .. } | K::Field { .. } => {}
+            | K::AnonymousRecord { .. }
+            | K::Record { .. }
+            | K::Variant { .. }
+            | K::AnonymousField { .. }
+            | K::Field { .. } => {}
             K::Not(_) | K::And(..) | K::Or(..) if expr.ty == Term::Primitive(Primitive::Bool) => {}
             K::IntegerBinary { op, left, right }
                 if op.is_comparison()
@@ -408,15 +442,16 @@ pub fn structural_boolean_dependencies(
                     && left.ty == right.ty
                     && matches!(left.ty,Term::Primitive(primitive)
                         if primitive.fixed_integer_layout().is_some()
-                            || matches!(primitive, Primitive::Char | Primitive::F32 | Primitive::F64)
+                            || matches!(primitive, Primitive::Char | Primitive::Float | Primitive::F32 | Primitive::F64)
                             || (matches!(expr.kind,K::ScalarEqual(..))
-                                && matches!(primitive,Primitive::Bool | Primitive::Str | Primitive::Symbol))) => {}
+                                && matches!(primitive,Primitive::Bool | Primitive::Str | Primitive::Symbol))) =>
+                {}
             K::If { .. } => {}
             K::Match { value, arms } if value.ty == Term::Primitive(Primitive::Bool) => {
                 let mut covered = 0;
                 for arm in arms {
                     let Some(outcomes) = boolean_pattern(&arm.pattern, fuel)? else {
-                        supported &= patterns::bindings(&arm.pattern,&mut local_bindings,fuel)?;
+                        supported &= patterns::bindings(&arm.pattern, &mut local_bindings, fuel)?;
                         continue;
                     };
                     for (index, bindings) in outcomes.into_iter().enumerate() {
@@ -433,7 +468,7 @@ pub fn structural_boolean_dependencies(
             }
             K::Match { arms, .. } => {
                 for arm in arms {
-                    supported &= patterns::bindings(&arm.pattern,&mut local_bindings,fuel)?;
+                    supported &= patterns::bindings(&arm.pattern, &mut local_bindings, fuel)?;
                 }
             }
             K::Block { .. } | K::Discard(_) => {}
@@ -456,9 +491,8 @@ pub fn structural_boolean_dependencies(
                             patterns.push(inner);
                         }
                         nir::program::Pattern::Tuple(fields)
-                        | nir::program::Pattern::AnonymousRecord { fields, .. } | nir::program::Pattern::Record {fields,..} => {
-                            patterns.extend(fields)
-                        }
+                        | nir::program::Pattern::AnonymousRecord { fields, .. }
+                        | nir::program::Pattern::Record { fields, .. } => patterns.extend(fields),
                         _ => {
                             supported = false;
                             break;
@@ -523,7 +557,10 @@ fn boolean_pattern_at(
                 }
             }
         }
-        Pattern::Remap { pattern, bindings: remaps } => {
+        Pattern::Remap {
+            pattern,
+            bindings: remaps,
+        } => {
             let mut removed = BTreeSet::new();
             let mut targets = BTreeSet::new();
             for (from, to) in remaps {
@@ -567,7 +604,12 @@ fn boolean_pattern_at(
 }
 
 #[inline(never)]
-fn fold_boolean_match(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut usize, depth: usize) -> Result<Expr, String> {
+fn fold_boolean_match(
+    heads: &[nir::normal_forms::Head],
+    expr: &Expr,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Expr, String> {
     if depth >= 128 {
         return Err("staged expression depth exceeded".into());
     }
@@ -613,6 +655,25 @@ fn fold_boolean_match(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut
 }
 
 fn total_float_operation(expr: &Expr) -> bool {
+    // Exact binary arithmetic can exceed representable magnitude even when
+    // both inputs are valid. Do not promote it as a total initializer.
+    supported_float_operation(expr)
+        && !(expr.ty == Term::Primitive(Primitive::Float)
+            && matches!(expr.kind, K::FloatBinary { .. }))
+}
+
+fn supported_float_operation(expr: &Expr) -> bool {
+    if expr.ty == Term::Primitive(Primitive::Float) {
+        return match &expr.kind {
+            K::FloatNegate(value) => value.ty == expr.ty,
+            K::FloatBinary { op, left, right } => {
+                !matches!(op, nir::program::FloatOp::Divide)
+                    && left.ty == expr.ty
+                    && right.ty == expr.ty
+            }
+            _ => false,
+        };
+    }
     if !matches!(expr.ty, Term::Primitive(Primitive::F32 | Primitive::F64)) {
         return false;
     }
@@ -624,12 +685,17 @@ fn total_float_operation(expr: &Expr) -> bool {
 }
 
 #[inline(never)]
-fn fold_float_operation(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut usize, depth: usize) -> Result<Expr, String> {
+fn fold_float_operation(
+    heads: &[nir::normal_forms::Head],
+    expr: &Expr,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Expr, String> {
     if depth >= 128 {
         return Err("staged expression depth exceeded".into());
     }
     charge(fuel, 1)?;
-    if !total_float_operation(expr) {
+    if !supported_float_operation(expr) {
         return Err("staged floating operation domain mismatch".into());
     }
     let (left, right, op) = match &expr.kind {
@@ -647,8 +713,34 @@ fn fold_float_operation(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &m
         .transpose()?;
     charge(fuel, 1)?;
     let literal = match (left, right, op) {
+        (Term::Float(value), None, None) => {
+            let mut budget = comptime_runtime::Budget {
+                steps: *fuel,
+                max_limbs: 4096,
+            };
+            let result = value
+                .negate(&mut budget)
+                .and_then(|v| v.to_literal(&mut budget));
+            *fuel = budget.steps;
+            Literal::Float(result.map_err(|e| e.to_string())?)
+        }
         (Term::Float32(value), None, None) => Literal::Float32(value ^ (1 << 31)),
         (Term::Float64(value), None, None) => Literal::Float64(value ^ (1 << 63)),
+        (Term::Float(left), Some(Term::Float(right)), Some(op)) => {
+            let mut budget = comptime_runtime::Budget {
+                steps: *fuel,
+                max_limbs: 4096,
+            };
+            let result = match op {
+                nir::program::FloatOp::Add => left.add(&right, &mut budget),
+                nir::program::FloatOp::Subtract => left.subtract(&right, &mut budget),
+                nir::program::FloatOp::Multiply => left.multiply(&right, &mut budget),
+                nir::program::FloatOp::Divide => unreachable!("unsupported exact division"),
+            }
+            .and_then(|v| v.to_literal(&mut budget));
+            *fuel = budget.steps;
+            Literal::Float(result.map_err(|e| e.to_string())?)
+        }
         (Term::Float32(left), Some(Term::Float32(right)), Some(op)) => {
             Literal::Float32(op.evaluate_f32(left, right))
         }
@@ -725,7 +817,12 @@ fn total_bit_representation(expr: &Expr) -> bool {
 }
 
 #[inline(never)]
-fn fold_bit_representation(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut usize, depth: usize) -> Result<Expr, String> {
+fn fold_bit_representation(
+    heads: &[nir::normal_forms::Head],
+    expr: &Expr,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Expr, String> {
     if depth >= 128 {
         return Err("staged expression depth exceeded".into());
     }
@@ -756,7 +853,9 @@ fn fold_bit_representation(heads: &[nir::normal_forms::Head], expr: &Expr, fuel:
                         K::Literal(Literal::Float32(value)) => u128::from(value),
                         K::Literal(Literal::Float64(value)) => u128::from(value),
                         _ => {
-                            return Err("staged bit representation requires a scalar literal".into())
+                            return Err(
+                                "staged bit representation requires a scalar literal".into()
+                            );
                         }
                     };
                     let raw = if width == 128 {
@@ -823,7 +922,8 @@ fn fold_bit_representation(heads: &[nir::normal_forms::Head], expr: &Expr, fuel:
 }
 
 #[inline(never)]
-fn folded_bits(heads: &[nir::normal_forms::Head],
+fn folded_bits(
+    heads: &[nir::normal_forms::Head],
     expr: &Expr,
     fuel: &mut usize,
     depth: usize,
@@ -836,7 +936,12 @@ fn folded_bits(heads: &[nir::normal_forms::Head],
 }
 
 #[inline(never)]
-fn fold_bitvec_operation(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut usize, depth: usize) -> Result<Expr, String> {
+fn fold_bitvec_operation(
+    heads: &[nir::normal_forms::Head],
+    expr: &Expr,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Expr, String> {
     if depth >= 128 {
         return Err("staged expression depth exceeded".into());
     }
@@ -899,7 +1004,9 @@ fn forwarding_writes(
     fuel: &mut usize,
     depth: usize,
 ) -> Result<(), String> {
-    if depth >= 128 { return Err("staged capture scope depth exceeded".into()); }
+    if depth >= 128 {
+        return Err("staged capture scope depth exceeded".into());
+    }
     crate::visit::expression_pruned(expression, fuel, |expr, fuel| {
         match &expr.kind {
             K::Closure { captures, body, .. } if expr.ty.is_comptime_callable() => {
@@ -914,14 +1021,20 @@ fn forwarding_writes(
                 forwarding_writes(body, &inner, unavailable, fuel, depth + 1)?;
                 return Ok(false);
             }
-            K::Assign { place, .. } | K::BitAssign { place, .. } | K::BitUpdate {place,..} => {
-                if !private.contains(&place.root) { unavailable.insert(place.root); }
+            K::Assign { place, .. } | K::BitAssign { place, .. } | K::BitUpdate { place, .. } => {
+                if !private.contains(&place.root) {
+                    unavailable.insert(place.root);
+                }
             }
             K::AddressOf(place) => {
                 let mut root = place.as_ref();
-                while let K::Field { value, .. } | K::AnonymousField { value, .. } = &root.kind { root = value; }
+                while let K::Field { value, .. } | K::AnonymousField { value, .. } = &root.kind {
+                    root = value;
+                }
                 if let K::Local(binding) = root.kind {
-                    if !private.contains(&binding) { unavailable.insert(binding); }
+                    if !private.contains(&binding) {
+                        unavailable.insert(binding);
+                    }
                 }
             }
             _ => {}
@@ -932,7 +1045,8 @@ fn forwarding_writes(
 
 // Callee-frame references in defaults must survive substitution of caller
 // inputs, including recursive calls whose LocalIds share the same owner.
-fn substitute_forwarded_expression(heads: &[nir::normal_forms::Head],
+fn substitute_forwarded_expression(
+    heads: &[nir::normal_forms::Head],
     expression: &mut Expr,
     values: &std::collections::BTreeMap<LocalId, &Expr>,
     unavailable: &BTreeSet<LocalId>,
@@ -945,37 +1059,84 @@ fn substitute_forwarded_expression(heads: &[nir::normal_forms::Head],
         return Err("staged forwarding depth exceeded".into());
     }
     crate::visit::expression_mut_pruned(expression, fuel, |expr, fuel| {
-        if let Some(plan)=preparation(expr,fuel)? {
-            let K::CallPreparation {statements,result}= &mut expr.kind else {unreachable!()};
-            for (index,statement) in statements.iter_mut().enumerate() {
-                substitute_forwarded_expression(heads, statement,values,unavailable,masked,staged || plan.indices.contains(&index),fuel,depth+1)?;
+        if let Some(plan) = preparation(expr, fuel)? {
+            let K::CallPreparation { statements, result } = &mut expr.kind else {
+                unreachable!()
+            };
+            for (index, statement) in statements.iter_mut().enumerate() {
+                substitute_forwarded_expression(
+                    heads,
+                    statement,
+                    values,
+                    unavailable,
+                    masked,
+                    staged || plan.indices.contains(&index),
+                    fuel,
+                    depth + 1,
+                )?;
             }
-            if let Some(result)=result {
-                substitute_forwarded_expression(heads, result,values,unavailable,masked,staged,fuel,depth+1)?;
+            if let Some(result) = result {
+                substitute_forwarded_expression(
+                    heads,
+                    result,
+                    values,
+                    unavailable,
+                    masked,
+                    staged,
+                    fuel,
+                    depth + 1,
+                )?;
             }
             return Ok(false);
         }
-        if let K::Closure { captures, body, parameters } = &mut expr.kind {
+        if let K::Closure {
+            captures,
+            body,
+            parameters,
+        } = &mut expr.kind
+        {
             charge(fuel, masked.len() + captures.len() + parameters.len())?;
             let mut inner = masked.clone();
             inner.extend(parameters.iter().copied());
             for capture in captures {
-                if staged { inner.insert(capture.binding); }
+                if staged {
+                    inner.insert(capture.binding);
+                }
                 if staged && capture.value.is_none() && !masked.contains(&capture.binding) {
                     if let Some(value) = values.get(&capture.binding) {
                         if unavailable.contains(&capture.binding) {
                             return Err("forwarding a staged capture after writes or address escape is not yet supported".into());
                         }
-                        if value.ty != capture.ty { return Err("staged capture type mismatch".into()); }
+                        if value.ty != capture.ty {
+                            return Err("staged capture type mismatch".into());
+                        }
                         constant(heads, value, fuel, 0)?;
                         capture.value = Some(Box::new((*value).clone()));
                     }
                 }
                 if let Some(value) = &mut capture.value {
-                    substitute_forwarded_expression(heads, value, values, unavailable, masked, staged, fuel, depth + 1)?;
+                    substitute_forwarded_expression(
+                        heads,
+                        value,
+                        values,
+                        unavailable,
+                        masked,
+                        staged,
+                        fuel,
+                        depth + 1,
+                    )?;
                 }
             }
-            substitute_closure_locals(heads, std::sync::Arc::make_mut(body), values, unavailable, &inner, staged, fuel, depth + 1)?;
+            substitute_closure_locals(
+                heads,
+                std::sync::Arc::make_mut(body),
+                values,
+                unavailable,
+                &inner,
+                staged,
+                fuel,
+                depth + 1,
+            )?;
             return Ok(false);
         }
         if let K::Local(binding) = expr.kind {
@@ -1006,7 +1167,8 @@ fn substitute_forwarded_expression(heads: &[nir::normal_forms::Head],
             };
             let sorts: Vec<_> = parameters.iter().map(|p| p.sort).collect();
             charge(fuel, sorts.len())?;
-            substitute_forwarded_expression(heads,
+            substitute_forwarded_expression(
+                heads,
                 callee,
                 values,
                 unavailable,
@@ -1023,7 +1185,8 @@ fn substitute_forwarded_expression(heads: &[nir::normal_forms::Head],
                     charge(fuel, masked.len() + parameter_bindings.len())?;
                     let mut inner = masked.clone();
                     inner.extend(parameter_bindings.iter().copied());
-                    substitute_forwarded_expression(heads,
+                    substitute_forwarded_expression(
+                        heads,
                         &mut argument.value,
                         values,
                         unavailable,
@@ -1033,7 +1196,8 @@ fn substitute_forwarded_expression(heads: &[nir::normal_forms::Head],
                         depth + 1,
                     )?;
                 } else {
-                    substitute_forwarded_expression(heads,
+                    substitute_forwarded_expression(
+                        heads,
                         &mut argument.value,
                         values,
                         unavailable,
@@ -1056,35 +1220,50 @@ fn substitute_forwarded_expression(heads: &[nir::normal_forms::Head],
 /// runtime arguments, still in their original evaluation order.
 /// `template` has already received its declaration arguments; these arguments
 /// remain the prefix of the resulting instance identity.
-pub fn bind_call_with_layouts(heads: &[nir::normal_forms::Head],
+pub fn bind_call_with_layouts(
+    heads: &[nir::normal_forms::Head],
     template: &Function,
     declaration_arguments: &[Term],
     call: &Expr,
     fuel: &mut usize,
 ) -> Result<(crate::FunctionInstance, Expr), String> {
-    bind_call_with_layouts_and_evaluator(heads, template, declaration_arguments, call, fuel, |expr, fuel| {
-        fold_input(heads, expr, fuel, 0)
-    })
+    bind_call_with_layouts_and_evaluator(
+        heads,
+        template,
+        declaration_arguments,
+        call,
+        fuel,
+        |expr, fuel| fold_input(heads, expr, fuel, 0),
+    )
 }
 
 /// Prepare staged inputs once in source/default order. The host evaluator runs
 /// only after preceding staged results have been substituted into a default's
 /// callee frame. It must return completed immutable data of the checked type.
-pub fn bind_call_with_layouts_and_evaluator(heads: &[nir::normal_forms::Head],
+pub fn bind_call_with_layouts_and_evaluator(
+    heads: &[nir::normal_forms::Head],
     template: &Function,
     declaration_arguments: &[Term],
     call: &Expr,
     fuel: &mut usize,
     mut evaluate: impl FnMut(&Expr, &mut usize) -> Result<Expr, String>,
 ) -> Result<(crate::FunctionInstance, Expr), String> {
-    bind_call_with_layouts_and_type_views(heads, template, declaration_arguments, call, fuel,
-        &mut evaluate, |evaluate, input, fuel| evaluate(input, fuel),
-        |_, ty, _| Ok(ty.clone()))
+    bind_call_with_layouts_and_type_views(
+        heads,
+        template,
+        declaration_arguments,
+        call,
+        fuel,
+        &mut evaluate,
+        |evaluate, input, fuel| evaluate(input, fuel),
+        |_, ty, _| Ok(ty.clone()),
+    )
 }
 
 /// Resolve substituted input domains using the same world as staged evaluation.
 /// The view normalizes types; it cannot bypass value/type consistency checks.
-pub fn bind_call_with_layouts_and_type_views<C>(heads: &[nir::normal_forms::Head],
+pub fn bind_call_with_layouts_and_type_views<C>(
+    heads: &[nir::normal_forms::Head],
     template: &Function,
     declaration_arguments: &[Term],
     call: &Expr,
@@ -1113,17 +1292,28 @@ pub fn bind_call_with_layouts_and_type_views<C>(heads: &[nir::normal_forms::Head
     if actual.0 != template.declaration || actual.1 != declaration_arguments {
         return Err("staged call target differs from template identity".into());
     }
-    let signature_differs = callee.ty != template.signature.clone()
-        .with_comptime_phase(template.phase == nir::program::FunctionPhase::Comptime);
+    let signature_differs = callee.ty
+        != template
+            .signature
+            .clone()
+            .with_comptime_phase(template.phase == nir::program::FunctionPhase::Comptime);
     let Term::Function { parameters, .. } = template.signature.callable_signature() else {
         return Err("staged template is not callable".into());
     };
-    let Term::Function { parameters: entry_parameters, .. } = callee.ty.callable_signature() else {
+    let Term::Function {
+        parameters: entry_parameters,
+        ..
+    } = callee.ty.callable_signature()
+    else {
         return Err("staged call signature differs from template".into());
     };
     if callee.ty.is_comptime_callable() != (template.phase == nir::program::FunctionPhase::Comptime)
         || parameters.len() != entry_parameters.len()
-        || parameters.iter().zip(entry_parameters).any(|(a,b)| a.sort != b.sort) {
+        || parameters
+            .iter()
+            .zip(entry_parameters)
+            .any(|(a, b)| a.sort != b.sort)
+    {
         return Err("staged call signature differs from template".into());
     }
     if !parameter_bindings.is_empty() && parameter_bindings != &template.parameters {
@@ -1177,16 +1367,22 @@ pub fn bind_call_with_layouts_and_type_views<C>(heads: &[nir::normal_forms::Head
         charge(fuel, 1)?;
         if parameters[argument.parameter].sort != Sort::Runtime {
             let input = if argument.is_default {
-                crate::visit::expression(&argument.value,fuel,|_,_|Ok(()))?;
-                let mut input=argument.value.clone();
-                let scope=prepare_binding_with_type_view(&template.signature, &symbols, fuel,
-                    &mut |ty, fuel| type_view(context, ty, fuel))?;
+                crate::visit::expression(&argument.value, fuel, |_, _| Ok(()))?;
+                let mut input = argument.value.clone();
+                let scope = prepare_binding_with_type_view(
+                    &template.signature,
+                    &symbols,
+                    fuel,
+                    &mut |ty, fuel| type_view(context, ty, fuel),
+                )?;
                 input.rewrite_types(&mut |ty| {
-                    charge(fuel,1)?;
-                    let ty = scope.rebind(ty).map_err(|e|e.to_string())?;
-                    binding_type_view(&ty, scope.signature(), fuel, &mut |ty, fuel| type_view(context, ty, fuel))
+                    charge(fuel, 1)?;
+                    let ty = scope.rebind(ty).map_err(|e| e.to_string())?;
+                    binding_type_view(&ty, scope.signature(), fuel, &mut |ty, fuel| {
+                        type_view(context, ty, fuel)
+                    })
                 })?;
-                prepare_local_input(heads, &input,&prepared,fuel,0)?
+                prepare_local_input(heads, &input, &prepared, fuel, 0)?
             } else {
                 crate::visit::expression(&argument.value, fuel, |_, _| Ok(()))?;
                 argument.value.clone()
@@ -1205,8 +1401,9 @@ pub fn bind_call_with_layouts_and_type_views<C>(heads: &[nir::normal_forms::Head
             inputs[argument.parameter] = Some(value);
         }
     }
-    let function = bind_inputs_with_type_view(heads, template, &inputs, fuel,
-        |ty, fuel| type_view(context, ty, fuel))?;
+    let function = bind_inputs_with_type_view(heads, template, &inputs, fuel, |ty, fuel| {
+        type_view(context, ty, fuel)
+    })?;
     let mut key_arguments = declaration_arguments.to_vec();
     let mut bindings = Vec::new();
     for (index, input) in inputs.iter().enumerate() {
@@ -1230,23 +1427,38 @@ pub fn bind_call_with_layouts_and_type_views<C>(heads: &[nir::normal_forms::Head
             None
         });
     }
-    let scope=prepare_binding_with_type_view(&template.signature, &symbols, fuel,
-        &mut |ty, fuel| type_view(context, ty, fuel))?;
+    let scope =
+        prepare_binding_with_type_view(&template.signature, &symbols, fuel, &mut |ty, fuel| {
+            type_view(context, ty, fuel)
+        })?;
     if signature_differs {
         // Interface and implementation annotations can differ under their
         // ordinary Type contract. Validate equivalence after binding actual
         // staged inputs, including the domains of erased parameters.
-        let entry_scope=prepare_binding_with_type_view(callee.ty.callable_signature(), &symbols, fuel,
-            &mut |ty,fuel| type_view(context,ty,fuel))?;
-        if entry_scope.signature()!=scope.signature() {
+        let entry_scope = prepare_binding_with_type_view(
+            callee.ty.callable_signature(),
+            &symbols,
+            fuel,
+            &mut |ty, fuel| type_view(context, ty, fuel),
+        )?;
+        if entry_scope.signature() != scope.signature() {
             return Err("staged call signature differs from template".into());
         }
-        for (expected,actual) in entry_parameters.iter().zip(parameters) {
-            let expected=entry_scope.rebind(&expected.ty).map_err(|e|e.to_string())?;
-            let actual=scope.rebind(&actual.ty).map_err(|e|e.to_string())?;
-            let expected=binding_type_view(&expected,entry_scope.signature(),fuel,&mut |ty,fuel|type_view(context,ty,fuel))?;
-            let actual=binding_type_view(&actual,scope.signature(),fuel,&mut |ty,fuel|type_view(context,ty,fuel))?;
-            if expected!=actual {return Err("staged call parameter domain differs from template".into());}
+        for (expected, actual) in entry_parameters.iter().zip(parameters) {
+            let expected = entry_scope
+                .rebind(&expected.ty)
+                .map_err(|e| e.to_string())?;
+            let actual = scope.rebind(&actual.ty).map_err(|e| e.to_string())?;
+            let expected =
+                binding_type_view(&expected, entry_scope.signature(), fuel, &mut |ty, fuel| {
+                    type_view(context, ty, fuel)
+                })?;
+            let actual = binding_type_view(&actual, scope.signature(), fuel, &mut |ty, fuel| {
+                type_view(context, ty, fuel)
+            })?;
+            if expected != actual {
+                return Err("staged call parameter domain differs from template".into());
+            }
         }
     }
     let mut runtime_arguments = Vec::new();
@@ -1256,7 +1468,10 @@ pub fn bind_call_with_layouts_and_type_views<C>(heads: &[nir::normal_forms::Head
             let mut argument = argument.clone();
             argument.parameter = slot;
             if argument.is_default {
-                argument.value.rewrite_types(&mut |ty| {charge(fuel,1)?;scope.rebind(ty).map_err(|e|e.to_string())})?;
+                argument.value.rewrite_types(&mut |ty| {
+                    charge(fuel, 1)?;
+                    scope.rebind(ty).map_err(|e| e.to_string())
+                })?;
                 wrap(heads, &mut argument.value, &bindings, fuel)?;
             }
             runtime_arguments.push(argument);
@@ -1295,7 +1510,8 @@ fn charge(fuel: &mut usize, work: usize) -> Result<(), String> {
     Ok(())
 }
 
-fn wrap(heads: &[nir::normal_forms::Head],
+fn wrap(
+    heads: &[nir::normal_forms::Head],
     expression: &mut Expr,
     bindings: &[(LocalId, Expr)],
     fuel: &mut usize,
@@ -1307,28 +1523,42 @@ fn wrap(heads: &[nir::normal_forms::Head],
     // or Integer used exclusively to prepare another instance has no runtime
     // storage. A closure's body uses its own capture frame; initialization is
     // the point that may still need an outer binding.
-    let mut needed=BTreeSet::new();
-    let mut pending=vec![&*expression];
-    while let Some(root)=pending.pop() {
-        crate::visit::expression_pruned(root,fuel,|expr,fuel| {
+    let mut needed = BTreeSet::new();
+    let mut pending = vec![&*expression];
+    while let Some(root) = pending.pop() {
+        crate::visit::expression_pruned(root, fuel, |expr, fuel| {
             match &expr.kind {
-                K::Local(binding)=>{needed.insert(*binding);},
-                K::Assign {place,..} | K::BitAssign {place,..} | K::BitUpdate {place,..}=>{needed.insert(place.root);},
-                K::Closure {captures,..}=>{
-                    charge(fuel,captures.len())?;
+                K::Local(binding) => {
+                    needed.insert(*binding);
+                }
+                K::Assign { place, .. }
+                | K::BitAssign { place, .. }
+                | K::BitUpdate { place, .. } => {
+                    needed.insert(place.root);
+                }
+                K::Closure { captures, .. } => {
+                    charge(fuel, captures.len())?;
                     for capture in captures {
-                        if let Some(value)=&capture.value {pending.push(value);}
-                        else {needed.insert(capture.binding);}
+                        if let Some(value) = &capture.value {
+                            pending.push(value);
+                        } else {
+                            needed.insert(capture.binding);
+                        }
                     }
                     return Ok(false);
-                },
-                _=>{},
+                }
+                _ => {}
             }
             Ok(true)
         })?;
     }
-    let bindings=bindings.iter().filter(|(binding,_)|needed.contains(binding)).collect::<Vec<_>>();
-    if bindings.is_empty() {return Ok(());}
+    let bindings = bindings
+        .iter()
+        .filter(|(binding, _)| needed.contains(binding))
+        .collect::<Vec<_>>();
+    if bindings.is_empty() {
+        return Ok(());
+    }
     charge(fuel, bindings.len() + 1)?;
     for (_, value) in &bindings {
         constant(heads, value, fuel, 0)?;
@@ -1348,7 +1578,15 @@ fn wrap(heads: &[nir::normal_forms::Head],
     // A block already provides the required lexical scope. Nesting another
     // block at the same source boundary creates two indistinguishable cleanup
     // exits. Bind staged locals in that existing scope instead.
-    if let K::Block { statements: existing, .. } | K::CallPreparation { statements: existing, .. } = &mut expression.kind {
+    if let K::Block {
+        statements: existing,
+        ..
+    }
+    | K::CallPreparation {
+        statements: existing,
+        ..
+    } = &mut expression.kind
+    {
         statements.append(existing);
         *existing = statements;
         return Ok(());
@@ -1368,38 +1606,79 @@ fn wrap(heads: &[nir::normal_forms::Head],
 // Only effect-free residual structure is folded here. General comptime calls
 // still belong to required invocation, not to runtime graph materialization.
 /// Complete the supported effect-free staged input fragment without invoking user code.
-pub fn fold_value_with_layouts(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut usize) -> Result<Expr, String> {
+pub fn fold_value_with_layouts(
+    heads: &[nir::normal_forms::Head],
+    expr: &Expr,
+    fuel: &mut usize,
+) -> Result<Expr, String> {
     fold_input(heads, expr, fuel, 0)
 }
 
 // Both alias discovery and folding use the same identity checks. Nominal
 // layouts originate in checked aggregate expressions supplied by the caller.
-fn staged_record_field<'a>(value:&'a Expr, projection:&Expr, fuel:&mut usize)->Result<&'a Expr,String> {
-    charge(fuel,1)?;
-    let (base,index,fields)=match (&projection.kind,&value.kind,&value.ty) {
-        (K::AnonymousField {value:base,name,index},K::AnonymousRecord {fields},Term::Record(types))=>{
-            charge(fuel,name.len())?;
-            let (expected,ty)=types.get(*index).ok_or("staged field index is out of range")?;
-            if expected!=name || ty!=&projection.ty {return Err("staged field identity or type mismatch".into());}
-            (base,index,fields)
+fn staged_record_field<'a>(
+    value: &'a Expr,
+    projection: &Expr,
+    fuel: &mut usize,
+) -> Result<&'a Expr, String> {
+    charge(fuel, 1)?;
+    let (base, index, fields) = match (&projection.kind, &value.kind, &value.ty) {
+        (
+            K::AnonymousField {
+                value: base,
+                name,
+                index,
+            },
+            K::AnonymousRecord { fields },
+            Term::Record(types),
+        ) => {
+            charge(fuel, name.len())?;
+            let (expected, ty) = types
+                .get(*index)
+                .ok_or("staged field index is out of range")?;
+            if expected != name || ty != &projection.ty {
+                return Err("staged field identity or type mismatch".into());
+            }
+            (base, index, fields)
         }
-        (K::Field {value:base,declaration,index},K::Record {declaration:actual,fields},Term::Nominal {declaration:owner,..})
-            if declaration==actual && declaration==owner=>(base,index,fields),
-        _=>return Err("staged field requires the matching record representation".into()),
+        (
+            K::Field {
+                value: base,
+                declaration,
+                index,
+            },
+            K::Record {
+                declaration: actual,
+                fields,
+            },
+            Term::Nominal {
+                declaration: owner, ..
+            },
+        ) if declaration == actual && declaration == owner => (base, index, fields),
+        _ => return Err("staged field requires the matching record representation".into()),
     };
-    if base.ty!=value.ty {return Err("staged field base type mismatch".into());}
-    let field=fields.get(*index).ok_or("staged field value is missing")?;
-    if field.ty!=projection.ty {return Err("staged field result type mismatch".into());}
+    if base.ty != value.ty {
+        return Err("staged field base type mismatch".into());
+    }
+    let field = fields.get(*index).ok_or("staged field value is missing")?;
+    if field.ty != projection.ty {
+        return Err("staged field result type mismatch".into());
+    }
     Ok(field)
 }
 
 #[inline(never)]
-fn fold_record_field(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut usize, depth: usize) -> Result<Expr, String> {
+fn fold_record_field(
+    heads: &[nir::normal_forms::Head],
+    expr: &Expr,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Expr, String> {
     // Flatten projection chains before folding their producer. Recursing once
     // per field would exhaust the host stack before the semantic depth limit.
     let mut root = expr;
     let mut path = Vec::new();
-    while let K::AnonymousField { value, .. } | K::Field {value,..} = &root.kind {
+    while let K::AnonymousField { value, .. } | K::Field { value, .. } = &root.kind {
         let current_depth = depth.saturating_add(path.len());
         if current_depth >= 128 {
             return Err("staged expression depth exceeded".into());
@@ -1411,7 +1690,7 @@ fn fold_record_field(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut 
     let completed = fold_input(heads, root, fuel, depth.saturating_add(path.len()))?;
     let mut selected = &completed;
     for (projection, current_depth) in path.into_iter().rev() {
-        let field=staged_record_field(selected,projection,fuel)?;
+        let field = staged_record_field(selected, projection, fuel)?;
         constant(heads, field, fuel, current_depth + 1)?;
         selected = field;
     }
@@ -1419,7 +1698,12 @@ fn fold_record_field(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut 
 }
 
 #[inline(never)]
-fn fold_integer_comparison(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut usize, depth: usize) -> Result<Expr, String> {
+fn fold_integer_comparison(
+    heads: &[nir::normal_forms::Head],
+    expr: &Expr,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Expr, String> {
     let K::IntegerBinary { op, left, right } = &expr.kind else {
         unreachable!()
     };
@@ -1455,13 +1739,21 @@ fn fold_integer_comparison(heads: &[nir::normal_forms::Head], expr: &Expr, fuel:
 }
 
 #[inline(never)]
-fn fold_aggregate_input(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut usize, depth: usize) -> Result<Expr, String> {
+fn fold_aggregate_input(
+    heads: &[nir::normal_forms::Head],
+    expr: &Expr,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Expr, String> {
     if depth >= 128 {
         return Err("staged expression depth exceeded".into());
     }
     charge(fuel, 1)?;
     let fields = match &expr.kind {
-        K::Tuple(fields) | K::AnonymousRecord { fields } | K::Record {fields,..} | K::Variant {fields,..} => fields,
+        K::Tuple(fields)
+        | K::AnonymousRecord { fields }
+        | K::Record { fields, .. }
+        | K::Variant { fields, .. } => fields,
         _ => unreachable!(),
     };
     let fields = fields
@@ -1470,8 +1762,17 @@ fn fold_aggregate_input(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &m
         .collect::<Result<Vec<_>, _>>()?;
     let kind = match &expr.kind {
         K::Tuple(_) => K::Tuple(fields),
-        K::Record {declaration,..} => K::Record {declaration:*declaration,fields},
-        K::Variant {declaration,index,..} => K::Variant {declaration:*declaration,index:*index,fields},
+        K::Record { declaration, .. } => K::Record {
+            declaration: *declaration,
+            fields,
+        },
+        K::Variant {
+            declaration, index, ..
+        } => K::Variant {
+            declaration: *declaration,
+            index: *index,
+            fields,
+        },
         _ => K::AnonymousRecord { fields },
     };
     let result = Expr {
@@ -1483,31 +1784,109 @@ fn fold_aggregate_input(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &m
     Ok(result)
 }
 
-fn fold_input(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut usize, depth: usize) -> Result<Expr, String> {
-    if let K::Match {value,arms}=&expr.kind {
-        let mut boolean=value.ty==Term::Primitive(Primitive::Bool);
+#[inline(never)]
+fn fold_scalar_comparison(
+    heads: &[nir::normal_forms::Head],
+    expr: &Expr,
+    left: &Expr,
+    right: &Expr,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Expr, String> {
+    if left.ty != right.ty {
+        return Err("staged comparison operand types differ".into());
+    }
+    let left = fold_input(heads, left, fuel, depth + 1)?;
+    let right = fold_input(heads, right, fuel, depth + 1)?;
+    let a = constant(heads, &left, fuel, depth + 1)?;
+    let b = constant(heads, &right, fuel, depth + 1)?;
+    let equality = matches!(expr.kind, K::ScalarEqual(..));
+    let ordering = match (&a, &b) {
+        (Term::Bool(a), Term::Bool(b)) if equality => Some(a.cmp(b)),
+        (Term::String(a), Term::String(b)) | (Term::Symbol(a), Term::Symbol(b)) if equality => {
+            Some(a.cmp(b))
+        }
+        (Term::Char(a), Term::Char(b)) => Some(a.cmp(b)),
+        (Term::Float(a), Term::Float(b)) if left.ty == Term::Primitive(Primitive::Float) => {
+            let mut budget = comptime_runtime::Budget {
+                steps: *fuel,
+                max_limbs: 4096,
+            };
+            let ordering = a.compare(b, &mut budget);
+            *fuel = budget.steps;
+            Some(ordering.map_err(|e| e.to_string())?)
+        }
+        (Term::Float32(a), Term::Float32(b)) => f32::from_bits(*a).partial_cmp(&f32::from_bits(*b)),
+        (Term::Float64(a), Term::Float64(b)) => f64::from_bits(*a).partial_cmp(&f64::from_bits(*b)),
+        (Term::Integer(a), Term::Integer(b)) if matches!(left.ty,Term::Primitive(p) if p.fixed_integer_layout().is_some()) => {
+            Some(a.cmp(b))
+        }
+        _ => {
+            return Err("staged scalar comparison is not supported for these operands".into());
+        }
+    };
+    // NaN is unordered: <= and >= must not turn a missing ordering
+    // into true by simply negating the opposite strict comparison.
+    let value = match expr.kind {
+        K::ScalarEqual(..) => ordering.is_some_and(|value| value.is_eq()),
+        K::ScalarLess(..) => ordering.is_some_and(|value| value.is_lt()),
+        K::ScalarLessEqual(..) => ordering.is_some_and(|value| !value.is_gt()),
+        K::ScalarGreater(..) => ordering.is_some_and(|value| value.is_gt()),
+        K::ScalarGreaterEqual(..) => ordering.is_some_and(|value| !value.is_lt()),
+        _ => unreachable!(),
+    };
+    Ok(Expr {
+        kind: K::Literal(Literal::Bool(value)),
+        ty: expr.ty.clone(),
+        source: expr.source,
+    })
+}
+
+fn fold_input(
+    heads: &[nir::normal_forms::Head],
+    expr: &Expr,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Expr, String> {
+    if let K::Match { value, arms } = &expr.kind {
+        let mut boolean = value.ty == Term::Primitive(Primitive::Bool);
         if boolean {
             for arm in arms {
-                if boolean_pattern(&arm.pattern,fuel)?.is_none() {boolean=false;break;}
+                if boolean_pattern(&arm.pattern, fuel)?.is_none() {
+                    boolean = false;
+                    break;
+                }
             }
         }
         return if boolean {
-            fold_boolean_match(heads, expr,fuel,depth)
-        } else { patterns::fold(heads,expr,fuel,depth) };
+            fold_boolean_match(heads, expr, fuel, depth)
+        } else {
+            patterns::fold(heads, expr, fuel, depth)
+        };
     }
     if matches!(expr.kind, K::If { .. })
         || (expr.ty == Term::Primitive(Primitive::Bool)
             && matches!(expr.kind, K::Not(_) | K::And(..) | K::Or(..)))
     {
         fold_boolean_control(heads, expr, fuel, depth)
-    } else if matches!(expr.kind, K::Tuple(_) | K::AnonymousRecord { .. } | K::Record {..} | K::Variant {..}) {
+    } else if matches!(
+        expr.kind,
+        K::Tuple(_) | K::AnonymousRecord { .. } | K::Record { .. } | K::Variant { .. }
+    ) {
         fold_aggregate_input(heads, expr, fuel, depth)
     } else if matches!(expr.kind, K::FloatNegate(_) | K::FloatBinary { .. }) {
         fold_float_operation(heads, expr, fuel, depth)
     } else if matches!(expr.kind, K::TakeBits(_) | K::BitConvert(_)) {
         fold_bit_representation(heads, expr, fuel, depth)
-    } else if matches!(expr.kind, K::Not(_) | K::And(..) | K::Or(..)
-        | K::BitEqual(..) | K::BitConcat(..) | K::BitSlice { .. }) {
+    } else if matches!(
+        expr.kind,
+        K::Not(_)
+            | K::And(..)
+            | K::Or(..)
+            | K::BitEqual(..)
+            | K::BitConcat(..)
+            | K::BitSlice { .. }
+    ) {
         fold_bitvec_operation(heads, expr, fuel, depth)
     } else {
         fold_general_input(heads, expr, fuel, depth)
@@ -1515,7 +1894,12 @@ fn fold_input(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut usize, 
 }
 
 #[inline(never)]
-fn folded_boolean(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut usize, depth: usize) -> Result<bool, String> {
+fn folded_boolean(
+    heads: &[nir::normal_forms::Head],
+    expr: &Expr,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<bool, String> {
     let value = fold_input(heads, expr, fuel, depth)?;
     if value.ty != Term::Primitive(Primitive::Bool) {
         return Err("staged condition is not boolean".into());
@@ -1527,7 +1911,12 @@ fn folded_boolean(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut usi
 }
 
 #[inline(never)]
-fn fold_boolean_control(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut usize, depth: usize) -> Result<Expr, String> {
+fn fold_boolean_control(
+    heads: &[nir::normal_forms::Head],
+    expr: &Expr,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Expr, String> {
     if depth >= 128 {
         return Err("staged expression depth exceeded".into());
     }
@@ -1578,14 +1967,21 @@ fn fold_boolean_control(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &m
     Ok(result)
 }
 
-fn fold_general_input(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut usize, depth: usize) -> Result<Expr, String> {
+fn fold_general_input(
+    heads: &[nir::normal_forms::Head],
+    expr: &Expr,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Expr, String> {
     if depth >= 128 {
         return Err("staged expression depth exceeded".into());
     }
     charge(fuel, 1)?;
     let selected = match &expr.kind {
         K::SymbolName(value) => {
-            if value.ty != Term::Primitive(Primitive::Symbol) || expr.ty != Term::Primitive(Primitive::Str) {
+            if value.ty != Term::Primitive(Primitive::Symbol)
+                || expr.ty != Term::Primitive(Primitive::Str)
+            {
                 return Err("invalid Symbol tag_name types".into());
             }
             let value = fold_input(heads, value, fuel, depth + 1)?;
@@ -1593,7 +1989,11 @@ fn fold_general_input(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut
                 return Err("tag_name requires a completed Symbol".into());
             };
             charge(fuel, name.len())?;
-            Some(Expr { source: expr.source, ty: expr.ty.clone(), kind: K::Literal(Literal::String(name.to_string())) })
+            Some(Expr {
+                source: expr.source,
+                ty: expr.ty.clone(),
+                kind: K::Literal(Literal::String(name.to_string())),
+            })
         }
         K::Discard(value) => {
             // Discard the result, not the evaluation or its failures.
@@ -1604,7 +2004,9 @@ fn fold_general_input(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut
                 source: expr.source,
             })
         }
-        K::AnonymousField { .. } | K::Field { .. } => Some(fold_record_field(heads, expr, fuel, depth)?),
+        K::AnonymousField { .. } | K::Field { .. } => {
+            Some(fold_record_field(heads, expr, fuel, depth)?)
+        }
         K::IntegerBinary { op, .. } if op.is_comparison() => {
             Some(fold_integer_comparison(heads, expr, fuel, depth)?)
         }
@@ -1618,48 +2020,9 @@ fn fold_general_input(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut
         | K::ScalarGreaterEqual(left, right)
             if expr.ty == Term::Primitive(Primitive::Bool) =>
         {
-            if left.ty != right.ty {
-                return Err("staged comparison operand types differ".into());
-            }
-            let left = fold_input(heads, left, fuel, depth + 1)?;
-            let right = fold_input(heads, right, fuel, depth + 1)?;
-            let a = constant(heads, &left, fuel, depth + 1)?;
-            let b = constant(heads, &right, fuel, depth + 1)?;
-            let equality = matches!(expr.kind, K::ScalarEqual(..));
-            let ordering = match (&a, &b) {
-                (Term::Bool(a), Term::Bool(b)) if equality => Some(a.cmp(b)),
-                (Term::String(a), Term::String(b)) | (Term::Symbol(a), Term::Symbol(b)) if equality => Some(a.cmp(b)),
-                (Term::Char(a), Term::Char(b)) => Some(a.cmp(b)),
-                (Term::Float32(a), Term::Float32(b)) => {
-                    f32::from_bits(*a).partial_cmp(&f32::from_bits(*b))
-                }
-                (Term::Float64(a), Term::Float64(b)) => {
-                    f64::from_bits(*a).partial_cmp(&f64::from_bits(*b))
-                }
-                (Term::Integer(a), Term::Integer(b)) if matches!(left.ty,Term::Primitive(p) if p.fixed_integer_layout().is_some()) => {
-                    Some(a.cmp(b))
-                }
-                _ => {
-                    return Err(
-                        "staged scalar comparison is not supported for these operands".into(),
-                    );
-                }
-            };
-            // NaN is unordered: <= and >= must not turn a missing ordering
-            // into true by simply negating the opposite strict comparison.
-            let value = match expr.kind {
-                K::ScalarEqual(..) => ordering.is_some_and(|value| value.is_eq()),
-                K::ScalarLess(..) => ordering.is_some_and(|value| value.is_lt()),
-                K::ScalarLessEqual(..) => ordering.is_some_and(|value| !value.is_gt()),
-                K::ScalarGreater(..) => ordering.is_some_and(|value| value.is_gt()),
-                K::ScalarGreaterEqual(..) => ordering.is_some_and(|value| !value.is_lt()),
-                _ => unreachable!(),
-            };
-            Some(Expr {
-                kind: K::Literal(Literal::Bool(value)),
-                ty: expr.ty.clone(),
-                source: expr.source,
-            })
+            Some(fold_scalar_comparison(
+                heads, expr, left, right, fuel, depth,
+            )?)
         }
         K::Block { statements, result } => {
             let mut locals = std::collections::BTreeMap::new();
@@ -1711,7 +2074,8 @@ fn fold_general_input(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut
 
 // Structural, irrefutable patterns require no protocol invocation. Binding uses
 // the already evaluated producer; destructuring never repeats that computation.
-fn bind_staged_pattern(heads: &[nir::normal_forms::Head],
+fn bind_staged_pattern(
+    heads: &[nir::normal_forms::Head],
     pattern: &nir::program::Pattern,
     value: &Expr,
     locals: &mut std::collections::BTreeMap<LocalId, Expr>,
@@ -1746,15 +2110,27 @@ fn bind_staged_pattern(heads: &[nir::normal_forms::Head],
             }
             Ok(())
         }
-        Pattern::Record {declaration,fields} => {
-            let (K::Record {declaration:actual,fields:values},Term::Nominal {declaration:owner,..})=(&value.kind,&value.ty) else {
+        Pattern::Record {
+            declaration,
+            fields,
+        } => {
+            let (
+                K::Record {
+                    declaration: actual,
+                    fields: values,
+                },
+                Term::Nominal {
+                    declaration: owner, ..
+                },
+            ) = (&value.kind, &value.ty)
+            else {
                 return Err("staged nominal record pattern requires a nominal record".into());
             };
-            if declaration!=actual || declaration!=owner || fields.len()!=values.len() {
+            if declaration != actual || declaration != owner || fields.len() != values.len() {
                 return Err("staged nominal record pattern identity or arity mismatch".into());
             }
-            for (field,value) in fields.iter().zip(values) {
-                bind_staged_pattern(heads,field,value,locals,fuel,depth+1)?;
+            for (field, value) in fields.iter().zip(values) {
+                bind_staged_pattern(heads, field, value, locals, fuel, depth + 1)?;
             }
             Ok(())
         }
@@ -1790,7 +2166,8 @@ fn bind_staged_pattern(heads: &[nir::normal_forms::Head],
 // Only immutable canonical data enters this local environment. Substitution is
 // simultaneous and scoped to a single block; nested blocks receive outer values
 // through their checked references before creating their own environment.
-fn fold_local_input(heads: &[nir::normal_forms::Head],
+fn fold_local_input(
+    heads: &[nir::normal_forms::Head],
     expr: &Expr,
     locals: &std::collections::BTreeMap<LocalId, Expr>,
     fuel: &mut usize,
@@ -1800,7 +2177,8 @@ fn fold_local_input(heads: &[nir::normal_forms::Head],
     fold_input(heads, &prepared, fuel, depth)
 }
 
-fn prepare_local_input(heads: &[nir::normal_forms::Head],
+fn prepare_local_input(
+    heads: &[nir::normal_forms::Head],
     expr: &Expr,
     locals: &std::collections::BTreeMap<LocalId, Expr>,
     fuel: &mut usize,
@@ -1813,7 +2191,8 @@ fn prepare_local_input(heads: &[nir::normal_forms::Head],
 }
 
 /// Substitute completed inputs while preserving closure-owned capture bindings.
-pub fn prepare_input_with_layouts(heads: &[nir::normal_forms::Head],
+pub fn prepare_input_with_layouts(
+    heads: &[nir::normal_forms::Head],
     expr: &Expr,
     locals: &std::collections::BTreeMap<LocalId, Expr>,
     fuel: &mut usize,
@@ -1821,26 +2200,39 @@ pub fn prepare_input_with_layouts(heads: &[nir::normal_forms::Head],
     prepare_local_input(heads, expr, locals, fuel, 0)
 }
 
-fn prepare_local_input_in_place(heads: &[nir::normal_forms::Head],
+fn prepare_local_input_in_place(
+    heads: &[nir::normal_forms::Head],
     prepared: &mut Expr,
     locals: &std::collections::BTreeMap<LocalId, Expr>,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<(), String> {
-    if depth >= 128 { return Err("staged capture scope depth exceeded".into()); }
+    if depth >= 128 {
+        return Err("staged capture scope depth exceeded".into());
+    }
     crate::visit::expression_mut_pruned(prepared, fuel, |expr, fuel| {
-
-        if let K::Closure { captures, body, parameters } = &mut expr.kind {
+        if let K::Closure {
+            captures,
+            body,
+            parameters,
+        } = &mut expr.kind
+        {
             // Values are canonical, so copying this map does not share storage.
             charge(fuel, captures.len() + parameters.len())?;
-            for value in locals.values() { constant(heads, value, fuel, depth)?; }
+            for value in locals.values() {
+                constant(heads, value, fuel, depth)?;
+            }
             let mut inner = locals.clone();
-            for parameter in parameters { inner.remove(parameter); }
+            for parameter in parameters {
+                inner.remove(parameter);
+            }
             for capture in captures {
                 inner.remove(&capture.binding);
                 if capture.value.is_none() {
                     if let Some(value) = locals.get(&capture.binding) {
-                        if value.ty != capture.ty { return Err("staged capture type mismatch".into()); }
+                        if value.ty != capture.ty {
+                            return Err("staged capture type mismatch".into());
+                        }
                         constant(heads, value, fuel, depth)?;
                         capture.value = Some(Box::new(value.clone()));
                     }
@@ -1849,7 +2241,13 @@ fn prepare_local_input_in_place(heads: &[nir::normal_forms::Head],
                     prepare_local_input_in_place(heads, value, locals, fuel, depth + 1)?;
                 }
             }
-            prepare_local_input_in_place(heads, std::sync::Arc::make_mut(body), &inner, fuel, depth + 1)?;
+            prepare_local_input_in_place(
+                heads,
+                std::sync::Arc::make_mut(body),
+                &inner,
+                fuel,
+                depth + 1,
+            )?;
             return Ok(false);
         }
         if let K::Local(binding) = expr.kind {
@@ -1871,7 +2269,8 @@ fn prepare_local_input_in_place(heads: &[nir::normal_forms::Head],
 // A closure's locals belong to a new invocation frame. Only closed producers
 // are discovered here; enclosing values are not seeds for local evaluation.
 #[inline(never)]
-fn substitute_closure_locals(heads: &[nir::normal_forms::Head],
+fn substitute_closure_locals(
+    heads: &[nir::normal_forms::Head],
     body: &mut Expr,
     enclosing: &std::collections::BTreeMap<LocalId, &Expr>,
     unavailable: &BTreeSet<LocalId>,
@@ -1897,7 +2296,8 @@ fn substitute_closure_locals(heads: &[nir::normal_forms::Head],
     let mut values = enclosing.clone();
     values.extend(completed.iter().map(|(binding, value)| (*binding, value)));
     local_unavailable.extend(unavailable.iter().copied());
-    substitute_forwarded_expression(heads,
+    substitute_forwarded_expression(
+        heads,
         body,
         &values,
         &local_unavailable,
@@ -1908,7 +2308,12 @@ fn substitute_closure_locals(heads: &[nir::normal_forms::Head],
     )
 }
 
-fn fold_machine_input(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut usize, depth: usize) -> Result<Expr, String> {
+fn fold_machine_input(
+    heads: &[nir::normal_forms::Head],
+    expr: &Expr,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Expr, String> {
     use comptime_runtime::machine::MachineInteger;
     use nir::program::IntegerOp as Op;
     let Term::Primitive(primitive) = expr.ty else {
@@ -1936,7 +2341,10 @@ fn fold_machine_input(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut
     let (left, right, op) = match &expr.kind {
         K::IntegerNegate(value) => (operand(value, fuel)?, None, None),
         K::IntegerBinary { op, left, right }
-            if matches!(op, Op::Add | Op::Subtract | Op::Multiply | Op::DivideTrunc | Op::RemainderTrunc) =>
+            if matches!(
+                op,
+                Op::Add | Op::Subtract | Op::Multiply | Op::DivideTrunc | Op::RemainderTrunc
+            ) =>
         {
             (operand(left, fuel)?, Some(operand(right, fuel)?), Some(*op))
         }
@@ -1950,8 +2358,12 @@ fn fold_machine_input(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut
         Some(Op::Add) => left.add(right.unwrap(), &mut budget),
         Some(Op::Subtract) => left.subtract(right.unwrap(), &mut budget),
         Some(Op::Multiply) => left.multiply(right.unwrap(), &mut budget),
-        Some(Op::DivideTrunc) => left.div_rem_trunc(right.unwrap(), &mut budget).map(|(q,_)|q),
-        Some(Op::RemainderTrunc) => left.div_rem_trunc(right.unwrap(), &mut budget).map(|(_,r)|r),
+        Some(Op::DivideTrunc) => left
+            .div_rem_trunc(right.unwrap(), &mut budget)
+            .map(|(q, _)| q),
+        Some(Op::RemainderTrunc) => left
+            .div_rem_trunc(right.unwrap(), &mut budget)
+            .map(|(_, r)| r),
         None => left.negate(&mut budget),
         _ => unreachable!(),
     };
@@ -1970,17 +2382,39 @@ fn fold_machine_input(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut
 }
 
 #[inline(never)]
-fn nominal_constant(heads: &[nir::normal_forms::Head], expr: &Expr, fields: &[Expr], fuel: &mut usize, depth: usize) -> Result<Term,String> {
+fn nominal_constant(
+    heads: &[nir::normal_forms::Head],
+    expr: &Expr,
+    fields: &[Expr],
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Term, String> {
     charge(fuel, fields.len())?;
-    nir::type_computations::charge_term(&expr.ty, fuel).map_err(|error|error.to_string())?;
-    Ok(Term::NominalValue {ty:Box::new(expr.ty.clone()),
-        variant:match &expr.kind {K::Variant {index,..}=>Some(u32::try_from(*index).map_err(|_|"enum variant index exceeds frozen representation")?),_=>None},
-        fields:fields.iter().map(|field|constant(heads,field,fuel,depth+1)).collect::<Result<_,_>>()?})
+    nir::type_computations::charge_term(&expr.ty, fuel).map_err(|error| error.to_string())?;
+    Ok(Term::NominalValue {
+        ty: Box::new(expr.ty.clone()),
+        variant: match &expr.kind {
+            K::Variant { index, .. } => Some(
+                u32::try_from(*index)
+                    .map_err(|_| "enum variant index exceeds frozen representation")?,
+            ),
+            _ => None,
+        },
+        fields: fields
+            .iter()
+            .map(|field| constant(heads, field, fuel, depth + 1))
+            .collect::<Result<_, _>>()?,
+    })
 }
 
 // This deliberately accepts only canonical immutable data, never a call,
 // local reference, pointer or expression whose evaluation could repeat effects.
-fn constant(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut usize, depth: usize) -> Result<Term, String> {
+fn constant(
+    heads: &[nir::normal_forms::Head],
+    expr: &Expr,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Term, String> {
     if depth >= 128 {
         return Err("staged constant depth exceeded".into());
     }
@@ -1992,7 +2426,8 @@ fn constant(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut usize, de
                 charge(fuel, 1)?;
                 for parameter in &head.parameters {
                     charge(fuel, 1)?;
-                    admitted |= parameter.kind == nir::normal_forms::Kind::TypeList && parameter.ty == *ty;
+                    admitted |=
+                        parameter.kind == nir::normal_forms::Kind::TypeList && parameter.ty == *ty;
                 }
             }
             if !admitted || !nir::normal_forms::type_list_input_type(ty) {
@@ -2016,8 +2451,22 @@ fn constant(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut usize, de
         (K::Unit, Term::Primitive(Primitive::Void)) => Term::Unit,
         (K::Literal(Literal::Bool(v)), Term::Primitive(Primitive::Bool)) => Term::Bool(*v),
         (K::Literal(Literal::Char(v)), Term::Primitive(Primitive::Char)) => Term::Char(*v),
-        (K::Literal(Literal::Float32(bits)), Term::Primitive(Primitive::F32)) => Term::Float32(*bits),
-        (K::Literal(Literal::Float64(bits)), Term::Primitive(Primitive::F64)) => Term::Float64(*bits),
+        (K::Literal(Literal::Float(spelling)), Term::Primitive(Primitive::Float)) => {
+            let mut budget = comptime_runtime::Budget {
+                steps: *fuel,
+                max_limbs: 4096,
+            };
+            let value =
+                comptime_runtime::decimal::DecimalValue::parse_literal(spelling, &mut budget);
+            *fuel = budget.steps;
+            Term::Float(value.map_err(|e| e.to_string())?)
+        }
+        (K::Literal(Literal::Float32(bits)), Term::Primitive(Primitive::F32)) => {
+            Term::Float32(*bits)
+        }
+        (K::Literal(Literal::Float64(bits)), Term::Primitive(Primitive::F64)) => {
+            Term::Float64(*bits)
+        }
         (K::Literal(Literal::Symbol(v)), Term::Primitive(Primitive::Symbol)) => {
             charge(fuel, v.len())?;
             Term::Symbol(v.clone().into())
@@ -2049,10 +2498,17 @@ fn constant(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut usize, de
             };
             // Materialized Integer constants use signed hexadecimal spellings;
             // the lexical parser intentionally accepts only unsigned tokens.
-            let (negative, digits) = spelling.strip_prefix('-')
+            let (negative, digits) = spelling
+                .strip_prefix('-')
                 .map_or((false, spelling.as_str()), |digits| (true, digits));
-            let value = comptime_runtime::Integer::parse_literal(digits, &mut budget)
-                .and_then(|value| if negative { value.negate(&mut budget) } else { Ok(value) });
+            let value =
+                comptime_runtime::Integer::parse_literal(digits, &mut budget).and_then(|value| {
+                    if negative {
+                        value.negate(&mut budget)
+                    } else {
+                        Ok(value)
+                    }
+                });
             *fuel = budget.steps;
             Term::Integer(value.map_err(|e| e.to_string())?)
         }
@@ -2072,9 +2528,27 @@ fn constant(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut usize, de
             }
             Term::BitVec(value)
         }
-        (K::Record {declaration,fields}, Term::Nominal {declaration: expected,..})
-        | (K::Variant {declaration,fields,..}, Term::Nominal {declaration:expected,..}) if declaration == expected =>
-            nominal_constant(heads, expr, fields, fuel, depth)?,
+        (
+            K::Record {
+                declaration,
+                fields,
+            },
+            Term::Nominal {
+                declaration: expected,
+                ..
+            },
+        )
+        | (
+            K::Variant {
+                declaration,
+                fields,
+                ..
+            },
+            Term::Nominal {
+                declaration: expected,
+                ..
+            },
+        ) if declaration == expected => nominal_constant(heads, expr, fields, fuel, depth)?,
         (K::AnonymousRecord { fields }, Term::Record(types)) if fields.len() == types.len() => {
             let mut names = BTreeSet::new();
             let mut values = Vec::new();
@@ -2119,7 +2593,6 @@ fn constant(heads: &[nir::normal_forms::Head], expr: &Expr, fuel: &mut usize, de
     })
 }
 
-
 // Context-free entrypoints retain support for structural constants only.
 pub fn bind_inputs(
     template: &Function,
@@ -2161,7 +2634,16 @@ pub fn bind_call_with_type_views<C>(
     evaluate: impl FnMut(&mut C, &Expr, &mut usize) -> Result<Expr, String>,
     type_view: impl FnMut(&mut C, &Term, &mut usize) -> Result<Term, String>,
 ) -> Result<(crate::FunctionInstance, Expr), String> {
-    bind_call_with_layouts_and_type_views(&[], template, declaration_arguments, call, fuel, context, evaluate, type_view)
+    bind_call_with_layouts_and_type_views(
+        &[],
+        template,
+        declaration_arguments,
+        call,
+        fuel,
+        context,
+        evaluate,
+        type_view,
+    )
 }
 
 pub fn fold_value(expr: &Expr, fuel: &mut usize) -> Result<Expr, String> {
@@ -2181,63 +2663,133 @@ mod tests {
 
     #[test]
     fn symbol_name_folding_checks_types_and_budget_before_publishing() {
-        let symbol=expr(K::Literal(Literal::Symbol("ready".into())),Primitive::Symbol);
-        let name=expr(K::SymbolName(Box::new(symbol.clone())),Primitive::Str);
-        assert_eq!(fold_input(&[],&name,&mut 100,0).unwrap().kind,K::Literal(Literal::String("ready".into())));
-        let forged=expr(K::SymbolName(Box::new(symbol)),Primitive::Bool);
-        assert!(fold_input(&[],&forged,&mut 100,0).is_err());
-        let wrong=expr(K::SymbolName(Box::new(expr(K::Literal(Literal::String("ready".into())),Primitive::Str))),Primitive::Str);
-        assert!(fold_input(&[],&wrong,&mut 100,0).is_err());
-        assert!(fold_input(&[],&name,&mut 1,0).is_err());
-        assert_eq!(fold_input(&[],&name,&mut 100,0).unwrap().kind,K::Literal(Literal::String("ready".into())));
+        let symbol = expr(
+            K::Literal(Literal::Symbol("ready".into())),
+            Primitive::Symbol,
+        );
+        let name = expr(K::SymbolName(Box::new(symbol.clone())), Primitive::Str);
+        assert_eq!(
+            fold_input(&[], &name, &mut 100, 0).unwrap().kind,
+            K::Literal(Literal::String("ready".into()))
+        );
+        let forged = expr(K::SymbolName(Box::new(symbol)), Primitive::Bool);
+        assert!(fold_input(&[], &forged, &mut 100, 0).is_err());
+        let wrong = expr(
+            K::SymbolName(Box::new(expr(
+                K::Literal(Literal::String("ready".into())),
+                Primitive::Str,
+            ))),
+            Primitive::Str,
+        );
+        assert!(fold_input(&[], &wrong, &mut 100, 0).is_err());
+        assert!(fold_input(&[], &name, &mut 1, 0).is_err());
+        assert_eq!(
+            fold_input(&[], &name, &mut 100, 0).unwrap().kind,
+            K::Literal(Literal::String("ready".into()))
+        );
     }
     use nir::program::SourceRange;
 
     #[test]
     fn bound_tuple_constants_require_metadata_and_preserve_annotations() {
         use nir::normal_forms::{Head, Kind, Parameter, Role};
-        let id=nir::DeclarationId {package:3,local:0};
-        let mut heads=vec![Head {declaration:id,role:Role::Tuple,requirements:vec![],
-            parameters:vec![Parameter {
-                declaration:nir::DeclarationId {package:3,local:1},
-                binding:LocalId {owner:0,index:0},kind:Kind::TypeList,
-                ty:Term::Nominal {declaration:nir::DeclarationId {package:3,local:2},
-                    arguments:vec![Term::Primitive(Primitive::Type)]},
+        let id = nir::DeclarationId {
+            package: 3,
+            local: 0,
+        };
+        let mut heads = vec![Head {
+            declaration: id,
+            role: Role::Tuple,
+            requirements: vec![],
+            parameters: vec![Parameter {
+                declaration: nir::DeclarationId {
+                    package: 3,
+                    local: 1,
+                },
+                binding: LocalId { owner: 0, index: 0 },
+                kind: Kind::TypeList,
+                ty: Term::Nominal {
+                    declaration: nir::DeclarationId {
+                        package: 3,
+                        local: 2,
+                    },
+                    arguments: vec![Term::Primitive(Primitive::Type)],
+                },
             }],
         }];
-        let tuple=|values:Vec<Expr>|Expr {
-            ty:Term::NormalForm {head:id,sort:Sort::Type,
-                arguments:vec![Term::TypeListValue(values.iter().map(|v|v.ty.clone()).collect())]},
-            kind:K::Tuple(values),source:SourceRange {start:0,end:0},
+        let tuple = |values: Vec<Expr>| Expr {
+            ty: Term::NormalForm {
+                head: id,
+                sort: Sort::Type,
+                arguments: vec![Term::TypeListValue(
+                    values.iter().map(|v| v.ty.clone()).collect(),
+                )],
+            },
+            kind: K::Tuple(values),
+            source: SourceRange { start: 0, end: 0 },
         };
-        let value=tuple(vec![tuple(vec![expr(K::Literal(Literal::Bool(true)),Primitive::Bool)]),tuple(vec![])]);
-        let expected=Term::TupleValue(vec![Term::TupleValue(vec![Term::Bool(true)]),Term::TupleValue(vec![])]);
-        assert_eq!(constant(&heads,&value,&mut 100,0).unwrap(),expected);
-        assert_eq!(fold_value_with_layouts(&heads,&value,&mut 100).unwrap(),value);
-        assert!(fold_value(&value,&mut 100).is_err());
-        assert!(constant(&heads,&value,&mut 1,0).is_err());
-        assert_eq!(constant(&heads,&value,&mut 100,0).unwrap(),expected);
-        let mut invalid=value.clone();
-        let K::Tuple(fields)=&mut invalid.kind else {unreachable!()};
+        let value = tuple(vec![
+            tuple(vec![expr(K::Literal(Literal::Bool(true)), Primitive::Bool)]),
+            tuple(vec![]),
+        ]);
+        let expected = Term::TupleValue(vec![
+            Term::TupleValue(vec![Term::Bool(true)]),
+            Term::TupleValue(vec![]),
+        ]);
+        assert_eq!(constant(&heads, &value, &mut 100, 0).unwrap(), expected);
+        assert_eq!(
+            fold_value_with_layouts(&heads, &value, &mut 100).unwrap(),
+            value
+        );
+        assert!(fold_value(&value, &mut 100).is_err());
+        assert!(constant(&heads, &value, &mut 1, 0).is_err());
+        assert_eq!(constant(&heads, &value, &mut 100, 0).unwrap(), expected);
+        let mut invalid = value.clone();
+        let K::Tuple(fields) = &mut invalid.kind else {
+            unreachable!()
+        };
         fields.pop();
-        assert!(constant(&heads,&invalid,&mut 100,0).unwrap_err().contains("arity"));
-        let K::Tuple(fields)=&mut invalid.kind else {unreachable!()};
-        fields.push(expr(K::Literal(Literal::Bool(false)),Primitive::Bool));
-        assert!(constant(&heads,&invalid,&mut 100,0).unwrap_err().contains("field type"));
-        heads[0].role=Role::Opaque;
-        assert!(constant(&heads,&value,&mut 100,0).unwrap_err().contains("trusted Tuple"));
-        let list=Expr {source:value.source,ty:heads[0].parameters[0].ty.clone(),
-            kind:K::TypeListValue(vec![Term::Primitive(Primitive::Bool)])};
-        assert_eq!(constant(&heads,&list,&mut 100,0).unwrap(),Term::TypeListValue(vec![Term::Primitive(Primitive::Bool)]));
-        assert!(constant(&[],&list,&mut 100,0).is_err());
-        assert!(constant(&heads,&list,&mut 1,0).is_err());
-        let mut wrong=list.clone();
-        wrong.kind=K::TypeListValue(vec![Term::Bool(true)]);
-        assert!(constant(&heads,&wrong,&mut 100,0).is_err());
-        wrong=list.clone();
-        wrong.ty=Term::Primitive(Primitive::Type);
-        assert!(constant(&heads,&wrong,&mut 100,0).is_err());
-        assert_eq!(fold_value_with_layouts(&heads,&list,&mut 100).unwrap(),list);
+        assert!(
+            constant(&heads, &invalid, &mut 100, 0)
+                .unwrap_err()
+                .contains("arity")
+        );
+        let K::Tuple(fields) = &mut invalid.kind else {
+            unreachable!()
+        };
+        fields.push(expr(K::Literal(Literal::Bool(false)), Primitive::Bool));
+        assert!(
+            constant(&heads, &invalid, &mut 100, 0)
+                .unwrap_err()
+                .contains("field type")
+        );
+        heads[0].role = Role::Opaque;
+        assert!(
+            constant(&heads, &value, &mut 100, 0)
+                .unwrap_err()
+                .contains("trusted Tuple")
+        );
+        let list = Expr {
+            source: value.source,
+            ty: heads[0].parameters[0].ty.clone(),
+            kind: K::TypeListValue(vec![Term::Primitive(Primitive::Bool)]),
+        };
+        assert_eq!(
+            constant(&heads, &list, &mut 100, 0).unwrap(),
+            Term::TypeListValue(vec![Term::Primitive(Primitive::Bool)])
+        );
+        assert!(constant(&[], &list, &mut 100, 0).is_err());
+        assert!(constant(&heads, &list, &mut 1, 0).is_err());
+        let mut wrong = list.clone();
+        wrong.kind = K::TypeListValue(vec![Term::Bool(true)]);
+        assert!(constant(&heads, &wrong, &mut 100, 0).is_err());
+        wrong = list.clone();
+        wrong.ty = Term::Primitive(Primitive::Type);
+        assert!(constant(&heads, &wrong, &mut 100, 0).is_err());
+        assert_eq!(
+            fold_value_with_layouts(&heads, &list, &mut 100).unwrap(),
+            list
+        );
     }
 
     fn expr(kind: K, ty: Primitive) -> Expr {
@@ -2298,9 +2850,11 @@ mod tests {
                     },
                     Primitive::Bool,
                 );
-                assert!(structural_boolean_dependencies(&expression, &mut 1000)
-                    .unwrap()
-                    .is_some());
+                assert!(
+                    structural_boolean_dependencies(&expression, &mut 1000)
+                        .unwrap()
+                        .is_some()
+                );
                 assert!(fold_value(&expression, &mut 1).is_err());
                 let mut fuel = 100_000;
                 let result = fold_value(&expression, &mut fuel).unwrap();
@@ -2314,9 +2868,11 @@ mod tests {
                     unreachable!()
                 };
                 **right = expr(K::Literal(Literal::UnsignedInteger(0)), Primitive::U8);
-                assert!(structural_boolean_dependencies(&wrong, &mut 1000)
-                    .unwrap()
-                    .is_none());
+                assert!(
+                    structural_boolean_dependencies(&wrong, &mut 1000)
+                        .unwrap()
+                        .is_none()
+                );
                 assert!(fold_value(&wrong, &mut 100_000).is_err());
             }
         }
@@ -2363,15 +2919,18 @@ mod tests {
         ]);
         for unavailable in [BTreeSet::from([left]), BTreeSet::from([right])] {
             let mut values = seed.clone();
-            collect_forwarded_locals(&[], &declaration, &mut values, &unavailable, &mut 10000).unwrap();
+            collect_forwarded_locals(&[], &declaration, &mut values, &unavailable, &mut 10000)
+                .unwrap();
             assert!(!values.contains_key(&alias));
         }
         let mut values = seed.clone();
         values.remove(&right);
-        collect_forwarded_locals(&[], &declaration, &mut values, &BTreeSet::new(), &mut 10000).unwrap();
+        collect_forwarded_locals(&[], &declaration, &mut values, &BTreeSet::new(), &mut 10000)
+            .unwrap();
         assert!(!values.contains_key(&alias));
         values.insert(right, seed[&right].clone());
-        collect_forwarded_locals(&[], &declaration, &mut values, &BTreeSet::new(), &mut 10000).unwrap();
+        collect_forwarded_locals(&[], &declaration, &mut values, &BTreeSet::new(), &mut 10000)
+            .unwrap();
         assert_eq!(values[&alias].kind, K::Literal(Literal::Bool(true)));
     }
 
@@ -2391,10 +2950,15 @@ mod tests {
                 pattern: Box::new(bind(b, false)),
                 bindings: vec![(b, a)],
             },
-            Pattern::Binding { binding: c, inner: Box::new(Pattern::Wild) },
+            Pattern::Binding {
+                binding: c,
+                inner: Box::new(Pattern::Wild),
+            },
         ]);
-        assert_eq!(boolean_pattern(&pattern, &mut 1000).unwrap(),
-            Some([Some(vec![a]), Some(vec![a])]));
+        assert_eq!(
+            boolean_pattern(&pattern, &mut 1000).unwrap(),
+            Some([Some(vec![a]), Some(vec![a])])
+        );
         assert!(boolean_pattern(&pattern, &mut 1).is_err());
         let swap = Pattern::Remap {
             pattern: Box::new(Pattern::Binding {
@@ -2405,23 +2969,47 @@ mod tests {
         };
         let outcomes = boolean_pattern(&swap, &mut 1000).unwrap().unwrap();
         assert!(outcomes[0].is_none());
-        assert_eq!(outcomes[1].as_ref().unwrap().iter().copied().collect::<BTreeSet<_>>(),
-            BTreeSet::from([a, b]));
+        assert_eq!(
+            outcomes[1]
+                .as_ref()
+                .unwrap()
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([a, b])
+        );
         let missing = Pattern::Remap {
             pattern: Box::new(bind(a, true)),
             bindings: vec![(a, b), (b, c)],
         };
-        assert!(boolean_pattern(&missing, &mut 1000).unwrap_err().contains("missing"));
-        for bindings in [vec![(a,c),(a,b)],vec![(a,c),(b,c)],vec![(a,b)]] {
+        assert!(
+            boolean_pattern(&missing, &mut 1000)
+                .unwrap_err()
+                .contains("missing")
+        );
+        for bindings in [vec![(a, c), (a, b)], vec![(a, c), (b, c)], vec![(a, b)]] {
             let invalid = Pattern::Remap {
-                pattern: Box::new(Pattern::Binding {binding:a,inner:Box::new(bind(b,true))}),
+                pattern: Box::new(Pattern::Binding {
+                    binding: a,
+                    inner: Box::new(bind(b, true)),
+                }),
                 bindings,
             };
-            assert!(boolean_pattern(&invalid, &mut 1000).unwrap_err().contains("remap"));
+            assert!(
+                boolean_pattern(&invalid, &mut 1000)
+                    .unwrap_err()
+                    .contains("remap")
+            );
         }
         let mut deep = Pattern::Wild;
-        for _ in 0..160 { deep = Pattern::Or(vec![deep]); }
-        assert!(boolean_pattern(&deep, &mut 10000).unwrap_err().contains("depth"));
+        for _ in 0..160 {
+            deep = Pattern::Or(vec![deep]);
+        }
+        assert!(
+            boolean_pattern(&deep, &mut 10000)
+                .unwrap_err()
+                .contains("depth")
+        );
     }
 
     #[test]
@@ -2478,9 +3066,11 @@ mod tests {
             structural_boolean_dependencies(&partial, &mut 1000).unwrap(),
             None
         );
-        assert!(fold_value(&partial, &mut 1000)
-            .unwrap_err()
-            .contains("not exhaustive"));
+        assert!(
+            fold_value(&partial, &mut 1000)
+                .unwrap_err()
+                .contains("not exhaustive")
+        );
         let mut exhaustive = partial;
         let K::Match { arms, .. } = &mut exhaustive.kind else {
             unreachable!()
@@ -2509,9 +3099,11 @@ mod tests {
                 Primitive::Bool,
             );
         }
-        assert!(fold_value(&deep, &mut 1_000_000)
-            .unwrap_err()
-            .contains("depth"));
+        assert!(
+            fold_value(&deep, &mut 1_000_000)
+                .unwrap_err()
+                .contains("depth")
+        );
     }
 
     #[test]
@@ -2757,11 +3349,20 @@ mod tests {
             assert!(!total_float_operation(&wrong));
             assert!(fold_value(&wrong, &mut 1000).is_err());
             let unavailable = expr(K::Local(LocalId { owner: 1, index: 0 }), primitive);
-            let product = expr(K::FloatBinary {
-                op: Op::Multiply, left: Box::new(value(0.0)), right: Box::new(unavailable),
-            }, primitive);
+            let product = expr(
+                K::FloatBinary {
+                    op: Op::Multiply,
+                    left: Box::new(value(0.0)),
+                    right: Box::new(unavailable),
+                },
+                primitive,
+            );
             assert!(fold_value(&product, &mut 1000).is_err());
-            let other = if primitive == Primitive::F32 {Primitive::F64} else {Primitive::F32};
+            let other = if primitive == Primitive::F32 {
+                Primitive::F64
+            } else {
+                Primitive::F32
+            };
             let mismatched = expr(K::FloatNegate(Box::new(value(0.0))), other);
             assert!(!total_float_operation(&mismatched));
             assert!(fold_value(&mismatched, &mut 1000).is_err());
@@ -2853,9 +3454,11 @@ mod tests {
         for _ in 0..160 {
             deep = expr(K::TakeBits(Box::new(deep)), Primitive::BitVec(0));
         }
-        assert!(fold_value(&deep, &mut 100000)
-            .unwrap_err()
-            .contains("depth"));
+        assert!(
+            fold_value(&deep, &mut 100000)
+                .unwrap_err()
+                .contains("depth")
+        );
         let zero = expr(K::BitConvert(Box::new(empty.clone())), Primitive::U8);
         assert_eq!(
             fold_value(&zero, &mut 1000).unwrap().kind,
@@ -2898,7 +3501,11 @@ mod tests {
             for _ in 0..160 {
                 deep = expr(K::Not(Box::new(deep)), ty);
             }
-            assert!(fold_value(&deep, &mut 100000).unwrap_err().contains("depth"));
+            assert!(
+                fold_value(&deep, &mut 100000)
+                    .unwrap_err()
+                    .contains("depth")
+            );
             let folded = fold_value(&inverse, &mut 10000).unwrap();
             let K::Literal(Literal::BitVec { words, .. }) = &folded.kind else {
                 panic!("not a bit constant")
@@ -2958,6 +3565,186 @@ mod tests {
                 assert!(fold_value(&expr(kind, ty), &mut 10000).is_err());
             }
         }
+    }
+
+    #[test]
+    fn staged_exact_float_arithmetic_preserves_precision_and_rejects_unbounded_alignment() {
+        use nir::program::FloatOp;
+        let literal = |text: &str| expr(K::Literal(Literal::Float(text.into())), Primitive::Float);
+        for (op, left, right, expected) in [
+            (FloatOp::Add, "0.1", "0.2", "0.3"),
+            (
+                FloatOp::Subtract,
+                "1.0000000000000000000000000000001",
+                "1.0",
+                "0.0000000000000000000000000000001",
+            ),
+            (
+                FloatOp::Multiply,
+                "1.0000000000000000000000000000001",
+                "10.0",
+                "10.000000000000000000000000000001",
+            ),
+        ] {
+            let expression = expr(
+                K::FloatBinary {
+                    op,
+                    left: Box::new(literal(left)),
+                    right: Box::new(literal(right)),
+                },
+                Primitive::Float,
+            );
+            assert!(
+                structural_boolean_dependencies(&expression, &mut 1000)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(fold_value(&expression, &mut 0).is_err());
+            let folded = fold_value(&expression, &mut 100_000).unwrap();
+            assert_eq!(
+                constant(&[], &folded, &mut 100_000, 0).unwrap(),
+                Term::Float(
+                    comptime_runtime::decimal::DecimalValue::parse_literal(
+                        expected,
+                        &mut comptime_runtime::Budget::default()
+                    )
+                    .unwrap()
+                )
+            );
+        }
+        for op in [FloatOp::Add, FloatOp::Divide] {
+            let expression = expr(
+                K::FloatBinary {
+                    op,
+                    left: Box::new(literal("1.0e9999999999999999999999999999999999999999")),
+                    right: Box::new(literal("1.0")),
+                },
+                Primitive::Float,
+            );
+            assert!(fold_value(&expression, &mut 100_000).is_err());
+        }
+        let failing = expr(
+            K::FloatBinary {
+                op: FloatOp::Add,
+                left: Box::new(literal("1.0e9999999999999999999999999999999999999999")),
+                right: Box::new(literal("1.0")),
+            },
+            Primitive::Float,
+        );
+        let zero_product = expr(
+            K::FloatBinary {
+                op: FloatOp::Multiply,
+                left: Box::new(literal("0.0")),
+                right: Box::new(failing),
+            },
+            Primitive::Float,
+        );
+        assert!(fold_value(&zero_product, &mut 100_000).is_err());
+        let malformed = expr(
+            K::FloatBinary {
+                op: FloatOp::Add,
+                left: Box::new(literal("1.0")),
+                right: Box::new(expr(
+                    K::Literal(Literal::Float64(1.0f64.to_bits())),
+                    Primitive::F64,
+                )),
+            },
+            Primitive::Float,
+        );
+        assert!(fold_value(&malformed, &mut 100_000).is_err());
+    }
+
+    #[test]
+    fn staged_exact_float_negation_checks_domains_precision_and_budget() {
+        for (positive, negative) in [
+            ("0.0", "-0.0"),
+            (
+                "1.0000000000000000000000000000001",
+                "-1.0000000000000000000000000000001",
+            ),
+            (
+                "1.0e9999999999999999999999999999999999999999",
+                "-1.0e9999999999999999999999999999999999999999",
+            ),
+        ] {
+            for (input, expected) in [(positive, negative), (negative, positive)] {
+                let value = expr(K::Literal(Literal::Float(input.into())), Primitive::Float);
+                let negative = expr(K::FloatNegate(Box::new(value.clone())), Primitive::Float);
+                assert!(fold_value(&negative, &mut 0).is_err());
+                let actual = fold_value(&negative, &mut 100_000).unwrap();
+                let term = constant(&[], &actual, &mut 100_000, 0).unwrap();
+                let expected = comptime_runtime::decimal::DecimalValue::parse_literal(
+                    expected,
+                    &mut comptime_runtime::Budget::default(),
+                )
+                .unwrap();
+                assert_eq!(term, Term::Float(expected));
+                let wrong = expr(K::FloatNegate(Box::new(value)), Primitive::F64);
+                assert!(fold_value(&wrong, &mut 100_000).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn staged_exact_float_comparisons_preserve_decimal_order_and_zero_equality() {
+        let cases = [
+            ("-1.0e9999999999999999999999999999999999999999", -3),
+            ("-0.000000000000000000000001", -2),
+            ("-0.0", 0),
+            ("0.0", 0),
+            ("1.0000000000000000000000000000001", 1),
+            ("10.000000000000000000000000000001e-1", 1),
+            ("1.0000000000000000000000000000002", 2),
+            ("1.0e9999999999999999999999999999999999999999", 3),
+        ];
+        for (a, rank_a) in cases {
+            for (b, rank_b) in cases {
+                for (index, expected) in [
+                    rank_a == rank_b,
+                    rank_a < rank_b,
+                    rank_a <= rank_b,
+                    rank_a > rank_b,
+                    rank_a >= rank_b,
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let left =
+                        Box::new(expr(K::Literal(Literal::Float(a.into())), Primitive::Float));
+                    let right =
+                        Box::new(expr(K::Literal(Literal::Float(b.into())), Primitive::Float));
+                    let kind = match index {
+                        0 => K::ScalarEqual(left, right),
+                        1 => K::ScalarLess(left, right),
+                        2 => K::ScalarLessEqual(left, right),
+                        3 => K::ScalarGreater(left, right),
+                        _ => K::ScalarGreaterEqual(left, right),
+                    };
+                    let comparison = expr(kind, Primitive::Bool);
+                    assert!(fold_value(&comparison, &mut 0).is_err());
+                    let folded = fold_value(&comparison, &mut 100_000).unwrap();
+                    assert_eq!(
+                        folded.kind,
+                        K::Literal(Literal::Bool(expected)),
+                        "{a} {b} op={index}"
+                    );
+                }
+            }
+        }
+        let malformed = expr(
+            K::ScalarEqual(
+                Box::new(expr(
+                    K::Literal(Literal::Float("1.0".into())),
+                    Primitive::F64,
+                )),
+                Box::new(expr(
+                    K::Literal(Literal::Float("1.0".into())),
+                    Primitive::F64,
+                )),
+            ),
+            Primitive::Bool,
+        );
+        assert!(fold_value(&malformed, &mut 1000).is_err());
     }
 
     #[test]
@@ -3106,9 +3893,11 @@ mod tests {
             unreachable!()
         };
         *name = "wrong".into();
-        assert!(fold_value(&invalid, &mut 100_000)
-            .unwrap_err()
-            .contains("identity"));
+        assert!(
+            fold_value(&invalid, &mut 100_000)
+                .unwrap_err()
+                .contains("identity")
+        );
         for length in [8, 48, 63] {
             let small = projection(length);
             assert!(fold_value(&small, &mut 1).is_err());
@@ -3186,8 +3975,14 @@ mod tests {
         );
         let seed = std::collections::BTreeMap::from([(input, record)]);
         let mut completed = seed.clone();
-        collect_forwarded_locals(&[], &declaration, &mut completed, &BTreeSet::new(), &mut 1000)
-            .unwrap();
+        collect_forwarded_locals(
+            &[],
+            &declaration,
+            &mut completed,
+            &BTreeSet::new(),
+            &mut 1000,
+        )
+        .unwrap();
         assert_eq!(completed.get(&alias), Some(&yes));
         for boundary in 0..4 {
             let mut invalid = declaration.clone();
@@ -3206,16 +4001,20 @@ mod tests {
                 2 => value.ty = Term::Primitive(Primitive::Bool),
                 _ => projection.ty = Term::Primitive(Primitive::Char),
             }
-            assert!(collect_forwarded_locals(&[],
-                &invalid,
-                &mut seed.clone(),
-                &BTreeSet::new(),
-                &mut 1000
-            )
-            .is_err());
+            assert!(
+                collect_forwarded_locals(
+                    &[],
+                    &invalid,
+                    &mut seed.clone(),
+                    &BTreeSet::new(),
+                    &mut 1000
+                )
+                .is_err()
+            );
         }
         let mut invalidated = seed.clone();
-        collect_forwarded_locals(&[],
+        collect_forwarded_locals(
+            &[],
             &declaration,
             &mut invalidated,
             &BTreeSet::from([input]),
@@ -3224,54 +4023,113 @@ mod tests {
         .unwrap();
         assert!(!invalidated.contains_key(&alias));
         let mut runtime = std::collections::BTreeMap::new();
-        collect_forwarded_locals(&[], &declaration, &mut runtime, &BTreeSet::new(), &mut 1000).unwrap();
+        collect_forwarded_locals(&[], &declaration, &mut runtime, &BTreeSet::new(), &mut 1000)
+            .unwrap();
         assert!(runtime.is_empty());
-        assert!(collect_forwarded_locals(&[],
-            &declaration,
-            &mut seed.clone(),
-            &BTreeSet::new(),
-            &mut 0
-        )
-        .is_err());
+        assert!(
+            collect_forwarded_locals(
+                &[],
+                &declaration,
+                &mut seed.clone(),
+                &BTreeSet::new(),
+                &mut 0
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn nominal_staged_fields_check_identity_types_and_invalidations() {
         use nir::DeclarationId;
-        let owner=DeclarationId {package:1,local:10};
-        let input=LocalId {owner:1,index:0};
-        let alias=LocalId {owner:1,index:1};
-        let yes=expr(K::Literal(Literal::Bool(true)),Primitive::Bool);
-        let record=Expr {source:yes.source,ty:Term::Nominal {declaration:owner,arguments:vec![]},
-            kind:K::Record {declaration:owner,fields:vec![yes.clone()]}};
-        let projection=Expr {source:yes.source,ty:yes.ty.clone(),kind:K::Field {
-            value:Box::new(record.clone()),declaration:owner,index:0,
-        }};
-        assert_eq!(fold_value(&projection,&mut 1000).unwrap(),yes);
-        assert!(fold_value(&projection,&mut 1).is_err());
-        assert_eq!(fold_value(&projection,&mut 1000).unwrap(),yes);
+        let owner = DeclarationId {
+            package: 1,
+            local: 10,
+        };
+        let input = LocalId { owner: 1, index: 0 };
+        let alias = LocalId { owner: 1, index: 1 };
+        let yes = expr(K::Literal(Literal::Bool(true)), Primitive::Bool);
+        let record = Expr {
+            source: yes.source,
+            ty: Term::Nominal {
+                declaration: owner,
+                arguments: vec![],
+            },
+            kind: K::Record {
+                declaration: owner,
+                fields: vec![yes.clone()],
+            },
+        };
+        let projection = Expr {
+            source: yes.source,
+            ty: yes.ty.clone(),
+            kind: K::Field {
+                value: Box::new(record.clone()),
+                declaration: owner,
+                index: 0,
+            },
+        };
+        assert_eq!(fold_value(&projection, &mut 1000).unwrap(), yes);
+        assert!(fold_value(&projection, &mut 1).is_err());
+        assert_eq!(fold_value(&projection, &mut 1000).unwrap(), yes);
         for boundary in 0..5 {
-            let mut invalid=projection.clone();
-            let K::Field {value,declaration,index}=&mut invalid.kind else {unreachable!()};
+            let mut invalid = projection.clone();
+            let K::Field {
+                value,
+                declaration,
+                index,
+            } = &mut invalid.kind
+            else {
+                unreachable!()
+            };
             match boundary {
-                0=>declaration.local+=1,
-                1=>*index=1,
-                2=>invalid.ty=Term::Primitive(Primitive::Char),
-                3=>value.ty=Term::Nominal {declaration:DeclarationId {package:2,local:10},arguments:vec![]},
-                _=>value.kind=K::Variant {declaration:owner,index:0,fields:vec![yes.clone()]},
+                0 => declaration.local += 1,
+                1 => *index = 1,
+                2 => invalid.ty = Term::Primitive(Primitive::Char),
+                3 => {
+                    value.ty = Term::Nominal {
+                        declaration: DeclarationId {
+                            package: 2,
+                            local: 10,
+                        },
+                        arguments: vec![],
+                    }
+                }
+                _ => {
+                    value.kind = K::Variant {
+                        declaration: owner,
+                        index: 0,
+                        fields: vec![yes.clone()],
+                    }
+                }
             }
-            assert!(fold_value(&invalid,&mut 1000).is_err());
+            assert!(fold_value(&invalid, &mut 1000).is_err());
         }
-        let mut selected=projection;
-        let K::Field {value,..}=&mut selected.kind else {unreachable!()};
-        value.kind=K::Local(input);
-        let declaration=expr(K::Let {binding:alias,value:Box::new(selected)},Primitive::Void);
-        let seed=std::collections::BTreeMap::from([(input,record)]);
-        let mut values=seed.clone();
-        collect_forwarded_locals(&[],&declaration,&mut values,&BTreeSet::new(),&mut 1000).unwrap();
-        assert_eq!(values.get(&alias),Some(&yes));
-        let mut invalidated=seed;
-        collect_forwarded_locals(&[],&declaration,&mut invalidated,&BTreeSet::from([input]),&mut 1000).unwrap();
+        let mut selected = projection;
+        let K::Field { value, .. } = &mut selected.kind else {
+            unreachable!()
+        };
+        value.kind = K::Local(input);
+        let declaration = expr(
+            K::Let {
+                binding: alias,
+                value: Box::new(selected),
+            },
+            Primitive::Void,
+        );
+        let seed = std::collections::BTreeMap::from([(input, record)]);
+        let mut values = seed.clone();
+        collect_forwarded_locals(&[], &declaration, &mut values, &BTreeSet::new(), &mut 1000)
+            .unwrap();
+        assert_eq!(values.get(&alias), Some(&yes));
+        let mut invalidated = seed;
+        collect_forwarded_locals(
+            &[],
+            &declaration,
+            &mut invalidated,
+            &BTreeSet::from([input]),
+            &mut 1000,
+        )
+        .unwrap();
         assert!(!invalidated.contains_key(&alias));
     }
 
@@ -3319,8 +4177,15 @@ mod tests {
                 _ => names[1] = "first".into(),
             }
             assert!(
-                bind_staged_pattern(&[], &invalid, &record, &mut Default::default(), &mut 1000, 0)
-                    .is_err()
+                bind_staged_pattern(
+                    &[],
+                    &invalid,
+                    &record,
+                    &mut Default::default(),
+                    &mut 1000,
+                    0
+                )
+                .is_err()
             );
         }
         let mut wrong = record.clone();
@@ -3329,10 +4194,12 @@ mod tests {
         };
         fields[1] = expr(K::Literal(Literal::Char('x')), Primitive::Char);
         assert!(
-            bind_staged_pattern(&[], &pattern, &wrong, &mut Default::default(), &mut 1000, 0).is_err()
+            bind_staged_pattern(&[], &pattern, &wrong, &mut Default::default(), &mut 1000, 0)
+                .is_err()
         );
         assert!(
-            bind_staged_pattern(&[], &pattern, &record, &mut Default::default(), &mut 0, 0).is_err()
+            bind_staged_pattern(&[], &pattern, &record, &mut Default::default(), &mut 0, 0)
+                .is_err()
         );
     }
 
@@ -3340,16 +4207,23 @@ mod tests {
     fn staged_records_validate_field_types_labels_and_budget() {
         let flag = expr(K::Literal(Literal::Bool(true)), Primitive::Bool);
         let mut record = Expr {
-            kind: K::AnonymousRecord { fields: vec![flag.clone()] },
+            kind: K::AnonymousRecord {
+                fields: vec![flag.clone()],
+            },
             ty: Term::Record(vec![("flag".into(), flag.ty.clone())]),
             source: flag.source,
         };
-        assert_eq!(constant(&[], &record, &mut 100, 0).unwrap(), Term::RecordValue(vec![("flag".into(), Term::Bool(true))]));
+        assert_eq!(
+            constant(&[], &record, &mut 100, 0).unwrap(),
+            Term::RecordValue(vec![("flag".into(), Term::Bool(true))])
+        );
         assert!(constant(&[], &record, &mut 2, 0).is_err());
         record.ty = Term::Record(vec![("flag".into(), Term::Primitive(Primitive::U8))]);
         assert!(constant(&[], &record, &mut 100, 0).is_err());
         record.ty = Term::Record(vec![("flag".into(), flag.ty.clone()); 2]);
-        record.kind = K::AnonymousRecord { fields: vec![flag.clone(), flag] };
+        record.kind = K::AnonymousRecord {
+            fields: vec![flag.clone(), flag],
+        };
         assert!(constant(&[], &record, &mut 100, 0).is_err());
     }
 
@@ -3504,7 +4378,8 @@ mod tests {
             K::Literal(Literal::Bool(false))
         );
         assert!(
-            fold_input(&[],
+            fold_input(
+                &[],
                 &block(vec![local.clone(), binding.clone()], flag.clone()),
                 &mut 1000,
                 0
@@ -3513,7 +4388,8 @@ mod tests {
             "use before initialization must fail"
         );
         assert!(
-            fold_input(&[],
+            fold_input(
+                &[],
                 &block(vec![binding.clone(), binding.clone()], local.clone()),
                 &mut 1000,
                 0
@@ -3523,7 +4399,8 @@ mod tests {
         );
         let wrong = expr(K::Local(LocalId { owner: 1, index: 7 }), Primitive::U8);
         assert!(
-            fold_input(&[],
+            fold_input(
+                &[],
                 &block(vec![binding.clone(), wrong], flag.clone()),
                 &mut 1000,
                 0
@@ -3560,21 +4437,48 @@ mod tests {
     #[test]
     fn staged_machine_division_uses_truncation_and_rejects_zero_and_overflow() {
         use nir::program::IntegerOp as Op;
-        for (ty, min) in [(Primitive::I8, i8::MIN as i128), (Primitive::I16, i16::MIN as i128),
-            (Primitive::I32, i32::MIN as i128), (Primitive::I64, i64::MIN as i128), (Primitive::I128, i128::MIN)] {
-            let operation = |op, a, b| expr(K::IntegerBinary {op,
-                left:Box::new(expr(K::Literal(Literal::SignedInteger(a)),ty)),
-                right:Box::new(expr(K::Literal(Literal::SignedInteger(b)),ty)),
-            },ty);
-            for op in [Op::DivideTrunc,Op::RemainderTrunc] {
-                for (a,b) in [(-7,3),(7,-3),(-7,-3),(7,3)] {
-                    assert_eq!(fold_input(&[], &operation(op,a,b),&mut 1000,0).unwrap().kind,
-                        K::Literal(Literal::SignedInteger(if op==Op::DivideTrunc {a/b} else {a%b})));
+        for (ty, min) in [
+            (Primitive::I8, i8::MIN as i128),
+            (Primitive::I16, i16::MIN as i128),
+            (Primitive::I32, i32::MIN as i128),
+            (Primitive::I64, i64::MIN as i128),
+            (Primitive::I128, i128::MIN),
+        ] {
+            let operation = |op, a, b| {
+                expr(
+                    K::IntegerBinary {
+                        op,
+                        left: Box::new(expr(K::Literal(Literal::SignedInteger(a)), ty)),
+                        right: Box::new(expr(K::Literal(Literal::SignedInteger(b)), ty)),
+                    },
+                    ty,
+                )
+            };
+            for op in [Op::DivideTrunc, Op::RemainderTrunc] {
+                for (a, b) in [(-7, 3), (7, -3), (-7, -3), (7, 3)] {
+                    assert_eq!(
+                        fold_input(&[], &operation(op, a, b), &mut 1000, 0)
+                            .unwrap()
+                            .kind,
+                        K::Literal(Literal::SignedInteger(if op == Op::DivideTrunc {
+                            a / b
+                        } else {
+                            a % b
+                        }))
+                    );
                 }
-                assert!(fold_input(&[], &operation(op,min,-1),&mut 1000,0).unwrap_err().contains("overflow"));
-                assert!(fold_input(&[], &operation(op,1,0),&mut 1000,0).unwrap_err().contains("division by zero"));
-                assert!(fold_input(&[], &operation(op,6,3),&mut 0,0).is_err());
-                assert!(fold_input(&[], &operation(op,6,3),&mut 1000,0).is_ok());
+                assert!(
+                    fold_input(&[], &operation(op, min, -1), &mut 1000, 0)
+                        .unwrap_err()
+                        .contains("overflow")
+                );
+                assert!(
+                    fold_input(&[], &operation(op, 1, 0), &mut 1000, 0)
+                        .unwrap_err()
+                        .contains("division by zero")
+                );
+                assert!(fold_input(&[], &operation(op, 6, 3), &mut 0, 0).is_err());
+                assert!(fold_input(&[], &operation(op, 6, 3), &mut 1000, 0).is_ok());
             }
         }
     }
@@ -3616,9 +4520,17 @@ mod tests {
                         .contains("overflow")
                 );
             }
-            for op in [Op::DivideTrunc,Op::RemainderTrunc] {
-                assert_eq!(fold_input(&[], &operation(op,max,3),&mut 1000,0).unwrap().kind,
-                    K::Literal(Literal::UnsignedInteger(if op==Op::DivideTrunc {max/3} else {max%3})));
+            for op in [Op::DivideTrunc, Op::RemainderTrunc] {
+                assert_eq!(
+                    fold_input(&[], &operation(op, max, 3), &mut 1000, 0)
+                        .unwrap()
+                        .kind,
+                    K::Literal(Literal::UnsignedInteger(if op == Op::DivideTrunc {
+                        max / 3
+                    } else {
+                        max % 3
+                    }))
+                );
             }
             assert!(
                 fold_input(&[], &operation(Op::DivideTrunc, 1, 0), &mut 1000, 0)
@@ -3692,7 +4604,8 @@ mod tests {
             assert_eq!(value.kind, K::Literal(Literal::Bool(expected)));
         }
         assert!(
-            fold_input(&[],
+            fold_input(
+                &[],
                 &expr(
                     K::And(Box::new(yes.clone()), Box::new(unknown)),
                     Primitive::Bool
@@ -3718,7 +4631,8 @@ mod tests {
             Primitive::Type,
         );
         assert!(
-            fold_input(&[],
+            fold_input(
+                &[],
                 &expr(
                     K::ScalarEqual(Box::new(ty.clone()), Box::new(ty)),
                     Primitive::Bool
@@ -3732,27 +4646,44 @@ mod tests {
 
     #[test]
     fn floating_staged_constants_validate_width_and_preserve_nan_bits() {
-        let value=expr(K::Literal(Literal::Float32(0x7fc00042)),Primitive::F32);
-        assert_eq!(constant(&[], &value,&mut 100,0).unwrap(),Term::Float32(0x7fc00042));
-        assert!(constant(&[], &value,&mut 0,0).is_err());
-        let wrong=expr(value.kind.clone(),Primitive::F64);
-        assert!(constant(&[], &wrong,&mut 100,0).is_err());
-        let value=expr(K::Literal(Literal::Float64(0x8000000000000000)),Primitive::F64);
-        assert_eq!(constant(&[], &value,&mut 100,0).unwrap(),Term::Float64(1<<63));
-        assert!(constant(&[], &expr(value.kind,Primitive::F32),&mut 100,0).is_err());
+        let value = expr(K::Literal(Literal::Float32(0x7fc00042)), Primitive::F32);
+        assert_eq!(
+            constant(&[], &value, &mut 100, 0).unwrap(),
+            Term::Float32(0x7fc00042)
+        );
+        assert!(constant(&[], &value, &mut 0, 0).is_err());
+        let wrong = expr(value.kind.clone(), Primitive::F64);
+        assert!(constant(&[], &wrong, &mut 100, 0).is_err());
+        let value = expr(
+            K::Literal(Literal::Float64(0x8000000000000000)),
+            Primitive::F64,
+        );
+        assert_eq!(
+            constant(&[], &value, &mut 100, 0).unwrap(),
+            Term::Float64(1 << 63)
+        );
+        assert!(constant(&[], &expr(value.kind, Primitive::F32), &mut 100, 0).is_err());
     }
 
     #[test]
     fn materialized_signed_integer_inputs_preserve_sign_and_budget() {
         for spelling in ["-0x4", "-4", "-0b100"] {
-            let value = expr(K::Literal(Literal::Integer(spelling.into())), Primitive::Integer);
-            assert_eq!(constant(&[], &value, &mut 1000, 0).unwrap(),
-                Term::Integer(comptime_runtime::Integer::from_i128(-4)));
+            let value = expr(
+                K::Literal(Literal::Integer(spelling.into())),
+                Primitive::Integer,
+            );
+            assert_eq!(
+                constant(&[], &value, &mut 1000, 0).unwrap(),
+                Term::Integer(comptime_runtime::Integer::from_i128(-4))
+            );
             assert!(constant(&[], &value, &mut 0, 0).is_err());
             assert!(constant(&[], &value, &mut 1000, 0).is_ok());
         }
         for spelling in ["--0x4", "-", "-0x", "+4"] {
-            let value = expr(K::Literal(Literal::Integer(spelling.into())), Primitive::Integer);
+            let value = expr(
+                K::Literal(Literal::Integer(spelling.into())),
+                Primitive::Integer,
+            );
             assert!(constant(&[], &value, &mut 1000, 0).is_err(), "{spelling}");
         }
     }
@@ -3805,7 +4736,8 @@ mod tests {
         assert!(constant(&[], &unknown, &mut 100, 0).is_err());
         assert!(constant(&[], &integer, &mut 100, 128).is_err());
         assert!(
-            constant(&[],
+            constant(
+                &[],
                 &expr(K::Literal(Literal::Bool(true)), Primitive::Bool),
                 &mut 100,
                 0

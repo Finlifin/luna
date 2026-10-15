@@ -1536,87 +1536,157 @@ fn predicate_entailment_uses_composed_bounds_and_short_circuit_refutation() {
 
 #[test]
 fn retained_disjunctions_require_current_values_and_both_join_paths() {
-    use elaboration::verification::{Condition as Q, Comparison as C};
-    let mut limits=Limits::default();
-    let mut root=Facts::default();
-    let (a,_)=variable(&mut root,0,0,1,&mut limits);
-    let (b,_)=variable(&mut root,1,0,1,&mut limits);
-    let bit=|value| Q::Compare {value,relation:C::Equal,constant:Integer::from_u128(1)};
-    let condition=Q::Or(Box::new(bit(a)),Box::new(bit(b)));
-    let mut known=root.fork(&mut limits).unwrap();
-    known.assume(&condition,true,&mut limits).unwrap();
-    let proof=known.prove_condition(&condition,true,&mut limits).unwrap();
-    proof.replay(&known,&mut limits).unwrap();
-    assert!(known.prove_condition(&bit(a),true,&mut limits).is_err());
-    assert!(known.prove_condition(&bit(b),true,&mut limits).is_err());
-    assert!(proof.replay(&root,&mut limits).is_err());
-    let common=known.join(&known.fork(&mut limits).unwrap(),&mut limits).unwrap();
-    common.prove_condition(&condition,true,&mut limits).unwrap();
-    let partial=known.join(&root,&mut limits).unwrap();
-    assert!(partial.prove_condition(&condition,true,&mut limits).is_err());
-    let mut contradicted=known.fork(&mut limits).unwrap();
-    contradicted.assume(&condition,false,&mut limits).unwrap();
+    use elaboration::verification::{Comparison as C, Condition as Q};
+    let mut limits = Limits::default();
+    let mut root = Facts::default();
+    let (a, _) = variable(&mut root, 0, 0, 1, &mut limits);
+    let (b, _) = variable(&mut root, 1, 0, 1, &mut limits);
+    let bit = |value| Q::Compare {
+        value,
+        relation: C::Equal,
+        constant: Integer::from_u128(1),
+    };
+    let condition = Q::Or(Box::new(bit(a)), Box::new(bit(b)));
+    let mut known = root.fork(&mut limits).unwrap();
+    known.assume(&condition, true, &mut limits).unwrap();
+    let proof = known
+        .prove_condition(&condition, true, &mut limits)
+        .unwrap();
+    proof.replay(&known, &mut limits).unwrap();
+    assert!(known.prove_condition(&bit(a), true, &mut limits).is_err());
+    assert!(known.prove_condition(&bit(b), true, &mut limits).is_err());
+    assert!(proof.replay(&root, &mut limits).is_err());
+    let common = known
+        .join(&known.fork(&mut limits).unwrap(), &mut limits)
+        .unwrap();
+    common
+        .prove_condition(&condition, true, &mut limits)
+        .unwrap();
+    let partial = known.join(&root, &mut limits).unwrap();
+    assert!(
+        partial
+            .prove_condition(&condition, true, &mut limits)
+            .is_err()
+    );
+    let mut contradicted = known.fork(&mut limits).unwrap();
+    contradicted.assume(&condition, false, &mut limits).unwrap();
     assert!(!contradicted.is_reachable());
-    known.assign(a.place,interval(0,0)).unwrap();
-    assert!(proof.replay(&known,&mut limits).is_err());
-    assert!(known.prove_condition(&condition,true,&mut limits).is_err());
-    let replaced=Q::Or(Box::new(bit(known.value(a.place).unwrap())),Box::new(bit(b)));
-    assert!(known.prove_condition(&replaced,true,&mut limits).is_err());
-    let mut exhausted=Limits::default(); exhausted.arithmetic.steps=0;
-    let before=root.to_string();
-    assert!(root.assume(&condition,true,&mut exhausted).is_err());
-    assert_eq!(root.to_string(),before);
-    root.assume(&condition,true,&mut limits).unwrap();
+    known.assign(a.place, interval(0, 0)).unwrap();
+    assert!(proof.replay(&known, &mut limits).is_err());
+    assert!(
+        known
+            .prove_condition(&condition, true, &mut limits)
+            .is_err()
+    );
+    let replaced = Q::Or(
+        Box::new(bit(known.value(a.place).unwrap())),
+        Box::new(bit(b)),
+    );
+    assert!(known.prove_condition(&replaced, true, &mut limits).is_err());
+    let mut exhausted = Limits::default();
+    exhausted.arithmetic.steps = 0;
+    let before = root.to_string();
+    assert!(root.assume(&condition, true, &mut exhausted).is_err());
+    assert_eq!(root.to_string(), before);
+    root.assume(&condition, true, &mut limits).unwrap();
     assert!(root.to_string().contains("(conditions (established"));
-    root.prove_condition(&condition,true,&mut limits).unwrap();
+    root.prove_condition(&condition, true, &mut limits).unwrap();
 }
 
 #[test]
 fn retained_disjunctions_follow_fresh_merge_versions_and_operand_permutations() {
-    use elaboration::verification::{Condition as Q, Comparison as C};
-    let mut limits=Limits::default();
-    let mut root=Facts::default();
-    let (a,_)=variable(&mut root,0,0,1,&mut limits);
-    let (b,_)=variable(&mut root,1,0,1,&mut limits);
-    let bit=|value| Q::Compare {value,relation:C::Equal,constant:Integer::from_u128(1)};
-    let mut left=root.fork(&mut limits).unwrap();
-    let mut right=root.fork(&mut limits).unwrap();
-    let la=left.assign(a.place,interval(0,1)).unwrap();
-    let lb=left.assign(b.place,interval(0,1)).unwrap();
-    let ra=right.assign(a.place,interval(0,1)).unwrap();
-    let rb=right.assign(b.place,interval(0,1)).unwrap();
-    left.assume(&Q::Or(Box::new(bit(la)),Box::new(bit(lb))),true,&mut limits).unwrap();
-    right.assume(&Q::Or(Box::new(bit(rb)),Box::new(bit(ra))),true,&mut limits).unwrap();
-    let merged=left.join(&right,&mut limits).unwrap();
-    let condition=Q::Or(Box::new(bit(merged.value(a.place).unwrap())),Box::new(bit(merged.value(b.place).unwrap())));
-    let proof=merged.prove_condition(&condition,true,&mut limits).unwrap();
-    proof.replay(&merged,&mut limits).unwrap();
-    assert!(proof.replay(&left,&mut limits).is_err());
-    assert!(merged.prove_condition(&Q::And(Box::new(bit(merged.value(a.place).unwrap())),Box::new(bit(merged.value(b.place).unwrap()))),true,&mut limits).is_err());
+    use elaboration::verification::{Comparison as C, Condition as Q};
+    let mut limits = Limits::default();
+    let mut root = Facts::default();
+    let (a, _) = variable(&mut root, 0, 0, 1, &mut limits);
+    let (b, _) = variable(&mut root, 1, 0, 1, &mut limits);
+    let bit = |value| Q::Compare {
+        value,
+        relation: C::Equal,
+        constant: Integer::from_u128(1),
+    };
+    let mut left = root.fork(&mut limits).unwrap();
+    let mut right = root.fork(&mut limits).unwrap();
+    let la = left.assign(a.place, interval(0, 1)).unwrap();
+    let lb = left.assign(b.place, interval(0, 1)).unwrap();
+    let ra = right.assign(a.place, interval(0, 1)).unwrap();
+    let rb = right.assign(b.place, interval(0, 1)).unwrap();
+    left.assume(
+        &Q::Or(Box::new(bit(la)), Box::new(bit(lb))),
+        true,
+        &mut limits,
+    )
+    .unwrap();
+    right
+        .assume(
+            &Q::Or(Box::new(bit(rb)), Box::new(bit(ra))),
+            true,
+            &mut limits,
+        )
+        .unwrap();
+    let merged = left.join(&right, &mut limits).unwrap();
+    let condition = Q::Or(
+        Box::new(bit(merged.value(a.place).unwrap())),
+        Box::new(bit(merged.value(b.place).unwrap())),
+    );
+    let proof = merged
+        .prove_condition(&condition, true, &mut limits)
+        .unwrap();
+    proof.replay(&merged, &mut limits).unwrap();
+    assert!(proof.replay(&left, &mut limits).is_err());
+    assert!(
+        merged
+            .prove_condition(
+                &Q::And(
+                    Box::new(bit(merged.value(a.place).unwrap())),
+                    Box::new(bit(merged.value(b.place).unwrap()))
+                ),
+                true,
+                &mut limits
+            )
+            .is_err()
+    );
 }
 
 #[test]
 fn retained_boolean_matching_is_associative_bounded_and_operator_sensitive() {
-    use elaboration::verification::{Condition as Q, Comparison as C};
-    let mut limits=Limits::default();
-    let mut facts=Facts::default();
-    let (a,_)=variable(&mut facts,0,0,1,&mut limits);
-    let (b,_)=variable(&mut facts,1,0,1,&mut limits);
-    let (c,_)=variable(&mut facts,2,0,1,&mut limits);
-    let bit=|value| Q::Compare {value,relation:C::Equal,constant:Integer::from_u128(1)};
-    let either=|a,b| Q::Or(Box::new(a),Box::new(b));
-    let premise=either(bit(a),either(bit(b),bit(c)));
-    facts.assume(&premise,true,&mut limits).unwrap();
-    let regrouped=either(either(bit(c),bit(a)),bit(b));
-    let proof=facts.prove_condition(&regrouped,true,&mut limits).unwrap();
-    proof.replay(&facts,&mut limits).unwrap();
-    let stronger=either(bit(a),Q::And(Box::new(bit(b)),Box::new(bit(c))));
-    assert!(facts.prove_condition(&stronger,true,&mut limits).is_err());
-    assert!(facts.prove_condition(&either(bit(a),bit(b)),true,&mut limits).is_err());
-    let mut tiny=Limits::default();tiny.arithmetic.steps=2;
-    assert!(facts.prove_condition(&regrouped,true,&mut tiny).is_err());
-    facts.prove_condition(&regrouped,true,&mut limits).unwrap();
-    let both=|a,b| Q::And(Box::new(a),Box::new(b));
-    facts.assume(&both(bit(a),both(bit(b),bit(c))),false,&mut limits).unwrap();
-    facts.prove_condition(&both(both(bit(c),bit(a)),bit(b)),false,&mut limits).unwrap();
+    use elaboration::verification::{Comparison as C, Condition as Q};
+    let mut limits = Limits::default();
+    let mut facts = Facts::default();
+    let (a, _) = variable(&mut facts, 0, 0, 1, &mut limits);
+    let (b, _) = variable(&mut facts, 1, 0, 1, &mut limits);
+    let (c, _) = variable(&mut facts, 2, 0, 1, &mut limits);
+    let bit = |value| Q::Compare {
+        value,
+        relation: C::Equal,
+        constant: Integer::from_u128(1),
+    };
+    let either = |a, b| Q::Or(Box::new(a), Box::new(b));
+    let premise = either(bit(a), either(bit(b), bit(c)));
+    facts.assume(&premise, true, &mut limits).unwrap();
+    let regrouped = either(either(bit(c), bit(a)), bit(b));
+    let proof = facts
+        .prove_condition(&regrouped, true, &mut limits)
+        .unwrap();
+    proof.replay(&facts, &mut limits).unwrap();
+    let stronger = either(bit(a), Q::And(Box::new(bit(b)), Box::new(bit(c))));
+    assert!(facts.prove_condition(&stronger, true, &mut limits).is_err());
+    assert!(
+        facts
+            .prove_condition(&either(bit(a), bit(b)), true, &mut limits)
+            .is_err()
+    );
+    let mut tiny = Limits::default();
+    tiny.arithmetic.steps = 2;
+    assert!(facts.prove_condition(&regrouped, true, &mut tiny).is_err());
+    facts
+        .prove_condition(&regrouped, true, &mut limits)
+        .unwrap();
+    let both = |a, b| Q::And(Box::new(a), Box::new(b));
+    facts
+        .assume(&both(bit(a), both(bit(b), bit(c))), false, &mut limits)
+        .unwrap();
+    facts
+        .prove_condition(&both(both(bit(c), bit(a)), bit(b)), false, &mut limits)
+        .unwrap();
 }

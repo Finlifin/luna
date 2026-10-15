@@ -56,7 +56,11 @@ impl Facts {
         limits: &mut Limits,
     ) -> Result<(), Unknown> {
         if let Some(actual) = self.known_condition(condition, limits)? {
-            return if actual == truth { Ok(()) } else { Err(Unknown::InsufficientBounds) };
+            return if actual == truth {
+                Ok(())
+            } else {
+                Err(Unknown::InsufficientBounds)
+            };
         }
         if let Some(actual) = condition.truth_by_enclosure(self, limits, 0)? {
             return if actual == truth {

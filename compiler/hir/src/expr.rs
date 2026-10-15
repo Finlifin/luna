@@ -94,7 +94,10 @@ pub enum ExprKind<'hir> {
     /// Explicit permission to retain the computation for instantiation.
     /// Does not relax ordinary definition-side operation checks.
     Defer(&'hir Expr<'hir>),
-    RefinedType { requirement: &'hir Expr<'hir>, base: &'hir Expr<'hir> },
+    RefinedType {
+        requirement: &'hir Expr<'hir>,
+        base: &'hir Expr<'hir>,
+    },
     RefinementSubject,
     Return(Option<&'hir Expr<'hir>>),
     OptionPropagate(&'hir Expr<'hir>),

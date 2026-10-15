@@ -13,7 +13,9 @@ impl Checker<'_, '_> {
         partial: Option<&crate::calls::CallableContext>,
     ) -> Result<n::Expr, Error> {
         if let Some(value) = self.associated_projection(value, field.name.as_str(), expr.span)? {
-            if let Some(expected) = expected { self.require(&value.ty, expected, expr.span)?; }
+            if let Some(expected) = expected {
+                self.require(&value.ty, expected, expr.span)?;
+            }
             return Ok(value);
         }
         let (ty, kind) = {
@@ -54,11 +56,15 @@ impl Checker<'_, '_> {
                 }
                 return self.callable_value_view(method, expected, expr.span);
             }
-            if let Some((ty,index)) = self.variant_target(expr,expected)? {
-                let Term::Nominal {declaration,..} = &ty else {unreachable!()};
+            if let Some((ty, index)) = self.variant_target(expr, expected)? {
+                let Term::Nominal { declaration, .. } = &ty else {
+                    unreachable!()
+                };
                 let name = self.enums[declaration].variants[index].name.clone();
-                let variant = self.enum_variant(&ty,&name,expr.span)?;
-                if let Some(expected) = expected {self.require(&variant.ty,expected,expr.span)?;}
+                let variant = self.enum_variant(&ty, &name, expr.span)?;
+                if let Some(expected) = expected {
+                    self.require(&variant.ty, expected, expr.span)?;
+                }
                 return Ok(variant);
             }
             if self.is_type_head(value) {
@@ -150,8 +156,12 @@ impl Checker<'_, '_> {
                 .iter()
                 .position(|(name, _)| name == field.name.as_str())
                 .ok_or_else(|| error(field.span, format!("unknown struct field {}", field.name)))?;
-            let ty = self.instantiate_input_types(&def.fields[index].1,
-                &def.type_parameters, arguments, expr.span)?;
+            let ty = self.instantiate_input_types(
+                &def.fields[index].1,
+                &def.type_parameters,
+                arguments,
+                expr.span,
+            )?;
             let ty = self.callable_input_view(&ty, expr.span)?;
             let declaration = *declaration;
             if pointer_projection {
@@ -196,11 +206,19 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         span: rustc_span::Span,
     ) -> Result<n::Expr, Error> {
-        let Some(expected) = expected else { return Ok(value); };
+        let Some(expected) = expected else {
+            return Ok(value);
+        };
         for _ in 0..128 {
-            if self.require(&value.ty, expected, span).is_ok() { return Ok(value); }
-            let Term::Pointer(pointee) = &value.ty else { break; };
-            if !self.intrinsic_pointer_input(pointee) { break; }
+            if self.require(&value.ty, expected, span).is_ok() {
+                return Ok(value);
+            }
+            let Term::Pointer(pointee) = &value.ty else {
+                break;
+            };
+            if !self.intrinsic_pointer_input(pointee) {
+                break;
+            }
             value = n::Expr {
                 source: value.source,
                 ty: (**pointee).clone(),
@@ -210,5 +228,4 @@ impl Checker<'_, '_> {
         self.require(&value.ty, expected, span)?;
         Ok(value)
     }
-
 }

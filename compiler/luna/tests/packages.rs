@@ -55,19 +55,57 @@ fn automatic_splice_uses_provider_identity_across_package_boundaries() {
          pub const FLAG=true;");
     let inputs = [app, library];
     let dependencies = [dependency(7, "support", 9)];
-    let Artifact::Nir(baseline) = packages::compile(&inputs, &dependencies, 7).unwrap() else { panic!("NIR") };
-    let id = baseline.traits.iter().find(|t| t.name == "Conversion").unwrap().declaration;
+    let Artifact::Nir(baseline) = packages::compile(&inputs, &dependencies, 7).unwrap() else {
+        panic!("NIR")
+    };
+    let id = baseline
+        .traits
+        .iter()
+        .find(|t| t.name == "Conversion")
+        .unwrap()
+        .declaration;
     assert_eq!(id.package, 1009);
-    std::fs::write(&inputs[0].entry,
-        "use support.FLAG; fn entry()->(bool,bool) {FLAG}").unwrap();
-    let Artifact::Nir(named) = packages::compile_with_splice(&inputs, &dependencies, 7, None, "library::Conversion").unwrap() else { panic!("NIR") };
-    assert_eq!(luna::execution::interpret(&named, "entry", 100_000).unwrap(),
-        comptime_interpretor::Value::Tuple(vec![comptime_interpretor::Value::Bool(true), comptime_interpretor::Value::Bool(false)]));
-    let protocols = elaboration::program::Protocols { splice: Some(id), ..Default::default() };
-    let Artifact::Nir(program) = packages::compile_with_protocols(&inputs, &dependencies, 7, None, &protocols).unwrap() else { panic!("NIR") };
-    assert_eq!(luna::execution::interpret(&program, "entry", 100_000).unwrap(),
-        comptime_interpretor::Value::Tuple(vec![comptime_interpretor::Value::Bool(true), comptime_interpretor::Value::Bool(false)]));
-    let foreign = elaboration::program::Protocols { splice: Some(nir::DeclarationId { package: 1007, ..id }), ..Default::default() };
+    std::fs::write(
+        &inputs[0].entry,
+        "use support.FLAG; fn entry()->(bool,bool) {FLAG}",
+    )
+    .unwrap();
+    let Artifact::Nir(named) =
+        packages::compile_with_splice(&inputs, &dependencies, 7, None, "library::Conversion")
+            .unwrap()
+    else {
+        panic!("NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&named, "entry", 100_000).unwrap(),
+        comptime_interpretor::Value::Tuple(vec![
+            comptime_interpretor::Value::Bool(true),
+            comptime_interpretor::Value::Bool(false)
+        ])
+    );
+    let protocols = elaboration::program::Protocols {
+        splice: Some(id),
+        ..Default::default()
+    };
+    let Artifact::Nir(program) =
+        packages::compile_with_protocols(&inputs, &dependencies, 7, None, &protocols).unwrap()
+    else {
+        panic!("NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&program, "entry", 100_000).unwrap(),
+        comptime_interpretor::Value::Tuple(vec![
+            comptime_interpretor::Value::Bool(true),
+            comptime_interpretor::Value::Bool(false)
+        ])
+    );
+    let foreign = elaboration::program::Protocols {
+        splice: Some(nir::DeclarationId {
+            package: 1007,
+            ..id
+        }),
+        ..Default::default()
+    };
     assert!(packages::compile_with_protocols(&inputs, &dependencies, 7, None, &foreign).is_err());
 }
 #[test]
@@ -539,160 +577,449 @@ fn explicit_nested_package_roots_are_not_rediscovered_as_local_modules() {
     let nested = inputs.0.join("vendor");
     std::fs::create_dir(&nested).unwrap();
     std::fs::write(nested.join("lib.fl"), "pub fn provided()->bool {true}").unwrap();
-    std::fs::write(inputs.0.join("main.fl"), "use support.provided; fn entry()->bool {provided()}").unwrap();
-    let app = SourcePackage { resolution_id: 1, identity: 101, name: "app".into(), entry: inputs.0.join("main.fl") };
-    let library = SourcePackage { resolution_id: 2, identity: 202, name: "library".into(), entry: nested.join("lib.fl") };
+    std::fs::write(
+        inputs.0.join("main.fl"),
+        "use support.provided; fn entry()->bool {provided()}",
+    )
+    .unwrap();
+    let app = SourcePackage {
+        resolution_id: 1,
+        identity: 101,
+        name: "app".into(),
+        entry: inputs.0.join("main.fl"),
+    };
+    let library = SourcePackage {
+        resolution_id: 2,
+        identity: 202,
+        name: "library".into(),
+        entry: nested.join("lib.fl"),
+    };
     let sources = [app, library];
-    let Artifact::Nir(program) = packages::compile(&sources, &[dependency(1, "support", 2)], 1).unwrap() else { panic!("NIR") };
-    let providers: Vec<_> = program.functions.iter().filter(|f| f.name == "provided").collect();
+    let Artifact::Nir(program) =
+        packages::compile(&sources, &[dependency(1, "support", 2)], 1).unwrap()
+    else {
+        panic!("NIR")
+    };
+    let providers: Vec<_> = program
+        .functions
+        .iter()
+        .filter(|f| f.name == "provided")
+        .collect();
     assert_eq!(providers.len(), 1);
     assert_eq!(providers[0].declaration.package, 202);
-    assert_eq!(luna::execution::interpret_in_package(&program, 101, "entry", 100_000).unwrap(), comptime_interpretor::Value::Bool(true));
+    assert_eq!(
+        luna::execution::interpret_in_package(&program, 101, "entry", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
     // Removing the edge must not make a dependency reachable via filesystem layout.
-    std::fs::write(inputs.0.join("main.fl"), "use vendor.lib.provided; fn entry()->bool {provided()}").unwrap();
+    std::fs::write(
+        inputs.0.join("main.fl"),
+        "use vendor.lib.provided; fn entry()->bool {provided()}",
+    )
+    .unwrap();
     assert!(packages::compile(&sources, &[], 1).is_err());
     // Without an explicit package input the same directory is ordinary source.
-    let Artifact::Nir(program) = packages::compile(&sources[..1], &[], 1).unwrap() else { panic!("NIR") };
-    assert!(program.functions.iter().filter(|f| f.name == "provided").all(|f| f.declaration.package == 101));
+    let Artifact::Nir(program) = packages::compile(&sources[..1], &[], 1).unwrap() else {
+        panic!("NIR")
+    };
+    assert!(
+        program
+            .functions
+            .iter()
+            .filter(|f| f.name == "provided")
+            .all(|f| f.declaration.package == 101)
+    );
 }
 
 #[test]
 fn explicit_single_file_dependency_is_excluded_without_hiding_sibling_modules() {
     let inputs = Inputs::new();
-    let app = SourcePackage { resolution_id: 1, identity: 101, name: "app".into(), entry: inputs.0.join("main.fl") };
-    std::fs::write(&app.entry, "use dep.provided; fn entry()->bool {provided() and helper.local()}").unwrap();
+    let app = SourcePackage {
+        resolution_id: 1,
+        identity: 101,
+        name: "app".into(),
+        entry: inputs.0.join("main.fl"),
+    };
+    std::fs::write(
+        &app.entry,
+        "use dep.provided; fn entry()->bool {provided() and helper.local()}",
+    )
+    .unwrap();
     std::fs::write(inputs.0.join("helper.fl"), "pub fn local()->bool {true}").unwrap();
     let library = inputs.package(2, "library", "pub fn provided()->bool {true}");
-    let Artifact::Nir(program) = packages::compile(&[app, library], &[dependency(1, "dep", 2)], 1).unwrap() else { panic!("NIR") };
-    assert_eq!(program.functions.iter().filter(|f| f.name == "provided").count(), 1);
-    assert_eq!(luna::execution::interpret_in_package(&program, 101, "entry", 100_000).unwrap(), comptime_interpretor::Value::Bool(true));
+    let Artifact::Nir(program) =
+        packages::compile(&[app, library], &[dependency(1, "dep", 2)], 1).unwrap()
+    else {
+        panic!("NIR")
+    };
+    assert_eq!(
+        program
+            .functions
+            .iter()
+            .filter(|f| f.name == "provided")
+            .count(),
+        1
+    );
+    assert_eq!(
+        luna::execution::interpret_in_package(&program, 101, "entry", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
 }
-
 
 #[test]
 fn trait_type_defaults_keep_definition_package_scope() {
     let inputs = Inputs::new();
     let app=inputs.package(1,"app","use support.Pick;typealias Choice=.char'builtin;struct Host {} impl Pick for Host {fn pick(value:bool)->bool {value}} fn entry()->bool {Host.as(Pick).pick(true)}");
     let library=inputs.package(2,"support","typealias Type=.Type'builtin;typealias Choice=bool;pub trait Pick where .T:Type=Choice {fn pick(value:T)->bool;}");
-    let Artifact::Nir(program)=packages::compile(&[app,library],&[dependency(1,"support",2)],1).unwrap() else {panic!("NIR")};
-    assert_eq!(luna::execution::interpret_in_package(&program,1001,"entry",100_000).unwrap(),comptime_interpretor::Value::Bool(true));
+    let Artifact::Nir(program) =
+        packages::compile(&[app, library], &[dependency(1, "support", 2)], 1).unwrap()
+    else {
+        panic!("NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret_in_package(&program, 1001, "entry", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
 }
-
 
 #[test]
 fn nominal_type_defaults_keep_provider_scope_and_identity() {
-    let inputs=Inputs::new();
+    let inputs = Inputs::new();
     let app=inputs.package(1,"app","use support.Holder;typealias Choice=.char'builtin;fn entry()->bool {Holder {value:true}.value}");
-    let library=inputs.package(2,"support","typealias Choice=bool;pub struct Holder where .T:.Type'builtin=Choice {value:T,}");
-    let Artifact::Nir(program)=packages::compile(&[app,library],&[dependency(1,"support",2)],1).unwrap() else {panic!("NIR")};
-    assert_eq!(luna::execution::interpret_in_package(&program,1001,"entry",100_000).unwrap(),comptime_interpretor::Value::Bool(true));
-    assert_eq!(program.structs.iter().find(|item| item.name=="Holder").unwrap().declaration.package,1002);
+    let library = inputs.package(
+        2,
+        "support",
+        "typealias Choice=bool;pub struct Holder where .T:.Type'builtin=Choice {value:T,}",
+    );
+    let Artifact::Nir(program) =
+        packages::compile(&[app, library], &[dependency(1, "support", 2)], 1).unwrap()
+    else {
+        panic!("NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret_in_package(&program, 1001, "entry", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    assert_eq!(
+        program
+            .structs
+            .iter()
+            .find(|item| item.name == "Holder")
+            .unwrap()
+            .declaration
+            .package,
+        1002
+    );
 }
-
 
 #[test]
 fn typealias_defaults_keep_definition_scope_across_packages() {
-    let inputs=Inputs::new();
-    let app=inputs.package(1,"app","use support.Alias;typealias Choice=.char'builtin;fn entry()->Alias {true}");
-    let library=inputs.package(2,"support","typealias Choice=bool;pub typealias Alias<.T:.Type'builtin=Choice> = T;");
-    let Artifact::Nir(program)=packages::compile(&[app,library],&[dependency(1,"support",2)],1).unwrap() else {panic!("NIR")};
-    assert_eq!(luna::execution::interpret_in_package(&program,1001,"entry",100_000).unwrap(),comptime_interpretor::Value::Bool(true));
+    let inputs = Inputs::new();
+    let app = inputs.package(
+        1,
+        "app",
+        "use support.Alias;typealias Choice=.char'builtin;fn entry()->Alias {true}",
+    );
+    let library = inputs.package(
+        2,
+        "support",
+        "typealias Choice=bool;pub typealias Alias<.T:.Type'builtin=Choice> = T;",
+    );
+    let Artifact::Nir(program) =
+        packages::compile(&[app, library], &[dependency(1, "support", 2)], 1).unwrap()
+    else {
+        panic!("NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret_in_package(&program, 1001, "entry", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
 }
 
 #[test]
 fn symbolic_normal_form_defaults_retain_provider_scope_and_head_identity() {
-    let inputs=Inputs::new();
+    let inputs = Inputs::new();
     let app=inputs.package(1,"app","use support.Head;typealias Choice=.char'builtin;typealias Alias<T> = Head<T,true>;fn keep(value:Alias<T>)->Head<T,true,.U=bool> where T {value} fn entry()->bool {true}");
     let library=inputs.package(2,"support","typealias Type=.Type'builtin;typealias Choice=bool;pub pure comptime fn Head<T,N:bool,.M:bool=N,.U:Type=Choice>->Type {T}");
-    let Artifact::Nir(program)=packages::compile(&[app,library],&[dependency(1,"support",2)],1).unwrap() else {panic!("NIR")};
-    let keep=program.functions.iter().find(|f| f.name=="keep").unwrap();
-    let nir::Term::Function {parameters,result}=&keep.signature else {panic!("signature")};
-    assert_eq!(parameters[0].ty,**result);
-    let nir::Term::NormalForm {head,arguments,..}=&**result else {panic!("head identity")};
-    assert_eq!(head.package,1002);
-    assert_eq!(arguments.last(),Some(&nir::Term::Primitive(nir::Primitive::Bool)));
-    assert_eq!(luna::execution::interpret_in_package(&program,1001,"entry",100_000).unwrap(),comptime_interpretor::Value::Bool(true));
+    let Artifact::Nir(program) =
+        packages::compile(&[app, library], &[dependency(1, "support", 2)], 1).unwrap()
+    else {
+        panic!("NIR")
+    };
+    let keep = program.functions.iter().find(|f| f.name == "keep").unwrap();
+    let nir::Term::Function { parameters, result } = &keep.signature else {
+        panic!("signature")
+    };
+    assert_eq!(parameters[0].ty, **result);
+    let nir::Term::NormalForm {
+        head, arguments, ..
+    } = &**result
+    else {
+        panic!("head identity")
+    };
+    assert_eq!(head.package, 1002);
+    assert_eq!(
+        arguments.last(),
+        Some(&nir::Term::Primitive(nir::Primitive::Bool))
+    );
+    assert_eq!(
+        luna::execution::interpret_in_package(&program, 1001, "entry", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
 }
 
 #[test]
 fn source_tuple_selectors_bind_provider_identities_before_elaboration() {
     use luna::protocols::type_constructors::Selectors;
     let input = Inputs::new();
-    let app = input.package(7, "app", "use core.Tuple; typealias Byte=.u8'builtin;
+    let app = input.package(
+        7,
+        "app",
+        "use core.Tuple; typealias Byte=.u8'builtin;
         fn entry()->Tuple<bool,Byte> {(true,9)}
-        fn check()->bool {let (flag,byte)=entry();flag and byte==9}");
-    let builtin = input.package(9, "core", "use sequence.List; typealias Type=.Type'builtin;
-        pub pure comptime fn Tuple<...Es:List<Type>> -> Type {bool}");
-    let meta = input.package(11, "sequence", "typealias Type=.Type'builtin;
-        pub pure comptime fn List<T> -> Type {T}");
+        fn check()->bool {let (flag,byte)=entry();flag and byte==9}",
+    );
+    let builtin = input.package(
+        9,
+        "core",
+        "use sequence.List; typealias Type=.Type'builtin;
+        pub pure comptime fn Tuple<...Es:List<Type>> -> Type {bool}",
+    );
+    let meta = input.package(
+        11,
+        "sequence",
+        "typealias Type=.Type'builtin;
+        pub pure comptime fn List<T> -> Type {T}",
+    );
     let packages = [app, builtin, meta];
-    let dependencies = [dependency(7,"core",9), dependency(9,"sequence",11)];
-    let selectors = Selectors { meta_list: Some("sequence::List"), tuple: Some("core::Tuple"), ..Default::default() };
-    let Artifact::Nir(program) = packages::compile_with_source_protocols(&packages,&dependencies,7,None,&Default::default(),selectors).unwrap() else { panic!("NIR"); };
-    let tuple = program.normal_forms.iter().find(|h|h.role == nir::normal_forms::Role::Tuple).unwrap();
-    assert_eq!(tuple.declaration.package,1009);
-    let entry = program.functions.iter().find(|f|f.name=="entry").unwrap();
-    assert!(matches!(&entry.body.ty, nir::Term::NormalForm {head,..} if *head == tuple.declaration));
-    assert_eq!(luna::execution::interpret(&program,"check",100_000).unwrap(),comptime_interpretor::Value::Bool(true));
-    let conflict = elaboration::program::Protocols { tuple:Some(nir::DeclarationId {package:1007,..tuple.declaration}),..Default::default() };
-    assert!(packages::compile_with_source_protocols(&packages,&dependencies,7,None,&conflict,selectors).err().unwrap().contains("conflicts"));
-    for selector in ["Tuple","missing::Tuple","core::Missing","core::Tuple::nested"] {
-        assert!(packages::compile_with_source_protocols(&packages,&dependencies,7,None,&Default::default(),Selectors {tuple:Some(selector),..selectors}).is_err(),"{selector}");
+    let dependencies = [dependency(7, "core", 9), dependency(9, "sequence", 11)];
+    let selectors = Selectors {
+        meta_list: Some("sequence::List"),
+        tuple: Some("core::Tuple"),
+        ..Default::default()
+    };
+    let Artifact::Nir(program) = packages::compile_with_source_protocols(
+        &packages,
+        &dependencies,
+        7,
+        None,
+        &Default::default(),
+        selectors,
+    )
+    .unwrap() else {
+        panic!("NIR");
+    };
+    let tuple = program
+        .normal_forms
+        .iter()
+        .find(|h| h.role == nir::normal_forms::Role::Tuple)
+        .unwrap();
+    assert_eq!(tuple.declaration.package, 1009);
+    let entry = program
+        .functions
+        .iter()
+        .find(|f| f.name == "entry")
+        .unwrap();
+    assert!(
+        matches!(&entry.body.ty, nir::Term::NormalForm {head,..} if *head == tuple.declaration)
+    );
+    assert_eq!(
+        luna::execution::interpret(&program, "check", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    let conflict = elaboration::program::Protocols {
+        tuple: Some(nir::DeclarationId {
+            package: 1007,
+            ..tuple.declaration
+        }),
+        ..Default::default()
+    };
+    assert!(
+        packages::compile_with_source_protocols(
+            &packages,
+            &dependencies,
+            7,
+            None,
+            &conflict,
+            selectors
+        )
+        .err()
+        .unwrap()
+        .contains("conflicts")
+    );
+    for selector in [
+        "Tuple",
+        "missing::Tuple",
+        "core::Missing",
+        "core::Tuple::nested",
+    ] {
+        assert!(
+            packages::compile_with_source_protocols(
+                &packages,
+                &dependencies,
+                7,
+                None,
+                &Default::default(),
+                Selectors {
+                    tuple: Some(selector),
+                    ..selectors
+                }
+            )
+            .is_err(),
+            "{selector}"
+        );
     }
-    std::fs::write(&packages[2].entry,"pub struct List {}").unwrap();
-    let error = packages::compile_with_source_protocols(&packages,&dependencies,7,None,&Default::default(),selectors).err().unwrap();
+    std::fs::write(&packages[2].entry, "pub struct List {}").unwrap();
+    let error = packages::compile_with_source_protocols(
+        &packages,
+        &dependencies,
+        7,
+        None,
+        &Default::default(),
+        selectors,
+    )
+    .err()
+    .unwrap();
     assert!(error.contains("pure normal-form"), "{error}");
-    let wrong = input.package(13,"wrong","typealias Type=.Type'builtin; pub pure comptime fn List<A,B> -> Type {A}");
-    let error = packages::compile_with_source_protocols(&[wrong],&[],13,None,&Default::default(),
-        Selectors {meta_list:Some("wrong::List"),..Default::default()}).err().unwrap();
+    let wrong = input.package(
+        13,
+        "wrong",
+        "typealias Type=.Type'builtin; pub pure comptime fn List<A,B> -> Type {A}",
+    );
+    let error = packages::compile_with_source_protocols(
+        &[wrong],
+        &[],
+        13,
+        None,
+        &Default::default(),
+        Selectors {
+            meta_list: Some("wrong::List"),
+            ..Default::default()
+        },
+    )
+    .err()
+    .unwrap();
     assert!(error.contains("invalid constructor signature"), "{error}");
 }
 
 #[test]
 fn source_tuple_selectors_follow_provider_module_paths() {
     use luna::protocols::type_constructors::Selectors;
-    let input=Inputs::new();
-    let app=input.package(7,"app","use support.types.Tuple; fn entry()->Tuple<bool,bool> {(true,false)}
-        fn check()->bool {let (a,b)=entry();a and not b}");
-    let library=input.package(9,"library","typealias Type=.Type'builtin;
+    let input = Inputs::new();
+    let app = input.package(
+        7,
+        "app",
+        "use support.types.Tuple; fn entry()->Tuple<bool,bool> {(true,false)}
+        fn check()->bool {let (a,b)=entry();a and not b}",
+    );
+    let library = input.package(
+        9,
+        "library",
+        "typealias Type=.Type'builtin;
         pub mod meta {pub pure comptime fn List<T>->Type {T}}
         pub mod types {pub pure comptime fn Tuple<...Es:meta.List<Type>>->Type {bool}}
-        mod other {pure comptime fn Tuple<...Es:meta.List<Type>>->Type {bool}}");
-    let inputs=[app,library];
-    let dependencies=[dependency(7,"support",9)];
-    let selectors=Selectors {meta_list:Some("library::meta::List"),tuple:Some("library::types::Tuple"),..Default::default()};
-    let Artifact::Nir(program)=packages::compile_with_source_protocols(&inputs,&dependencies,7,None,&Default::default(),selectors).unwrap() else {panic!("NIR")};
-    let tuple=program.normal_forms.iter().find(|head|head.role==nir::normal_forms::Role::Tuple).unwrap();
-    assert_eq!(tuple.declaration.package,1009);
-    assert_eq!(luna::execution::interpret(&program,"check",100_000).unwrap(),comptime_interpretor::Value::Bool(true));
-    for wrong in ["support::types::Tuple","app::types::Tuple","library::Tuple"] {
-        assert!(packages::compile_with_source_protocols(&inputs,&dependencies,7,None,&Default::default(),
-            Selectors {tuple:Some(wrong),..selectors}).is_err(),"accepted {wrong}");
+        mod other {pure comptime fn Tuple<...Es:meta.List<Type>>->Type {bool}}",
+    );
+    let inputs = [app, library];
+    let dependencies = [dependency(7, "support", 9)];
+    let selectors = Selectors {
+        meta_list: Some("library::meta::List"),
+        tuple: Some("library::types::Tuple"),
+        ..Default::default()
+    };
+    let Artifact::Nir(program) = packages::compile_with_source_protocols(
+        &inputs,
+        &dependencies,
+        7,
+        None,
+        &Default::default(),
+        selectors,
+    )
+    .unwrap() else {
+        panic!("NIR")
+    };
+    let tuple = program
+        .normal_forms
+        .iter()
+        .find(|head| head.role == nir::normal_forms::Role::Tuple)
+        .unwrap();
+    assert_eq!(tuple.declaration.package, 1009);
+    assert_eq!(
+        luna::execution::interpret(&program, "check", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    for wrong in [
+        "support::types::Tuple",
+        "app::types::Tuple",
+        "library::Tuple",
+    ] {
+        assert!(
+            packages::compile_with_source_protocols(
+                &inputs,
+                &dependencies,
+                7,
+                None,
+                &Default::default(),
+                Selectors {
+                    tuple: Some(wrong),
+                    ..selectors
+                }
+            )
+            .is_err(),
+            "accepted {wrong}"
+        );
     }
 }
 
 #[test]
 fn source_tuple_selectors_walk_directory_only_modules() {
-    let input=Inputs::new();
-    let root=input.0.join("library");
+    let input = Inputs::new();
+    let root = input.0.join("library");
     std::fs::create_dir_all(root.join("types")).unwrap();
-    std::fs::write(root.join("lib.fl"),"typealias Type=.Type'builtin;
+    std::fs::write(
+        root.join("lib.fl"),
+        "typealias Type=.Type'builtin;
         mod meta {pure comptime fn List<T>->Type {T}}
         fn pair()->types.tuples.Tuple<bool,bool> {(true,false)}
-        fn check()->bool {let (a,b)=pair();a and not b}").unwrap();
-    std::fs::write(root.join("types/tuples.fl"),"pub pure comptime fn Tuple<...Es:meta.List<Type>>->Type {bool}").unwrap();
-    let library=SourcePackage {resolution_id:9,identity:1009,name:"library".into(),entry:root.join("lib.fl")};
-    let Artifact::Nir(program)=packages::compile_with_source_protocols(&[library],&[],9,None,&Default::default(),
+        fn check()->bool {let (a,b)=pair();a and not b}",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("types/tuples.fl"),
+        "pub pure comptime fn Tuple<...Es:meta.List<Type>>->Type {bool}",
+    )
+    .unwrap();
+    let library = SourcePackage {
+        resolution_id: 9,
+        identity: 1009,
+        name: "library".into(),
+        entry: root.join("lib.fl"),
+    };
+    let Artifact::Nir(program) = packages::compile_with_source_protocols(
+        &[library],
+        &[],
+        9,
+        None,
+        &Default::default(),
         luna::protocols::type_constructors::Selectors {
-            meta_list:Some("library::meta::List"),tuple:Some("library::types::tuples::Tuple"),..Default::default()
-        }).unwrap() else {panic!("NIR")};
-    assert_eq!(luna::execution::interpret(&program,"check",100_000).unwrap(),comptime_interpretor::Value::Bool(true));
+            meta_list: Some("library::meta::List"),
+            tuple: Some("library::types::tuples::Tuple"),
+            ..Default::default()
+        },
+    )
+    .unwrap() else {
+        panic!("NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&program, "check", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
 }
 
 #[test]
 fn module_qualified_splice_binding_selects_the_declared_provider_trait() {
-    let input=Inputs::new();
-    let app=input.package(7,"app","use support.FLAG; fn entry()->(bool,bool) {FLAG}");
+    let input = Inputs::new();
+    let app = input.package(7, "app", "use support.FLAG; fn entry()->(bool,bool) {FLAG}");
     let library=input.package(9,"library","typealias Type=.Type'builtin;
         pub mod conversion {
             pub trait Splice {assoc RuntimeTarget:Type;fn splice(comptime data:Self)->RuntimeTarget;}
@@ -700,47 +1027,157 @@ fn module_qualified_splice_binding_selects_the_declared_provider_trait() {
         }
         mod decoy {trait Splice {}}
         pub const FLAG=true;");
-    let inputs=[app,library];
-    let dependencies=[dependency(7,"support",9)];
-    let Artifact::Nir(program)=packages::compile_with_splice(&inputs,&dependencies,7,None,"library::conversion::Splice").unwrap() else {panic!("NIR")};
-    assert_eq!(luna::execution::interpret(&program,"entry",100_000).unwrap(),
-        comptime_interpretor::Value::Tuple(vec![comptime_interpretor::Value::Bool(true),comptime_interpretor::Value::Bool(false)]));
-    for wrong in ["Splice","library::conversion","library::Splice","support::conversion::Splice","library::conversion::::Splice","library::conversion::Splice::nested"] {
-        assert!(packages::compile_with_splice(&inputs,&dependencies,7,None,wrong).is_err(),"accepted {wrong}");
+    let inputs = [app, library];
+    let dependencies = [dependency(7, "support", 9)];
+    let Artifact::Nir(program) = packages::compile_with_splice(
+        &inputs,
+        &dependencies,
+        7,
+        None,
+        "library::conversion::Splice",
+    )
+    .unwrap() else {
+        panic!("NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&program, "entry", 100_000).unwrap(),
+        comptime_interpretor::Value::Tuple(vec![
+            comptime_interpretor::Value::Bool(true),
+            comptime_interpretor::Value::Bool(false)
+        ])
+    );
+    for wrong in [
+        "Splice",
+        "library::conversion",
+        "library::Splice",
+        "support::conversion::Splice",
+        "library::conversion::::Splice",
+        "library::conversion::Splice::nested",
+    ] {
+        assert!(
+            packages::compile_with_splice(&inputs, &dependencies, 7, None, wrong).is_err(),
+            "accepted {wrong}"
+        );
     }
-    let source=std::fs::read_to_string(&inputs[1].entry).unwrap();
-    std::fs::write(&inputs[1].entry,source.replace("mod decoy {trait Splice {}}","")).unwrap();
-    let Artifact::Nir(unique)=packages::compile_with_splice(&inputs,&dependencies,7,None,"Splice").unwrap() else {panic!("NIR")};
-    assert_eq!(luna::execution::interpret(&unique,"entry",100_000).unwrap(),
-        luna::execution::interpret(&program,"entry",100_000).unwrap());
+    let source = std::fs::read_to_string(&inputs[1].entry).unwrap();
+    std::fs::write(
+        &inputs[1].entry,
+        source.replace("mod decoy {trait Splice {}}", ""),
+    )
+    .unwrap();
+    let Artifact::Nir(unique) =
+        packages::compile_with_splice(&inputs, &dependencies, 7, None, "Splice").unwrap()
+    else {
+        panic!("NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&unique, "entry", 100_000).unwrap(),
+        luna::execution::interpret(&program, "entry", 100_000).unwrap()
+    );
 }
 
 #[test]
 fn public_nested_nominal_functions_execute_from_an_importing_package() {
-    let input=Inputs::new();
-    let app=input.package(7,"app","use support.{Flag,Choice};fn entry()->bool {Flag.read() and Choice.read()}");
-    let library=input.package(9,"library","pub struct Flag {pub fn read()->bool {true}}
-        pub enum Choice {yes,pub fn read()->bool {true}}");
-    let Artifact::Nir(program)=packages::compile(&[app,library],&[dependency(7,"support",9)],7).unwrap() else {panic!("NIR")};
-    assert_eq!(luna::execution::interpret(&program,"entry",100_000).unwrap(),comptime_interpretor::Value::Bool(true));
-    assert!(program.functions.iter().filter(|function|function.name=="read").all(|function|function.declaration.package==1009));
+    let input = Inputs::new();
+    let app = input.package(
+        7,
+        "app",
+        "use support.{Flag,Choice};fn entry()->bool {Flag.read() and Choice.read()}",
+    );
+    let library = input.package(
+        9,
+        "library",
+        "pub struct Flag {pub fn read()->bool {true}}
+        pub enum Choice {yes,pub fn read()->bool {true}}",
+    );
+    let Artifact::Nir(program) =
+        packages::compile(&[app, library], &[dependency(7, "support", 9)], 7).unwrap()
+    else {
+        panic!("NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&program, "entry", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    assert!(
+        program
+            .functions
+            .iter()
+            .filter(|function| function.name == "read")
+            .all(|function| function.declaration.package == 1009)
+    );
 }
 
 #[test]
 fn source_type_constructors_preserve_their_own_opaque_heads() {
     use luna::protocols::type_constructors::Selectors;
-    let input=Inputs::new();
+    let input = Inputs::new();
     let app=input.package(7,"app","use core.Tuple; fn pair()->Tuple<bool,bool> {(true,false)} fn entry()->bool {let (a,b)=pair();a and not b}");
     let core=input.package(9,"core","use sequence.List; typealias Type=.Type'builtin; pub pure comptime fn Tuple<...Es:List<Type>>->Type {Tuple<...Es>}");
-    let meta=input.package(11,"sequence","typealias Type=.Type'builtin; pub pure comptime fn List<T>->Type {List<T>}");
-    let packages=[app,core,meta];
-    let dependencies=[dependency(7,"core",9),dependency(9,"sequence",11)];
-    let selectors=Selectors {meta_list:Some("sequence::List"),tuple:Some("core::Tuple"),..Default::default()};
-    let Artifact::Nir(program)=packages::compile_with_source_protocols(&packages,&dependencies,7,None,&Default::default(),selectors).unwrap() else {panic!("NIR")};
-    assert_eq!(program.normal_forms.len(),2);
-    assert_eq!(program.functions.iter().filter(|f|matches!(f.name.as_str(),"Tuple"|"List") && f.phase==nir::program::FunctionPhase::NormalForm).count(),2);
-    let tuple=program.normal_forms.iter().find(|head|head.role==nir::normal_forms::Role::Tuple).unwrap();
-    let pair=program.functions.iter().find(|f|f.name=="pair").unwrap();
+    let meta = input.package(
+        11,
+        "sequence",
+        "typealias Type=.Type'builtin; pub pure comptime fn List<T>->Type {List<T>}",
+    );
+    let packages = [app, core, meta];
+    let dependencies = [dependency(7, "core", 9), dependency(9, "sequence", 11)];
+    let selectors = Selectors {
+        meta_list: Some("sequence::List"),
+        tuple: Some("core::Tuple"),
+        ..Default::default()
+    };
+    let Artifact::Nir(program) = packages::compile_with_source_protocols(
+        &packages,
+        &dependencies,
+        7,
+        None,
+        &Default::default(),
+        selectors,
+    )
+    .unwrap() else {
+        panic!("NIR")
+    };
+    assert_eq!(program.normal_forms.len(), 2);
+    assert_eq!(
+        program
+            .functions
+            .iter()
+            .filter(|f| matches!(f.name.as_str(), "Tuple" | "List")
+                && f.phase == nir::program::FunctionPhase::NormalForm)
+            .count(),
+        2
+    );
+    let tuple = program
+        .normal_forms
+        .iter()
+        .find(|head| head.role == nir::normal_forms::Role::Tuple)
+        .unwrap();
+    let pair = program.functions.iter().find(|f| f.name == "pair").unwrap();
     assert!(matches!(&pair.body.ty,nir::Term::NormalForm {head,..} if *head==tuple.declaration));
-    assert_eq!(luna::execution::interpret(&program,"entry",100000).unwrap(),comptime_interpretor::Value::Bool(true));
+    assert_eq!(
+        luna::execution::interpret(&program, "entry", 100000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn dependency_errors_retain_provider_diagnostics_and_do_not_leak_to_retry() {
+    for source in ["pub fn broken( {", "pub fn broken() { not_declared; }"] {
+        let inputs = Inputs::new();
+        let app = inputs.package(7, "app", "use support.broken;fn run() {broken();}");
+        let library = inputs.package(9, "library", source);
+        let sources = [app, library];
+        let dependencies = [dependency(7, "support", 9)];
+        let error = packages::compile(&sources, &dependencies, 7)
+            .err()
+            .expect("invalid dependency must fail");
+        assert!(error.contains("library.fl:1:"), "{error}");
+        assert!(error.contains("error[E"), "{error}");
+        assert!(!error.contains('\u{1b}'));
+        std::fs::write(&sources[1].entry, "pub fn broken() {}").unwrap();
+        assert!(matches!(
+            packages::compile(&sources, &dependencies, 7).unwrap(),
+            Artifact::Nir(_)
+        ));
+    }
 }

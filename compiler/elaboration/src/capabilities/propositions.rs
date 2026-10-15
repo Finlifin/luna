@@ -85,12 +85,19 @@ impl<'w> World<'w> {
     /// fallback. Trait decisions reserve their bounded allowance; PTC returns
     /// the work it actually consumed.
     pub fn check_predicate_metered(
-        &self, predicate: &nir::program::TypePredicate, budget: &mut Budget,
+        &self,
+        predicate: &nir::program::TypePredicate,
+        budget: &mut Budget,
     ) -> Result<Outcome, String> {
-        let goal=Formula::from_predicate(predicate);
-        let direct=self.context.prove_metered(goal.clone(),budget);
-        if matches!(direct,Outcome::Entailed(_) | Outcome::IllFormed(_)) {return Ok(direct);}
-        Ok(self.prove_proposition_metered(goal,budget)?.outcome().clone())
+        let goal = Formula::from_predicate(predicate);
+        let direct = self.context.prove_metered(goal.clone(), budget);
+        if matches!(direct, Outcome::Entailed(_) | Outcome::IllFormed(_)) {
+            return Ok(direct);
+        }
+        Ok(self
+            .prove_proposition_metered(goal, budget)?
+            .outcome()
+            .clone())
     }
     pub fn prove_proposition<'a>(
         &'a self,
@@ -100,7 +107,9 @@ impl<'w> World<'w> {
         self.prove_proposition_metered(goal, &mut budget)
     }
     pub fn prove_proposition_metered<'a>(
-        &'a self, goal: Formula, budget: &mut Budget,
+        &'a self,
+        goal: Formula,
+        budget: &mut Budget,
     ) -> Result<WorldProposition<'a, 'w>, String> {
         let mut fuel = budget.steps;
         for formula in self
@@ -217,11 +226,11 @@ impl<'w> World<'w> {
         budget: Budget,
     ) -> Result<TraitDecision<'a, 'w>, String> {
         let mut fuel = budget.steps;
+        if query.subject.sort() != nir::Sort::Type {
+            return Err("trait proposition requires a Type subject".into());
+        }
         for input in query.inputs() {
             crate::associated::charge_projection_copy(input, &mut fuel)?;
-            if input.sort() != nir::Sort::Type {
-                return Err("trait proposition requires Type inputs".into());
-            }
             input
                 .check_scope(self.context.scope())
                 .map_err(|e| format!("invalid trait proposition input: {e:?}"))?;
@@ -241,6 +250,13 @@ impl<'w> World<'w> {
         if contract.type_parameters.len() != query.arguments.len() {
             return Err("trait proposition interface argument count mismatch".into());
         }
+        contract.validate_arguments_in_declarations(
+            &query.arguments,
+            self.context.scope(),
+            self.traits,
+            &mut fuel,
+        )?;
+        let parameter_binders = contract.parameter_binders(&mut fuel)?;
         // Reserve separate bounded allowances for every proof/selection query.
         let count = contract
             .requirements
@@ -261,14 +277,7 @@ impl<'w> World<'w> {
             }
             let requirement = requirement
                 .instantiate_parameters_in_scope(
-                    &contract
-                        .type_parameters
-                        .iter()
-                        .map(|id| nir::DeclarationParameter {
-                            declaration: *id,
-                            sort: nir::Sort::Type,
-                        })
-                        .collect::<Vec<_>>(),
+                    &parameter_binders,
                     &query.arguments,
                     self.context.scope(),
                 )
@@ -287,14 +296,7 @@ impl<'w> World<'w> {
             }
             let requirement = requirement
                 .instantiate_parameters_in_scope(
-                    &contract
-                        .type_parameters
-                        .iter()
-                        .map(|id| nir::DeclarationParameter {
-                            declaration: *id,
-                            sort: nir::Sort::Type,
-                        })
-                        .collect::<Vec<_>>(),
+                    &parameter_binders,
                     &query.arguments,
                     self.context.scope(),
                 )
@@ -371,9 +373,9 @@ impl<'w> World<'w> {
                 if self.closed_trait_inputs(&selected_query, allowance)
                     && resolution.types.assessments.iter().all(
                         |(id, assessment)| match assessment {
-                            TypeAssessment::Excluded(_) | TypeAssessment::ForbiddenSubject(_) => {
-                                true
-                            }
+                            TypeAssessment::Excluded(_)
+                            | TypeAssessment::SymbolMismatch { .. }
+                            | TypeAssessment::ForbiddenSubject(_) => true,
                             TypeAssessment::Applicable(_) => matches!(
                                 resolution.qualifications.get(id),
                                 Some(Qualification::Excluded(_))

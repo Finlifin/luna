@@ -36,14 +36,24 @@ impl World<'_> {
         projection: &Term,
         budget: Budget,
     ) -> Result<(AssociatedTypeResolution, usize), String> {
-        self.resolve_associated_type_using(projection, budget, &mut |interface, subject, allowance| {
-            self.resolve_projected_instance(interface, subject, allowance)
-        })
+        self.resolve_associated_type_using(
+            projection,
+            budget,
+            &mut |interface, subject, allowance| {
+                self.resolve_projected_instance(interface, subject, allowance)
+            },
+        )
     }
 
     fn resolve_associated_type_using(
-        &self, projection: &Term, budget: Budget,
-        resolve: &mut dyn FnMut(&InterfaceInstance, &Term, Budget) -> Result<crate::capabilities::Resolution, String>,
+        &self,
+        projection: &Term,
+        budget: Budget,
+        resolve: &mut dyn FnMut(
+            &InterfaceInstance,
+            &Term,
+            Budget,
+        ) -> Result<crate::capabilities::Resolution, String>,
     ) -> Result<(AssociatedTypeResolution, usize), String> {
         let mut fuel = budget.steps;
         charge_projection_copy(projection, &mut fuel)?;
@@ -111,7 +121,9 @@ impl World<'_> {
                 match requirement {
                     nir::program::TypePredicate::Trait(requirement) => {
                         charge_projection_copy(&requirement.subject, &mut fuel)?;
-                        for argument in &requirement.interface_arguments { charge_projection_copy(argument, &mut fuel)?; }
+                        for argument in &requirement.interface_arguments {
+                            charge_projection_copy(argument, &mut fuel)?;
+                        }
                     }
                     nir::program::TypePredicate::Equal(a, b) => {
                         charge_projection_copy(a, &mut fuel)?;
@@ -301,16 +313,26 @@ impl World<'_> {
     }
 
     pub(crate) fn associated_type_view_cached(
-        &self, ty: &Term, budget: Budget, cache: &mut std::collections::HashMap<Term, Term>,
+        &self,
+        ty: &Term,
+        budget: Budget,
+        cache: &mut std::collections::HashMap<Term, Term>,
     ) -> Result<(AssociatedTypeNormalization, usize), String> {
-        let (value, remaining, completed) = self.normalize_associated_types_mode(ty, budget, true, Some(cache), None)?;
+        let (value, remaining, completed) =
+            self.normalize_associated_types_mode(ty, budget, true, Some(cache), None)?;
         cache.extend(completed);
         Ok((value, remaining))
     }
 
     pub(crate) fn associated_type_view_for_selection(
-        &self, ty: &Term, budget: Budget,
-        resolve: &mut dyn FnMut(&InterfaceInstance, &Term, Budget) -> Result<crate::capabilities::Resolution, String>,
+        &self,
+        ty: &Term,
+        budget: Budget,
+        resolve: &mut dyn FnMut(
+            &InterfaceInstance,
+            &Term,
+            Budget,
+        ) -> Result<crate::capabilities::Resolution, String>,
     ) -> Result<(Term, usize), String> {
         self.normalize_associated_types_mode(ty, budget, true, None, Some(resolve))
             .map(|(result, remaining, _)| (result.value, remaining))
@@ -322,7 +344,13 @@ impl World<'_> {
         budget: Budget,
         preserve_given: bool,
         shared: Option<&std::collections::HashMap<Term, Term>>,
-        resolve: Option<&mut dyn FnMut(&InterfaceInstance, &Term, Budget) -> Result<crate::capabilities::Resolution, String>>,
+        resolve: Option<
+            &mut dyn FnMut(
+                &InterfaceInstance,
+                &Term,
+                Budget,
+            ) -> Result<crate::capabilities::Resolution, String>,
+        >,
     ) -> Result<
         (
             AssociatedTypeNormalization,
@@ -362,7 +390,13 @@ impl World<'_> {
 }
 
 struct Normalizer<'a, 'w, 'r> {
-    resolve: Option<&'r mut dyn FnMut(&InterfaceInstance, &Term, Budget) -> Result<crate::capabilities::Resolution, String>>,
+    resolve: Option<
+        &'r mut dyn FnMut(
+            &InterfaceInstance,
+            &Term,
+            Budget,
+        ) -> Result<crate::capabilities::Resolution, String>,
+    >,
     world: &'a World<'w>,
     preserve_given: bool,
     budget: Budget,
@@ -401,10 +435,15 @@ impl Normalizer<'_, '_, '_> {
         Ok(match term {
             Term::Computation { effects, result } => {
                 self.spend(effects.len())?;
-                let operations = effects.iter().map(|operation| Ok(nir::effects::Operation {
-                    declaration: operation.declaration,
-                    arguments: self.many(&operation.arguments, depth + 1)?,
-                })).collect::<Result<Vec<_>, String>>()?;
+                let operations = effects
+                    .iter()
+                    .map(|operation| {
+                        Ok(nir::effects::Operation {
+                            declaration: operation.declaration,
+                            arguments: self.many(&operation.arguments, depth + 1)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
                 Term::computation(operations, self.normalize(result, depth + 1)?)
             }
             Term::AssociatedType {
@@ -423,23 +462,47 @@ impl Normalizer<'_, '_, '_> {
                     // A projection can capture any enclosing callable frame,
                     // not just its immediate depth-zero frame. Validate it in
                     // the complete telescope before retaining it uncached.
-                    key.check_scope(&self.frames).map_err(|e|e.to_string())?;
+                    key.check_scope(&self.frames).map_err(|e| e.to_string())?;
                     // A callable's ordinary inputs have not been supplied yet.
                     // Retain the projection without choosing an implementation
                     // or manufacturing an equality. Formation evidence is
                     // checked by elaboration; strict IIR normalization still
                     // requires a selected concrete projection.
-                    let Term::AssociatedType { origin, subject, arguments } = &key else { unreachable!() };
-                    let contract = self.world.traits.iter().find(|t| t.declaration == origin.interface)
+                    let Term::AssociatedType {
+                        origin,
+                        subject,
+                        arguments,
+                    } = &key
+                    else {
+                        unreachable!()
+                    };
+                    let contract = self
+                        .world
+                        .traits
+                        .iter()
+                        .find(|t| t.declaration == origin.interface)
                         .ok_or("associated Type query has no originating interface")?;
                     if arguments.len() != contract.type_parameters.len() {
-                        return Err("associated Type query interface argument count mismatch".into());
+                        return Err(
+                            "associated Type query interface argument count mismatch".into()
+                        );
                     }
-                    let member = contract.associated.iter().find(|m| m.declaration == origin.member)
+                    let member = contract
+                        .associated
+                        .iter()
+                        .find(|m| m.declaration == origin.member)
                         .ok_or("associated Type query member does not belong to its interface")?;
                     self.charge_copy(&member.ty)?;
-                    let inputs = std::iter::once(subject.as_ref().clone()).chain(arguments.iter().cloned()).collect::<Vec<_>>();
-                    let ty = member.ty.instantiate_types_in_scope(&contract.parameters_with_self(), &inputs, &self.frames)
+                    let inputs = std::iter::once(subject.as_ref().clone())
+                        .chain(arguments.iter().cloned())
+                        .collect::<Vec<_>>();
+                    let ty = member
+                        .ty
+                        .instantiate_types_in_scope(
+                            &contract.parameters_with_self(),
+                            &inputs,
+                            &self.frames,
+                        )
                         .map_err(|e| e.to_string())?;
                     if ty != Term::Primitive(Primitive::Type) {
                         return Err("associated projection member is not Type-valued".into());
@@ -526,14 +589,19 @@ impl Normalizer<'_, '_, '_> {
                     return Err("cyclic associated Type projection".into());
                 }
                 let result = (|| {
-                    let allowance = Budget { steps: self.remaining, ..self.budget };
+                    let allowance = Budget {
+                        steps: self.remaining,
+                        ..self.budget
+                    };
                     let resolved = if let Some(resolve) = self.resolve.as_deref_mut() {
-                        self.world.resolve_associated_type_using(&key, allowance, resolve)
+                        self.world
+                            .resolve_associated_type_using(&key, allowance, resolve)
                     } else {
                         self.world.resolve_associated_type_budgeted(&key, allowance)
                     };
-                    let (resolution, remaining) = resolved
-                        .map_err(|message| format!("associated Type normalization of {key}: {message}"))?;
+                    let (resolution, remaining) = resolved.map_err(|message| {
+                        format!("associated Type normalization of {key}: {message}")
+                    })?;
                     self.remaining = remaining;
                     let value = self.normalize(&resolution.value, depth + 1)?;
                     self.charge_copy(&value)?;
@@ -569,7 +637,15 @@ impl Normalizer<'_, '_, '_> {
             Term::TupleValue(items) => Term::TupleValue(self.many(items, depth + 1)?),
             Term::TypeListValue(items) => Term::TypeListValue(self.many(items, depth + 1)?),
             Term::TypeListConcat(items) => Term::type_list_concat(self.many(items, depth + 1)?),
-            Term::NominalValue {ty,variant,fields} => Term::NominalValue {ty:Box::new(self.normalize(ty,depth+1)?),variant:*variant,fields:self.many(fields,depth+1)?},
+            Term::NominalValue {
+                ty,
+                variant,
+                fields,
+            } => Term::NominalValue {
+                ty: Box::new(self.normalize(ty, depth + 1)?),
+                variant: *variant,
+                fields: self.many(fields, depth + 1)?,
+            },
             Term::Record(fields) | Term::RecordValue(fields) => {
                 if fields.len() > self.remaining {
                     return Err("associated normalization budget exhausted".into());
@@ -579,7 +655,11 @@ impl Normalizer<'_, '_, '_> {
                     self.spend(name.len())?;
                     output.push((name.clone(), self.normalize(ty, depth + 1)?));
                 }
-                if matches!(term, Term::RecordValue(_)) { Term::RecordValue(output) } else { Term::Record(output) }
+                if matches!(term, Term::RecordValue(_)) {
+                    Term::RecordValue(output)
+                } else {
+                    Term::Record(output)
+                }
             }
             Term::Pointer(inner) => Term::Pointer(Box::new(self.normalize(inner, depth + 1)?)),
             Term::ComptimeFunction(inner) => {
@@ -589,7 +669,8 @@ impl Normalizer<'_, '_, '_> {
                 if parameters.len() > self.remaining {
                     return Err("associated normalization budget exhausted".into());
                 }
-                self.frames.push(parameters.iter().map(|p| p.sort).collect());
+                self.frames
+                    .push(parameters.iter().map(|p| p.sort).collect());
                 let normalized = (|| {
                     let parameters = parameters
                         .iter()
@@ -615,6 +696,15 @@ impl Normalizer<'_, '_, '_> {
                 environment: self.many(environment, depth + 1)?,
                 signature: Box::new(self.normalize(signature, depth + 1)?),
             },
+            Term::Float(value) => {
+                self.spend(
+                    value
+                        .digits()
+                        .len()
+                        .saturating_add(value.exponent().bit_len().div_ceil(32)),
+                )?;
+                term.clone()
+            }
             Term::Integer(value) => {
                 self.spend(value.bit_len().div_ceil(32))?;
                 term.clone()
@@ -663,7 +753,9 @@ pub(crate) fn charge_projection_copy(term: &Term, fuel: &mut usize) -> Result<()
         let cost = match term {
             Term::Computation { effects, result } => {
                 pending.push(result);
-                for operation in effects { pending.extend(&operation.arguments); }
+                for operation in effects {
+                    pending.extend(&operation.arguments);
+                }
                 effects.len()
             }
             Term::AssociatedType {
@@ -674,7 +766,9 @@ pub(crate) fn charge_projection_copy(term: &Term, fuel: &mut usize) -> Result<()
                 0
             }
             Term::Tuple(items)
-            | Term::TypeListValue(items) | Term::TypeListConcat(items) | Term::TupleValue(items)
+            | Term::TypeListValue(items)
+            | Term::TypeListConcat(items)
+            | Term::TupleValue(items)
             | Term::Nominal {
                 arguments: items, ..
             }
@@ -684,7 +778,11 @@ pub(crate) fn charge_projection_copy(term: &Term, fuel: &mut usize) -> Result<()
                 pending.extend(items);
                 0
             }
-            Term::NominalValue {ty,fields,..} => {pending.push(ty);pending.extend(fields);0},
+            Term::NominalValue { ty, fields, .. } => {
+                pending.push(ty);
+                pending.extend(fields);
+                0
+            }
             Term::Record(fields) | Term::RecordValue(fields) => {
                 let mut cost = 0usize;
                 for (name, ty) in fields {
@@ -713,6 +811,10 @@ pub(crate) fn charge_projection_copy(term: &Term, fuel: &mut usize) -> Result<()
                 0
             }
             Term::Integer(value) => value.bit_len().div_ceil(32),
+            Term::Float(value) => value
+                .digits()
+                .len()
+                .saturating_add(value.exponent().bit_len().div_ceil(32)),
             Term::BitVec(value) => value.words().len(),
             Term::String(value) | Term::Symbol(value) => value.len(),
             _ => 0,
@@ -746,6 +848,7 @@ mod view_tests {
             subject: Box::new(subject.clone()),
         };
         let mut traits = vec![Trait {
+            parameter_types: Vec::new(),
             declaration: id(1),
             self_parameter: id(1),
             name: "Source".into(),
@@ -819,40 +922,92 @@ mod view_tests {
         );
         let mut scoped_projection = projection.clone();
         if let Term::AssociatedType { subject, .. } = &mut scoped_projection {
-            *subject = Box::new(Term::Bound { depth: 0, index: 0, sort: nir::Sort::Type });
+            *subject = Box::new(Term::Bound {
+                depth: 0,
+                index: 0,
+                sort: nir::Sort::Type,
+            });
         }
         let callable = Term::Function {
-            parameters: vec![nir::Parameter { sort: nir::Sort::Type, ty: Term::Primitive(Primitive::Type) }],
+            parameters: vec![nir::Parameter {
+                sort: nir::Sort::Type,
+                ty: Term::Primitive(Primitive::Type),
+            }],
             result: Box::new(scoped_projection.clone()),
         };
-        let view = without_givens.associated_type_view(&callable, Budget::default()).unwrap();
+        let view = without_givens
+            .associated_type_view(&callable, Budget::default())
+            .unwrap();
         assert_eq!(view.value, callable);
         assert!(view.steps.is_empty());
         let mut view_cache = std::collections::HashMap::new();
-        let (cached, _) = without_givens.associated_type_view_cached(&callable, Budget::default(), &mut view_cache).unwrap();
+        let (cached, _) = without_givens
+            .associated_type_view_cached(&callable, Budget::default(), &mut view_cache)
+            .unwrap();
         assert_eq!(cached.value, callable);
-        assert!(view_cache.is_empty(), "caller-bound projections must not enter a context-free cache");
-        let mut outer_projection=scoped_projection.clone();
-        if let Term::AssociatedType {subject,..}=&mut outer_projection {
-            *subject=Box::new(Term::Bound {depth:1,index:0,sort:nir::Sort::Type});
+        assert!(
+            view_cache.is_empty(),
+            "caller-bound projections must not enter a context-free cache"
+        );
+        let mut outer_projection = scoped_projection.clone();
+        if let Term::AssociatedType { subject, .. } = &mut outer_projection {
+            *subject = Box::new(Term::Bound {
+                depth: 1,
+                index: 0,
+                sort: nir::Sort::Type,
+            });
         }
-        let nested=Term::Function {
-            parameters:vec![nir::Parameter {sort:nir::Sort::Type,ty:Term::Primitive(Primitive::Type)}],
-            result:Box::new(Term::Function {parameters:vec![],result:Box::new(outer_projection)}),
+        let nested = Term::Function {
+            parameters: vec![nir::Parameter {
+                sort: nir::Sort::Type,
+                ty: Term::Primitive(Primitive::Type),
+            }],
+            result: Box::new(Term::Function {
+                parameters: vec![],
+                result: Box::new(outer_projection),
+            }),
         };
-        let (nested_view,_)=without_givens.associated_type_view_cached(&nested,Budget::default(),&mut view_cache).unwrap();
-        assert_eq!(nested_view.value,nested);
+        let (nested_view, _) = without_givens
+            .associated_type_view_cached(&nested, Budget::default(), &mut view_cache)
+            .unwrap();
+        assert_eq!(nested_view.value, nested);
         assert!(nested_view.steps.is_empty());
-        assert!(view_cache.is_empty(),"outer-frame projections must not enter a context-free cache");
-        assert!(without_givens.normalize_associated_types(&nested,Budget::default()).is_err());
-        assert!(without_givens.normalize_associated_types(&callable, Budget::default()).is_err());
-        assert!(without_givens.associated_type_view(&scoped_projection, Budget::default()).is_err());
+        assert!(
+            view_cache.is_empty(),
+            "outer-frame projections must not enter a context-free cache"
+        );
+        assert!(
+            without_givens
+                .normalize_associated_types(&nested, Budget::default())
+                .is_err()
+        );
+        assert!(
+            without_givens
+                .normalize_associated_types(&callable, Budget::default())
+                .is_err()
+        );
+        assert!(
+            without_givens
+                .associated_type_view(&scoped_projection, Budget::default())
+                .is_err()
+        );
         let mut bad_member = callable.clone();
         if let Term::Function { result, .. } = &mut bad_member {
-            if let Term::AssociatedType { origin, .. } = result.as_mut() { origin.member = id(99); }
+            if let Term::AssociatedType { origin, .. } = result.as_mut() {
+                origin.member = id(99);
+            }
         }
-        assert!(without_givens.associated_type_view(&bad_member, Budget::default()).unwrap_err().contains("member does not belong"));
-        assert!(without_givens.associated_type_view_cached(&bad_member, Budget::default(), &mut view_cache).is_err());
+        assert!(
+            without_givens
+                .associated_type_view(&bad_member, Budget::default())
+                .unwrap_err()
+                .contains("member does not belong")
+        );
+        assert!(
+            without_givens
+                .associated_type_view_cached(&bad_member, Budget::default(), &mut view_cache)
+                .is_err()
+        );
         assert!(view_cache.is_empty());
         traits[0].associated[0].ty = Term::Primitive(Primitive::Bool);
         let world = World {
@@ -868,7 +1023,12 @@ mod view_tests {
                 .unwrap_err()
                 .contains("not Type-valued")
         );
-        assert!(world.associated_type_view(&callable, Budget::default()).unwrap_err().contains("not Type-valued"));
+        assert!(
+            world
+                .associated_type_view(&callable, Budget::default())
+                .unwrap_err()
+                .contains("not Type-valued")
+        );
     }
 }
 
@@ -891,6 +1051,7 @@ mod shared_cache_tests {
             subject: Box::new(Term::Primitive(Primitive::Bool)),
         };
         let traits = vec![Trait {
+            parameter_types: Vec::new(),
             declaration: id(1),
             self_parameter: id(1),
             name: "Source".into(),
@@ -1100,7 +1261,9 @@ impl World<'_> {
                 match requirement {
                     nir::program::TypePredicate::Trait(requirement) => {
                         charge_projection_copy(&requirement.subject, &mut fuel)?;
-                        for argument in &requirement.interface_arguments { charge_projection_copy(argument, &mut fuel)?; }
+                        for argument in &requirement.interface_arguments {
+                            charge_projection_copy(argument, &mut fuel)?;
+                        }
                     }
                     nir::program::TypePredicate::Equal(a, b) => {
                         charge_projection_copy(a, &mut fuel)?;

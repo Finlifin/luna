@@ -477,11 +477,26 @@ fn routing_matches_computation_type_arguments_by_proved_row_equality() {
     let context = Context::default();
     let a = op(2, vec![]);
     let b = op(3, vec![]);
-    let request = op(1, vec![Term::computation(vec![a.clone(), b.clone(), a.clone()], ty(P::Bool))]);
-    let supplied = op(1, vec![Term::computation(vec![b.clone(), a.clone(), a.clone()], ty(P::Bool))]);
+    let request = op(
+        1,
+        vec![Term::computation(
+            vec![a.clone(), b.clone(), a.clone()],
+            ty(P::Bool),
+        )],
+    );
+    let supplied = op(
+        1,
+        vec![Term::computation(
+            vec![b.clone(), a.clone(), a.clone()],
+            ty(P::Bool),
+        )],
+    );
     let frames = [entry(supplied, true)];
     let result = route(&request, Abi::Direct, &frames, &context, Budget::default()).unwrap();
     assert_eq!(result.entries().count(), 1);
-    let frames = [entry(op(1, vec![Term::computation(vec![a, b], ty(P::Bool))]), true)];
+    let frames = [entry(
+        op(1, vec![Term::computation(vec![a, b], ty(P::Bool))]),
+        true,
+    )];
     assert!(route(&request, Abi::Direct, &frames, &context, Budget::default()).is_err());
 }

@@ -10,8 +10,10 @@ pub(super) struct RoutedArgument<'h> {
 }
 
 impl RoutedArgument<'_> {
-    pub(super) fn is_collected(&self) -> bool { self.collected }
-    pub(super) fn source_inputs(&self) -> impl Iterator<Item=(usize, &Expr<'_>)> {
+    pub(super) fn is_collected(&self) -> bool {
+        self.collected
+    }
+    pub(super) fn source_inputs(&self) -> impl Iterator<Item = (usize, &Expr<'_>)> {
         self.positions.iter().copied().zip(&self.values)
     }
     pub(super) fn single_position(&self) -> Option<usize> {

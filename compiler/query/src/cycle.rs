@@ -22,11 +22,7 @@ impl fmt::Display for CycleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "query cycle:")?;
         for (i, frame) in self.frames.iter().enumerate() {
-            writeln!(
-                f,
-                "  #{i}: {}({})",
-                frame.desc.name, frame.key
-            )?;
+            writeln!(f, "  #{i}: {}({})", frame.desc.name, frame.key)?;
         }
         Ok(())
     }

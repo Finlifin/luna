@@ -87,8 +87,11 @@ impl Checker<'_, '_> {
             }
             let ty = &parameters[index];
             let default = if let TyParamKind::Optional(_, _, value) = parameter.ty.kind {
-                let value = self.with_staged_input(ty.sort != Sort::Runtime, |this| this.expr(value, Some(&ty.ty)))?;
-                if !sig.modifiers.is_comptime && !parameter.ty.is_comptime()
+                let value = self.with_staged_input(ty.sort != Sort::Runtime, |this| {
+                    this.expr(value, Some(&ty.ty))
+                })?;
+                if !sig.modifiers.is_comptime
+                    && !parameter.ty.is_comptime()
                     && !stable_default(&value)
                 {
                     let viewed = self.default_stability_view(&value, parameter.span)?;
@@ -96,7 +99,8 @@ impl Checker<'_, '_> {
                         // Function bodies are not all available while defaults
                         // are demanded. Retain this definition-scoped obligation
                         // and discharge it against the complete checked package.
-                        self.pending_default_stability.push((viewed, parameter.span));
+                        self.pending_default_stability
+                            .push((viewed, parameter.span));
                     }
                 }
                 Some(value)
@@ -215,7 +219,9 @@ impl Checker<'_, '_> {
             let view = if let Some(elements) = self.bound_tuple_elements(&view) {
                 crate::associated::charge_projection_copy(&view, fuel)?;
                 Term::Tuple(elements.to_vec())
-            } else { view };
+            } else {
+                view
+            };
             // Descend only through data aggregates. Pointer pointees and callable
             // binders are not observations made by evaluating this default.
             let view = match view {
@@ -245,5 +251,4 @@ impl Checker<'_, '_> {
         active.remove(ty);
         result
     }
-
 }

@@ -89,7 +89,8 @@ impl Checker<'_, '_> {
                 )
                 .map_err(|e| call_inference_error(span, e))?;
             if let Some(context) = structural_result {
-                candidate.constrain_result_context(context, crate::ptc::Budget::default())
+                candidate
+                    .constrain_result_context(context, crate::ptc::Budget::default())
                     .map_err(|e| call_inference_error(span, e))?;
             }
             candidate
@@ -128,10 +129,16 @@ impl Checker<'_, '_> {
                 {
                     self.preserve_effect_value = true;
                 }
-                let input_context = candidate.parameter_input_context(index)
+                let input_context = candidate
+                    .parameter_input_context(index)
                     .map_err(|e| call_inference_error(input.span, e))?;
                 checked[index] = self.argument_attempt_with_input(
-                    input, context.as_ref(), partial.as_ref(), false, Some(&input_context))?;
+                    input,
+                    context.as_ref(),
+                    partial.as_ref(),
+                    false,
+                    Some(&input_context),
+                )?;
                 progress |= checked[index].is_some();
             }
             if !progress && self.numeric_defaults {
@@ -145,7 +152,8 @@ impl Checker<'_, '_> {
                     let partial = candidate
                         .parameter_callable_context(index)
                         .map_err(|e| call_inference_error(input.span, e))?;
-                    let input_context = candidate.parameter_input_context(index)
+                    let input_context = candidate
+                        .parameter_input_context(index)
                         .map_err(|e| call_inference_error(input.span, e))?;
                     checked[index] = self.argument_attempt_with_input(
                         input,

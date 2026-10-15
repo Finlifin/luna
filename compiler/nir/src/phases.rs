@@ -24,7 +24,8 @@ pub fn machine_arithmetic_functions(
     let mut machine_owners = std::collections::BTreeSet::new();
     for definition in &package.enums {
         definition.validate_encoding().map_err(|message| Error {
-            source: SourceRange {start:0,end:0}, message,
+            source: SourceRange { start: 0, end: 0 },
+            message,
         })?;
     }
     let mut quote_ids = BTreeSet::new();
@@ -32,14 +33,23 @@ pub fn machine_arithmetic_functions(
     for template in &package.quote_templates {
         if template.phase != Phase::Runtime
             || !quote_ids.insert(template.declaration)
-            || package.functions.iter().any(|function| function.declaration == template.declaration)
-            || package.runtime_function_identities.iter().any(|function| function.declaration == template.declaration)
+            || package
+                .functions
+                .iter()
+                .any(|function| function.declaration == template.declaration)
+            || package
+                .runtime_function_identities
+                .iter()
+                .any(|function| function.declaration == template.declaration)
         {
-            return Err(Error { source: template.body.source,
-                message: "invalid or duplicate quote template identity" });
+            return Err(Error {
+                source: template.body.source,
+                message: "invalid or duplicate quote template identity",
+            });
         }
         if matches!(template.signature.callable_signature(),Term::Function {parameters,..}
-            if parameters.iter().any(|parameter|parameter.sort!=Sort::Runtime)) {
+            if parameters.iter().any(|parameter|parameter.sort!=Sort::Runtime))
+        {
             staged_quote_ids.insert(template.declaration);
         }
     }
@@ -47,9 +57,15 @@ pub fn machine_arithmetic_functions(
     for identity in &package.runtime_function_identities {
         if !matches!(identity.signature, Term::Function { .. })
             || !identity_ids.insert(identity.declaration)
-            || package.functions.iter().any(|f| f.declaration == identity.declaration)
+            || package
+                .functions
+                .iter()
+                .any(|f| f.declaration == identity.declaration)
         {
-            return Err(Error { source: SourceRange { start: 0, end: 0 }, message: "invalid or duplicate runtime function identity" });
+            return Err(Error {
+                source: SourceRange { start: 0, end: 0 },
+                message: "invalid or duplicate runtime function identity",
+            });
         }
     }
     crate::normal_forms::validate(package).map_err(|message| Error {
@@ -61,13 +77,29 @@ pub fn machine_arithmetic_functions(
         .iter()
         .chain(&package.quote_templates)
         .map(|f| (f.declaration, (f.phase, !f.preconditions.is_empty())))
-        .chain(package.runtime_function_identities.iter().map(|f| (f.declaration, (Phase::Runtime, false))))
+        .chain(
+            package
+                .runtime_function_identities
+                .iter()
+                .map(|f| (f.declaration, (Phase::Runtime, false))),
+        )
         .collect();
     let mut storage_cache = std::collections::HashMap::new();
-    let mut runtime_storage = |ty: &crate::Term, source, frames: &[Vec<crate::Sort>]| -> Result<(), Error> {
-        let result = *storage_cache.entry((ty.clone(),frames.to_vec())).or_insert_with(|| {
-            comptime_storage(ty, package, frames, &mut std::collections::HashSet::new(), 0)
-        });
+    let mut runtime_storage = |ty: &crate::Term,
+                               source,
+                               frames: &[Vec<crate::Sort>]|
+     -> Result<(), Error> {
+        let result = *storage_cache
+            .entry((ty.clone(), frames.to_vec()))
+            .or_insert_with(|| {
+                comptime_storage(
+                    ty,
+                    package,
+                    frames,
+                    &mut std::collections::HashSet::new(),
+                    0,
+                )
+            });
         match result {
             Ok(false) => Ok(()),
             Ok(true) => Err(Error {
@@ -93,11 +125,16 @@ pub fn machine_arithmetic_functions(
         .collect::<Result<Vec<_>, _>>()?;
     // Each work item carries its execution context. Staged inputs/defaults do
     // not change the owner's declaration phase or require cloned summary bodies.
-    let mut preparation_fuel=1_000_000usize;
-    for function in package.functions.iter().chain(&package.quote_templates).chain(&interface_summaries) {
-        let caller_frames=match function.signature.callable_signature() {
-            Term::Function {parameters,..}=>vec![parameters.iter().map(|p|p.sort).collect()],
-            _=>vec![],
+    let mut preparation_fuel = 1_000_000usize;
+    for function in package
+        .functions
+        .iter()
+        .chain(&package.quote_templates)
+        .chain(&interface_summaries)
+    {
+        let caller_frames = match function.signature.callable_signature() {
+            Term::Function { parameters, .. } => vec![parameters.iter().map(|p| p.sort).collect()],
+            _ => vec![],
         };
         let ct = function.phase != Phase::Runtime;
         if !ct {
@@ -143,17 +180,12 @@ pub fn machine_arithmetic_functions(
                 work.push(Work::Expr(condition, false, ct));
             }
         }
-        work.extend(
-            function
-                .defaults
-                .iter()
-                .map(|(index, value)| {
-                    let staged = matches!(function.signature.callable_signature(),
+        work.extend(function.defaults.iter().map(|(index, value)| {
+            let staged = matches!(function.signature.callable_signature(),
                         crate::Term::Function {parameters,..}
                         if parameters.get(*index).is_some_and(|p|p.sort!=crate::Sort::Runtime));
-                    Work::Expr(value, false, ct || staged)
-                }),
-        );
+            Work::Expr(value, false, ct || staged)
+        }));
         while let Some(node) = work.pop() {
             match node {
                 Work::Pattern(pattern, ct) => match pattern {
@@ -190,7 +222,8 @@ pub fn machine_arithmetic_functions(
                         }
                         work.push(Work::Pattern(pattern, ct));
                     }
-                    Pattern::Record { fields, .. } | Pattern::AnonymousRecord { fields, .. }
+                    Pattern::Record { fields, .. }
+                    | Pattern::AnonymousRecord { fields, .. }
                     | Pattern::Variant { fields, .. }
                     | Pattern::NormalForm {
                         arguments: fields, ..
@@ -205,7 +238,9 @@ pub fn machine_arithmetic_functions(
                 Work::Expr(expr, _callee, ct) => {
                     let written = match &expr.kind {
                         K::Let { binding, .. } => Some(*binding),
-                        K::Assign { place, .. } | K::BitAssign { place, .. } | K::BitUpdate {place,..} => Some(place.root),
+                        K::Assign { place, .. }
+                        | K::BitAssign { place, .. }
+                        | K::BitUpdate { place, .. } => Some(place.root),
                         _ => None,
                     };
                     if written.is_some_and(|id| frozen.contains(&id)) {
@@ -214,7 +249,16 @@ pub fn machine_arithmetic_functions(
                     let machine = crate::program::machine_integer_type(expr).is_some();
                     // Comptime positions are checked concretely by invocation;
                     // residual runtime positions need a static program proof.
-                    if machine || (!ct && matches!(expr.kind, K::BitIndex(..) | K::BitWindow {..} | K::BitUpdate {..} | K::BitWritePointer {..})) {
+                    if machine
+                        || (!ct
+                            && matches!(
+                                expr.kind,
+                                K::BitIndex(..)
+                                    | K::BitWindow { .. }
+                                    | K::BitUpdate { .. }
+                                    | K::BitWritePointer { .. }
+                            ))
+                    {
                         machine_owners.insert(function.declaration);
                     }
                     if !ct {
@@ -237,15 +281,19 @@ pub fn machine_arithmetic_functions(
                             expr.kind,
                             K::AddressOf(_)
                                 | K::ReadPointer(_)
-                                | K::PointerAnonymousField { .. } | K::PointerField { .. }
-                                | K::WritePointer { .. } | K::BitWritePointer {..}
+                                | K::PointerAnonymousField { .. }
+                                | K::PointerField { .. }
+                                | K::WritePointer { .. }
+                                | K::BitWritePointer { .. }
                         )
                     {
                         return Err(error("comptime pointer operations are not implemented"));
                     }
                     if let K::AddressOf(place) = &expr.kind {
                         let mut place = place.as_ref();
-                        while let K::AnonymousField { value, .. } | K::Field { value, .. } = &place.kind {
+                        while let K::AnonymousField { value, .. } | K::Field { value, .. } =
+                            &place.kind
+                        {
                             place = value;
                         }
                         if matches!(&place.kind,K::Local(id) if frozen.contains(id)) {
@@ -253,22 +301,46 @@ pub fn machine_arithmetic_functions(
                         }
                     }
                     match &expr.kind {
-                        K::EffectHandle {computation, handlers, ..} => {
-                            if ct {return Err(error("comptime effect handlers are not implemented"));}
+                        K::EffectHandle {
+                            computation,
+                            handlers,
+                            ..
+                        } => {
+                            if ct {
+                                return Err(error("comptime effect handlers are not implemented"));
+                            }
                             work.push(Work::Expr(computation, false, ct));
-                            for handler in handlers {for arm in &handler.arms {
-                                work.push(Work::Pattern(&arm.pattern, ct));
-                                if let Some(g) = &arm.guard {work.push(Work::Expr(g, false, ct));}
-                                work.push(Work::Expr(&arm.body, false, ct));
-                            }}
+                            for handler in handlers {
+                                for arm in &handler.arms {
+                                    work.push(Work::Pattern(&arm.pattern, ct));
+                                    if let Some(g) = &arm.guard {
+                                        work.push(Work::Expr(g, false, ct));
+                                    }
+                                    work.push(Work::Expr(&arm.body, false, ct));
+                                }
+                            }
                         }
-                        K::EffectResume(body) | K::EffectComputation {body, ..} | K::EffectRun {computation:body, ..} => {
-                            if ct {return Err(error("comptime effect computations are not implemented"));}
+                        K::EffectResume(body)
+                        | K::EffectComputation { body, .. }
+                        | K::EffectRun {
+                            computation: body, ..
+                        } => {
+                            if ct {
+                                return Err(error(
+                                    "comptime effect computations are not implemented",
+                                ));
+                            }
                             work.push(Work::Expr(body, false, ct));
                         }
-                        K::EffectRequest {arguments, ..} => {
-                            if ct {return Err(error("comptime effect requests are not implemented"));}
-                            work.extend(arguments.iter().map(|argument| Work::Expr(argument, false, ct)));
+                        K::EffectRequest { arguments, .. } => {
+                            if ct {
+                                return Err(error("comptime effect requests are not implemented"));
+                            }
+                            work.extend(
+                                arguments
+                                    .iter()
+                                    .map(|argument| Work::Expr(argument, false, ct)),
+                            );
                         }
                         K::Function(id)
                         | K::FunctionInstance {
@@ -276,11 +348,16 @@ pub fn machine_arithmetic_functions(
                         } => {
                             if quote_ids.contains(id) {
                                 if !_callee {
-                                    return Err(error("quote template cannot escape as a runtime function value"));
+                                    return Err(error(
+                                        "quote template cannot escape as a runtime function value",
+                                    ));
                                 }
                                 if !quote_ids.contains(&function.declaration)
-                                    && !staged_quote_ids.contains(id) {
-                                    return Err(error("quote application requires deterministic expansion before runtime execution"));
+                                    && !staged_quote_ids.contains(id)
+                                {
+                                    return Err(error(
+                                        "quote application requires deterministic expansion before runtime execution",
+                                    ));
                                 }
                             }
                             let target = functions
@@ -317,18 +394,42 @@ pub fn machine_arithmetic_functions(
                                 ));
                             }
                         }
-                        K::AssociatedValue { interface, member, subject } => {
-                            let contract=package.traits.iter().find(|definition|definition.declaration==interface.declaration)
-                                .ok_or_else(||error("associated value has no interface contract"))?;
-                            let member=contract.associated.iter().find(|definition|definition.declaration==*member)
-                                .ok_or_else(||error("associated value has no member contract"))?;
-                            if interface.arguments.len()!=contract.type_parameters.len() {
-                                return Err(error("associated value interface argument count mismatch"));
+                        K::AssociatedValue {
+                            interface,
+                            member,
+                            subject,
+                        } => {
+                            let contract = package
+                                .traits
+                                .iter()
+                                .find(|definition| definition.declaration == interface.declaration)
+                                .ok_or_else(|| {
+                                    error("associated value has no interface contract")
+                                })?;
+                            let member = contract
+                                .associated
+                                .iter()
+                                .find(|definition| definition.declaration == *member)
+                                .ok_or_else(|| error("associated value has no member contract"))?;
+                            if interface.arguments.len() != contract.type_parameters.len() {
+                                return Err(error(
+                                    "associated value interface argument count mismatch",
+                                ));
                             }
-                            let arguments:Vec<_>=std::iter::once(subject.clone()).chain(interface.arguments.iter().cloned()).collect();
-                            let ty=member.ty.instantiate_types(&contract.parameters_with_self(),&arguments)
-                                .map_err(|_|error("associated value contract substitution failed"))?;
-                            if ty!=expr.ty {return Err(error("associated value type does not preserve its contract"));}
+                            let arguments: Vec<_> = std::iter::once(subject.clone())
+                                .chain(interface.arguments.iter().cloned())
+                                .collect();
+                            let ty = member
+                                .ty
+                                .instantiate_types(&contract.parameters_with_self(), &arguments)
+                                .map_err(|_| {
+                                    error("associated value contract substitution failed")
+                                })?;
+                            if ty != expr.ty {
+                                return Err(error(
+                                    "associated value type does not preserve its contract",
+                                ));
+                            }
                         }
                         K::TraitMethod {
                             method_arguments,
@@ -348,7 +449,9 @@ pub fn machine_arithmetic_functions(
                                 .find(|method| method.declaration == *member)
                                 .ok_or_else(|| error("trait method has no member contract"))?;
                             if method.is_quote && !_callee {
-                                return Err(error("quote trait method cannot escape as a runtime function value"));
+                                return Err(error(
+                                    "quote trait method cannot escape as a runtime function value",
+                                ));
                             }
                             if !method.program.is_empty() {
                                 machine_owners.insert(function.declaration);
@@ -363,15 +466,28 @@ pub fn machine_arithmetic_functions(
                             {
                                 return Err(error("trait method type argument count mismatch"));
                             }
-                            let parameters: Vec<_> = contract.parameters_with_self().into_iter()
-                                .chain(method.type_parameters.iter().copied()).collect();
+                            let parameters: Vec<_> = contract
+                                .binders_with_self(&mut 100_000)
+                                .map_err(|_| error("invalid trait parameter domains"))?
+                                .into_iter()
+                                .chain(method.type_parameters.iter().map(|id| {
+                                    crate::DeclarationParameter {
+                                        declaration: *id,
+                                        sort: crate::Sort::Type,
+                                    }
+                                }))
+                                .collect();
                             let arguments: Vec<_> = std::iter::once(subject.clone())
                                 .chain(interface_arguments.iter().cloned())
                                 .chain(method_arguments.iter().cloned())
                                 .collect();
                             let signature = method
                                 .signature
-                                .instantiate_types_in_scope(&parameters, &arguments, &caller_frames)
+                                .instantiate_parameters_in_scope(
+                                    &parameters,
+                                    &arguments,
+                                    &caller_frames,
+                                )
                                 .map_err(|_| error("trait method contract substitution failed"))?;
                             if signature != expr.ty {
                                 return Err(error(
@@ -398,12 +514,15 @@ pub fn machine_arithmetic_functions(
                                 ));
                             }
                             work.push(Work::Expr(callee, true, ct));
-                            let Term::Function { parameters, .. } = callee.ty.callable_signature() else {
+                            let Term::Function { parameters, .. } = callee.ty.callable_signature()
+                            else {
                                 return Err(error("call target has no callable signature"));
                             };
                             for argument in arguments {
-                                let parameter = parameters.get(argument.parameter)
-                                    .ok_or_else(|| error("call argument parameter index out of range"))?;
+                                let parameter =
+                                    parameters.get(argument.parameter).ok_or_else(|| {
+                                        error("call argument parameter index out of range")
+                                    })?;
                                 // Staged arguments execute before this runtime invocation.
                                 // This changes execution phase only; the frontend separately
                                 // proves that referenced inputs are available at that stage.
@@ -415,7 +534,9 @@ pub fn machine_arithmetic_functions(
                         // specialization. Their Type operands are compile-time
                         // descriptions, never runtime storage or runtime reads.
                         K::TypeEqual(left, right)
-                            if matches!(left.kind, K::TypeValue(_)) && matches!(right.kind, K::TypeValue(_)) => {
+                            if matches!(left.kind, K::TypeValue(_))
+                                && matches!(right.kind, K::TypeValue(_)) =>
+                        {
                             work.push(Work::Expr(left, false, true));
                             work.push(Work::Expr(right, false, true));
                         }
@@ -433,8 +554,16 @@ pub fn machine_arithmetic_functions(
                                     .map(|e| Work::Expr(e, false, ct)),
                             );
                         }
-                        K::NormalFormType { head, arguments, plan } => {
-                            work.extend(plan.iter().flat_map(|p| &p.preparations).map(|p| Work::Expr(&p.expression, false, ct)));
+                        K::NormalFormType {
+                            head,
+                            arguments,
+                            plan,
+                        } => {
+                            work.extend(
+                                plan.iter()
+                                    .flat_map(|p| &p.preparations)
+                                    .map(|p| Work::Expr(&p.expression, false, ct)),
+                            );
                             work.extend(
                                 arguments
                                     .iter()
@@ -453,7 +582,10 @@ pub fn machine_arithmetic_functions(
                                 .ok_or_else(|| {
                                     error("normal-form constructor metadata is missing")
                                 })?;
-                            if plan.as_ref().is_some_and(|plan| !plan.valid(arguments.len())) {
+                            if plan
+                                .as_ref()
+                                .is_some_and(|plan| !plan.valid(arguments.len()))
+                            {
                                 return Err(error("invalid normal-form input plan"));
                             }
                             if arguments.len() != metadata.parameters.len() {
@@ -489,26 +621,48 @@ pub fn machine_arithmetic_functions(
                         }
                         K::AnonymousRecord { fields } => {
                             match &expr.ty {
-                                crate::Term::Record(types) if types.len() == fields.len() => {},
-                                crate::Term::Primitive(crate::Primitive::Never) if fields.iter().any(|field| field.ty == crate::Term::Primitive(crate::Primitive::Never)) => {},
-                                _ => return Err(error("anonymous record construction requires matching named field types")),
+                                crate::Term::Record(types) if types.len() == fields.len() => {}
+                                crate::Term::Primitive(crate::Primitive::Never)
+                                    if fields.iter().any(|field| {
+                                        field.ty == crate::Term::Primitive(crate::Primitive::Never)
+                                    }) => {}
+                                _ => {
+                                    return Err(error(
+                                        "anonymous record construction requires matching named field types",
+                                    ));
+                                }
                             }
                             work.extend(fields.iter().map(|e| Work::Expr(e, false, ct)));
                         }
                         K::AnonymousField { value, name, index } => {
                             match &value.ty {
-                                crate::Term::Record(fields) if fields.get(*index).is_some_and(|(field, _)| field == name) => {},
-                                crate::Term::AssociatedType { .. } | crate::Term::Rigid { .. } | crate::Term::NormalForm { .. } | crate::Term::Bound { .. } | crate::Term::Hole { .. } => {},
-                                _ => return Err(error("anonymous field projection requires a matching record label and index")),
+                                crate::Term::Record(fields)
+                                    if fields
+                                        .get(*index)
+                                        .is_some_and(|(field, _)| field == name) => {}
+                                crate::Term::AssociatedType { .. }
+                                | crate::Term::Rigid { .. }
+                                | crate::Term::NormalForm { .. }
+                                | crate::Term::Bound { .. }
+                                | crate::Term::Hole { .. } => {}
+                                _ => {
+                                    return Err(error(
+                                        "anonymous field projection requires a matching record label and index",
+                                    ));
+                                }
                             }
                             work.push(Work::Expr(value, false, ct));
                         }
                         K::Snapshot(value) => {
-                            if value.ty!=expr.ty {return Err(error("entry snapshot must preserve its operand type"));}
-                            work.push(Work::Expr(value,false,ct));
+                            if value.ty != expr.ty {
+                                return Err(error("entry snapshot must preserve its operand type"));
+                            }
+                            work.push(Work::Expr(value, false, ct));
                         }
-                        K::RequirePredicate(condition) | K::EnsurePredicate(condition) | K::CheckPredicate(condition) => {
-                            if matches!(expr.kind,K::RequirePredicate(_) | K::EnsurePredicate(_)) {
+                        K::RequirePredicate(condition)
+                        | K::EnsurePredicate(condition)
+                        | K::CheckPredicate(condition) => {
+                            if matches!(expr.kind, K::RequirePredicate(_) | K::EnsurePredicate(_)) {
                                 machine_owners.insert(function.declaration);
                             }
                             if expr.ty != Term::Primitive(Primitive::Void)
@@ -535,7 +689,10 @@ pub fn machine_arithmetic_functions(
                         | K::IntegerNegate(value)
                         | K::FloatNegate(value)
                         | K::BitConvert(value)
-                        | K::TakeBits(value) | K::SymbolName(value) | K::EnumName(value)
+                        | K::NewtypeConvert(value)
+                        | K::TakeBits(value)
+                        | K::SymbolName(value)
+                        | K::EnumName(value)
                         | K::Not(value)
                         | K::Loop { body: value, .. } => work.push(Work::Expr(value, false, ct)),
                         K::WritePointer {
@@ -558,7 +715,7 @@ pub fn machine_arithmetic_functions(
                         | K::ScalarLessEqual(a, b)
                         | K::ScalarEqual(a, b)
                         | K::TypeEqual(a, b)
-                    | K::TypeListIndex(a, b)
+                        | K::TypeListIndex(a, b)
                         | K::BitEqual(a, b)
                         | K::BitConcat(a, b)
                         | K::And(a, b)
@@ -566,21 +723,59 @@ pub fn machine_arithmetic_functions(
                             work.push(Work::Expr(a, false, ct));
                             work.push(Work::Expr(b, false, ct));
                         }
-                        K::BitWritePointer {pointer,selections,value} => {
-                            preparation_fuel = preparation_fuel.checked_sub(selections.len()).ok_or_else(||error("bit selection validation budget exhausted"))?;
-                            let Term::Pointer(storage) = &pointer.ty else {return Err(error("bit writeback requires a pointer"))};
-                            if let Some(message) = crate::program::bit_update_error(storage,selections,&value.ty,&expr.ty) {return Err(error(message));}
-                            work.push(Work::Expr(pointer,false,ct));
-                            for input in selections.iter().flat_map(crate::program::BitSelection::expressions) {work.push(Work::Expr(input,false,ct));}
-                            work.push(Work::Expr(value,false,ct));
+                        K::BitWritePointer {
+                            pointer,
+                            selections,
+                            value,
+                        } => {
+                            preparation_fuel =
+                                preparation_fuel.checked_sub(selections.len()).ok_or_else(
+                                    || error("bit selection validation budget exhausted"),
+                                )?;
+                            let Term::Pointer(storage) = &pointer.ty else {
+                                return Err(error("bit writeback requires a pointer"));
+                            };
+                            if let Some(message) = crate::program::bit_update_error(
+                                storage, selections, &value.ty, &expr.ty,
+                            ) {
+                                return Err(error(message));
+                            }
+                            work.push(Work::Expr(pointer, false, ct));
+                            for input in selections
+                                .iter()
+                                .flat_map(crate::program::BitSelection::expressions)
+                            {
+                                work.push(Work::Expr(input, false, ct));
+                            }
+                            work.push(Work::Expr(value, false, ct));
                         }
-                        K::BitUpdate {storage_type, selections, value, ..} => {
-                            preparation_fuel = preparation_fuel.checked_sub(selections.len()).ok_or_else(||error("bit selection validation budget exhausted"))?;
-                            if let Some(message) = crate::program::bit_update_error(storage_type,selections,&value.ty,&expr.ty) {return Err(error(message));}
-                            for input in selections.iter().flat_map(crate::program::BitSelection::expressions) {work.push(Work::Expr(input,false,ct));}
-                            work.push(Work::Expr(value,false,ct));
+                        K::BitUpdate {
+                            storage_type,
+                            selections,
+                            value,
+                            ..
+                        } => {
+                            preparation_fuel =
+                                preparation_fuel.checked_sub(selections.len()).ok_or_else(
+                                    || error("bit selection validation budget exhausted"),
+                                )?;
+                            if let Some(message) = crate::program::bit_update_error(
+                                storage_type,
+                                selections,
+                                &value.ty,
+                                &expr.ty,
+                            ) {
+                                return Err(error(message));
+                            }
+                            for input in selections
+                                .iter()
+                                .flat_map(crate::program::BitSelection::expressions)
+                            {
+                                work.push(Work::Expr(input, false, ct));
+                            }
+                            work.push(Work::Expr(value, false, ct));
                         }
-                        K::BitWindow {value, start, end} => {
+                        K::BitWindow { value, start, end } => {
                             let never = Term::Primitive(Primitive::Never);
                             if matches!(value.ty, Term::Primitive(p) if !matches!(p, Primitive::BitVec(_)))
                                 || [start, end].iter().any(|e|matches!(e.ty, Term::Primitive(p)
@@ -600,9 +795,18 @@ pub fn machine_arithmetic_functions(
                             let bad_value = matches!(value.ty, Term::Primitive(p) if !matches!(p, Primitive::BitVec(_)));
                             let bad_index = matches!(index.ty, Term::Primitive(p)
                                 if !matches!(p, Primitive::Integer | Primitive::Never) && p.fixed_integer_layout().is_none());
-                            if bad_value || bad_index
-                                || expr.ty != if index.ty == never {never} else {Term::Primitive(Primitive::BitVec(1))} {
-                                return Err(error("invalid dynamic BitVec index operand or result type"));
+                            if bad_value
+                                || bad_index
+                                || expr.ty
+                                    != if index.ty == never {
+                                        never
+                                    } else {
+                                        Term::Primitive(Primitive::BitVec(1))
+                                    }
+                            {
+                                return Err(error(
+                                    "invalid dynamic BitVec index operand or result type",
+                                ));
                             }
                             work.push(Work::Expr(value, false, ct));
                             work.push(Work::Expr(index, false, ct));
@@ -617,41 +821,78 @@ pub fn machine_arithmetic_functions(
                                 work.push(Work::Expr(&arm.body, false, ct));
                             }
                         }
-                        K::Block { statements, result } | K::CallPreparation { statements, result } => {
+                        K::Block { statements, result }
+                        | K::CallPreparation { statements, result } => {
                             if matches!(expr.kind, K::CallPreparation { .. }) {
                                 let mut bindings = BTreeSet::new();
                                 for statement in statements {
                                     let declared = match &statement.kind {
                                         K::Let { binding, .. } => vec![*binding],
-                                        K::LetPattern { pattern: Pattern::Tuple(fields), guard: None, otherwise: None, .. } => {
+                                        K::LetPattern {
+                                            pattern: Pattern::Tuple(fields),
+                                            guard: None,
+                                            otherwise: None,
+                                            ..
+                                        } => {
                                             let mut declared = Vec::new();
                                             for field in fields {
-                                                let Pattern::Binding { binding, inner } = field else {
-                                                    return Err(fail(statement.source, "spread preparation requires tuple binding patterns"));
+                                                let Pattern::Binding { binding, inner } = field
+                                                else {
+                                                    return Err(fail(
+                                                        statement.source,
+                                                        "spread preparation requires tuple binding patterns",
+                                                    ));
                                                 };
                                                 if !matches!(inner.as_ref(), Pattern::Wild) {
-                                                    return Err(fail(statement.source, "spread preparation requires tuple binding patterns"));
+                                                    return Err(fail(
+                                                        statement.source,
+                                                        "spread preparation requires tuple binding patterns",
+                                                    ));
                                                 }
                                                 declared.push(*binding);
                                             }
                                             declared
                                         }
-                                        _ => return Err(fail(statement.source, "call preparation requires binding statements")),
+                                        _ => {
+                                            return Err(fail(
+                                                statement.source,
+                                                "call preparation requires binding statements",
+                                            ));
+                                        }
                                     };
                                     for binding in declared {
                                         if !bindings.insert(binding) {
-                                            return Err(fail(statement.source, "call preparation bindings must be distinct"));
+                                            return Err(fail(
+                                                statement.source,
+                                                "call preparation bindings must be distinct",
+                                            ));
                                         }
                                     }
                                 }
-                                if !result.as_ref().is_some_and(|value| matches!(value.kind, K::Call { .. } | K::Variant { .. } | K::Block { .. })) {
-                                    return Err(fail(expr.source, "call preparation requires a normalized call, variant or expanded call block"));
+                                if !result.as_ref().is_some_and(|value| {
+                                    matches!(
+                                        value.kind,
+                                        K::Call { .. } | K::Variant { .. } | K::Block { .. }
+                                    )
+                                }) {
+                                    return Err(fail(
+                                        expr.source,
+                                        "call preparation requires a normalized call, variant or expanded call block",
+                                    ));
                                 }
                             }
-                            let staged=crate::preparation::inputs(expr,&mut preparation_fuel)
-                                .map_err(|_|fail(expr.source,"invalid or excessive staged preparation dependencies"))?
-                                .map(|(indices,_)|indices).unwrap_or_default();
-                            work.extend(statements.iter().enumerate().map(|(index,e)| Work::Expr(e, false, ct || staged.contains(&index))));
+                            let staged = crate::preparation::inputs(expr, &mut preparation_fuel)
+                                .map_err(|_| {
+                                    fail(
+                                        expr.source,
+                                        "invalid or excessive staged preparation dependencies",
+                                    )
+                                })?
+                                .map(|(indices, _)| indices)
+                                .unwrap_or_default();
+                            work.extend(statements.iter().enumerate().map(|(index, e)| {
+                                Work::Expr(e, false, ct || staged.contains(&index))
+                            }));
                             if let Some(result) = result {
                                 work.push(Work::Expr(result, false, ct));
                             }
@@ -687,7 +928,8 @@ pub fn machine_arithmetic_functions(
                                 work.push(Work::Expr(e, false, ct));
                             }
                         }
-                        K::TypeValue(_) | K::TypeListValue(_)
+                        K::TypeValue(_)
+                        | K::TypeListValue(_)
                         | K::Literal(_)
                         | K::Local(_)
                         | K::Unit
@@ -706,15 +948,26 @@ pub fn machine_arithmetic_functions(
 /// Check a known runtime domain even when its enclosing ordinary signature
 /// contains separate Any descriptions and cannot yet be represented as a Term.
 /// Unknown descriptions are deliberately not accepted by this API.
-pub fn validate_runtime_storage(ty: &Term, package: &Package, frames: &[Vec<crate::Sort>])
-    -> Result<(), &'static str> {
+pub fn validate_runtime_storage(
+    ty: &Term,
+    package: &Package,
+    frames: &[Vec<crate::Sort>],
+) -> Result<(), &'static str> {
     if ty.sort() != crate::Sort::Type || ty.check_scope(frames).is_err() {
         return Err("runtime storage requires a Type in the declared input scope");
     }
-    match comptime_storage(ty, package, frames, &mut std::collections::HashSet::new(), 0) {
+    match comptime_storage(
+        ty,
+        package,
+        frames,
+        &mut std::collections::HashSet::new(),
+        0,
+    ) {
         Ok(false) => Ok(()),
         Ok(true) => Err("comptime-only value cannot inhabit runtime storage; Splice is required"),
-        Err(()) => Err("runtime storage phase could not be established within the type inspection limit"),
+        Err(()) => {
+            Err("runtime storage phase could not be established within the type inspection limit")
+        }
     }
 }
 
@@ -722,7 +975,7 @@ fn comptime_storage(
     ty: &crate::Term,
     package: &Package,
     frames: &[Vec<crate::Sort>],
-    seen: &mut std::collections::HashSet<(crate::Term,Vec<Vec<crate::Sort>>)>,
+    seen: &mut std::collections::HashSet<(crate::Term, Vec<Vec<crate::Sort>>)>,
     depth: usize,
 ) -> Result<bool, ()> {
     use crate::{Primitive as P, Term as T};
@@ -732,8 +985,12 @@ fn comptime_storage(
     // Closed recursive storage types do not depend on intervening function
     // frames. Canonicalize their cache scope so a recursive callback signature
     // reaches the existing cycle guard instead of growing frames indefinitely.
-    let identity_frames=if ty.check_scope(&[]).is_ok() {vec![]} else {frames.to_vec()};
-    if !seen.insert((ty.clone(),identity_frames)) {
+    let identity_frames = if ty.check_scope(&[]).is_ok() {
+        vec![]
+    } else {
+        frames.to_vec()
+    };
+    if !seen.insert((ty.clone(), identity_frames)) {
         return Ok(false);
     }
     let children: Vec<T> = match ty {
@@ -742,14 +999,20 @@ fn comptime_storage(
         T::Record(fields) => fields.iter().map(|(_, ty)| ty.clone()).collect(),
         T::Pointer(inner) => vec![(**inner).clone()],
         T::Function { parameters, result } => {
-            let mut nested=frames.to_vec();
-            nested.push(parameters.iter().map(|p|p.sort).collect());
-            for child in parameters.iter().filter(|p|p.sort==crate::Sort::Runtime)
-                .map(|p|&p.ty).chain(std::iter::once(result.as_ref())) {
-                if comptime_storage(child,package,&nested,seen,depth+1)? {return Ok(true);}
+            let mut nested = frames.to_vec();
+            nested.push(parameters.iter().map(|p| p.sort).collect());
+            for child in parameters
+                .iter()
+                .filter(|p| p.sort == crate::Sort::Runtime)
+                .map(|p| &p.ty)
+                .chain(std::iter::once(result.as_ref()))
+            {
+                if comptime_storage(child, package, &nested, seen, depth + 1)? {
+                    return Ok(true);
+                }
             }
             return Ok(false);
-        },
+        }
         T::Closure {
             environment,
             signature,
@@ -767,11 +1030,26 @@ fn comptime_storage(
                 .iter()
                 .find(|d| d.declaration == *declaration)
             {
-                def.instantiate_fields_in_scope(arguments,frames).map_err(|_|())?
-                    .into_iter().map(|(_,ty)|ty).collect()
+                def.instantiate_fields_in_scope(arguments, frames)
+                    .map_err(|_| ())?
+                    .into_iter()
+                    .map(|(_, ty)| ty)
+                    .collect()
             } else if let Some(def) = package.enums.iter().find(|d| d.declaration == *declaration) {
-                def.instantiate_variants_in_scope(arguments,frames).map_err(|_|())?
-                    .into_iter().flat_map(|v|v.fields).collect()
+                def.instantiate_variants_in_scope(arguments, frames)
+                    .map_err(|_| ())?
+                    .into_iter()
+                    .flat_map(|v| v.fields)
+                    .collect()
+            } else if let Some(def) = package
+                .newtypes
+                .iter()
+                .find(|d| d.declaration == *declaration)
+            {
+                vec![
+                    def.representation_budgeted(arguments, frames, &mut 100_000)
+                        .map_err(|_| ())?,
+                ]
             } else {
                 vec![]
             }

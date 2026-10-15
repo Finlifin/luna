@@ -1,12 +1,12 @@
 //! Check the captured destructor's memory footprint against the current owner.
 //! This does not acquire environments, prove program predicates, or run Drop.
 use super::*;
-use std::collections::{BTreeMap, BTreeSet};
 use crate::verification::PlaceId;
 use crate::verification::{
     memory,
     ownership::{Availability, CleanupTree, Place, State},
 };
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Borrowed evidence for one cleanup instant, not a persistent certificate.
 /// Every alternative in a stored pointer must satisfy the access obligation.
@@ -28,11 +28,16 @@ pub struct AccessCheck {
 }
 impl fmt::Display for AccessCheck {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "(drop-access-check (receiver {}) (constructed {}) {} (targets",
-            self.receiver, self.constructed, self.footprint)?;
+        write!(
+            f,
+            "(drop-access-check (receiver {}) (constructed {}) {} (targets",
+            self.receiver, self.constructed, self.footprint
+        )?;
         for targets in &self.targets {
             f.write_str(" (access")?;
-            for target in targets { write!(f, " {target}")?; }
+            for target in targets {
+                write!(f, " {target}")?;
+            }
             f.write_str(")")?;
         }
         f.write_str("))")
@@ -149,7 +154,12 @@ pub fn check_access_with_memory(
     if footprint.signature != signature(selected.subject.clone()) {
         return Err("captured Drop body signature changed".into());
     }
-    if let Some(pointers) = pointers.filter(|_| footprint.accesses.iter().any(|a| !a.target.through.is_empty())) {
+    if let Some(pointers) = pointers.filter(|_| {
+        footprint
+            .accesses
+            .iter()
+            .any(|a| !a.target.through.is_empty())
+    }) {
         if place_type(package, pointers.types, receiver, fuel)? != selected.subject {
             return Err("Drop receiver type disagrees with memory snapshot".into());
         }
@@ -163,22 +173,29 @@ pub fn check_access_with_memory(
         let mut ty = selected.subject.clone();
         for fields in &access.target.through {
             project(package, &mut ty, &mut targets, fields, fuel)?;
-            let pointers = pointers.ok_or("indirect Drop access requires stored pointer provenance")?;
+            let pointers =
+                pointers.ok_or("indirect Drop access requires stored pointer provenance")?;
             let Term::Pointer(subject) = ty else {
                 return Err("Drop indirect path loads a non-pointer slot".into());
             };
             let mut loaded = BTreeSet::new();
             for slot in &targets {
                 check_retired(pointers.retired, slot, fuel)?;
-                state.require_present(slot).map_err(|e| format!("Drop pointer slot {slot} is unavailable: {e:?}"))?;
-                let values = pointers.slots.get(slot)
+                state
+                    .require_present(slot)
+                    .map_err(|e| format!("Drop pointer slot {slot} is unavailable: {e:?}"))?;
+                let values = pointers
+                    .slots
+                    .get(slot)
                     .filter(|values| !values.is_empty())
                     .ok_or("indirect Drop access requires stored pointer provenance")?;
                 for target in values {
                     charge(fuel, target.fields.len().saturating_add(1))?;
                     // Loading an address need not read its pointee, but its
                     // storage must still belong to the current state.
-                    state.require_place(target).map_err(|e| format!("Drop pointer target {target} is unavailable: {e:?}"))?;
+                    state.require_place(target).map_err(|e| {
+                        format!("Drop pointer target {target} is unavailable: {e:?}")
+                    })?;
                     if place_type(package, pointers.types, target, fuel)? != *subject {
                         return Err("Drop pointer target type disagrees with slot pointee".into());
                     }
@@ -195,13 +212,25 @@ pub fn check_access_with_memory(
         for target in &targets {
             charge(fuel, target.fields.len().saturating_add(1))?;
             let checked = if access.read_value {
-                if let Some(pointers) = pointers { check_retired(pointers.retired, target, fuel)?; }
+                if let Some(pointers) = pointers {
+                    check_retired(pointers.retired, target, fuel)?;
+                }
                 state.require_present(target)
             } else {
                 state.require_place(target)
             };
-            checked.map_err(|error| format!("Drop {} target {target} is unavailable: {error:?}",
-                if access.write { "write" } else if access.read_value { "read" } else { "address" }))?;
+            checked.map_err(|error| {
+                format!(
+                    "Drop {} target {target} is unavailable: {error:?}",
+                    if access.write {
+                        "write"
+                    } else if access.read_value {
+                        "read"
+                    } else {
+                        "address"
+                    }
+                )
+            })?;
         }
         resolved.push(targets);
     }
@@ -214,36 +243,67 @@ pub fn check_access_with_memory(
 }
 
 fn charge(fuel: &mut usize, amount: usize) -> Result<(), String> {
-    *fuel = fuel.checked_sub(amount).ok_or("Drop access budget exhausted")?;
+    *fuel = fuel
+        .checked_sub(amount)
+        .ok_or("Drop access budget exhausted")?;
     Ok(())
 }
 
-fn field_type(package: &Package, ty: &Term, index: usize, fuel: &mut usize) -> Result<Term, String> {
+fn field_type(
+    package: &Package,
+    ty: &Term,
+    index: usize,
+    fuel: &mut usize,
+) -> Result<Term, String> {
     charge(fuel, 1)?;
     memory::bound_type(ty, fuel)?;
     if let Some(fields) = nir::normal_forms::tuple_fields(Some(package), ty) {
-        return fields.get(index).cloned().ok_or("Drop tuple field index is out of bounds".into());
+        return fields
+            .get(index)
+            .cloned()
+            .ok_or("Drop tuple field index is out of bounds".into());
     }
     match ty {
-        Term::Record(fields) => fields.get(index).map(|(_, ty)| ty.clone())
+        Term::Record(fields) => fields
+            .get(index)
+            .map(|(_, ty)| ty.clone())
             .ok_or("Drop field index is out of bounds".into()),
-        Term::Nominal {declaration, arguments} => {
-            let definition = package.structs.iter().find(|item| item.declaration == *declaration)
+        Term::Nominal {
+            declaration,
+            arguments,
+        } => {
+            let definition = package
+                .structs
+                .iter()
+                .find(|item| item.declaration == *declaration)
                 .ok_or("Drop field layout is missing")?;
-            definition.fields.get(index).ok_or("Drop field index is out of bounds")?.1
-                .instantiate_types(&definition.type_parameters, arguments).map_err(|e| e.to_string())
+            definition
+                .fields
+                .get(index)
+                .ok_or("Drop field index is out of bounds")?
+                .1
+                .instantiate_types(&definition.type_parameters, arguments)
+                .map_err(|e| e.to_string())
         }
         _ => Err("Drop field access has no aggregate layout".into()),
     }
 }
 
-fn project(package: &Package, ty: &mut Term, targets: &mut BTreeSet<Place>,
-    fields: &[(nir::program::FieldOwner, usize)], fuel: &mut usize) -> Result<(), String> {
+fn project(
+    package: &Package,
+    ty: &mut Term,
+    targets: &mut BTreeSet<Place>,
+    fields: &[(nir::program::FieldOwner, usize)],
+    fuel: &mut usize,
+) -> Result<(), String> {
     for (owner, index) in fields {
         match (&*ty, owner) {
             (Term::Record(_), nir::program::FieldOwner::Anonymous) => (),
-            (Term::Nominal {declaration, ..}, nir::program::FieldOwner::Nominal(expected))
-                if declaration == expected => (),
+            (Term::Nominal { declaration, .. }, nir::program::FieldOwner::Nominal(expected))
+                if declaration == expected =>
+            {
+                ()
+            }
             _ => return Err("Drop field declaration disagrees with receiver layout".into()),
         }
         *ty = field_type(package, ty, *index, fuel)?;
@@ -259,20 +319,44 @@ fn project(package: &Package, ty: &mut Term, targets: &mut BTreeSet<Place>,
     Ok(())
 }
 
-fn place_type(package: &Package, types: &BTreeMap<PlaceId, Term>, place: &Place,
-    fuel: &mut usize) -> Result<Term, String> {
-    let ty = types.get(&place.root).ok_or("Drop pointer target type is missing")?;
+fn place_type(
+    package: &Package,
+    types: &BTreeMap<PlaceId, Term>,
+    place: &Place,
+    fuel: &mut usize,
+) -> Result<Term, String> {
+    let ty = types
+        .get(&place.root)
+        .ok_or("Drop pointer target type is missing")?;
     memory::bound_type(ty, fuel)?;
     let mut ty = ty.clone();
-    for index in &place.fields { ty = field_type(package, &ty, *index, fuel)?; }
+    for index in &place.fields {
+        ty = field_type(package, &ty, *index, fuel)?;
+    }
     Ok(ty)
 }
 
-pub(super) fn check_retired(retired: &[Place], target: &Place, fuel: &mut usize) -> Result<(), String> {
+pub(super) fn check_retired(
+    retired: &[Place],
+    target: &Place,
+    fuel: &mut usize,
+) -> Result<(), String> {
     for prior in retired {
-        charge(fuel, prior.fields.len().saturating_add(target.fields.len()).saturating_add(1))?;
-        if prior.root == target.root && (target.fields.starts_with(&prior.fields) || prior.fields.starts_with(&target.fields)) {
-            return Err(format!("Drop target {target} is unavailable after earlier cleanup of {prior}"));
+        charge(
+            fuel,
+            prior
+                .fields
+                .len()
+                .saturating_add(target.fields.len())
+                .saturating_add(1),
+        )?;
+        if prior.root == target.root
+            && (target.fields.starts_with(&prior.fields)
+                || prior.fields.starts_with(&target.fields))
+        {
+            return Err(format!(
+                "Drop target {target} is unavailable after earlier cleanup of {prior}"
+            ));
         }
     }
     Ok(())

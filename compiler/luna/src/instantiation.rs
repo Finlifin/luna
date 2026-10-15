@@ -5,12 +5,25 @@ pub fn instantiate(package: &Package, entry: &str, fuel: u64) -> Result<iir::Pac
     instantiate_selected(package, entry, None, fuel)
 }
 
-pub fn instantiate_in_package(package: &Package, identity: u64, entry: &str, fuel: u64) -> Result<iir::Package, String> {
+pub fn instantiate_in_package(
+    package: &Package,
+    identity: u64,
+    entry: &str,
+    fuel: u64,
+) -> Result<iir::Package, String> {
     instantiate_selected(package, entry, Some(identity), fuel)
 }
 
-fn instantiate_selected(package: &Package, entry: &str, identity: Option<u64>, fuel: u64) -> Result<iir::Package, String> {
-    let mut candidates = package.functions.iter().filter(|f| f.name == entry && identity.is_none_or(|id| f.declaration.package == id));
+fn instantiate_selected(
+    package: &Package,
+    entry: &str,
+    identity: Option<u64>,
+    fuel: u64,
+) -> Result<iir::Package, String> {
+    let mut candidates = package
+        .functions
+        .iter()
+        .filter(|f| f.name == entry && identity.is_none_or(|id| f.declaration.package == id));
     let function = candidates
         .next()
         .ok_or_else(|| format!("IIR entry `{entry}` was not found"))?;

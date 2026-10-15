@@ -12,7 +12,7 @@ pub struct ExprOption {
     pub stop_at_pipe: bool,
     pub stop_at_do: bool,
     pub stop_at_pattern_gt: bool,
-    pub stop_at_effect_prefix: bool,
+    pub stop_at_type_qualifier: bool,
     pub stop_at_call: bool,
 }
 
@@ -23,7 +23,7 @@ impl ExprOption {
             stop_at_pipe: false,
             stop_at_do: false,
             stop_at_pattern_gt: false,
-            stop_at_effect_prefix: false,
+            stop_at_type_qualifier: false,
             stop_at_call: false,
         }
     }
@@ -75,8 +75,19 @@ impl Parser<'_> {
             // 循环处理操作符和右操作数
             loop {
                 let token = p.peek_next_token();
-                if option.stop_at_call && token.kind == TokenKind::LParen {break;}
-                if option.stop_at_effect_prefix && token.kind == TokenKind::Hash {
+                if option.stop_at_call && token.kind == TokenKind::LParen {
+                    break;
+                }
+                if option.stop_at_type_qualifier
+                    && matches!(
+                        token.kind,
+                        TokenKind::Hash
+                            | TokenKind::Bang
+                            | TokenKind::Ampersand
+                            | TokenKind::Percent
+                            | TokenKind::SeparatedPercent
+                    )
+                {
                     break;
                 }
                 if option.stop_at_pattern_gt && token.kind == TokenKind::SeparatedGt {
@@ -243,10 +254,12 @@ impl Parser<'_> {
                 TokenKind::Pipe => p.try_lambda(option),
                 TokenKind::Forall => p.try_forall_prefix(option),
                 TokenKind::Exists => p.try_bool_exists(option),
-                TokenKind::Hash => p.try_effect_qualified_type(),
-                TokenKind::Bang => p.try_error_qualified_type(),
-                TokenKind::Ampersand => p.try_reachability_type(),
-                TokenKind::Percent | TokenKind::SeparatedPercent => p.try_closure_qualified_type(),
+                TokenKind::Hash => p.try_effect_qualified_type(option),
+                TokenKind::Bang => p.try_error_qualified_type(option),
+                TokenKind::Ampersand => p.try_reachability_type(option),
+                TokenKind::Percent | TokenKind::SeparatedPercent => {
+                    p.try_closure_qualified_type(option)
+                }
                 TokenKind::Minus | TokenKind::SeparatedMinus => {
                     p.try_prefix_unary_expr(token.kind, NodeKind::Negative, 90, option)
                 }
@@ -272,18 +285,32 @@ impl Parser<'_> {
                 TokenKind::Refines => {
                     p.eat_tokens(1);
                     if !p.eat_token(TokenKind::LBrace) {
-                        return Err(ParseError::invalid_syntax("Expected `{` after refines".into(),p.peek_next_token().kind,p.next_token_span()));
+                        return Err(ParseError::invalid_syntax(
+                            "Expected `{` after refines".into(),
+                            p.peek_next_token().kind,
+                            p.next_token_span(),
+                        ));
                     }
-                    let requirement=p.try_expr()?;
-                    if requirement==0 || !p.eat_token(TokenKind::RBrace) {
-                        return Err(ParseError::invalid_syntax("Expected refinement expression and `}`".into(),p.peek_next_token().kind,p.next_token_span()));
+                    let requirement = p.try_expr()?;
+                    if requirement == 0 || !p.eat_token(TokenKind::RBrace) {
+                        return Err(ParseError::invalid_syntax(
+                            "Expected refinement expression and `}`".into(),
+                            p.peek_next_token().kind,
+                            p.next_token_span(),
+                        ));
                     }
-                    let base=p.try_expr_pratt(0,option)?;
-                    if base==0 {
-                        return Err(ParseError::invalid_syntax("Expected base type after refinement".into(),p.peek_next_token().kind,p.next_token_span()));
+                    let base = p.try_expr_pratt(0, option)?;
+                    if base == 0 {
+                        return Err(ParseError::invalid_syntax(
+                            "Expected base type after refinement".into(),
+                            p.peek_next_token().kind,
+                            p.next_token_span(),
+                        ));
                     }
-                    Ok(NodeBuilder::new(NodeKind::RefinedType,p.current_span())
-                        .add_single_child(requirement).add_single_child(base).build(&mut p.ast))
+                    Ok(NodeBuilder::new(NodeKind::RefinedType, p.current_span())
+                        .add_single_child(requirement)
+                        .add_single_child(base)
+                        .build(&mut p.ast))
                 }
                 TokenKind::Defer => {
                     p.try_prefix_unary_expr(TokenKind::Defer, NodeKind::Defer, 0, option)
@@ -634,40 +661,67 @@ impl Parser<'_> {
             let mut option = ExprOption::new().with_no_extended_call(true);
             option.stop_at_call = true;
             let head = p.try_expr_pratt(100, option)?;
-            if head == 0 {return Ok(0);}
+            if head == 0 {
+                return Ok(0);
+            }
             let head = NodeBuilder::new(NodeKind::ExprAsPattern, p.current_span())
-                .add_single_child(head).build(&mut p.ast);
+                .add_single_child(head)
+                .build(&mut p.ast);
             let fields = p.try_multi_with_bracket(
                 &[Rule::comma("effect parameter pattern", |p| p.try_pattern())],
                 (TokenKind::LParen, TokenKind::RParen),
             )?;
             let mut pattern = NodeBuilder::new(NodeKind::ApplicationPattern, p.current_span())
-                .add_single_child(head).add_multiple_children(fields).build(&mut p.ast);
+                .add_single_child(head)
+                .add_multiple_children(fields)
+                .build(&mut p.ast);
             if p.eat_token(TokenKind::If) {
                 let condition = p.try_expr_without_extended_call()?;
-                if condition == 0 {return Err(ParseError::invalid_syntax("Expected effect arm guard".into(),p.peek_next_token().kind,p.next_token_span()));}
+                if condition == 0 {
+                    return Err(ParseError::invalid_syntax(
+                        "Expected effect arm guard".into(),
+                        p.peek_next_token().kind,
+                        p.next_token_span(),
+                    ));
+                }
                 pattern = NodeBuilder::new(NodeKind::IfGuardPattern, p.current_span())
-                    .add_single_child(pattern).add_single_child(condition).build(&mut p.ast);
+                    .add_single_child(pattern)
+                    .add_single_child(condition)
+                    .build(&mut p.ast);
             }
-            if !p.eat_token(TokenKind::FatArrow) {return Err(ParseError::unexpected_token(TokenKind::FatArrow,p.peek_next_token().kind,p.next_token_span()));}
+            if !p.eat_token(TokenKind::FatArrow) {
+                return Err(ParseError::unexpected_token(
+                    TokenKind::FatArrow,
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
             let body = p.try_block_or_statement()?;
-            if body == 0 {return Err(ParseError::invalid_syntax("Expected effect arm body".into(),p.peek_next_token().kind,p.next_token_span()));}
-            Ok(NodeBuilder::new(NodeKind::CaseArm,p.current_span())
-                .add_single_child(pattern).add_single_child(body).build(&mut p.ast))
+            if body == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected effect arm body".into(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+            Ok(NodeBuilder::new(NodeKind::CaseArm, p.current_span())
+                .add_single_child(pattern)
+                .add_single_child(body)
+                .build(&mut p.ast))
         })
     }
 
     /// 解析效果限定类型
     /// effect_qualified_type -> #expr expr
-    fn try_effect_qualified_type(&mut self) -> ParseResult {
+    fn try_effect_qualified_type(&mut self, option: ExprOption) -> ParseResult {
         self.scoped_with_expected_prefix(&[TokenKind::Hash], |p| {
             p.eat_tokens(1); // 消耗 '#'
 
             // 解析效果列表
-            // The next # begins the qualified result, not a request on
-            // this row. Parentheses give row expressions their own scope.
-            let mut row_option = ExprOption::new().with_no_extended_call(true);
-            row_option.stop_at_effect_prefix = true;
+            // Another type qualifier begins the result, not a postfix
+            // operation on this row. Parentheses provide an inner scope.
+            let mut row_option = option.with_no_extended_call(true);
+            row_option.stop_at_type_qualifier = true;
             let effect_list = p.try_expr_with_option(row_option)?;
             if effect_list == 0 {
                 return Err(ParseError::invalid_syntax(
@@ -678,7 +732,7 @@ impl Parser<'_> {
             }
 
             // 解析类型表达式
-            let type_expr = p.try_expr_without_extended_call()?;
+            let type_expr = p.try_expr_pratt(50, option.with_no_extended_call(true))?;
             if type_expr == 0 {
                 return Err(ParseError::invalid_syntax(
                     "Expected type expression in effect qualified type".to_string(),
@@ -698,12 +752,14 @@ impl Parser<'_> {
 
     /// 解析错误限定类型
     /// error_qualified_type -> !expr expr
-    fn try_error_qualified_type(&mut self) -> ParseResult {
+    fn try_error_qualified_type(&mut self, option: ExprOption) -> ParseResult {
         self.scoped_with_expected_prefix(&[TokenKind::Bang], |p| {
             p.eat_tokens(1); // 消耗 '!'
 
             // 解析错误列表
-            let error_list = p.try_expr_without_extended_call()?;
+            let mut context_option = option.with_no_extended_call(true);
+            context_option.stop_at_type_qualifier = true;
+            let error_list = p.try_expr_with_option(context_option)?;
             if error_list == 0 {
                 return Err(ParseError::invalid_syntax(
                     "Expected error list after '!'".to_string(),
@@ -713,7 +769,7 @@ impl Parser<'_> {
             }
 
             // 解析类型表达式
-            let type_expr = p.try_expr_without_extended_call()?;
+            let type_expr = p.try_expr_pratt(50, option.with_no_extended_call(true))?;
             if type_expr == 0 {
                 return Err(ParseError::invalid_syntax(
                     "Expected type expression in error qualified type".to_string(),
@@ -732,12 +788,14 @@ impl Parser<'_> {
     }
 
     // &expr expr
-    fn try_reachability_type(&mut self) -> ParseResult {
+    fn try_reachability_type(&mut self, option: ExprOption) -> ParseResult {
         self.scoped_with_expected_prefix(&[TokenKind::Ampersand], |p| {
             p.eat_tokens(1);
 
             // 解析可达性列表
-            let reachability_set = p.try_expr_without_extended_call()?;
+            let mut context_option = option.with_no_extended_call(true);
+            context_option.stop_at_type_qualifier = true;
+            let reachability_set = p.try_expr_with_option(context_option)?;
             if reachability_set == 0 {
                 return Err(ParseError::invalid_syntax(
                     "Expected reachability list after '&'".to_string(),
@@ -747,7 +805,7 @@ impl Parser<'_> {
             }
 
             // 解析类型表达式
-            let type_expr = p.try_expr_without_extended_call()?;
+            let type_expr = p.try_expr_pratt(50, option.with_no_extended_call(true))?;
             if type_expr == 0 {
                 return Err(ParseError::invalid_syntax(
                     "Expected type expression in reachability type".to_string(),
@@ -834,7 +892,7 @@ impl Parser<'_> {
     }
 
     /// closure_qualified_type -> % (expr | { binding* }) expr
-    fn try_closure_qualified_type(&mut self) -> ParseResult {
+    fn try_closure_qualified_type(&mut self, option: ExprOption) -> ParseResult {
         let prefix = self.peek_next_token().kind;
         if !matches!(prefix, TokenKind::Percent | TokenKind::SeparatedPercent) {
             return Ok(0);
@@ -893,7 +951,9 @@ impl Parser<'_> {
                     .add_multiple_children(bindings)
                     .build(&mut p.ast)
             } else {
-                p.try_expr_without_extended_call()?
+                let mut context_option = option.with_no_extended_call(true);
+                context_option.stop_at_type_qualifier = true;
+                p.try_expr_with_option(context_option)?
             };
             if context == 0 {
                 return Err(ParseError::invalid_syntax(
@@ -904,7 +964,9 @@ impl Parser<'_> {
             }
             // Include a function result arrow, but leave comparisons and
             // boolean propositions outside the qualified type.
-            let body = p.try_expr_pratt(50, ExprOption::new().with_no_extended_call(true))?;
+            // The qualified type still belongs to the surrounding expression;
+            // in a lambda parameter its closing pipe is not a union operator.
+            let body = p.try_expr_pratt(50, option.with_no_extended_call(true))?;
             if body == 0 {
                 return Err(ParseError::invalid_syntax(
                     "Expected closure body type".into(),
@@ -1333,7 +1395,8 @@ impl Parser<'_> {
                 );
             }
 
-            let arms = p.try_multi(&[Rule::comma("effect handling arm", |p| p.try_effect_arm())])?;
+            let arms =
+                p.try_multi(&[Rule::comma("effect handling arm", |p| p.try_effect_arm())])?;
 
             if !p.eat_token(TokenKind::RBrace) {
                 return Err(ParseError::invalid_syntax(

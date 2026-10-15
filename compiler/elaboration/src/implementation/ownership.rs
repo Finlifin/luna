@@ -79,10 +79,21 @@ fn local_identity(
             }
             Term::Nominal { arguments, .. }
             | Term::Tuple(arguments)
-            | Term::TypeListValue(arguments) | Term::TypeListConcat(arguments) | Term::TupleValue(arguments) => arguments,
-            Term::NominalValue {ty,fields,..} => {if fields.len().saturating_add(1)>*fuel {return Err(Error::BudgetExhausted);}work.push((ty,depth+1));work.extend(fields.iter().map(|field|(field,depth+1)));continue;},
+            | Term::TypeListValue(arguments)
+            | Term::TypeListConcat(arguments)
+            | Term::TupleValue(arguments) => arguments,
+            Term::NominalValue { ty, fields, .. } => {
+                if fields.len().saturating_add(1) > *fuel {
+                    return Err(Error::BudgetExhausted);
+                }
+                work.push((ty, depth + 1));
+                work.extend(fields.iter().map(|field| (field, depth + 1)));
+                continue;
+            }
             Term::Record(fields) | Term::RecordValue(fields) => {
-                if fields.len() > *fuel { return Err(Error::BudgetExhausted); }
+                if fields.len() > *fuel {
+                    return Err(Error::BudgetExhausted);
+                }
                 work.extend(fields.iter().rev().map(|(_, ty)| (ty, depth + 1)));
                 continue;
             }
@@ -112,11 +123,14 @@ fn local_identity(
             Term::Primitive(_)
             | Term::Unit
             | Term::Bool(_)
+            | Term::Float(_)
             | Term::Integer(_)
             | Term::BitVec(_)
-                | Term::Float32(_) | Term::Float64(_)
+            | Term::Float32(_)
+            | Term::Float64(_)
             | Term::Char(_)
-            | Term::String(_) | Term::Symbol(_)
+            | Term::String(_)
+            | Term::Symbol(_)
             | Term::Runtime(_)
             | Term::Value { .. } => continue,
         };

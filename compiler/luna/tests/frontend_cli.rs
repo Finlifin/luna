@@ -18,58 +18,157 @@ const OLD_OUTPUT: &[u8] = b"previous output: preserve these bytes\n\0";
 #[test]
 fn tuple_selectors_work_in_single_file_and_sysroot_commands() {
     let sandbox = Sandbox::new();
-    sandbox.write("input.fl", "typealias Type=.Type'builtin;
+    sandbox.write(
+        "input.fl",
+        "typealias Type=.Type'builtin;
         pure comptime fn List<T> -> Type {T}
         pure comptime fn Tuple<...Es:List<Type>> -> Type {bool}
         fn pair()->Tuple<bool,.u8'builtin> {(true,9)}
-        fn run()->bool {let (flag,byte)=pair();flag and byte==9}");
-    let output = sandbox.run(&["input.fl","--interpret","run","--meta-list-type","input::List","--tuple-type","input::Tuple"]);
+        fn run()->bool {let (flag,byte)=pair();flag and byte==9}",
+    );
+    let output = sandbox.run(&[
+        "input.fl",
+        "--interpret",
+        "run",
+        "--meta-list-type",
+        "input::List",
+        "--tuple-type",
+        "input::Tuple",
+    ]);
     assert_eq!(success(&output).trim(), "(bool true)");
     for args in [
-        vec!["input.fl","--tuple-type","input::Tuple"],
-        vec!["input.fl","--emit","ast","--meta-list-type","input::List"],
-        vec!["input.fl","--interpret","run","--tuple-type","input::Tuple","--tuple-type","input::Tuple"],
-        vec!["input.fl","--interpret","run","--meta-list-type"],
-    ] { failure(&sandbox.run(&args), 2); }
-    let missing = sandbox.run(&["input.fl","--interpret","run","--tuple-type","input::Tuple"]);
+        vec!["input.fl", "--tuple-type", "input::Tuple"],
+        vec![
+            "input.fl",
+            "--emit",
+            "ast",
+            "--meta-list-type",
+            "input::List",
+        ],
+        vec![
+            "input.fl",
+            "--interpret",
+            "run",
+            "--tuple-type",
+            "input::Tuple",
+            "--tuple-type",
+            "input::Tuple",
+        ],
+        vec!["input.fl", "--interpret", "run", "--meta-list-type"],
+    ] {
+        failure(&sandbox.run(&args), 2);
+    }
+    let missing = sandbox.run(&[
+        "input.fl",
+        "--interpret",
+        "run",
+        "--tuple-type",
+        "input::Tuple",
+    ]);
     failure(&missing, 1);
     assert!(String::from_utf8_lossy(&missing.stderr).contains("meta.List binding"));
 
-    for name in ["builtin","std","meta"] {
+    for name in ["builtin", "std", "meta"] {
         fs::create_dir_all(sandbox.path(&format!("library/{name}"))).unwrap();
     }
-    sandbox.write("library/builtin/lib.fl", "pub mod prelude {} use meta.List;
-        typealias Type=.Type'builtin; pub pure comptime fn Tuple<...Es:List<Type>> -> Type {bool}");
+    sandbox.write(
+        "library/builtin/lib.fl",
+        "pub mod prelude {} use meta.List;
+        typealias Type=.Type'builtin; pub pure comptime fn Tuple<...Es:List<Type>> -> Type {bool}",
+    );
     sandbox.write("library/std/lib.fl", "");
-    sandbox.write("library/meta/lib.fl", "typealias Type=.Type'builtin; pub pure comptime fn List<T> -> Type {T}");
-    sandbox.write("input.fl", "use builtin.Tuple; fn run()->Tuple<bool,.u8'builtin> {(true,9)}");
-    let output = sandbox.run(&["input.fl","--sysroot","library","--interpret","run",
-        "--meta-list-type","meta::List","--tuple-type","builtin::Tuple"]);
-    assert_eq!(success(&output).trim(), "(tuple (bool true) (unsigned-integer 9))");
+    sandbox.write(
+        "library/meta/lib.fl",
+        "typealias Type=.Type'builtin; pub pure comptime fn List<T> -> Type {T}",
+    );
+    sandbox.write(
+        "input.fl",
+        "use builtin.Tuple; fn run()->Tuple<bool,.u8'builtin> {(true,9)}",
+    );
+    let output = sandbox.run(&[
+        "input.fl",
+        "--sysroot",
+        "library",
+        "--interpret",
+        "run",
+        "--meta-list-type",
+        "meta::List",
+        "--tuple-type",
+        "builtin::Tuple",
+    ]);
+    assert_eq!(
+        success(&output).trim(),
+        "(tuple (bool true) (unsigned-integer 9))"
+    );
 }
 
 #[test]
 fn splice_selector_runs_automatic_conversion_and_rejects_invalid_bindings() {
     let sandbox = Sandbox::new();
-    sandbox.write("input.fl", include_str!("../../../development/examples/automatic-splice.fl"));
+    sandbox.write(
+        "input.fl",
+        include_str!("../../../development/examples/automatic-splice.fl"),
+    );
     for selector in ["Splice", "input::Splice"] {
-        let output = sandbox.run(&["input.fl", "--interpret", "run", "--splice-protocol", selector]);
-        assert_eq!(success(&output).trim(), "(tuple (tuple (bool true) (bool false)) (tuple (bool false) (bool true)))");
+        let output = sandbox.run(&[
+            "input.fl",
+            "--interpret",
+            "run",
+            "--splice-protocol",
+            selector,
+        ]);
+        assert_eq!(
+            success(&output).trim(),
+            "(tuple (tuple (bool true) (bool false)) (tuple (bool false) (bool true)))"
+        );
     }
     failure(&sandbox.run(&["input.fl", "--interpret", "run"]), 1);
-    for selector in ["Missing", "missing::Splice", "input::", "::Splice", "input::Splice::extra"] {
+    for selector in [
+        "Missing",
+        "missing::Splice",
+        "input::",
+        "::Splice",
+        "input::Splice::extra",
+    ] {
         sandbox.write("result", OLD_OUTPUT);
-        failure(&sandbox.run(&["input.fl", "--interpret", "run", "--splice-protocol", selector, "--output", "result"]), 1);
+        failure(
+            &sandbox.run(&[
+                "input.fl",
+                "--interpret",
+                "run",
+                "--splice-protocol",
+                selector,
+                "--output",
+                "result",
+            ]),
+            1,
+        );
         assert_eq!(fs::read(sandbox.path("result")).unwrap(), OLD_OUTPUT);
     }
     for args in [
         vec!["input.fl", "--splice-protocol"],
         vec!["input.fl", "--splice-protocol", "Splice"],
         vec!["input.fl", "--emit", "ast", "--splice-protocol", "Splice"],
-        vec!["input.fl", "--interpret", "run", "--splice-protocol", "Splice", "--splice-protocol", "Splice"],
-    ] { failure(&sandbox.run(&args), 2); }
+        vec![
+            "input.fl",
+            "--interpret",
+            "run",
+            "--splice-protocol",
+            "Splice",
+            "--splice-protocol",
+            "Splice",
+        ],
+    ] {
+        failure(&sandbox.run(&args), 2);
+    }
     sandbox.write("input.fl", "trait NotSplice {} fn run()->bool {true}");
-    let output = sandbox.run(&["input.fl", "--interpret", "run", "--splice-protocol", "NotSplice"]);
+    let output = sandbox.run(&[
+        "input.fl",
+        "--interpret",
+        "run",
+        "--splice-protocol",
+        "NotSplice",
+    ]);
     failure(&output, 1);
     assert!(String::from_utf8_lossy(&output.stderr).contains("RuntimeTarget"));
 }
@@ -84,35 +183,72 @@ fn splice_selector_disambiguates_sysroot_protocols() {
         pub trait Conversion {assoc RuntimeTarget:Type;fn splice(comptime data:Self)->RuntimeTarget;}
         impl Conversion for bool {assoc RuntimeTarget:Type=bool;fn splice(comptime data:bool)->bool {not data}}
         pub const FLAG=false;");
-    sandbox.write("input.fl", "use std.FLAG; trait Conversion {} fn run()->bool {FLAG}");
-    let output = sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run", "--splice-protocol", "std::Conversion"]);
+    sandbox.write(
+        "input.fl",
+        "use std.FLAG; trait Conversion {} fn run()->bool {FLAG}",
+    );
+    let output = sandbox.run(&[
+        "input.fl",
+        "--sysroot",
+        "library",
+        "--interpret",
+        "run",
+        "--splice-protocol",
+        "std::Conversion",
+    ]);
     assert_eq!(success(&output).trim(), "(bool true)");
-    let ambiguous = sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run", "--splice-protocol", "Conversion"]);
+    let ambiguous = sandbox.run(&[
+        "input.fl",
+        "--sysroot",
+        "library",
+        "--interpret",
+        "run",
+        "--splice-protocol",
+        "Conversion",
+    ]);
     failure(&ambiguous, 1);
     assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("ambiguous"));
 }
 
 #[test]
 fn splice_selector_api_rejects_conflicting_identity_and_nonsemantic_output() {
-    use luna::{cli::{Emit, Options}, frontend};
+    use luna::{
+        cli::{Emit, Options},
+        frontend,
+    };
     let sandbox = Sandbox::new();
     let mut options = Options {
-        input: sandbox.write("input.fl", include_str!("../../../development/examples/automatic-splice.fl")),
-        emit: Emit::Nir, output: None, sysroot: None,
+        input: sandbox.write(
+            "input.fl",
+            include_str!("../../../development/examples/automatic-splice.fl"),
+        ),
+        emit: Emit::Nir,
+        output: None,
+        sysroot: None,
         splice_protocol: Some("Splice".into()),
         meta_list_type: None,
-        index_protocol: None, arithmetic_protocols:Default::default(), tuple_type: None, optional_type: None,
+        index_protocol: None,
+        literal_into_protocol: None,
+        arithmetic_protocols: Default::default(),
+        tuple_type: None,
+        optional_type: None,
     };
     let foreign = elaboration::program::Protocols {
-        splice: Some(nir::DeclarationId { package: 999, local: 0 }),
+        splice: Some(nir::DeclarationId {
+            package: 999,
+            local: 0,
+        }),
         ..Default::default()
     };
     let error = frontend::compile_in_package_with_protocols(&options, 0, &foreign)
-        .err().expect("conflicting binding was accepted");
+        .err()
+        .expect("conflicting binding was accepted");
     assert!(error.contains("conflicts"), "{error}");
     for emit in [Emit::Ast, Emit::Hir] {
         options.emit = emit;
-        let error = frontend::compile(&options).err().expect("selector was silently ignored");
+        let error = frontend::compile(&options)
+            .err()
+            .expect("selector was silently ignored");
         assert!(error.contains("requires NIR"), "{error}");
     }
 }
@@ -683,7 +819,10 @@ fn explicit_valid_sysroot_is_accepted() {
     sandbox.write("input.fl", "fn entry()->Flag {true}");
     fs::create_dir_all(sandbox.path("library/builtin")).unwrap();
     fs::create_dir_all(sandbox.path("library/std")).unwrap();
-    sandbox.write("library/builtin/lib.fl", "pub mod prelude {pub typealias Flag=bool;}");
+    sandbox.write(
+        "library/builtin/lib.fl",
+        "pub mod prelude {pub typealias Flag=bool;}",
+    );
     sandbox.write("library/std/lib.fl", "pub mod prelude {}");
     let library = sandbox.path("library");
     let output = run_command(
@@ -698,45 +837,88 @@ fn explicit_valid_sysroot_is_accepted() {
 
 #[test]
 fn explicit_sysroot_loads_builtin_prelude_and_keeps_std_import_explicit() {
-    let sandbox=Sandbox::new();
+    let sandbox = Sandbox::new();
     fs::create_dir_all(sandbox.path("library/builtin")).unwrap();
     fs::create_dir_all(sandbox.path("library/std")).unwrap();
-    sandbox.write("library/builtin/lib.fl", "pub mod prelude {pub typealias Flag=bool;pub fn ready()->Flag {true}}");
-    sandbox.write("library/std/lib.fl", "pub mod prelude {pub fn standard()->bool {ready()}}");
-    sandbox.write("input.fl", "use std.prelude.*;fn run()->Flag {standard() and ready()}");
-    let output=sandbox.run(&["input.fl","--sysroot","library","--interpret","run"]);
-    assert!(output.status.success(),"{}",details(&output));
-    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(),"(bool true)");
+    sandbox.write(
+        "library/builtin/lib.fl",
+        "pub mod prelude {pub typealias Flag=bool;pub fn ready()->Flag {true}}",
+    );
+    sandbox.write(
+        "library/std/lib.fl",
+        "pub mod prelude {pub fn standard()->bool {ready()}}",
+    );
+    sandbox.write(
+        "input.fl",
+        "use std.prelude.*;fn run()->Flag {standard() and ready()}",
+    );
+    let output = sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"]);
+    assert!(output.status.success(), "{}", details(&output));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "(bool true)"
+    );
     sandbox.write("input.fl", "fn run()->bool {standard()}");
-    failure(&sandbox.run(&["input.fl","--sysroot","library","--emit","nir"]),1);
-    sandbox.write("input.fl", "fn ready()->bool {false} fn run()->Flag {ready()}");
-    let output=sandbox.run(&["input.fl","--sysroot","library","--interpret","run"]);
-    assert!(output.status.success(),"{}",details(&output));
-    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(),"(bool false)");
+    failure(
+        &sandbox.run(&["input.fl", "--sysroot", "library", "--emit", "nir"]),
+        1,
+    );
+    sandbox.write(
+        "input.fl",
+        "fn ready()->bool {false} fn run()->Flag {ready()}",
+    );
+    let output = sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"]);
+    assert!(output.status.success(), "{}", details(&output));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "(bool false)"
+    );
 }
 
 #[test]
 fn explicit_sysroot_protects_dependency_sources_and_reports_invalid_packages() {
-    let sandbox=Sandbox::new();
+    let sandbox = Sandbox::new();
     fs::create_dir_all(sandbox.path("library/builtin")).unwrap();
     fs::create_dir_all(sandbox.path("library/std")).unwrap();
     sandbox.write("input.fl", "fn run()->bool {true}");
     sandbox.write("library/builtin/lib.fl", "pub mod prelude {}");
-    let source="pub fn standard()->bool {true}";
-    sandbox.write("library/std/lib.fl",source);
-    failure(&sandbox.run(&["input.fl","--sysroot","library","--output","library/std/lib.fl"]),1);
-    assert_eq!(fs::read_to_string(sandbox.path("library/std/lib.fl")).unwrap(),source);
-    #[cfg(unix)] {
-        fs::hard_link(sandbox.path("library/std/lib.fl"),sandbox.path("alias.fl")).unwrap();
-        failure(&sandbox.run(&["input.fl","--sysroot","library","--output","alias.fl"]),1);
-        assert_eq!(fs::read_to_string(sandbox.path("alias.fl")).unwrap(),source);
+    let source = "pub fn standard()->bool {true}";
+    sandbox.write("library/std/lib.fl", source);
+    failure(
+        &sandbox.run(&[
+            "input.fl",
+            "--sysroot",
+            "library",
+            "--output",
+            "library/std/lib.fl",
+        ]),
+        1,
+    );
+    assert_eq!(
+        fs::read_to_string(sandbox.path("library/std/lib.fl")).unwrap(),
+        source
+    );
+    #[cfg(unix)]
+    {
+        fs::hard_link(sandbox.path("library/std/lib.fl"), sandbox.path("alias.fl")).unwrap();
+        failure(
+            &sandbox.run(&["input.fl", "--sysroot", "library", "--output", "alias.fl"]),
+            1,
+        );
+        assert_eq!(
+            fs::read_to_string(sandbox.path("alias.fl")).unwrap(),
+            source
+        );
     }
-    sandbox.write("library/std/lib.fl","fn broken(");
-    sandbox.write("result",OLD_OUTPUT);
-    failure(&sandbox.run(&["input.fl","--sysroot","library","--output","result"]),1);
-    assert_eq!(fs::read(sandbox.path("result")).unwrap(),OLD_OUTPUT);
+    sandbox.write("library/std/lib.fl", "fn broken(");
+    sandbox.write("result", OLD_OUTPUT);
+    failure(
+        &sandbox.run(&["input.fl", "--sysroot", "library", "--output", "result"]),
+        1,
+    );
+    assert_eq!(fs::read(sandbox.path("result")).unwrap(), OLD_OUTPUT);
     fs::remove_file(sandbox.path("library/std/lib.fl")).unwrap();
-    failure(&sandbox.run(&["input.fl","--sysroot","library"]),1);
+    failure(&sandbox.run(&["input.fl", "--sysroot", "library"]), 1);
 }
 
 #[test]
@@ -744,13 +926,26 @@ fn explicit_sysroot_cli_entries_are_selected_from_primary_package() {
     let sandbox = Sandbox::new();
     fs::create_dir_all(sandbox.path("library/builtin")).unwrap();
     fs::create_dir_all(sandbox.path("library/std")).unwrap();
-    sandbox.write("library/builtin/lib.fl", "pub mod prelude {} trait Duplicate {} trait Retire {fn drop(*self);}");
+    sandbox.write(
+        "library/builtin/lib.fl",
+        "pub mod prelude {} trait Duplicate {} trait Retire {fn drop(*self);}",
+    );
     sandbox.write("library/std/lib.fl", "pub fn run()->bool {false} pub comptime fn compute()->bool {false} pub fn dependency_only()->bool {false}");
-    sandbox.write("input.fl", "fn run()->bool {true} comptime fn compute()->bool {true}");
+    sandbox.write(
+        "input.fl",
+        "fn run()->bool {true} comptime fn compute()->bool {true}",
+    );
     for args in [
         vec!["--interpret", "run"],
         vec!["--invoke-comptime", "compute"],
-        vec!["--interpret", "run", "--copy-protocol", "Duplicate", "--drop-protocol", "Retire"],
+        vec![
+            "--interpret",
+            "run",
+            "--copy-protocol",
+            "Duplicate",
+            "--drop-protocol",
+            "Retire",
+        ],
         vec!["--instantiate", "run"],
         vec!["--analyze-resources", "run", "--copy-protocol", "Duplicate"],
     ] {
@@ -759,13 +954,30 @@ fn explicit_sysroot_cli_entries_are_selected_from_primary_package() {
         let output = sandbox.run(&command);
         assert!(output.status.success(), "{args:?}: {}", details(&output));
         if args[0] == "--interpret" || args[0] == "--invoke-comptime" {
-            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "(bool true)");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout).trim(),
+                "(bool true)"
+            );
         }
     }
     for mode in ["--interpret", "--instantiate", "--invoke-comptime"] {
-        failure(&sandbox.run(&["input.fl", "--sysroot", "library", mode, "dependency_only"]), 1);
+        failure(
+            &sandbox.run(&["input.fl", "--sysroot", "library", mode, "dependency_only"]),
+            1,
+        );
     }
-    failure(&sandbox.run(&["input.fl", "--sysroot", "library", "--analyze-resources", "dependency_only", "--copy-protocol", "Duplicate"]), 1);
+    failure(
+        &sandbox.run(&[
+            "input.fl",
+            "--sysroot",
+            "library",
+            "--analyze-resources",
+            "dependency_only",
+            "--copy-protocol",
+            "Duplicate",
+        ]),
+        1,
+    );
 }
 
 #[test]
@@ -773,12 +985,18 @@ fn explicit_sysroot_can_be_nested_inside_primary_source_directory() {
     let sandbox = Sandbox::new();
     fs::create_dir_all(sandbox.path("library/builtin")).unwrap();
     fs::create_dir_all(sandbox.path("library/std")).unwrap();
-    sandbox.write("library/builtin/lib.fl", "pub mod prelude {pub typealias Flag=bool;}");
+    sandbox.write(
+        "library/builtin/lib.fl",
+        "pub mod prelude {pub typealias Flag=bool;}",
+    );
     sandbox.write("library/std/lib.fl", "pub fn ready()->Flag {true}");
     sandbox.write("main.fl", "use std.ready; fn run()->Flag {ready()}");
     let output = sandbox.run(&["main.fl", "--sysroot", "./library", "--interpret", "run"]);
     assert!(output.status.success(), "{}", details(&output));
-    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "(bool true)");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "(bool true)"
+    );
 }
 
 fn rejects_alias(sandbox: &Sandbox, input: &str, output: impl AsRef<OsStr>) {
@@ -1362,8 +1580,16 @@ fn runtime_reference_cli_executes_direct_effect_environments() {
          fn entry()->bool {caller()# {input()=>true,read()=>true,}}",
     );
     let result = sandbox.run(&["input.fl", "--interpret", "entry"]);
-    assert_eq!(result.status.code(), Some(0), "{}", String::from_utf8_lossy(&result.stderr));
-    assert_eq!(String::from_utf8_lossy(&result.stdout).trim(), "(bool true)");
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout).trim(),
+        "(bool true)"
+    );
 }
 
 #[test]
@@ -1465,41 +1691,162 @@ fn runtime_reference_cli_failures_preserve_existing_artifact() {
 fn resource_cli_emits_obligations_with_explicit_protocol_identity() {
     let sandbox = Sandbox::new();
     sandbox.write("input.fl", "trait Duplicate {} struct Holder {ptr:*true'type,} fn entry() {let value=true; let holder=Holder {ptr:value.ref}; let {ptr:p}=holder; let seen=p.*;}");
-    let arguments = ["input.fl", "--analyze-resources", "entry", "--copy-protocol", "Duplicate"];
+    let arguments = [
+        "input.fl",
+        "--analyze-resources",
+        "entry",
+        "--copy-protocol",
+        "Duplicate",
+    ];
     let result = sandbox.run(&arguments);
-    assert_eq!(result.status.code(), Some(0), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
     let dump = String::from_utf8(result.stdout).unwrap();
     assert!(dump.starts_with("(resource-analysis "), "{dump}");
-    assert!(dump.contains("(copy-protocol ") && dump.contains("(stage ownership-obligations)"), "{dump}");
+    assert!(
+        dump.contains("(copy-protocol ") && dump.contains("(stage ownership-obligations)"),
+        "{dump}"
+    );
     assert!(dump.contains("(move-report "), "{dump}");
-    let result = sandbox.run(&["input.fl", "--analyze-resources", "entry", "--copy-protocol", "Duplicate", "--output", "report.lisp"]);
-    assert_eq!(result.status.code(), Some(0), "{}", String::from_utf8_lossy(&result.stderr));
+    let result = sandbox.run(&[
+        "input.fl",
+        "--analyze-resources",
+        "entry",
+        "--copy-protocol",
+        "Duplicate",
+        "--output",
+        "report.lisp",
+    ]);
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
     assert!(result.stdout.is_empty());
-    assert_eq!(fs::read_to_string(sandbox.path("report.lisp")).unwrap(), dump);
+    assert_eq!(
+        fs::read_to_string(sandbox.path("report.lisp")).unwrap(),
+        dump
+    );
 }
 
 #[test]
 fn resource_cli_reports_failures_without_replacing_existing_output() {
     let sandbox = Sandbox::new();
     for (source, entry, protocol, fuel, diagnostic) in [
-        ("trait Duplicate {} struct Token {} fn entry() {let a=Token {}; let b=a; let c=a;}", "entry", "Duplicate", "100000", "unavailable"),
-        ("trait Duplicate {} struct Token {} impl Duplicate for Token {} fn entry() {let a=Token {}; let b=a;}", "entry", "Duplicate", "100000", "representation and resource legality"),
-        ("trait Duplicate {} fn entry() {let a=true; let b=a;}", "entry", "Duplicate", "1", "budget"),
-        ("trait Duplicate {} fn entry() {}", "missing", "Duplicate", "100000", "was not found"),
-        ("trait Duplicate {} fn entry() {}", "entry", "Missing", "100000", "was not found"),
-        ("trait Duplicate where T {} fn entry() {}", "entry", "Duplicate", "100000", "no explicit type parameters"),
-        ("trait Duplicate {} fn entry(value:T) where T {}", "entry", "Duplicate", "100000", "nongeneric wrapper"),
-        ("trait Duplicate {} comptime fn entry() {}", "entry", "Duplicate", "100000", "ordinary runtime"),
-        ("trait Duplicate {} mod a {fn entry() {}} mod b {fn entry() {}}", "entry", "Duplicate", "100000", "ambiguous"),
-        ("mod a {trait Duplicate {}} mod b {trait Duplicate {}} fn entry() {}", "entry", "Duplicate", "100000", "ambiguous"),
-        ("mod a {trait Duplicate where T {}} mod b {trait Duplicate {}} fn entry() {}", "entry", "Duplicate", "100000", "ambiguous"),
-        ("mod a {trait Duplicate {}} mod b {trait Duplicate where T {}} fn entry() {}", "entry", "Duplicate", "100000", "ambiguous"),
+        (
+            "trait Duplicate {} struct Token {} fn entry() {let a=Token {}; let b=a; let c=a;}",
+            "entry",
+            "Duplicate",
+            "100000",
+            "unavailable",
+        ),
+        (
+            "trait Duplicate {} struct Token {} impl Duplicate for Token {} fn entry() {let a=Token {}; let b=a;}",
+            "entry",
+            "Duplicate",
+            "100000",
+            "representation and resource legality",
+        ),
+        (
+            "trait Duplicate {} fn entry() {let a=true; let b=a;}",
+            "entry",
+            "Duplicate",
+            "1",
+            "budget",
+        ),
+        (
+            "trait Duplicate {} fn entry() {}",
+            "missing",
+            "Duplicate",
+            "100000",
+            "was not found",
+        ),
+        (
+            "trait Duplicate {} fn entry() {}",
+            "entry",
+            "Missing",
+            "100000",
+            "was not found",
+        ),
+        (
+            "trait Duplicate where T {} fn entry() {}",
+            "entry",
+            "Duplicate",
+            "100000",
+            "no explicit type parameters",
+        ),
+        (
+            "trait Duplicate {} fn entry(value:T) where T {}",
+            "entry",
+            "Duplicate",
+            "100000",
+            "nongeneric wrapper",
+        ),
+        (
+            "trait Duplicate {} comptime fn entry() {}",
+            "entry",
+            "Duplicate",
+            "100000",
+            "ordinary runtime",
+        ),
+        (
+            "trait Duplicate {} mod a {fn entry() {}} mod b {fn entry() {}}",
+            "entry",
+            "Duplicate",
+            "100000",
+            "ambiguous",
+        ),
+        (
+            "mod a {trait Duplicate {}} mod b {trait Duplicate {}} fn entry() {}",
+            "entry",
+            "Duplicate",
+            "100000",
+            "ambiguous",
+        ),
+        (
+            "mod a {trait Duplicate where T {}} mod b {trait Duplicate {}} fn entry() {}",
+            "entry",
+            "Duplicate",
+            "100000",
+            "ambiguous",
+        ),
+        (
+            "mod a {trait Duplicate {}} mod b {trait Duplicate where T {}} fn entry() {}",
+            "entry",
+            "Duplicate",
+            "100000",
+            "ambiguous",
+        ),
     ] {
         sandbox.write("input.fl", source);
         sandbox.write("report.lisp", OLD_OUTPUT);
-        let result = sandbox.run(&["input.fl", "--analyze-resources", entry, "--copy-protocol", protocol, "--fuel", fuel, "--output", "report.lisp"]);
-        assert_eq!(result.status.code(), Some(1), "{source}: {}", String::from_utf8_lossy(&result.stderr));
-        assert!(String::from_utf8_lossy(&result.stderr).contains(diagnostic), "{source}: {}", String::from_utf8_lossy(&result.stderr));
+        let result = sandbox.run(&[
+            "input.fl",
+            "--analyze-resources",
+            entry,
+            "--copy-protocol",
+            protocol,
+            "--fuel",
+            fuel,
+            "--output",
+            "report.lisp",
+        ]);
+        assert_eq!(
+            result.status.code(),
+            Some(1),
+            "{source}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(diagnostic),
+            "{source}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
         assert!(result.stdout.is_empty());
         assert_eq!(fs::read(sandbox.path("report.lisp")).unwrap(), OLD_OUTPUT);
     }
@@ -1511,16 +1858,77 @@ fn resource_cli_rejects_missing_binding_and_conflicting_modes() {
     for args in [
         vec!["input.fl", "--analyze-resources", "entry"],
         vec!["input.fl", "--copy-protocol", "Duplicate"],
-        vec!["input.fl", "--analyze-resources", "entry", "--copy-protocol", "Duplicate", "--emit", "nir"],
-        vec!["input.fl", "--analyze-resources", "entry", "--copy-protocol", "Duplicate", "--interpret", "entry"],
-        vec!["input.fl", "--analyze-resources", "entry", "--copy-protocol", "Duplicate", "--instantiate", "entry"],
-        vec!["input.fl", "--analyze-resources", "entry", "--copy-protocol", "Duplicate", "--invoke-comptime", "entry"],
-        vec!["input.fl", "--analyze-resources", "entry", "--analyze-resources", "entry", "--copy-protocol", "Duplicate"],
-        vec!["input.fl", "--analyze-resources", "entry", "--copy-protocol", "Duplicate", "--copy-protocol", "Duplicate"],
-        vec!["input.fl", "--analyze-resources", "entry", "--copy-protocol", "Duplicate", "--fuel", "0"],
+        vec![
+            "input.fl",
+            "--analyze-resources",
+            "entry",
+            "--copy-protocol",
+            "Duplicate",
+            "--emit",
+            "nir",
+        ],
+        vec![
+            "input.fl",
+            "--analyze-resources",
+            "entry",
+            "--copy-protocol",
+            "Duplicate",
+            "--interpret",
+            "entry",
+        ],
+        vec![
+            "input.fl",
+            "--analyze-resources",
+            "entry",
+            "--copy-protocol",
+            "Duplicate",
+            "--instantiate",
+            "entry",
+        ],
+        vec![
+            "input.fl",
+            "--analyze-resources",
+            "entry",
+            "--copy-protocol",
+            "Duplicate",
+            "--invoke-comptime",
+            "entry",
+        ],
+        vec![
+            "input.fl",
+            "--analyze-resources",
+            "entry",
+            "--analyze-resources",
+            "entry",
+            "--copy-protocol",
+            "Duplicate",
+        ],
+        vec![
+            "input.fl",
+            "--analyze-resources",
+            "entry",
+            "--copy-protocol",
+            "Duplicate",
+            "--copy-protocol",
+            "Duplicate",
+        ],
+        vec![
+            "input.fl",
+            "--analyze-resources",
+            "entry",
+            "--copy-protocol",
+            "Duplicate",
+            "--fuel",
+            "0",
+        ],
     ] {
         let result = sandbox.run(&args);
-        assert_eq!(result.status.code(), Some(2), "{args:?}: {}", String::from_utf8_lossy(&result.stderr));
+        assert_eq!(
+            result.status.code(),
+            Some(2),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
         assert!(result.stdout.is_empty());
     }
 }
@@ -1868,6 +2276,9 @@ fn checked_interpret_cli_requires_both_protocols_and_one_execution_mode() {
 fn owned_default_cli_constructs_and_delivers_aggregate_results() {
     let sandbox = Sandbox::new();
     for body in [
+        "fn make()->Item {Item {flag:true}} fn target(.item:Item=make())->bool {item.flag} fn entry()->bool {target()}",
+        "fn target(pointer:*bool,.item:Item=do {Item {flag:pointer.*}})->bool {item.flag} fn entry()->bool {var flag=true;target(flag.ref)}",
+        "fn target(pointer:*bool,ready:bool,.item:Item=do {Item {flag:pointer.*}})->bool {item.flag} fn entry()->bool {var flag=false;target(flag.ref,do {flag=true;true})}",
         "fn entry(.item:Item=do {Item {flag:true}})->bool {item.flag}",
         "struct Box {item:Item,} impl Retire for Box {fn drop(*self) {}} fn entry(.box:Box=do {Box {item:Item {flag:true}}})->bool {box.item.flag}",
         "enum Choice {none,some(Item)} fn entry(.choice:Choice=Choice.some(Item {flag:true}))->bool {choice match {.none=>false,.some(item)=>item.flag,}}",
@@ -1952,9 +2363,9 @@ fn owned_default_cli_rejects_hidden_cleanup_reads_and_unknown_calls() {
         "fn target(.flag:bool=do {let {flag}=Item {flag:true};flag})->bool {flag}",
         "fn target(.flag:bool=(Item {flag:true}).flag)->bool {flag}",
         "fn target(.item:Item=do {let old=Item {flag:true};Item {flag:true}})->bool {item.flag}",
-        "fn make()->Item {Item {flag:true}} fn target(.item:Item=make())->bool {item.flag}",
+        "fn make()->Item {make()} fn target(.item:Item=make())->bool {item.flag}",
         "typealias Byte=.u8'builtin; struct Pair {item:Item,count:Byte,} fn target(value:Byte,.pair:Pair=do {Pair {item:Item {flag:true},count:value + 1}}) {}",
-        "fn target(pointer:*bool,.item:Item=do {Item {flag:pointer.*}})->bool {item.flag}",
+        "fn target(pointer:*bool,.item:Item=do {pointer.* = true;Item {flag:pointer.*}})->bool {item.flag}",
     ] {
         sandbox.write("input.fl", format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}} struct Item {{flag:bool,}} impl Retire for Item {{fn drop(*self) {{assumes false;}}}} {declaration} fn entry() {{}}"));
         let result = sandbox.run(&[
@@ -2089,7 +2500,9 @@ fn callable_default_cli_cannot_duplicate_an_affine_prepared_parameter() {
 #[test]
 fn effect_hir_preserves_operation_identity_groups_and_modifiers() {
     let sandbox = Sandbox::new();
-    sandbox.write("input.fl", r#"
+    sandbox.write(
+        "input.fl",
+        r#"
         effect read() -> bool;
         async inline effect wait(flag: bool) -> bool;
         effect enum Report {
@@ -2098,7 +2511,8 @@ fn effect_hir_preserves_operation_identity_groups_and_modifiers() {
             async wait() -> bool,
         }
         fn names() { read; Report.count; }
-    "#);
+    "#,
+    );
     let output = sandbox.run(&["input.fl", "--emit", "hir"]);
     let dump = hir_dump(&output);
     assert_eq!(dump.matches("(effect-operation ").count(), 5, "{dump}");
@@ -2115,14 +2529,17 @@ fn effect_hir_preserves_operation_identity_groups_and_modifiers() {
 #[test]
 fn effect_hir_resolves_group_and_operation_type_parameters() {
     let sandbox = Sandbox::new();
-    sandbox.write("input.fl", r#"
+    sandbox.write(
+        "input.fl",
+        r#"
         effect identity(value: T) -> T where T;
         effect enum Channel where T {
             send(value: T),
             receive() -> T,
         }
         effect enum Other { receive() -> bool, }
-    "#);
+    "#,
+    );
     let output = sandbox.run(&["input.fl", "--emit", "hir"]);
     let dump = hir_dump(&output);
     assert_eq!(dump.matches("(effect-operation ").count(), 4, "{dump}");
@@ -2149,11 +2566,17 @@ fn effect_declarations_reject_duplicate_names_and_leaked_parameters() {
 #[test]
 fn effect_requests_require_an_explicit_allowed_row() {
     let sandbox = Sandbox::new();
-    sandbox.write("input.fl", "effect read() -> bool; fn entry() -> bool { read()# }");
+    sandbox.write(
+        "input.fl",
+        "effect read() -> bool; fn entry() -> bool { read()# }",
+    );
     let output = sandbox.run(&["input.fl", "--emit", "nir"]);
     assert!(!output.status.success());
     let errors = String::from_utf8_lossy(&output.stderr);
-    assert!(errors.contains("effect request requires an explicit allowed effect row"), "{errors}");
+    assert!(
+        errors.contains("effect request requires an explicit allowed effect row"),
+        "{errors}"
+    );
     assert!(!errors.contains("panicked"), "{errors}");
     assert!(output.stdout.is_empty());
 }
@@ -2161,7 +2584,9 @@ fn effect_requests_require_an_explicit_allowed_row() {
 #[test]
 fn effect_handlers_keep_requests_guards_and_resume_structure() {
     let sandbox = Sandbox::new();
-    sandbox.write("input.fl", r#"
+    sandbox.write(
+        "input.fl",
+        r#"
         effect echo(value: bool) -> bool;
         fn source() -> #[echo] bool { echo(true)# }
         fn entry() -> bool {
@@ -2173,7 +2598,8 @@ fn effect_handlers_keep_requests_guards_and_resume_structure() {
                 echo(other) => other,
             }
         }
-    "#);
+    "#,
+    );
     let output = sandbox.run(&["input.fl", "--emit", "hir"]);
     let dump = hir_dump(&output);
     assert_eq!(dump.matches("(effect-handle ").count(), 1, "{dump}");
@@ -2187,13 +2613,16 @@ fn effect_handlers_keep_requests_guards_and_resume_structure() {
 #[test]
 fn nested_effect_handlers_keep_outer_request_and_inner_computation_separate() {
     let sandbox = Sandbox::new();
-    sandbox.write("input.fl", r#"
+    sandbox.write(
+        "input.fl",
+        r#"
         effect read() -> bool;
         fn source() -> #[read] bool { read()# }
         fn entry() -> bool {
             (source()# { read() => read()#, })# { read() => true, }
         }
-    "#);
+    "#,
+    );
     let output = sandbox.run(&["input.fl", "--emit", "hir"]);
     let dump = hir_dump(&output);
     assert_eq!(dump.matches("(effect-handle ").count(), 2, "{dump}");
@@ -2220,14 +2649,17 @@ fn effect_handler_bindings_do_not_escape_their_arm() {
 #[test]
 fn effect_group_qualifications_and_attributed_arms_lower_without_losing_structure() {
     let sandbox = Sandbox::new();
-    sandbox.write("input.fl", r#"
+    sandbox.write(
+        "input.fl",
+        r#"
         effect enum IO { read() -> bool, write(value: bool), }
         fn whole() -> #IO bool { IO.read()# }
         fn single() -> #IO.read bool { IO.read()# }
         fn entry() -> bool {
             whole()# { ^attrs.marker IO.read() => true, }
         }
-    "#);
+    "#,
+    );
     let output = sandbox.run(&["input.fl", "--emit", "hir"]);
     let dump = hir_dump(&output);
     assert_eq!(dump.matches("(effect-qualified-type ").count(), 2, "{dump}");
@@ -2254,14 +2686,20 @@ fn effect_nir_checks_signature_types_and_rejects_ordinary_callable_uses() {
         let output = sandbox.run(&["input.fl", "--emit", "nir"]);
         assert!(!output.status.success(), "accepted: {source}");
         assert!(output.stdout.is_empty(), "{source}");
-        assert!(!String::from_utf8_lossy(&output.stderr).contains("panicked"), "{source}");
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("panicked"),
+            "{source}"
+        );
     }
 }
 
 #[test]
 fn effect_nir_dump_preserves_checked_operation_metadata() {
     let sandbox = Sandbox::new();
-    sandbox.write("input.fl", "effect read() -> bool; async inline effect wait(value: bool); fn entry() -> bool { true }");
+    sandbox.write(
+        "input.fl",
+        "effect read() -> bool; async inline effect wait(value: bool); fn entry() -> bool { true }",
+    );
     let output = sandbox.run(&["input.fl", "--emit", "nir"]);
     let dump = success(&output);
     single_sexpression(dump);
@@ -2282,31 +2720,53 @@ fn effect_signature_formation_does_not_assume_missing_group_contracts() {
     assert!(!String::from_utf8_lossy(&output.stderr).contains("panicked"));
 }
 
-
 #[test]
 fn shipped_library_files_use_current_syntax() {
     let sandbox = Sandbox::new();
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for relative in ["library/builtin/lib.fl", "library/std/lib.fl", "library/builtin/traits.fl", "library/builtin/ops.fl", "library/builtin/iterator.fl", "library/std/collections.fl", "library/builtin/option.fl", "library/builtin/result.fl", "library/std/fmt.fl", "library/std/io.fl", "library/builtin/primitives.fl"] {
-        let output = run_command(sandbox.command().arg(repository.join(relative)).args(["--emit", "ast"]));
+    for relative in [
+        "library/builtin/lib.fl",
+        "library/std/lib.fl",
+        "library/builtin/traits.fl",
+        "library/builtin/ops.fl",
+        "library/builtin/iterator.fl",
+        "library/std/collections.fl",
+        "library/builtin/option.fl",
+        "library/builtin/result.fl",
+        "library/std/fmt.fl",
+        "library/std/io.fl",
+        "library/builtin/primitives.fl",
+    ] {
+        let output = run_command(
+            sandbox
+                .command()
+                .arg(repository.join(relative))
+                .args(["--emit", "ast"]),
+        );
         assert!(output.status.success(), "{relative}: {}", details(&output));
     }
 }
-
 
 #[test]
 fn shipped_operator_protocols_execute_with_default_and_named_types() {
     let sandbox = Sandbox::new();
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     for name in ["primitives", "ops"] {
-        fs::copy(repository.join(format!("library/builtin/{name}.fl")), sandbox.path(format!("{name}.fl"))).unwrap();
+        fs::copy(
+            repository.join(format!("library/builtin/{name}.fl")),
+            sandbox.path(format!("{name}.fl")),
+        )
+        .unwrap();
     }
     sandbox.write("lib.fl", "pub use primitives.*; pub use ops.*; impl Add for bool {assoc Output:Type=bool;fn add(self,rhs:bool)->bool {self or rhs}} impl Add<.Rhs=bool> for char {assoc Output:Type=bool;fn add(self,rhs:bool)->bool {rhs}} fn run()->bool {false.as(Add).add(true) and 'x'.as(Add<.Rhs=bool>).add(true)}");
     let output = sandbox.run(&["lib.fl", "--emit", "hir"]);
     hir_dump(&output);
     let output = sandbox.run(&["lib.fl", "--interpret", "run"]);
     assert!(output.status.success(), "{}", details(&output));
-    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "(bool true)");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "(bool true)"
+    );
 }
 
 #[test]
@@ -2314,23 +2774,36 @@ fn shipped_option_and_result_modules_resolve_contextual_variants() {
     let sandbox = Sandbox::new();
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     for name in ["primitives", "option", "result"] {
-        fs::copy(repository.join(format!("library/builtin/{name}.fl")), sandbox.path(format!("{name}.fl"))).unwrap();
+        fs::copy(
+            repository.join(format!("library/builtin/{name}.fl")),
+            sandbox.path(format!("{name}.fl")),
+        )
+        .unwrap();
     }
-    sandbox.write("lib.fl", "pub use primitives.*;pub use option.Option;pub use result.Result;
+    sandbox.write(
+        "lib.fl",
+        "pub use primitives.*;pub use option.Option;pub use result.Result;
         fn panic(message:str)->noreturn {panic(message)}
-        fn run()->bool {let value:Option<bool> = .Some(true);value.unwrap_or(false)}");
-    let output=sandbox.run(&["lib.fl","--emit","hir"]);
+        fn run()->bool {let value:Option<bool> = .Some(true);value.unwrap_or(false)}",
+    );
+    let output = sandbox.run(&["lib.fl", "--emit", "hir"]);
     hir_dump(&output);
 }
 
 #[test]
 fn shipped_result_methods_execute_both_variants_and_generic_callbacks() {
-    let sandbox=Sandbox::new();
-    let repository=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for name in ["primitives","result"] {
-        fs::copy(repository.join(format!("library/builtin/{name}.fl")),sandbox.path(format!("{name}.fl"))).unwrap();
+    let sandbox = Sandbox::new();
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for name in ["primitives", "result"] {
+        fs::copy(
+            repository.join(format!("library/builtin/{name}.fl")),
+            sandbox.path(format!("{name}.fl")),
+        )
+        .unwrap();
     }
-    sandbox.write("lib.fl","pub use primitives.*;pub use result.Result;
+    sandbox.write(
+        "lib.fl",
+        "pub use primitives.*;pub use result.Result;
         fn panic(message:str)->noreturn {panic(message)}
         fn good()->Result<bool,u8> {.Ok(true)}
         fn bad()->Result<bool,u8> {.Err(7)}
@@ -2346,40 +2819,64 @@ fn shipped_result_methods_execute_both_variants_and_generic_callbacks() {
             bad().and_then(forbidden_result).is_err() and
             bad().map(forbidden_bool).unwrap_err()==7 and
             good().map_err(forbidden_byte).unwrap()
-        }");
-    let output=sandbox.run(&["lib.fl","--interpret","run"]);
-    assert_eq!(success(&output).trim(),"(bool true)");
+        }",
+    );
+    let output = sandbox.run(&["lib.fl", "--interpret", "run"]);
+    assert_eq!(success(&output).trim(), "(bool true)");
 }
 
 #[test]
 fn shipped_result_methods_execute_from_an_importing_package() {
-    let sandbox=Sandbox::new();
-    let repository=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let sandbox = Sandbox::new();
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     fs::create_dir_all(sandbox.path("library/builtin")).unwrap();
     fs::create_dir_all(sandbox.path("library/std")).unwrap();
-    fs::copy(repository.join("library/builtin/primitives.fl"),sandbox.path("library/builtin/primitives.fl")).unwrap();
-    fs::copy(repository.join("library/builtin/result.fl"),sandbox.path("library/std/result.fl")).unwrap();
-    sandbox.write("library/builtin/lib.fl","pub use primitives.*;pub mod prelude {pub use primitives.*;}");
+    fs::copy(
+        repository.join("library/builtin/primitives.fl"),
+        sandbox.path("library/builtin/primitives.fl"),
+    )
+    .unwrap();
+    fs::copy(
+        repository.join("library/builtin/result.fl"),
+        sandbox.path("library/std/result.fl"),
+    )
+    .unwrap();
+    sandbox.write(
+        "library/builtin/lib.fl",
+        "pub use primitives.*;pub mod prelude {pub use primitives.*;}",
+    );
     // A test-only diverging panic implementation makes the real Result module
     // checkable. No assertion below invokes panic or claims its API is shipped.
-    sandbox.write("library/std/lib.fl","pub use result.Result;fn panic(message:str)->noreturn {panic(message)}");
-    sandbox.write("input.fl","use std.Result;
+    sandbox.write(
+        "library/std/lib.fl",
+        "pub use result.Result;fn panic(message:str)->noreturn {panic(message)}",
+    );
+    sandbox.write(
+        "input.fl",
+        "use std.Result;
         fn good()->Result<bool,u8> {.Ok(true)}
         fn bad()->Result<bool,u8> {.Err(7)}
-        fn run()->bool {good().map(|value| not value).is_ok() and bad().unwrap_err()==7}");
-    let output=sandbox.run(&["input.fl","--sysroot","library","--interpret","run"]);
-    assert_eq!(success(&output).trim(),"(bool true)");
+        fn run()->bool {good().map(|value| not value).is_ok() and bad().unwrap_err()==7}",
+    );
+    let output = sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"]);
+    assert_eq!(success(&output).trim(), "(bool true)");
 }
 
 #[test]
 fn shipped_option_methods_execute_with_explicit_optional_binding() {
-    let sandbox=Sandbox::new();
-    let repository=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for name in ["primitives","option"] {
-        fs::copy(repository.join(format!("library/builtin/{name}.fl")),sandbox.path(format!("{name}.fl"))).unwrap();
+    let sandbox = Sandbox::new();
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for name in ["primitives", "option"] {
+        fs::copy(
+            repository.join(format!("library/builtin/{name}.fl")),
+            sandbox.path(format!("{name}.fl")),
+        )
+        .unwrap();
     }
     // Test-only diverging panic; exercised success branches do not invoke it.
-    sandbox.write("lib.fl","pub use primitives.*;pub use option.Option;
+    sandbox.write(
+        "lib.fl",
+        "pub use primitives.*;pub use option.Option;
         fn panic(message:str)->noreturn {panic(message)}
         fn some()->?bool {.Some(true)}
         fn none()->?bool {.None}
@@ -2390,24 +2887,37 @@ fn shipped_option_methods_execute_with_explicit_optional_binding() {
             some().unwrap_or(false) and none().unwrap_or(true) and
             not some().map(|value| not value).unwrap() and none().map(forbidden).is_none() and
             some().and_then(|value| .Some(not value)).is_some() and
-            none().and_then(forbidden_option).is_none() and nested().unwrap().is_none()}");
-    let output=sandbox.run(&["lib.fl","--optional-type","input::option::Option","--interpret","run"]);
-    assert_eq!(success(&output).trim(),"(bool true)");
-    let missing=sandbox.run(&["lib.fl","--interpret","run"]);
+            none().and_then(forbidden_option).is_none() and nested().unwrap().is_none()}",
+    );
+    let output = sandbox.run(&[
+        "lib.fl",
+        "--optional-type",
+        "input::option::Option",
+        "--interpret",
+        "run",
+    ]);
+    assert_eq!(success(&output).trim(), "(bool true)");
+    let missing = sandbox.run(&["lib.fl", "--interpret", "run"]);
     assert!(!missing.status.success());
     assert!(details(&missing).contains("optional type requires a bound optional declaration"));
 }
 
 #[test]
 fn optional_binding_checks_representation_and_does_not_use_spelling() {
-    let sandbox=Sandbox::new();
+    let sandbox = Sandbox::new();
     for definition in [
         "enum Maybe where T {Absent,Present(T)}",
         "enum Maybe where T {Present(T),Absent}",
     ] {
         sandbox.write("input.fl",&format!("{definition} enum Option where T {{Wrong(T)}} fn run()->bool {{let value:?bool=.Present(true);value match {{.Present(flag)=>flag,.Absent=>false}}}}"));
-        let output=sandbox.run(&["input.fl","--optional-type","input::Maybe","--interpret","run"]);
-        assert_eq!(success(&output).trim(),"(bool true)");
+        let output = sandbox.run(&[
+            "input.fl",
+            "--optional-type",
+            "input::Maybe",
+            "--interpret",
+            "run",
+        ]);
+        assert_eq!(success(&output).trim(), "(bool true)");
     }
     for definition in [
         "enum Maybe where T {Absent,Present(bool)}",
@@ -2416,55 +2926,110 @@ fn optional_binding_checks_representation_and_does_not_use_spelling() {
         "enum Maybe where T, requires T == bool {Absent,Present(T)}",
         "struct Maybe where T {value:T}",
     ] {
-        sandbox.write("input.fl",&format!("{definition} fn run()->bool {{true}}"));
-        let output=sandbox.run(&["input.fl","--optional-type","input::Maybe","--interpret","run"]);
-        assert!(!output.status.success(),"{definition}");
-        assert!(details(&output).contains("optional binding requires"),"{}",details(&output));
+        sandbox.write("input.fl", &format!("{definition} fn run()->bool {{true}}"));
+        let output = sandbox.run(&[
+            "input.fl",
+            "--optional-type",
+            "input::Maybe",
+            "--interpret",
+            "run",
+        ]);
+        assert!(!output.status.success(), "{definition}");
+        assert!(
+            details(&output).contains("optional binding requires"),
+            "{}",
+            details(&output)
+        );
     }
 }
 
 #[test]
 fn optional_null_and_patterns_preserve_each_nested_layer() {
-    let sandbox=Sandbox::new();
-    for definition in ["enum Maybe where T {Absent,Present(T)}","enum Maybe where T {Present(T),Absent}"] {
-        sandbox.write("input.fl",&format!("{definition}
+    let sandbox = Sandbox::new();
+    for definition in [
+        "enum Maybe where T {Absent,Present(T)}",
+        "enum Maybe where T {Present(T),Absent}",
+    ] {
+        sandbox.write(
+            "input.fl",
+            &format!(
+                "{definition}
             fn classify(value:??bool)->.u8'builtin {{value match {{
                 inner? => inner match {{flag? => if flag {{2}} else {{3}},null=>1}},null=>0}}}}
             fn make(flag:bool)->?bool {{if flag {{.Present(true)}} else {{null}}}}
             fn run()->bool {{classify(null)==0 and classify(.Present(null))==1 and
                 classify(.Present(.Present(true)))==2 and classify(.Present(.Present(false)))==3 and
                 (make(true) match {{value?=>value,null=>false}}) and
-                (make(false) match {{_?=>false,null=>true}})}}"));
-        let output=sandbox.run(&["input.fl","--optional-type","input::Maybe","--interpret","run"]);
-        assert_eq!(success(&output).trim(),"(bool true)");
+                (make(false) match {{_?=>false,null=>true}})}}"
+            ),
+        );
+        let output = sandbox.run(&[
+            "input.fl",
+            "--optional-type",
+            "input::Maybe",
+            "--interpret",
+            "run",
+        ]);
+        assert_eq!(success(&output).trim(), "(bool true)");
     }
-    for body in ["fn run()->bool {null}","fn run()->bool {true match {value?=>value,_=>false}}",
-        "fn run()->bool {let value:?bool=null;value match {flag?=>flag}}"] {
-        sandbox.write("input.fl",&format!("enum Maybe where T {{Absent,Present(T)}} {body}"));
-        let output=sandbox.run(&["input.fl","--optional-type","input::Maybe","--interpret","run"]);
-        assert!(!output.status.success(),"{body}");
+    for body in [
+        "fn run()->bool {null}",
+        "fn run()->bool {true match {value?=>value,_=>false}}",
+        "fn run()->bool {let value:?bool=null;value match {flag?=>flag}}",
+    ] {
+        sandbox.write(
+            "input.fl",
+            &format!("enum Maybe where T {{Absent,Present(T)}} {body}"),
+        );
+        let output = sandbox.run(&[
+            "input.fl",
+            "--optional-type",
+            "input::Maybe",
+            "--interpret",
+            "run",
+        ]);
+        assert!(!output.status.success(), "{body}");
     }
 }
 
 #[test]
 fn optional_patterns_export_bindings_and_keep_failure_scopes_separate() {
-    let sandbox=Sandbox::new();
+    let sandbox = Sandbox::new();
     sandbox.write("input.fl","enum Maybe where T {Missing,Value(T)}
         fn take(value:?bool)->bool {let inner?=value else {return false;};inner}
         fn choose(value:?bool)->bool {value match {flag? or flag?=>flag,null=>false}}
         fn run()->bool {take(.Value(true)) and not take(null) and choose(.Value(true)) and not choose(null)}");
-    let output=sandbox.run(&["input.fl","--optional-type","input::Maybe","--interpret","run"]);
-    assert_eq!(success(&output).trim(),"(bool true)");
-    sandbox.write("input.fl","enum Maybe where T {Missing,Value(T)}
-        fn run()->bool {let value:?bool=null;value match {flag?=>flag,null=>flag}}");
-    let output=sandbox.run(&["input.fl","--optional-type","input::Maybe","--interpret","run"]);
+    let output = sandbox.run(&[
+        "input.fl",
+        "--optional-type",
+        "input::Maybe",
+        "--interpret",
+        "run",
+    ]);
+    assert_eq!(success(&output).trim(), "(bool true)");
+    sandbox.write(
+        "input.fl",
+        "enum Maybe where T {Missing,Value(T)}
+        fn run()->bool {let value:?bool=null;value match {flag?=>flag,null=>flag}}",
+    );
+    let output = sandbox.run(&[
+        "input.fl",
+        "--optional-type",
+        "input::Maybe",
+        "--interpret",
+        "run",
+    ]);
     assert!(!output.status.success());
-    assert!(details(&output).contains("Unresolved identifier"),"{}",details(&output));
+    assert!(
+        details(&output).contains("Unresolved identifier"),
+        "{}",
+        details(&output)
+    );
 }
 
 #[test]
 fn optional_success_injection_preserves_existing_layers() {
-    let sandbox=Sandbox::new();
+    let sandbox = Sandbox::new();
     sandbox.write("input.fl","enum Maybe where T {Absent,Present(T)}
         fn classify(value:??bool)->.u8'builtin {value match {inner?=>inner match {flag?=>if flag {2} else {3},null=>1},null=>0}}
         fn identity(value:T)->T where T {value}
@@ -2477,14 +3042,22 @@ fn optional_success_injection_preserves_existing_layers() {
             (choose(false) match {_?=>false,null=>true}) and
             (number() match {value?=>value==9,null=>false}) and
             (missing match {_?=>false,null=>true})}");
-    let output=sandbox.run(&["input.fl","--optional-type","input::Maybe","--interpret","run"]);
-    assert_eq!(success(&output).trim(),"(bool true)");
+    let output = sandbox.run(&[
+        "input.fl",
+        "--optional-type",
+        "input::Maybe",
+        "--interpret",
+        "run",
+    ]);
+    assert_eq!(success(&output).trim(), "(bool true)");
 }
 
 #[test]
 fn generic_optional_parameters_infer_payloads_without_extra_layers() {
-    let sandbox=Sandbox::new();
-    sandbox.write("input.fl","enum Maybe where T {Absent,Present(T)}
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        "enum Maybe where T {Absent,Present(T)}
         fn keep(value:?T)->?T where T {value}
         fn nested(value:??T)->??T where T {value}
         fn pair(value:?T,other:T)->?T where T {value}
@@ -2496,38 +3069,66 @@ fn generic_optional_parameters_infer_payloads_without_extra_layers() {
             (b match {flag?=>flag,null=>false}) and
             (c match {_?=>false,null=>true}) and
             (d match {inner?=>inner match {_?=>false,null=>true},null=>false}) and
-            (e match {flag?=>flag,null=>false})}");
-    let output=sandbox.run(&["input.fl","--optional-type","input::Maybe","--interpret","run"]);
-    assert_eq!(success(&output).trim(),"(bool true)");
-    for expression in ["pair(true,'x')","keep(null)"] {
+            (e match {flag?=>flag,null=>false})}",
+    );
+    let output = sandbox.run(&[
+        "input.fl",
+        "--optional-type",
+        "input::Maybe",
+        "--interpret",
+        "run",
+    ]);
+    assert_eq!(success(&output).trim(), "(bool true)");
+    for expression in ["pair(true,'x')", "keep(null)"] {
         sandbox.write("input.fl",&format!("enum Maybe where T {{Absent,Present(T)}} fn keep(value:?T)->?T where T {{value}} fn pair(value:?T,other:T)->?T where T {{value}} fn run()->bool {{let result={expression};true}}"));
-        let output=sandbox.run(&["input.fl","--optional-type","input::Maybe","--interpret","run"]);
-        assert!(!output.status.success(),"{expression}");
+        let output = sandbox.run(&[
+            "input.fl",
+            "--optional-type",
+            "input::Maybe",
+            "--interpret",
+            "run",
+        ]);
+        assert!(!output.status.success(), "{expression}");
     }
 }
 
 #[test]
 fn optional_propagation_has_a_structured_hir_dump_and_converts_missing_result_type() {
-    let sandbox=Sandbox::new();
-    sandbox.write("input.fl","enum Maybe where T {Absent,Present(T)}
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        "enum Maybe where T {Absent,Present(T)}
         fn lookup(flag:bool)->?bool {if flag {true} else {null}}
         fn convert(flag:bool)->?.u8'builtin {let value=lookup(flag)?;if value {9} else {8}}
         comptime fn absent()->?bool {null}
         comptime fn propagate()->?.u8'builtin {let value=absent()?;9}
         comptime fn check()->bool {propagate() match {_?=>false,null=>true}}
         fn run()->bool {(convert(false) match {_?=>false,null=>true}) and
-            (convert(true) match {value?=>value==9,null=>false})}");
-    let output=sandbox.run(&["input.fl","--emit","hir"]);
+            (convert(true) match {value?=>value==9,null=>false})}",
+    );
+    let output = sandbox.run(&["input.fl", "--emit", "hir"]);
     assert!(hir_dump(&output).contains("(option-propagate (value "));
-    let output=sandbox.run(&["input.fl","--optional-type","input::Maybe","--interpret","run"]);
-    assert_eq!(success(&output).trim(),"(bool true)");
-    let output=sandbox.run(&["input.fl","--optional-type","input::Maybe","--invoke-comptime","check"]);
-    assert_eq!(success(&output).trim(),"(bool true)");
+    let output = sandbox.run(&[
+        "input.fl",
+        "--optional-type",
+        "input::Maybe",
+        "--interpret",
+        "run",
+    ]);
+    assert_eq!(success(&output).trim(), "(bool true)");
+    let output = sandbox.run(&[
+        "input.fl",
+        "--optional-type",
+        "input::Maybe",
+        "--invoke-comptime",
+        "check",
+    ]);
+    assert_eq!(success(&output).trim(), "(bool true)");
 }
 
 #[test]
 fn inferred_optional_callbacks_complete_missing_returns_from_success_paths() {
-    let sandbox=Sandbox::new();
+    let sandbox = Sandbox::new();
     sandbox.write("input.fl","enum Maybe where T {Absent,Present(T)}
         fn lookup(flag:bool)->?bool {if flag {true} else {null}}
         fn apply(action:fn(bool)->?T,flag:bool)->?T where T {action(flag)}
@@ -2541,13 +3142,28 @@ fn inferred_optional_callbacks_complete_missing_returns_from_success_paths() {
             (nested match {value?=>not value,null=>false}) and (number match {value?=>value==9,null=>false}) and
             (yes match {value?=>not value,null=>false}) and (no match {_?=>false,null=>true}) and
             (byte match {value?=>value==9,null=>false}) and (missing_byte match {_?=>false,null=>true})}");
-    let output=sandbox.run(&["input.fl","--optional-type","input::Maybe","--interpret","run"]);
-    assert_eq!(success(&output).trim(),"(bool true)");
-    sandbox.write("input.fl","enum Maybe where T {Absent,Present(T)}
+    let output = sandbox.run(&[
+        "input.fl",
+        "--optional-type",
+        "input::Maybe",
+        "--interpret",
+        "run",
+    ]);
+    assert_eq!(success(&output).trim(), "(bool true)");
+    sandbox.write(
+        "input.fl",
+        "enum Maybe where T {Absent,Present(T)}
         fn lookup(flag:bool)->?bool {null}
         fn apply(action:fn(bool)->?T)->?T where T {action(true)}
-        fn run()->bool {let value=apply(|flag| {lookup(flag)?;null});true}");
-    let output=sandbox.run(&["input.fl","--optional-type","input::Maybe","--interpret","run"]);
+        fn run()->bool {let value=apply(|flag| {lookup(flag)?;null});true}",
+    );
+    let output = sandbox.run(&[
+        "input.fl",
+        "--optional-type",
+        "input::Maybe",
+        "--interpret",
+        "run",
+    ]);
     assert!(!output.status.success());
 }
 
@@ -2563,14 +3179,25 @@ fn inferred_optional_callbacks_defer_explicit_missing_returns() {
         "if flag {return 9;} return null;",
         "if not flag {return null;} let inner=apply(|other| {if not other {return null;} true},flag);inner?;9",
     ] {
-        sandbox.write("input.fl", &format!("{prefix}
+        sandbox.write(
+            "input.fl",
+            &format!(
+                "{prefix}
             fn run()->bool {{
                 let yes=apply(|flag| {{{body}}},true);
                 let no=apply(|flag| {{{body}}},false);
                 (yes match {{value?=>value==9,null=>false}}) and
-                (no match {{_?=>false,null=>true}})}}"));
-        let output=sandbox.run(&["input.fl","--optional-type","input::Maybe","--interpret","run"]);
-        assert_eq!(success(&output).trim(),"(bool true)","{body}");
+                (no match {{_?=>false,null=>true}})}}"
+            ),
+        );
+        let output = sandbox.run(&[
+            "input.fl",
+            "--optional-type",
+            "input::Maybe",
+            "--interpret",
+            "run",
+        ]);
+        assert_eq!(success(&output).trim(), "(bool true)", "{body}");
     }
     for body in [
         "return null;",
@@ -2578,10 +3205,21 @@ fn inferred_optional_callbacks_defer_explicit_missing_returns() {
         "if flag {return null;} let inner=apply(|other| {true},flag);return null;",
         "if flag {return null;} if flag {return true;} return 9;",
     ] {
-        sandbox.write("input.fl", &format!("{prefix}
-            fn run()->bool {{let value=apply(|flag| {{{body}}},true);true}}"));
-        let output=sandbox.run(&["input.fl","--optional-type","input::Maybe","--interpret","run"]);
-        assert!(!output.status.success(),"accepted {body}");
+        sandbox.write(
+            "input.fl",
+            &format!(
+                "{prefix}
+            fn run()->bool {{let value=apply(|flag| {{{body}}},true);true}}"
+            ),
+        );
+        let output = sandbox.run(&[
+            "input.fl",
+            "--optional-type",
+            "input::Maybe",
+            "--interpret",
+            "run",
+        ]);
+        assert!(!output.status.success(), "accepted {body}");
     }
 }
 
@@ -2602,12 +3240,30 @@ fn partial_optional_branches_infer_from_later_success_values() {
         "when {flag=>null,else=>if flag {null} else {9}}",
     ] {
         for flag in ["true", "false"] {
-            let apply = if body.contains("base") { "captured" } else { "apply" };
-            for input in [format!("keep({body})"), format!("{apply}(|flag| {{{body}}},flag)")] {
-                sandbox.write("input.fl", &format!("{prefix} fn run()->bool {{let flag={flag};let base:.u8'builtin=9;
-                    let result={input};result match {{value?=>not flag and value==9,null=>flag}}}}"));
-                let output=sandbox.run(&["input.fl","--optional-type","input::Maybe","--interpret","run"]);
-                assert_eq!(success(&output).trim(),"(bool true)","{input}, {flag}");
+            let apply = if body.contains("base") {
+                "captured"
+            } else {
+                "apply"
+            };
+            for input in [
+                format!("keep({body})"),
+                format!("{apply}(|flag| {{{body}}},flag)"),
+            ] {
+                sandbox.write(
+                    "input.fl",
+                    &format!(
+                        "{prefix} fn run()->bool {{let flag={flag};let base:.u8'builtin=9;
+                    let result={input};result match {{value?=>not flag and value==9,null=>flag}}}}"
+                    ),
+                );
+                let output = sandbox.run(&[
+                    "input.fl",
+                    "--optional-type",
+                    "input::Maybe",
+                    "--interpret",
+                    "run",
+                ]);
+                assert_eq!(success(&output).trim(), "(bool true)", "{input}, {flag}");
             }
         }
     }
@@ -2615,8 +3271,10 @@ fn partial_optional_branches_infer_from_later_success_values() {
 
 #[test]
 fn optional_propagation_supplies_context_to_generic_producers() {
-    let sandbox=Sandbox::new();
-    sandbox.write("input.fl","typealias Byte=.u8'builtin;
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        "typealias Byte=.u8'builtin;
         enum Maybe where T {Absent,Present(T)}
         fn empty()->?T where T {null}
         fn consume(value:bool)->Byte {9}
@@ -2628,53 +3286,94 @@ fn optional_propagation_supplies_context_to_generic_producers() {
             (local() match {_?=>false,null=>true}) and
             (argument() match {_?=>false,null=>true}) and
             (symbol() match {_?=>false,null=>true}) and
-            (nested() match {_?=>false,null=>true})}");
-    let output=sandbox.run(&["input.fl","--optional-type","input::Maybe","--interpret","run"]);
-    assert_eq!(success(&output).trim(),"(bool true)");
+            (nested() match {_?=>false,null=>true})}",
+    );
+    let output = sandbox.run(&[
+        "input.fl",
+        "--optional-type",
+        "input::Maybe",
+        "--interpret",
+        "run",
+    ]);
+    assert_eq!(success(&output).trim(), "(bool true)");
 }
 
 #[test]
 fn optional_branch_probes_reach_later_evidence_through_nested_nulls() {
-    let sandbox=Sandbox::new();
+    let sandbox = Sandbox::new();
     for shape in ["if", "match", "when"] {
-        let mut missing="null".to_string();
+        let mut missing = "null".to_string();
         for _ in 0..32 {
-            missing=match shape {
+            missing = match shape {
                 "if" => format!("if flag {{{missing}}} else {{null}}"),
                 "match" => format!("flag match {{true=>{missing},false=>null}}"),
                 _ => format!("when {{flag=>{missing},else=>null}}"),
             };
         }
-        for flag in ["true","false"] {
-            sandbox.write("input.fl", &format!("enum Maybe where T {{Absent,Present(T)}}
+        for flag in ["true", "false"] {
+            sandbox.write(
+                "input.fl",
+                &format!(
+                    "enum Maybe where T {{Absent,Present(T)}}
                 fn keep(value:?T)->?T where T {{value}}
                 fn run()->bool {{let flag={flag};let byte:.u8'builtin=9;
                     let value=keep(if flag {{{missing}}} else {{byte}});
-                    value match {{value?=>not flag and value==9,null=>flag}}}}"));
-            let output=sandbox.run(&["input.fl","--optional-type","input::Maybe","--interpret","run"]);
-            assert_eq!(success(&output).trim(),"(bool true)","{shape}, {flag}");
+                    value match {{value?=>not flag and value==9,null=>flag}}}}"
+                ),
+            );
+            let output = sandbox.run(&[
+                "input.fl",
+                "--optional-type",
+                "input::Maybe",
+                "--interpret",
+                "run",
+            ]);
+            assert_eq!(success(&output).trim(), "(bool true)", "{shape}, {flag}");
         }
     }
-    sandbox.write("input.fl","enum Maybe where T {Absent,Present(T)}
+    sandbox.write(
+        "input.fl",
+        "enum Maybe where T {Absent,Present(T)}
         fn apply(action:?(fn(bool)->?T))->?T where T {let action=action?;action(true)}
         fn run()->bool {let value=apply(if false {null} else {
             |flag| {if flag {return true;} else {return false;}}
-        });value match {value?=>value,null=>false}}");
-    let output=sandbox.run(&["input.fl","--optional-type","input::Maybe","--interpret","run"]);
-    assert_eq!(success(&output).trim(),"(bool true)");
-    for missing in ["true match {true=>null}","if true {null} else {.Absent(9)}"] {
-        sandbox.write("input.fl", &format!("enum Maybe where T {{Absent,Present(T)}}
+        });value match {value?=>value,null=>false}}",
+    );
+    let output = sandbox.run(&[
+        "input.fl",
+        "--optional-type",
+        "input::Maybe",
+        "--interpret",
+        "run",
+    ]);
+    assert_eq!(success(&output).trim(), "(bool true)");
+    for missing in [
+        "true match {true=>null}",
+        "if true {null} else {.Absent(9)}",
+    ] {
+        sandbox.write(
+            "input.fl",
+            &format!(
+                "enum Maybe where T {{Absent,Present(T)}}
             fn keep(value:?T)->?T where T {{value}}
-            fn run()->bool {{let value=keep(if false {{{missing}}} else {{true}});true}}"));
-        let output=sandbox.run(&["input.fl","--optional-type","input::Maybe","--interpret","run"]);
-        assert!(!output.status.success(),"accepted {missing}");
+            fn run()->bool {{let value=keep(if false {{{missing}}} else {{true}});true}}"
+            ),
+        );
+        let output = sandbox.run(&[
+            "input.fl",
+            "--optional-type",
+            "input::Maybe",
+            "--interpret",
+            "run",
+        ]);
+        assert!(!output.status.success(), "accepted {missing}");
     }
 }
 
 #[test]
 fn optional_callback_tails_use_explicit_return_payload_evidence() {
-    let sandbox=Sandbox::new();
-    let prefix="enum Maybe where T {Absent,Present(T)}
+    let sandbox = Sandbox::new();
+    let prefix = "enum Maybe where T {Absent,Present(T)}
         fn lookup(flag:bool)->?bool {if flag {true} else {null}}
         fn apply(action:fn(bool)->?T,flag:bool)->?T where T {action(flag)}";
     for body in [
@@ -2685,22 +3384,37 @@ fn optional_callback_tails_use_explicit_return_payload_evidence() {
         "if flag {return 9;} when {flag=>null,else=>null}",
         "lookup(flag)?;if flag {return 9;} null",
     ] {
-        for flag in ["true","false"] {
-            sandbox.write("input.fl", &format!("{prefix} fn run()->bool {{
+        for flag in ["true", "false"] {
+            sandbox.write(
+                "input.fl",
+                &format!(
+                    "{prefix} fn run()->bool {{
                 let result=apply(|flag| {{{body}}},{flag});
-                result match {{value?=>{flag} and value==9,null=>not {flag}}}}}"));
-            let output=sandbox.run(&["input.fl","--optional-type","input::Maybe","--interpret","run"]);
-            assert_eq!(success(&output).trim(),"(bool true)","{body}, {flag}");
+                result match {{value?=>{flag} and value==9,null=>not {flag}}}}}"
+                ),
+            );
+            let output = sandbox.run(&[
+                "input.fl",
+                "--optional-type",
+                "input::Maybe",
+                "--interpret",
+                "run",
+            ]);
+            assert_eq!(success(&output).trim(), "(bool true)", "{body}, {flag}");
         }
     }
 }
 
 #[test]
 fn shipped_clone_protocol_preserves_noncopy_sources() {
-    let sandbox=Sandbox::new();
-    let repository=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for name in ["primitives","traits"] {
-        fs::copy(repository.join(format!("library/builtin/{name}.fl")),sandbox.path(format!("{name}.fl"))).unwrap();
+    let sandbox = Sandbox::new();
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for name in ["primitives", "traits"] {
+        fs::copy(
+            repository.join(format!("library/builtin/{name}.fl")),
+            sandbox.path(format!("{name}.fl")),
+        )
+        .unwrap();
     }
     // Formatting is outside this fixture. This local type only supplies the
     // opaque signatures of Display/Debug; neither formatting method is called.
@@ -2711,21 +3425,39 @@ fn shipped_clone_protocol_preserves_noncopy_sources() {
         impl Drop for Ticket {fn drop(*self) {}}
         fn require_once(value:*T) where T :- Once {}
         fn clone_generic(value:*T)->T where T :- Clone {require_once(value);value.*.as(Clone).clone()}";
-    sandbox.write("lib.fl", &format!("{prefix}
+    sandbox.write(
+        "lib.fl",
+        &format!(
+            "{prefix}
         fn run()->bool {{let source=Ticket {{flag:true}};
             let first=source.as(Clone).clone();let second=clone_generic(source.ref);
-            source.flag and first.flag and second.flag}}"));
-    let output=sandbox.run(&["lib.fl","--interpret","run"]);
-    assert_eq!(success(&output).trim(),"(bool true)");
+            source.flag and first.flag and second.flag}}"
+        ),
+    );
+    let output = sandbox.run(&["lib.fl", "--interpret", "run"]);
+    assert_eq!(success(&output).trim(), "(bool true)");
     // The concrete method footprint must also pass resource-checked execution.
-    let checked=sandbox.run(&["lib.fl","--interpret","run","--copy-protocol","Copy","--drop-protocol","Drop"]);
-    assert_eq!(success(&checked).trim(),"(bool true)");
+    let checked = sandbox.run(&[
+        "lib.fl",
+        "--interpret",
+        "run",
+        "--copy-protocol",
+        "Copy",
+        "--drop-protocol",
+        "Drop",
+    ]);
+    assert_eq!(success(&checked).trim(), "(bool true)");
     for invalid in [
         prefix.replace("impl Once for Ticket {}", ""),
         prefix.replace("fn clone(*self)->Self", "fn clone(self)->Self"),
     ] {
         sandbox.write("lib.fl", &format!("{invalid} fn run()->bool {{true}}"));
-        assert!(!sandbox.run(&["lib.fl","--interpret","run"]).status.success());
+        assert!(
+            !sandbox
+                .run(&["lib.fl", "--interpret", "run"])
+                .status
+                .success()
+        );
     }
     sandbox.write("lib.fl","pub use primitives.*;pub use traits.*;struct String {}
         struct Key {value:u8}
@@ -2748,139 +3480,275 @@ fn shipped_clone_protocol_preserves_noncopy_sources() {
             Key {value:2}.as(Ord).ge(Key {value:2}) and
             Key {value:3}.as(Ord).ge(Key {value:2}) and
             Key {value:1}.as(Hash).hash() == 7}");
-    let output=sandbox.run(&["lib.fl","--interpret","run"]);
-    assert_eq!(success(&output).trim(),"(bool true)");
+    let output = sandbox.run(&["lib.fl", "--interpret", "run"]);
+    assert_eq!(success(&output).trim(), "(bool true)");
 }
 
 #[test]
 fn field_pointer_reads_require_a_target_and_copy_payload() {
-    let sandbox=Sandbox::new();
+    let sandbox = Sandbox::new();
     for definition in [
         "struct Owned {} struct Cell {value:Owned} fn read(cell:*Cell)->Owned {cell.value}",
         "struct Cell {value:*bool} fn read(cell:*Cell)->.u8'builtin {cell.value}",
         "struct Cell {value:bool} fn bad(cell:*Cell) {cell.value=true;}",
     ] {
-        sandbox.write("input.fl",definition);
-        assert!(!sandbox.run(&["input.fl","--emit","nir"]).status.success(),"accepted {definition}");
+        sandbox.write("input.fl", definition);
+        assert!(
+            !sandbox.run(&["input.fl", "--emit", "nir"]).status.success(),
+            "accepted {definition}"
+        );
     }
     sandbox.write("input.fl","fn packet(...properties:T)->T where T {properties}
         fn run()->bool {let flag=true;let middle=flag.ref;let record=packet {value:middle.ref};
             let pointer=record.ref;let value:bool=pointer.value;let raw=pointer.value;value and raw.*.*.*}");
-    assert_eq!(success(&sandbox.run(&["input.fl","--interpret","run"])).trim(),"(bool true)");
-    sandbox.write("input.fl","struct Cell {value:*bool}
+    assert_eq!(
+        success(&sandbox.run(&["input.fl", "--interpret", "run"])).trim(),
+        "(bool true)"
+    );
+    sandbox.write(
+        "input.fl",
+        "struct Cell {value:*bool}
         fn identity(value:T)->T where T {value}
         fn read(cell:*Cell)->bool {cell.value}
         fn run()->bool {let flag=true;let cell=Cell {value:flag.ref};let pointer=cell.ref;
-            let value=identity(pointer.value);value.*.* and read(pointer)}");
-    assert_eq!(success(&sandbox.run(&["input.fl","--interpret","run"])).trim(),"(bool true)");
+            let value=identity(pointer.value);value.*.* and read(pointer)}",
+    );
+    assert_eq!(
+        success(&sandbox.run(&["input.fl", "--interpret", "run"])).trim(),
+        "(bool true)"
+    );
 }
 
 #[test]
 fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
-    let sandbox=Sandbox::new();
-    for name in ["builtin","std","meta"] {fs::create_dir_all(sandbox.path(&format!("library/{name}"))).unwrap();}
+    let sandbox = Sandbox::new();
+    for name in ["builtin", "std", "meta"] {
+        fs::create_dir_all(sandbox.path(&format!("library/{name}"))).unwrap();
+    }
     sandbox.write("library/builtin/lib.fl","pub typealias Type=.Type'builtin;pub use tuple.Tuple;pub use ops.*;pub mod prelude {pub use tuple.Tuple;}");
-    sandbox.write("library/builtin/tuple.fl",include_str!("../../../library/builtin/tuple.fl"));
-    sandbox.write("library/builtin/ops.fl",include_str!("../../../library/builtin/ops.fl"));
-    sandbox.write("library/meta/lib.fl",include_str!("../../../library/meta/lib.fl"));
-    sandbox.write("library/std/lib.fl","pub mod prelude {}");
-    sandbox.write("library/language-items.conf",include_str!("../../../library/language-items.conf"));
+    sandbox.write(
+        "library/builtin/tuple.fl",
+        include_str!("../../../library/builtin/tuple.fl"),
+    );
+    sandbox.write(
+        "library/builtin/ops.fl",
+        include_str!("../../../library/builtin/ops.fl"),
+    );
+    sandbox.write(
+        "library/meta/lib.fl",
+        include_str!("../../../library/meta/lib.fl"),
+    );
+    sandbox.write("library/std/lib.fl", "pub mod prelude {}");
+    sandbox.write(
+        "library/language-items.conf",
+        include_str!("../../../library/language-items.conf"),
+    );
     sandbox.write("input.fl","fn pair()->Tuple<bool,.u8'builtin> {(true,9)} fn run()->bool {let (flag,byte)=pair();flag and byte==9}");
-    assert_eq!(success(&sandbox.run(&["input.fl","--sysroot","library","--interpret","run"])).trim(),"(bool true)");
-    let output=sandbox.run(&["input.fl","--sysroot","library","--emit","nir"]);
-    let dump=success(&output);
-    assert!(dump.contains("normal-form"),"{dump}");
-    assert!(dump.contains("type-list-value"),"{dump}");
-    let original=fs::read_to_string(sandbox.path("input.fl")).unwrap();
+    assert_eq!(
+        success(&sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"])).trim(),
+        "(bool true)"
+    );
+    let output = sandbox.run(&["input.fl", "--sysroot", "library", "--emit", "nir"]);
+    let dump = success(&output);
+    assert!(dump.contains("normal-form"), "{dump}");
+    assert!(dump.contains("type-list-value"), "{dump}");
+    let original = fs::read_to_string(sandbox.path("input.fl")).unwrap();
     sandbox.write("input.fl","use builtin.Add;typealias Type=.Type'builtin;
         struct Flag {value:bool}
         impl Add<.Rhs=bool> for Flag {assoc Output:Type=bool;fn add(self,rhs:bool)->bool {self.value and rhs}}
         fn run()->bool {Flag {value:true} + true}");
-    assert_eq!(success(&sandbox.run(&["input.fl","--sysroot","library","--interpret","run"])).trim(),"(bool true)");
-    for (trait_name,method,symbol) in [("Neg","neg","-"),("Not","invert","not ")] {
+    assert_eq!(
+        success(&sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"])).trim(),
+        "(bool true)"
+    );
+    for (trait_name, method, symbol) in [("Neg", "neg", "-"), ("Not", "invert", "not ")] {
         sandbox.write("input.fl",format!("use builtin.{trait_name};typealias Type=.Type'builtin;
             struct Flag {{value:bool}}
             impl {trait_name} for Flag {{assoc Output:Type=bool;fn {method}(self)->bool {{self.value}}}}
             fn run()->bool {{ {symbol}Flag {{value:true}} }}"));
-        assert_eq!(success(&sandbox.run(&["input.fl","--sysroot","library","--interpret","run"])).trim(),"(bool true)");
+        assert_eq!(
+            success(&sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"]))
+                .trim(),
+            "(bool true)"
+        );
     }
-    sandbox.write("input.fl",original);
+    sandbox.write("input.fl", original);
     // Defaults do not override explicit driver choices.
-    sandbox.write("library/language-items.conf","version = 1\nmeta-list-type = meta::List\ntuple-type = missing::Tuple\n");
-    failure(&sandbox.run(&["input.fl","--sysroot","library","--interpret","run"]),1);
-    assert_eq!(success(&sandbox.run(&["input.fl","--sysroot","library","--interpret","run","--tuple-type","builtin::tuple::Tuple"])).trim(),"(bool true)");
-    sandbox.write("library/language-items.conf",include_str!("../../../library/language-items.conf"));
+    sandbox.write(
+        "library/language-items.conf",
+        "version = 1\nmeta-list-type = meta::List\ntuple-type = missing::Tuple\n",
+    );
+    failure(
+        &sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"]),
+        1,
+    );
+    assert_eq!(
+        success(&sandbox.run(&[
+            "input.fl",
+            "--sysroot",
+            "library",
+            "--interpret",
+            "run",
+            "--tuple-type",
+            "builtin::tuple::Tuple"
+        ]))
+        .trim(),
+        "(bool true)"
+    );
+    sandbox.write(
+        "library/language-items.conf",
+        include_str!("../../../library/language-items.conf"),
+    );
     sandbox.write("input.fl","typealias Type=.Type'builtin;pure comptime fn Tuple<...Es:meta.List<Type>>->Type {Tuple<...Es>} fn run()->Tuple<bool> {(true,)}");
-    let shadow=sandbox.run(&["input.fl","--sysroot","library","--interpret","run"]);
-    failure(&shadow,1);
+    let shadow = sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"]);
+    failure(&shadow, 1);
     assert!(String::from_utf8_lossy(&shadow.stderr).contains("multi-package elaboration failed"));
 }
 
 #[test]
 fn sysroot_language_item_configuration_is_validated_without_clobbering_output() {
-    let sandbox=Sandbox::new();
-    for name in ["builtin","std"] {fs::create_dir_all(sandbox.path(&format!("library/{name}"))).unwrap();}
-    sandbox.write("library/builtin/lib.fl","pub mod prelude {}");
-    sandbox.write("library/std/lib.fl","");
-    sandbox.write("input.fl","fn run()->bool {true}");
-    for config in [
-        "", "version = 2", "version = 1\nversion = 1", "version = 1\nunknown = x::T",
-        "version = 1\ntuple-type = Tuple", "version = 1\ntuple-type = x::::T",
-        "version = 1\ntuple-type = x::T\ntuple-type = x::T", "version = 1\ntuple-type x::T",
-    ] {
-        sandbox.write("library/language-items.conf",config);
-        sandbox.write("dump.lisp",OLD_OUTPUT);
-        let output=sandbox.run(&["input.fl","--sysroot","library","--emit","nir","--output","dump.lisp"]);
-        failure(&output,1);
-        assert!(String::from_utf8_lossy(&output.stderr).contains("language-items.conf"));
-        assert_eq!(fs::read(sandbox.path("dump.lisp")).unwrap(),OLD_OUTPUT);
+    let sandbox = Sandbox::new();
+    for name in ["builtin", "std"] {
+        fs::create_dir_all(sandbox.path(&format!("library/{name}"))).unwrap();
     }
-    sandbox.write("library/language-items.conf",format!("version = 1\n#{}","x".repeat(65536)));
-    let oversized=sandbox.run(&["input.fl","--sysroot","library","--interpret","run"]);
-    failure(&oversized,1);
+    sandbox.write("library/builtin/lib.fl", "pub mod prelude {}");
+    sandbox.write("library/std/lib.fl", "");
+    sandbox.write("input.fl", "fn run()->bool {true}");
+    for config in [
+        "",
+        "version = 2",
+        "version = 1\nversion = 1",
+        "version = 1\nunknown = x::T",
+        "version = 1\ntuple-type = Tuple",
+        "version = 1\ntuple-type = x::::T",
+        "version = 1\ntuple-type = x::T\ntuple-type = x::T",
+        "version = 1\ntuple-type x::T",
+    ] {
+        sandbox.write("library/language-items.conf", config);
+        sandbox.write("dump.lisp", OLD_OUTPUT);
+        let output = sandbox.run(&[
+            "input.fl",
+            "--sysroot",
+            "library",
+            "--emit",
+            "nir",
+            "--output",
+            "dump.lisp",
+        ]);
+        failure(&output, 1);
+        assert!(String::from_utf8_lossy(&output.stderr).contains("language-items.conf"));
+        assert_eq!(fs::read(sandbox.path("dump.lisp")).unwrap(), OLD_OUTPUT);
+    }
+    sandbox.write(
+        "library/language-items.conf",
+        format!("version = 1\n#{}", "x".repeat(65536)),
+    );
+    let oversized = sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"]);
+    failure(&oversized, 1);
     assert!(String::from_utf8_lossy(&oversized.stderr).contains("size limit"));
-    let valid="version = 1\n# No type constructors selected here.\n";
-    sandbox.write("library/language-items.conf",valid);
-    assert_eq!(success(&sandbox.run(&["input.fl","--sysroot","library","--interpret","run"])).trim(),"(bool true)");
-    fs::hard_link(sandbox.path("library/language-items.conf"),sandbox.path("config-alias")).unwrap();
-    for output in ["library/language-items.conf","config-alias"] {
-        failure(&sandbox.run(&["input.fl","--sysroot","library","--emit","nir","--output",output]),1);
-        assert_eq!(fs::read_to_string(sandbox.path("library/language-items.conf")).unwrap(),valid);
+    let valid = "version = 1\n# No type constructors selected here.\n";
+    sandbox.write("library/language-items.conf", valid);
+    assert_eq!(
+        success(&sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"])).trim(),
+        "(bool true)"
+    );
+    fs::hard_link(
+        sandbox.path("library/language-items.conf"),
+        sandbox.path("config-alias"),
+    )
+    .unwrap();
+    for output in ["library/language-items.conf", "config-alias"] {
+        failure(
+            &sandbox.run(&[
+                "input.fl",
+                "--sysroot",
+                "library",
+                "--emit",
+                "nir",
+                "--output",
+                output,
+            ]),
+            1,
+        );
+        assert_eq!(
+            fs::read_to_string(sandbox.path("library/language-items.conf")).unwrap(),
+            valid
+        );
     }
 }
 
 #[test]
 fn defer_retains_hir_boundaries_and_resolves_its_operand() {
-    let sandbox=Sandbox::new();
-    sandbox.write("input.fl","typealias Type=.Type'builtin;
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        "typealias Type=.Type'builtin;
         comptime fn Select(flag:bool)->Type {if flag {bool} else {.u8'builtin}}
-        fn keep(comptime flag:bool,value:defer Select(flag))->defer Select(flag) {value}");
-    let output=sandbox.run(&["input.fl","--emit","hir"]);
-    let dump=hir_dump(&output);
+        fn keep(comptime flag:bool,value:defer Select(flag))->defer Select(flag) {value}",
+    );
+    let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+    let dump = hir_dump(&output);
     // The parameter appears in both signature and body metadata; the result
     // annotation appears only in the signature.
-    assert_eq!(dump.matches("(defer ").count(),3,"{dump}");
-    assert!(dump.contains("application"),"{dump}");
-    sandbox.write("input.fl","fn missing(value:defer UnknownType(false)) {}");
-    failure(&sandbox.run(&["input.fl","--emit","hir"]),1);
+    assert_eq!(dump.matches("(defer ").count(), 3, "{dump}");
+    assert!(dump.contains("application"), "{dump}");
+    sandbox.write("input.fl", "fn missing(value:defer UnknownType(false)) {}");
+    failure(&sandbox.run(&["input.fl", "--emit", "hir"]), 1);
 }
 
 #[test]
 fn arithmetic_protocol_cli_checks_binding_shape_and_source_identity() {
-    let sandbox=Sandbox::new();
+    let sandbox = Sandbox::new();
     let source="typealias Type=.Type'builtin;
         trait Operation where Rhs {assoc Output:Type;fn add(self,rhs:Rhs)->Output;}
         struct Flag {value:bool}
         impl Operation<bool> for Flag {assoc Output:Type=bool;fn add(self,rhs:bool)->bool {self.value and rhs}}
         fn native()->.u8'builtin {7 + 1}
         fn run()->bool {(Flag {value:true} + true) and native() == 8}";
-    sandbox.write("input.fl",source);
-    assert_eq!(success(&sandbox.run(&["input.fl","--add-protocol","input::Operation","--interpret","run"])).trim(),"(bool true)");
-    failure(&sandbox.run(&["input.fl","--interpret","run"]),1);
-    failure(&sandbox.run(&["input.fl","--add-protocol","input::Flag","--interpret","run"]),1);
-    failure(&sandbox.run(&["input.fl","--add-protocol","missing::Operation","--interpret","run"]),1);
-    failure(&sandbox.run(&["input.fl","--add-protocol","input::Operation","--add-protocol","input::Operation"]),2);
-    failure(&sandbox.run(&["input.fl","--add-protocol"]),2);
+    sandbox.write("input.fl", source);
+    assert_eq!(
+        success(&sandbox.run(&[
+            "input.fl",
+            "--add-protocol",
+            "input::Operation",
+            "--interpret",
+            "run"
+        ]))
+        .trim(),
+        "(bool true)"
+    );
+    failure(&sandbox.run(&["input.fl", "--interpret", "run"]), 1);
+    failure(
+        &sandbox.run(&[
+            "input.fl",
+            "--add-protocol",
+            "input::Flag",
+            "--interpret",
+            "run",
+        ]),
+        1,
+    );
+    failure(
+        &sandbox.run(&[
+            "input.fl",
+            "--add-protocol",
+            "missing::Operation",
+            "--interpret",
+            "run",
+        ]),
+        1,
+    );
+    failure(
+        &sandbox.run(&[
+            "input.fl",
+            "--add-protocol",
+            "input::Operation",
+            "--add-protocol",
+            "input::Operation",
+        ]),
+        2,
+    );
+    failure(&sandbox.run(&["input.fl", "--add-protocol"]), 2);
     for declaration in [
         "trait Operation {assoc Output:Type;fn add(self,rhs:Self)->Output;}",
         "trait Operation where Rhs {fn add(self,rhs:Rhs)->bool;}",
@@ -2888,17 +3756,33 @@ fn arithmetic_protocol_cli_checks_binding_shape_and_source_identity() {
         "trait Operation where Rhs {assoc Output:Type;fn add(self,rhs:bool)->Output;}",
         "trait Operation where Rhs {assoc Output:Type;fn add(self,rhs:Rhs)->bool;}",
     ] {
-        sandbox.write("input.fl",format!("typealias Type=.Type'builtin;{declaration} fn run()->bool {{true}}"));
-        let output=sandbox.run(&["input.fl","--add-protocol","input::Operation","--interpret","run"]);
-        failure(&output,1);
-        assert!(String::from_utf8_lossy(&output.stderr).contains("arithmetic"),"{declaration}: {}",String::from_utf8_lossy(&output.stderr));
+        sandbox.write(
+            "input.fl",
+            format!("typealias Type=.Type'builtin;{declaration} fn run()->bool {{true}}"),
+        );
+        let output = sandbox.run(&[
+            "input.fl",
+            "--add-protocol",
+            "input::Operation",
+            "--interpret",
+            "run",
+        ]);
+        failure(&output, 1);
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("arithmetic"),
+            "{declaration}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
 
 #[test]
 fn unary_protocol_cli_validates_identity_shape_and_native_fallback() {
-    let sandbox=Sandbox::new();
-    for (option,method,symbol) in [("--neg-protocol","neg","-"),("--not-protocol","invert","not ")] {
+    let sandbox = Sandbox::new();
+    for (option, method, symbol) in [
+        ("--neg-protocol", "neg", "-"),
+        ("--not-protocol", "invert", "not "),
+    ] {
         let source=format!("typealias Type=.Type'builtin;
             trait Operation {{assoc Output:Type;fn {method}(self)->Output;}}
             struct Flag {{value:bool}}
@@ -2908,19 +3792,49 @@ fn unary_protocol_cli_validates_identity_shape_and_native_fallback() {
             fn negative()->.i8'builtin {{let value:.i8'builtin=7; -value}}
             fn native_not()->bool {{not false}}
             fn bits()->.BitVec'builtin<8> {{not 0b00001111}}");
-        sandbox.write("input.fl",&source);
-        for (entry,expected) in [("run","(bool true)"),("minimum","(signed-integer -128)"),("negative","(signed-integer -7)"),("native_not","(bool true)")] {
-            let output=sandbox.run(&["input.fl",option,"input::Operation","--interpret",entry]);
-            let result=success(&output);
-            assert_eq!(result.trim(),expected,"{option} {entry}");
+        sandbox.write("input.fl", &source);
+        for (entry, expected) in [
+            ("run", "(bool true)"),
+            ("minimum", "(signed-integer -128)"),
+            ("negative", "(signed-integer -7)"),
+            ("native_not", "(bool true)"),
+        ] {
+            let output =
+                sandbox.run(&["input.fl", option, "input::Operation", "--interpret", entry]);
+            let result = success(&output);
+            assert_eq!(result.trim(), expected, "{option} {entry}");
         }
-        let bits=sandbox.run(&["input.fl",option,"input::Operation","--interpret","bits"]);
-        assert_eq!(success(&bits).trim(),"(bitvec (width 8) (hex \"000000f0\"))");
-        failure(&sandbox.run(&["input.fl","--interpret","run"]),1);
-        failure(&sandbox.run(&["input.fl",option,"input::Flag","--emit","nir"]),1);
-        failure(&sandbox.run(&["input.fl",option,"missing::Operation","--emit","nir"]),1);
-        failure(&sandbox.run(&["input.fl",option,"input::Operation",option,"input::Operation"]),2);
-        failure(&sandbox.run(&["input.fl",option]),2);
+        let bits = sandbox.run(&[
+            "input.fl",
+            option,
+            "input::Operation",
+            "--interpret",
+            "bits",
+        ]);
+        assert_eq!(
+            success(&bits).trim(),
+            "(bitvec (width 8) (hex \"000000f0\"))"
+        );
+        failure(&sandbox.run(&["input.fl", "--interpret", "run"]), 1);
+        failure(
+            &sandbox.run(&["input.fl", option, "input::Flag", "--emit", "nir"]),
+            1,
+        );
+        failure(
+            &sandbox.run(&["input.fl", option, "missing::Operation", "--emit", "nir"]),
+            1,
+        );
+        failure(
+            &sandbox.run(&[
+                "input.fl",
+                option,
+                "input::Operation",
+                option,
+                "input::Operation",
+            ]),
+            2,
+        );
+        failure(&sandbox.run(&["input.fl", option]), 2);
         for declaration in [
             format!("trait Operation where T {{assoc Output:Type;fn {method}(self)->Output;}}"),
             format!("trait Operation {{fn {method}(self)->bool;}}"),
@@ -2928,9 +3842,13 @@ fn unary_protocol_cli_validates_identity_shape_and_native_fallback() {
             format!("trait Operation {{assoc Output:Type;fn {method}(self,rhs:bool)->Output;}}"),
             format!("trait Operation {{assoc Output:Type;fn {method}(self)->bool;}}"),
         ] {
-            sandbox.write("input.fl",format!("typealias Type=.Type'builtin;{declaration} fn run()->bool {{true}}"));
-            let output=sandbox.run(&["input.fl",option,"input::Operation","--interpret","run"]);
-            failure(&output,1);
+            sandbox.write(
+                "input.fl",
+                format!("typealias Type=.Type'builtin;{declaration} fn run()->bool {{true}}"),
+            );
+            let output =
+                sandbox.run(&["input.fl", option, "input::Operation", "--interpret", "run"]);
+            failure(&output, 1);
             assert!(String::from_utf8_lossy(&output.stderr).contains("protocol"));
         }
     }
@@ -2938,84 +3856,428 @@ fn unary_protocol_cli_validates_identity_shape_and_native_fallback() {
 
 #[test]
 fn index_protocol_cli_checks_binding_and_declaration_shape() {
-    let sandbox=Sandbox::new();
-    let source="trait Access where K {fn index(self,idx:K)->bool;}
+    let sandbox = Sandbox::new();
+    let source = "trait Access where K {fn index(self,idx:K)->bool;}
         struct Flag {value:bool}
         impl Access<bool> for Flag {fn index(self,idx:bool)->bool {self.value and idx}}
         fn run()->bool {Flag {value:true}[true]}";
-    sandbox.write("input.fl",source);
-    assert_eq!(success(&sandbox.run(&["input.fl","--index-protocol","input::Access","--interpret","run"])).trim(),"(bool true)");
-    failure(&sandbox.run(&["input.fl","--interpret","run"]),1);
-    for selector in ["input::Flag","missing::Access","Access","input::","input::missing::Access"] {
-        failure(&sandbox.run(&["input.fl","--index-protocol",selector,"--interpret","run"]),1);
+    sandbox.write("input.fl", source);
+    assert_eq!(
+        success(&sandbox.run(&[
+            "input.fl",
+            "--index-protocol",
+            "input::Access",
+            "--interpret",
+            "run"
+        ]))
+        .trim(),
+        "(bool true)"
+    );
+    failure(&sandbox.run(&["input.fl", "--interpret", "run"]), 1);
+    for selector in [
+        "input::Flag",
+        "missing::Access",
+        "Access",
+        "input::",
+        "input::missing::Access",
+    ] {
+        failure(
+            &sandbox.run(&[
+                "input.fl",
+                "--index-protocol",
+                selector,
+                "--interpret",
+                "run",
+            ]),
+            1,
+        );
     }
-    for args in [vec!["input.fl","--index-protocol"],vec!["input.fl","--index-protocol","input::Access"],
-        vec!["input.fl","--index-protocol","input::Access","--index-protocol","input::Access","--interpret","run"]] {
-        failure(&sandbox.run(&args),2);
+    for args in [
+        vec!["input.fl", "--index-protocol"],
+        vec!["input.fl", "--index-protocol", "input::Access"],
+        vec![
+            "input.fl",
+            "--index-protocol",
+            "input::Access",
+            "--index-protocol",
+            "input::Access",
+            "--interpret",
+            "run",
+        ],
+    ] {
+        failure(&sandbox.run(&args), 2);
     }
-    for declaration in ["trait Access {fn index(self,idx:bool)->bool;}",
+    for declaration in [
+        "trait Access {fn index(self,idx:bool)->bool;}",
         "trait Access where K {fn other(self,idx:K)->bool;}",
         "trait Access where K {fn index(*self,idx:K)->bool;}",
-        "trait Access where K {fn index(self,idx:bool)->bool;}"] {
-        sandbox.write("input.fl",format!("{declaration}fn run()->bool {{true}}"));
-        let output=sandbox.run(&["input.fl","--index-protocol","input::Access","--interpret","run"]);
-        failure(&output,1);
+        "trait Access where K {fn index(self,idx:bool)->bool;}",
+    ] {
+        sandbox.write("input.fl", format!("{declaration}fn run()->bool {{true}}"));
+        let output = sandbox.run(&[
+            "input.fl",
+            "--index-protocol",
+            "input::Access",
+            "--interpret",
+            "run",
+        ]);
+        failure(&output, 1);
         assert!(String::from_utf8_lossy(&output.stderr).contains("Index protocol"));
     }
 }
 
 #[test]
 fn index_protocol_sysroot_defaults_preserve_explicit_pointer_access() {
-    let sandbox=Sandbox::new();
-    for name in ["builtin","std"] {fs::create_dir_all(sandbox.path(&format!("library/{name}"))).unwrap();}
-    sandbox.write("library/builtin/lib.fl","pub typealias Type=.Type'builtin;pub use ops.*;pub mod prelude {}");
-    sandbox.write("library/builtin/ops.fl",include_str!("../../../library/builtin/ops.fl"));
-    sandbox.write("library/std/lib.fl","pub mod prelude {}");
-    sandbox.write("library/language-items.conf","version = 1\nindex-protocol = builtin::ops::Index\n");
-    sandbox.write("input.fl","use builtin.Index;typealias Type=.Type'builtin;typealias Word=.u16'builtin;
+    let sandbox = Sandbox::new();
+    for name in ["builtin", "std"] {
+        fs::create_dir_all(sandbox.path(&format!("library/{name}"))).unwrap();
+    }
+    sandbox.write(
+        "library/builtin/lib.fl",
+        "pub typealias Type=.Type'builtin;pub use ops.*;pub mod prelude {}",
+    );
+    sandbox.write(
+        "library/builtin/ops.fl",
+        include_str!("../../../library/builtin/ops.fl"),
+    );
+    sandbox.write("library/std/lib.fl", "pub mod prelude {}");
+    sandbox.write(
+        "library/language-items.conf",
+        "version = 1\nindex-protocol = builtin::ops::Index\n",
+    );
+    sandbox.write(
+        "input.fl",
+        "use builtin.Index;typealias Type=.Type'builtin;typealias Word=.u16'builtin;
         struct Slot {p:*Word}
         impl Index<bool> for Slot {assoc Output:Type=Word;fn index(self,idx:bool)->*Word {self.p}}
-        fn run()->Word {var word:Word=0;Slot {p:word.ref}[true].* = 17;word}");
-    assert_eq!(success(&sandbox.run(&["input.fl","--sysroot","library","--interpret","run"])).trim(),"(unsigned-integer 17)");
-    let output=sandbox.run(&["input.fl","--sysroot","library","--interpret","run","--index-protocol","input::Missing"]);
-    failure(&output,1);
+        fn run()->Word {var word:Word=0;Slot {p:word.ref}[true].* = 17;word}",
+    );
+    assert_eq!(
+        success(&sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"])).trim(),
+        "(unsigned-integer 17)"
+    );
+    let output = sandbox.run(&[
+        "input.fl",
+        "--sysroot",
+        "library",
+        "--interpret",
+        "run",
+        "--index-protocol",
+        "input::Missing",
+    ]);
+    failure(&output, 1);
 }
 
 #[test]
 fn checked_interpret_supplies_resource_identities_before_pure_validation() {
     let sandbox = Sandbox::new();
     sandbox.write("input.fl", "trait Duplicate {} trait Retire {fn drop(*self);} struct Flag {value:bool} impl Duplicate for Flag {} pure fn duplicate(value:Flag)->(Flag,Flag) {(value,value)} fn run()->bool {let (first,second)=duplicate(Flag {value:true});first.value and second.value}");
-    let result = sandbox.run(&["input.fl", "--interpret", "run", "--copy-protocol", "Duplicate", "--drop-protocol", "Retire"]);
-    assert_eq!(result.status.code(), Some(0), "{}", String::from_utf8_lossy(&result.stderr));
-    assert_eq!(String::from_utf8(result.stdout).unwrap().trim(), "(bool true)");
+    let result = sandbox.run(&[
+        "input.fl",
+        "--interpret",
+        "run",
+        "--copy-protocol",
+        "Duplicate",
+        "--drop-protocol",
+        "Retire",
+    ]);
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(result.stdout).unwrap().trim(),
+        "(bool true)"
+    );
 }
 
 #[test]
 fn optional_inlining_cli_requires_checked_execution_and_preserves_cleanup() {
-    let sandbox=Sandbox::new();
-    sandbox.write("input.fl","trait Duplicate {} trait Retire {fn drop(*self);}
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        "trait Duplicate {} trait Retire {fn drop(*self);}
         struct Held {ready:bool}
         impl Retire for Held {fn drop(*self) {assumes self.ready.*;}}
         inline fn consume(held:Held)->bool {true}
-        fn entry()->bool {consume(Held {ready:true})}");
-    let output=sandbox.run(&["input.fl","--interpret","entry","--inline-functions",
-        "--copy-protocol","Duplicate","--drop-protocol","Retire"]);
-    assert_eq!(success(&output).trim(),"(bool true)");
-    let reordered = sandbox.run(&["--inline-functions", "--drop-protocol", "Retire",
-        "input.fl", "--copy-protocol", "Duplicate", "--interpret", "entry"]);
+        fn entry()->bool {consume(Held {ready:true})}",
+    );
+    let output = sandbox.run(&[
+        "input.fl",
+        "--interpret",
+        "entry",
+        "--inline-functions",
+        "--copy-protocol",
+        "Duplicate",
+        "--drop-protocol",
+        "Retire",
+    ]);
+    assert_eq!(success(&output).trim(), "(bool true)");
+    let reordered = sandbox.run(&[
+        "--inline-functions",
+        "--drop-protocol",
+        "Retire",
+        "input.fl",
+        "--copy-protocol",
+        "Duplicate",
+        "--interpret",
+        "entry",
+    ]);
     assert_eq!(success(&reordered).trim(), "(bool true)");
     for args in [
-        vec!["input.fl","--inline-functions"],
-        vec!["input.fl","--interpret","entry","--inline-functions"],
-        vec!["input.fl","--interpret","entry","--inline-functions","--inline-functions","--copy-protocol","Duplicate","--drop-protocol","Retire"],
-        vec!["input.fl","--instantiate","entry","--inline-functions","--copy-protocol","Duplicate","--drop-protocol","Retire"],
-    ] {failure(&sandbox.run(&args),2);}
-    sandbox.write("input.fl","trait Duplicate {} trait Retire {fn drop(*self);}
+        vec!["input.fl", "--inline-functions"],
+        vec!["input.fl", "--interpret", "entry", "--inline-functions"],
+        vec![
+            "input.fl",
+            "--interpret",
+            "entry",
+            "--inline-functions",
+            "--inline-functions",
+            "--copy-protocol",
+            "Duplicate",
+            "--drop-protocol",
+            "Retire",
+        ],
+        vec![
+            "input.fl",
+            "--instantiate",
+            "entry",
+            "--inline-functions",
+            "--copy-protocol",
+            "Duplicate",
+            "--drop-protocol",
+            "Retire",
+        ],
+    ] {
+        failure(&sandbox.run(&args), 2);
+    }
+    sandbox.write(
+        "input.fl",
+        "trait Duplicate {} trait Retire {fn drop(*self);}
         struct Held {ready:bool}
         impl Retire for Held {fn drop(*self) {assumes self.ready.*;}}
         inline fn consume(held:Held)->bool {true}
-        fn entry()->bool {consume(Held {ready:false})}");
-    let output=sandbox.run(&["input.fl","--interpret","entry","--inline-functions",
-        "--copy-protocol","Duplicate","--drop-protocol","Retire"]);
-    failure(&output,1);
+        fn entry()->bool {consume(Held {ready:false})}",
+    );
+    let output = sandbox.run(&[
+        "input.fl",
+        "--interpret",
+        "entry",
+        "--inline-functions",
+        "--copy-protocol",
+        "Duplicate",
+        "--drop-protocol",
+        "Retire",
+    ]);
+    failure(&output, 1);
+}
+
+#[test]
+fn literal_into_cli_runs_suffix_conversion_and_checks_usage() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        include_str!("../../../development/examples/literal-suffix.fl"),
+    );
+    assert_eq!(
+        success(&sandbox.run(&[
+            "input.fl",
+            "--literal-into-protocol",
+            "input::Convert",
+            "--interpret",
+            "run"
+        ]))
+        .trim(),
+        "(bool true)"
+    );
+    failure(&sandbox.run(&["input.fl", "--interpret", "run"]), 1);
+    for selector in [
+        "Convert",
+        "input::Missing",
+        "missing::Convert",
+        "input::run",
+    ] {
+        failure(
+            &sandbox.run(&[
+                "input.fl",
+                "--literal-into-protocol",
+                selector,
+                "--interpret",
+                "run",
+            ]),
+            1,
+        );
+    }
+    for args in [
+        vec!["input.fl", "--literal-into-protocol"],
+        vec!["input.fl", "--literal-into-protocol", "input::Convert"],
+        vec![
+            "input.fl",
+            "--literal-into-protocol",
+            "input::Convert",
+            "--literal-into-protocol",
+            "input::Convert",
+            "--emit",
+            "nir",
+        ],
+    ] {
+        failure(&sandbox.run(&args), 2);
+    }
+    assert!(success(&sandbox.run(&["--help"])).contains("--literal-into-protocol"));
+}
+
+#[test]
+fn literal_into_cli_overrides_sysroot_defaults() {
+    let sandbox = Sandbox::new();
+    for name in ["builtin", "std"] {
+        fs::create_dir_all(sandbox.path(&format!("library/{name}"))).unwrap();
+    }
+    sandbox.write("library/builtin/lib.fl", "pub mod prelude {} pub typealias Symbol=.Symbol'builtin;typealias Char=.char'builtin; pub trait Convert where suffix:Symbol,R {fn literal_into(comptime value:Self)->R;} impl Convert<.flag,bool> for Char {fn literal_into(comptime value:Char)->bool {false}}");
+    sandbox.write("library/std/lib.fl", "pub mod prelude {}");
+    sandbox.write(
+        "library/language-items.conf",
+        "version = 1\nliteral-into-protocol = builtin::Convert\n",
+    );
+    sandbox.write(
+        "input.fl",
+        "use builtin.Convert;typealias Symbol=.Symbol'builtin;typealias Char=.char'builtin;
+        trait Custom where suffix:Symbol,R {fn literal_into(comptime value:Self)->R;}
+        impl Custom<.flag,bool> for Char {fn literal_into(comptime value:Char)->bool {true}}
+        fn run()->bool {'x'flag}",
+    );
+    assert_eq!(
+        success(&sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"])).trim(),
+        "(bool false)"
+    );
+    assert_eq!(
+        success(&sandbox.run(&[
+            "input.fl",
+            "--sysroot",
+            "library",
+            "--interpret",
+            "run",
+            "--literal-into-protocol",
+            "input::Custom"
+        ]))
+        .trim(),
+        "(bool true)"
+    );
+}
+
+#[test]
+fn literal_suffix_result_inference_requires_a_unique_complete_candidate() {
+    let sandbox = Sandbox::new();
+    let base = include_str!("../../../development/examples/literal-suffix.fl");
+    let inferred = base.replace("'x'flag\n}", "let result = 'x'flag; result\n}");
+    assert_ne!(base, inferred);
+    sandbox.write("input.fl", &inferred);
+    let args = [
+        "input.fl",
+        "--literal-into-protocol",
+        "input::Convert",
+        "--interpret",
+        "run",
+    ];
+    assert_eq!(success(&sandbox.run(&args)).trim(), "(bool true)");
+    let second =
+        "impl Convert<.flag,Char> for Char {fn literal_into(comptime value:Char)->Char {value}}";
+    sandbox.write("input.fl", format!("{inferred}\n{second}"));
+    let ambiguous = sandbox.run(&args);
+    failure(&ambiguous, 1);
+    assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("ambiguous or unresolved"));
+    sandbox.write("input.fl", format!("{base}\n{second}"));
+    assert_eq!(success(&sandbox.run(&args)).trim(), "(bool true)");
+    let contextual_call = base.replace("'x'flag\n}", "identity('x'flag)\n}");
+    sandbox.write(
+        "input.fl",
+        format!("{contextual_call}\n{second}\nfn identity(value:T)->T where T {{value}}"),
+    );
+    assert_eq!(success(&sandbox.run(&args)).trim(), "(bool true)");
+    // A different suffix cannot pollute the result choice, regardless of order.
+    for source in [
+        format!("{}\n{inferred}", second.replace(".flag,", ".other,")),
+        format!("{inferred}\n{}", second.replace(".flag,", ".other,")),
+    ] {
+        sandbox.write("input.fl", source);
+        assert_eq!(success(&sandbox.run(&args)).trim(), "(bool true)");
+    }
+    let scoped = format!("{inferred}\n{second}").replace(
+        "fn run() -> bool",
+        "fn selected() -> bool where requires Char :- Convert<.flag,bool>",
+    );
+    sandbox.write(
+        "input.fl",
+        format!("{scoped}\nfn run()->bool {{selected()}}"),
+    );
+    assert_eq!(success(&sandbox.run(&args)).trim(), "(bool true)");
+    sandbox.write("input.fl", "typealias Symbol=.Symbol'builtin;typealias Char=.char'builtin;
+        trait Convert where suffix:Symbol,R {fn literal_into(comptime value:Self)->R;}
+        impl Convert<.flag,R> for Char where R {fn literal_into(comptime value:Char)->R {while true {}}}
+        fn run()->bool {let result='x'flag;result}");
+    let unresolved = sandbox.run(&args);
+    failure(&unresolved, 1);
+    assert!(
+        String::from_utf8_lossy(&unresolved.stderr).contains("ambiguous or unresolved"),
+        "{}",
+        details(&unresolved)
+    );
+    let generic = inferred
+        .replace("for Char", "for T where T")
+        .replace("comptime value: Char", "comptime value: T")
+        .replace("value == 'x'", "true");
+    sandbox.write("input.fl", generic);
+    assert_eq!(success(&sandbox.run(&args)).trim(), "(bool true)");
+}
+
+#[test]
+fn literal_result_inference_uses_implementation_equalities_without_assuming_them() {
+    let sandbox = Sandbox::new();
+    let source = "typealias Symbol=.Symbol'builtin;typealias Char=.char'builtin;
+        trait Convert where suffix:Symbol,R {fn literal_into(comptime value:Self)->R;}
+        impl Convert<.flag,R> for Char where R, requires R == bool {
+            fn literal_into(comptime value:Char)->R {true}
+        }
+        fn run()->bool {let value='x'flag;value}";
+    let args = [
+        "input.fl",
+        "--literal-into-protocol",
+        "input::Convert",
+        "--interpret",
+        "run",
+    ];
+    sandbox.write("input.fl", source);
+    assert_eq!(success(&sandbox.run(&args)).trim(), "(bool true)");
+    let impossible = "impl Convert<.flag,R> for Char where R, requires (R == bool) and (R == Char) {fn literal_into(comptime value:Char)->R {while true {}}}";
+    for source in [
+        format!("{source}\n{impossible}"),
+        format!("{impossible}\n{source}"),
+    ] {
+        sandbox.write("input.fl", source);
+        assert_eq!(success(&sandbox.run(&args)).trim(), "(bool true)");
+    }
+
+    let disjunction = source
+        .replace("requires R == bool", "requires (R == bool) or (R == Char)")
+        .replace("->R {true}", "->R {while true {}}");
+    sandbox.write("input.fl", disjunction);
+    let unresolved = sandbox.run(&args);
+    failure(&unresolved, 1);
+    assert!(String::from_utf8_lossy(&unresolved.stderr).contains("ambiguous or unresolved"));
+    let unsupported = format!(
+        "trait Missing {{}} {}",
+        source.replace(
+            "requires R == bool",
+            "requires (R == bool) and (Char :- Missing)"
+        )
+    );
+    sandbox.write("input.fl", unsupported);
+    let rejected = sandbox.run(&args);
+    failure(&rejected, 1);
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("ambiguous or unresolved"),
+        "{}",
+        details(&rejected)
+    );
 }

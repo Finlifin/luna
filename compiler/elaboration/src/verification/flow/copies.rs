@@ -28,27 +28,41 @@ pub(super) fn observation_link(
 ) -> Result<InstalledCopy, Unknown> {
     let mut source = facts.fork(limits)?;
     source.retain_places(&BTreeSet::from([original.place]), limits)?;
-    Ok(InstalledCopy {source, mapping: BTreeMap::from([(original, observed)]), expression: None})
+    Ok(InstalledCopy {
+        source,
+        mapping: BTreeMap::from([(original, observed)]),
+        expression: None,
+    })
 }
 impl Walker<'_> {
     /// Publish relations between observed exit-memory cells even when the call
     /// has no scalar result. Only current, explicitly transported identities
     /// cross the frame boundary; unrelated callee locals remain private.
     pub(super) fn export_memory_observations(
-        &mut self, state: &mut State, frame: &State, observations: &[InstalledCopy],
+        &mut self,
+        state: &mut State,
+        frame: &State,
+        observations: &[InstalledCopy],
         entry_ghosts: &[InstalledCopy],
     ) -> Result<(), Reason> {
         let mut copy = InstalledCopy {
-            source: frame.facts.fork(self.limits)?, mapping: BTreeMap::new(), expression: None,
+            source: frame.facts.fork(self.limits)?,
+            mapping: BTreeMap::new(),
+            expression: None,
         };
         self.connect_call_observations(&mut copy, state, observations, entry_ghosts)?;
-        if copy.mapping.is_empty() { return Ok(()); }
+        if copy.mapping.is_empty() {
+            return Ok(());
+        }
         self.finish_copies(state, vec![copy])
     }
 
     fn connect_call_observations(
-        &mut self, copy: &mut InstalledCopy, state: &State,
-        ghosts: &[InstalledCopy], additional_ghosts: &[InstalledCopy],
+        &mut self,
+        copy: &mut InstalledCopy,
+        state: &State,
+        ghosts: &[InstalledCopy],
+        additional_ghosts: &[InstalledCopy],
     ) -> Result<(), Reason> {
         for ghost in ghosts.iter().chain(additional_ghosts) {
             self.limits.step(1)?;
@@ -382,9 +396,9 @@ impl Walker<'_> {
                 }
             }
             for (condition, truth) in copy.source.copy_conditions(self.limits)? {
-                if let Some(condition) = condition.renamed(
-                    &mapping, &state.facts, same_lineage, self.limits, 0,
-                )? {
+                if let Some(condition) =
+                    condition.renamed(&mapping, &state.facts, same_lineage, self.limits, 0)?
+                {
                     state.facts.assume(&condition, truth, self.limits)?;
                 }
             }
@@ -410,7 +424,12 @@ impl Walker<'_> {
                     same_lineage,
                     self.limits,
                 )? {
-                    project_expression_bounds(&mut state.facts, *destination, &expression, self.limits)?;
+                    project_expression_bounds(
+                        &mut state.facts,
+                        *destination,
+                        &expression,
+                        self.limits,
+                    )?;
                     add_equality(
                         &mut state.facts,
                         Polynomial::variable(*destination, self.limits)?,
@@ -429,22 +448,43 @@ impl Walker<'_> {
 // operands. Only retain rewrites that reduce nonlinear terms, avoiding an
 // unbounded algebraic closure while preserving useful degree-two/three bounds.
 fn project_expression_bounds(
-    facts: &mut Facts, destination: ValueId, expression: &Polynomial, limits: &mut Limits,
+    facts: &mut Facts,
+    destination: ValueId,
+    expression: &Polynomial,
+    limits: &mut Limits,
 ) -> Result<(), Unknown> {
-    if !expression.terms.keys().any(|factors| factors.len() > 1) { return Ok(()); }
+    if !expression.terms.keys().any(|factors| factors.len() > 1) {
+        return Ok(());
+    }
     let variable = Polynomial::variable(destination, limits)?;
     for row in facts.copy_relations(limits)? {
         let nonlinear = row.terms.keys().filter(|factors| factors.len() > 1).count();
         for subtract in [true, false] {
             limits.step(1)?;
-            let shifted = if subtract { row.subtract(expression, limits) } else { row.add(expression, limits) };
+            let shifted = if subtract {
+                row.subtract(expression, limits)
+            } else {
+                row.add(expression, limits)
+            };
             let shifted = match shifted {
                 Ok(p) => p,
                 Err(Unknown::TermLimit) => continue,
                 Err(e) => return Err(e),
             };
-            if shifted.terms.keys().filter(|factors| factors.len() > 1).count() >= nonlinear { continue; }
-            let projected = if subtract { shifted.add(&variable, limits) } else { shifted.subtract(&variable, limits) };
+            if shifted
+                .terms
+                .keys()
+                .filter(|factors| factors.len() > 1)
+                .count()
+                >= nonlinear
+            {
+                continue;
+            }
+            let projected = if subtract {
+                shifted.add(&variable, limits)
+            } else {
+                shifted.subtract(&variable, limits)
+            };
             match projected {
                 Ok(row) => add_row(facts, row, limits)?,
                 Err(Unknown::TermLimit) => (),
@@ -583,8 +623,10 @@ impl Walker<'_> {
     /// aligned by State::merge before intersecting relational guarantees.
     pub(super) fn result_root(&mut self, ty: &Term) -> Result<Option<PlaceId>, Reason> {
         let integer = matches!(ty, Term::Primitive(p) if p.fixed_integer_layout().is_some() || *p == nir::Primitive::Bool);
-        if !integer && !matches!(ty, Term::Tuple(_) | Term::Record(_) | Term::Nominal { .. })
-            && self.tuple_field_types(ty)?.is_none() {
+        if !integer
+            && !matches!(ty, Term::Tuple(_) | Term::Record(_) | Term::Nominal { .. })
+            && self.tuple_field_types(ty)?.is_none()
+        {
             return Ok(None);
         }
         self.limits.step(1)?;

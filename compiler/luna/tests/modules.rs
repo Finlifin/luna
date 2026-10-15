@@ -29,7 +29,11 @@ impl Project {
             sysroot: None,
             splice_protocol: None,
             meta_list_type: None,
-            index_protocol: None, arithmetic_protocols:Default::default(), tuple_type: None, optional_type: None,
+            index_protocol: None,
+            literal_into_protocol: None,
+            arithmetic_protocols: Default::default(),
+            tuple_type: None,
+            optional_type: None,
         })? {
             Artifact::Nir(package) => Ok(package),
             _ => panic!("expected NIR"),
@@ -195,7 +199,11 @@ fn output_cannot_overwrite_an_automatically_discovered_source() {
         sysroot: None,
         splice_protocol: None,
         meta_list_type: None,
-        index_protocol: None, arithmetic_protocols:Default::default(), tuple_type: None, optional_type: None,
+        index_protocol: None,
+        literal_into_protocol: None,
+        arithmetic_protocols: Default::default(),
+        tuple_type: None,
+        optional_type: None,
     });
     assert!(result.err().unwrap().contains("discovered source"));
     assert_eq!(
@@ -472,7 +480,11 @@ fn grouped_imports_preserve_shared_prefixes_nested_paths_and_aliases() {
         sysroot: None,
         splice_protocol: None,
         meta_list_type: None,
-        index_protocol: None, arithmetic_protocols:Default::default(), tuple_type: None, optional_type: None,
+        index_protocol: None,
+        literal_into_protocol: None,
+        arithmetic_protocols: Default::default(),
+        tuple_type: None,
+        optional_type: None,
     })
     .unwrap()
     .to_string();
@@ -879,4 +891,45 @@ fn generic_alias_parameters_are_private_to_the_definition_through_reexports() {
         ("shapes.fl", "pub typealias Pair<T> = (T, T);"),
     ]);
     assert!(missing.compile().unwrap_err().contains("HIR lowering"));
+}
+
+#[test]
+fn library_frontend_errors_retain_diagnostic_locations_and_causes() {
+    for (source, stage, location) in [
+        ("fn run( {", "parsing failed", "main.fl:1:"),
+        (
+            "fn run() { not_declared; }",
+            "HIR lowering failed",
+            "main.fl:1:",
+        ),
+        (
+            "-- 注释😀\nfn run() { \0 }",
+            "lexing failed",
+            "main.fl:2:12:",
+        ),
+    ] {
+        let error = Project::new(&[("main.fl", source)]).compile().unwrap_err();
+        assert!(error.starts_with(stage), "{error}");
+        assert!(error.contains(location), "{error}");
+        assert!(error.contains("error[E"), "{error}");
+        if source.contains("not_declared") {
+            assert!(
+                error.contains("unresolved")
+                    || error.contains("Unresolved")
+                    || error.contains("not_declared"),
+                "{error}"
+            );
+        }
+        assert!(
+            !error.contains('\u{1b}'),
+            "returned errors must not contain terminal escapes"
+        );
+    }
+    let error = Project::new(&[
+        ("main.fl", "fn run() { child.broken(); }"),
+        ("child.fl", "pub fn broken() { not_declared; }"),
+    ])
+    .compile()
+    .unwrap_err();
+    assert!(error.contains("child.fl:1:"), "{error}");
 }

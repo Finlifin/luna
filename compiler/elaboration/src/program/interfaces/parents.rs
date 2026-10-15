@@ -27,14 +27,14 @@ impl Checker<'_, '_> {
         ) {
             return Err(error(expr.span, "interface expression must be a trait"));
         }
-        let arguments =
-            self.type_clause_arguments(owner, args.unwrap_or_default(), Some(subject), expr.span)
-                .map_err(|mut failure| {
-                    if failure.message == "type argument count mismatch" {
-                        failure.message = "interface type argument count mismatch".into();
-                    }
-                    failure
-                })?;
+        let arguments = self
+            .type_clause_arguments(owner, args.unwrap_or_default(), Some(subject), expr.span)
+            .map_err(|mut failure| {
+                if failure.message == "type argument count mismatch" {
+                    failure.message = "interface type argument count mismatch".into();
+                }
+                failure
+            })?;
         self.check_type_application(owner, &arguments, expr.span)?;
         Ok(n::InterfaceInstance {
             declaration: declaration(self.package, &self.package_identities, owner),
@@ -134,6 +134,18 @@ impl Checker<'_, '_> {
                     )
             })
     }
+    pub(crate) fn interface_parameter_binders(
+        &self,
+        interface: &n::InterfaceInstance,
+        span: Span,
+    ) -> Result<Vec<nir::DeclarationParameter>, Error> {
+        self.checked_traits
+            .iter()
+            .find(|t| t.declaration == interface.declaration)
+            .ok_or_else(|| error(span, "unknown interface"))?
+            .binders_with_self(&mut 100_000)
+            .map_err(|e| error(span, e))
+    }
     pub(crate) fn interface_substitution(
         &self,
         interface: &n::InterfaceInstance,
@@ -160,7 +172,9 @@ impl Checker<'_, '_> {
     ) -> Result<Option<n::InterfaceInstance>, Error> {
         let mut pending = vec![root.clone()];
         let scope = self.call_inference_scope();
-        let frames = if scope.is_empty() { vec![] } else {
+        let frames = if scope.is_empty() {
+            vec![]
+        } else {
             vec![scope.iter().map(|parameter| parameter.sort).collect()]
         };
         let mut seen = HashSet::new();
@@ -188,9 +202,8 @@ impl Checker<'_, '_> {
                     sources.push(instance);
                 }
             } else {
-                let (parameters, arguments) = self.interface_substitution(&instance, subject);
-                let parameters = parameters.into_iter().map(|declaration|
-                    nir::DeclarationParameter { declaration, sort: Sort::Type }).collect::<Vec<_>>();
+                let (_, arguments) = self.interface_substitution(&instance, subject);
+                let parameters = self.interface_parameter_binders(&instance, span)?;
                 for parent in &interface.parents {
                     pending.push(
                         parent
@@ -227,7 +240,14 @@ impl Checker<'_, '_> {
                     .iter()
                     .map(|id| Term::Rigid {
                         declaration: *id,
-                        sort: Sort::Type,
+                        sort: if self
+                            .trait_input_domain(*id)
+                            .is_some_and(|ty| ty != p(P::Type))
+                        {
+                            Sort::ComptimeValue
+                        } else {
+                            Sort::Type
+                        },
                     })
                     .collect(),
             })
@@ -246,15 +266,24 @@ impl Checker<'_, '_> {
             context: &self.context,
         };
         let requirement = n::TraitRequirement {
-            subject: subject.clone(), interface: target.declaration,
+            subject: subject.clone(),
+            interface: target.declaration,
             interface_arguments: target.arguments.clone(),
         };
         // An open definition has a complete sort frame but no complete Type
         // telescope. Context facts must be queried in that original frame.
         if self.context.scope() == self.call_input_frames().as_slice() {
-            world.given_in_context(&requirement, Budget::default()).is_some()
+            world
+                .given_in_context(&requirement, Budget::default())
+                .is_some()
         } else {
-            world.given_in_scope(&requirement, Budget::default(), &self.call_inference_scope()).is_some()
+            world
+                .given_in_scope(
+                    &requirement,
+                    Budget::default(),
+                    &self.call_inference_scope(),
+                )
+                .is_some()
         }
     }
     pub(super) fn context_member_interface(
@@ -265,7 +294,9 @@ impl Checker<'_, '_> {
     ) -> Result<Option<n::InterfaceInstance>, Error> {
         let mut sources = Vec::new();
         let scope = self.call_inference_scope();
-        let frames = if scope.is_empty() { vec![] } else {
+        let frames = if scope.is_empty() {
+            vec![]
+        } else {
             vec![scope.iter().map(|parameter| parameter.sort).collect()]
         };
         for capability in crate::capabilities::capability_sources_in_scope(

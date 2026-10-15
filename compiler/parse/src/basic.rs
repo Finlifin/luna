@@ -42,7 +42,11 @@ impl Parser<'_> {
     }
 
     // TODO: GPT写的, 拉胯, 没有用scoped
-    pub(crate) fn wrap_with_attributes(&mut self, mut target: NodeIndex, attrs: &[NodeIndex]) -> NodeIndex {
+    pub(crate) fn wrap_with_attributes(
+        &mut self,
+        mut target: NodeIndex,
+        attrs: &[NodeIndex],
+    ) -> NodeIndex {
         // Writing order: first parsed attribute should be the outermost wrapper.
         // attrs collected in textual order; we fold from last to first to keep that property.
         for &attr_expr in attrs.iter().rev() {
@@ -299,11 +303,14 @@ impl Parser<'_> {
             if value == 0 {
                 return Err(ParseError::invalid_syntax(
                     "Expected a value after configuration name".into(),
-                    p.peek_next_token().kind, p.next_token_span(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
                 ));
             }
             Ok(NodeBuilder::new(NodeKind::Configuration, p.current_span())
-                .add_single_child(id).add_single_child(value).build(&mut p.ast))
+                .add_single_child(id)
+                .add_single_child(value)
+                .build(&mut p.ast))
         })
     }
 

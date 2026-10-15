@@ -139,6 +139,7 @@ fn qualification_abstract_absence_is_pending_and_parent_assumptions_are_scoped()
     let index = index(&implementations);
     let context = context();
     let traits = vec![Trait {
+        parameter_types: Vec::new(),
         associated: vec![],
         requirements: vec![],
         capabilities: vec![],
@@ -310,6 +311,7 @@ fn parameterized_parent_assumptions_substitute_all_interface_arguments() {
     let index = Index::default();
     let context = context();
     let traits = vec![Trait {
+        parameter_types: Vec::new(),
         associated: vec![],
         requirements: vec![],
         capabilities: vec![],
@@ -349,6 +351,7 @@ fn subject_guarantees_preserve_substitution_scope_and_budget() {
         sort: Sort::Type,
     };
     let same = Trait {
+        parameter_types: Vec::new(),
         associated: vec![],
         declaration: id(100),
         self_parameter: id(101),
@@ -363,6 +366,7 @@ fn subject_guarantees_preserve_substitution_scope_and_budget() {
         ],
     };
     let child = Trait {
+        parameter_types: Vec::new(),
         associated: vec![],
         declaration: id(110),
         self_parameter: id(111),
@@ -420,6 +424,7 @@ fn given_capabilities_follow_parameter_edges_with_full_subject_identity() {
     };
     let traits = vec![
         Trait {
+            parameter_types: Vec::new(),
             associated: vec![],
             declaration: id(100),
             self_parameter: id(101),
@@ -435,6 +440,7 @@ fn given_capabilities_follow_parameter_edges_with_full_subject_identity() {
             }],
         },
         Trait {
+            parameter_types: Vec::new(),
             associated: vec![],
             declaration: id(110),
             self_parameter: id(111),
@@ -526,6 +532,7 @@ fn given_capabilities_follow_parameter_edges_with_full_subject_identity() {
 
 fn marker(n: u32) -> Trait {
     Trait {
+        parameter_types: Vec::new(),
         associated: vec![],
         requirements: vec![],
         capabilities: vec![],
@@ -540,90 +547,398 @@ fn marker(n: u32) -> Trait {
 
 #[test]
 fn scoped_given_evidence_follows_parents_and_parameter_capabilities() {
-    use nir::{Parameter, Primitive};
     use nir::program::InterfaceInstance;
-    let bound = |index| Term::Bound { depth: 0, index, sort: Sort::Type };
-    let rigid = |local| Term::Rigid { declaration: id(local), sort: Sort::Type };
+    use nir::{Parameter, Primitive};
+    let bound = |index| Term::Bound {
+        depth: 0,
+        index,
+        sort: Sort::Type,
+    };
+    let rigid = |local| Term::Rigid {
+        declaration: id(local),
+        sort: Sort::Type,
+    };
     let mut child = marker(100);
     child.type_parameters = vec![id(101)];
-    child.parents.push(InterfaceInstance { declaration: id(110), arguments: vec![rigid(101)] });
+    child.parents.push(InterfaceInstance {
+        declaration: id(110),
+        arguments: vec![rigid(101)],
+    });
     let mut parent = marker(110);
     parent.type_parameters = vec![id(111)];
     parent.capabilities.push(TraitRequirement {
-        interface: id(120), subject: rigid(111), interface_arguments: vec![rigid(110)],
+        interface: id(120),
+        subject: rigid(111),
+        interface_arguments: vec![rigid(110)],
     });
     let mut target = marker(120);
     target.type_parameters = vec![id(121)];
     // Return to the original assumption; a failed lookup must still terminate.
     target.capabilities.push(TraitRequirement {
-        interface: id(100), subject: rigid(121), interface_arguments: vec![rigid(120)],
+        interface: id(100),
+        subject: rigid(121),
+        interface_arguments: vec![rigid(120)],
     });
     let traits = vec![child, parent, target];
     let assumption = TraitRequirement {
-        interface: id(100), subject: bound(0), interface_arguments: vec![bound(1)],
+        interface: id(100),
+        subject: bound(0),
+        interface_arguments: vec![bound(1)],
     };
     let assumptions = vec![assumption.clone()];
     let index = Index::default();
     let context = Context::default();
-    let world = World { index: &index, implementations: &[], traits: &traits, assumptions: &assumptions, context: &context };
-    let scope = vec![Parameter { sort: Sort::Type, ty: Term::Primitive(Primitive::Type) }; 2];
-    let requested = TraitRequirement {
-        interface: id(120), subject: bound(1), interface_arguments: vec![bound(0)],
+    let world = World {
+        index: &index,
+        implementations: &[],
+        traits: &traits,
+        assumptions: &assumptions,
+        context: &context,
     };
-    assert_eq!(world.given_in_scope(&requested, Budget::default(), &scope), Some(assumption.clone()));
+    let scope = vec![
+        Parameter {
+            sort: Sort::Type,
+            ty: Term::Primitive(Primitive::Type)
+        };
+        2
+    ];
+    let requested = TraitRequirement {
+        interface: id(120),
+        subject: bound(1),
+        interface_arguments: vec![bound(0)],
+    };
+    assert_eq!(
+        world.given_in_scope(&requested, Budget::default(), &scope),
+        Some(assumption.clone())
+    );
     let sources = elaboration::capabilities::capability_sources_in_scope(
-        &traits, &assumptions, Budget::default(), &[vec![Sort::Type, Sort::Type]],
-    ).unwrap();
+        &traits,
+        &assumptions,
+        Budget::default(),
+        &[vec![Sort::Type, Sort::Type]],
+    )
+    .unwrap();
     assert!(sources.contains(&assumption));
     assert!(sources.contains(&requested));
-    assert!(!sources.iter().any(|source| source.interface == id(110)),
-        "parent members must remain under their child lookup root");
-    assert!(elaboration::capabilities::capability_sources_in_scope(
-        &traits, &assumptions, Budget { steps: 1, ..Budget::default() }, &[vec![Sort::Type, Sort::Type]],
-    ).is_err(), "partial lookup roots cannot establish an unambiguous member");
-    assert!(elaboration::capabilities::capability_sources_in_scope(
-        &traits, &assumptions, Budget::default(), &[vec![Sort::Type]],
-    ).is_err());
-    assert!(elaboration::capabilities::capability_sources(&traits, &assumptions, Budget::default()).is_err());
+    assert!(
+        !sources.iter().any(|source| source.interface == id(110)),
+        "parent members must remain under their child lookup root"
+    );
+    assert!(
+        elaboration::capabilities::capability_sources_in_scope(
+            &traits,
+            &assumptions,
+            Budget {
+                steps: 1,
+                ..Budget::default()
+            },
+            &[vec![Sort::Type, Sort::Type]],
+        )
+        .is_err(),
+        "partial lookup roots cannot establish an unambiguous member"
+    );
+    assert!(
+        elaboration::capabilities::capability_sources_in_scope(
+            &traits,
+            &assumptions,
+            Budget::default(),
+            &[vec![Sort::Type]],
+        )
+        .is_err()
+    );
+    assert!(
+        elaboration::capabilities::capability_sources(&traits, &assumptions, Budget::default())
+            .is_err()
+    );
     let mut invalid_traits = traits.clone();
-    invalid_traits[1].capabilities[0].subject = Term::Bound { depth: 0, index: 9, sort: Sort::Type };
-    assert!(elaboration::capabilities::capability_sources_in_scope(
-        &invalid_traits, &assumptions, Budget::default(), &[vec![Sort::Type, Sort::Type]],
-    ).is_err(), "a broken inherited edge must not silently remove a competing member source");
+    invalid_traits[1].capabilities[0].subject = Term::Bound {
+        depth: 0,
+        index: 9,
+        sort: Sort::Type,
+    };
+    assert!(
+        elaboration::capabilities::capability_sources_in_scope(
+            &invalid_traits,
+            &assumptions,
+            Budget::default(),
+            &[vec![Sort::Type, Sort::Type]],
+        )
+        .is_err(),
+        "a broken inherited edge must not silently remove a competing member source"
+    );
     assert!(world.given(&requested, Budget::default()).is_none());
     let mut wrong = requested.clone();
     wrong.subject = bound(0);
-    assert!(world.given_in_scope(&wrong, Budget::default(), &scope).is_none());
+    assert!(
+        world
+            .given_in_scope(&wrong, Budget::default(), &scope)
+            .is_none()
+    );
     wrong = requested.clone();
     wrong.interface_arguments = vec![bound(1)];
-    assert!(world.given_in_scope(&wrong, Budget::default(), &scope).is_none());
+    assert!(
+        world
+            .given_in_scope(&wrong, Budget::default(), &scope)
+            .is_none()
+    );
     wrong = requested.clone();
     wrong.interface = id(130);
-    assert!(world.given_in_scope(&wrong, Budget::default(), &scope).is_none());
-    assert!(world.given_in_scope(&requested, Budget { steps: 1, ..Budget::default() }, &scope).is_none());
-    assert!(world.given_in_scope(&assumption, Budget::default(), &scope[..1]).is_none());
-    let invalid_scope = vec![Parameter { sort: Sort::Type, ty: bound(9) }; 2];
-    assert!(world.given_in_scope(&assumption, Budget::default(), &invalid_scope).is_none());
+    assert!(
+        world
+            .given_in_scope(&wrong, Budget::default(), &scope)
+            .is_none()
+    );
+    assert!(
+        world
+            .given_in_scope(
+                &requested,
+                Budget {
+                    steps: 1,
+                    ..Budget::default()
+                },
+                &scope
+            )
+            .is_none()
+    );
+    assert!(
+        world
+            .given_in_scope(&assumption, Budget::default(), &scope[..1])
+            .is_none()
+    );
+    let invalid_scope = vec![
+        Parameter {
+            sort: Sort::Type,
+            ty: bound(9)
+        };
+        2
+    ];
+    assert!(
+        world
+            .given_in_scope(&assumption, Budget::default(), &invalid_scope)
+            .is_none()
+    );
     // No evidence is cached into a subsequent query with different assumptions.
-    let empty = World { assumptions: &[], ..world };
-    assert!(empty.given_in_scope(&requested, Budget::default(), &scope).is_none());
+    let empty = World {
+        assumptions: &[],
+        ..world
+    };
+    assert!(
+        empty
+            .given_in_scope(&requested, Budget::default(), &scope)
+            .is_none()
+    );
 }
 
 #[test]
 fn scoped_given_evidence_retains_closed_type_equalities() {
     let index = Index::default();
     let mut context = Context::default();
-    context.assume(elaboration::ptc::Formula::equal(var(), Term::Primitive(Primitive::Bool)));
+    context.assume(elaboration::ptc::Formula::equal(
+        var(),
+        Term::Primitive(Primitive::Bool),
+    ));
     let assumptions = vec![requirement(100, var())];
     let traits = vec![marker(100)];
-    let world = World { index: &index, implementations: &[], traits: &traits, assumptions: &assumptions, context: &context };
-    let scope = vec![nir::Parameter { sort: Sort::Type, ty: Term::Primitive(Primitive::Type) }];
-    assert_eq!(world.given_in_scope(&requirement(100, Term::Primitive(Primitive::Bool)), Budget::default(), &scope), Some(assumptions[0].clone()));
-    assert!(world.given_in_scope(&requirement(100, Term::Primitive(Primitive::Char)), Budget::default(), &scope).is_none());
+    let world = World {
+        index: &index,
+        implementations: &[],
+        traits: &traits,
+        assumptions: &assumptions,
+        context: &context,
+    };
+    let scope = vec![nir::Parameter {
+        sort: Sort::Type,
+        ty: Term::Primitive(Primitive::Type),
+    }];
+    assert_eq!(
+        world.given_in_scope(
+            &requirement(100, Term::Primitive(Primitive::Bool)),
+            Budget::default(),
+            &scope
+        ),
+        Some(assumptions[0].clone())
+    );
+    assert!(
+        world
+            .given_in_scope(
+                &requirement(100, Term::Primitive(Primitive::Char)),
+                Budget::default(),
+                &scope
+            )
+            .is_none()
+    );
     let malformed = vec![requirement(100, Term::Bool(true))];
-    let invalid_world = World { assumptions: &malformed, ..world };
-    assert!(invalid_world.given_in_scope(&malformed[0], Budget::default(), &scope).is_none());
+    let invalid_world = World {
+        assumptions: &malformed,
+        ..world
+    };
+    assert!(
+        invalid_world
+            .given_in_scope(&malformed[0], Budget::default(), &scope)
+            .is_none()
+    );
 }
+#[test]
+fn symbol_indexed_world_queries_check_domains_and_preserve_evidence() {
+    use elaboration::{
+        capabilities::TraitTruth,
+        ptc::{Formula, Outcome},
+    };
+    let mut contract = marker(100);
+    contract.type_parameters = vec![id(2), id(3)];
+    contract.parameter_types = vec![
+        Term::Primitive(Primitive::Symbol),
+        Term::Primitive(Primitive::Type),
+    ];
+    let traits = vec![contract];
+    let mut supplied = implementation(20, 100, Term::Primitive(Primitive::Integer), vec![], vec![]);
+    supplied.interface_arguments = vec![Term::Symbol("px".into()), Term::Primitive(Primitive::U32)];
+    let implementations = vec![supplied];
+    let ix = index(&implementations);
+    let context = Context::default();
+    let world = World {
+        index: &ix,
+        implementations: &implementations,
+        traits: &traits,
+        assumptions: &[],
+        context: &context,
+    };
+    let query = elaboration::ptc::TraitQuery {
+        interface: id(100),
+        subject: Term::Primitive(Primitive::Integer),
+        arguments: implementations[0].interface_arguments.clone(),
+    };
+    assert_eq!(
+        world
+            .decide_trait(&query, Budget::default())
+            .unwrap()
+            .truth(),
+        TraitTruth::Established
+    );
+    let proof = world
+        .prove_proposition(Formula::Trait(query.clone()), Budget::default())
+        .unwrap();
+    assert!(matches!(proof.outcome(), Outcome::Entailed(_)));
+    proof.verify(&world, Budget::default()).unwrap();
+    let mut missing = query.clone();
+    missing.arguments[0] = Term::Symbol("em".into());
+    assert_eq!(
+        world
+            .decide_trait(&missing, Budget::default())
+            .unwrap()
+            .truth(),
+        TraitTruth::Excluded
+    );
+    for invalid in [
+        Term::String("px".into()),
+        Term::Primitive(Primitive::Symbol),
+        Term::Bool(true),
+    ] {
+        let mut wrong = query.clone();
+        wrong.arguments[0] = invalid;
+        assert!(world.decide_trait(&wrong, Budget::default()).is_err());
+        assert!(
+            world
+                .resolve_instance(
+                    &nir::program::InterfaceInstance {
+                        declaration: wrong.interface,
+                        arguments: wrong.arguments.clone(),
+                    },
+                    &wrong.subject,
+                    Budget::default()
+                )
+                .is_err()
+        );
+    }
+    assert!(
+        world
+            .decide_trait(
+                &query,
+                Budget {
+                    steps: 1,
+                    ..Budget::default()
+                }
+            )
+            .is_err()
+    );
+    assert_eq!(
+        world
+            .decide_trait(&query, Budget::default())
+            .unwrap()
+            .truth(),
+        TraitTruth::Established
+    );
+    assert!(traits[0].to_string().contains("(parameter-types"));
+}
+
+#[test]
+fn symbol_indexed_parent_assumptions_keep_input_sorts() {
+    let mut parent = marker(100);
+    parent.type_parameters = vec![id(2)];
+    parent.parameter_types = vec![Term::Primitive(Primitive::Symbol)];
+    parent.capabilities.push(TraitRequirement {
+        interface: id(102),
+        subject: Term::Rigid {
+            declaration: parent.self_parameter,
+            sort: Sort::Type,
+        },
+        interface_arguments: vec![Term::Rigid {
+            declaration: id(2),
+            sort: Sort::ComptimeValue,
+        }],
+    });
+    let mut target = marker(102);
+    target.type_parameters = vec![id(4)];
+    target.parameter_types = vec![Term::Primitive(Primitive::Symbol)];
+    let mut child = marker(101);
+    child.type_parameters = vec![id(3)];
+    child.parameter_types = vec![Term::Primitive(Primitive::Symbol)];
+    child.parents.push(nir::program::InterfaceInstance {
+        declaration: id(100),
+        arguments: vec![Term::Rigid {
+            declaration: id(3),
+            sort: Sort::ComptimeValue,
+        }],
+    });
+    let traits = vec![parent, child, target];
+    let subject = Term::Primitive(Primitive::Integer);
+    let assumptions = vec![TraitRequirement {
+        interface: id(101),
+        subject: subject.clone(),
+        interface_arguments: vec![Term::Symbol("px".into())],
+    }];
+    let ix = Index::default();
+    let context = Context::default();
+    let world = World {
+        index: &ix,
+        implementations: &[],
+        traits: &traits,
+        assumptions: &assumptions,
+        context: &context,
+    };
+    let mut query = TraitRequirement {
+        interface: id(100),
+        subject,
+        interface_arguments: vec![Term::Symbol("px".into())],
+    };
+    assert!(world.given(&query, Budget::default()).is_some());
+    query.interface_arguments[0] = Term::Symbol("em".into());
+    assert!(world.given(&query, Budget::default()).is_none());
+    let sources =
+        elaboration::capabilities::capability_sources(&traits, &assumptions, Budget::default())
+            .unwrap();
+    assert!(sources.iter().any(|source| source.interface == id(102)
+        && source.interface_arguments == vec![Term::Symbol("px".into())]));
+    let mut invalid = traits[0].clone();
+    invalid
+        .parameter_types
+        .push(Term::Primitive(Primitive::Type));
+    assert!(invalid.parameter_binders(&mut 1000).is_err());
+    invalid = traits[0].clone();
+    invalid.parameter_types[0] = Term::Bool(true);
+    assert!(invalid.parameter_binders(&mut 1000).is_err());
+}
+
 fn trait_query(n: u32, subject: Term) -> elaboration::ptc::TraitQuery {
     elaboration::ptc::TraitQuery {
         interface: id(n),
@@ -1460,43 +1775,120 @@ fn absence_decisions_use_context_equalities_without_guessing_or_unfolding() {
 
 #[test]
 fn scoped_given_evidence_uses_equalities_in_the_same_input_scope() {
-    let parameters = vec![nir::Parameter {sort: Sort::Type, ty: Term::Primitive(Primitive::Type)}; 2];
-    let a = Term::Bound {depth: 0, index: 0, sort: Sort::Type};
-    let b = Term::Bound {depth: 0, index: 1, sort: Sort::Type};
+    let parameters = vec![
+        nir::Parameter {
+            sort: Sort::Type,
+            ty: Term::Primitive(Primitive::Type)
+        };
+        2
+    ];
+    let a = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    };
+    let b = Term::Bound {
+        depth: 0,
+        index: 1,
+        sort: Sort::Type,
+    };
     let mut context = Context::with_scope(vec![vec![Sort::Type, Sort::Type]]);
     context.assume(elaboration::ptc::Formula::equal(a.clone(), b.clone()));
     let assumptions = [requirement(100, a.clone())];
     let index = Index::default();
-    let world = World {index: &index, implementations: &[], traits: &[], assumptions: &assumptions, context: &context};
-    assert!(world.given_in_scope(&requirement(100, b.clone()), Budget::default(), &parameters).is_some());
+    let world = World {
+        index: &index,
+        implementations: &[],
+        traits: &[],
+        assumptions: &assumptions,
+        context: &context,
+    };
+    assert!(
+        world
+            .given_in_scope(&requirement(100, b.clone()), Budget::default(), &parameters)
+            .is_some()
+    );
     let empty = Context::with_scope(vec![vec![Sort::Type, Sort::Type]]);
-    let world = World {context: &empty, ..world};
-    assert!(world.given_in_scope(&requirement(100, b), Budget::default(), &parameters).is_none());
-    assert!(world.given(&requirement(100, a), Budget::default()).is_none());
+    let world = World {
+        context: &empty,
+        ..world
+    };
+    assert!(
+        world
+            .given_in_scope(&requirement(100, b), Budget::default(), &parameters)
+            .is_none()
+    );
+    assert!(
+        world
+            .given(&requirement(100, a), Budget::default())
+            .is_none()
+    );
 }
 
 #[test]
 fn scoped_world_queries_preserve_abstract_absence_and_use_proved_input_views() {
-    use elaboration::{capabilities::TraitTruth, ptc::{Formula as F, Outcome}};
-    let a = Term::Bound { depth: 0, index: 0, sort: Sort::Type };
+    use elaboration::{
+        capabilities::TraitTruth,
+        ptc::{Formula as F, Outcome},
+    };
+    let a = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    };
     let boolean = Term::Primitive(Primitive::Bool);
     let traits = vec![marker(100), marker(101)];
     let implementations = vec![implementation(20, 100, boolean.clone(), vec![], vec![])];
     let ix = index(&implementations);
     let mut ctx = Context::with_scope(vec![vec![Sort::Type]]);
     let query = trait_query(101, a.clone());
-    let world = World { index: &ix, implementations: &implementations,
-        traits: &traits, assumptions: &[], context: &ctx };
-    assert_eq!(world.decide_trait(&query, Budget::default()).unwrap().truth(), TraitTruth::Pending);
-    assert!(!matches!(world.prove_proposition(F::Trait(query.clone()).negate(), Budget::default()).unwrap().outcome(), Outcome::Entailed(_)));
-    let malformed = trait_query(100, Term::Bound {depth: 0, index: 1, sort: Sort::Type});
+    let world = World {
+        index: &ix,
+        implementations: &implementations,
+        traits: &traits,
+        assumptions: &[],
+        context: &ctx,
+    };
+    assert_eq!(
+        world
+            .decide_trait(&query, Budget::default())
+            .unwrap()
+            .truth(),
+        TraitTruth::Pending
+    );
+    assert!(!matches!(
+        world
+            .prove_proposition(F::Trait(query.clone()).negate(), Budget::default())
+            .unwrap()
+            .outcome(),
+        Outcome::Entailed(_)
+    ));
+    let malformed = trait_query(
+        100,
+        Term::Bound {
+            depth: 0,
+            index: 1,
+            sort: Sort::Type,
+        },
+    );
     assert!(world.decide_trait(&malformed, Budget::default()).is_err());
     ctx.assume(F::equal(a.clone(), boolean));
-    let world = World {index: &ix, implementations: &implementations,
-        traits: &traits, assumptions: &[], context: &ctx};
-    let proof = world.prove_proposition(F::And(vec![
-        F::Trait(trait_query(100, a)), F::Trait(query).negate(),
-    ]), Budget::default()).unwrap();
+    let world = World {
+        index: &ix,
+        implementations: &implementations,
+        traits: &traits,
+        assumptions: &[],
+        context: &ctx,
+    };
+    let proof = world
+        .prove_proposition(
+            F::And(vec![
+                F::Trait(trait_query(100, a)),
+                F::Trait(query).negate(),
+            ]),
+            Budget::default(),
+        )
+        .unwrap();
     assert!(matches!(proof.outcome(), Outcome::Entailed(_)), "{proof}");
     assert!(format!("{proof}").contains("input-equalities"));
     proof.verify(&world, Budget::default()).unwrap();
@@ -1504,32 +1896,78 @@ fn scoped_world_queries_preserve_abstract_absence_and_use_proved_input_views() {
 
 #[test]
 fn scoped_interface_formation_is_checked_before_given_evidence() {
-    use elaboration::{capabilities::TraitTruth, ptc::{Formula, TraitQuery}};
+    use elaboration::{
+        capabilities::TraitTruth,
+        ptc::{Formula, TraitQuery},
+    };
     use nir::program::TypePredicate;
-    let a = Term::Bound {depth: 1, index: 0, sort: Sort::Type};
-    let b = Term::Bound {depth: 0, index: 0, sort: Sort::Type};
+    let a = Term::Bound {
+        depth: 1,
+        index: 0,
+        sort: Sort::Type,
+    };
+    let b = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    };
     let mut contract = marker(100);
     contract.type_parameters = vec![id(1)];
-    contract.requirements.push(TypePredicate::Equal(var(), Term::Primitive(Primitive::Bool)));
+    contract.requirements.push(TypePredicate::Equal(
+        var(),
+        Term::Primitive(Primitive::Bool),
+    ));
     contract.capabilities.push(requirement(101, var()));
     let traits = vec![contract, marker(101)];
-    let query = TraitQuery {interface: id(100), arguments: vec![a.clone()], subject: b};
-    let givens = vec![TraitRequirement {interface: query.interface,
-        interface_arguments: query.arguments.clone(), subject: query.subject.clone()},
-        requirement(101, a.clone())];
+    let query = TraitQuery {
+        interface: id(100),
+        arguments: vec![a.clone()],
+        subject: b,
+    };
+    let givens = vec![
+        TraitRequirement {
+            interface: query.interface,
+            interface_arguments: query.arguments.clone(),
+            subject: query.subject.clone(),
+        },
+        requirement(101, a.clone()),
+    ];
     let ix = Index::default();
     let mut ctx = Context::with_scope(vec![vec![Sort::Type], vec![Sort::Type]]);
     {
-        let world = World {index: &ix, implementations: &[], traits: &traits,
-            assumptions: &givens, context: &ctx};
+        let world = World {
+            index: &ix,
+            implementations: &[],
+            traits: &traits,
+            assumptions: &givens,
+            context: &ctx,
+        };
         assert!(world.decide_trait(&query, Budget::default()).is_err());
     }
     ctx.assume(Formula::equal(a, Term::Primitive(Primitive::Bool)));
-    let world = World {index: &ix, implementations: &[], traits: &traits,
-        assumptions: &givens, context: &ctx};
-    assert_eq!(world.decide_trait(&query, Budget::default()).unwrap().truth(), TraitTruth::Established);
-    let missing_capability = World {assumptions: &[], ..world};
-    assert!(missing_capability.decide_trait(&query, Budget::default()).is_err());
+    let world = World {
+        index: &ix,
+        implementations: &[],
+        traits: &traits,
+        assumptions: &givens,
+        context: &ctx,
+    };
+    assert_eq!(
+        world
+            .decide_trait(&query, Budget::default())
+            .unwrap()
+            .truth(),
+        TraitTruth::Established
+    );
+    let missing_capability = World {
+        assumptions: &[],
+        ..world
+    };
+    assert!(
+        missing_capability
+            .decide_trait(&query, Budget::default())
+            .is_err()
+    );
 }
 
 #[test]
@@ -1591,4 +2029,3 @@ fn metered_world_propositions_share_budget_and_preserve_evidence() {
         Outcome::Entailed(_)
     ));
 }
-

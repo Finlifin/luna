@@ -64,11 +64,15 @@ impl Checker<'_, '_> {
             return Ok(None);
         };
         let mut subject = if self.is_type_head(base)
-            || matches!(&base.kind, H::ResolvedFnParam(_, id) if self.type_input_bindings.contains_key(&local(*id))) {
+            || matches!(&base.kind, H::ResolvedFnParam(_, id) if self.type_input_bindings.contains_key(&local(*id)))
+        {
             self.type_expr(base)?
         } else if let H::Projection(view, field) = &base.kind {
             match self.associated_projection(view, field.name.as_str(), base.span)? {
-                Some(n::Expr { kind: K::TypeValue(ty), .. }) => ty,
+                Some(n::Expr {
+                    kind: K::TypeValue(ty),
+                    ..
+                }) => ty,
                 _ => return Ok(None),
             }
         } else {
@@ -78,11 +82,13 @@ impl Checker<'_, '_> {
         // The declaration is checked separately under its abstract binders.
         // While evaluating a selected initializer, queries use its concrete
         // (or implementation-generic) Self and interface arguments.
-        if let Some((parameters,arguments))=self.initializer_substitution() {
-            requested=requested.instantiate_types(parameters,arguments)
-                .map_err(|e|error(span,e.to_string()))?;
-            subject=subject.instantiate_types(parameters,arguments)
-                .map_err(|e|error(span,e.to_string()))?;
+        if let Some((parameters, arguments)) = self.initializer_substitution() {
+            requested = requested
+                .instantiate_types(parameters, arguments)
+                .map_err(|e| error(span, e.to_string()))?;
+            subject = subject
+                .instantiate_types(parameters, arguments)
+                .map_err(|e| error(span, e.to_string()))?;
         }
         if self.checked_traits.is_empty() && !self.interfaces_ready {
             return self.declaration_associated_projection(subject, requested, name, span);
@@ -101,9 +107,11 @@ impl Checker<'_, '_> {
         };
         let member = contract.declaration;
         let member_type = contract.ty.clone();
-        if let Some(implementation)=self.initializer_projection_selection(&interface,&subject,member) {
-            let mut value=self.selected_associated_value(implementation,member,span)?;
-            value.source=source(span);
+        if let Some(implementation) =
+            self.initializer_projection_selection(&interface, &subject, member)
+        {
+            let mut value = self.selected_associated_value(implementation, member, span)?;
+            value.source = source(span);
             return Ok(Some(value));
         }
 
@@ -125,8 +133,13 @@ impl Checker<'_, '_> {
             let ty = self.instantiate_input_types(&member_type, &parameters, &inputs, span)?;
             if ty != p(P::Type) {
                 return Ok(Some(n::Expr {
-                    ty, source: source(span),
-                    kind: K::AssociatedValue { interface, member, subject },
+                    ty,
+                    source: source(span),
+                    kind: K::AssociatedValue {
+                        interface,
+                        member,
+                        subject,
+                    },
                 }));
             }
             return Ok(Some(n::Expr {
@@ -142,10 +155,20 @@ impl Checker<'_, '_> {
                 }),
             }));
         }
-        if std::iter::once(&subject).chain(&interface.arguments)
-            .any(|ty| ty.substitution_parameters().is_ok_and(|slots| !slots.is_empty()))
+        if std::iter::once(&subject)
+            .chain(&interface.arguments)
+            .any(|ty| {
+                ty.substitution_parameters()
+                    .is_ok_and(|slots| !slots.is_empty())
+            })
         {
-            return Err(Error { needs_capability: true, ..error(span, "associated projection with ordinary Type inputs requires established trait evidence") });
+            return Err(Error {
+                needs_capability: true,
+                ..error(
+                    span,
+                    "associated projection with ordinary Type inputs requires established trait evidence",
+                )
+            });
         }
         let resolution = self
             .resolve_trait_capability(&interface, &subject, Budget::default())
@@ -153,7 +176,10 @@ impl Checker<'_, '_> {
         let crate::implementation::Selection::Selected(selected) = resolution.selection else {
             return Err(Error {
                 needs_capability: true,
-                ..error(span, "associated value requires an established concrete implementation or a given interface constraint")
+                ..error(
+                    span,
+                    "associated value requires an established concrete implementation or a given interface constraint",
+                )
             });
         };
         let Some(crate::implementation::TypeAssessment::Applicable(evidence)) =
@@ -226,7 +252,9 @@ impl Checker<'_, '_> {
                 "cyclic or excessively deep associated value dependency",
             ));
         }
-        let saved_selection=self.selected_associated_implementation.replace(implementation);
+        let saved_selection = self
+            .selected_associated_implementation
+            .replace(implementation);
         let result = (|| {
             let value = self
                 .associated_contract(owner, true)?
@@ -237,7 +265,7 @@ impl Checker<'_, '_> {
                 .instantiate_types(&parameters, &arguments)
                 .map_err(|e| error(span, e.to_string()))
         })();
-        self.selected_associated_implementation=saved_selection;
+        self.selected_associated_implementation = saved_selection;
         self.active_associated_values.remove(&key);
         if let Ok(value) = &result {
             constants::charge_copy(value, &mut self.required_steps, span)?;
@@ -259,7 +287,9 @@ impl Checker<'_, '_> {
         // Publish them first, independent of declaration order. Dependencies
         // inside a template still use selected_associated_value's demand and
         // cycle checks; this does not turn abstract defaults into equations.
-        let type_members: BTreeSet<_> = self.checked_traits.iter()
+        let type_members: BTreeSet<_> = self
+            .checked_traits
+            .iter()
             .flat_map(|interface| interface.associated.iter())
             .filter(|member| member.ty == p(P::Type))
             .map(|member| member.declaration)
@@ -286,21 +316,35 @@ impl Checker<'_, '_> {
         for (interface, member) in members {
             let owner = self.associated_owner(member).unwrap();
             let mut contract = self.associated_contract(owner, false)?;
-            if contract.ty==p(P::Type) {
-                contract=self.associated_contract(owner,true)?;
+            if contract.ty == p(P::Type) {
+                contract = self.associated_contract(owner, true)?;
             } else if self.associated_has_initializer(member) {
-                let mut template=self.associated_default_template(owner,&contract.ty)?;
-                let mut dependent=false;
-                let binders=self.checked_traits.iter().find(|t|t.declaration==interface).unwrap().parameters_with_self();
-                template.rewrite_types(&mut |ty| {
-                    dependent |= binders.iter().any(|binder|ty.mentions_rigid(*binder));
-                    Ok::<_,String>(ty.clone())
-                }).map_err(|message|error(self.package.item(owner).unwrap().span,message))?;
-                iir::visit::expression(&template,&mut 100_000,|expr,_| {
-                    if matches!(expr.kind,K::AssociatedValue {..}) {dependent=true;}
+                let mut template = self.associated_default_template(owner, &contract.ty)?;
+                let mut dependent = false;
+                let binders = self
+                    .checked_traits
+                    .iter()
+                    .find(|t| t.declaration == interface)
+                    .unwrap()
+                    .parameters_with_self();
+                template
+                    .rewrite_types(&mut |ty| {
+                        dependent |= binders.iter().any(|binder| ty.mentions_rigid(*binder));
+                        Ok::<_, String>(ty.clone())
+                    })
+                    .map_err(|message| error(self.package.item(owner).unwrap().span, message))?;
+                iir::visit::expression(&template, &mut 100_000, |expr, _| {
+                    if matches!(expr.kind, K::AssociatedValue { .. }) {
+                        dependent = true;
+                    }
                     Ok(())
-                }).map_err(|message|error(self.package.item(owner).unwrap().span,message))?;
-                contract.default=if dependent {Some(template)} else {self.associated_contract(owner,true)?.default};
+                })
+                .map_err(|message| error(self.package.item(owner).unwrap().span, message))?;
+                contract.default = if dependent {
+                    Some(template)
+                } else {
+                    self.associated_contract(owner, true)?.default
+                };
             }
             *self
                 .checked_traits
@@ -389,10 +433,10 @@ impl Checker<'_, '_> {
         owner: OwnerId,
         span: Span,
     ) -> Result<n::Expr, Error> {
-        let referenced=declaration(self.package,&self.package_identities,owner);
-        if let Some(implementation)=self.initializer_selection(referenced) {
-            let mut value=self.selected_associated_value(implementation,referenced,span)?;
-            value.source=source(span);
+        let referenced = declaration(self.package, &self.package_identities, owner);
+        if let Some(implementation) = self.initializer_selection(referenced) {
+            let mut value = self.selected_associated_value(implementation, referenced, span)?;
+            value.source = source(span);
             return Ok(value);
         }
         if !self.self_containers.contains_key(&owner) {
@@ -541,10 +585,18 @@ impl Checker<'_, '_> {
             })
             .collect();
         if ty != p(P::Type) {
-            return Ok(Some(n::Expr { ty, source: source(span), kind: K::AssociatedValue {
-                interface: n::InterfaceInstance {declaration:declaration(self.package,&self.package_identities,parent),arguments},
-                member:declaration(self.package,&self.package_identities,owner), subject,
-            }}));
+            return Ok(Some(n::Expr {
+                ty,
+                source: source(span),
+                kind: K::AssociatedValue {
+                    interface: n::InterfaceInstance {
+                        declaration: declaration(self.package, &self.package_identities, parent),
+                        arguments,
+                    },
+                    member: declaration(self.package, &self.package_identities, owner),
+                    subject,
+                },
+            }));
         }
         Ok(Some(n::Expr {
             ty: p(P::Type),
@@ -673,10 +725,19 @@ impl Checker<'_, '_> {
                 Term::Nominal { arguments, .. }
                 | Term::NormalForm { arguments, .. }
                 | Term::Tuple(arguments)
-                | Term::TypeListValue(arguments) | Term::TypeListConcat(arguments) | Term::TupleValue(arguments) => {
+                | Term::TypeListValue(arguments)
+                | Term::TypeListConcat(arguments)
+                | Term::TupleValue(arguments) => {
                     pending.extend(arguments.into_iter().map(|t| Work::Visit(t, depth + 1)))
                 }
-                Term::NominalValue {ty,fields,..} => {pending.push(Work::Visit(*ty,depth+1));pending.extend(fields.into_iter().map(|field|Work::Visit(field,depth+1)));},
+                Term::NominalValue { ty, fields, .. } => {
+                    pending.push(Work::Visit(*ty, depth + 1));
+                    pending.extend(
+                        fields
+                            .into_iter()
+                            .map(|field| Work::Visit(field, depth + 1)),
+                    );
+                }
                 Term::Record(fields) | Term::RecordValue(fields) => {
                     pending.extend(fields.into_iter().map(|(_, t)| Work::Visit(t, depth + 1)))
                 }
@@ -690,7 +751,12 @@ impl Checker<'_, '_> {
                 Term::Computation { effects, result } => {
                     pending.push(Work::Visit(*result, depth + 1));
                     for operation in effects {
-                        pending.extend(operation.arguments.into_iter().map(|t| Work::Visit(t, depth + 1)));
+                        pending.extend(
+                            operation
+                                .arguments
+                                .into_iter()
+                                .map(|t| Work::Visit(t, depth + 1)),
+                        );
                     }
                 }
                 Term::Closure {
@@ -736,16 +802,25 @@ impl Checker<'_, '_> {
 
     pub(in crate::program) fn initializer_implementation(&self) -> Option<&n::Implementation> {
         self.initializer_substitution()?;
-        let selected=self.selected_associated_implementation?;
-        self.checked_implementations.iter().find(|i|i.declaration==selected)
+        let selected = self.selected_associated_implementation?;
+        self.checked_implementations
+            .iter()
+            .find(|i| i.declaration == selected)
     }
 
-    pub(in crate::program) fn initializer_substitution(&self) -> Option<(&[DeclarationId], &[Term])> {
-        let selected=self.selected_associated_implementation?;
-        let owner=self.signature_owner?;
-        let (_,parameters,arguments)=self.associated_initializers.iter()
-            .find(|((implementation,_),(initializer,_,_))|*implementation==selected && *initializer==owner)?.1;
-        Some((parameters,arguments))
+    pub(in crate::program) fn initializer_substitution(
+        &self,
+    ) -> Option<(&[DeclarationId], &[Term])> {
+        let selected = self.selected_associated_implementation?;
+        let owner = self.signature_owner?;
+        let (_, parameters, arguments) = self
+            .associated_initializers
+            .iter()
+            .find(|((implementation, _), (initializer, _, _))| {
+                *implementation == selected && *initializer == owner
+            })?
+            .1;
+        Some((parameters, arguments))
     }
 
     fn initializer_projection_selection(

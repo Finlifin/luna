@@ -11,9 +11,9 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
-mod propositions;
-mod conditions;
 mod closed_inputs;
+mod conditions;
+mod propositions;
 pub use conditions::ConditionSupport;
 pub use propositions::{TraitDecision, TraitTruth, WorldProposition};
 
@@ -56,7 +56,10 @@ struct ResolutionScope {
 }
 impl ResolutionScope {
     fn capture(world: &World<'_>) -> Arc<Self> {
-        Arc::new(Self { context: world.context.clone(), assumptions: world.assumptions.to_vec() })
+        Arc::new(Self {
+            context: world.context.clone(),
+            assumptions: world.assumptions.to_vec(),
+        })
     }
     fn matches(&self, world: &World<'_>) -> bool {
         self.context == *world.context && self.assumptions == world.assumptions
@@ -90,7 +93,8 @@ pub fn capability_sources_in_scope(
     frames: &[Vec<nir::Sort>],
 ) -> Result<Vec<TraitRequirement>, String> {
     for assumption in assumptions {
-        assumption.instantiate_parameters_in_scope(&[], &[], frames)
+        assumption
+            .instantiate_parameters_in_scope(&[], &[], frames)
             .map_err(|error| format!("invalid capability lookup scope: {error}"))?;
     }
     let mut output = assumptions.to_vec();
@@ -114,19 +118,26 @@ pub fn capability_sources_in_scope(
         if contract.type_parameters.len() != current.interface_arguments.len() {
             continue;
         }
-        let parameters = contract.parameters_with_self().into_iter()
-            .map(|declaration| nir::DeclarationParameter { declaration, sort: nir::Sort::Type }).collect::<Vec<_>>();
+        contract.validate_arguments_in_declarations(
+            &current.interface_arguments,
+            frames,
+            traits,
+            &mut remaining,
+        )?;
+        let parameters = contract.binders_with_self(&mut remaining)?;
         let arguments: Vec<_> = std::iter::once(current.subject.clone())
             .chain(current.interface_arguments.iter().cloned())
             .collect();
         for capability in &contract.capabilities {
-            let capability = capability.instantiate_parameters_in_scope(&parameters, &arguments, frames)
+            let capability = capability
+                .instantiate_parameters_in_scope(&parameters, &arguments, frames)
                 .map_err(|error| format!("invalid capability member edge: {error}"))?;
             output.push(capability.clone());
             pending.push((capability, depth + 1));
         }
         for parent in &contract.parents {
-            let parent = parent.instantiate_parameters_in_scope(&parameters, &arguments, frames)
+            let parent = parent
+                .instantiate_parameters_in_scope(&parameters, &arguments, frames)
                 .map_err(|error| format!("invalid parent member edge: {error}"))?;
             pending.push((
                 TraitRequirement {
@@ -176,19 +187,33 @@ pub fn subject_requirements(
         if contract.type_parameters.len() != assumption.interface_arguments.len() {
             continue;
         }
-        let parameters = contract.parameters_with_self();
+        if contract
+            .validate_arguments_in_declarations(
+                &assumption.interface_arguments,
+                &[],
+                traits,
+                &mut remaining,
+            )
+            .is_err()
+        {
+            continue;
+        }
+        let Ok(parameters) = contract.binders_with_self(&mut remaining) else {
+            continue;
+        };
         let arguments: Vec<_> = std::iter::once(assumption.subject.clone())
             .chain(assumption.interface_arguments.iter().cloned())
             .collect();
         for requirement in &contract.requirements {
             if requirement.mentions_rigid(contract.self_parameter) {
-                if let Ok(requirement) = requirement.instantiate_types(&parameters, &arguments) {
+                if let Ok(requirement) = requirement.instantiate_parameters(&parameters, &arguments)
+                {
                     output.push(requirement);
                 }
             }
         }
         for parent in &contract.parents {
-            if let Ok(parent) = parent.instantiate_types(&parameters, &arguments) {
+            if let Ok(parent) = parent.instantiate_parameters(&parameters, &arguments) {
                 pending.push((
                     TraitRequirement {
                         subject: assumption.subject.clone(),
@@ -200,7 +225,7 @@ pub fn subject_requirements(
             }
         }
         for capability in &contract.capabilities {
-            if let Ok(capability) = capability.instantiate_types(&parameters, &arguments) {
+            if let Ok(capability) = capability.instantiate_parameters(&parameters, &arguments) {
                 pending.push((capability, depth + 1));
             }
         }
@@ -245,11 +270,21 @@ impl World<'_> {
             scope: ResolutionScope::capture(self),
             active: HashSet::new(),
             remaining: budget.steps,
-        }.given_scoped(requirement, budget, parameters)
+        }
+        .given_scoped(requirement, budget, parameters)
     }
-    pub(crate) fn given_in_context(&self, requirement: &TraitRequirement, budget: Budget) -> Option<TraitRequirement> {
-        Solver { world: self, scope: ResolutionScope::capture(self), active: HashSet::new(), remaining: budget.steps }
-            .given_frames(requirement, budget, &[], self.context.scope())
+    pub(crate) fn given_in_context(
+        &self,
+        requirement: &TraitRequirement,
+        budget: Budget,
+    ) -> Option<TraitRequirement> {
+        Solver {
+            world: self,
+            scope: ResolutionScope::capture(self),
+            active: HashSet::new(),
+            remaining: budget.steps,
+        }
+        .given_frames(requirement, budget, &[], self.context.scope())
     }
     pub fn resolve(
         &self,
@@ -274,16 +309,32 @@ impl World<'_> {
         .resolve(interface, subject, budget, 0)
     }
     pub(crate) fn resolve_projected_instance(
-        &self, interface: &InterfaceInstance, subject: &Term, budget: Budget,
+        &self,
+        interface: &InterfaceInstance,
+        subject: &Term,
+        budget: Budget,
     ) -> Result<Resolution, String> {
         let mut solver = Solver {
-            world: self, scope: ResolutionScope::capture(self),
-            active: HashSet::new(), remaining: budget.steps,
+            world: self,
+            scope: ResolutionScope::capture(self),
+            active: HashSet::new(),
+            remaining: budget.steps,
         };
         let subject = solver.prerequisite_type(subject, budget, 0)?;
-        let arguments = interface.arguments.iter().map(|ty| solver.prerequisite_type(ty, budget, 0))
+        let arguments = interface
+            .arguments
+            .iter()
+            .map(|ty| solver.prerequisite_type(ty, budget, 0))
             .collect::<Result<_, _>>()?;
-        solver.resolve(&InterfaceInstance { declaration: interface.declaration, arguments }, &subject, budget, 0)
+        solver.resolve(
+            &InterfaceInstance {
+                declaration: interface.declaration,
+                arguments,
+            },
+            &subject,
+            budget,
+            0,
+        )
     }
 
     pub fn resolve_inherent(
@@ -303,14 +354,20 @@ impl World<'_> {
         let mut condition_support = BTreeMap::new();
         let types = index
             .resolve_matched_with(
-                name, subject, self.context, budget,
+                name,
+                subject,
+                self.context,
+                budget,
                 |declaration, matched, allowance| {
                     let assessment = match matched {
                         Ok(matched) => {
                             let mut support = Vec::new();
-                            let assessment = matched.discharge_with(|goal, allowance|
-                                solver.prove_condition(goal, allowance, 0, &mut support));
-                            if !support.is_empty() { condition_support.insert(declaration, support); }
+                            let assessment = matched.discharge_with(|goal, allowance| {
+                                solver.prove_condition(goal, allowance, 0, &mut support)
+                            });
+                            if !support.is_empty() {
+                                condition_support.insert(declaration, support);
+                            }
                             assessment
                         }
                         Err(assessment) => assessment,
@@ -328,9 +385,13 @@ impl World<'_> {
                 },
             )
             .map_err(|e| format!("inherent capability query: {e:?}"))?;
-        Ok(Resolution { scope: solver.scope.clone(), types, qualifications, condition_support })
+        Ok(Resolution {
+            scope: solver.scope.clone(),
+            types,
+            qualifications,
+            condition_support,
+        })
     }
-
 }
 impl Qualification {
     fn state(&self) -> Applicability {
@@ -353,6 +414,19 @@ impl Solver<'_, '_> {
             return Err("capability resolution budget exhausted".into());
         }
         self.remaining -= 1;
+        if let Some(contract) = self
+            .world
+            .traits
+            .iter()
+            .find(|t| t.declaration == interface.declaration)
+        {
+            contract.validate_arguments_in_declarations(
+                &interface.arguments,
+                self.world.context.scope(),
+                self.world.traits,
+                &mut self.remaining,
+            )?;
+        }
         let key = (interface.clone(), subject.clone());
         if !self.active.insert(key.clone()) {
             return Err("recursive capability obligation remains pending".into());
@@ -371,16 +445,20 @@ impl Solver<'_, '_> {
                     ..budget
                 },
                 |head, allowance| {
-                    let assessment = match head.match_types(subject, &interface.arguments, context, allowance) {
-                        Ok(matched) => {
-                            let mut support = Vec::new();
-                            let assessment = matched.discharge_with(|goal, allowance|
-                                self.prove_condition(goal, allowance, depth + 1, &mut support));
-                            if !support.is_empty() { condition_support.insert(head.declaration, support); }
-                            assessment
-                        }
-                        Err(assessment) => assessment,
-                    };
+                    let assessment =
+                        match head.match_types(subject, &interface.arguments, context, allowance) {
+                            Ok(matched) => {
+                                let mut support = Vec::new();
+                                let assessment = matched.discharge_with(|goal, allowance| {
+                                    self.prove_condition(goal, allowance, depth + 1, &mut support)
+                                });
+                                if !support.is_empty() {
+                                    condition_support.insert(head.declaration, support);
+                                }
+                                assessment
+                            }
+                            Err(assessment) => assessment,
+                        };
                     let state = match &assessment {
                         crate::implementation::TypeAssessment::Applicable(evidence) => {
                             let qualification = self.qualify(evidence, allowance, depth + 1);
@@ -415,32 +493,83 @@ impl Solver<'_, '_> {
         budget: Budget,
         scope: &[nir::Parameter],
     ) -> Option<TraitRequirement> {
-        let frames = if scope.is_empty() { vec![] } else {
+        let frames = if scope.is_empty() {
+            vec![]
+        } else {
             vec![scope.iter().map(|parameter| parameter.sort).collect()]
         };
         self.given_frames(requirement, budget, scope, &frames)
     }
-    fn given_frames(&mut self, requirement: &TraitRequirement, budget: Budget,
-        scope: &[nir::Parameter], frames: &[Vec<nir::Sort>]) -> Option<TraitRequirement> {
+    fn given_frames(
+        &mut self,
+        requirement: &TraitRequirement,
+        budget: Budget,
+        scope: &[nir::Parameter],
+        frames: &[Vec<nir::Sort>],
+    ) -> Option<TraitRequirement> {
         let valid = |requirement: &TraitRequirement| {
-            std::iter::once(&requirement.subject).chain(&requirement.interface_arguments)
-                .all(|ty| ty.sort() == nir::Sort::Type && ty.check_scope(&frames).is_ok())
+            if requirement.subject.sort() != nir::Sort::Type
+                || requirement.subject.check_scope(frames).is_err()
+            {
+                return false;
+            }
+            if let Some(contract) = self
+                .world
+                .traits
+                .iter()
+                .find(|t| t.declaration == requirement.interface)
+            {
+                let mut fuel = budget.steps;
+                contract
+                    .validate_arguments_in_declarations(
+                        &requirement.interface_arguments,
+                        frames,
+                        self.world.traits,
+                        &mut fuel,
+                    )
+                    .is_ok()
+            } else {
+                requirement
+                    .interface_arguments
+                    .iter()
+                    .all(|ty| ty.sort() == nir::Sort::Type && ty.check_scope(frames).is_ok())
+            }
         };
-        if !valid(requirement) { return None; }
+        if !valid(requirement) {
+            return None;
+        }
         let equal = |left: &Term, right: &Term| {
-            if left == right { return true; }
+            if left == right {
+                return true;
+            }
             let closed = left.check_scope(&[]).is_ok() && right.check_scope(&[]).is_ok();
-            let scoped = |ty: &Term| if scope.is_empty() || closed || self.world.context.scope() == frames { ty.clone() } else {
-                Term::Function { parameters: scope.to_vec(), result: Box::new(ty.clone()) }
+            let scoped = |ty: &Term| {
+                if scope.is_empty() || closed || self.world.context.scope() == frames {
+                    ty.clone()
+                } else {
+                    Term::Function {
+                        parameters: scope.to_vec(),
+                        result: Box::new(ty.clone()),
+                    }
+                }
             };
-            matches!(self.world.context.prove(Formula::equal(scoped(left), scoped(right)), budget), Outcome::Entailed(_))
+            matches!(
+                self.world
+                    .context
+                    .prove(Formula::equal(scoped(left), scoped(right)), budget),
+                Outcome::Entailed(_)
+            )
         };
         for assumption in self.world.assumptions {
-            if !valid(assumption) { continue; }
+            if !valid(assumption) {
+                continue;
+            }
             let mut pending = vec![assumption.clone()];
             let mut seen = HashSet::new();
             while let Some(current) = pending.pop() {
-                if !valid(&current) { continue; }
+                if !valid(&current) {
+                    continue;
+                }
                 let interface = current.interface_instance();
                 if self.remaining == 0 {
                     return None;
@@ -466,22 +595,23 @@ impl Solver<'_, '_> {
                     .iter()
                     .find(|t| t.declaration == interface.declaration)
                 {
-                    let parameters: Vec<_> = std::iter::once(t.self_parameter)
-                        .chain(t.type_parameters.iter().copied())
-                        .map(|declaration| nir::DeclarationParameter { declaration, sort: nir::Sort::Type })
-                        .collect();
+                    let parameters = t.binders_with_self(&mut self.remaining).ok()?;
                     let arguments: Vec<_> = std::iter::once(current.subject.clone())
                         .chain(interface.arguments.iter().cloned())
                         .collect();
                     for capability in &t.capabilities {
-                        if let Ok(capability) =
-                            capability.instantiate_parameters_in_scope(&parameters, &arguments, &frames)
-                        {
+                        if let Ok(capability) = capability.instantiate_parameters_in_scope(
+                            &parameters,
+                            &arguments,
+                            &frames,
+                        ) {
                             pending.push(capability);
                         }
                     }
                     for parent in &t.parents {
-                        if let Ok(parent) = parent.instantiate_parameters_in_scope(&parameters, &arguments, &frames) {
+                        if let Ok(parent) =
+                            parent.instantiate_parameters_in_scope(&parameters, &arguments, &frames)
+                        {
                             pending.push(TraitRequirement {
                                 subject: current.subject.clone(),
                                 interface: parent.declaration,
@@ -494,23 +624,57 @@ impl Solver<'_, '_> {
         }
         None
     }
-    fn prerequisite_type(&mut self, ty: &Term, budget: Budget, depth: usize) -> Result<Term, String> {
+    fn prerequisite_type(
+        &mut self,
+        ty: &Term,
+        budget: Budget,
+        depth: usize,
+    ) -> Result<Term, String> {
         // Reserve only part of the remaining search for one projection. A
         // pending projection must not hide a later definitely false premise.
-        if depth >= budget.max_depth.min(64) { return Err("capability normalization depth exhausted".into()); }
+        if depth >= budget.max_depth.min(64) {
+            return Err("capability normalization depth exhausted".into());
+        }
+        if matches!(ty, Term::Symbol(_)) {
+            crate::associated::charge_projection_copy(ty, &mut self.remaining)?;
+            ty.check_scope(self.world.context.scope())
+                .map_err(|e| e.to_string())?;
+            return Ok(ty.clone());
+        }
         let allowance = budget.steps.min(self.remaining / 2);
-        if allowance == 0 { return Err("capability normalization budget exhausted".into()); }
+        if allowance == 0 {
+            return Err("capability normalization budget exhausted".into());
+        }
         let world = self.world;
-        let normalized = world.associated_type_view_for_selection(ty, Budget { steps: allowance, ..budget },
+        let normalized = world.associated_type_view_for_selection(
+            ty,
+            Budget {
+                steps: allowance,
+                ..budget
+            },
             &mut |interface, subject, budget| {
                 let subject = self.prerequisite_type(subject, budget, depth + 1)?;
-                let arguments = interface.arguments.iter()
-                    .map(|ty| self.prerequisite_type(ty, budget, depth + 1)).collect::<Result<_, _>>()?;
-                self.resolve(&InterfaceInstance { declaration: interface.declaration, arguments }, &subject, budget, depth + 1)
-            });
+                let arguments = interface
+                    .arguments
+                    .iter()
+                    .map(|ty| self.prerequisite_type(ty, budget, depth + 1))
+                    .collect::<Result<_, _>>()?;
+                self.resolve(
+                    &InterfaceInstance {
+                        declaration: interface.declaration,
+                        arguments,
+                    },
+                    &subject,
+                    budget,
+                    depth + 1,
+                )
+            },
+        );
         match normalized {
             Ok((ty, remaining)) => {
-                self.remaining = self.remaining.checked_sub(allowance - remaining)
+                self.remaining = self
+                    .remaining
+                    .checked_sub(allowance - remaining)
                     .ok_or("capability normalization budget exhausted")?;
                 Ok(ty)
             }
@@ -555,15 +719,24 @@ impl Solver<'_, '_> {
                 Ok::<_, String>(TraitRequirement {
                     interface: requirement.interface,
                     subject: self.prerequisite_type(&requirement.subject, budget, depth)?,
-                    interface_arguments: requirement.interface_arguments.iter()
-                        .map(|ty| self.prerequisite_type(ty, budget, depth)).collect::<Result<_, _>>()?,
+                    interface_arguments: requirement
+                        .interface_arguments
+                        .iter()
+                        .map(|ty| self.prerequisite_type(ty, budget, depth))
+                        .collect::<Result<_, _>>()?,
                 })
             })() {
                 Ok(requirement) => requirement,
-                Err(error) => { pending = Some(error); continue; }
+                Err(error) => {
+                    pending = Some(error);
+                    continue;
+                }
             };
             if let Some(given) = self.given(&requirement, budget) {
-                witnesses.push(Witness { requirement, origin: Origin::Given(given) });
+                witnesses.push(Witness {
+                    requirement,
+                    origin: Origin::Given(given),
+                });
                 continue;
             }
             let resolution = match self.resolve(
@@ -691,11 +864,15 @@ impl fmt::Display for Resolution {
             write!(f, "({id} {qualification})")?;
         }
         write!(f, ") (scope {} (capability-assumptions", self.scope.context)?;
-        for assumption in &self.scope.assumptions { write!(f, " {assumption}")?; }
+        for assumption in &self.scope.assumptions {
+            write!(f, " {assumption}")?;
+        }
         f.write_str(")) (condition-support")?;
         for (id, supports) in &self.condition_support {
             write!(f, " ({id}")?;
-            for support in supports { write!(f, " {support}")?; }
+            for support in supports {
+                write!(f, " {support}")?;
+            }
             f.write_str(")")?;
         }
         f.write_str("))")

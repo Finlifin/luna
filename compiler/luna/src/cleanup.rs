@@ -92,7 +92,11 @@ fn lower(
                     // The enclosing program already checks the subject type.
                     // Each case retains exact tag premises and verified steps.
                     cases.push(iir::cleanup::VariantCase {
-                        guards: plan.variants.iter().map(|v| (v.fields.clone(), v.index)).collect(),
+                        guards: plan
+                            .variants
+                            .iter()
+                            .map(|v| (v.fields.clone(), v.index))
+                            .collect(),
                         steps: lower(&plan.steps, receiver, roots, receivers, fuel, depth + 1)?,
                     });
                 }
@@ -186,14 +190,18 @@ pub fn prepare_source(
     let mut types = vec![];
     let mut receivers: Vec<(iir::InstanceKey, nir::Term)> = vec![];
     let mut schedule = Schedule::default();
-    let mut generated_layouts=std::collections::HashSet::new();
+    let mut generated_layouts = std::collections::HashSet::new();
     loop {
         *fuel = fuel
             .checked_sub(1)
             .ok_or("source cleanup publication budget exhausted")?;
         // Generated return storage is recreated by its owning function, not
         // an independently materializable source type root.
-        let source_types=types.iter().filter(|ty|!generated_layouts.contains(*ty)).cloned().collect::<Vec<_>>();
+        let source_types = types
+            .iter()
+            .filter(|ty| !generated_layouts.contains(*ty))
+            .cloned()
+            .collect::<Vec<_>>();
         let graph = elaboration::materialization::instantiate_with_types(
             package,
             &roots,
@@ -202,32 +210,58 @@ pub fn prepare_source(
             budget,
         )?;
         graph.validate_cleanup_control(fuel)?;
-        let generated=graph.nominals.iter().filter_map(|nominal|match &nominal.definition {
-            iir::NominalDefinition::Enum(definition) if !package.enums.iter().any(|source|source.declaration==definition.declaration)=>Some((nominal.ty.clone(),definition)),
-            _=>None,
-        }).collect::<Vec<_>>();
-        let mut layouts=std::borrow::Cow::Borrowed(package);
+        let generated = graph
+            .nominals
+            .iter()
+            .filter_map(|nominal| match &nominal.definition {
+                iir::NominalDefinition::Enum(definition)
+                    if !package
+                        .enums
+                        .iter()
+                        .any(|source| source.declaration == definition.declaration) =>
+                {
+                    Some((nominal.ty.clone(), definition))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut layouts = std::borrow::Cow::Borrowed(package);
         if !generated.is_empty() {
             // New roots can change the traversal order of late expansions.
             // Recompute schedules against this graph's identities and sources.
-            schedule=Schedule::default();
+            schedule = Schedule::default();
             for function in package.functions.iter().chain(&package.quote_templates) {
-                nir::visit::expressions(function,fuel,|expr,fuel|
-                    nir::type_computations::charge_term(&expr.ty,fuel).map_err(|e|e.to_string()))?;
+                nir::visit::expressions(function, fuel, |expr, fuel| {
+                    nir::type_computations::charge_term(&expr.ty, fuel).map_err(|e| e.to_string())
+                })?;
             }
-            let view=layouts.to_mut();
-            for (ty,definition) in generated {
+            let view = layouts.to_mut();
+            for (ty, definition) in generated {
                 generated_layouts.insert(ty);
                 view.enums.push(definition.clone());
             }
         }
-        let package=layouts.as_ref();
+        let package = layouts.as_ref();
         let previous = (roots.len(), types.len());
         for instance in &graph.functions {
             // Higher-order bodies are verified against each call's concrete
             // inputs below, never published as an unconditional root schedule.
-            if !moves::callable_parameter_paths(package, &instance.function.signature, fuel, instance.function.body.source)
-                .map_err(|error|error.to_string())?.is_empty()
+            if !moves::callable_parameter_paths(
+                package,
+                &instance.function.signature,
+                fuel,
+                instance.function.body.source,
+            )
+            .map_err(|error| error.to_string())?
+            .is_empty()
+                || !moves::effect_result_slots(
+                    package,
+                    &instance.function.signature,
+                    fuel,
+                    instance.function.body.source,
+                )
+                .map_err(|error| error.to_string())?
+                .is_empty()
             {
                 if instance.key == entry {
                     return Err("higher-order entry requires callable input context".into());
@@ -280,11 +314,32 @@ pub fn prepare_source(
                 package, world, items, function, *fuel, budget, &borrows,
             )
             .map_err(|e| e.to_string())?;
-            let mut scopes = std::collections::VecDeque::from([(vec![], function.clone(), report)]);
-            let mut named_contexts: Vec<(Vec<ContextKey>,iir::InstanceKey,Vec<moves::CallableParameter>,Vec<moves::EnumParameter>)> = vec![];
-            while let Some((context, scope, report)) = scopes.pop_front() {
-                if let Some(ContextKey::Function {callee,..})=context.last() {
-                    named_contexts.push((context.clone(),callee.clone(),report.callable_parameters.clone(),report.enum_parameters.clone()));
+            if report.borrowed_parameters != borrows {
+                return Err("cleanup report disagrees with borrowed entry premises".into());
+            }
+            let mut scopes =
+                std::collections::VecDeque::from([(vec![], function.clone(), report, vec![])]);
+            let mut named_contexts: Vec<(
+                Vec<ContextKey>,
+                iir::InstanceKey,
+                Vec<moves::CallableParameter>,
+                Vec<moves::EnumParameter>,
+                Vec<moves::EffectResultInput>,
+            )> = vec![];
+            while let Some((context, scope, report, observations)) = scopes.pop_front() {
+                if let Some(ContextKey::Function { callee, .. }) = context.last() {
+                    named_contexts.push((
+                        context.clone(),
+                        callee.clone(),
+                        report.callable_parameters.clone(),
+                        report.enum_parameters.clone(),
+                        moves::copy_effect_inputs(
+                            &report.effect_parameters,
+                            fuel,
+                            scope.body.source,
+                        )
+                        .map_err(|e| e.to_string())?,
+                    ));
                 }
                 if !report.deferred_calls.is_empty() {
                     return Err(
@@ -309,15 +364,18 @@ pub fn prepare_source(
                         Some(ContextKey::Closure { .. } | ContextKey::Function { .. })
                     ) {
                     vec![(function.body.source, Boundary::FunctionEnd)]
-                } else if matches!(context.last(),Some(ContextKey::EffectHandler { .. })) {
+                } else if matches!(context.last(), Some(ContextKey::EffectHandler { .. })) {
                     vec![(function.body.source, Boundary::HandlerEnd)]
                 } else {
                     vec![]
                 };
                 let mut discard_hooks = vec![];
-                let mut projection_hooks = if matches!(context.last(),Some(ContextKey::EffectHandler { .. })) {
-                    vec![function.body.source]
-                } else { vec![] };
+                let mut projection_hooks =
+                    if matches!(context.last(), Some(ContextKey::EffectHandler { .. })) {
+                        vec![function.body.source]
+                    } else {
+                        vec![]
+                    };
                 let mut callee_hooks = vec![];
                 let mut prepared_hooks = vec![];
                 let mut result_hooks = vec![function.body.source];
@@ -327,129 +385,161 @@ pub fn prepare_source(
                         .iter()
                         .map(|p| (p.source, Boundary::PredicateFailure)),
                 );
-                iir::visit::expressions_in_scope(function, fuel, |expr, _| {
-                    if !matches!(expr.kind, K::CallPreparation { .. }) {
-                        hooks.push((expr.source, Boundary::TemporaryEnd));
-                    }
-                    if let K::Match { arms, .. } = &expr.kind {
-                        for arm in arms {
-                            projection_hooks.push(arm.body.source);
-                            if !matches!(arm.body.kind, K::Block { .. } | K::CallPreparation { .. }) {
-                                hooks.push((arm.body.source, Boundary::ScopeEnd));
+                iir::visit::expressions_in_scope_with_observations(
+                    function,
+                    &observations,
+                    fuel,
+                    |expr, _| {
+                        if !matches!(expr.kind, K::CallPreparation { .. })
+                            && !expr.shares_discard_temporary_boundary()
+                        {
+                            hooks.push((expr.source, Boundary::TemporaryEnd));
+                        }
+                        if let K::Match { arms, .. } = &expr.kind {
+                            for arm in arms {
+                                projection_hooks.push(arm.body.source);
+                                if !matches!(
+                                    arm.body.kind,
+                                    K::Block { .. } | K::CallPreparation { .. }
+                                ) {
+                                    hooks.push((arm.body.source, Boundary::ScopeEnd));
+                                }
                             }
                         }
-                    }
-                    if let K::EnumName(value) = &expr.kind {
-                        projection_hooks.push(value.source);
-                    }
-                    if let K::LetPattern { value, .. } = &expr.kind {
-                        projection_hooks.push(expr.source);
-                        projection_hooks.push(value.source);
-                    }
-                    if let K::AnonymousField { value, .. } | K::Field { value, .. } = &expr.kind {
-                        if !matches!(value.kind, K::AnonymousField { .. } | K::Field { .. } | K::Local(_)) {
+                        if let K::EnumName(value) = &expr.kind {
                             projection_hooks.push(value.source);
                         }
-                    }
-                    if matches!(expr.kind, K::Return(_)) {
-                        result_hooks.push(expr.source);
-                    }
-                    if let K::Discard(value) = &expr.kind {
-                        discard_hooks.push((expr.source, value.source));
-                    }
-                    match &expr.kind {
-                        K::Tuple(fields) | K::AnonymousRecord { fields } | K::Record { fields, .. } | K::Variant { fields, .. } => {
-                            for (slot, value) in fields.iter().enumerate() {
-                                prepared_hooks.push((expr.source, slot, value.source));
-                            }
+                        if let K::LetPattern { value, .. } = &expr.kind {
+                            projection_hooks.push(expr.source);
+                            projection_hooks.push(value.source);
                         }
-                        K::Closure { captures, .. } => {
-                            for (slot, capture) in captures.iter().enumerate() {
-                                prepared_hooks.push((
-                                    expr.source,
-                                    slot,
-                                    capture
-                                        .value
-                                        .as_ref()
-                                        .map_or(expr.source, |value| value.source),
-                                ));
-                            }
-                        }
-                        K::Call {
-                            callee, arguments, ..
-                        } => {
-                            callee_hooks.push(callee.source);
+                        if let K::AnonymousField { value, .. } | K::Field { value, .. } = &expr.kind
+                        {
                             if !matches!(
-                                callee.kind,
-                                K::Local(_)
-                                    | K::Function(_)
-                                    | K::FunctionInstance { .. }
-                                    | K::TraitMethod { .. }
+                                value.kind,
+                                K::AnonymousField { .. } | K::Field { .. } | K::Local(_)
                             ) {
-                                projection_hooks.push(callee.source);
+                                projection_hooks.push(value.source);
                             }
-                            hooks.push((expr.source, Boundary::InterfacePreconditionFailure));
-                            for argument in arguments {
-                                if argument.is_default {
-                                    hooks.push((
+                        }
+                        if matches!(expr.kind, K::Return(_)) {
+                            result_hooks.push(expr.source);
+                        }
+                        if let K::Discard(value) = &expr.kind {
+                            discard_hooks.push((expr.source, value.source));
+                        }
+                        match &expr.kind {
+                            K::Tuple(fields)
+                            | K::AnonymousRecord { fields }
+                            | K::Record { fields, .. }
+                            | K::Variant { fields, .. } => {
+                                for (slot, value) in fields.iter().enumerate() {
+                                    prepared_hooks.push((expr.source, slot, value.source));
+                                }
+                            }
+                            K::Closure { captures, .. } => {
+                                for (slot, capture) in captures.iter().enumerate() {
+                                    prepared_hooks.push((
                                         expr.source,
-                                        Boundary::DefaultFailure(argument.parameter),
-                                    ));
-                                    default_roots.push((
-                                        ContextKey::Default {
-                                            construction: expr.source,
-                                            parameter: argument.parameter,
-                                        },
-                                        argument.value.clone(),
+                                        slot,
+                                        capture
+                                            .value
+                                            .as_ref()
+                                            .map_or(expr.source, |value| value.source),
                                     ));
                                 }
-                                prepared_hooks.push((
-                                    expr.source,
-                                    argument.parameter,
-                                    argument.value.source,
-                                ));
+                            }
+                            K::Call {
+                                callee, arguments, ..
+                            } => {
+                                callee_hooks.push(callee.source);
+                                if !matches!(
+                                    callee.kind,
+                                    K::Local(_)
+                                        | K::Function(_)
+                                        | K::FunctionInstance { .. }
+                                        | K::TraitMethod { .. }
+                                ) {
+                                    projection_hooks.push(callee.source);
+                                }
+                                hooks.push((expr.source, Boundary::InterfacePreconditionFailure));
+                                for argument in arguments {
+                                    if argument.is_default {
+                                        hooks.push((
+                                            expr.source,
+                                            Boundary::DefaultFailure(argument.parameter),
+                                        ));
+                                        default_roots.push((
+                                            ContextKey::Default {
+                                                construction: expr.source,
+                                                parameter: argument.parameter,
+                                            },
+                                            argument.value.clone(),
+                                        ));
+                                    }
+                                    prepared_hooks.push((
+                                        expr.source,
+                                        argument.parameter,
+                                        argument.value.source,
+                                    ));
+                                }
+                            }
+                            _ => (),
+                        }
+                        if matches!(
+                            &expr.kind,
+                            K::EffectRequest {
+                                abi: nir::effects::Abi::Direct,
+                                ..
+                            }
+                        ) || matches!(&expr.kind, K::Call { callee, .. }
+                            if matches!(callee.ty.callable_signature(), nir::Term::Function { result, .. }
+                                if matches!(result.as_ref(), nir::Term::Computation { effects, .. } if !effects.is_empty())))
+                        {
+                            hooks.push((expr.source, Boundary::EffectEscape));
+                            hooks.push((expr.source, Boundary::EffectReturn));
+                            result_hooks.push(expr.source);
+                        }
+                        if let K::EffectRequest { arguments, .. } = &expr.kind {
+                            for (slot, argument) in arguments.iter().enumerate() {
+                                prepared_hooks.push((expr.source, slot, argument.source));
                             }
                         }
-                        _ => (),
-                    }
-                    if matches!(&expr.kind, K::EffectRequest { abi: nir::effects::Abi::Direct, .. })
-                        || matches!(&expr.kind, K::Call { callee, .. }
-                            if matches!(callee.ty.callable_signature(), nir::Term::Function { result, .. }
-                                if matches!(result.as_ref(), nir::Term::Computation { effects, .. } if !effects.is_empty()))) {
-                        hooks.push((expr.source, Boundary::EffectEscape));
-                        hooks.push((expr.source, Boundary::EffectReturn));
-                        result_hooks.push(expr.source);
-                    }
-                    if let K::EffectRequest { arguments, .. } = &expr.kind {
-                        for (slot, argument) in arguments.iter().enumerate() {
-                            prepared_hooks.push((expr.source, slot, argument.source));
+                        if matches!(&expr.kind, K::EffectHandle { handlers, .. }
+                        if handlers.iter().any(|h|h.abi == nir::effects::Abi::DirectPassing))
+                        {
+                            hooks.push((expr.source, Boundary::PredicateFailure));
+                            hooks.push((expr.source, Boundary::EffectEscape));
+                            hooks.push((expr.source, Boundary::EffectReturn));
+                            result_hooks.push(expr.source);
                         }
-                    }
-                    if matches!(&expr.kind, K::EffectHandle { handlers, .. }
-                        if handlers.iter().any(|h|h.abi == nir::effects::Abi::DirectPassing)) {
-                        hooks.push((expr.source, Boundary::PredicateFailure));
-                        hooks.push((expr.source, Boundary::EffectEscape));
-                        hooks.push((expr.source, Boundary::EffectReturn));
-                        result_hooks.push(expr.source);
-                    }
-                    let hook = match &expr.kind {
-                        K::Block { .. } | K::CallPreparation { .. } => Some((expr.source, Boundary::ScopeEnd)),
-                        K::Return(_) => Some((expr.source, Boundary::Return)),
-                        K::EffectResume(_) => Some((expr.source, Boundary::EffectResume)),
-                        K::Break(_) => Some((expr.source, Boundary::Break)),
-                        K::Continue(_) => Some((expr.source, Boundary::Continue)),
-                        K::Assign { .. } => Some((expr.source, Boundary::Replacement)),
-                        K::RequirePredicate(condition) | K::EnsurePredicate(condition) | K::CheckPredicate(condition) => {
-                            Some((condition.source, Boundary::PredicateFailure))
+                        let hook = match &expr.kind {
+                            K::Block { .. } | K::CallPreparation { .. } => {
+                                Some((expr.source, Boundary::ScopeEnd))
+                            }
+                            K::Return(_) => Some((expr.source, Boundary::Return)),
+                            K::EffectResume(_) => Some((expr.source, Boundary::EffectResume)),
+                            K::Break(_) => Some((expr.source, Boundary::Break)),
+                            K::Continue(_) => Some((expr.source, Boundary::Continue)),
+                            K::Assign { .. } => Some((expr.source, Boundary::Replacement)),
+                            K::RequirePredicate(condition)
+                            | K::EnsurePredicate(condition)
+                            | K::CheckPredicate(condition) => {
+                                Some((condition.source, Boundary::PredicateFailure))
+                            }
+                            K::Call { .. }
+                            | K::EffectRequest {
+                                abi: nir::effects::Abi::Direct,
+                                ..
+                            } => Some((expr.source, Boundary::PredicateFailure)),
+                            _ => None,
+                        };
+                        if let Some(hook) = hook {
+                            hooks.push(hook);
                         }
-                        K::Call { .. } | K::EffectRequest { abi: nir::effects::Abi::Direct, .. } => Some((expr.source, Boundary::PredicateFailure)),
-                        _ => None,
-                    };
-                    if let Some(hook) = hook {
-                        hooks.push(hook);
-                    }
-                    Ok(())
-                })?;
+                        Ok(())
+                    },
+                )?;
                 for site in &report.cleanup_sites {
                     let boundary = match site.reason {
                         CleanupReason::EffectBreak(id) => Some(Boundary::EffectBreak(id)),
@@ -460,7 +550,9 @@ pub fn prepare_source(
                         if !hooks.contains(&(site.source, Boundary::EffectEscape)) {
                             return Err("effect loop edge has no suspension boundary".into());
                         }
-                        if !hooks.contains(&(site.source, boundary)) { hooks.push((site.source, boundary)); }
+                        if !hooks.contains(&(site.source, boundary)) {
+                            hooks.push((site.source, boundary));
+                        }
                     }
                 }
                 if !function.postconditions.is_empty() {
@@ -496,38 +588,73 @@ pub fn prepare_source(
                     if child.signature.callable_signature() != call.callee.ty.callable_signature() {
                         return Err("named callable context signature mismatch".into());
                     }
-                    let mut recursive_target=None;
-                    for (ancestor,callee,callables,enums) in &named_contexts {
-                        *fuel=fuel.checked_sub(ancestor.len()+1).ok_or("recursive cleanup context budget exhausted")?;
-                        if callee==&key && context.starts_with(ancestor) && callables==&call.callables && enums==&call.enums {
-                            recursive_target=Some(ancestor.clone());break;
+                    let mut recursive_target = None;
+                    for (ancestor, callee, callables, enums, effects) in &named_contexts {
+                        *fuel = fuel
+                            .checked_sub(ancestor.len() + 1)
+                            .ok_or("recursive cleanup context budget exhausted")?;
+                        if callee == &key
+                            && context.starts_with(ancestor)
+                            && callables == &call.callables
+                            && enums == &call.enums
+                            && effects == &call.effects
+                        {
+                            recursive_target = Some(ancestor.clone());
+                            break;
                         }
                     }
-                    if let Some(target)=recursive_target {
-                        let mut recursive_context=context.clone();
-                        recursive_context.push(ContextKey::Function {call:call.source,callee:key.clone()});
-                        let alias=iir::cleanup::ContextAlias {instance:instance.key.clone(),context:recursive_context,target};
-                        if let Some(previous)=schedule.aliases.iter().find(|previous|previous.instance==alias.instance && previous.context==alias.context) {
-                            if previous!=&alias {return Err("ambiguous recursive cleanup context".into());}
-                        } else {schedule.aliases.push(alias);}
+                    if let Some(target) = recursive_target {
+                        let mut recursive_context = context.clone();
+                        recursive_context.push(ContextKey::Function {
+                            call: call.source,
+                            callee: key.clone(),
+                        });
+                        let alias = iir::cleanup::ContextAlias {
+                            instance: instance.key.clone(),
+                            context: recursive_context,
+                            target,
+                        };
+                        if let Some(previous) = schedule.aliases.iter().find(|previous| {
+                            previous.instance == alias.instance && previous.context == alias.context
+                        }) {
+                            if previous != &alias {
+                                return Err("ambiguous recursive cleanup context".into());
+                            }
+                        } else {
+                            schedule.aliases.push(alias);
+                        }
                         continue;
                     }
                     if context.len() >= 128 {
                         return Err("named callable context depth exhausted".into());
                     }
                     let mut borrows = vec![];
-                    if let nir::Term::Function {parameters, ..} = child.signature.callable_signature() {
+                    if let nir::Term::Function { parameters, .. } =
+                        child.signature.callable_signature()
+                    {
                         for (slot, parameter) in parameters.iter().enumerate() {
-                            if let nir::Term::Pointer(subject) = &parameter.ty {borrows.push((slot, (**subject).clone()));}
+                            if let nir::Term::Pointer(subject) = &parameter.ty {
+                                borrows.push((slot, (**subject).clone()));
+                            }
                         }
                     }
                     if !borrows.is_empty() {
-                        let footprint = moves::infer_callable_memory(package, key.declaration, &key.arguments, &call.callables, fuel, call.source)?;
+                        let footprint = moves::infer_callable_memory(
+                            package,
+                            key.declaration,
+                            &key.arguments,
+                            &call.callables,
+                            fuel,
+                            call.source,
+                        )?;
                         if footprint.signature != child.signature {
-                            return Err("contextual helper signature disagrees with memory footprint".into());
+                            return Err(
+                                "contextual helper signature disagrees with memory footprint"
+                                    .into(),
+                            );
                         }
                     }
-                    let invocation = crate::protocols::analyze_cleanup_with_context(
+                    let invocation = crate::protocols::analyze_cleanup_with_effect_context(
                         package,
                         world,
                         items,
@@ -537,9 +664,19 @@ pub fn prepare_source(
                         &borrows,
                         &call.callables,
                         &call.enums,
+                        moves::copy_effect_inputs(&call.effects, fuel, call.source)
+                            .map_err(|e| e.to_string())?,
                     )
                     .map_err(|e| e.to_string())?;
-                    if invocation.callable_parameters != call.callables || invocation.enum_parameters != call.enums {
+                    if invocation.borrowed_parameters != borrows {
+                        return Err(
+                            "contextual cleanup report disagrees with borrowed premises".into()
+                        );
+                    }
+                    if invocation.callable_parameters != call.callables
+                        || invocation.enum_parameters != call.enums
+                        || invocation.effect_parameters != call.effects
+                    {
                         return Err("named callable context lost its input premises".into());
                     }
                     let mut child_context = context.clone();
@@ -547,23 +684,31 @@ pub fn prepare_source(
                         call: call.source,
                         callee: key,
                     });
-                    scopes.push_back((child_context, child, invocation));
+                    scopes.push_back((child_context, child, invocation, vec![]));
                 }
                 for handler in report.handlers {
                     let mut child = scope.clone();
                     child.body = handler.definition.body;
-                    child.signature = nir::Term::Function {parameters:vec![],result:Box::new(handler.result)};
+                    child.signature = nir::Term::Function {
+                        parameters: vec![],
+                        result: Box::new(handler.result),
+                    };
                     child.parameters.clear();
                     child.defaults.clear();
-                    child.preconditions = handler.definition.guard.into_iter().collect();
+                    let mut observations =
+                        nir::visit::into_pattern_observations(handler.definition.pattern, fuel)?;
+                    observations.extend(handler.definition.guard);
+                    child.preconditions.clear();
                     child.postconditions.clear();
                     child.entry_snapshots.clear();
                     child.result_binding = None;
                     let mut child_context = context.clone();
                     child_context.push(ContextKey::EffectHandler {
-                        installation:handler.installation,handler:handler.handler,arm:handler.arm,
+                        installation: handler.installation,
+                        handler: handler.handler,
+                        arm: handler.arm,
                     });
-                    scopes.push_back((child_context,child,handler.invocation));
+                    scopes.push_back((child_context, child, handler.invocation, observations));
                 }
                 for closure in report
                     .closures
@@ -590,7 +735,7 @@ pub fn prepare_source(
                         call: closure.source,
                         definition: closure.definition.source,
                     });
-                    scopes.push_back((child_context, child, closure.invocation));
+                    scopes.push_back((child_context, child, closure.invocation, vec![]));
                 }
                 for default in report.defaults {
                     let key = ContextKey::Default {
@@ -615,7 +760,7 @@ pub fn prepare_source(
                     child.postconditions.clear();
                     let mut child_context = context.clone();
                     child_context.push(key);
-                    scopes.push_back((child_context, child, default.evaluation));
+                    scopes.push_back((child_context, child, default.evaluation, vec![]));
                 }
                 let mut sites: Vec<Site> = vec![];
                 let mut discards: Vec<DiscardCleanup> = vec![];
@@ -653,14 +798,28 @@ pub fn prepare_source(
                         };
                         let candidate = match *candidate {
                             CleanupAction::Alternatives(mut candidates) => {
-                                let Some(CleanupAction::Temporary { identity, temporary, presence, .. }) = candidates.first() else {
-                                    return Err("residual alternatives need one retained temporary target".into());
+                                let Some(CleanupAction::Temporary {
+                                    identity,
+                                    temporary,
+                                    presence,
+                                    ..
+                                }) = candidates.first()
+                                else {
+                                    return Err(
+                                        "residual alternatives need one retained temporary target"
+                                            .into(),
+                                    );
                                 };
                                 for candidate in &candidates {
-                                    *fuel = fuel.checked_sub(1).ok_or("residual target validation budget exhausted")?;
+                                    *fuel = fuel
+                                        .checked_sub(1)
+                                        .ok_or("residual target validation budget exhausted")?;
                                     if !matches!(candidate, CleanupAction::Temporary { identity: other_id, temporary: other, presence: other_presence, .. }
-                                        if identity == other_id && temporary == other && presence == other_presence) {
-                                        return Err("residual alternatives change cleanup storage".into());
+                                        if identity == other_id && temporary == other && presence == other_presence)
+                                    {
+                                        return Err(
+                                            "residual alternatives change cleanup storage".into()
+                                        );
                                     }
                                 }
                                 candidates.remove(0)
@@ -736,8 +895,10 @@ pub fn prepare_source(
                             .count()
                             != 1
                         {
-                            return Err(format!("cleanup site has no unique runtime boundary in {} at {}..{} ({boundary:?})",
-                                function.name, site.source.start, site.source.end));
+                            return Err(format!(
+                                "cleanup site has no unique runtime boundary in {} at {}..{} ({boundary:?})",
+                                function.name, site.source.start, site.source.end
+                            ));
                         }
                         let mut methods = vec![];
                         let steps = lower(
@@ -782,7 +943,11 @@ pub fn prepare_source(
                         // require explicit path discrimination.
                         if boundary == Boundary::PredicateFailure
                             && existing.actions.len() == actions.len()
-                            && existing.actions.iter().zip(&actions).all(|(a, b)| a.target == b.target && a.program == b.program)
+                            && existing
+                                .actions
+                                .iter()
+                                .zip(&actions)
+                                .all(|(a, b)| a.target == b.target && a.program == b.program)
                         {
                             continue;
                         }
@@ -798,9 +963,10 @@ pub fn prepare_source(
                                     _ => a.target == b.target,
                                 })
                         }) {
-                            return Err(
-                                format!("ambiguous repeated cleanup owner at one runtime boundary: function {} at {:?} {:?}, context {:?}", scope.name, site.source, boundary, context)
-                            );
+                            return Err(format!(
+                                "ambiguous repeated cleanup owner at one runtime boundary: function {} at {:?} {:?}, context {:?}",
+                                scope.name, site.source, boundary, context
+                            ));
                         }
                         existing.actions.extend(actions);
                     } else {
@@ -814,44 +980,81 @@ pub fn prepare_source(
                 let mut transfers = vec![];
                 let mut seen_transfers = std::collections::BTreeSet::new();
                 for (source, place) in report.transfers {
-                    *fuel = fuel.checked_sub(place.fields.len().saturating_add(1))
+                    *fuel = fuel
+                        .checked_sub(place.fields.len().saturating_add(1))
                         .ok_or("cleanup transfer publication budget exhausted")?;
                     let transfer = iir::cleanup::Transfer {
                         source,
                         binding: nir::program::LocalId {
-                            owner: u32::try_from(place.root.owner).map_err(|_| "transfer local identity exceeds runtime representation")?,
+                            owner: u32::try_from(place.root.owner).map_err(
+                                |_| "transfer local identity exceeds runtime representation",
+                            )?,
                             index: place.root.local,
                         },
                         fields: place.fields,
                     };
-                    if seen_transfers.insert((source.start, source.end, transfer.binding, transfer.fields.clone())) {
+                    if seen_transfers.insert((
+                        source.start,
+                        source.end,
+                        transfer.binding,
+                        transfer.fields.clone(),
+                    )) {
                         transfers.push(transfer);
                     }
                 }
-                let mut copies=vec![];
-                let mut seen_copies=std::collections::BTreeSet::new();
-                for (source,place) in report.copies {
-                    *fuel=fuel.checked_sub(place.fields.len().saturating_add(1)).ok_or("copy delivery publication budget exhausted")?;
-                    let copy=iir::cleanup::Transfer {source,binding:nir::program::LocalId {
-                        owner:u32::try_from(place.root.owner).map_err(|_|"copy local identity exceeds runtime representation")?,index:place.root.local,
-                    },fields:place.fields};
-                    if seen_copies.insert((source.start,source.end,copy.binding,copy.fields.clone())) {copies.push(copy);}
+                let mut copies = vec![];
+                let mut seen_copies = std::collections::BTreeSet::new();
+                for (source, place) in report.copies {
+                    *fuel = fuel
+                        .checked_sub(place.fields.len().saturating_add(1))
+                        .ok_or("copy delivery publication budget exhausted")?;
+                    let copy = iir::cleanup::Transfer {
+                        source,
+                        binding: nir::program::LocalId {
+                            owner: u32::try_from(place.root.owner).map_err(
+                                |_| "copy local identity exceeds runtime representation",
+                            )?,
+                            index: place.root.local,
+                        },
+                        fields: place.fields,
+                    };
+                    if seen_copies.insert((
+                        source.start,
+                        source.end,
+                        copy.binding,
+                        copy.fields.clone(),
+                    )) {
+                        copies.push(copy);
+                    }
                 }
                 let mut pattern_transfers = vec![];
                 let mut seen_patterns = std::collections::BTreeSet::new();
                 for (source, binding, fields) in report.pattern_transfers {
-                    *fuel = fuel.checked_sub(fields.len().saturating_add(1)).ok_or("pattern transfer publication budget exhausted")?;
+                    *fuel = fuel
+                        .checked_sub(fields.len().saturating_add(1))
+                        .ok_or("pattern transfer publication budget exhausted")?;
                     if seen_patterns.insert((source.start, source.end, binding, fields.clone())) {
-                        pattern_transfers.push(iir::cleanup::Transfer { source, binding, fields });
+                        pattern_transfers.push(iir::cleanup::Transfer {
+                            source,
+                            binding,
+                            fields,
+                        });
                     }
                 }
                 let mut pattern_orders = vec![];
                 for (source, alternatives) in report.pattern_orders {
                     for order in &alternatives {
-                        *fuel = fuel.checked_sub(order.len().saturating_add(1)).ok_or("pattern order publication budget exhausted")?;
+                        *fuel = fuel
+                            .checked_sub(order.len().saturating_add(1))
+                            .ok_or("pattern order publication budget exhausted")?;
                     }
-                    let order = iir::cleanup::BindingOrder {source, alternatives};
-                    if !pattern_orders.contains(&order) { pattern_orders.push(order); }
+                    let order = iir::cleanup::BindingOrder {
+                        source,
+                        alternatives,
+                    };
+                    if !pattern_orders.contains(&order) {
+                        pattern_orders.push(order);
+                    }
                 }
                 schedule.functions.push(FunctionSchedule {
                     instance: instance.key.clone(),

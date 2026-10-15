@@ -77,7 +77,8 @@ pub fn interpret_effects_with_protocols(
     })?;
     let mut usage_fuel = steps;
     elaboration::verification::effect_usage::check(&graph, &plan, &mut usage_fuel)?;
-    let solver = |predicate: &nir::program::TypePredicate| runtime_type_predicate(&world, predicate);
+    let solver =
+        |predicate: &nir::program::TypePredicate| runtime_type_predicate(&world, predicate);
     Interpreter::from_iir(
         &graph,
         Budget {
@@ -125,19 +126,34 @@ fn interpret_selected(
     let context = elaboration::ptc::Context::from_package(&package)
         .map_err(|error| format!("cannot prepare runtime type context: {error}"))?;
     let mut index = elaboration::implementation::Index::default();
-    for implementation in package.implementations.iter().filter(|item| item.interface.is_some()) {
-        index.insert(elaboration::implementation::ImplementationHead {
-            declaration: implementation.declaration, interface: implementation.interface,
-            interface_arguments: implementation.interface_arguments.clone(),
-            subject: implementation.subject.clone(), type_parameters: implementation.type_parameters.clone(),
-            requirements: implementation.requirements.clone(),
-        }, elaboration::ptc::Budget::default()).map_err(|error| format!("runtime implementation index: {error:?}"))?;
+    for implementation in package
+        .implementations
+        .iter()
+        .filter(|item| item.interface.is_some())
+    {
+        index
+            .insert(
+                elaboration::implementation::ImplementationHead {
+                    declaration: implementation.declaration,
+                    interface: implementation.interface,
+                    interface_arguments: implementation.interface_arguments.clone(),
+                    subject: implementation.subject.clone(),
+                    type_parameters: implementation.type_parameters.clone(),
+                    requirements: implementation.requirements.clone(),
+                },
+                elaboration::ptc::Budget::default(),
+            )
+            .map_err(|error| format!("runtime implementation index: {error:?}"))?;
     }
     let world = elaboration::capabilities::World {
-        index: &index, implementations: &package.implementations, traits: &package.traits,
-        assumptions: &[], context: &context,
+        index: &index,
+        implementations: &package.implementations,
+        traits: &package.traits,
+        assumptions: &[],
+        context: &context,
     };
-    let solver = |predicate: &nir::program::TypePredicate| runtime_type_predicate(&world, predicate);
+    let solver =
+        |predicate: &nir::program::TypePredicate| runtime_type_predicate(&world, predicate);
     Interpreter::from_iir(
         &graph,
         Budget {
@@ -160,28 +176,65 @@ pub fn interpret_with_protocols(
     drop_protocol: &str,
     fuel: u64,
 ) -> Result<Value, String> {
-    interpret_protocols_selected(package, entry, None, copy_protocol, drop_protocol, fuel, false)
+    interpret_protocols_selected(
+        package,
+        entry,
+        None,
+        copy_protocol,
+        drop_protocol,
+        fuel,
+        false,
+    )
 }
 
 pub fn interpret_with_protocols_in_package(
-    package: &Package, identity: u64, entry: &str, copy_protocol: &str,
-    drop_protocol: &str, fuel: u64,
+    package: &Package,
+    identity: u64,
+    entry: &str,
+    copy_protocol: &str,
+    drop_protocol: &str,
+    fuel: u64,
 ) -> Result<Value, String> {
-    interpret_protocols_selected(package, entry, Some(identity), copy_protocol, drop_protocol, fuel, false)
+    interpret_protocols_selected(
+        package,
+        entry,
+        Some(identity),
+        copy_protocol,
+        drop_protocol,
+        fuel,
+        false,
+    )
 }
 
 /// Explicit optional transformation before resource verification. Preparation
 /// failures are reported before execution; runtime failures are never retried.
 pub fn interpret_inline_with_protocols_in_package(
-    package: &Package, identity: u64, entry: &str, copy_protocol: &str,
-    drop_protocol: &str, fuel: u64,
+    package: &Package,
+    identity: u64,
+    entry: &str,
+    copy_protocol: &str,
+    drop_protocol: &str,
+    fuel: u64,
 ) -> Result<Value, String> {
-    interpret_protocols_selected(package, entry, Some(identity), copy_protocol, drop_protocol, fuel, true)
+    interpret_protocols_selected(
+        package,
+        entry,
+        Some(identity),
+        copy_protocol,
+        drop_protocol,
+        fuel,
+        true,
+    )
 }
 
 fn interpret_protocols_selected(
-    package: &Package, entry: &str, identity: Option<u64>, copy_protocol: &str,
-    drop_protocol: &str, fuel: u64, inline_functions: bool,
+    package: &Package,
+    entry: &str,
+    identity: Option<u64>,
+    copy_protocol: &str,
+    drop_protocol: &str,
+    fuel: u64,
+    inline_functions: bool,
 ) -> Result<Value, String> {
     if fuel == 0 {
         return Err("execution fuel must be positive".into());
@@ -192,8 +245,12 @@ fn interpret_protocols_selected(
         steps,
         ..Default::default()
     };
-    let (mut package, declaration) =
-        crate::invocation::prepare_entry_in_package(package, entry, FunctionPhase::Runtime, identity)?;
+    let (mut package, declaration) = crate::invocation::prepare_entry_in_package(
+        package,
+        entry,
+        FunctionPhase::Runtime,
+        identity,
+    )?;
     if inline_functions {
         let mut optimization_fuel = steps;
         elaboration::program::inlining::expand(package.to_mut(), &mut optimization_fuel)
@@ -218,7 +275,8 @@ fn interpret_protocols_selected(
     )
     .map_err(|e| format!("cannot prepare resource-checked execution: {e}"))?;
     let world = protocols.world(&package);
-    let solver = |predicate: &nir::program::TypePredicate| runtime_type_predicate(&world, predicate);
+    let solver =
+        |predicate: &nir::program::TypePredicate| runtime_type_predicate(&world, predicate);
     Interpreter::from_iir(
         &executable.graph,
         Budget {
@@ -234,8 +292,10 @@ fn interpret_protocols_selected(
     .map_err(|e| format!("runtime reference execution of '{entry}' failed: {e}"))
 }
 
-fn runtime_type_predicate(world: &elaboration::capabilities::World<'_>, predicate: &nir::program::TypePredicate)
-    -> comptime_interpretor::ContractOutcome {
+fn runtime_type_predicate(
+    world: &elaboration::capabilities::World<'_>,
+    predicate: &nir::program::TypePredicate,
+) -> comptime_interpretor::ContractOutcome {
     use comptime_interpretor::ContractOutcome;
     match world.check_predicate(predicate, elaboration::ptc::Budget::default()) {
         Ok(elaboration::ptc::Outcome::Entailed(_)) => ContractOutcome::Satisfied,

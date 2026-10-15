@@ -2,8 +2,8 @@ pub mod cli;
 pub mod frontend;
 pub mod invocation;
 
-pub mod instantiation;
 pub mod execution;
+pub mod instantiation;
 pub mod packages;
 pub mod protocols;
 

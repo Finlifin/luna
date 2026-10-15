@@ -113,6 +113,13 @@ pub enum TypeAssessment {
     Applicable(TypeEvidence),
     /// A refutation, not merely a countermodel to the positive requirement.
     Excluded(Proof),
+    /// Distinct fixed symbol indices cannot denote the same interface instance.
+    /// This is a checked identity mismatch, not a program-value PTC equation.
+    SymbolMismatch {
+        position: usize,
+        expected: Term,
+        actual: Term,
+    },
     ForbiddenSubject(Term),
     Pending(String),
     Invalid(String),
@@ -121,7 +128,9 @@ impl TypeAssessment {
     pub fn applicability(&self) -> Applicability {
         match self {
             Self::Applicable(_) => Applicability::Applicable,
-            Self::Excluded(_) | Self::ForbiddenSubject(_) => Applicability::Excluded,
+            Self::Excluded(_) | Self::SymbolMismatch { .. } | Self::ForbiddenSubject(_) => {
+                Applicability::Excluded
+            }
             Self::Pending(_) | Self::Invalid(_) => Applicability::Pending,
         }
     }
@@ -178,19 +187,29 @@ pub(super) fn validate(
                 pending.push((Work::Term(subject), depth + 1));
                 pending.extend(arguments.iter().map(|t| (Work::Term(t), depth + 1)));
             }
-            Work::Term(Term::NominalValue {ty,fields,..}) => {if fields.len().saturating_add(1)>fuel {return Err("input budget exhausted".into());}pending.push((Work::Term(ty),depth+1));pending.extend(fields.iter().map(|field|(Work::Term(field),depth+1)));},
+            Work::Term(Term::NominalValue { ty, fields, .. }) => {
+                if fields.len().saturating_add(1) > fuel {
+                    return Err("input budget exhausted".into());
+                }
+                pending.push((Work::Term(ty), depth + 1));
+                pending.extend(fields.iter().map(|field| (Work::Term(field), depth + 1)));
+            }
             Work::Term(Term::Record(fields) | Term::RecordValue(fields)) => {
                 if fields.len() > fuel {
                     return Err("input budget exhausted".into());
                 }
                 for (name, ty) in fields {
-                    fuel = fuel.checked_sub(name.len()).ok_or("input budget exhausted")?;
+                    fuel = fuel
+                        .checked_sub(name.len())
+                        .ok_or("input budget exhausted")?;
                     pending.push((Work::Term(ty), depth + 1));
                 }
             }
             Work::Term(
                 Term::Tuple(items)
-                | Term::TypeListValue(items) | Term::TypeListConcat(items) | Term::TupleValue(items)
+                | Term::TypeListValue(items)
+                | Term::TypeListConcat(items)
+                | Term::TupleValue(items)
                 | Term::Nominal {
                     arguments: items, ..
                 }
@@ -206,6 +225,11 @@ pub(super) fn validate(
             Work::Term(Term::Pointer(t) | Term::ComptimeFunction(t)) => {
                 pending.push((Work::Term(t), depth + 1))
             }
+            Work::Term(Term::Symbol(name) | Term::String(name)) => {
+                fuel = fuel
+                    .checked_sub(name.len())
+                    .ok_or("input budget exhausted")?;
+            }
             Work::Term(Term::Function { parameters, result }) => {
                 if parameters.len() > fuel {
                     return Err("input budget exhausted".into());
@@ -214,12 +238,24 @@ pub(super) fn validate(
                 pending.push((Work::Term(result), depth + 1));
             }
             Work::Term(Term::Computation { effects, result }) => {
-                fuel = fuel.checked_sub(effects.len()).ok_or("input budget exhausted")?;
-                let width = effects.iter().try_fold(1usize, |sum, op| sum.checked_add(op.arguments.len())).ok_or("input budget exhausted")?;
-                if width > fuel { return Err("input budget exhausted".into()); }
+                fuel = fuel
+                    .checked_sub(effects.len())
+                    .ok_or("input budget exhausted")?;
+                let width = effects
+                    .iter()
+                    .try_fold(1usize, |sum, op| sum.checked_add(op.arguments.len()))
+                    .ok_or("input budget exhausted")?;
+                if width > fuel {
+                    return Err("input budget exhausted".into());
+                }
                 pending.push((Work::Term(result), depth + 1));
                 for operation in effects {
-                    pending.extend(operation.arguments.iter().map(|t| (Work::Term(t), depth + 1)));
+                    pending.extend(
+                        operation
+                            .arguments
+                            .iter()
+                            .map(|t| (Work::Term(t), depth + 1)),
+                    );
                 }
             }
             Work::Term(Term::Closure {
@@ -321,12 +357,17 @@ impl ImplementationHead {
                 "duplicate implementation parameter".into(),
             ));
         }
+        if subject.sort() != Sort::Type || self.subject.sort() != Sort::Type {
+            return Err(TypeAssessment::Invalid(
+                "implementation subject must be a Type".into(),
+            ));
+        }
         for term in std::iter::once(subject)
             .chain(interface_arguments)
             .chain(std::iter::once(&self.subject))
             .chain(&self.interface_arguments)
         {
-            if term.sort() != Sort::Type {
+            if term.sort() != Sort::Type && !matches!(term, Term::Symbol(_)) {
                 return Err(TypeAssessment::Pending(
                     "non-Type interface argument matching is not implemented".into(),
                 ));
@@ -347,7 +388,12 @@ impl ImplementationHead {
         let (shape, eligibility_proof) = match subject {
             subject if context.is_tuple_type(subject) => (subject.clone(), None),
             Term::Rigid { .. } | Term::NormalForm { .. } | Term::AssociatedType { .. } => {
-                match context.structural_view_with_heads_metered(subject, budget, |head| context.is_tuple_head(head)).0 {
+                match context
+                    .structural_view_with_heads_metered(subject, budget, |head| {
+                        context.is_tuple_head(head)
+                    })
+                    .0
+                {
                     Ok(Some((shape, proof))) => (shape, Some(proof)),
                     _ => {
                         return Err(TypeAssessment::Pending(
@@ -370,7 +416,8 @@ impl ImplementationHead {
                 | Term::Pointer(_)
                 | Term::Function { .. }
                 | Term::ComptimeFunction(_)
-        ) && !context.is_tuple_type(&shape) {
+        ) && !context.is_tuple_type(&shape)
+        {
             return Err(TypeAssessment::Pending(
                 "user implementation subject eligibility is unresolved".into(),
             ));
@@ -396,7 +443,27 @@ impl ImplementationHead {
         if shape != *subject {
             relations.push((template, I::Stable(shape)));
         }
-        for (template, actual) in self.interface_arguments.iter().zip(interface_arguments) {
+        for (position, (template, actual)) in self
+            .interface_arguments
+            .iter()
+            .zip(interface_arguments)
+            .enumerate()
+        {
+            if let (Term::Symbol(expected), Term::Symbol(supplied)) = (template, actual) {
+                if expected != supplied {
+                    return Err(TypeAssessment::SymbolMismatch {
+                        position,
+                        expected: template.clone(),
+                        actual: actual.clone(),
+                    });
+                }
+                continue;
+            }
+            if template.sort() != Sort::Type || actual.sort() != Sort::Type {
+                return Err(TypeAssessment::Invalid(
+                    "interface index domain mismatch".into(),
+                ));
+            }
             let template = match instantiate(template) {
                 Ok(t) => t,
                 Err(e) => return Err(TypeAssessment::Invalid(e.to_string())),
@@ -497,7 +564,10 @@ impl ImplementationHead {
     }
 }
 impl HeadMatch {
-    pub(crate) fn discharge_with(self, mut prove: impl FnMut(Formula, Budget) -> Outcome) -> TypeAssessment {
+    pub(crate) fn discharge_with(
+        self,
+        mut prove: impl FnMut(Formula, Budget) -> Outcome,
+    ) -> TypeAssessment {
         let HeadMatch {
             evidence,
             requirements: pending_requirements,
@@ -521,7 +591,9 @@ impl HeadMatch {
                     let assessment = match prove(requirement.negate(), budget) {
                         Outcome::Entailed(proof) => TypeAssessment::Excluded(proof),
                         Outcome::IllFormed(reason) => TypeAssessment::Invalid(reason),
-                        _ => TypeAssessment::Pending("type relation has not been proved or refuted".into()),
+                        _ => TypeAssessment::Pending(
+                            "type relation has not been proved or refuted".into(),
+                        ),
                     };
                     if matches!(
                         assessment,
@@ -580,7 +652,11 @@ impl Index {
         })
     }
     pub(crate) fn resolve_assessed_with(
-        &self, interface: DeclarationId, arguments: &[Term], subject: &Term, budget: Budget,
+        &self,
+        interface: DeclarationId,
+        arguments: &[Term],
+        subject: &Term,
+        budget: Budget,
         mut assess: impl FnMut(&ImplementationHead, Budget) -> (TypeAssessment, Applicability),
     ) -> Result<TypeResolution, Error> {
         let search_budget = Budget {
@@ -645,6 +721,14 @@ impl fmt::Display for TypeAssessment {
         match self {
             Self::Applicable(evidence) => evidence.fmt(f),
             Self::Excluded(proof) => write!(f, "(excluded {proof})"),
+            Self::SymbolMismatch {
+                position,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "(symbol-index-mismatch (position {position}) (expected {expected}) (actual {actual}))"
+            ),
             Self::ForbiddenSubject(ty) => write!(f, "(forbidden-subject {ty})"),
             Self::Pending(reason) => write!(f, "(pending {reason:?})"),
             Self::Invalid(reason) => write!(f, "(invalid {reason:?})"),
@@ -689,13 +773,26 @@ impl ImplementationHead {
         context: &Context,
         budget: Budget,
     ) -> Result<(), crate::ptc::ProofError> {
-        self.verify_subject_evidence_with(evidence, subject, interface_arguments, context, budget,
-            |proof, budget| context.verify_proof(proof, budget))
+        self.verify_subject_evidence_with(
+            evidence,
+            subject,
+            interface_arguments,
+            context,
+            budget,
+            |proof, budget| context.verify_proof(proof, budget),
+        )
     }
     pub(super) fn verify_subject_evidence_with(
-        &self, evidence: &TypeEvidence, subject: &Term, interface_arguments: &[Term],
-        context: &Context, budget: Budget,
-        mut verify_requirement: impl FnMut(&crate::ptc::Proof, Budget) -> Result<(), crate::ptc::ProofError>,
+        &self,
+        evidence: &TypeEvidence,
+        subject: &Term,
+        interface_arguments: &[Term],
+        context: &Context,
+        budget: Budget,
+        mut verify_requirement: impl FnMut(
+            &crate::ptc::Proof,
+            Budget,
+        ) -> Result<(), crate::ptc::ProofError>,
     ) -> Result<(), crate::ptc::ProofError> {
         use crate::ptc::{Equality, ProofError};
         let remaining = validate(self, subject, interface_arguments, budget)
@@ -751,7 +848,8 @@ impl ImplementationHead {
                 | Term::Pointer(_)
                 | Term::Function { .. }
                 | Term::ComptimeFunction(_)
-        ) && !context.is_tuple_type(&shape) {
+        ) && !context.is_tuple_type(&shape)
+        {
             return Err(ProofError::Invalid);
         }
         let instantiate = |ty: &Term| {
@@ -764,7 +862,17 @@ impl ImplementationHead {
             expected.push(Formula::equal(instantiated, shape.clone()));
         }
         for (template, actual) in self.interface_arguments.iter().zip(interface_arguments) {
-            expected.push(Formula::equal(instantiate(template)?, actual.clone()));
+            let template = instantiate(template)?;
+            if let (Term::Symbol(left), Term::Symbol(right)) = (&template, actual) {
+                if left != right {
+                    return Err(ProofError::Invalid);
+                }
+                continue;
+            }
+            if template.sort() != Sort::Type || actual.sort() != Sort::Type {
+                return Err(ProofError::Invalid);
+            }
+            expected.push(Formula::equal(template, actual.clone()));
         }
         if expected.len() != evidence.head_proofs.len()
             || self.requirements.len() != evidence.requirement_proofs.len()

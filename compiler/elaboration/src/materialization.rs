@@ -1,9 +1,9 @@
 //! Compile-time closure of concrete function/interface dependencies. Templates
 //! stay in NIR; only fixed selections are exported to the execution table.
-mod staged;
-mod conditional_calls;
 #[cfg(test)]
 mod callable_tests;
+mod conditional_calls;
+mod staged;
 use crate::{
     implementation::{ImplementationHead, Index, Selection, TypeAssessment},
     ptc::{Budget, Context},
@@ -17,32 +17,54 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 // namespace; closure-owned bindings remain local to that closure.
 fn rebind_default_locals(
     expression: &mut n::Expr,
-    aliases: &std::collections::BTreeMap<n::LocalId,n::LocalId>,
+    aliases: &std::collections::BTreeMap<n::LocalId, n::LocalId>,
     fuel: &mut usize,
     depth: usize,
-) -> Result<(),String> {
-    if depth>=128 {return Err("staged method default scope depth exceeded".into());}
-    iir::visit::expression_mut_pruned(expression,fuel,|expr,fuel| {
-        if let K::Closure {captures,parameters,body}=&mut expr.kind {
-            *fuel=fuel.checked_sub(aliases.len()+captures.len()+parameters.len())
+) -> Result<(), String> {
+    if depth >= 128 {
+        return Err("staged method default scope depth exceeded".into());
+    }
+    iir::visit::expression_mut_pruned(expression, fuel, |expr, fuel| {
+        if let K::Closure {
+            captures,
+            parameters,
+            body,
+        } = &mut expr.kind
+        {
+            *fuel = fuel
+                .checked_sub(aliases.len() + captures.len() + parameters.len())
                 .ok_or("staged method default binding budget exhausted")?;
-            let mut inner=aliases.clone();
-            for parameter in parameters {inner.remove(parameter);}
+            let mut inner = aliases.clone();
+            for parameter in parameters {
+                inner.remove(parameter);
+            }
             for capture in captures {
                 inner.remove(&capture.binding);
-                if let Some(value)=&mut capture.value {
-                    rebind_default_locals(value,aliases,fuel,depth+1)?;
-                } else if let Some(binding)=aliases.get(&capture.binding) {
-                    capture.value=Some(Box::new(n::Expr {source:expr.source,ty:capture.ty.clone(),kind:K::Local(*binding)}));
+                if let Some(value) = &mut capture.value {
+                    rebind_default_locals(value, aliases, fuel, depth + 1)?;
+                } else if let Some(binding) = aliases.get(&capture.binding) {
+                    capture.value = Some(Box::new(n::Expr {
+                        source: expr.source,
+                        ty: capture.ty.clone(),
+                        kind: K::Local(*binding),
+                    }));
                 }
             }
-            rebind_default_locals(std::sync::Arc::make_mut(body),&inner,fuel,depth+1)?;
+            rebind_default_locals(std::sync::Arc::make_mut(body), &inner, fuel, depth + 1)?;
             return Ok(false);
         }
         match &mut expr.kind {
-            K::Local(binding)=>{if let Some(replacement)=aliases.get(binding) {*binding=*replacement;}},
-            K::Assign {place,..} | K::BitAssign {place,..} | K::BitUpdate {place,..}=>{if let Some(replacement)=aliases.get(&place.root) {place.root=*replacement;}},
-            _=>{},
+            K::Local(binding) => {
+                if let Some(replacement) = aliases.get(binding) {
+                    *binding = *replacement;
+                }
+            }
+            K::Assign { place, .. } | K::BitAssign { place, .. } | K::BitUpdate { place, .. } => {
+                if let Some(replacement) = aliases.get(&place.root) {
+                    place.root = *replacement;
+                }
+            }
+            _ => {}
         }
         Ok(true)
     })
@@ -54,8 +76,9 @@ enum Task {
     Type(Term),
 }
 struct Builder<'a> {
-    quote_cursor:u32,
-    quote_sources:Vec<n::ExpansionSource>,
+    trait_parameter_sorts: std::collections::BTreeMap<Id, nir::Sort>,
+    quote_cursor: u32,
+    quote_sources: Vec<n::ExpansionSource>,
     retain_templates: bool,
     package: &'a n::Package,
     index: Index,
@@ -84,7 +107,8 @@ pub fn dispatch_instances(
     package: &n::Package,
     budget: Budget,
 ) -> Result<Vec<n::DispatchInstance>, String> {
-    build(package, budget, Roots::All, BTreeSet::new(), &[], None).map(|(dispatch, _, _, _, _, _)| dispatch)
+    build(package, budget, Roots::All, BTreeSet::new(), &[], None)
+        .map(|(dispatch, _, _, _, _, _)| dispatch)
 }
 /// Prepare only the transitive dispatch dependencies of explicit entry points.
 /// This preserves NIR function bodies and does not impose runtime IIR closure
@@ -94,8 +118,15 @@ pub fn dispatch_instances_for_roots(
     roots: &[iir::InstanceKey],
     budget: Budget,
 ) -> Result<Vec<n::DispatchInstance>, String> {
-    build(package, budget, Roots::Dispatch(roots), BTreeSet::new(), &[], None)
-        .map(|(dispatch, _, _, _, _, _)| dispatch)
+    build(
+        package,
+        budget,
+        Roots::Dispatch(roots),
+        BTreeSet::new(),
+        &[],
+        None,
+    )
+    .map(|(dispatch, _, _, _, _, _)| dispatch)
 }
 
 /// Resolve one concrete method through the same checked dispatch closure used
@@ -107,8 +138,17 @@ pub fn resolve_method_instance(
     fuel: &mut usize,
 ) -> Result<n::MethodInstance, String> {
     let mut selected = None;
-    let result = build(package, Budget { steps: *fuel, ..Budget::default() },
-        Roots::Method(callee, &mut selected), BTreeSet::new(), &[], None);
+    let result = build(
+        package,
+        Budget {
+            steps: *fuel,
+            ..Budget::default()
+        },
+        Roots::Method(callee, &mut selected),
+        BTreeSet::new(),
+        &[],
+        None,
+    );
     match result {
         Ok((_, _, _, _, remaining, _)) => {
             *fuel = remaining;
@@ -122,24 +162,83 @@ pub fn resolve_method_instance(
     }
 }
 
+/// Normalize annotations on a private expansion candidate without invoking
+/// code, selecting bodies or publishing an executable instance. Unresolved
+/// definition-side projections remain views; opaque heads retain identity.
+pub(crate) fn normalize_inline_annotations(
+    package: &n::Package,
+    function: &mut n::Function,
+    fuel: &mut usize,
+) -> Result<(), String> {
+    let result = build(
+        package,
+        Budget {
+            steps: *fuel,
+            ..Budget::default()
+        },
+        Roots::Annotations(function),
+        BTreeSet::new(),
+        &[],
+        None,
+    );
+    match result {
+        Ok((_, _, _, _, remaining, _)) => {
+            *fuel = remaining;
+            Ok(())
+        }
+        Err(reason) => {
+            *fuel = 0;
+            Err(reason)
+        }
+    }
+}
+
 /// Select a quote body without enqueueing it as an executable function.
 pub(crate) fn resolve_quote_method_instance(
-    package:&n::Package,callee:&n::Expr,fuel:&mut usize,
-)->Result<n::MethodInstance,String> {
-    let mut selected=None;
-    let result=build(package,Budget {steps:*fuel,..Budget::default()},
-        Roots::QuoteMethod(callee,&mut selected),BTreeSet::new(),&[],None);
+    package: &n::Package,
+    callee: &n::Expr,
+    fuel: &mut usize,
+) -> Result<n::MethodInstance, String> {
+    let mut selected = None;
+    let result = build(
+        package,
+        Budget {
+            steps: *fuel,
+            ..Budget::default()
+        },
+        Roots::QuoteMethod(callee, &mut selected),
+        BTreeSet::new(),
+        &[],
+        None,
+    );
     match result {
-        Ok((_,_,_,_,remaining,_))=>{*fuel=remaining;selected.ok_or("quote selection produced no body identity".into())},
-        Err(reason)=>{*fuel=0;Err(reason)},
+        Ok((_, _, _, _, remaining, _)) => {
+            *fuel = remaining;
+            selected.ok_or("quote selection produced no body identity".into())
+        }
+        Err(reason) => {
+            *fuel = 0;
+            Err(reason)
+        }
     }
 }
 
 /// Private comptime snapshots may retain admitted rigid binder premises.
 pub(crate) fn dispatch_instances_in_context(
-    package: &n::Package, context: &Context, assumptions: &[n::TraitRequirement], budget: Budget,
-) -> Result<Vec<n::DispatchInstance>,String> {
-    build(package,budget,Roots::All,BTreeSet::new(),&[],Some((context,assumptions))).map(|(dispatch,_,_,_,_,_)|dispatch)
+    package: &n::Package,
+    context: &Context,
+    assumptions: &[n::TraitRequirement],
+    budget: Budget,
+) -> Result<Vec<n::DispatchInstance>, String> {
+    build(
+        package,
+        budget,
+        Roots::All,
+        BTreeSet::new(),
+        &[],
+        Some((context, assumptions)),
+    )
+    .map(|(dispatch, _, _, _, _, _)| dispatch)
 }
 /// Materialize an explicit set of function instances. Failure publishes no
 /// partial graph; recursive calls reuse the same instance identity.
@@ -149,17 +248,26 @@ pub fn instantiate(
     runtime_bindings: BTreeSet<nir::RuntimeId>,
     budget: Budget,
 ) -> Result<iir::Package, String> {
-    instantiate_with_types(package,roots,&[],runtime_bindings,budget)
+    instantiate_with_types(package, roots, &[], runtime_bindings, budget)
 }
 
 /// Retain layouts needed by external concrete operations, including cleanup.
 pub fn instantiate_with_types(
-    package:&n::Package, roots:&[iir::InstanceKey], types:&[nir::Term],
-    runtime_bindings:BTreeSet<nir::RuntimeId>, budget:Budget,
-)->Result<iir::Package,String> {
+    package: &n::Package,
+    roots: &[iir::InstanceKey],
+    types: &[nir::Term],
+    runtime_bindings: BTreeSet<nir::RuntimeId>,
+    budget: Budget,
+) -> Result<iir::Package, String> {
     nir::phases::validate(package).map_err(|e| format!("IIR input phase: {}", e.message))?;
-    let (mut dispatch, functions, nominals, interfaces, _, expansion_sources) =
-        build(package, budget, Roots::Iir(roots), runtime_bindings.clone(), types, None)?;
+    let (mut dispatch, functions, nominals, interfaces, _, expansion_sources) = build(
+        package,
+        budget,
+        Roots::Iir(roots),
+        runtime_bindings.clone(),
+        types,
+        None,
+    )?;
     // A selected interface may have conditionally available or simply unused
     // methods. Publish executable links only for demanded concrete bodies.
     let demanded: HashSet<_> = functions
@@ -187,6 +295,7 @@ pub fn instantiate_with_types(
 }
 enum Roots<'a> {
     All,
+    Annotations(&'a mut n::Function),
     Dispatch(&'a [iir::InstanceKey]),
     Iir(&'a [iir::InstanceKey]),
     Method(&'a n::Expr, &'a mut Option<n::MethodInstance>),
@@ -210,11 +319,14 @@ fn build(
     ),
     String,
 > {
-    let quote_selection=matches!(roots,Roots::QuoteMethod(..));
-    let assumptions=context.map(|(_,assumptions)|assumptions.to_vec()).unwrap_or_default();
+    let quote_selection = matches!(roots, Roots::QuoteMethod(..));
+    let assumptions = context
+        .map(|(_, assumptions)| assumptions.to_vec())
+        .unwrap_or_default();
     let context = match context {
-        Some((context,_))=>context.clone(),
-        None=>Context::from_package(package).map_err(|reason|format!("dispatch type context: {reason}"))?,
+        Some((context, _)) => context.clone(),
+        None => Context::from_package(package)
+            .map_err(|reason| format!("dispatch type context: {reason}"))?,
     };
     let mut index = Index::default();
     for implementation in &package.implementations {
@@ -234,10 +346,16 @@ fn build(
                 .map_err(|e| format!("dispatch index: {e:?}"))?;
         }
     }
+    let mut input_fuel = budget.steps;
+    let trait_parameter_sorts = package.trait_parameter_sorts(&mut input_fuel)?;
     let mut builder = Builder {
-        quote_cursor:package.quote_identity_cursor,
-        quote_sources:if matches!(roots,Roots::Iir(_)) {package.expansion_sources.clone()} else {Vec::new()},
-        retain_templates: matches!(roots,Roots::All),
+        quote_cursor: package.quote_identity_cursor,
+        quote_sources: if matches!(roots, Roots::Iir(_)) {
+            package.expansion_sources.clone()
+        } else {
+            Vec::new()
+        },
+        retain_templates: matches!(roots, Roots::All),
         package,
         index,
         context,
@@ -251,18 +369,28 @@ fn build(
         staging_views: HashMap::new(),
         interfaces: HashMap::new(),
         output: vec![],
-        fuel: budget.steps,
+        fuel: input_fuel,
         budget,
         instances: matches!(roots, Roots::Iir(_)).then(Vec::new),
         runtime_bindings,
         nominals: vec![],
         interface_contracts: vec![],
+        trait_parameter_sorts,
     };
     for ty in type_roots {
         let ty = builder.normalized_type(ty)?;
         builder.queue.push_back(Task::Type(ty));
     }
-    if let Roots::Dispatch(roots) | Roots::Iir(roots) = roots {
+    if let Roots::Annotations(function) = roots {
+        function.signature = builder.staging_type_view(&function.signature)?;
+        for expression in std::iter::once(&mut function.body)
+            .chain(function.defaults.iter_mut().map(|(_, value)| value))
+            .chain(&mut function.preconditions)
+            .chain(&mut function.postconditions)
+        {
+            expression.rewrite_types(&mut |ty| builder.staging_type_view(ty))?;
+        }
+    } else if let Roots::Dispatch(roots) | Roots::Iir(roots) = roots {
         for root in roots {
             builder.tick(0)?;
             for argument in &root.arguments {
@@ -274,16 +402,32 @@ fn build(
                 .push_back(Task::Function(root.declaration, root.arguments.clone()));
         }
     } else if let Roots::Method(callee, selected) | Roots::QuoteMethod(callee, selected) = roots {
-        let K::TraitMethod { interface, interface_arguments, subject, member, method_arguments } = &callee.kind else {
+        let K::TraitMethod {
+            interface,
+            interface_arguments,
+            subject,
+            member,
+            method_arguments,
+        } = &callee.kind
+        else {
             return Err("method selection requires a trait method expression".into());
         };
-        let slot = builder.interface(n::InterfaceInstance {
-            declaration: *interface, arguments: interface_arguments.clone(),
-        }, subject.clone())?;
+        let slot = builder.interface(
+            n::InterfaceInstance {
+                declaration: *interface,
+                arguments: interface_arguments.clone(),
+            },
+            subject.clone(),
+        )?;
         let instance = builder.output[slot].interface_instance();
         let subject = builder.output[slot].subject.clone();
-        let method = builder.specialize_method(slot, &instance, &subject, *member, method_arguments)?;
-        if !quote_selection {builder.queue.push_back(Task::Function(method.body, method.arguments.clone()));}
+        let method =
+            builder.specialize_method(slot, &instance, &subject, *member, method_arguments)?;
+        if !quote_selection {
+            builder
+                .queue
+                .push_back(Task::Function(method.body, method.arguments.clone()));
+        }
         *selected = Some(method);
     } else {
         for function in &package.functions {
@@ -317,14 +461,28 @@ fn build(
             Task::Interface(interface, subject) => {
                 // A given obligation has no executable dispatch identity.
                 // Method/value demands still call interface() directly.
-                let given=crate::capabilities::World {
-                    index:&builder.index, implementations:&package.implementations,
-                    traits:&package.traits, assumptions:&builder.assumptions, context:&builder.context,
-                }.given(&n::TraitRequirement {interface:interface.declaration,interface_arguments:interface.arguments.clone(),subject:subject.clone()},budget).is_some();
+                let given = crate::capabilities::World {
+                    index: &builder.index,
+                    implementations: &package.implementations,
+                    traits: &package.traits,
+                    assumptions: &builder.assumptions,
+                    context: &builder.context,
+                }
+                .given(
+                    &n::TraitRequirement {
+                        interface: interface.declaration,
+                        interface_arguments: interface.arguments.clone(),
+                        subject: subject.clone(),
+                    },
+                    budget,
+                )
+                .is_some();
                 if !given {
                     if builder.instances.is_some() {
                         let capability = builder.normalized_capability(&n::TraitRequirement {
-                            interface: interface.declaration, interface_arguments: interface.arguments, subject,
+                            interface: interface.declaration,
+                            interface_arguments: interface.arguments,
+                            subject,
                         })?;
                         builder.interface(capability.interface_instance(), capability.subject)?;
                     } else {
@@ -360,11 +518,20 @@ impl Builder<'_> {
             crate::associated::charge_projection_copy(argument, &mut self.fuel)
                 .map_err(|_| "dispatch instance argument type budget exhausted".to_owned())?;
         }
-        if let Some(identity) = self.package.runtime_function_identities.iter().find(|f| f.declaration == id) {
+        if let Some(identity) = self
+            .package
+            .runtime_function_identities
+            .iter()
+            .find(|f| f.declaration == id)
+        {
             if self.instances.is_some() {
-                return Err("runtime function identity has no executable definition for IIR".into());
+                return Err(
+                    "runtime function identity has no executable definition for IIR".into(),
+                );
             }
-            let signature = identity.signature.instantiate_types(&identity.type_parameters, &arguments)
+            let signature = identity
+                .signature
+                .instantiate_types(&identity.type_parameters, &arguments)
                 .map_err(|e| e.to_string())?;
             self.queue.push_back(Task::Type(signature));
             return Ok(());
@@ -391,14 +558,30 @@ impl Builder<'_> {
                 self.queue.push_back(Task::Type(argument.clone()));
             }
         }
-        let mut function = if let Some(staged) = self.staged_functions.get(&(id, arguments.clone())) {
+        let mut function = if let Some(staged) = self.staged_functions.get(&(id, arguments.clone()))
+        {
             staged.clone()
         } else {
-            if self.instances.is_some() && f.phase==n::FunctionPhase::Runtime
-                && matches!(f.signature.callable_signature(),Term::Function {parameters,..} if parameters.iter().any(|p|p.sort!=nir::Sort::Runtime)) {
+            if self.instances.is_some()
+                && f.phase == n::FunctionPhase::Runtime
+                && matches!(f.signature.callable_signature(),Term::Function {parameters,..} if parameters.iter().any(|p|p.sort!=nir::Sort::Runtime))
+            {
                 return Err("staged runtime function requires a specialized direct call".into());
             }
-            f.instantiate_types(&f.type_parameters, &arguments).map_err(|e| e.to_string())?
+            let parameters = f
+                .type_parameters
+                .iter()
+                .map(|id| nir::DeclarationParameter {
+                    declaration: *id,
+                    sort: self
+                        .trait_parameter_sorts
+                        .get(id)
+                        .copied()
+                        .unwrap_or(nir::Sort::Type),
+                })
+                .collect::<Vec<_>>();
+            f.instantiate_parameters(&parameters, &arguments)
+                .map_err(|e| e.to_string())?
         };
         if self.instances.is_some() {
             function.signature = self.normalized_type(&function.signature)?;
@@ -407,9 +590,12 @@ impl Builder<'_> {
         self.queue.push_back(Task::Type(function.signature.clone()));
         if self.instances.is_none()
             && matches!(function.signature.callable_signature(),Term::Function {parameters,..}
-                if parameters.iter().any(|parameter|parameter.sort==nir::Sort::Type)) {
+                if parameters.iter().any(|parameter|parameter.sort==nir::Sort::Type))
+        {
             if !self.retain_templates {
-                return Err("requested dispatch function still requires ordinary Type input staging".into());
+                return Err(
+                    "requested dispatch function still requires ordinary Type input staging".into(),
+                );
             }
             // An ordinary Type input is an invocation binder, not a closed
             // dispatch identity. Keep the template and its contracts in NIR;
@@ -417,7 +603,9 @@ impl Builder<'_> {
             return Ok(());
         }
         if self.instances.is_none() {
-            for requirement in &function.requirements {self.predicate_dependencies(requirement,0)?;}
+            for requirement in &function.requirements {
+                self.predicate_dependencies(requirement, 0)?;
+            }
         }
         if self.instances.is_some() {
             for requirement in &mut function.requirements {
@@ -445,11 +633,23 @@ impl Builder<'_> {
             ));
         }
         if self.instances.is_some() {
-            iir::staging::forward_closed_locals_with_layouts(&self.package.normal_forms, &mut function, &mut self.fuel)?;
+            iir::staging::forward_closed_locals_with_layouts(
+                &self.package.normal_forms,
+                &mut function,
+                &mut self.fuel,
+            )?;
             self.normalize_expression(&mut function.body)?;
-            for expression in function.preconditions.iter_mut()
+            for expression in function
+                .preconditions
+                .iter_mut()
                 .chain(&mut function.postconditions)
-                .chain(function.defaults.iter_mut().map(|(_, expression)| expression)) {
+                .chain(
+                    function
+                        .defaults
+                        .iter_mut()
+                        .map(|(_, expression)| expression),
+                )
+            {
                 self.normalize_expression(expression)?;
             }
         }
@@ -486,7 +686,7 @@ impl Builder<'_> {
             subject = selected_subject;
         }
         for argument in &mut interface.arguments {
-            let selected = self.normalized_type(argument)?;
+            let selected = self.normalized_interface_input(argument)?;
             if selected != *argument {
                 self.queue.push_back(Task::Type(argument.clone()));
                 *argument = selected;
@@ -534,10 +734,11 @@ impl Builder<'_> {
             .iter()
             .find(|t| t.declaration == interface.declaration)
             .ok_or("missing dispatch interface")?;
+        let parameter_binders = contract.binders_with_self(&mut self.fuel)?;
         for requirement in &contract.requirements {
             let requirement = requirement
-                .instantiate_types(
-                    &contract.parameters_with_self(),
+                .instantiate_parameters(
+                    &parameter_binders,
                     &std::iter::once(subject.clone())
                         .chain(interface.arguments.iter().cloned())
                         .collect::<Vec<_>>(),
@@ -555,8 +756,8 @@ impl Builder<'_> {
         }
         for capability in &contract.capabilities {
             let capability = capability
-                .instantiate_types(
-                    &contract.parameters_with_self(),
+                .instantiate_parameters(
+                    &parameter_binders,
                     &std::iter::once(subject.clone())
                         .chain(interface.arguments.iter().cloned())
                         .collect::<Vec<_>>(),
@@ -574,28 +775,44 @@ impl Builder<'_> {
             // Unconditional interface signatures remain part of the exported
             // contract even when their bodies are unused. Conditional members
             // are added by specialize_method only when actually demanded.
-            let parameters = contract.parameters_with_self();
+            let parameters = &parameter_binders;
             let inputs: Vec<_> = std::iter::once(subject.clone())
-                .chain(interface.arguments.iter().cloned()).collect();
+                .chain(interface.arguments.iter().cloned())
+                .collect();
             let mut methods = Vec::new();
             for template in &contract.methods {
-                if !template.type_parameters.is_empty() || !template.requirements.is_empty()
-                    || !template.capabilities.is_empty() { continue; }
+                if !template.type_parameters.is_empty()
+                    || !template.requirements.is_empty()
+                    || !template.capabilities.is_empty()
+                {
+                    continue;
+                }
                 let mut method = template.clone();
                 method.default = None;
-                method.signature = method.signature.instantiate_types(&parameters, &inputs)
+                method.signature = method
+                    .signature
+                    .instantiate_parameters(parameters, &inputs)
                     .map_err(|e| e.to_string())?;
-                method.program = method.program.instantiate_types(&parameters, &inputs)
+                method.program = method
+                    .program
+                    .instantiate_parameters(parameters, &inputs)
                     .map_err(|e| e.to_string())?;
                 self.normalize_method_contract(&mut method)?;
                 self.queue.push_back(Task::Type(method.signature.clone()));
-                for expression in method.program.preconditions.iter().chain(&method.program.postconditions) {
+                for expression in method
+                    .program
+                    .preconditions
+                    .iter()
+                    .chain(&method.program.postconditions)
+                {
                     self.expr(expression, 0)?;
                 }
                 methods.push(method);
             }
             self.interface_contracts.push(iir::InterfaceContract {
-                interface: interface.clone(), subject: subject.clone(), methods,
+                interface: interface.clone(),
+                subject: subject.clone(),
+                methods,
             });
             for argument in &interface.arguments {
                 self.queue.push_back(Task::Type(argument.clone()));
@@ -615,15 +832,13 @@ impl Builder<'_> {
         self.interfaces
             .insert((interface.clone(), subject.clone()), slot);
         for parent in &contract.parents {
-            let parameters: Vec<_> = std::iter::once(contract.self_parameter)
-                .chain(contract.type_parameters.iter().copied())
-                .collect();
+            let parameters = &parameter_binders;
             let arguments: Vec<_> = std::iter::once(subject.clone())
                 .chain(interface.arguments.iter().cloned())
                 .collect();
             self.queue.push_back(Task::Interface(
                 parent
-                    .instantiate_types(&parameters, &arguments)
+                    .instantiate_parameters(parameters, &arguments)
                     .map_err(|e| e.to_string())?,
                 subject.clone(),
             ));
@@ -638,12 +853,23 @@ impl Builder<'_> {
         member: Id,
         method_arguments: &[Term],
     ) -> Result<n::MethodInstance, String> {
-        if let Some(method) = self.output[slot].methods.iter().find(|m| {
-            m.member == member && m.method_arguments == method_arguments
-        }) { return Ok(method.clone()); }
-        let contract = self.package.traits.iter().find(|t| t.declaration == interface.declaration)
+        if let Some(method) = self.output[slot]
+            .methods
+            .iter()
+            .find(|m| m.member == member && m.method_arguments == method_arguments)
+        {
+            return Ok(method.clone());
+        }
+        let contract = self
+            .package
+            .traits
+            .iter()
+            .find(|t| t.declaration == interface.declaration)
             .ok_or("missing method interface")?;
-        let template = contract.methods.iter().find(|m| m.declaration == member)
+        let template = contract
+            .methods
+            .iter()
+            .find(|m| m.declaration == member)
             .ok_or("unknown dispatch member")?;
         if template.is_quote && self.instances.is_some() {
             return Err("trait quote method requires deterministic expansion after implementation selection; runtime dispatch is not permitted".into());
@@ -651,45 +877,109 @@ impl Builder<'_> {
         if template.type_parameters.len() != method_arguments.len() {
             return Err("dispatch method type argument count mismatch".into());
         }
-        let parameters: Vec<_> = contract.parameters_with_self().into_iter()
-            .chain(template.type_parameters.iter().copied()).collect();
+        let parameters: Vec<_> = contract
+            .binders_with_self(&mut self.fuel)?
+            .into_iter()
+            .chain(
+                template
+                    .type_parameters
+                    .iter()
+                    .map(|id| nir::DeclarationParameter {
+                        declaration: *id,
+                        sort: nir::Sort::Type,
+                    }),
+            )
+            .collect();
         let arguments: Vec<_> = std::iter::once(subject.clone())
-            .chain(interface.arguments.iter().cloned()).chain(method_arguments.iter().cloned()).collect();
-        let implementation = self.package.implementations.iter()
-            .find(|i| i.declaration == self.output[slot].implementation).ok_or("missing selected implementation")?;
-        let body = implementation.methods.iter().find(|(name, _)| name == &template.name)
-            .ok_or("missing selected method body")?.1;
+            .chain(interface.arguments.iter().cloned())
+            .chain(method_arguments.iter().cloned())
+            .collect();
+        let implementation = self
+            .package
+            .implementations
+            .iter()
+            .find(|i| i.declaration == self.output[slot].implementation)
+            .ok_or("missing selected implementation")?;
+        let body = implementation
+            .methods
+            .iter()
+            .find(|(name, _)| name == &template.name)
+            .ok_or("missing selected method body")?
+            .1;
         let mut body_arguments = if template.default == Some(body) {
-            std::iter::once(subject.clone()).chain(interface.arguments.iter().cloned()).collect::<Vec<_>>()
-        } else { self.output[slot].arguments.clone() };
+            std::iter::once(subject.clone())
+                .chain(interface.arguments.iter().cloned())
+                .collect::<Vec<_>>()
+        } else {
+            self.output[slot].arguments.clone()
+        };
         body_arguments.extend(method_arguments.iter().cloned());
         let mut specialized = template.clone();
         specialized.type_arguments = method_arguments.to_vec();
         specialized.type_parameters.clear();
         specialized.default = None;
-        specialized.signature = template.signature.instantiate_types(&parameters, &arguments).map_err(|e| e.to_string())?;
-        specialized.program = template.program.instantiate_types(&parameters, &arguments).map_err(|e| e.to_string())?;
-        specialized.requirements = template.requirements.iter().map(|r| r.instantiate_types(&parameters, &arguments))
-            .collect::<Result<_, _>>().map_err(|e| e.to_string())?;
-        specialized.capabilities = template.capabilities.iter().map(|r| r.instantiate_types(&parameters, &arguments))
-            .collect::<Result<_, _>>().map_err(|e| e.to_string())?;
-        if self.instances.is_some() { self.normalize_method_contract(&mut specialized)?; }
+        specialized.signature = template
+            .signature
+            .instantiate_parameters(&parameters, &arguments)
+            .map_err(|e| e.to_string())?;
+        specialized.program = template
+            .program
+            .instantiate_parameters(&parameters, &arguments)
+            .map_err(|e| e.to_string())?;
+        specialized.requirements = template
+            .requirements
+            .iter()
+            .map(|r| r.instantiate_parameters(&parameters, &arguments))
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?;
+        specialized.capabilities = template
+            .capabilities
+            .iter()
+            .map(|r| r.instantiate_parameters(&parameters, &arguments))
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?;
+        if self.instances.is_some() {
+            self.normalize_method_contract(&mut specialized)?;
+        }
         self.formation_requirements(&specialized.requirements, &[], &[])?;
         for capability in &specialized.capabilities {
-            self.queue.push_back(Task::Interface(capability.interface_instance(), capability.subject.clone()));
+            self.queue.push_back(Task::Interface(
+                capability.interface_instance(),
+                capability.subject.clone(),
+            ));
         }
-        let method = n::MethodInstance {member, body, arguments:body_arguments, method_arguments:method_arguments.to_vec()};
+        let method = n::MethodInstance {
+            member,
+            body,
+            arguments: body_arguments,
+            method_arguments: method_arguments.to_vec(),
+        };
         self.output[slot].methods.push(method.clone());
-        self.queue.push_back(Task::Type(specialized.signature.clone()));
+        self.queue
+            .push_back(Task::Type(specialized.signature.clone()));
         if self.instances.is_some() {
-            for argument in method_arguments { self.queue.push_back(Task::Type(argument.clone())); }
-            let retained = self.interface_contracts.iter_mut().find(|c| c.interface == *interface && c.subject == *subject)
+            for argument in method_arguments {
+                self.queue.push_back(Task::Type(argument.clone()));
+            }
+            let retained = self
+                .interface_contracts
+                .iter_mut()
+                .find(|c| c.interface == *interface && c.subject == *subject)
                 .ok_or("missing retained interface contract")?;
-            if !retained.methods.iter().any(|m| m.declaration == member && m.type_arguments == method_arguments) {
+            if !retained
+                .methods
+                .iter()
+                .any(|m| m.declaration == member && m.type_arguments == method_arguments)
+            {
                 retained.methods.push(specialized.clone());
             }
         }
-        for expression in specialized.program.preconditions.iter().chain(&specialized.program.postconditions) {
+        for expression in specialized
+            .program
+            .preconditions
+            .iter()
+            .chain(&specialized.program.postconditions)
+        {
             self.expr(expression, 0)?;
         }
         Ok(method)
@@ -703,7 +993,9 @@ impl Builder<'_> {
         match predicate {
             n::TypePredicate::Trait(requirement) => {
                 // A logical atom is not an unconditional executable capability.
-                for ty in std::iter::once(&requirement.subject).chain(&requirement.interface_arguments) {
+                for ty in
+                    std::iter::once(&requirement.subject).chain(&requirement.interface_arguments)
+                {
                     crate::associated::charge_projection_copy(ty, &mut self.fuel)?;
                     self.queue.push_back(Task::Type(ty.clone()));
                 }
@@ -724,11 +1016,18 @@ impl Builder<'_> {
         }
         Ok(())
     }
-    fn prove_requirement(&self, requirement: &n::TypePredicate) -> Result<crate::ptc::Outcome, String> {
+    fn prove_requirement(
+        &self,
+        requirement: &n::TypePredicate,
+    ) -> Result<crate::ptc::Outcome, String> {
         crate::capabilities::World {
-            index: &self.index, implementations: &self.package.implementations,
-            traits: &self.package.traits, assumptions: &self.assumptions, context: &self.context,
-        }.check_predicate(requirement, self.budget)
+            index: &self.index,
+            implementations: &self.package.implementations,
+            traits: &self.package.traits,
+            assumptions: &self.assumptions,
+            context: &self.context,
+        }
+        .check_predicate(requirement, self.budget)
     }
     fn formation_requirements(
         &mut self,
@@ -738,7 +1037,12 @@ impl Builder<'_> {
     ) -> Result<(), String> {
         if self.instances.is_none() {
             for requirement in requirements {
-                self.predicate_dependencies(&requirement.instantiate_types(parameters,arguments).map_err(|e|e.to_string())?,0)?;
+                self.predicate_dependencies(
+                    &requirement
+                        .instantiate_types(parameters, arguments)
+                        .map_err(|e| e.to_string())?,
+                    0,
+                )?;
             }
             return Ok(());
         }
@@ -761,14 +1065,21 @@ impl Builder<'_> {
     }
     fn normalize_method_contract(&mut self, method: &mut n::MethodContract) -> Result<(), String> {
         method.signature = self.normalized_type(&method.signature)?;
-        for argument in &mut method.type_arguments { *argument = self.normalized_type(argument)?; }
+        for argument in &mut method.type_arguments {
+            *argument = self.normalized_type(argument)?;
+        }
         for requirement in &mut method.requirements {
             *requirement = self.normalized_predicate(requirement, 0)?;
         }
         for capability in &mut method.capabilities {
             *capability = self.normalized_capability(capability)?;
         }
-        for expression in method.program.preconditions.iter_mut().chain(&mut method.program.postconditions) {
+        for expression in method
+            .program
+            .preconditions
+            .iter_mut()
+            .chain(&mut method.program.postconditions)
+        {
             self.normalize_expression(expression)?;
         }
         Ok(())
@@ -776,55 +1087,84 @@ impl Builder<'_> {
     fn normalize_expression(&mut self, expression: &mut n::Expr) -> Result<(), String> {
         // Private working copies are discarded on any failure. Selected values
         // are substituted before dependency discovery, including nested patterns.
-        let mut fuel=self.fuel;
-        let result=iir::visit::expression_mut(expression,&mut fuel,|expr,fuel| {
-            self.fuel=*fuel;
+        let mut fuel = self.fuel;
+        let result = iir::visit::expression_mut(expression, &mut fuel, |expr, fuel| {
+            self.fuel = *fuel;
             Self::resolve_immediate_callable(expr, &mut self.fuel)?;
             Self::resolve_conditional_callable(expr, &mut self.fuel)?;
-            if let K::AssociatedValue { interface, member, subject }=&expr.kind {
-                let interface=n::InterfaceInstance {
-                    declaration:interface.declaration,
-                    arguments:interface.arguments.iter().map(|ty|self.normalized_type(ty)).collect::<Result<_,_>>()?,
+            if let K::AssociatedValue {
+                interface,
+                member,
+                subject,
+            } = &expr.kind
+            {
+                let interface = n::InterfaceInstance {
+                    declaration: interface.declaration,
+                    arguments: interface
+                        .arguments
+                        .iter()
+                        .map(|ty| self.normalized_type(ty))
+                        .collect::<Result<_, _>>()?,
                 };
-                let subject=self.normalized_type(subject)?;
-                let expected=self.normalized_type(&expr.ty)?;
-                let (selected,remaining)=crate::capabilities::World {
-                    index:&self.index, implementations:&self.package.implementations,
-                    traits:&self.package.traits, assumptions:&self.assumptions, context:&self.context,
-                }.resolve_associated_value_budgeted(&interface,*member,&subject,Budget {steps:self.fuel,..self.budget})?;
-                self.fuel=remaining;
-                if selected.value.ty!=expected {return Err("associated expression type disagrees with selected member".into());}
-                let source=expr.source;
-                *expr=selected.value;
-                expr.source=source;
+                let subject = self.normalized_type(subject)?;
+                let expected = self.normalized_type(&expr.ty)?;
+                let (selected, remaining) = crate::capabilities::World {
+                    index: &self.index,
+                    implementations: &self.package.implementations,
+                    traits: &self.package.traits,
+                    assumptions: &self.assumptions,
+                    context: &self.context,
+                }
+                .resolve_associated_value_budgeted(
+                    &interface,
+                    *member,
+                    &subject,
+                    Budget {
+                        steps: self.fuel,
+                        ..self.budget
+                    },
+                )?;
+                self.fuel = remaining;
+                if selected.value.ty != expected {
+                    return Err("associated expression type disagrees with selected member".into());
+                }
+                let source = expr.source;
+                *expr = selected.value;
+                expr.source = source;
             }
-            *fuel=self.fuel;
+            *fuel = self.fuel;
             Ok(())
         });
-        self.fuel=fuel.min(self.fuel);
+        self.fuel = fuel.min(self.fuel);
         result?;
         expression.rewrite_types(&mut |ty| self.staging_type_view(ty))?;
         if self.instances.is_some() {
-            let mut generated=Vec::new();
-            crate::program::expand_materialized_quotes(self.package,expression,&mut self.quote_cursor,
-                &mut self.quote_sources,&mut generated,&mut self.fuel)?;
+            let mut generated = Vec::new();
+            crate::program::expand_materialized_quotes(
+                self.package,
+                expression,
+                &mut self.quote_cursor,
+                &mut self.quote_sources,
+                &mut generated,
+                &mut self.fuel,
+            )?;
             self.register_quote_layouts(generated)?;
         }
         if self.instances.is_some() {
-            let mut fuel=self.fuel;
-            let result=iir::visit::expression_mut(expression,&mut fuel,|expr,fuel| {
-                self.fuel=*fuel;
-                let result=(|| {
-                    if let Some(plan)=iir::staging::preparation(expr,&mut self.fuel)? {
-                        let completed=self.invoke_staged_input(&plan.expression)?;
-                        plan.apply(expr,completed,&mut self.fuel)?;
+            let mut fuel = self.fuel;
+            let result = iir::visit::expression_mut(expression, &mut fuel, |expr, fuel| {
+                self.fuel = *fuel;
+                let result = (|| {
+                    if let Some(plan) = iir::staging::preparation(expr, &mut self.fuel)? {
+                        let completed = self.invoke_staged_input(&plan.expression)?;
+                        plan.apply(expr, completed, &mut self.fuel)?;
                     }
                     self.stage_direct_call(expr)
                 })();
-                *fuel=self.fuel;
+                *fuel = self.fuel;
                 result
             });
-            self.fuel=fuel.min(self.fuel);
+            self.fuel = fuel.min(self.fuel);
             result?;
         }
         expression.rewrite_types(&mut |ty| {
@@ -866,7 +1206,11 @@ impl Builder<'_> {
             };
             if !matches!(
                 value.kind,
-                K::Function(_) | K::FunctionInstance { .. } | K::TraitMethod { .. } | K::Local(_) | K::If { .. }
+                K::Function(_)
+                    | K::FunctionInstance { .. }
+                    | K::TraitMethod { .. }
+                    | K::Local(_)
+                    | K::If { .. }
             ) {
                 return Ok(());
             }
@@ -911,195 +1255,408 @@ impl Builder<'_> {
         }
     }
 
-    fn register_quote_layouts(&mut self, generated:Vec<n::Enum>)->Result<(),String> {
+    fn register_quote_layouts(&mut self, generated: Vec<n::Enum>) -> Result<(), String> {
         for definition in generated {
             if !definition.type_parameters.is_empty() {
-                return Err("materialized quote return storage retained abstract Type parameters".into());
+                return Err(
+                    "materialized quote return storage retained abstract Type parameters".into(),
+                );
             }
-            let ty=Term::Nominal {declaration:definition.declaration,arguments:vec![]};
-            if !self.types.insert(ty.clone()) {return Err("materialized quote storage identity collision".into());}
+            let ty = Term::Nominal {
+                declaration: definition.declaration,
+                arguments: vec![],
+            };
+            if !self.types.insert(ty.clone()) {
+                return Err("materialized quote storage identity collision".into());
+            }
             for variant in &definition.variants {
-                for field in &variant.fields {self.queue.push_back(Task::Type(field.clone()));}
+                for field in &variant.fields {
+                    self.queue.push_back(Task::Type(field.clone()));
+                }
             }
-            self.nominals.push(iir::NominalInstance {ty,definition:iir::NominalDefinition::Enum(definition)});
+            self.nominals.push(iir::NominalInstance {
+                ty,
+                definition: iir::NominalDefinition::Enum(definition),
+            });
         }
         Ok(())
     }
 
-    fn stage_direct_call(&mut self, expression: &mut n::Expr) -> Result<(),String> {
+    fn stage_direct_call(&mut self, expression: &mut n::Expr) -> Result<(), String> {
         let mut entry_contract = None;
         // A concrete trait selection determines the body before ordinary
         // comptime inputs can be bound. Keep the interface contract, but route
         // this call through the same specialization path as a direct function.
-        if let K::Call {callee,arguments,parameter_bindings}=&mut expression.kind {
-            if let K::TraitMethod {interface,interface_arguments,subject,member,method_arguments}=&callee.kind {
-                if matches!(callee.ty.callable_signature(),Term::Function {parameters,..} if parameters.iter().any(|p|p.sort!=nir::Sort::Runtime)) {
-                    let instance=n::InterfaceInstance {declaration:*interface,arguments:interface_arguments.clone()};
-                    let slot=self.interface(instance,subject.clone())?;
-                    let instance=self.output[slot].interface_instance();
-                    let subject=self.output[slot].subject.clone();
-                    let interface_contract=self.package.traits.iter().find(|t|t.declaration==instance.declaration)
+        if let K::Call {
+            callee,
+            arguments,
+            parameter_bindings,
+        } = &mut expression.kind
+        {
+            if let K::TraitMethod {
+                interface,
+                interface_arguments,
+                subject,
+                member,
+                method_arguments,
+            } = &callee.kind
+            {
+                if matches!(callee.ty.callable_signature(),Term::Function {parameters,..} if parameters.iter().any(|p|p.sort!=nir::Sort::Runtime))
+                {
+                    let instance = n::InterfaceInstance {
+                        declaration: *interface,
+                        arguments: interface_arguments.clone(),
+                    };
+                    let slot = self.interface(instance, subject.clone())?;
+                    let instance = self.output[slot].interface_instance();
+                    let subject = self.output[slot].subject.clone();
+                    let interface_contract = self
+                        .package
+                        .traits
+                        .iter()
+                        .find(|t| t.declaration == instance.declaration)
                         .ok_or("missing selected staged interface")?;
-                    let contract=interface_contract.methods.iter().find(|m|m.declaration==*member)
+                    let contract = interface_contract
+                        .methods
+                        .iter()
+                        .find(|m| m.declaration == *member)
                         .ok_or("missing selected staged method contract")?;
-                    if contract.type_parameters.len()!=method_arguments.len() {
+                    if contract.type_parameters.len() != method_arguments.len() {
                         return Err("dispatch method type argument count mismatch".into());
                     }
-                    let implementation=self.package.implementations.iter()
-                        .find(|i|i.declaration==self.output[slot].implementation)
+                    let implementation = self
+                        .package
+                        .implementations
+                        .iter()
+                        .find(|i| i.declaration == self.output[slot].implementation)
                         .ok_or("missing selected staged implementation")?;
-                    let body=implementation.methods.iter().find(|(name,_)|name==&contract.name)
-                        .ok_or("missing selected staged method body")?.1;
-                    let mut body_arguments=if contract.default==Some(body) {
-                        std::iter::once(subject.clone()).chain(instance.arguments.iter().cloned()).collect::<Vec<_>>()
-                    } else {self.output[slot].arguments.clone()};
-                    body_arguments.extend(method_arguments.iter().cloned());
-                    let method=n::MethodInstance {member:*member,body,arguments:body_arguments,method_arguments:method_arguments.clone()};
-                    let template=self.package.functions.iter().chain(&self.package.quote_templates).find(|f|f.declaration==body)
-                        .ok_or("missing selected staged method body")?;
-                    let parameters=interface_contract.parameters_with_self().into_iter()
-                        .chain(contract.type_parameters.iter().copied())
-                        .map(|declaration|nir::DeclarationParameter {declaration,sort:nir::Sort::Type}).collect::<Vec<_>>();
-                    let inputs=std::iter::once(subject.clone()).chain(instance.arguments.iter().cloned())
-                        .chain(method_arguments.iter().cloned()).collect::<Vec<_>>();
-                    let frames=match contract.signature.callable_signature() {
-                        Term::Function {parameters,..}=>vec![parameters.iter().map(|p|p.sort).collect()],
-                        _=>return Err("staged method needs a function signature".into()),
+                    let body = implementation
+                        .methods
+                        .iter()
+                        .find(|(name, _)| name == &contract.name)
+                        .ok_or("missing selected staged method body")?
+                        .1;
+                    let mut body_arguments = if contract.default == Some(body) {
+                        std::iter::once(subject.clone())
+                            .chain(instance.arguments.iter().cloned())
+                            .collect::<Vec<_>>()
+                    } else {
+                        self.output[slot].arguments.clone()
                     };
-                    let requirements=contract.requirements.iter().map(|r|r.instantiate_parameters_in_scope(&parameters,&inputs,&frames))
-                        .collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
-                    let capabilities=contract.capabilities.iter().map(|r|r.instantiate_parameters_in_scope(&parameters,&inputs,&frames))
-                        .collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
-                    let declarations=parameters.iter().map(|p|p.declaration).collect::<Vec<_>>();
-                    let mut program=contract.program.instantiate_types(&declarations,&inputs).map_err(|e|e.to_string())?;
-                    let mut aliases=contract.parameter_bindings.iter().copied().zip(template.parameters.iter().copied()).collect::<std::collections::BTreeMap<_,_>>();
-                    if let (Some(source),Some(target))=(program.result_binding,template.result_binding) {
-                        aliases.insert(source,target);
-                        program.result_binding=Some(target);
+                    body_arguments.extend(method_arguments.iter().cloned());
+                    let method = n::MethodInstance {
+                        member: *member,
+                        body,
+                        arguments: body_arguments,
+                        method_arguments: method_arguments.clone(),
+                    };
+                    let template = self
+                        .package
+                        .functions
+                        .iter()
+                        .chain(&self.package.quote_templates)
+                        .find(|f| f.declaration == body)
+                        .ok_or("missing selected staged method body")?;
+                    let parameters = interface_contract
+                        .binders_with_self(&mut self.fuel)?
+                        .into_iter()
+                        .chain(contract.type_parameters.iter().map(|declaration| {
+                            nir::DeclarationParameter {
+                                declaration: *declaration,
+                                sort: nir::Sort::Type,
+                            }
+                        }))
+                        .collect::<Vec<_>>();
+                    let inputs = std::iter::once(subject.clone())
+                        .chain(instance.arguments.iter().cloned())
+                        .chain(method_arguments.iter().cloned())
+                        .collect::<Vec<_>>();
+                    let frames = match contract.signature.callable_signature() {
+                        Term::Function { parameters, .. } => {
+                            vec![parameters.iter().map(|p| p.sort).collect()]
+                        }
+                        _ => return Err("staged method needs a function signature".into()),
+                    };
+                    let requirements = contract
+                        .requirements
+                        .iter()
+                        .map(|r| r.instantiate_parameters_in_scope(&parameters, &inputs, &frames))
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| e.to_string())?;
+                    let capabilities = contract
+                        .capabilities
+                        .iter()
+                        .map(|r| r.instantiate_parameters_in_scope(&parameters, &inputs, &frames))
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| e.to_string())?;
+                    let mut program = contract
+                        .program
+                        .instantiate_parameters(&parameters, &inputs)
+                        .map_err(|e| e.to_string())?;
+                    let mut aliases = contract
+                        .parameter_bindings
+                        .iter()
+                        .copied()
+                        .zip(template.parameters.iter().copied())
+                        .collect::<std::collections::BTreeMap<_, _>>();
+                    if let (Some(source), Some(target)) =
+                        (program.result_binding, template.result_binding)
+                    {
+                        aliases.insert(source, target);
+                        program.result_binding = Some(target);
                     }
                     // An old-value observation belongs to the entry frame of
                     // the selected body. Reuse its snapshot when available;
                     // otherwise retain the interface binding with its remapped input.
                     for snapshot in &mut program.entry_snapshots {
-                        snapshot.parameter=*aliases.get(&snapshot.parameter)
+                        snapshot.parameter = *aliases
+                            .get(&snapshot.parameter)
                             .ok_or("staged trait snapshot does not refer to a parameter")?;
-                        if let Some(existing)=template.entry_snapshots.iter().find(|s|s.parameter==snapshot.parameter) {
-                            aliases.insert(snapshot.binding,existing.binding);
-                            snapshot.binding=existing.binding;
+                        if let Some(existing) = template
+                            .entry_snapshots
+                            .iter()
+                            .find(|s| s.parameter == snapshot.parameter)
+                        {
+                            aliases.insert(snapshot.binding, existing.binding);
+                            snapshot.binding = existing.binding;
                         }
                     }
-                    for predicate in program.preconditions.iter_mut().chain(&mut program.postconditions) {
-                        rebind_default_locals(predicate,&aliases,&mut self.fuel,0)?;
+                    for predicate in program
+                        .preconditions
+                        .iter_mut()
+                        .chain(&mut program.postconditions)
+                    {
+                        rebind_default_locals(predicate, &aliases, &mut self.fuel, 0)?;
                     }
-                    entry_contract=Some((requirements,capabilities,program));
+                    entry_contract = Some((requirements, capabilities, program));
                     if !parameter_bindings.is_empty() {
-                        if *parameter_bindings!=contract.parameter_bindings || parameter_bindings.len()!=template.parameters.len() {
-                            return Err("staged method preparation bindings differ from interface".into());
+                        if *parameter_bindings != contract.parameter_bindings
+                            || parameter_bindings.len() != template.parameters.len()
+                        {
+                            return Err(
+                                "staged method preparation bindings differ from interface".into()
+                            );
                         }
-                        let aliases=parameter_bindings.iter().copied().zip(template.parameters.iter().copied()).collect();
-                        for argument in arguments.iter_mut().filter(|argument|argument.is_default) {
-                            rebind_default_locals(&mut argument.value,&aliases,&mut self.fuel,0)?;
+                        let aliases = parameter_bindings
+                            .iter()
+                            .copied()
+                            .zip(template.parameters.iter().copied())
+                            .collect();
+                        for argument in arguments.iter_mut().filter(|argument| argument.is_default)
+                        {
+                            rebind_default_locals(
+                                &mut argument.value,
+                                &aliases,
+                                &mut self.fuel,
+                                0,
+                            )?;
                         }
-                        *parameter_bindings=template.parameters.clone();
+                        *parameter_bindings = template.parameters.clone();
                     }
-                    callee.kind=K::FunctionInstance {declaration:method.body,arguments:method.arguments};
+                    callee.kind = K::FunctionInstance {
+                        declaration: method.body,
+                        arguments: method.arguments,
+                    };
                 }
             }
         }
-        let K::Call {callee,..}=&expression.kind else {return Ok(());};
-        let (declaration,arguments)=match &callee.kind {
-            K::Function(id)=>(*id,vec![]),
-            K::FunctionInstance {declaration,arguments}=>(*declaration,arguments.clone()),
-            _=>return Ok(()),
+        let K::Call { callee, .. } = &expression.kind else {
+            return Ok(());
         };
-        if self.staged_functions.contains_key(&(declaration,arguments.clone())) {return Ok(());}
-        let Some(template)=self.package.functions.iter().chain(&self.package.quote_templates).find(|f|f.declaration==declaration) else {return Ok(());};
-        let Term::Function {parameters,..}=template.signature.callable_signature() else {return Ok(());};
-        if !parameters.iter().any(|p|p.sort!=nir::Sort::Runtime) {return Ok(());}
+        let (declaration, arguments) = match &callee.kind {
+            K::Function(id) => (*id, vec![]),
+            K::FunctionInstance {
+                declaration,
+                arguments,
+            } => (*declaration, arguments.clone()),
+            _ => return Ok(()),
+        };
+        if self
+            .staged_functions
+            .contains_key(&(declaration, arguments.clone()))
+        {
+            return Ok(());
+        }
+        let Some(template) = self
+            .package
+            .functions
+            .iter()
+            .chain(&self.package.quote_templates)
+            .find(|f| f.declaration == declaration)
+        else {
+            return Ok(());
+        };
+        let Term::Function { parameters, .. } = template.signature.callable_signature() else {
+            return Ok(());
+        };
+        if !parameters.iter().any(|p| p.sort != nir::Sort::Runtime) {
+            return Ok(());
+        }
         // Declaration substitution closes the type inputs before staged evaluation.
-        let mut template=template.instantiate_types(&template.type_parameters,&arguments).map_err(|e|e.to_string())?;
+        let mut template = template
+            .instantiate_types(&template.type_parameters, &arguments)
+            .map_err(|e| e.to_string())?;
         template.type_parameters.clear();
-        if let Some((requirements,capabilities,program))=entry_contract {
+        if let Some((requirements, capabilities, program)) = entry_contract {
             template.requirements.extend(requirements);
             template.capabilities.extend(capabilities);
             template.preconditions.extend(program.preconditions);
             template.postconditions.extend(program.postconditions);
-            template.result_binding=template.result_binding.or(program.result_binding);
+            template.result_binding = template.result_binding.or(program.result_binding);
             for snapshot in program.entry_snapshots {
-                if !template.entry_snapshots.iter().any(|s|s.parameter==snapshot.parameter) {
+                if !template
+                    .entry_snapshots
+                    .iter()
+                    .any(|s| s.parameter == snapshot.parameter)
+                {
                     template.entry_snapshots.push(snapshot);
                 }
             }
         }
-        template.signature=self.staging_type_view(&template.signature)?;
-        let mut fuel=self.fuel;
-        let result=iir::staging::bind_call_with_layouts_and_type_views(&self.package.normal_forms, &template,&arguments,expression,&mut fuel,self,|this,input,fuel| {
-            let mut invokes=false;
-            iir::visit::expression(input,fuel,|expr,_| {
-                invokes |= matches!(expr.kind,K::Call {..} | K::NormalFormType {..} | K::Assign {..} | K::Loop {..}
-                    | K::Break(_) | K::Continue(_) | K::CheckPredicate(_) | K::Match {..} | K::LetPattern {..}
-                    | K::Field {..} | K::AnonymousField {..} | K::CallPreparation {..} | K::Closure {..});
-                invokes |= matches!(expr.kind,K::EnumName(_) | K::SymbolName(_) | K::TakeBits(_) | K::BitConvert(_) | K::BitSlice {..}
-                    | K::BitEqual(..) | K::BitWritePointer {..} | K::BitUpdate {..} | K::BitWindow {..} | K::BitIndex(..) | K::BitConcat(..) | K::BitAssign {..})
-                    || (matches!(expr.kind,K::Not(_) | K::And(..) | K::Or(..))
-                        && matches!(expr.ty,Term::Primitive(nir::Primitive::BitVec(_))));
-                invokes |= matches!(expr.kind,K::IntegerNegate(_) | K::IntegerBinary {..})
-                    && expr.ty==Term::Primitive(nir::Primitive::Integer);
-                // Mathematical Integer comparisons produce Bool, so their
-                // execution domain cannot be selected from result type alone.
-                invokes |= matches!(&expr.kind, K::IntegerBinary {op,..} if op.is_comparison());
-                invokes |= matches!(expr.kind,K::FloatNegate(_) | K::FloatBinary {..});
-                invokes |= matches!(&expr.kind,
+        template.signature = self.staging_type_view(&template.signature)?;
+        let mut fuel = self.fuel;
+        let result = iir::staging::bind_call_with_layouts_and_type_views(
+            &self.package.normal_forms,
+            &template,
+            &arguments,
+            expression,
+            &mut fuel,
+            self,
+            |this, input, fuel| {
+                let mut invokes = false;
+                iir::visit::expression(input, fuel, |expr, _| {
+                    invokes |= matches!(
+                        expr.kind,
+                        K::Call { .. }
+                            | K::NormalFormType { .. }
+                            | K::Assign { .. }
+                            | K::Loop { .. }
+                            | K::Break(_)
+                            | K::Continue(_)
+                            | K::CheckPredicate(_)
+                            | K::Match { .. }
+                            | K::LetPattern { .. }
+                            | K::Field { .. }
+                            | K::AnonymousField { .. }
+                            | K::CallPreparation { .. }
+                            | K::Closure { .. }
+                    );
+                    invokes |= matches!(
+                        expr.kind,
+                        K::EnumName(_)
+                            | K::SymbolName(_)
+                            | K::TakeBits(_)
+                            | K::BitConvert(_)
+                            | K::NewtypeConvert(_)
+                            | K::BitSlice { .. }
+                            | K::BitEqual(..)
+                            | K::BitWritePointer { .. }
+                            | K::BitUpdate { .. }
+                            | K::BitWindow { .. }
+                            | K::BitIndex(..)
+                            | K::BitConcat(..)
+                            | K::BitAssign { .. }
+                    ) || (matches!(expr.kind, K::Not(_) | K::And(..) | K::Or(..))
+                        && matches!(expr.ty, Term::Primitive(nir::Primitive::BitVec(_))));
+                    invokes |= matches!(expr.kind, K::IntegerNegate(_) | K::IntegerBinary { .. })
+                        && expr.ty == Term::Primitive(nir::Primitive::Integer);
+                    // Mathematical Integer comparisons produce Bool, so their
+                    // execution domain cannot be selected from result type alone.
+                    invokes |= matches!(&expr.kind, K::IntegerBinary {op,..} if op.is_comparison());
+                    invokes |= matches!(expr.kind, K::FloatNegate(_) | K::FloatBinary { .. });
+                    invokes |= matches!(&expr.kind,
                     K::ScalarEqual(left,_) | K::ScalarLess(left,_) | K::ScalarLessEqual(left,_)
                     | K::ScalarGreater(left,_) | K::ScalarGreaterEqual(left,_)
                         if matches!(left.ty,Term::Primitive(nir::Primitive::F32 | nir::Primitive::F64)));
-                Ok(())
-            })?;
-            this.fuel=*fuel;
-            let result=if invokes {this.invoke_staged_input(input)} else {iir::staging::fold_value_with_layouts(&this.package.normal_forms, input,&mut this.fuel)};
-            *fuel=this.fuel;
-            result
-        }, |this, ty, fuel| {
-            this.fuel = *fuel;
-            let result = this.staging_type_view(ty);
-            *fuel = this.fuel;
-            result
-        });
-        self.fuel=fuel.min(self.fuel);
-        let (instance,call)=result?;
-        *expression=call;
-        if self.package.quote_templates.iter().any(|template|template.declaration==declaration) {
+                    Ok(())
+                })?;
+                this.fuel = *fuel;
+                let result = if invokes {
+                    this.invoke_staged_input(input)
+                } else {
+                    iir::staging::fold_value_with_layouts(
+                        &this.package.normal_forms,
+                        input,
+                        &mut this.fuel,
+                    )
+                };
+                *fuel = this.fuel;
+                result
+            },
+            |this, ty, fuel| {
+                this.fuel = *fuel;
+                let result = this.staging_type_view(ty);
+                *fuel = this.fuel;
+                result
+            },
+        );
+        self.fuel = fuel.min(self.fuel);
+        let (instance, call) = result?;
+        *expression = call;
+        if self
+            .package
+            .quote_templates
+            .iter()
+            .any(|template| template.declaration == declaration)
+        {
             // Expansion removes the callable boundary, not its Type obligations.
             // Check after staged substitution, as for a runtime instance.
             for requirement in &instance.function.requirements {
-                let requirement=self.normalized_predicate(requirement,0)?;
+                let requirement = self.normalized_predicate(requirement, 0)?;
                 self.tick(0)?;
-                if !matches!(self.prove_requirement(&requirement)?,crate::ptc::Outcome::Entailed(_)) {
-                    return Err(format!("quote function type requirement is not established: {requirement}"));
+                if !matches!(
+                    self.prove_requirement(&requirement)?,
+                    crate::ptc::Outcome::Entailed(_)
+                ) {
+                    return Err(format!(
+                        "quote function type requirement is not established: {requirement}"
+                    ));
                 }
             }
             for capability in &instance.function.capabilities {
-                let capability=self.normalized_capability(capability)?;
-                self.queue.push_back(Task::Interface(capability.interface_instance(),capability.subject));
+                let capability = self.normalized_capability(capability)?;
+                self.queue.push_back(Task::Interface(
+                    capability.interface_instance(),
+                    capability.subject,
+                ));
             }
-            let mut generated=Vec::new();
-            crate::program::expand_bound_quote(self.package,&instance.function,expression,&mut self.quote_cursor,
-                &mut self.quote_sources,&mut generated,&mut self.fuel)?;
+            let mut generated = Vec::new();
+            crate::program::expand_bound_quote(
+                self.package,
+                &instance.function,
+                expression,
+                &mut self.quote_cursor,
+                &mut self.quote_sources,
+                &mut generated,
+                &mut self.fuel,
+            )?;
             self.register_quote_layouts(generated)?;
         } else {
-            self.staged_functions.entry((instance.key.declaration,instance.key.arguments)).or_insert(instance.function);
+            self.staged_functions
+                .entry((instance.key.declaration, instance.key.arguments))
+                .or_insert(instance.function);
         }
         Ok(())
     }
-    fn normalized_capability(&mut self, capability: &n::TraitRequirement) -> Result<n::TraitRequirement, String> {
+    fn normalized_capability(
+        &mut self,
+        capability: &n::TraitRequirement,
+    ) -> Result<n::TraitRequirement, String> {
         Ok(n::TraitRequirement {
             interface: capability.interface,
             subject: self.normalized_type(&capability.subject)?,
-            interface_arguments: capability.interface_arguments.iter()
-                .map(|argument| self.normalized_type(argument)).collect::<Result<_, _>>()?,
+            interface_arguments: capability
+                .interface_arguments
+                .iter()
+                .map(|argument| self.normalized_interface_input(argument))
+                .collect::<Result<_, _>>()?,
         })
     }
-    fn normalized_predicate(&mut self, predicate: &n::TypePredicate, depth: usize) -> Result<n::TypePredicate, String> {
+    fn normalized_predicate(
+        &mut self,
+        predicate: &n::TypePredicate,
+        depth: usize,
+    ) -> Result<n::TypePredicate, String> {
         self.tick(depth)?;
         use n::TypePredicate as P;
         Ok(match predicate {
@@ -1108,11 +1665,31 @@ impl Builder<'_> {
             P::Equal(a, b) => P::Equal(self.normalized_type(a)?, self.normalized_type(b)?),
             P::Not(inner) => P::Not(Box::new(self.normalized_predicate(inner, depth + 1)?)),
             P::And(items) | P::Or(items) => {
-                if items.len() > self.fuel { return Err("IIR predicate normalization budget exhausted".into()); }
-                let items = items.iter().map(|p| self.normalized_predicate(p, depth + 1)).collect::<Result<_, _>>()?;
-                if matches!(predicate, P::And(_)) { P::And(items) } else { P::Or(items) }
+                if items.len() > self.fuel {
+                    return Err("IIR predicate normalization budget exhausted".into());
+                }
+                let items = items
+                    .iter()
+                    .map(|p| self.normalized_predicate(p, depth + 1))
+                    .collect::<Result<_, _>>()?;
+                if matches!(predicate, P::And(_)) {
+                    P::And(items)
+                } else {
+                    P::Or(items)
+                }
             }
         })
+    }
+    fn normalized_interface_input(&mut self, input: &Term) -> Result<Term, String> {
+        if input.sort() == nir::Sort::Type {
+            return self.normalized_type(input);
+        }
+        crate::associated::charge_projection_copy(input, &mut self.fuel)?;
+        input.check_scope(&[]).map_err(|e| e.to_string())?;
+        if matches!(input, Term::Symbol(_)) {
+            return Ok(input.clone());
+        }
+        Err("interface value input normalization requires domain evidence".into())
     }
     fn normalized_type(&mut self, ty: &Term) -> Result<Term, String> {
         crate::associated::charge_projection_copy(ty, &mut self.fuel)?;
@@ -1126,20 +1703,42 @@ impl Builder<'_> {
             traits: &self.package.traits,
             assumptions: &self.assumptions,
             context: &self.context,
-        }.normalize_associated_types_cached(ty, Budget { steps: self.fuel, ..self.budget }, &mut self.normalized_types)?;
+        }
+        .normalize_associated_types_cached(
+            ty,
+            Budget {
+                steps: self.fuel,
+                ..self.budget
+            },
+            &mut self.normalized_types,
+        )?;
         self.fuel = remaining;
         crate::associated::charge_projection_copy(&normalized.value, &mut self.fuel)?;
-        self.normalized_types.insert(ty.clone(), normalized.value.clone());
+        self.normalized_types
+            .insert(ty.clone(), normalized.value.clone());
         Ok(normalized.value)
     }
     fn staging_type_view(&mut self, ty: &Term) -> Result<Term, String> {
+        // The annotation walker also visits complete interface identity inputs.
+        if matches!(ty, Term::Symbol(_)) {
+            crate::associated::charge_projection_copy(ty, &mut self.fuel)?;
+            return Ok(ty.clone());
+        }
         let (view, remaining) = crate::capabilities::World {
             index: &self.index,
             implementations: &self.package.implementations,
             traits: &self.package.traits,
             assumptions: &self.assumptions,
             context: &self.context,
-        }.associated_type_view_cached(ty, Budget { steps: self.fuel, ..self.budget }, &mut self.staging_views)?;
+        }
+        .associated_type_view_cached(
+            ty,
+            Budget {
+                steps: self.fuel,
+                ..self.budget
+            },
+            &mut self.staging_views,
+        )?;
         self.fuel = remaining;
         Ok(view.value)
     }
@@ -1149,7 +1748,8 @@ impl Builder<'_> {
         }
         if self.instances.is_none()
             && matches!(&ty,Term::Function {parameters,..}
-                if parameters.iter().any(|parameter|parameter.sort==nir::Sort::Type)) {
+                if parameters.iter().any(|parameter|parameter.sort==nir::Sort::Type))
+        {
             // Do not enqueue a dependent child outside the telescope that
             // binds it. Validate the complete retained callable view instead;
             // concrete dependency closure runs after invocation input staging.
@@ -1184,7 +1784,9 @@ impl Builder<'_> {
                     self.formation_requirements(&s.requirements, &s.type_parameters, arguments)?;
                     let mut fields = s.instantiate_fields(arguments).map_err(|e| e.to_string())?;
                     if self.instances.is_some() {
-                        for (_, field) in &mut fields { *field = self.normalized_type(field)?; }
+                        for (_, field) in &mut fields {
+                            *field = self.normalized_type(field)?;
+                        }
                         let mut definition = s.clone();
                         definition.fields = fields.clone();
                         definition.requirements = s
@@ -1227,10 +1829,14 @@ impl Builder<'_> {
                     .find(|e| e.declaration == *declaration)
                 {
                     self.formation_requirements(&e.requirements, &e.type_parameters, arguments)?;
-                    let mut variants = e.instantiate_variants(arguments).map_err(|e| e.to_string())?;
+                    let mut variants = e
+                        .instantiate_variants(arguments)
+                        .map_err(|e| e.to_string())?;
                     if self.instances.is_some() {
                         for variant in &mut variants {
-                            for field in &mut variant.fields { *field = self.normalized_type(field)?; }
+                            for field in &mut variant.fields {
+                                *field = self.normalized_type(field)?;
+                            }
                         }
                         let mut definition = e.clone();
                         definition.variants = variants.clone();
@@ -1267,6 +1873,51 @@ impl Builder<'_> {
                             .push_back(Task::Interface(cap.interface_instance(), cap.subject));
                     }
                     children.extend(variants.into_iter().flat_map(|v| v.fields));
+                } else if let Some(n) = self
+                    .package
+                    .newtypes
+                    .iter()
+                    .find(|n| n.declaration == *declaration)
+                {
+                    self.formation_requirements(&n.requirements, &n.type_parameters, arguments)?;
+                    let representation = n
+                        .representation_budgeted(arguments, &[], &mut self.fuel)
+                        .map_err(|e| e.to_string())?;
+                    if self.instances.is_some() {
+                        let mut definition = n.clone();
+                        definition.representation = self.normalized_type(&representation)?;
+                        definition.requirements = n
+                            .requirements
+                            .iter()
+                            .map(|r| r.instantiate_types(&n.type_parameters, arguments))
+                            .collect::<Result<_, _>>()
+                            .map_err(|e| e.to_string())?;
+                        definition.capabilities = n
+                            .capabilities
+                            .iter()
+                            .map(|c| c.instantiate_types(&n.type_parameters, arguments))
+                            .collect::<Result<_, _>>()
+                            .map_err(|e| e.to_string())?;
+                        for capability in &mut definition.capabilities {
+                            *capability = self.normalized_capability(capability)?;
+                        }
+                        for requirement in &mut definition.requirements {
+                            *requirement = self.normalized_predicate(requirement, 0)?;
+                        }
+                        definition.type_parameters.clear();
+                        self.nominals.push(iir::NominalInstance {
+                            ty: ty.clone(),
+                            definition: iir::NominalDefinition::Newtype(definition),
+                        });
+                    }
+                    for cap in &n.capabilities {
+                        let cap = cap
+                            .instantiate_types(&n.type_parameters, arguments)
+                            .map_err(|e| e.to_string())?;
+                        self.queue
+                            .push_back(Task::Interface(cap.interface_instance(), cap.subject));
+                    }
+                    children.push(representation);
                 } else if self.instances.is_some() {
                     return Err("IIR nominal type has no declaration".into());
                 }
@@ -1282,10 +1933,24 @@ impl Builder<'_> {
                         .find(|h| h.declaration == *head)
                         .ok_or("IIR normal-form type has no head declaration")?;
                     descriptor
-                        .check_closed_arguments_budgeted(arguments, |head|
-                            self.package.normal_forms.iter().any(|metadata|
-                                metadata.declaration == head && metadata.role == nir::normal_forms::Role::Tuple),
-                            |ty,variant,fuel|nir::normal_forms::nominal_value_fields_budgeted(self.package,ty,variant,fuel), &mut self.fuel)
+                        .check_closed_arguments_budgeted(
+                            arguments,
+                            |head| {
+                                self.package.normal_forms.iter().any(|metadata| {
+                                    metadata.declaration == head
+                                        && metadata.role == nir::normal_forms::Role::Tuple
+                                })
+                            },
+                            |ty, variant, fuel| {
+                                nir::normal_forms::nominal_value_fields_budgeted(
+                                    self.package,
+                                    ty,
+                                    variant,
+                                    fuel,
+                                )
+                            },
+                            &mut self.fuel,
+                        )
                         .map_err(|e| format!("IIR normal-form inputs: {e}"))?;
                     let parameters: Vec<_> = descriptor
                         .parameters
@@ -1296,37 +1961,72 @@ impl Builder<'_> {
                 }
                 children.extend(arguments.iter().cloned());
             }
-            Term::AssociatedType { origin, arguments, subject } => {
+            Term::AssociatedType {
+                origin,
+                arguments,
+                subject,
+            } => {
                 if self.instances.is_some() {
                     return Err("IIR requires associated type projection resolution".into());
                 }
                 // Prove the complete projection (including cycle checks), then
                 // retain its originating Type-valued member for reference execution.
-                let normalized=self.normalized_type(&ty)?;
-                let interface=n::InterfaceInstance {declaration:origin.interface,arguments:arguments.clone()};
-                let slot=self.interface(interface.clone(),(**subject).clone())?;
+                let normalized = self.normalized_type(&ty)?;
+                let interface = n::InterfaceInstance {
+                    declaration: origin.interface,
+                    arguments: arguments.clone(),
+                };
+                let slot = self.interface(interface.clone(), (**subject).clone())?;
                 let selected_interface = self.output[slot].interface_instance();
                 let selected_subject = self.output[slot].subject.clone();
-                if !self.output[slot].associated.iter().any(|(member,_)|*member==origin.member) {
-                    let (selected,remaining)=crate::capabilities::World {
-                        index:&self.index, implementations:&self.package.implementations,
-                        traits:&self.package.traits, assumptions:&self.assumptions, context:&self.context,
-                    }.resolve_associated_value_budgeted(&selected_interface,origin.member,&selected_subject,Budget {steps:self.fuel,..self.budget})?;
-                    self.fuel=remaining;
-                    self.output[slot].associated.push((origin.member,selected.value.clone()));
-                    self.expr(&selected.value,0)?;
+                if !self.output[slot]
+                    .associated
+                    .iter()
+                    .any(|(member, _)| *member == origin.member)
+                {
+                    let (selected, remaining) = crate::capabilities::World {
+                        index: &self.index,
+                        implementations: &self.package.implementations,
+                        traits: &self.package.traits,
+                        assumptions: &self.assumptions,
+                        context: &self.context,
+                    }
+                    .resolve_associated_value_budgeted(
+                        &selected_interface,
+                        origin.member,
+                        &selected_subject,
+                        Budget {
+                            steps: self.fuel,
+                            ..self.budget
+                        },
+                    )?;
+                    self.fuel = remaining;
+                    self.output[slot]
+                        .associated
+                        .push((origin.member, selected.value.clone()));
+                    self.expr(&selected.value, 0)?;
                 }
                 children.push(normalized);
                 children.extend(arguments.iter().cloned());
                 children.push((**subject).clone());
             }
             Term::Computation { effects, result } => {
-                for operation in effects { children.extend(operation.arguments.iter().cloned()); }
+                for operation in effects {
+                    children.extend(operation.arguments.iter().cloned());
+                }
                 children.push((**result).clone());
             }
-            Term::Tuple(items) | Term::TypeListValue(items) | Term::TypeListConcat(items) | Term::TupleValue(items) => children.extend(items.iter().cloned()),
-            Term::NominalValue {ty,fields,..} => {children.push((**ty).clone());children.extend(fields.iter().cloned());},
-            Term::Record(fields) | Term::RecordValue(fields) => children.extend(fields.iter().map(|(_, ty)| ty.clone())),
+            Term::Tuple(items)
+            | Term::TypeListValue(items)
+            | Term::TypeListConcat(items)
+            | Term::TupleValue(items) => children.extend(items.iter().cloned()),
+            Term::NominalValue { ty, fields, .. } => {
+                children.push((**ty).clone());
+                children.extend(fields.iter().cloned());
+            }
+            Term::Record(fields) | Term::RecordValue(fields) => {
+                children.extend(fields.iter().map(|(_, ty)| ty.clone()))
+            }
             Term::Pointer(t) | Term::ComptimeFunction(t) => children.push((**t).clone()),
             Term::Function { parameters, result } => {
                 children.extend(parameters.iter().map(|p| p.ty.clone()));
@@ -1359,7 +2059,8 @@ impl Builder<'_> {
             P::Remap { pattern, .. } | P::Binding { inner: pattern, .. } => {
                 self.pattern(pattern, depth + 1)?
             }
-            P::Record { fields, .. } | P::AnonymousRecord { fields, .. }
+            P::Record { fields, .. }
+            | P::AnonymousRecord { fields, .. }
             | P::Variant { fields, .. }
             | P::NormalForm {
                 arguments: fields, ..
@@ -1382,45 +2083,92 @@ impl Builder<'_> {
         }
         self.queue.push_back(Task::Type(expr.ty.clone()));
         match &expr.kind {
-            K::EffectHandle {computation, handlers, outer} => {
+            K::EffectHandle {
+                computation,
+                handlers,
+                outer,
+            } => {
                 self.expr(computation, depth + 1)?;
-                for operation in outer {for argument in &operation.arguments {self.queue.push_back(Task::Type(argument.clone()));}}
+                for operation in outer {
+                    for argument in &operation.arguments {
+                        self.queue.push_back(Task::Type(argument.clone()));
+                    }
+                }
                 for handler in handlers {
                     self.queue.push_back(Task::Type(handler.signature.clone()));
-                    for argument in &handler.operation.arguments {self.queue.push_back(Task::Type(argument.clone()));}
+                    for argument in &handler.operation.arguments {
+                        self.queue.push_back(Task::Type(argument.clone()));
+                    }
                     for arm in &handler.arms {
                         self.pattern(&arm.pattern, depth + 1)?;
-                        if let Some(g) = &arm.guard {self.expr(g, depth + 1)?;}
+                        if let Some(g) = &arm.guard {
+                            self.expr(g, depth + 1)?;
+                        }
                         self.expr(&arm.body, depth + 1)?;
                     }
                 }
             }
-            K::EffectResume(computation) | K::EffectRun {computation, ..} => {
+            K::EffectResume(computation) | K::EffectRun { computation, .. } => {
                 self.expr(computation, depth + 1)?;
             }
-            K::EffectComputation {effects, body} => {
-                for operation in effects {for argument in &operation.arguments {self.queue.push_back(Task::Type(argument.clone()));}}
+            K::EffectComputation { effects, body } => {
+                for operation in effects {
+                    for argument in &operation.arguments {
+                        self.queue.push_back(Task::Type(argument.clone()));
+                    }
+                }
                 self.expr(body, depth + 1)?;
             }
-            K::EffectRequest {operation, signature, arguments, ..} => {
+            K::EffectRequest {
+                operation,
+                signature,
+                arguments,
+                ..
+            } => {
                 self.queue.push_back(Task::Type((**signature).clone()));
-                for argument in &operation.arguments {self.queue.push_back(Task::Type(argument.clone()));}
-                for argument in arguments {self.expr(argument, depth + 1)?;}
+                for argument in &operation.arguments {
+                    self.queue.push_back(Task::Type(argument.clone()));
+                }
+                for argument in arguments {
+                    self.expr(argument, depth + 1)?;
+                }
             }
-            K::AssociatedValue {interface, subject, member} => {
-                if self.instances.is_some() {return Err("unresolved associated value in IIR".into());}
+            K::AssociatedValue {
+                interface,
+                subject,
+                member,
+            } => {
+                if self.instances.is_some() {
+                    return Err("unresolved associated value in IIR".into());
+                }
                 let slot = self.interface(interface.clone(), subject.clone())?;
                 let interface = self.output[slot].interface_instance();
                 let subject = self.output[slot].subject.clone();
-                if !self.output[slot].associated.iter().any(|(id,_)|id==member) {
-                    let (selected,remaining)=crate::capabilities::World {
-                        index:&self.index, implementations:&self.package.implementations,
-                        traits:&self.package.traits, assumptions:&self.assumptions, context:&self.context,
-                    }.resolve_associated_value_budgeted(&interface,*member,&subject,Budget {steps:self.fuel,..self.budget})?;
-                    self.fuel=remaining;
+                if !self.output[slot]
+                    .associated
+                    .iter()
+                    .any(|(id, _)| id == member)
+                {
+                    let (selected, remaining) = crate::capabilities::World {
+                        index: &self.index,
+                        implementations: &self.package.implementations,
+                        traits: &self.package.traits,
+                        assumptions: &self.assumptions,
+                        context: &self.context,
+                    }
+                    .resolve_associated_value_budgeted(
+                        &interface,
+                        *member,
+                        &subject,
+                        Budget {
+                            steps: self.fuel,
+                            ..self.budget
+                        },
+                    )?;
+                    self.fuel = remaining;
                     // Retain function identities/layout dependencies carried by values.
-                    self.expr(&selected.value,depth+1)?;
-                    self.output[slot].associated.push((*member,selected.value));
+                    self.expr(&selected.value, depth + 1)?;
+                    self.output[slot].associated.push((*member, selected.value));
                 }
             }
             // A value can retain an ordinary-Type telescope without invoking
@@ -1445,13 +2193,24 @@ impl Builder<'_> {
                 member,
                 subject,
             } => {
-                let instance = n::InterfaceInstance { declaration: *interface, arguments: interface_arguments.clone() };
+                let instance = n::InterfaceInstance {
+                    declaration: *interface,
+                    arguments: interface_arguments.clone(),
+                };
                 let slot = self.interface(instance.clone(), subject.clone())?;
                 let instance = self.output[slot].interface_instance();
                 let subject = self.output[slot].subject.clone();
-                let method = self.specialize_method(slot, &instance, &subject, *member, method_arguments)?;
-                if self.instances.is_some() || !self.package.quote_templates.iter().any(|template|template.declaration==method.body) {
-                    self.queue.push_back(Task::Function(method.body, method.arguments));
+                let method =
+                    self.specialize_method(slot, &instance, &subject, *member, method_arguments)?;
+                if self.instances.is_some()
+                    || !self
+                        .package
+                        .quote_templates
+                        .iter()
+                        .any(|template| template.declaration == method.body)
+                {
+                    self.queue
+                        .push_back(Task::Function(method.body, method.arguments));
                 }
             }
             K::Closure { captures, body, .. } => {
@@ -1463,8 +2222,12 @@ impl Builder<'_> {
                 }
                 self.expr(body, depth + 1)?;
             }
-            K::NormalFormType { arguments, plan, .. } => {
-                for p in plan.iter().flat_map(|p| &p.preparations) { self.expr(&p.expression, depth + 1)?; }
+            K::NormalFormType {
+                arguments, plan, ..
+            } => {
+                for p in plan.iter().flat_map(|p| &p.preparations) {
+                    self.expr(&p.expression, depth + 1)?;
+                }
                 for pattern in arguments.iter().flat_map(|a| a.patterns()) {
                     self.pattern(pattern, depth + 1)?;
                 }
@@ -1482,7 +2245,8 @@ impl Builder<'_> {
                 self.expr(signature, depth + 1)?;
             }
             K::Variant { fields, .. }
-            | K::AnonymousRecord { fields } | K::Record { fields, .. }
+            | K::AnonymousRecord { fields }
+            | K::Record { fields, .. }
             | K::NominalType {
                 arguments: fields, ..
             }
@@ -1495,15 +2259,34 @@ impl Builder<'_> {
                     self.expr(e, depth + 1)?;
                 }
             }
-            K::BitWritePointer {pointer,selections,value} => {
-                self.expr(pointer,depth+1)?;
-                for input in selections.iter().flat_map(nir::program::BitSelection::expressions) {self.expr(input,depth+1)?;}
-                self.expr(value,depth+1)?;
+            K::BitWritePointer {
+                pointer,
+                selections,
+                value,
+            } => {
+                self.expr(pointer, depth + 1)?;
+                for input in selections
+                    .iter()
+                    .flat_map(nir::program::BitSelection::expressions)
+                {
+                    self.expr(input, depth + 1)?;
+                }
+                self.expr(value, depth + 1)?;
             }
-            K::BitUpdate {storage_type, selections, value, ..} => {
+            K::BitUpdate {
+                storage_type,
+                selections,
+                value,
+                ..
+            } => {
                 self.queue.push_back(Task::Type(storage_type.clone()));
-                for input in selections.iter().flat_map(nir::program::BitSelection::expressions) {self.expr(input,depth+1)?;}
-                self.expr(value,depth+1)?;
+                for input in selections
+                    .iter()
+                    .flat_map(nir::program::BitSelection::expressions)
+                {
+                    self.expr(input, depth + 1)?;
+                }
+                self.expr(value, depth + 1)?;
             }
             K::BitAssign {
                 storage_type,
@@ -1513,11 +2296,14 @@ impl Builder<'_> {
                 self.queue.push_back(Task::Type(storage_type.clone()));
                 self.expr(value, depth + 1)?;
             }
-            K::AnonymousField { value, .. } | K::Field { value, .. }
+            K::AnonymousField { value, .. }
+            | K::Field { value, .. }
             | K::Let { value, .. }
             | K::Assign { value, .. }
             | K::Discard(value)
-            | K::RequirePredicate(value) | K::EnsurePredicate(value) | K::CheckPredicate(value)
+            | K::RequirePredicate(value)
+            | K::EnsurePredicate(value)
+            | K::CheckPredicate(value)
             | K::BitSlice { value, .. }
             | K::AddressOf(value)
             | K::ReadPointer(value)
@@ -1528,10 +2314,14 @@ impl Builder<'_> {
             | K::IntegerNegate(value)
             | K::FloatNegate(value)
             | K::BitConvert(value)
-            | K::Snapshot(value) | K::TakeBits(value) | K::SymbolName(value) | K::EnumName(value)
+            | K::NewtypeConvert(value)
+            | K::Snapshot(value)
+            | K::TakeBits(value)
+            | K::SymbolName(value)
+            | K::EnumName(value)
             | K::Not(value)
             | K::Loop { body: value, .. } => self.expr(value, depth + 1)?,
-            K::BitWindow {value, start, end} => {
+            K::BitWindow { value, start, end } => {
                 self.expr(value, depth + 1)?;
                 self.expr(start, depth + 1)?;
                 self.expr(end, depth + 1)?;
@@ -1594,7 +2384,11 @@ impl Builder<'_> {
                 {
                     match &callee.kind {
                         K::Function(id) => self.queue.push_back(Task::Function(*id, vec![])),
-                        K::FunctionInstance { declaration, arguments } => self.queue
+                        K::FunctionInstance {
+                            declaration,
+                            arguments,
+                        } => self
+                            .queue
                             .push_back(Task::Function(*declaration, arguments.clone())),
                         _ => {}
                     }
@@ -1626,7 +2420,8 @@ impl Builder<'_> {
             | K::TypeEqual(a, b)
             | K::TypeListIndex(a, b)
             | K::BitEqual(a, b)
-            | K::BitConcat(a, b) | K::BitIndex(a, b)
+            | K::BitConcat(a, b)
+            | K::BitIndex(a, b)
             | K::And(a, b)
             | K::Or(a, b) => {
                 self.expr(a, depth + 1)?;

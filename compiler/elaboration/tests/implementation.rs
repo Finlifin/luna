@@ -41,42 +41,101 @@ fn record_subject_keys_preserve_labels_precision_and_budget() {
     let generic = record("enabled", var(1));
     let concrete = record("enabled", ty(P::Bool));
     let key = Key::from_type(&concrete, Budget::default()).unwrap();
-    assert!(key.precision() > Key::from_type(&generic, Budget::default()).unwrap().precision());
-    let escaped = Key::from_type(&record("a\"b", ty(P::Bool)), Budget::default()).unwrap().to_string();
+    assert!(
+        key.precision()
+            > Key::from_type(&generic, Budget::default())
+                .unwrap()
+                .precision()
+    );
+    let escaped = Key::from_type(&record("a\"b", ty(P::Bool)), Budget::default())
+        .unwrap()
+        .to_string();
     assert!(escaped.contains("a\\\"b"), "{escaped}");
     let mut index = Index::default();
     add(&mut index, 200, generic);
     add(&mut index, 201, concrete.clone());
     add(&mut index, 202, record("disabled", ty(P::Bool)));
-    let candidates = index.candidates(Some(id(100)), &[], &concrete, Budget::default()).unwrap();
+    let candidates = index
+        .candidates(Some(id(100)), &[], &concrete, Budget::default())
+        .unwrap();
     assert!(candidates.declarations().contains(&id(200)));
     assert!(candidates.declarations().contains(&id(201)));
     assert!(!candidates.declarations().contains(&id(202)));
     let wide = record(&"x".repeat(200), ty(P::Bool));
-    assert!(Key::from_type(&wide, Budget { steps: 100, max_depth: 32 }).is_err());
+    assert!(
+        Key::from_type(
+            &wide,
+            Budget {
+                steps: 100,
+                max_depth: 32
+            }
+        )
+        .is_err()
+    );
     assert!(Key::from_type(&wide, Budget::default()).is_ok());
 }
 
 #[test]
 fn associated_type_queries_do_not_claim_structural_precision_or_ownership() {
     let projection = Term::AssociatedType {
-        origin: Box::new(nir::AssociatedTypeOrigin { interface: id(100), member: id(101) }),
-        subject: Box::new(node(10, vec![])), arguments: vec![],
+        origin: Box::new(nir::AssociatedTypeOrigin {
+            interface: id(100),
+            member: id(101),
+        }),
+        subject: Box::new(node(10, vec![])),
+        arguments: vec![],
     };
-    assert_eq!(Key::from_type(&projection, Budget::default()).unwrap().precision(), 0);
+    assert_eq!(
+        Key::from_type(&projection, Budget::default())
+            .unwrap()
+            .precision(),
+        0
+    );
     let mut declaration = head(200, projection.clone());
-    declaration.interface = Some(Id { package: 99, local: 100 });
-    assert!(matches!(declaration.ownership(Budget::default()), Err(Error::Ownership(_))));
+    declaration.interface = Some(Id {
+        package: 99,
+        local: 100,
+    });
+    assert!(matches!(
+        declaration.ownership(Budget::default()),
+        Err(Error::Ownership(_))
+    ));
     // An opaque outer application must also visit projection inputs before
     // cloning or deciding whether its key is closed.
-    let outer = Term::NormalForm { head: id(300), sort: Sort::Type, arguments: vec![projection] };
-    assert_eq!(Key::from_type(&outer, Budget::default()).unwrap().precision(), 0);
+    let outer = Term::NormalForm {
+        head: id(300),
+        sort: Sort::Type,
+        arguments: vec![projection],
+    };
+    assert_eq!(
+        Key::from_type(&outer, Budget::default())
+            .unwrap()
+            .precision(),
+        0
+    );
     let wide = Term::AssociatedType {
-        origin: Box::new(nir::AssociatedTypeOrigin { interface: id(100), member: id(101) }), subject: Box::new(ty(P::Bool)),
+        origin: Box::new(nir::AssociatedTypeOrigin {
+            interface: id(100),
+            member: id(101),
+        }),
+        subject: Box::new(ty(P::Bool)),
         arguments: vec![ty(P::Bool); 100],
     };
-    let outer = Term::NormalForm { head: id(300), sort: Sort::Type, arguments: vec![wide] };
-    assert!(matches!(Key::from_type(&outer, Budget { steps: 20, max_depth: 128 }), Err(Error::BudgetExhausted)));
+    let outer = Term::NormalForm {
+        head: id(300),
+        sort: Sort::Type,
+        arguments: vec![wide],
+    };
+    assert!(matches!(
+        Key::from_type(
+            &outer,
+            Budget {
+                steps: 20,
+                max_depth: 128
+            }
+        ),
+        Err(Error::BudgetExhausted)
+    ));
 }
 
 #[test]
@@ -450,6 +509,97 @@ fn context() -> elaboration::ptc::Context {
 }
 
 #[test]
+fn fixed_symbol_indices_select_infer_and_replay_without_value_equations() {
+    use elaboration::implementation::{PairAssessment, TypeAssessment};
+    let px = Term::Symbol("px".into());
+    let em = Term::Symbol("em".into());
+    let mut h = generic(200, ty(P::Integer), vec![id(1)]);
+    h.interface_arguments = vec![px.clone(), var(1)];
+    let context = context();
+    let inputs = [px.clone(), ty(P::U32)];
+    let assessment = h.assess_types(&ty(P::Integer), &inputs, &context, Budget::default());
+    let TypeAssessment::Applicable(evidence) = assessment else {
+        panic!("{assessment}")
+    };
+    assert_eq!(evidence.type_arguments, vec![ty(P::U32)]);
+    assert_eq!(evidence.head_proofs.len(), 2);
+    h.verify_type_evidence(
+        &evidence,
+        &ty(P::Integer),
+        &inputs,
+        &context,
+        Budget::default(),
+    )
+    .unwrap();
+    let wrong = [em.clone(), ty(P::U32)];
+    assert!(
+        h.verify_type_evidence(
+            &evidence,
+            &ty(P::Integer),
+            &wrong,
+            &context,
+            Budget::default()
+        )
+        .is_err()
+    );
+    let mismatch = h.assess_types(&ty(P::Integer), &wrong, &context, Budget::default());
+    assert!(
+        matches!(mismatch, TypeAssessment::SymbolMismatch { position: 0, .. }),
+        "{mismatch}"
+    );
+    assert_eq!(
+        mismatch.applicability(),
+        elaboration::implementation::Applicability::Excluded
+    );
+    assert!(mismatch.to_string().contains("(symbol-index-mismatch"));
+    let mut other = h.clone();
+    other.declaration = id(201);
+    other.interface_arguments[0] = em;
+    let PairAssessment::Disjoint(proof) =
+        h.assess_type_overlap(&other, &context, Budget::default())
+    else {
+        panic!("distinct suffixes must be disjoint")
+    };
+    assert!(h.verify_disjointness(&other, &proof, &context, Budget::default()));
+    other.interface_arguments[0] = px;
+    assert!(!h.verify_disjointness(&other, &proof, &context, Budget::default()));
+    assert!(
+        !h.assess_type_overlap(&other, &context, Budget::default())
+            .is_proved()
+    );
+    assert!(matches!(
+        h.assess_types(
+            &ty(P::Integer),
+            &inputs,
+            &context,
+            Budget {
+                steps: 1,
+                ..Budget::default()
+            }
+        ),
+        TypeAssessment::Pending(_)
+    ));
+    assert!(matches!(
+        h.assess_types(&ty(P::Integer), &inputs, &context, Budget::default()),
+        TypeAssessment::Applicable(_)
+    ));
+    let wide = Term::Symbol("x".repeat(10000).into());
+    h.interface_arguments[0] = wide.clone();
+    assert!(matches!(
+        h.assess_types(
+            &ty(P::Integer),
+            &[wide, ty(P::U32)],
+            &context,
+            Budget {
+                steps: 1000,
+                ..Budget::default()
+            }
+        ),
+        TypeAssessment::Pending(_)
+    ));
+}
+
+#[test]
 fn real_candidate_matching_solves_subject_and_trait_arguments_together() {
     use elaboration::implementation::TypeAssessment;
     let mut h = generic(200, node(11, vec![var(1), var(2)]), vec![id(1), id(2)]);
@@ -602,32 +752,67 @@ fn blanket_user_implementations_check_final_subject_eligibility() {
 fn tuple_subject_eligibility_requires_trusted_metadata_at_selection_and_replay() {
     use elaboration::{implementation::TypeAssessment, ptc::Context};
     use nir::normal_forms::{Head, Kind, Parameter, Role};
-    let mut package = nir::program::Package { normal_forms: vec![Head {
-        declaration: id(990), role: Role::Tuple, requirements: vec![],
-        parameters: vec![Parameter { declaration: id(991),
-            binding: nir::program::LocalId { owner: 990, index: 0 }, kind: Kind::TypeList,
-            ty: node(992, vec![ty(P::Type)]) }],
-    }], ..Default::default() };
-    let subject = Term::NormalForm { head: id(990), sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(vec![ty(P::Bool)])] };
+    let mut package = nir::program::Package {
+        normal_forms: vec![Head {
+            declaration: id(990),
+            role: Role::Tuple,
+            requirements: vec![],
+            parameters: vec![Parameter {
+                declaration: id(991),
+                binding: nir::program::LocalId {
+                    owner: 990,
+                    index: 0,
+                },
+                kind: Kind::TypeList,
+                ty: node(992, vec![ty(P::Type)]),
+            }],
+        }],
+        ..Default::default()
+    };
+    let subject = Term::NormalForm {
+        head: id(990),
+        sort: Sort::Type,
+        arguments: vec![Term::TypeListValue(vec![ty(P::Bool)])],
+    };
     let implementation = generic(200, var(1), vec![id(1)]);
     let trusted = Context::from_package(&package).unwrap();
-    let TypeAssessment::Applicable(evidence) = implementation.assess_types(&subject, &[], &trusted, Budget::default())
-        else { panic!("bound Tuple must be an eligible subject"); };
-    for context in [trusted.fork(), trusted.theory_context(), trusted.theory_in_scope(vec![])] {
-        implementation.verify_type_evidence(&evidence, &subject, &[], &context, Budget::default()).unwrap();
+    let TypeAssessment::Applicable(evidence) =
+        implementation.assess_types(&subject, &[], &trusted, Budget::default())
+    else {
+        panic!("bound Tuple must be an eligible subject");
+    };
+    for context in [
+        trusted.fork(),
+        trusted.theory_context(),
+        trusted.theory_in_scope(vec![]),
+    ] {
+        implementation
+            .verify_type_evidence(&evidence, &subject, &[], &context, Budget::default())
+            .unwrap();
     }
     assert!(trusted.to_string().contains("(tuple-heads"));
     package.normal_forms[0].role = Role::Opaque;
     let opaque = Context::from_package(&package).unwrap();
-    assert!(matches!(implementation.assess_types(&subject, &[], &opaque, Budget::default()), TypeAssessment::Pending(_)));
-    assert!(implementation.verify_type_evidence(&evidence, &subject, &[], &opaque, Budget::default()).is_err());
+    assert!(matches!(
+        implementation.assess_types(&subject, &[], &opaque, Budget::default()),
+        TypeAssessment::Pending(_)
+    ));
+    assert!(
+        implementation
+            .verify_type_evidence(&evidence, &subject, &[], &opaque, Budget::default())
+            .is_err()
+    );
     let mut equal = trusted.fork();
     equal.assume(elaboration::ptc::Formula::equal(var(995), subject));
-    let TypeAssessment::Applicable(evidence) = implementation.assess_types(&var(995), &[], &equal, Budget::default())
-        else { panic!("equality-backed Tuple must be eligible"); };
+    let TypeAssessment::Applicable(evidence) =
+        implementation.assess_types(&var(995), &[], &equal, Budget::default())
+    else {
+        panic!("equality-backed Tuple must be eligible");
+    };
     assert!(evidence.eligibility_proof.is_some());
-    implementation.verify_type_evidence(&evidence, &var(995), &[], &equal, Budget::default()).unwrap();
+    implementation
+        .verify_type_evidence(&evidence, &var(995), &[], &equal, Budget::default())
+        .unwrap();
 }
 
 #[test]
@@ -1407,32 +1592,65 @@ fn matched_heads_keep_unresolved_inputs_and_exhaustion_out_of_the_success_path()
 #[test]
 fn record_labels_charge_opaque_index_keys_before_copying() {
     for record in [
-        Term::Record(vec![("x".repeat(512),ty(P::Bool))]),
-        Term::RecordValue(vec![("x".repeat(512),Term::Bool(true))]),
+        Term::Record(vec![("x".repeat(512), ty(P::Bool))]),
+        Term::RecordValue(vec![("x".repeat(512), Term::Bool(true))]),
     ] {
-        let term=Term::NormalForm {head:id(300),sort:Sort::Type,arguments:vec![record]};
-        assert!(matches!(Key::from_type(&term,Budget {steps:128,max_depth:128}),Err(Error::BudgetExhausted)));
-        assert!(Key::from_type(&term,Budget::default()).is_ok());
+        let term = Term::NormalForm {
+            head: id(300),
+            sort: Sort::Type,
+            arguments: vec![record],
+        };
+        assert!(matches!(
+            Key::from_type(
+                &term,
+                Budget {
+                    steps: 128,
+                    max_depth: 128
+                }
+            ),
+            Err(Error::BudgetExhausted)
+        ));
+        assert!(Key::from_type(&term, Budget::default()).is_ok());
     }
 }
 
 #[test]
 fn record_label_budget_does_not_publish_candidate_applicability() {
     use elaboration::implementation::TypeAssessment;
-    let subject=Term::Record(vec![("x".repeat(512),ty(P::Bool))]);
-    let candidate=generic(200,subject.clone(),vec![]);
-    assert!(matches!(candidate.assess_types(&subject,&[],&context(),Budget {steps:128,max_depth:128}),TypeAssessment::Pending(_)));
-    assert!(matches!(candidate.assess_types(&subject,&[],&context(),Budget::default()),TypeAssessment::Applicable(_)));
+    let subject = Term::Record(vec![("x".repeat(512), ty(P::Bool))]);
+    let candidate = generic(200, subject.clone(), vec![]);
+    assert!(matches!(
+        candidate.assess_types(
+            &subject,
+            &[],
+            &context(),
+            Budget {
+                steps: 128,
+                max_depth: 128
+            }
+        ),
+        TypeAssessment::Pending(_)
+    ));
+    assert!(matches!(
+        candidate.assess_types(&subject, &[], &context(), Budget::default()),
+        TypeAssessment::Applicable(_)
+    ));
 }
 
 #[test]
 fn type_list_inputs_keep_potentially_equal_opaque_candidates() {
     let mut index = Index::default();
-    let opaque = |n| Term::NormalForm { head: id(n), sort: Sort::Type, arguments: vec![] };
+    let opaque = |n| Term::NormalForm {
+        head: id(n),
+        sort: Sort::Type,
+        arguments: vec![],
+    };
     let subject = |field| node(10, vec![Term::TypeListValue(vec![field])]);
     add(&mut index, 200, subject(opaque(30)));
     for query in [subject(opaque(31)), subject(var(9))] {
-        let candidates = index.candidates(Some(id(100)), &[], &query, Budget::default()).unwrap();
+        let candidates = index
+            .candidates(Some(id(100)), &[], &query, Budget::default())
+            .unwrap();
         assert!(candidates.declarations().contains(&id(200)));
     }
 }

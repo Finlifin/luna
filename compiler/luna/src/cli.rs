@@ -1,9 +1,9 @@
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
-pub const USAGE: &str = "Usage: luna <input.fl> [--emit hir|ast|nir | --invoke-comptime <name> | --instantiate <name> | --interpret <name> [--inline-functions] [--copy-protocol <trait> --drop-protocol <trait>] | --analyze-resources <name> --copy-protocol <trait> [--drop-protocol <trait>]] [--fuel <steps>] [--output <path>] [--sysroot <library-path>] [--splice-protocol <trait|package::trait>] [--meta-list-type <package::definition> --tuple-type <package::definition>] [--optional-type <package::definition>] [--add-protocol <package::trait>] [--index-protocol <package::trait>]\n       luna --help";
+pub const USAGE: &str = "Usage: luna <input.fl> [--emit hir|ast|nir | --invoke-comptime <name> | --instantiate <name> | --interpret <name> [--inline-functions] [--copy-protocol <trait> --drop-protocol <trait>] | --analyze-resources <name> --copy-protocol <trait> [--drop-protocol <trait>]] [--fuel <steps>] [--output <path>] [--sysroot <library-path>] [--splice-protocol <trait|package::trait>] [--meta-list-type <package::definition> --tuple-type <package::definition>] [--optional-type <package::definition>] [--add-protocol <package::trait>] [--index-protocol <package::trait>] [--literal-into-protocol <package::trait>]\n       luna --help";
 
-pub const HELP: &str = "Luna single-file frontend\n\nUsage: luna <input.fl> [--emit hir|ast|nir | --invoke-comptime <name> | --instantiate <name> | --interpret <name> [--inline-functions] [--copy-protocol <trait> --drop-protocol <trait>] | --analyze-resources <name> --copy-protocol <trait> [--drop-protocol <trait>]] [--fuel <steps>] [--output <path>] [--sysroot <library-path>] [--splice-protocol <trait|package::trait>] [--meta-list-type <package::definition> --tuple-type <package::definition>] [--optional-type <package::definition>] [--add-protocol <package::trait>] [--index-protocol <package::trait>]\n       luna --help\n\n  --emit hir|ast|nir     Dump HIR (default), AST, or type-elaborated NIR\n  --invoke-comptime <name>  Invoke one unambiguous comptime function without supplied arguments\n  --instantiate <name>  Dump the concrete IIR dependency graph of a runtime entry\n  --interpret <name>  Reference-execute IIR; both protocol options enable checked cleanup\n  --inline-functions  Expand eligible inline fn calls (requires --interpret and both protocols)\n  --analyze-resources <name>  Report ownership obligations (does not lower Drop or certify full safety)\n  --copy-protocol <trait>  Explicit source Copy identity for analysis or checked execution\n  --drop-protocol <trait>  Source Drop identity; analyze plans or execute them with --interpret\n  --fuel <steps>    Positive per-stage/per-query work budget (default: 100000)\n  --output <path>    Write the dump or result to a file (default: stdout)\n  --sysroot <path>   Use a library directory containing builtin/ and std/\n                     NIR reads optional language-items.conf defaults; explicit bindings override them\n  --splice-protocol <trait|package::trait>  Bind runtime conversion of comptime constants (qualified module paths supported)\n  --meta-list-type  Bind List by package::definition or package::module::definition\n  --tuple-type      Bind Tuple by package::definition or package::module::definition (requires List)\n  --optional-type   Bind optional enum by package::definition or package::module::definition\n  --add-protocol / --sub-protocol / --mul-protocol / --div-protocol / --rem-protocol / --neg-protocol / --not-protocol\n                    Bind arithmetic by package::trait or package::module::trait\n  --index-protocol  Bind Index by package::trait or package::module::trait\n  --help            Show this help\n  --                Treat remaining arguments as input paths\n\nA main.fl/lib.fl input scans its parent as the source root; other inputs compile alone.\n\nExit status: 0 on success, 1 on compilation, invocation or I/O errors, 2 on invalid usage.\n";
+pub const HELP: &str = "Luna single-file frontend\n\nUsage: luna <input.fl> [--emit hir|ast|nir | --invoke-comptime <name> | --instantiate <name> | --interpret <name> [--inline-functions] [--copy-protocol <trait> --drop-protocol <trait>] | --analyze-resources <name> --copy-protocol <trait> [--drop-protocol <trait>]] [--fuel <steps>] [--output <path>] [--sysroot <library-path>] [--splice-protocol <trait|package::trait>] [--meta-list-type <package::definition> --tuple-type <package::definition>] [--optional-type <package::definition>] [--add-protocol <package::trait>] [--index-protocol <package::trait>] [--literal-into-protocol <package::trait>]\n       luna --help\n\n  --emit hir|ast|nir     Dump HIR (default), AST, or type-elaborated NIR\n  --invoke-comptime <name>  Invoke one unambiguous comptime function without supplied arguments\n  --instantiate <name>  Dump the concrete IIR dependency graph of a runtime entry\n  --interpret <name>  Reference-execute IIR; both protocol options enable checked cleanup\n  --inline-functions  Expand eligible inline fn calls (requires --interpret and both protocols)\n  --analyze-resources <name>  Report ownership obligations (does not lower Drop or certify full safety)\n  --copy-protocol <trait>  Explicit source Copy identity for analysis or checked execution\n  --drop-protocol <trait>  Source Drop identity; analyze plans or execute them with --interpret\n  --fuel <steps>    Positive per-stage/per-query work budget (default: 100000)\n  --output <path>    Write the dump or result to a file (default: stdout)\n  --sysroot <path>   Use a library directory containing builtin/ and std/\n                     NIR reads optional language-items.conf defaults; explicit bindings override them\n  --splice-protocol <trait|package::trait>  Bind runtime conversion of comptime constants (qualified module paths supported)\n  --meta-list-type  Bind List by package::definition or package::module::definition\n  --tuple-type      Bind Tuple by package::definition or package::module::definition (requires List)\n  --optional-type   Bind optional enum by package::definition or package::module::definition\n  --add-protocol / --sub-protocol / --mul-protocol / --div-protocol / --rem-protocol / --neg-protocol / --not-protocol\n                    Bind arithmetic by package::trait or package::module::trait\n  --index-protocol  Bind Index by package::trait or package::module::trait\n  --literal-into-protocol  Bind literal suffix conversion by package::trait or package::module::trait\n  --help            Show this help\n  --                Treat remaining arguments as input paths\n\nA main.fl/lib.fl input scans its parent as the source root; other inputs compile alone.\n\nExit status: 0 on success, 1 on compilation, invocation or I/O errors, 2 on invalid usage.\n";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Emit {
@@ -15,7 +15,8 @@ pub enum Emit {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Options {
     pub index_protocol: Option<String>,
-    pub arithmetic_protocols: [Option<String>;7],
+    pub literal_into_protocol: Option<String>,
+    pub arithmetic_protocols: [Option<String>; 7],
     pub input: PathBuf,
     pub emit: Emit,
     pub output: Option<PathBuf>,
@@ -69,9 +70,10 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
     let mut splice_protocol = None;
     let mut meta_list_type = None;
     let mut index_protocol = None;
+    let mut literal_into_protocol = None;
     let mut tuple_type = None;
     let mut optional_type = None;
-    let mut arithmetic_protocols: [Option<String>;7]=Default::default();
+    let mut arithmetic_protocols: [Option<String>; 7] = Default::default();
     let mut positional = false;
     let mut entry = None;
     let mut instantiate = None;
@@ -141,7 +143,9 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
                     continue;
                 }
                 Some("--inline-functions") => {
-                    if inline_functions { return Err("--inline-functions may only be specified once".into()); }
+                    if inline_functions {
+                        return Err("--inline-functions may only be specified once".into());
+                    }
                     inline_functions = true;
                     continue;
                 }
@@ -199,33 +203,82 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
                     continue;
                 }
                 Some("--index-protocol") => {
-                    if index_protocol.is_some() { return Err("--index-protocol may only be specified once".into()); }
-                    index_protocol = Some(option_value(&mut args, "--index-protocol")?
-                        .into_string().map_err(|_| "Index protocol selector must be valid UTF-8")?);
+                    if index_protocol.is_some() {
+                        return Err("--index-protocol may only be specified once".into());
+                    }
+                    index_protocol = Some(
+                        option_value(&mut args, "--index-protocol")?
+                            .into_string()
+                            .map_err(|_| "Index protocol selector must be valid UTF-8")?,
+                    );
+                    continue;
+                }
+                Some("--literal-into-protocol") => {
+                    if literal_into_protocol.is_some() {
+                        return Err("--literal-into-protocol may only be specified once".into());
+                    }
+                    literal_into_protocol = Some(
+                        option_value(&mut args, "--literal-into-protocol")?
+                            .into_string()
+                            .map_err(|_| "LiteralInto protocol selector must be valid UTF-8")?,
+                    );
                     continue;
                 }
                 Some("--splice-protocol") => {
                     if splice_protocol.is_some() {
                         return Err("--splice-protocol may only be specified once".into());
                     }
-                    splice_protocol = Some(option_value(&mut args, "--splice-protocol")?
-                        .into_string().map_err(|_| "Splice protocol name must be valid UTF-8")?);
+                    splice_protocol = Some(
+                        option_value(&mut args, "--splice-protocol")?
+                            .into_string()
+                            .map_err(|_| "Splice protocol name must be valid UTF-8")?,
+                    );
                     continue;
                 }
-                Some(option @ ("--add-protocol" | "--sub-protocol" | "--mul-protocol" | "--div-protocol" | "--rem-protocol" | "--neg-protocol" | "--not-protocol")) => {
-                    let index=match option {"--add-protocol"=>0,"--sub-protocol"=>1,"--mul-protocol"=>2,"--div-protocol"=>3,"--rem-protocol"=>4,"--neg-protocol"=>5,_=>6};
-                    if arithmetic_protocols[index].is_some() {return Err(format!("{option} may only be specified once"));}
-                    let value=args.next().ok_or_else(||format!("{option} requires a source trait selector"))?
-                        .into_string().map_err(|_|format!("{option} requires UTF-8"))?;
-                    if value.starts_with('-') || value.is_empty() {return Err(format!("{option} requires a source trait selector"));}
-                    arithmetic_protocols[index]=Some(value);
+                Some(
+                    option @ ("--add-protocol" | "--sub-protocol" | "--mul-protocol"
+                    | "--div-protocol" | "--rem-protocol" | "--neg-protocol"
+                    | "--not-protocol"),
+                ) => {
+                    let index = match option {
+                        "--add-protocol" => 0,
+                        "--sub-protocol" => 1,
+                        "--mul-protocol" => 2,
+                        "--div-protocol" => 3,
+                        "--rem-protocol" => 4,
+                        "--neg-protocol" => 5,
+                        _ => 6,
+                    };
+                    if arithmetic_protocols[index].is_some() {
+                        return Err(format!("{option} may only be specified once"));
+                    }
+                    let value = args
+                        .next()
+                        .ok_or_else(|| format!("{option} requires a source trait selector"))?
+                        .into_string()
+                        .map_err(|_| format!("{option} requires UTF-8"))?;
+                    if value.starts_with('-') || value.is_empty() {
+                        return Err(format!("{option} requires a source trait selector"));
+                    }
+                    arithmetic_protocols[index] = Some(value);
                     continue;
                 }
                 Some(option @ ("--meta-list-type" | "--tuple-type" | "--optional-type")) => {
-                    let target = if option == "--meta-list-type" { &mut meta_list_type } else if option == "--tuple-type" { &mut tuple_type } else { &mut optional_type };
-                    if target.is_some() { return Err(format!("{option} may only be specified once")); }
-                    *target = Some(option_value(&mut args, option)?.into_string()
-                        .map_err(|_| "type constructor selector must be valid UTF-8")?);
+                    let target = if option == "--meta-list-type" {
+                        &mut meta_list_type
+                    } else if option == "--tuple-type" {
+                        &mut tuple_type
+                    } else {
+                        &mut optional_type
+                    };
+                    if target.is_some() {
+                        return Err(format!("{option} may only be specified once"));
+                    }
+                    *target = Some(
+                        option_value(&mut args, option)?
+                            .into_string()
+                            .map_err(|_| "type constructor selector must be valid UTF-8")?,
+                    );
                     continue;
                 }
                 Some("--sysroot") => {
@@ -251,7 +304,10 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
     if inline_functions
         && (interpret.is_none() || copy_protocol.is_none() || drop_protocol.is_none())
     {
-        return Err("--inline-functions requires --interpret with --copy-protocol and --drop-protocol".into());
+        return Err(
+            "--inline-functions requires --interpret with --copy-protocol and --drop-protocol"
+                .into(),
+        );
     }
     if resources.is_some()
         && (interpret.is_some() || instantiate.is_some() || entry.is_some() || emit.is_some())
@@ -314,15 +370,29 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, String
         optional_type,
         arithmetic_protocols,
         index_protocol,
+        literal_into_protocol,
     };
+    if options.literal_into_protocol.is_some() && options.emit != Emit::Nir {
+        return Err(
+            "--literal-into-protocol requires --emit nir or an execution/analysis command".into(),
+        );
+    }
     if options.index_protocol.is_some() && options.emit != Emit::Nir {
         return Err("--index-protocol requires --emit nir or an execution/analysis command".into());
     }
     if options.splice_protocol.is_some() && options.emit != Emit::Nir {
-        return Err("--splice-protocol requires --emit nir or an execution/analysis command".into());
+        return Err(
+            "--splice-protocol requires --emit nir or an execution/analysis command".into(),
+        );
     }
-    if (options.meta_list_type.is_some() || options.tuple_type.is_some() || options.optional_type.is_some()) && options.emit != Emit::Nir {
-        return Err("type constructor bindings require --emit nir or an execution/analysis command".into());
+    if (options.meta_list_type.is_some()
+        || options.tuple_type.is_some()
+        || options.optional_type.is_some())
+        && options.emit != Emit::Nir
+    {
+        return Err(
+            "type constructor bindings require --emit nir or an execution/analysis command".into(),
+        );
     }
     if let Some(entry) = resources {
         return Ok(Command::AnalyzeResources {
@@ -391,7 +461,11 @@ mod tests {
                 sysroot: None,
                 splice_protocol: None,
                 meta_list_type: None,
-                index_protocol: None, arithmetic_protocols:Default::default(), tuple_type: None, optional_type: None,
+                index_protocol: None,
+                literal_into_protocol: None,
+                arithmetic_protocols: Default::default(),
+                tuple_type: None,
+                optional_type: None,
             })
         );
     }
@@ -416,7 +490,11 @@ mod tests {
                 sysroot: Some("library".into()),
                 splice_protocol: None,
                 meta_list_type: None,
-                index_protocol: None, arithmetic_protocols:Default::default(), tuple_type: None, optional_type: None,
+                index_protocol: None,
+                literal_into_protocol: None,
+                arithmetic_protocols: Default::default(),
+                tuple_type: None,
+                optional_type: None,
             })
         );
     }

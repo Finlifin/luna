@@ -201,6 +201,9 @@ impl Display for ItemKind<'_> {
             Self::TypeAlias(ty, parameters, constraints) => {
                 form!(f, "type-alias", "parameters" => List(parameters), "constraints" => List(constraints), "type" => ty)
             }
+            Self::Newtype(ty, parameters, constraints) => {
+                form!(f, "newtype", "parameters" => List(parameters), "constraints" => List(constraints), "representation" => ty)
+            }
             Self::Use(path) => form!(f, "use", "import" => path),
             Self::Const(ty, value) => form!(f, "const", "type" => ty, "value" => value),
             Self::Invalid => form!(f, "invalid"),
@@ -457,14 +460,35 @@ impl Display for ExprKind<'_> {
             Self::ContextualExprType(bindings, result) => {
                 f.write_str("(contextual-expr-type (context")?;
                 for entry in bindings {
-                    write!(f, " (binding (name {}) (id {}) (type {}) (default {}))", Name(entry.name), Id(entry.hir_id), entry.ty, Maybe(entry.default))?;
+                    write!(
+                        f,
+                        " (binding (name {}) (id {}) (type {}) (default {}))",
+                        Name(entry.name),
+                        Id(entry.hir_id),
+                        entry.ty,
+                        Maybe(entry.default)
+                    )?;
                 }
                 write!(f, ") (result {}))", result)
             }
             Self::CodeQuote(body, substitutions) | Self::CodeSplice(body, substitutions) => {
-                write!(f, "({} (body {}) (substitutions", if matches!(self, Self::CodeQuote(..)) {"code-quote"} else {"code-splice"}, body)?;
+                write!(
+                    f,
+                    "({} (body {}) (substitutions",
+                    if matches!(self, Self::CodeQuote(..)) {
+                        "code-quote"
+                    } else {
+                        "code-splice"
+                    },
+                    body
+                )?;
                 for entry in substitutions {
-                    write!(f, " (substitute (port {}) (binding {}))", Name(entry.port), entry.binding)?;
+                    write!(
+                        f,
+                        " (substitute (port {}) (binding {}))",
+                        Name(entry.port),
+                        entry.binding
+                    )?;
                 }
                 f.write_str("))")
             }
@@ -507,7 +531,9 @@ impl Display for ExprKind<'_> {
             Self::Application(callee, args) => {
                 form!(f, "application", "callee" => callee, "args" => List(args))
             }
-            Self::CollectedProperties(fields) => form!(f, "collected-properties", "fields" => List(fields)),
+            Self::CollectedProperties(fields) => {
+                form!(f, "collected-properties", "fields" => List(fields))
+            }
             Self::ExtendedApplication(callee, args) => {
                 form!(f, "extended-application", "callee" => callee, "args" => List(args))
             }
@@ -523,11 +549,19 @@ impl Display for ExprKind<'_> {
             }
             Self::When(arms) => form!(f, "when", "arms" => List(arms)),
             Self::Block(block) => form!(f, "block-expr", "block" => block),
-            Self::For {label,pat,guard,iter,body} => form!(f, "for", "label" => Maybe(label.map(Name)),
+            Self::For {
+                label,
+                pat,
+                guard,
+                iter,
+                body,
+            } => form!(f, "for", "label" => Maybe(label.map(Name)),
                 "pattern" => pat, "guard" => Maybe(*guard), "iterable" => iter, "body" => body),
             Self::Loop(block) => form!(f, "loop", "body" => block),
             Self::EffectRequest(value) => form!(f, "effect-request", "computation" => value),
-            Self::EffectHandle(value, arms) => form!(f, "effect-handle", "computation" => value, "arms" => List(arms)),
+            Self::EffectHandle(value, arms) => {
+                form!(f, "effect-handle", "computation" => value, "arms" => List(arms))
+            }
             Self::Match(value, arms) => form!(f, "match", "value" => value, "arms" => List(arms)),
             Self::Assign(place, value) => form!(f, "assign", "place" => place, "value" => value),
             Self::AssignOp(op, place, value) => {
@@ -535,7 +569,9 @@ impl Display for ExprKind<'_> {
             }
             Self::Assumes(value) => form!(f, "assumes", "condition" => value),
             Self::Defer(value) => form!(f, "defer", "value" => value),
-            Self::RefinedType { requirement, base } => form!(f, "refined-type", "requirement" => requirement, "base" => base),
+            Self::RefinedType { requirement, base } => {
+                form!(f, "refined-type", "requirement" => requirement, "base" => base)
+            }
             Self::RefinementSubject => write!(f, "(refinement-subject)"),
             Self::Return(value) => form!(f, "return", "value" => Maybe(*value)),
             Self::Resume(value) => form!(f, "resume", "value" => Maybe(*value)),
@@ -597,7 +633,9 @@ impl Display for ExprKind<'_> {
             }
             Self::ReachabilityType => form!(f, "reachability-type"),
             Self::ErrorQualifiedType => form!(f, "error-qualified-type"),
-            Self::EffectQualifiedType(effects, result) => form!(f, "effect-qualified-type", "effects" => effects, "result" => result),
+            Self::EffectQualifiedType(effects, result) => {
+                form!(f, "effect-qualified-type", "effects" => effects, "result" => result)
+            }
             Self::TyPlaceholder => form!(f, "ty-placeholder"),
             Self::TyNoReturn => form!(f, "ty-no-return"),
             Self::TyVoid => form!(f, "ty-void"),
@@ -605,7 +643,9 @@ impl Display for ExprKind<'_> {
             Self::TyType => form!(f, "ty-type"),
             Self::TySelf => form!(f, "ty-self"),
             Self::TermTypedWith => form!(f, "term-typed-with"),
-            Self::TraitBound(subject, interface) => form!(f, "trait-bound", "subject" => subject, "interface" => interface),
+            Self::TraitBound(subject, interface) => {
+                form!(f, "trait-bound", "subject" => subject, "interface" => interface)
+            }
             Self::LambdaBound => form!(f, "lambda-bound"),
             Self::TermTraitBound => form!(f, "term-trait-bound"),
             Self::Implication => form!(f, "implication"),

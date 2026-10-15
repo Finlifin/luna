@@ -89,7 +89,10 @@ impl Checker<'_, '_> {
                     index
                 } else {
                     let metadata = self.effect_metadata(&operation, arm.span)?;
-                    if !matches!(metadata.abi, nir::effects::Abi::Direct | nir::effects::Abi::DirectPassing) {
+                    if !matches!(
+                        metadata.abi,
+                        nir::effects::Abi::Direct | nir::effects::Abi::DirectPassing
+                    ) {
                         return Err(error(
                             arm.span,
                             "non-direct effect handler source lowering is not implemented",

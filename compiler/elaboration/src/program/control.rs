@@ -52,7 +52,76 @@ fn pattern_matches(
         n::Pattern::Binding { inner, .. } | n::Pattern::Remap { pattern: inner, .. } => {
             pattern_matches(inner, value, fuel, depth + 1)
         }
-        n::Pattern::Literal(n::Literal::Bool(expected)) => Some(boolean_inner(value, 0, fuel)? == *expected),
+        n::Pattern::Literal(n::Literal::Bool(expected)) => {
+            Some(boolean_inner(value, 0, fuel)? == *expected)
+        }
+        n::Pattern::Literal(expected) => {
+            let K::Literal(actual) = &value.kind else {
+                return None;
+            };
+            literal_matches(expected, actual, fuel)
+        }
+        n::Pattern::Tuple(patterns) => {
+            let K::Tuple(values) = &value.kind else {
+                return None;
+            };
+            fields_match(patterns, values, fuel, depth + 1)
+        }
+        n::Pattern::Record {
+            declaration,
+            fields,
+        } => {
+            let K::Record {
+                declaration: actual,
+                fields: values,
+            } = &value.kind
+            else {
+                return None;
+            };
+            if declaration != actual {
+                return None;
+            }
+            fields_match(fields, values, fuel, depth + 1)
+        }
+        n::Pattern::AnonymousRecord { names, fields } => {
+            let K::AnonymousRecord { fields: values } = &value.kind else {
+                return None;
+            };
+            let Term::Record(types) = &value.ty else {
+                return None;
+            };
+            if names.len() != types.len() {
+                return None;
+            }
+            for (name, (actual, _)) in names.iter().zip(types) {
+                *fuel = fuel.checked_sub(name.len().max(actual.len()).saturating_add(1))?;
+                if name != actual {
+                    return None;
+                }
+            }
+            fields_match(fields, values, fuel, depth + 1)
+        }
+        n::Pattern::Variant {
+            declaration,
+            index,
+            fields,
+        } => {
+            let K::Variant {
+                declaration: actual,
+                index: tag,
+                fields: values,
+            } = &value.kind
+            else {
+                return None;
+            };
+            if declaration != actual {
+                return None;
+            }
+            if index != tag {
+                return Some(false);
+            }
+            fields_match(fields, values, fuel, depth + 1)
+        }
         n::Pattern::Unit if matches!(value.kind, K::Unit) => Some(true),
         n::Pattern::Or(patterns) => {
             for pattern in patterns {
@@ -64,6 +133,54 @@ fn pattern_matches(
         }
         _ => None,
     }
+}
+
+fn fields_match(
+    patterns: &[n::Pattern],
+    values: &[n::Expr],
+    fuel: &mut usize,
+    depth: usize,
+) -> Option<bool> {
+    if patterns.len() != values.len() {
+        return None;
+    }
+    for (pattern, value) in patterns.iter().zip(values) {
+        if !pattern_matches(pattern, value, fuel, depth)? {
+            return Some(false);
+        }
+    }
+    Some(true)
+}
+
+fn literal_matches(expected: &n::Literal, actual: &n::Literal, fuel: &mut usize) -> Option<bool> {
+    use n::Literal as L;
+    Some(match (expected, actual) {
+        (L::SignedInteger(a), L::SignedInteger(b)) => a == b,
+        (L::UnsignedInteger(a), L::UnsignedInteger(b)) => a == b,
+        (L::Char(a), L::Char(b)) => a == b,
+        (L::String(a), L::String(b)) | (L::Symbol(a), L::Symbol(b)) => {
+            *fuel = fuel.checked_sub(a.len().max(b.len()))?;
+            a == b
+        }
+        (L::Float32(a), L::Float32(b)) => f32::from_bits(*a) == f32::from_bits(*b),
+        (L::Float64(a), L::Float64(b)) => f64::from_bits(*a) == f64::from_bits(*b),
+        (
+            L::BitVec {
+                width: a,
+                words: aw,
+            },
+            L::BitVec {
+                width: b,
+                words: bw,
+            },
+        ) => {
+            *fuel = fuel.checked_sub(aw.len().max(bw.len()))?;
+            a == b && aw == bw
+        }
+        // Unbounded Integer/Float spellings need semantic normalization, not
+        // string equality. Unknown or mismatched literal forms stay conservative.
+        _ => return None,
+    })
 }
 
 /// A loop completes normally only through a break to its own identity. Calls
@@ -221,6 +338,44 @@ mod tests {
             source: n::SourceRange { start: 0, end: 0 },
             kind: K::Literal(n::Literal::Bool(value)),
         }
+    }
+
+    #[test]
+    fn literal_classification_uses_runtime_float_equality_and_bounded_storage() {
+        use n::Literal as L;
+        let zero = L::Float64(0.0f64.to_bits());
+        let negative_zero = L::Float64((-0.0f64).to_bits());
+        let nan = L::Float64(f64::NAN.to_bits());
+        assert_eq!(literal_matches(&zero, &negative_zero, &mut 100), Some(true));
+        assert_eq!(literal_matches(&nan, &nan, &mut 100), Some(false));
+        let text = L::String("hello".into());
+        assert_eq!(literal_matches(&text, &text, &mut 4), None);
+        assert_eq!(literal_matches(&text, &text, &mut 5), Some(true));
+        let integer = L::Integer("01".into());
+        assert_eq!(literal_matches(&integer, &integer, &mut 100), None);
+    }
+
+    #[test]
+    fn structural_classification_keeps_unknown_fields_and_executable_patterns() {
+        let value = n::Expr {
+            ty: Term::Tuple(vec![p(P::Bool)]),
+            source: literal(true).source,
+            kind: K::Tuple(vec![literal(true)]),
+        };
+        let pattern = n::Pattern::Tuple(vec![n::Pattern::Literal(n::Literal::Bool(true))]);
+        assert_eq!(pattern_matches(&pattern, &value, &mut 100, 0), Some(true));
+        assert_eq!(pattern_matches(&pattern, &value, &mut 1, 0), None);
+        let guarded = n::Pattern::Tuple(vec![n::Pattern::Guard {
+            pattern: Box::new(n::Pattern::Wild),
+            condition: Box::new(literal(true)),
+        }]);
+        assert_eq!(pattern_matches(&guarded, &value, &mut 100, 0), None);
+        let mut unknown = value.clone();
+        unknown.kind = K::Tuple(vec![n::Expr {
+            kind: K::Local(n::LocalId { owner: 1, index: 0 }),
+            ..literal(true)
+        }]);
+        assert_eq!(pattern_matches(&pattern, &unknown, &mut 100, 0), None);
     }
 
     #[test]

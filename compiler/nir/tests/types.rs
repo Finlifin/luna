@@ -26,22 +26,55 @@ fn bound(depth: u32, index: usize, sort: Sort) -> Term {
 
 #[test]
 fn scoped_declaration_substitution_preserves_local_and_caller_frames() {
-    let generic=Term::Rigid {declaration:SENSOR,sort:Sort::Type};
-    let signature=Term::Function {
-        parameters:vec![Parameter {sort:Sort::Type,ty:primitive(Primitive::Type)}],
-        result:Box::new(Term::Tuple(vec![bound(0,0,Sort::Type),generic])),
+    let generic = Term::Rigid {
+        declaration: SENSOR,
+        sort: Sort::Type,
     };
-    let caller=bound(0,0,Sort::Type);
-    let replaced=signature.instantiate_types_in_scope(&[SENSOR],&[caller.clone()],&[vec![Sort::Type]]).unwrap();
-    assert_eq!(replaced,Term::Function {
-        parameters:vec![Parameter {sort:Sort::Type,ty:primitive(Primitive::Type)}],
-        result:Box::new(Term::Tuple(vec![bound(0,0,Sort::Type),bound(1,0,Sort::Type)])),
-    });
-    assert!(signature.instantiate_types(&[SENSOR],&[caller.clone()]).is_err());
-    assert!(signature.instantiate_types_in_scope(&[SENSOR],&[caller],&[vec![Sort::Runtime]]).is_err());
-    assert!(signature.instantiate_types_in_scope(&[SENSOR],&[bound(1,0,Sort::Type)],&[vec![Sort::Type]]).is_err());
-    assert_eq!(replaced.substitute(&[primitive(Primitive::Bool)]).unwrap(),
-        signature.instantiate_types(&[SENSOR],&[primitive(Primitive::Bool)]).unwrap());
+    let signature = Term::Function {
+        parameters: vec![Parameter {
+            sort: Sort::Type,
+            ty: primitive(Primitive::Type),
+        }],
+        result: Box::new(Term::Tuple(vec![bound(0, 0, Sort::Type), generic])),
+    };
+    let caller = bound(0, 0, Sort::Type);
+    let replaced = signature
+        .instantiate_types_in_scope(&[SENSOR], &[caller.clone()], &[vec![Sort::Type]])
+        .unwrap();
+    assert_eq!(
+        replaced,
+        Term::Function {
+            parameters: vec![Parameter {
+                sort: Sort::Type,
+                ty: primitive(Primitive::Type)
+            }],
+            result: Box::new(Term::Tuple(vec![
+                bound(0, 0, Sort::Type),
+                bound(1, 0, Sort::Type)
+            ])),
+        }
+    );
+    assert!(
+        signature
+            .instantiate_types(&[SENSOR], &[caller.clone()])
+            .is_err()
+    );
+    assert!(
+        signature
+            .instantiate_types_in_scope(&[SENSOR], &[caller], &[vec![Sort::Runtime]])
+            .is_err()
+    );
+    assert!(
+        signature
+            .instantiate_types_in_scope(&[SENSOR], &[bound(1, 0, Sort::Type)], &[vec![Sort::Type]])
+            .is_err()
+    );
+    assert_eq!(
+        replaced.substitute(&[primitive(Primitive::Bool)]).unwrap(),
+        signature
+            .instantiate_types(&[SENSOR], &[primitive(Primitive::Bool)])
+            .unwrap()
+    );
 }
 fn object(instance: u64) -> Term {
     Term::Runtime(RuntimeId { instance, local: 0 })
@@ -50,38 +83,90 @@ fn object(instance: u64) -> Term {
 #[test]
 fn function_input_domain_views_refine_sorts_before_binding_and_compose() {
     let projection = Term::AssociatedType {
-        origin: Box::new(AssociatedTypeOrigin { interface: SENSOR, member: CALIBRATION }),
-        subject: Box::new(bound(0, 0, Sort::Type)), arguments: vec![],
+        origin: Box::new(AssociatedTypeOrigin {
+            interface: SENSOR,
+            member: CALIBRATION,
+        }),
+        subject: Box::new(bound(0, 0, Sort::Type)),
+        arguments: vec![],
     };
-    let indexed = Term::NormalForm { head: IDENTITY, sort: Sort::Type,
-        arguments: vec![bound(0, 1, Sort::ComptimeValue)] };
+    let indexed = Term::NormalForm {
+        head: IDENTITY,
+        sort: Sort::Type,
+        arguments: vec![bound(0, 1, Sort::ComptimeValue)],
+    };
     let signature = Term::Function {
         parameters: vec![
-            Parameter { sort: Sort::Type, ty: primitive(Primitive::Type) },
-            Parameter { sort: Sort::ComptimeValue, ty: projection },
-            Parameter { sort: Sort::Runtime, ty: indexed.clone() },
-        ], result: Box::new(indexed.clone()),
+            Parameter {
+                sort: Sort::Type,
+                ty: primitive(Primitive::Type),
+            },
+            Parameter {
+                sort: Sort::ComptimeValue,
+                ty: projection,
+            },
+            Parameter {
+                sort: Sort::Runtime,
+                ty: indexed.clone(),
+            },
+        ],
+        result: Box::new(indexed.clone()),
     };
     let view = |ty: &Term, _: &[Parameter]| -> Result<Term, TypeError> {
         Ok(match ty {
-            Term::AssociatedType { subject, .. } if **subject == primitive(Primitive::Bool) => primitive(Primitive::Type),
+            Term::AssociatedType { subject, .. } if **subject == primitive(Primitive::Bool) => {
+                primitive(Primitive::Type)
+            }
             _ => ty.clone(),
         })
     };
-    let inputs = vec![Some(primitive(Primitive::Bool)), Some(primitive(Primitive::Char)), None];
+    let inputs = vec![
+        Some(primitive(Primitive::Bool)),
+        Some(primitive(Primitive::Char)),
+        None,
+    ];
     assert!(signature.prepare_function_inputs(&inputs).is_err());
-    let full = signature.prepare_function_inputs_with_type_view(&inputs, view).unwrap();
-    let expected = Term::NormalForm { head: IDENTITY, sort: Sort::Type, arguments: vec![primitive(Primitive::Char)] };
-    assert_eq!(full.signature(), &Term::Function {
-        parameters: vec![Parameter { sort: Sort::Runtime, ty: expected.clone() }], result: Box::new(expected.clone()),
-    });
+    let full = signature
+        .prepare_function_inputs_with_type_view(&inputs, view)
+        .unwrap();
+    let expected = Term::NormalForm {
+        head: IDENTITY,
+        sort: Sort::Type,
+        arguments: vec![primitive(Primitive::Char)],
+    };
+    assert_eq!(
+        full.signature(),
+        &Term::Function {
+            parameters: vec![Parameter {
+                sort: Sort::Runtime,
+                ty: expected.clone()
+            }],
+            result: Box::new(expected.clone()),
+        }
+    );
     assert_eq!(full.rebind(&indexed).unwrap(), expected);
-    let partial = signature.prepare_function_inputs_with_type_view(&[inputs[0].clone(), None, None], view).unwrap();
-    let Term::Function { parameters, .. } = partial.signature() else { panic!() };
-    assert_eq!(parameters[0], Parameter { sort: Sort::Type, ty: primitive(Primitive::Type) });
-    let split = partial.signature().prepare_function_inputs_with_type_view(&[inputs[1].clone(), None], view).unwrap();
+    let partial = signature
+        .prepare_function_inputs_with_type_view(&[inputs[0].clone(), None, None], view)
+        .unwrap();
+    let Term::Function { parameters, .. } = partial.signature() else {
+        panic!()
+    };
+    assert_eq!(
+        parameters[0],
+        Parameter {
+            sort: Sort::Type,
+            ty: primitive(Primitive::Type)
+        }
+    );
+    let split = partial
+        .signature()
+        .prepare_function_inputs_with_type_view(&[inputs[1].clone(), None], view)
+        .unwrap();
     assert_eq!(split.signature(), full.signature());
-    assert_eq!(split.rebind(&partial.rebind(&indexed).unwrap()).unwrap(), full.rebind(&indexed).unwrap());
+    assert_eq!(
+        split.rebind(&partial.rebind(&indexed).unwrap()).unwrap(),
+        full.rebind(&indexed).unwrap()
+    );
     assert!(full.to_string().contains("(type-slots 1)"));
     assert!(full.to_string().contains("(normal-form"));
 }
@@ -89,26 +174,65 @@ fn function_input_domain_views_refine_sorts_before_binding_and_compose() {
 #[test]
 fn function_input_domain_views_reject_invalid_sorts_scopes_and_propagate_failure() {
     let signature = Term::Function {
-        parameters: vec![Parameter { sort: Sort::ComptimeValue, ty: primitive(Primitive::Bool) }],
+        parameters: vec![Parameter {
+            sort: Sort::ComptimeValue,
+            ty: primitive(Primitive::Bool),
+        }],
         result: Box::new(primitive(Primitive::Bool)),
     };
     let inputs = [Some(Term::Bool(true))];
-    assert!(signature.prepare_function_inputs_with_type_view(&inputs,
-        |_, _| Ok::<_, TypeError>(Term::Bool(true))).is_err());
-    assert!(signature.prepare_function_inputs_with_type_view(&inputs,
-        |_, _| Ok::<_, TypeError>(bound(0, 0, Sort::Type))).is_err());
-    assert!(signature.prepare_function_inputs_with_type_view(&inputs,
-        |_, _| Err::<Term, _>(TypeError::InvalidFunctionSignature)).is_err());
-    assert!(signature.prepare_function_inputs_with_type_view(&[Some(primitive(Primitive::Char))],
-        |ty, _| Ok::<_, TypeError>(ty.clone())).is_err());
+    assert!(
+        signature
+            .prepare_function_inputs_with_type_view(&inputs, |_, _| Ok::<_, TypeError>(Term::Bool(
+                true
+            )))
+            .is_err()
+    );
+    assert!(
+        signature
+            .prepare_function_inputs_with_type_view(&inputs, |_, _| Ok::<_, TypeError>(bound(
+                0,
+                0,
+                Sort::Type
+            )))
+            .is_err()
+    );
+    assert!(
+        signature
+            .prepare_function_inputs_with_type_view(&inputs, |_, _| Err::<Term, _>(
+                TypeError::InvalidFunctionSignature
+            ))
+            .is_err()
+    );
+    assert!(
+        signature
+            .prepare_function_inputs_with_type_view(
+                &[Some(primitive(Primitive::Char))],
+                |ty, _| Ok::<_, TypeError>(ty.clone())
+            )
+            .is_err()
+    );
     assert!(signature.prepare_function_inputs(&inputs).is_ok());
     let opaque_domain = Term::Function {
-        parameters: vec![Parameter { sort: Sort::ComptimeValue, ty: Term::NormalForm {
-            head: IDENTITY, sort: Sort::Type, arguments: vec![primitive(Primitive::Type)],
-        } }], result: Box::new(primitive(Primitive::Bool)),
+        parameters: vec![Parameter {
+            sort: Sort::ComptimeValue,
+            ty: Term::NormalForm {
+                head: IDENTITY,
+                sort: Sort::Type,
+                arguments: vec![primitive(Primitive::Type)],
+            },
+        }],
+        result: Box::new(primitive(Primitive::Bool)),
     };
-    assert!(opaque_domain.prepare_function_inputs_with_type_view(&[Some(primitive(Primitive::Char))],
-        |ty, _| Ok::<_, TypeError>(ty.clone())).is_err(), "opaque Type-result heads are not the Type domain");
+    assert!(
+        opaque_domain
+            .prepare_function_inputs_with_type_view(
+                &[Some(primitive(Primitive::Char))],
+                |ty, _| Ok::<_, TypeError>(ty.clone())
+            )
+            .is_err(),
+        "opaque Type-result heads are not the Type domain"
+    );
 }
 fn calibration() -> Term {
     Term::Nominal {
@@ -1268,65 +1392,170 @@ fn replacing_callable_results_preserves_environment_phase_and_parameter_binders(
 
 #[test]
 fn record_types_validate_fields_before_interning() {
-    let mut interner=TypeInterner::default();
-    let record=Term::Record(vec![("enabled".into(),primitive(Primitive::Bool)),("count".into(),primitive(Primitive::U8))]);
-    let core=interner.intern(vec![],record.clone()).unwrap();
-    assert!(Arc::ptr_eq(&core,&interner.intern(vec![],record.clone()).unwrap()));
-    assert_eq!(core.body(),&record);
-    assert_ne!(record,Term::Tuple(vec![primitive(Primitive::Bool),primitive(Primitive::U8)]));
-    assert_eq!(interner.intern(vec![],Term::Record(vec![("x".into(),primitive(Primitive::Bool)),("x".into(),primitive(Primitive::U8))])).unwrap_err(),TypeError::DuplicateRecordField("x".into()));
-    assert!(matches!(interner.intern(vec![],Term::Record(vec![("bad".into(),Term::Bool(true))])),Err(TypeError::WrongSort {..})));
-    assert_eq!(interner.len(),1,"invalid records must not publish cores");
+    let mut interner = TypeInterner::default();
+    let record = Term::Record(vec![
+        ("enabled".into(), primitive(Primitive::Bool)),
+        ("count".into(), primitive(Primitive::U8)),
+    ]);
+    let core = interner.intern(vec![], record.clone()).unwrap();
+    assert!(Arc::ptr_eq(
+        &core,
+        &interner.intern(vec![], record.clone()).unwrap()
+    ));
+    assert_eq!(core.body(), &record);
+    assert_ne!(
+        record,
+        Term::Tuple(vec![primitive(Primitive::Bool), primitive(Primitive::U8)])
+    );
+    assert_eq!(
+        interner
+            .intern(
+                vec![],
+                Term::Record(vec![
+                    ("x".into(), primitive(Primitive::Bool)),
+                    ("x".into(), primitive(Primitive::U8))
+                ])
+            )
+            .unwrap_err(),
+        TypeError::DuplicateRecordField("x".into())
+    );
+    assert!(matches!(
+        interner.intern(vec![], Term::Record(vec![("bad".into(), Term::Bool(true))])),
+        Err(TypeError::WrongSort { .. })
+    ));
+    assert_eq!(interner.len(), 1, "invalid records must not publish cores");
 }
 
 #[test]
 fn record_type_substitution_reaches_fields_and_respects_nested_binders() {
-    let term=Term::Record(vec![("value".into(),bound(0,0,Sort::Type)),("callback".into(),Term::Function {parameters:vec![Parameter {sort:Sort::Type,ty:primitive(Primitive::Type)}],result:Box::new(Term::Tuple(vec![bound(1,0,Sort::Type),bound(0,0,Sort::Type)]))})]);
-    let actual=term.substitute(&[primitive(Primitive::U8)]).unwrap();
-    let expected=Term::Record(vec![("value".into(),primitive(Primitive::U8)),("callback".into(),Term::Function {parameters:vec![Parameter {sort:Sort::Type,ty:primitive(Primitive::Type)}],result:Box::new(Term::Tuple(vec![primitive(Primitive::U8),bound(0,0,Sort::Type)]))})]);
-    assert_eq!(actual,expected);
+    let term = Term::Record(vec![
+        ("value".into(), bound(0, 0, Sort::Type)),
+        (
+            "callback".into(),
+            Term::Function {
+                parameters: vec![Parameter {
+                    sort: Sort::Type,
+                    ty: primitive(Primitive::Type),
+                }],
+                result: Box::new(Term::Tuple(vec![
+                    bound(1, 0, Sort::Type),
+                    bound(0, 0, Sort::Type),
+                ])),
+            },
+        ),
+    ]);
+    let actual = term.substitute(&[primitive(Primitive::U8)]).unwrap();
+    let expected = Term::Record(vec![
+        ("value".into(), primitive(Primitive::U8)),
+        (
+            "callback".into(),
+            Term::Function {
+                parameters: vec![Parameter {
+                    sort: Sort::Type,
+                    ty: primitive(Primitive::Type),
+                }],
+                result: Box::new(Term::Tuple(vec![
+                    primitive(Primitive::U8),
+                    bound(0, 0, Sort::Type),
+                ])),
+            },
+        ),
+    ]);
+    assert_eq!(actual, expected);
     actual.check_scope(&[]).unwrap();
-    let rigid=Term::Rigid {declaration:SENSOR,sort:Sort::Type};
-    let record=Term::Record(vec![("value".into(),rigid)]);
+    let rigid = Term::Rigid {
+        declaration: SENSOR,
+        sort: Sort::Type,
+    };
+    let record = Term::Record(vec![("value".into(), rigid)]);
     assert!(record.mentions_rigid(SENSOR));
-    assert_eq!(record.instantiate_types(&[SENSOR],&[primitive(Primitive::Bool)]).unwrap(),Term::Record(vec![("value".into(),primitive(Primitive::Bool))]));
+    assert_eq!(
+        record
+            .instantiate_types(&[SENSOR], &[primitive(Primitive::Bool)])
+            .unwrap(),
+        Term::Record(vec![("value".into(), primitive(Primitive::Bool))])
+    );
 }
 
 #[test]
 fn record_runtime_dependencies_are_abstracted_without_merging_environments() {
-    let mut interner=TypeInterner::default();
-    let mut refs=Vec::new();
-    for instance in [1,2] {
-        let runtime=RuntimeId {instance,local:0};
-        let ty=Term::Record(vec![("reading".into(),Term::NormalForm {head:IDENTITY,sort:Sort::Type,arguments:vec![Term::Runtime(runtime)]})]);
-        let reference=interner.abstract_runtime(&ty,&[(runtime,calibration())]).unwrap();
-        assert_eq!(reference.materialize().unwrap(),ty);
-        assert_eq!(reference.runtime_dependencies().unwrap(),BTreeSet::from([runtime]));
+    let mut interner = TypeInterner::default();
+    let mut refs = Vec::new();
+    for instance in [1, 2] {
+        let runtime = RuntimeId { instance, local: 0 };
+        let ty = Term::Record(vec![(
+            "reading".into(),
+            Term::NormalForm {
+                head: IDENTITY,
+                sort: Sort::Type,
+                arguments: vec![Term::Runtime(runtime)],
+            },
+        )]);
+        let reference = interner
+            .abstract_runtime(&ty, &[(runtime, calibration())])
+            .unwrap();
+        assert_eq!(reference.materialize().unwrap(), ty);
+        assert_eq!(
+            reference.runtime_dependencies().unwrap(),
+            BTreeSet::from([runtime])
+        );
         assert!(reference.check_runtime_bindings(&BTreeSet::new()).is_err());
         refs.push(reference);
     }
-    assert_ne!(refs[0],refs[1]);
-    assert_eq!(interner.len(),1);
+    assert_ne!(refs[0], refs[1]);
+    assert_eq!(interner.len(), 1);
 }
 
 #[test]
 fn record_type_dump_escapes_names_and_retains_field_structure() {
-    let term=Term::Record(vec![("quote\"\n".into(),Term::Record(vec![("\\tail".into(),primitive(Primitive::Bool))]))]);
-    assert_eq!(term.to_string(),r#"(record-type (fields (field "quote\"\n" (record-type (fields (field "\\tail" (primitive bool)))))))"#);
+    let term = Term::Record(vec![(
+        "quote\"\n".into(),
+        Term::Record(vec![("\\tail".into(), primitive(Primitive::Bool))]),
+    )]);
+    assert_eq!(
+        term.to_string(),
+        r#"(record-type (fields (field "quote\"\n" (record-type (fields (field "\\tail" (primitive bool)))))))"#
+    );
     println!("RECORD_TYPE_DUMP={term}\nRECORD_TYPE_END");
 }
 
 #[test]
 fn record_type_arguments_retain_nested_runtime_environment_requirements() {
-    let runtime=RuntimeId {instance:9,local:2};
-    let argument=Term::Record(vec![("sensor".into(),Term::NormalForm {head:IDENTITY,sort:Sort::Type,arguments:vec![Term::Runtime(runtime)]})]);
-    let mut interner=TypeInterner::default();
-    let core=interner.intern(vec![Parameter {sort:Sort::Type,ty:primitive(Primitive::Type)}],hole(0,Sort::Type)).unwrap();
-    let reference=TypeRef::bind(core,vec![argument.clone()]).unwrap();
-    assert_eq!(reference.runtime_dependencies().unwrap(),BTreeSet::from([runtime]));
-    assert_eq!(reference.check_runtime_bindings(&BTreeSet::new()),Err(TypeError::UnboundRuntime(runtime)));
-    reference.check_runtime_bindings(&BTreeSet::from([runtime])).unwrap();
-    assert_eq!(reference.materialize().unwrap(),argument);
+    let runtime = RuntimeId {
+        instance: 9,
+        local: 2,
+    };
+    let argument = Term::Record(vec![(
+        "sensor".into(),
+        Term::NormalForm {
+            head: IDENTITY,
+            sort: Sort::Type,
+            arguments: vec![Term::Runtime(runtime)],
+        },
+    )]);
+    let mut interner = TypeInterner::default();
+    let core = interner
+        .intern(
+            vec![Parameter {
+                sort: Sort::Type,
+                ty: primitive(Primitive::Type),
+            }],
+            hole(0, Sort::Type),
+        )
+        .unwrap();
+    let reference = TypeRef::bind(core, vec![argument.clone()]).unwrap();
+    assert_eq!(
+        reference.runtime_dependencies().unwrap(),
+        BTreeSet::from([runtime])
+    );
+    assert_eq!(
+        reference.check_runtime_bindings(&BTreeSet::new()),
+        Err(TypeError::UnboundRuntime(runtime))
+    );
+    reference
+        .check_runtime_bindings(&BTreeSet::from([runtime]))
+        .unwrap();
+    assert_eq!(reference.materialize().unwrap(), argument);
 }
 
 #[test]
@@ -1382,83 +1611,268 @@ fn trait_predicates_preserve_identity_boolean_structure_and_substitution() {
 #[test]
 fn mixed_parameter_abstraction_round_trips_under_function_binders() {
     use nir::DeclarationParameter as D;
-    let runtime=DeclarationId {package:9,local:3};
-    let inputs=[D {declaration:SENSOR,sort:Sort::Type},D {declaration:CALIBRATION,sort:Sort::ComptimeValue},D {declaration:runtime,sort:Sort::Runtime}];
-    let template=Term::Function {parameters:vec![Parameter {sort:Sort::Runtime,ty:Term::Rigid {declaration:SENSOR,sort:Sort::Type}}],result:Box::new(Term::NormalForm {head:IDENTITY,sort:Sort::Type,arguments:vec![Term::Rigid {declaration:SENSOR,sort:Sort::Type},Term::Rigid {declaration:CALIBRATION,sort:Sort::ComptimeValue},Term::Rigid {declaration:runtime,sort:Sort::Runtime},bound(0,0,Sort::Runtime)]})};
-    let abstracted=template.abstract_parameters(&inputs).unwrap();
-    abstracted.check_scope(&[vec![Sort::Type,Sort::ComptimeValue,Sort::Runtime]]).unwrap();
-    let arguments=[primitive(Primitive::U8),Term::Integer(comptime_runtime::Integer::from_u128(8)),object(99)];
-    let concrete=template.instantiate_parameters(&inputs,&arguments).unwrap();
-    assert_eq!(abstracted.substitute(&arguments).unwrap(),concrete);
-    let Term::Function {parameters,result}=concrete else {panic!("function")};
-    assert_eq!(parameters[0].ty,primitive(Primitive::U8));
-    assert_eq!(*result,Term::NormalForm {head:IDENTITY,sort:Sort::Type,arguments:arguments.into_iter().chain([bound(0,0,Sort::Runtime)]).collect()});
-    assert_eq!(inputs[1].to_string(),format!("(declaration-parameter (identity {CALIBRATION}) (sort comptime-value))"));
+    let runtime = DeclarationId {
+        package: 9,
+        local: 3,
+    };
+    let inputs = [
+        D {
+            declaration: SENSOR,
+            sort: Sort::Type,
+        },
+        D {
+            declaration: CALIBRATION,
+            sort: Sort::ComptimeValue,
+        },
+        D {
+            declaration: runtime,
+            sort: Sort::Runtime,
+        },
+    ];
+    let template = Term::Function {
+        parameters: vec![Parameter {
+            sort: Sort::Runtime,
+            ty: Term::Rigid {
+                declaration: SENSOR,
+                sort: Sort::Type,
+            },
+        }],
+        result: Box::new(Term::NormalForm {
+            head: IDENTITY,
+            sort: Sort::Type,
+            arguments: vec![
+                Term::Rigid {
+                    declaration: SENSOR,
+                    sort: Sort::Type,
+                },
+                Term::Rigid {
+                    declaration: CALIBRATION,
+                    sort: Sort::ComptimeValue,
+                },
+                Term::Rigid {
+                    declaration: runtime,
+                    sort: Sort::Runtime,
+                },
+                bound(0, 0, Sort::Runtime),
+            ],
+        }),
+    };
+    let abstracted = template.abstract_parameters(&inputs).unwrap();
+    abstracted
+        .check_scope(&[vec![Sort::Type, Sort::ComptimeValue, Sort::Runtime]])
+        .unwrap();
+    let arguments = [
+        primitive(Primitive::U8),
+        Term::Integer(comptime_runtime::Integer::from_u128(8)),
+        object(99),
+    ];
+    let concrete = template
+        .instantiate_parameters(&inputs, &arguments)
+        .unwrap();
+    assert_eq!(abstracted.substitute(&arguments).unwrap(), concrete);
+    let Term::Function { parameters, result } = concrete else {
+        panic!("function")
+    };
+    assert_eq!(parameters[0].ty, primitive(Primitive::U8));
+    assert_eq!(
+        *result,
+        Term::NormalForm {
+            head: IDENTITY,
+            sort: Sort::Type,
+            arguments: arguments
+                .into_iter()
+                .chain([bound(0, 0, Sort::Runtime)])
+                .collect()
+        }
+    );
+    assert_eq!(
+        inputs[1].to_string(),
+        format!("(declaration-parameter (identity {CALIBRATION}) (sort comptime-value))")
+    );
 }
 
 #[test]
 fn mixed_parameter_abstraction_preserves_existing_outer_frames() {
     use nir::DeclarationParameter;
-    let parameters=[DeclarationParameter {declaration:SENSOR,sort:Sort::Type}];
-    let template=Term::Tuple(vec![bound(0,0,Sort::Type),Term::Rigid {declaration:SENSOR,sort:Sort::Type}]);
-    let abstracted=template.abstract_parameters(&parameters).unwrap();
-    assert_eq!(abstracted,Term::Tuple(vec![bound(1,0,Sort::Type),bound(0,0,Sort::Type)]));
-    abstracted.check_scope(&[vec![Sort::Type],vec![Sort::Type]]).unwrap();
-    assert_eq!(abstracted.substitute(&[primitive(Primitive::Bool)]).unwrap(),template.instantiate_parameters(&parameters,&[primitive(Primitive::Bool)]).unwrap());
-    assert!(matches!(bound(u32::MAX,0,Sort::Type).abstract_parameters(&parameters),Err(TypeError::BinderDepthOverflow)));
+    let parameters = [DeclarationParameter {
+        declaration: SENSOR,
+        sort: Sort::Type,
+    }];
+    let template = Term::Tuple(vec![
+        bound(0, 0, Sort::Type),
+        Term::Rigid {
+            declaration: SENSOR,
+            sort: Sort::Type,
+        },
+    ]);
+    let abstracted = template.abstract_parameters(&parameters).unwrap();
+    assert_eq!(
+        abstracted,
+        Term::Tuple(vec![bound(1, 0, Sort::Type), bound(0, 0, Sort::Type)])
+    );
+    abstracted
+        .check_scope(&[vec![Sort::Type], vec![Sort::Type]])
+        .unwrap();
+    assert_eq!(
+        abstracted
+            .substitute(&[primitive(Primitive::Bool)])
+            .unwrap(),
+        template
+            .instantiate_parameters(&parameters, &[primitive(Primitive::Bool)])
+            .unwrap()
+    );
+    assert!(matches!(
+        bound(u32::MAX, 0, Sort::Type).abstract_parameters(&parameters),
+        Err(TypeError::BinderDepthOverflow)
+    ));
 }
 
 #[test]
 fn declared_input_sorts_are_checked_even_when_unused() {
     use nir::DeclarationParameter as D;
-    let parameters=[D {declaration:SENSOR,sort:Sort::ComptimeValue}];
-    let unchanged=primitive(Primitive::Bool);
-    assert!(matches!(unchanged.instantiate_parameters(&parameters,&[primitive(Primitive::U8)]),Err(TypeError::WrongSort {expected:Sort::ComptimeValue,actual:Sort::Type})));
-    assert_eq!(unchanged.instantiate_parameters(&parameters,&[Term::Bool(true)]).unwrap(),unchanged);
-    let duplicates=[parameters[0],parameters[0]];
-    assert!(matches!(unchanged.abstract_parameters(&duplicates),Err(TypeError::DuplicateDeclarationParameter(SENSOR))));
-    assert!(matches!(unchanged.instantiate_parameters(&duplicates,&[Term::Bool(true),Term::Bool(false)]),Err(TypeError::DuplicateDeclarationParameter(SENSOR))));
-    assert!(matches!(unchanged.instantiate_rigids(&[SENSOR,SENSOR],&[Term::Bool(true),Term::Bool(false)]),Err(TypeError::DuplicateDeclarationParameter(SENSOR))));
-    let malformed=Term::Rigid {declaration:SENSOR,sort:Sort::Type};
-    assert!(matches!(malformed.abstract_parameters(&parameters),Err(TypeError::WrongSort {..})));
-    assert!(matches!(malformed.instantiate_parameters(&parameters,&[Term::Bool(true)]),Err(TypeError::WrongSort {..})));
-    assert!(unchanged.instantiate_parameters(&parameters,&[bound(0,0,Sort::ComptimeValue)]).is_err());
+    let parameters = [D {
+        declaration: SENSOR,
+        sort: Sort::ComptimeValue,
+    }];
+    let unchanged = primitive(Primitive::Bool);
+    assert!(matches!(
+        unchanged.instantiate_parameters(&parameters, &[primitive(Primitive::U8)]),
+        Err(TypeError::WrongSort {
+            expected: Sort::ComptimeValue,
+            actual: Sort::Type
+        })
+    ));
+    assert_eq!(
+        unchanged
+            .instantiate_parameters(&parameters, &[Term::Bool(true)])
+            .unwrap(),
+        unchanged
+    );
+    let duplicates = [parameters[0], parameters[0]];
+    assert!(matches!(
+        unchanged.abstract_parameters(&duplicates),
+        Err(TypeError::DuplicateDeclarationParameter(SENSOR))
+    ));
+    assert!(matches!(
+        unchanged.instantiate_parameters(&duplicates, &[Term::Bool(true), Term::Bool(false)]),
+        Err(TypeError::DuplicateDeclarationParameter(SENSOR))
+    ));
+    assert!(matches!(
+        unchanged.instantiate_rigids(&[SENSOR, SENSOR], &[Term::Bool(true), Term::Bool(false)]),
+        Err(TypeError::DuplicateDeclarationParameter(SENSOR))
+    ));
+    let malformed = Term::Rigid {
+        declaration: SENSOR,
+        sort: Sort::Type,
+    };
+    assert!(matches!(
+        malformed.abstract_parameters(&parameters),
+        Err(TypeError::WrongSort { .. })
+    ));
+    assert!(matches!(
+        malformed.instantiate_parameters(&parameters, &[Term::Bool(true)]),
+        Err(TypeError::WrongSort { .. })
+    ));
+    assert!(
+        unchanged
+            .instantiate_parameters(&parameters, &[bound(0, 0, Sort::ComptimeValue)])
+            .is_err()
+    );
 }
 
 #[test]
 fn mixed_declaration_inputs_rewrite_nir_type_operands_without_erasing_heads() {
     use nir::DeclarationParameter;
-    use nir::program::{Expr,ExprKind,SourceRange};
-    let parameters=[DeclarationParameter {declaration:CALIBRATION,sort:Sort::ComptimeValue}];
-    let expr=Expr {ty:primitive(Primitive::Type),source:SourceRange {start:0,end:1},kind:ExprKind::TypeValue(Term::NormalForm {head:IDENTITY,sort:Sort::Type,arguments:vec![Term::Rigid {declaration:CALIBRATION,sort:Sort::ComptimeValue}]})};
-    let result=expr.instantiate_parameters(&parameters,&[Term::Bool(true)]).unwrap();
-    assert_eq!(result.kind,ExprKind::TypeValue(Term::NormalForm {head:IDENTITY,sort:Sort::Type,arguments:vec![Term::Bool(true)]}));
-    assert!(expr.instantiate_parameters(&parameters,&[primitive(Primitive::Bool)]).is_err());
-    assert!(matches!(expr.kind,ExprKind::TypeValue(Term::NormalForm {arguments,..}) if matches!(arguments[0],Term::Rigid {..})));
+    use nir::program::{Expr, ExprKind, SourceRange};
+    let parameters = [DeclarationParameter {
+        declaration: CALIBRATION,
+        sort: Sort::ComptimeValue,
+    }];
+    let expr = Expr {
+        ty: primitive(Primitive::Type),
+        source: SourceRange { start: 0, end: 1 },
+        kind: ExprKind::TypeValue(Term::NormalForm {
+            head: IDENTITY,
+            sort: Sort::Type,
+            arguments: vec![Term::Rigid {
+                declaration: CALIBRATION,
+                sort: Sort::ComptimeValue,
+            }],
+        }),
+    };
+    let result = expr
+        .instantiate_parameters(&parameters, &[Term::Bool(true)])
+        .unwrap();
+    assert_eq!(
+        result.kind,
+        ExprKind::TypeValue(Term::NormalForm {
+            head: IDENTITY,
+            sort: Sort::Type,
+            arguments: vec![Term::Bool(true)]
+        })
+    );
+    assert!(
+        expr.instantiate_parameters(&parameters, &[primitive(Primitive::Bool)])
+            .is_err()
+    );
+    assert!(
+        matches!(expr.kind,ExprKind::TypeValue(Term::NormalForm {arguments,..}) if matches!(arguments[0],Term::Rigid {..}))
+    );
 }
 
 #[test]
 fn type_only_parameter_facade_keeps_outer_scope_and_rejects_duplicate_ids() {
-    let ty=Term::Tuple(vec![bound(0,0,Sort::Type),Term::Rigid {declaration:SENSOR,sort:Sort::Type}]);
-    let bound_ty=ty.abstract_types(&[SENSOR]).unwrap();
-    assert_eq!(bound_ty,Term::Tuple(vec![bound(1,0,Sort::Type),bound(0,0,Sort::Type)]));
-    assert_eq!(bound_ty.substitute(&[primitive(Primitive::U8)]).unwrap(),ty.instantiate_types(&[SENSOR],&[primitive(Primitive::U8)]).unwrap());
-    assert!(matches!(ty.instantiate_types(&[SENSOR,SENSOR],&[primitive(Primitive::U8),primitive(Primitive::U16)]),Err(TypeError::DuplicateDeclarationParameter(SENSOR))));
+    let ty = Term::Tuple(vec![
+        bound(0, 0, Sort::Type),
+        Term::Rigid {
+            declaration: SENSOR,
+            sort: Sort::Type,
+        },
+    ]);
+    let bound_ty = ty.abstract_types(&[SENSOR]).unwrap();
+    assert_eq!(
+        bound_ty,
+        Term::Tuple(vec![bound(1, 0, Sort::Type), bound(0, 0, Sort::Type)])
+    );
+    assert_eq!(
+        bound_ty.substitute(&[primitive(Primitive::U8)]).unwrap(),
+        ty.instantiate_types(&[SENSOR], &[primitive(Primitive::U8)])
+            .unwrap()
+    );
+    assert!(matches!(
+        ty.instantiate_types(
+            &[SENSOR, SENSOR],
+            &[primitive(Primitive::U8), primitive(Primitive::U16)]
+        ),
+        Err(TypeError::DuplicateDeclarationParameter(SENSOR))
+    ));
 }
 
 #[test]
 fn mixed_inputs_specialize_nested_type_contracts_without_unfolding() {
     use nir::program::{InterfaceInstance, TraitRequirement, TypePredicate as P};
     let parameters = [
-        DeclarationParameter { declaration: SENSOR, sort: Sort::Type },
-        DeclarationParameter { declaration: CALIBRATION, sort: Sort::ComptimeValue },
+        DeclarationParameter {
+            declaration: SENSOR,
+            sort: Sort::Type,
+        },
+        DeclarationParameter {
+            declaration: CALIBRATION,
+            sort: Sort::ComptimeValue,
+        },
     ];
     let subject = Term::NormalForm {
         head: IDENTITY,
         sort: Sort::Type,
         arguments: vec![
-            Term::Rigid { declaration: SENSOR, sort: Sort::Type },
-            Term::Rigid { declaration: CALIBRATION, sort: Sort::ComptimeValue },
+            Term::Rigid {
+                declaration: SENSOR,
+                sort: Sort::Type,
+            },
+            Term::Rigid {
+                declaration: CALIBRATION,
+                sort: Sort::ComptimeValue,
+            },
         ],
     };
     let requirement = TraitRequirement {
@@ -1468,19 +1882,42 @@ fn mixed_inputs_specialize_nested_type_contracts_without_unfolding() {
     };
     let input = P::And(vec![
         P::Trait(requirement.clone()),
-        P::Not(Box::new(P::Or(vec![P::Equal(subject.clone(), primitive(Primitive::Bool))]))),
+        P::Not(Box::new(P::Or(vec![P::Equal(
+            subject.clone(),
+            primitive(Primitive::Bool),
+        )]))),
     ]);
     let args = [primitive(Primitive::U8), Term::Bool(true)];
     let expected = Term::NormalForm {
-        head: IDENTITY, sort: Sort::Type, arguments: args.to_vec(),
+        head: IDENTITY,
+        sort: Sort::Type,
+        arguments: args.to_vec(),
     };
     let result = input.instantiate_parameters(&parameters, &args).unwrap();
-    assert_eq!(result, P::And(vec![
-        P::Trait(TraitRequirement { interface: SENSOR, subject: expected.clone(), interface_arguments: vec![expected.clone()] }),
-        P::Not(Box::new(P::Or(vec![P::Equal(expected.clone(), primitive(Primitive::Bool))]))),
-    ]));
-    assert_eq!(requirement.interface_instance().instantiate_parameters(&parameters, &args).unwrap(),
-        InterfaceInstance { declaration: SENSOR, arguments: vec![expected] });
+    assert_eq!(
+        result,
+        P::And(vec![
+            P::Trait(TraitRequirement {
+                interface: SENSOR,
+                subject: expected.clone(),
+                interface_arguments: vec![expected.clone()]
+            }),
+            P::Not(Box::new(P::Or(vec![P::Equal(
+                expected.clone(),
+                primitive(Primitive::Bool)
+            )]))),
+        ])
+    );
+    assert_eq!(
+        requirement
+            .interface_instance()
+            .instantiate_parameters(&parameters, &args)
+            .unwrap(),
+        InterfaceInstance {
+            declaration: SENSOR,
+            arguments: vec![expected]
+        }
+    );
     assert!(input.mentions_rigid(CALIBRATION));
     assert!(!result.mentions_rigid(CALIBRATION));
 }
@@ -1488,53 +1925,164 @@ fn mixed_inputs_specialize_nested_type_contracts_without_unfolding() {
 #[test]
 fn empty_contracts_validate_unused_declaration_inputs() {
     use nir::program::{InterfaceInstance, TypePredicate as P};
-    let parameters = [DeclarationParameter { declaration: SENSOR, sort: Sort::ComptimeValue }];
-    let empty = InterfaceInstance { declaration: IDENTITY, arguments: vec![] };
-    assert!(empty.instantiate_parameters(&parameters, &[primitive(Primitive::Bool)]).is_err());
-    assert_eq!(empty.instantiate_parameters(&parameters, &[Term::Bool(true)]).unwrap(), empty);
+    let parameters = [DeclarationParameter {
+        declaration: SENSOR,
+        sort: Sort::ComptimeValue,
+    }];
+    let empty = InterfaceInstance {
+        declaration: IDENTITY,
+        arguments: vec![],
+    };
+    assert!(
+        empty
+            .instantiate_parameters(&parameters, &[primitive(Primitive::Bool)])
+            .is_err()
+    );
+    assert_eq!(
+        empty
+            .instantiate_parameters(&parameters, &[Term::Bool(true)])
+            .unwrap(),
+        empty
+    );
     for predicate in [P::Bool(true), P::And(vec![]), P::Or(vec![])] {
         assert!(predicate.instantiate_parameters(&parameters, &[]).is_err());
-        assert!(predicate.instantiate_parameters(&parameters, &[primitive(Primitive::Bool)]).is_err());
-        assert_eq!(predicate.instantiate_parameters(&parameters, &[Term::Bool(true)]).unwrap(), predicate);
-        assert!(predicate.instantiate_types(&[SENSOR], &[Term::Bool(true)]).is_err());
-        assert!(predicate.instantiate_types(&[SENSOR, SENSOR], &[primitive(Primitive::Bool), primitive(Primitive::Bool)]).is_err());
+        assert!(
+            predicate
+                .instantiate_parameters(&parameters, &[primitive(Primitive::Bool)])
+                .is_err()
+        );
+        assert_eq!(
+            predicate
+                .instantiate_parameters(&parameters, &[Term::Bool(true)])
+                .unwrap(),
+            predicate
+        );
+        assert!(
+            predicate
+                .instantiate_types(&[SENSOR], &[Term::Bool(true)])
+                .is_err()
+        );
+        assert!(
+            predicate
+                .instantiate_types(
+                    &[SENSOR, SENSOR],
+                    &[primitive(Primitive::Bool), primitive(Primitive::Bool)]
+                )
+                .is_err()
+        );
     }
 }
 
 #[test]
 fn function_specialization_covers_contracts_defaults_and_preserves_local_identity() {
     use nir::program::*;
-    let input = DeclarationParameter { declaration: CALIBRATION, sort: Sort::ComptimeValue };
-    let ty = Term::NormalForm { head: IDENTITY, sort: Sort::Type,
-        arguments: vec![Term::Rigid { declaration: CALIBRATION, sort: Sort::ComptimeValue }] };
-    let concrete = Term::NormalForm { head: IDENTITY, sort: Sort::Type, arguments: vec![Term::Bool(true)] };
+    let input = DeclarationParameter {
+        declaration: CALIBRATION,
+        sort: Sort::ComptimeValue,
+    };
+    let ty = Term::NormalForm {
+        head: IDENTITY,
+        sort: Sort::Type,
+        arguments: vec![Term::Rigid {
+            declaration: CALIBRATION,
+            sort: Sort::ComptimeValue,
+        }],
+    };
+    let concrete = Term::NormalForm {
+        head: IDENTITY,
+        sort: Sort::Type,
+        arguments: vec![Term::Bool(true)],
+    };
     let local = LocalId { owner: 3, index: 1 };
-    let expression = Expr { source: SourceRange { start: 10, end: 20 }, ty: ty.clone(), kind: ExprKind::Local(local) };
-    let predicate = Expr { source: expression.source, ty: primitive(Primitive::Bool),
-        kind: ExprKind::TypeEqual(Box::new(Expr { source: expression.source, ty: primitive(Primitive::Type), kind: ExprKind::TypeValue(ty.clone()) }), Box::new(Expr { source: expression.source, ty: primitive(Primitive::Type), kind: ExprKind::TypeValue(ty.clone()) })) };
+    let expression = Expr {
+        source: SourceRange { start: 10, end: 20 },
+        ty: ty.clone(),
+        kind: ExprKind::Local(local),
+    };
+    let predicate = Expr {
+        source: expression.source,
+        ty: primitive(Primitive::Bool),
+        kind: ExprKind::TypeEqual(
+            Box::new(Expr {
+                source: expression.source,
+                ty: primitive(Primitive::Type),
+                kind: ExprKind::TypeValue(ty.clone()),
+            }),
+            Box::new(Expr {
+                source: expression.source,
+                ty: primitive(Primitive::Type),
+                kind: ExprKind::TypeValue(ty.clone()),
+            }),
+        ),
+    };
     let template = Function {
-        phase: FunctionPhase::Runtime, inline: false, pure: true,
-        declaration: IDENTITY, name: "template".into(), type_parameters: vec![],
-        signature: Term::Function { parameters: vec![Parameter { sort: Sort::Runtime, ty: ty.clone() }], result: Box::new(ty.clone()) },
-        parameters: vec![local], body: expression.clone(), defaults: vec![(0, expression)],
-        preconditions: vec![predicate.clone()], postconditions: vec![predicate],
+        phase: FunctionPhase::Runtime,
+        inline: false,
+        pure: true,
+        declaration: IDENTITY,
+        name: "template".into(),
+        type_parameters: vec![],
+        signature: Term::Function {
+            parameters: vec![Parameter {
+                sort: Sort::Runtime,
+                ty: ty.clone(),
+            }],
+            result: Box::new(ty.clone()),
+        },
+        parameters: vec![local],
+        body: expression.clone(),
+        defaults: vec![(0, expression)],
+        preconditions: vec![predicate.clone()],
+        postconditions: vec![predicate],
         result_binding: Some(LocalId { owner: 3, index: 2 }),
-        entry_snapshots: vec![EntrySnapshot { parameter: local, binding: LocalId { owner: 3, index: 3 } }],
-        capabilities: vec![TraitRequirement { interface: SENSOR, subject: ty.clone(), interface_arguments: vec![ty.clone()] }],
+        entry_snapshots: vec![EntrySnapshot {
+            parameter: local,
+            binding: LocalId { owner: 3, index: 3 },
+        }],
+        capabilities: vec![TraitRequirement {
+            interface: SENSOR,
+            subject: ty.clone(),
+            interface_arguments: vec![ty.clone()],
+        }],
         requirements: vec![TypePredicate::Equal(ty.clone(), ty)],
     };
     let original = template.clone();
-    let specialized = template.instantiate_parameters(&[input], &[Term::Bool(true)]).unwrap();
+    let specialized = template
+        .instantiate_parameters(&[input], &[Term::Bool(true)])
+        .unwrap();
     assert_eq!(specialized.body.ty, concrete);
     assert_eq!(specialized.defaults[0].1.ty, concrete);
     assert_eq!(specialized.capabilities[0].subject, concrete);
-    assert_eq!(specialized.capabilities[0].interface_arguments, vec![concrete.clone()]);
-    assert_eq!(specialized.requirements, vec![TypePredicate::Equal(concrete.clone(), concrete.clone())]);
-    assert_eq!(specialized.signature, Term::Function { parameters: vec![Parameter { sort: Sort::Runtime, ty: concrete.clone() }], result: Box::new(concrete) });
-    for expression in specialized.preconditions.iter().chain(&specialized.postconditions) {
-        let ExprKind::TypeEqual(left, right) = &expression.kind else { panic!("predicate lost") };
+    assert_eq!(
+        specialized.capabilities[0].interface_arguments,
+        vec![concrete.clone()]
+    );
+    assert_eq!(
+        specialized.requirements,
+        vec![TypePredicate::Equal(concrete.clone(), concrete.clone())]
+    );
+    assert_eq!(
+        specialized.signature,
+        Term::Function {
+            parameters: vec![Parameter {
+                sort: Sort::Runtime,
+                ty: concrete.clone()
+            }],
+            result: Box::new(concrete)
+        }
+    );
+    for expression in specialized
+        .preconditions
+        .iter()
+        .chain(&specialized.postconditions)
+    {
+        let ExprKind::TypeEqual(left, right) = &expression.kind else {
+            panic!("predicate lost")
+        };
         for operand in [left, right] {
-            let ExprKind::TypeValue(ty) = &operand.kind else { panic!("type operand lost") };
+            let ExprKind::TypeValue(ty) = &operand.kind else {
+                panic!("type operand lost")
+            };
             assert!(!ty.mentions_rigid(CALIBRATION));
         }
     }
@@ -1545,130 +2093,360 @@ fn function_specialization_covers_contracts_defaults_and_preserves_local_identit
     assert_eq!(specialized.body.source, template.body.source);
     assert_eq!(specialized.phase, template.phase);
     assert!(specialized.pure);
-    assert!(template.instantiate_parameters(&[input], &[primitive(Primitive::Bool)]).is_err());
+    assert!(
+        template
+            .instantiate_parameters(&[input], &[primitive(Primitive::Bool)])
+            .is_err()
+    );
     assert_eq!(template, original);
     let mut malformed = template.clone();
-    malformed.postconditions[0].ty = Term::Rigid { declaration: CALIBRATION, sort: Sort::Type };
+    malformed.postconditions[0].ty = Term::Rigid {
+        declaration: CALIBRATION,
+        sort: Sort::Type,
+    };
     let before_failure = malformed.clone();
-    assert!(matches!(malformed.instantiate_parameters(&[input], &[Term::Bool(true)]),
-        Err(TypeError::WrongSort { expected: Sort::ComptimeValue, actual: Sort::Type })));
+    assert!(matches!(
+        malformed.instantiate_parameters(&[input], &[Term::Bool(true)]),
+        Err(TypeError::WrongSort {
+            expected: Sort::ComptimeValue,
+            actual: Sort::Type
+        })
+    ));
     assert_eq!(malformed, before_failure);
 }
 
 #[test]
 fn binding_function_inputs_erases_slots_and_reindexes_nested_dependencies() {
-    let opaque = |args| Term::NormalForm { head: IDENTITY, sort: Sort::Type, arguments: args };
+    let opaque = |args| Term::NormalForm {
+        head: IDENTITY,
+        sort: Sort::Type,
+        arguments: args,
+    };
     let signature = Term::Function {
         parameters: vec![
-            Parameter { sort: Sort::Type, ty: primitive(Primitive::Type) },
-            Parameter { sort: Sort::Runtime, ty: bound(0,0,Sort::Type) },
-            Parameter { sort: Sort::ComptimeValue, ty: primitive(Primitive::Bool) },
+            Parameter {
+                sort: Sort::Type,
+                ty: primitive(Primitive::Type),
+            },
+            Parameter {
+                sort: Sort::Runtime,
+                ty: bound(0, 0, Sort::Type),
+            },
+            Parameter {
+                sort: Sort::ComptimeValue,
+                ty: primitive(Primitive::Bool),
+            },
         ],
         result: Box::new(Term::Function {
-            parameters: vec![Parameter { sort: Sort::Runtime, ty: bound(1,0,Sort::Type) }],
-            result: Box::new(opaque(vec![bound(1,1,Sort::Runtime), bound(1,2,Sort::ComptimeValue), bound(0,0,Sort::Runtime)])),
+            parameters: vec![Parameter {
+                sort: Sort::Runtime,
+                ty: bound(1, 0, Sort::Type),
+            }],
+            result: Box::new(opaque(vec![
+                bound(1, 1, Sort::Runtime),
+                bound(1, 2, Sort::ComptimeValue),
+                bound(0, 0, Sort::Runtime),
+            ])),
         }),
     };
-    let specialized = signature.bind_function_inputs(&[Some(primitive(Primitive::U8)),None,Some(Term::Bool(true))]).unwrap();
-    assert_eq!(specialized, Term::Function {
-        parameters: vec![Parameter { sort: Sort::Runtime, ty: primitive(Primitive::U8) }],
-        result: Box::new(Term::Function {
-            parameters: vec![Parameter { sort: Sort::Runtime, ty: primitive(Primitive::U8) }],
-            result: Box::new(opaque(vec![bound(1,0,Sort::Runtime),Term::Bool(true),bound(0,0,Sort::Runtime)])),
-        }),
-    });
-    assert_eq!(signature.bind_function_inputs(&[None,None,None]).unwrap(),signature);
+    let specialized = signature
+        .bind_function_inputs(&[Some(primitive(Primitive::U8)), None, Some(Term::Bool(true))])
+        .unwrap();
+    assert_eq!(
+        specialized,
+        Term::Function {
+            parameters: vec![Parameter {
+                sort: Sort::Runtime,
+                ty: primitive(Primitive::U8)
+            }],
+            result: Box::new(Term::Function {
+                parameters: vec![Parameter {
+                    sort: Sort::Runtime,
+                    ty: primitive(Primitive::U8)
+                }],
+                result: Box::new(opaque(vec![
+                    bound(1, 0, Sort::Runtime),
+                    Term::Bool(true),
+                    bound(0, 0, Sort::Runtime)
+                ])),
+            }),
+        }
+    );
+    assert_eq!(
+        signature.bind_function_inputs(&[None, None, None]).unwrap(),
+        signature
+    );
     // Repeated specialization must agree with binding all inputs at once,
     // including the runtime object's identity under the nested function.
-    assert_eq!(specialized.bind_function_inputs(&[Some(object(77))]).unwrap(),
-        signature.bind_function_inputs(&[Some(primitive(Primitive::U8)),Some(object(77)),Some(Term::Bool(true))]).unwrap());
-    let wrapped = Term::Closure { environment: vec![primitive(Primitive::Bool)], signature: Box::new(Term::ComptimeFunction(Box::new(signature))) };
-    assert_eq!(wrapped.bind_function_inputs(&[Some(primitive(Primitive::U8)),None,Some(Term::Bool(true))]).unwrap(),
-        Term::Closure { environment: vec![primitive(Primitive::Bool)], signature: Box::new(Term::ComptimeFunction(Box::new(specialized))) });
+    assert_eq!(
+        specialized
+            .bind_function_inputs(&[Some(object(77))])
+            .unwrap(),
+        signature
+            .bind_function_inputs(&[
+                Some(primitive(Primitive::U8)),
+                Some(object(77)),
+                Some(Term::Bool(true))
+            ])
+            .unwrap()
+    );
+    let wrapped = Term::Closure {
+        environment: vec![primitive(Primitive::Bool)],
+        signature: Box::new(Term::ComptimeFunction(Box::new(signature))),
+    };
+    assert_eq!(
+        wrapped
+            .bind_function_inputs(&[Some(primitive(Primitive::U8)), None, Some(Term::Bool(true))])
+            .unwrap(),
+        Term::Closure {
+            environment: vec![primitive(Primitive::Bool)],
+            signature: Box::new(Term::ComptimeFunction(Box::new(specialized)))
+        }
+    );
 }
 
 #[test]
 fn binding_function_inputs_checks_unused_values_and_forward_references() {
     let signature = Term::Function {
-        parameters: vec![Parameter { sort: Sort::ComptimeValue, ty: primitive(Primitive::Bool) }],
+        parameters: vec![Parameter {
+            sort: Sort::ComptimeValue,
+            ty: primitive(Primitive::Bool),
+        }],
         result: Box::new(primitive(Primitive::Bool)),
     };
     assert!(signature.bind_function_inputs(&[]).is_err());
-    assert!(signature.bind_function_inputs(&[Some(primitive(Primitive::U8))]).is_err());
-    assert!(signature.bind_function_inputs(&[Some(bound(0,0,Sort::ComptimeValue))]).is_err());
-    assert_eq!(signature.bind_function_inputs(&[Some(Term::Bool(true))]).unwrap(),
-        Term::Function { parameters: vec![], result: Box::new(primitive(Primitive::Bool)) });
+    assert!(
+        signature
+            .bind_function_inputs(&[Some(primitive(Primitive::U8))])
+            .is_err()
+    );
+    assert!(
+        signature
+            .bind_function_inputs(&[Some(bound(0, 0, Sort::ComptimeValue))])
+            .is_err()
+    );
+    assert_eq!(
+        signature
+            .bind_function_inputs(&[Some(Term::Bool(true))])
+            .unwrap(),
+        Term::Function {
+            parameters: vec![],
+            result: Box::new(primitive(Primitive::Bool))
+        }
+    );
     let invalid = Term::Function {
-        parameters: vec![Parameter { sort: Sort::Type, ty: bound(0,0,Sort::Type) }],
+        parameters: vec![Parameter {
+            sort: Sort::Type,
+            ty: bound(0, 0, Sort::Type),
+        }],
         result: Box::new(primitive(Primitive::Bool)),
     };
-    assert!(invalid.bind_function_inputs(&[Some(primitive(Primitive::Bool))]).is_err());
-    assert!(matches!(primitive(Primitive::Bool).bind_function_inputs(&[]), Err(TypeError::InvalidFunctionSignature)));
+    assert!(
+        invalid
+            .bind_function_inputs(&[Some(primitive(Primitive::Bool))])
+            .is_err()
+    );
+    assert!(matches!(
+        primitive(Primitive::Bool).bind_function_inputs(&[]),
+        Err(TypeError::InvalidFunctionSignature)
+    ));
 }
 
 #[test]
 fn rebinding_a_function_scope_preserves_nested_and_distant_binders() {
-    let nested=Term::Function {
-        parameters:vec![Parameter {sort:Sort::Type,ty:primitive(Primitive::Type)},Parameter {sort:Sort::Runtime,ty:bound(1,0,Sort::Type)}],
-        result:Box::new(Term::Tuple(vec![bound(0,0,Sort::Type),bound(1,0,Sort::Type),bound(2,0,Sort::Type)])),
+    let nested = Term::Function {
+        parameters: vec![
+            Parameter {
+                sort: Sort::Type,
+                ty: primitive(Primitive::Type),
+            },
+            Parameter {
+                sort: Sort::Runtime,
+                ty: bound(1, 0, Sort::Type),
+            },
+        ],
+        result: Box::new(Term::Tuple(vec![
+            bound(0, 0, Sort::Type),
+            bound(1, 0, Sort::Type),
+            bound(2, 0, Sort::Type),
+        ])),
     };
-    let rebound=nested.rebind_scope(&[primitive(Primitive::Bool)]).unwrap();
-    assert_eq!(rebound,Term::Function {
-        parameters:vec![Parameter {sort:Sort::Type,ty:primitive(Primitive::Type)},Parameter {sort:Sort::Runtime,ty:primitive(Primitive::Bool)}],
-        result:Box::new(Term::Tuple(vec![bound(0,0,Sort::Type),primitive(Primitive::Bool),bound(2,0,Sort::Type)])),
-    });
-    assert!(bound(0,0,Sort::Type).rebind_scope(&[Term::Bool(true)]).is_err());
-    assert!(bound(0,1,Sort::Type).rebind_scope(&[primitive(Primitive::Bool)]).is_err());
-    let head=Term::NormalForm {head:IDENTITY,arguments:vec![bound(0,0,Sort::Type)],sort:Sort::Type};
-    assert_eq!(head.rebind_scope(&[primitive(Primitive::Bool)]).unwrap(),Term::NormalForm {head:IDENTITY,arguments:vec![primitive(Primitive::Bool)],sort:Sort::Type});
+    let rebound = nested.rebind_scope(&[primitive(Primitive::Bool)]).unwrap();
+    assert_eq!(
+        rebound,
+        Term::Function {
+            parameters: vec![
+                Parameter {
+                    sort: Sort::Type,
+                    ty: primitive(Primitive::Type)
+                },
+                Parameter {
+                    sort: Sort::Runtime,
+                    ty: primitive(Primitive::Bool)
+                }
+            ],
+            result: Box::new(Term::Tuple(vec![
+                bound(0, 0, Sort::Type),
+                primitive(Primitive::Bool),
+                bound(2, 0, Sort::Type)
+            ])),
+        }
+    );
+    assert!(
+        bound(0, 0, Sort::Type)
+            .rebind_scope(&[Term::Bool(true)])
+            .is_err()
+    );
+    assert!(
+        bound(0, 1, Sort::Type)
+            .rebind_scope(&[primitive(Primitive::Bool)])
+            .is_err()
+    );
+    let head = Term::NormalForm {
+        head: IDENTITY,
+        arguments: vec![bound(0, 0, Sort::Type)],
+        sort: Sort::Type,
+    };
+    assert_eq!(
+        head.rebind_scope(&[primitive(Primitive::Bool)]).unwrap(),
+        Term::NormalForm {
+            head: IDENTITY,
+            arguments: vec![primitive(Primitive::Bool)],
+            sort: Sort::Type
+        }
+    );
 }
 
 #[test]
 fn scoped_call_binding_refines_domains_without_capturing_caller_inputs() {
     let signature = Term::Function {
         parameters: vec![
-            Parameter { sort: Sort::Type, ty: primitive(Primitive::Type) },
-            Parameter { sort: Sort::ComptimeValue, ty: bound(0, 0, Sort::Type) },
-            Parameter { sort: Sort::Runtime, ty: primitive(Primitive::Bool) },
-        ], result: Box::new(primitive(Primitive::Bool)),
+            Parameter {
+                sort: Sort::Type,
+                ty: primitive(Primitive::Type),
+            },
+            Parameter {
+                sort: Sort::ComptimeValue,
+                ty: bound(0, 0, Sort::Type),
+            },
+            Parameter {
+                sort: Sort::Runtime,
+                ty: primitive(Primitive::Bool),
+            },
+        ],
+        result: Box::new(primitive(Primitive::Bool)),
     };
-    let inputs = [Some(primitive(Primitive::Type)), Some(bound(0, 0, Sort::Type)), None];
-    let binding = FunctionCallBinding::new(&signature, &inputs, &[vec![Sort::Type]], |ty| Ok::<_, TypeError>(ty.clone())).unwrap();
+    let inputs = [
+        Some(primitive(Primitive::Type)),
+        Some(bound(0, 0, Sort::Type)),
+        None,
+    ];
+    let binding = FunctionCallBinding::new(&signature, &inputs, &[vec![Sort::Type]], |ty| {
+        Ok::<_, TypeError>(ty.clone())
+    })
+    .unwrap();
     let annotation = Term::Function {
-        parameters: vec![Parameter { sort: Sort::Type, ty: primitive(Primitive::Type) }],
-        result: Box::new(Term::NormalForm { head: IDENTITY, sort: Sort::Type,
-            arguments: vec![bound(1, 1, Sort::ComptimeValue), bound(0, 0, Sort::Type), bound(2, 0, Sort::Type)] }),
+        parameters: vec![Parameter {
+            sort: Sort::Type,
+            ty: primitive(Primitive::Type),
+        }],
+        result: Box::new(Term::NormalForm {
+            head: IDENTITY,
+            sort: Sort::Type,
+            arguments: vec![
+                bound(1, 1, Sort::ComptimeValue),
+                bound(0, 0, Sort::Type),
+                bound(2, 0, Sort::Type),
+            ],
+        }),
     };
-    assert_eq!(binding.substitute(&annotation).unwrap(), Term::Function {
-        parameters: vec![Parameter { sort: Sort::Type, ty: primitive(Primitive::Type) }],
-        result: Box::new(Term::NormalForm { head: IDENTITY, sort: Sort::Type,
-            arguments: vec![bound(1, 0, Sort::Type), bound(0, 0, Sort::Type), bound(1, 0, Sort::Type)] }),
-    });
+    assert_eq!(
+        binding.substitute(&annotation).unwrap(),
+        Term::Function {
+            parameters: vec![Parameter {
+                sort: Sort::Type,
+                ty: primitive(Primitive::Type)
+            }],
+            result: Box::new(Term::NormalForm {
+                head: IDENTITY,
+                sort: Sort::Type,
+                arguments: vec![
+                    bound(1, 0, Sort::Type),
+                    bound(0, 0, Sort::Type),
+                    bound(1, 0, Sort::Type)
+                ]
+            }),
+        }
+    );
     assert!(annotation.substitute_partial(&inputs).is_err());
-    assert!(matches!(binding.substitute(&bound(0, 2, Sort::Runtime)), Err(TypeError::MissingArgument(2))));
+    assert!(matches!(
+        binding.substitute(&bound(0, 2, Sort::Runtime)),
+        Err(TypeError::MissingArgument(2))
+    ));
     assert!(binding.substitute(&bound(0, 1, Sort::Type)).is_err());
     assert!(binding.to_string().contains("(type-slots 1)"));
     assert!(binding.to_string().contains("(caller-frames (frame type))"));
-    assert!(FunctionCallBinding::new(&signature, &inputs, &[], |ty| Ok::<_, TypeError>(ty.clone())).is_err());
+    assert!(
+        FunctionCallBinding::new(&signature, &inputs, &[], |ty| Ok::<_, TypeError>(
+            ty.clone()
+        ))
+        .is_err()
+    );
 }
 
 #[test]
 fn scoped_call_binding_checks_view_results_and_does_not_unfold_opaque_domains() {
-    let opaque = Term::NormalForm { head: IDENTITY, sort: Sort::Type, arguments: vec![] };
+    let opaque = Term::NormalForm {
+        head: IDENTITY,
+        sort: Sort::Type,
+        arguments: vec![],
+    };
     let signature = Term::Function {
-        parameters: vec![Parameter { sort: Sort::ComptimeValue, ty: opaque.clone() }],
+        parameters: vec![Parameter {
+            sort: Sort::ComptimeValue,
+            ty: opaque.clone(),
+        }],
         result: Box::new(primitive(Primitive::Bool)),
     };
     let inputs = [Some(primitive(Primitive::Bool))];
-    assert!(FunctionCallBinding::new(&signature, &inputs, &[], |ty| Ok::<_, &str>(ty.clone())).is_err());
-    let binding = FunctionCallBinding::new(&signature, &inputs, &[], |_| Ok::<_, &str>(primitive(Primitive::Type))).unwrap();
-    assert_eq!(binding.substitute(&bound(0, 0, Sort::ComptimeValue)).unwrap(), primitive(Primitive::Bool));
+    assert!(
+        FunctionCallBinding::new(&signature, &inputs, &[], |ty| Ok::<_, &str>(ty.clone())).is_err()
+    );
+    let binding = FunctionCallBinding::new(&signature, &inputs, &[], |_| {
+        Ok::<_, &str>(primitive(Primitive::Type))
+    })
+    .unwrap();
+    assert_eq!(
+        binding
+            .substitute(&bound(0, 0, Sort::ComptimeValue))
+            .unwrap(),
+        primitive(Primitive::Bool)
+    );
     for invalid in [Term::Bool(true), bound(0, 0, Sort::Type)] {
-        assert!(FunctionCallBinding::new(&signature, &inputs, &[], |_| Ok::<_, &str>(invalid.clone())).is_err());
+        assert!(
+            FunctionCallBinding::new(&signature, &inputs, &[], |_| Ok::<_, &str>(invalid.clone()))
+                .is_err()
+        );
     }
-    assert!(matches!(FunctionCallBinding::new(&signature, &inputs, &[], |_| Err("view failed")), Err(CallError::Contract {parameter: 0, error: "view failed"})));
-    assert!(FunctionCallBinding::new(&signature, &[], &[], |ty| Ok::<_, &str>(ty.clone())).is_err());
-    assert!(FunctionCallBinding::new(&signature, &[Some(Term::Bool(true))], &[], |_| Ok::<_, &str>(primitive(Primitive::Type))).is_err());
+    assert!(matches!(
+        FunctionCallBinding::new(&signature, &inputs, &[], |_| Err("view failed")),
+        Err(CallError::Contract {
+            parameter: 0,
+            error: "view failed"
+        })
+    ));
+    assert!(
+        FunctionCallBinding::new(&signature, &[], &[], |ty| Ok::<_, &str>(ty.clone())).is_err()
+    );
+    assert!(
+        FunctionCallBinding::new(
+            &signature,
+            &[Some(Term::Bool(true))],
+            &[],
+            |_| Ok::<_, &str>(primitive(Primitive::Type))
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -1681,8 +2459,14 @@ fn type_list_values_preserve_opaque_heads_and_distinguish_tuple_representations(
     assert_ne!(list, Term::TupleValue(elements.clone()));
     assert_ne!(Term::TypeListValue(vec![]), Term::Unit);
     assert_ne!(Term::TypeListValue(vec![]), Term::TupleValue(vec![]));
-    assert_eq!(list.to_string(), "(type-list-value ((primitive u8) (primitive bool)))");
-    assert_eq!(HashSet::from([list.clone(), Term::TypeListValue(elements)]).len(), 1);
+    assert_eq!(
+        list.to_string(),
+        "(type-list-value ((primitive u8) (primitive bool)))"
+    );
+    assert_eq!(
+        HashSet::from([list.clone(), Term::TypeListValue(elements)]).len(),
+        1
+    );
 
     let application = Term::NormalForm {
         head: IDENTITY,
@@ -1692,49 +2476,77 @@ fn type_list_values_preserve_opaque_heads_and_distinguish_tuple_representations(
             sort: Sort::Type,
         }])],
     };
-    let instantiated = application.instantiate_types(&[SENSOR], &[primitive(Primitive::U8)]).unwrap();
-    assert_eq!(instantiated, Term::NormalForm {
-        head: IDENTITY,
-        sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(vec![primitive(Primitive::U8)])],
-    });
+    let instantiated = application
+        .instantiate_types(&[SENSOR], &[primitive(Primitive::U8)])
+        .unwrap();
+    assert_eq!(
+        instantiated,
+        Term::NormalForm {
+            head: IDENTITY,
+            sort: Sort::Type,
+            arguments: vec![Term::TypeListValue(vec![primitive(Primitive::U8)])],
+        }
+    );
     assert_ne!(instantiated, primitive(Primitive::U8));
     assert_ne!(instantiated, Term::Tuple(vec![primitive(Primitive::U8)]));
 }
 
 #[test]
 fn type_list_values_validate_elements_and_substitute_without_adding_a_binder() {
-    for invalid in [Term::Bool(true), Term::Unit, object(1), Term::TypeListValue(vec![])] {
+    for invalid in [
+        Term::Bool(true),
+        Term::Unit,
+        object(1),
+        Term::TypeListValue(vec![]),
+    ] {
         assert!(Term::TypeListValue(vec![invalid]).check_scope(&[]).is_err());
     }
     let open = Term::TypeListValue(vec![bound(0, 0, Sort::Type)]);
     assert!(open.check_scope(&[]).is_err());
     assert!(open.check_scope(&[vec![Sort::ComptimeValue]]).is_err());
     assert!(open.check_scope(&[vec![Sort::Type]]).is_ok());
-    assert_eq!(open.substitute(&[primitive(Primitive::Char)]).unwrap(),
-        Term::TypeListValue(vec![primitive(Primitive::Char)]));
+    assert_eq!(
+        open.substitute(&[primitive(Primitive::Char)]).unwrap(),
+        Term::TypeListValue(vec![primitive(Primitive::Char)])
+    );
     assert!(open.substitute(&[Term::Bool(true)]).is_err());
 }
 
 #[test]
 fn type_list_inputs_retain_runtime_dependencies_inside_element_types() {
     let make = |element| Term::NormalForm {
-        head: IDENTITY, sort: Sort::Type,
+        head: IDENTITY,
+        sort: Sort::Type,
         arguments: vec![Term::TypeListValue(vec![element])],
     };
     let template = make(Term::Nominal {
-        declaration: SENSOR, arguments: vec![hole(0, Sort::Runtime)],
+        declaration: SENSOR,
+        arguments: vec![hole(0, Sort::Runtime)],
     });
-    let parameters = vec![Parameter { sort: Sort::Runtime, ty: calibration() }];
+    let parameters = vec![Parameter {
+        sort: Sort::Runtime,
+        ty: calibration(),
+    }];
     let mut interner = TypeInterner::default();
-    let first = interner.intern(parameters.clone(), template.clone()).unwrap();
+    let first = interner
+        .intern(parameters.clone(), template.clone())
+        .unwrap();
     let second = interner.intern(parameters, template).unwrap();
     assert!(Arc::ptr_eq(&first, &second));
     let reference = TypeRef::bind(first, vec![object(8)]).unwrap();
-    assert_eq!(reference.runtime_dependencies().unwrap(),
-        BTreeSet::from([RuntimeId { instance: 8, local: 0 }]));
-    assert_eq!(reference.materialize().unwrap(), make(Term::Nominal {
-        declaration: SENSOR, arguments: vec![object(8)],
-    }));
+    assert_eq!(
+        reference.runtime_dependencies().unwrap(),
+        BTreeSet::from([RuntimeId {
+            instance: 8,
+            local: 0
+        }])
+    );
+    assert_eq!(
+        reference.materialize().unwrap(),
+        make(Term::Nominal {
+            declaration: SENSOR,
+            arguments: vec![object(8)],
+        })
+    );
     assert!(reference.check_runtime_bindings(&BTreeSet::new()).is_err());
 }

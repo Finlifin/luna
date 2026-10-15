@@ -20,7 +20,10 @@ fn parse(source: &str) -> (Ast, NodeIndex) {
 
 #[test]
 fn function_result_arrows_nest_right_and_parentheses_keep_explicit_scope() {
-    for source in ["fn() -> fn() -> bool", "comptime fn() -> comptime fn() -> bool"] {
+    for source in [
+        "fn() -> fn() -> bool",
+        "comptime fn() -> comptime fn() -> bool",
+    ] {
         let (ast, root) = parse(source);
         assert_eq!(ast.get_node_kind(root), Some(NodeKind::Arrow));
         let children = ast.get_children(root);
@@ -29,10 +32,16 @@ fn function_result_arrows_nest_right_and_parentheses_keep_explicit_scope() {
     }
     let (ast, root) = parse("(fn() -> fn()) -> bool");
     assert_eq!(ast.get_node_kind(root), Some(NodeKind::Arrow));
-    assert_ne!(ast.get_node_kind(ast.get_children(root)[1]), Some(NodeKind::Arrow));
+    assert_ne!(
+        ast.get_node_kind(ast.get_children(root)[1]),
+        Some(NodeKind::Arrow)
+    );
     let (ast, root) = parse("a - b - c");
     assert_eq!(ast.get_node_kind(root), Some(NodeKind::Sub));
-    assert_eq!(ast.get_node_kind(ast.get_children(root)[0]), Some(NodeKind::Sub));
+    assert_eq!(
+        ast.get_node_kind(ast.get_children(root)[0]),
+        Some(NodeKind::Sub)
+    );
 }
 
 #[test]

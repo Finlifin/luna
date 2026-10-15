@@ -201,16 +201,26 @@ impl LangItems {
             if item != LangItem::Tuple {
                 return Err(SourceBindingError::NotNormalFormItem(item));
             }
-            let count = package.normal_forms.iter()
-                .filter(|head| head.declaration == declaration).count();
-            let functions: Vec<_> = package.functions.iter()
-                .filter(|function| function.declaration == declaration).collect();
-            if count != 1 || functions.len() > 1 || functions.first().is_some_and(|function| {
-                function.phase != nir::program::FunctionPhase::NormalForm || !function.pure
-            }) {
+            let count = package
+                .normal_forms
+                .iter()
+                .filter(|head| head.declaration == declaration)
+                .count();
+            let functions: Vec<_> = package
+                .functions
+                .iter()
+                .filter(|function| function.declaration == declaration)
+                .collect();
+            if count != 1
+                || functions.len() > 1
+                || functions.first().is_some_and(|function| {
+                    function.phase != nir::program::FunctionPhase::NormalForm || !function.pure
+                })
+            {
                 return Err(SourceBindingError::InvalidNormalFormIdentity { item, declaration });
             }
-            staged.set(item, LangItemDef::UserDef(declaration))
+            staged
+                .set(item, LangItemDef::UserDef(declaration))
                 .map_err(SourceBindingError::Conflict)?;
         }
         *self = staged;
@@ -300,7 +310,10 @@ impl std::error::Error for RegistrationConflict {}
 pub enum SourceBindingError {
     NotTraitItem(LangItem),
     NotNormalFormItem(LangItem),
-    InvalidNormalFormIdentity { item: LangItem, declaration: nir::DeclarationId },
+    InvalidNormalFormIdentity {
+        item: LangItem,
+        declaration: nir::DeclarationId,
+    },
     InvalidTraitIdentity {
         item: LangItem,
         declaration: nir::DeclarationId,
@@ -310,9 +323,13 @@ pub enum SourceBindingError {
 impl fmt::Display for SourceBindingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotNormalFormItem(item) => write!(f, "language item {item} is not a source normal-form item"),
-            Self::InvalidNormalFormIdentity { item, declaration } => write!(f,
-                "language item {item} requires exactly one pure normal-form head at {declaration}"),
+            Self::NotNormalFormItem(item) => {
+                write!(f, "language item {item} is not a source normal-form item")
+            }
+            Self::InvalidNormalFormIdentity { item, declaration } => write!(
+                f,
+                "language item {item} requires exactly one pure normal-form head at {declaration}"
+            ),
             Self::NotTraitItem(item) => {
                 write!(f, "language item {item} is not a source trait item")
             }

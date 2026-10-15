@@ -10,7 +10,7 @@ use std::fmt;
 use std::sync::Arc;
 
 mod input_binding;
-pub use input_binding::{FunctionInputBinding, FunctionCallBinding};
+pub use input_binding::{FunctionCallBinding, FunctionInputBinding};
 
 /// Semantic domain of an argument, not a source-language type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -198,7 +198,11 @@ pub enum Term {
     RecordValue(Vec<(String, Term)>),
     /// Closed nominal value. Full nominal identity and declaration-order fields
     /// survive staging; Some(index) distinguishes enum variants from structs.
-    NominalValue { ty: Box<Term>, variant: Option<u32>, fields: Vec<Term> },
+    NominalValue {
+        ty: Box<Term>,
+        variant: Option<u32>,
+        fields: Vec<Term>,
+    },
     Pointer(Box<Term>),
     /// A comptime callable. Its inner signature must be an ordinary Function.
     ComptimeFunction(Box<Term>),
@@ -235,6 +239,7 @@ pub enum Term {
     Symbol(Arc<str>),
     /// Canonical exact builtin integer; no machine-width truncation or store identity.
     Integer(comptime_runtime::Integer),
+    Float(comptime_runtime::decimal::DecimalValue),
     /// Handle into a comptime value store. Structural identity does not replace
     /// that store's semantic value equality (e.g. Eq/Hash protocols).
     Value {
@@ -261,18 +266,33 @@ impl Term {
             match term {
                 Self::Computation { effects, result } => {
                     pending.push(*result);
-                    for operation in effects { pending.extend(operation.arguments); }
+                    for operation in effects {
+                        pending.extend(operation.arguments);
+                    }
                 }
-                Self::AssociatedType { arguments, subject, .. } => {
+                Self::AssociatedType {
+                    arguments, subject, ..
+                } => {
                     pending.push(*subject);
                     pending.extend(arguments);
                 }
-                Self::NormalForm { arguments, .. } | Self::Nominal { arguments, .. }
-                | Self::Tuple(arguments) | Self::TupleValue(arguments)
-                | Self::TypeListValue(arguments) | Self::TypeListConcat(arguments) => pending.extend(arguments),
-                Self::Record(fields) | Self::RecordValue(fields) => pending.extend(fields.into_iter().map(|(_, field)| field)),
-                Self::NominalValue { ty, fields, .. } => { pending.push(*ty); pending.extend(fields); },
-                Self::Closure { environment, signature } => {
+                Self::NormalForm { arguments, .. }
+                | Self::Nominal { arguments, .. }
+                | Self::Tuple(arguments)
+                | Self::TupleValue(arguments)
+                | Self::TypeListValue(arguments)
+                | Self::TypeListConcat(arguments) => pending.extend(arguments),
+                Self::Record(fields) | Self::RecordValue(fields) => {
+                    pending.extend(fields.into_iter().map(|(_, field)| field))
+                }
+                Self::NominalValue { ty, fields, .. } => {
+                    pending.push(*ty);
+                    pending.extend(fields);
+                }
+                Self::Closure {
+                    environment,
+                    signature,
+                } => {
                     pending.push(*signature);
                     pending.extend(environment);
                 }
@@ -281,36 +301,71 @@ impl Term {
                     pending.push(*result);
                     pending.extend(parameters.into_iter().map(|parameter| parameter.ty));
                 }
-                Self::Primitive(_) | Self::Hole { .. } | Self::Bound { .. }
-                | Self::Rigid { .. } | Self::Runtime(_) | Self::Value { .. }
-                | Self::Unit | Self::Bool(_) | Self::Char(_) | Self::BitVec(_)
-                | Self::Float32(_) | Self::Float64(_) | Self::String(_) | Self::Symbol(_) | Self::Integer(_) => {}
+                Self::Primitive(_)
+                | Self::Hole { .. }
+                | Self::Bound { .. }
+                | Self::Rigid { .. }
+                | Self::Runtime(_)
+                | Self::Value { .. }
+                | Self::Unit
+                | Self::Bool(_)
+                | Self::Char(_)
+                | Self::BitVec(_)
+                | Self::Float32(_)
+                | Self::Float64(_)
+                | Self::String(_)
+                | Self::Symbol(_)
+                | Self::Float(_)
+                | Self::Integer(_) => {}
             }
         }
     }
 
     pub fn type_list_concat(parts: Vec<Term>) -> Self {
-        let mut pending=parts.into_iter().rev().collect::<Vec<_>>();
-        let mut result=Vec::new();
-        while let Some(part)=pending.pop() {
+        let mut pending = parts.into_iter().rev().collect::<Vec<_>>();
+        let mut result = Vec::new();
+        while let Some(part) = pending.pop() {
             match part {
-                Self::TypeListConcat(parts)=>pending.extend(parts.into_iter().rev()),
-                Self::TypeListValue(mut elements)=>{
-                    if elements.is_empty() {continue;}
-                    if let Some(Self::TypeListValue(previous))=result.last_mut() {previous.append(&mut elements);}
-                    else {result.push(Self::TypeListValue(elements));}
+                Self::TypeListConcat(parts) => pending.extend(parts.into_iter().rev()),
+                Self::TypeListValue(mut elements) => {
+                    if elements.is_empty() {
+                        continue;
+                    }
+                    if let Some(Self::TypeListValue(previous)) = result.last_mut() {
+                        previous.append(&mut elements);
+                    } else {
+                        result.push(Self::TypeListValue(elements));
+                    }
                 }
-                other=>result.push(other),
+                other => result.push(other),
             }
         }
-        if result.is_empty() {Self::TypeListValue(vec![])}
-        else if result.len()==1 && result[0].is_type_list_component() {result.pop().unwrap()}
-        else {Self::TypeListConcat(result)}
+        if result.is_empty() {
+            Self::TypeListValue(vec![])
+        } else if result.len() == 1 && result[0].is_type_list_component() {
+            result.pop().unwrap()
+        } else {
+            Self::TypeListConcat(result)
+        }
     }
     fn is_type_list_component(&self) -> bool {
-        matches!(self,Self::TypeListValue(_) | Self::TypeListConcat(_))
-            || matches!(self,Self::Rigid {sort:Sort::ComptimeValue,..} | Self::Bound {sort:Sort::ComptimeValue,..}
-                | Self::Hole {sort:Sort::ComptimeValue,..} | Self::NormalForm {sort:Sort::ComptimeValue,..})
+        matches!(self, Self::TypeListValue(_) | Self::TypeListConcat(_))
+            || matches!(
+                self,
+                Self::Rigid {
+                    sort: Sort::ComptimeValue,
+                    ..
+                } | Self::Bound {
+                    sort: Sort::ComptimeValue,
+                    ..
+                } | Self::Hole {
+                    sort: Sort::ComptimeValue,
+                    ..
+                } | Self::NormalForm {
+                    sort: Sort::ComptimeValue,
+                    ..
+                }
+            )
     }
     /// Empty qualification disappears; adjacent effect prefixes concatenate.
     /// Do not deduplicate occurrences or reorder labels without evidence.
@@ -385,12 +440,16 @@ impl Term {
     /// A comptime-value input whose substituted type is exactly Type acquires
     /// the Type domain; the returned binding plan also refines its references.
     pub fn bind_function_inputs(&self, inputs: &[Option<Term>]) -> Result<Term, TypeError> {
-        self.prepare_function_inputs(inputs).map(FunctionInputBinding::into_signature)
+        self.prepare_function_inputs(inputs)
+            .map(FunctionInputBinding::into_signature)
     }
 
     /// Prepare a checked, reusable substitution for both the signature and
     /// expression annotations in its frame.
-    pub fn prepare_function_inputs(&self, inputs: &[Option<Term>]) -> Result<FunctionInputBinding, TypeError> {
+    pub fn prepare_function_inputs(
+        &self,
+        inputs: &[Option<Term>],
+    ) -> Result<FunctionInputBinding, TypeError> {
         FunctionInputBinding::new(self, inputs)
     }
 
@@ -430,17 +489,23 @@ impl Term {
         let mut type_slots = BTreeSet::new();
         let mut expected_types = Vec::with_capacity(parameters.len());
         for (index, (parameter, argument)) in parameters.iter().zip(arguments).enumerate() {
-            let expected = input_binding::replace_scope(&parameter.ty,&arguments[..index],&type_slots,true)
-                .map_err(CallError::Shape)?;
-            let sort = input_binding::input_sort(parameter,&expected);
-            require_sort(argument,sort).map_err(CallError::Shape)?;
-            if sort != parameter.sort { type_slots.insert(index); }
+            let expected =
+                input_binding::replace_scope(&parameter.ty, &arguments[..index], &type_slots, true)
+                    .map_err(CallError::Shape)?;
+            let sort = input_binding::input_sort(parameter, &expected);
+            require_sort(argument, sort).map_err(CallError::Shape)?;
+            if sort != parameter.sort {
+                type_slots.insert(index);
+            }
             expected_types.push(expected);
         }
-        for (index,(argument,expected)) in arguments.iter().zip(&expected_types).enumerate() {
-            check(index, argument, expected).map_err(|error| CallError::Contract { parameter: index, error })?;
+        for (index, (argument, expected)) in arguments.iter().zip(&expected_types).enumerate() {
+            check(index, argument, expected).map_err(|error| CallError::Contract {
+                parameter: index,
+                error,
+            })?;
         }
-        input_binding::replace_scope(result,arguments,&type_slots,true).map_err(CallError::Shape)
+        input_binding::replace_scope(result, arguments, &type_slots, true).map_err(CallError::Shape)
     }
 
     /// Validate stable term shape and binder scope without changing its head.
@@ -455,13 +520,20 @@ impl Term {
             | Self::Rigid { sort, .. }
             | Self::NormalForm { sort, .. } => *sort,
             Self::Runtime(_) => Sort::Runtime,
-            Self::NominalValue { .. } | Self::TupleValue(_) | Self::TypeListValue(_) | Self::TypeListConcat(_) | Self::RecordValue(_)
+            Self::NominalValue { .. }
+            | Self::TupleValue(_)
+            | Self::TypeListValue(_)
+            | Self::TypeListConcat(_)
+            | Self::RecordValue(_)
             | Self::Unit
             | Self::Bool(_)
             | Self::BitVec(_)
-            | Self::Float32(_) | Self::Float64(_)
+            | Self::Float32(_)
+            | Self::Float64(_)
             | Self::Char(_)
-            | Self::String(_) | Self::Symbol(_)
+            | Self::String(_)
+            | Self::Symbol(_)
+            | Self::Float(_)
             | Self::Integer(_)
             | Self::Value { .. } => Sort::ComptimeValue,
             _ => Sort::Type,
@@ -495,36 +567,47 @@ impl Term {
     pub fn rebind_scope(&self, arguments: &[Term]) -> Result<Term, TypeError> {
         self.rewrite(0, &mut |term, nesting| match term {
             Self::Bound { depth, index, sort } if *depth == nesting => {
-                let value=arguments.get(*index).ok_or(TypeError::MissingArgument(*index))?;
-                require_sort(value,*sort)?;
-                value.shift(nesting,0)
+                let value = arguments
+                    .get(*index)
+                    .ok_or(TypeError::MissingArgument(*index))?;
+                require_sort(value, *sort)?;
+                value.shift(nesting, 0)
             }
-            _=>Ok(term.clone()),
+            _ => Ok(term.clone()),
         })
     }
 
     /// Rebind only demanded slots, preserving the surrounding frame. Missing
     /// entries are errors if referenced; no dummy type/value fills a pruned slot.
     pub fn rebind_scope_partial(&self, arguments: &[Option<Term>]) -> Result<Term, TypeError> {
-        self.rewrite(0, &mut |term,nesting|match term {
-            Self::Bound {depth,index,sort} if *depth==nesting=>{
-                let value=arguments.get(*index).and_then(Option::as_ref)
+        self.rewrite(0, &mut |term, nesting| match term {
+            Self::Bound { depth, index, sort } if *depth == nesting => {
+                let value = arguments
+                    .get(*index)
+                    .and_then(Option::as_ref)
                     .ok_or(TypeError::MissingArgument(*index))?;
-                require_sort(value,*sort)?;
-                value.shift(nesting,0)
-            },
-            _=>Ok(term.clone()),
+                require_sort(value, *sort)?;
+                value.shift(nesting, 0)
+            }
+            _ => Ok(term.clone()),
         })
     }
 
     /// Free declaration identities, including those under nested binders.
     /// Normal-form heads remain opaque; only their explicit arguments are read.
-    pub fn rigid_parameters(&self) -> Result<std::collections::BTreeMap<DeclarationId,Sort>,TypeError> {
-        let mut parameters=std::collections::BTreeMap::new();
-        self.rewrite(0,&mut |term,_| {
-            if let Self::Rigid {declaration,sort}=term {
-                if let Some(previous)=parameters.insert(*declaration,*sort) {
-                    if previous!=*sort {return Err(TypeError::WrongSort {expected:previous,actual:*sort});}
+    pub fn rigid_parameters(
+        &self,
+    ) -> Result<std::collections::BTreeMap<DeclarationId, Sort>, TypeError> {
+        let mut parameters = std::collections::BTreeMap::new();
+        self.rewrite(0, &mut |term, _| {
+            if let Self::Rigid { declaration, sort } = term {
+                if let Some(previous) = parameters.insert(*declaration, *sort) {
+                    if previous != *sort {
+                        return Err(TypeError::WrongSort {
+                            expected: previous,
+                            actual: *sort,
+                        });
+                    }
                 }
             }
             Ok(term.clone())
@@ -671,11 +754,18 @@ impl Term {
     /// The ordinary closed-input API remains strict. Insert/remove a declaration
     /// frame so local binders and caller references retain distinct depths.
     pub fn instantiate_types_in_scope(
-        &self, parameters: &[DeclarationId], arguments: &[Term], frames: &[Vec<Sort>],
-    ) -> Result<Term,TypeError> {
-        let parameters = parameters.iter().map(|&declaration| DeclarationParameter {
-            declaration, sort: Sort::Type,
-        }).collect::<Vec<_>>();
+        &self,
+        parameters: &[DeclarationId],
+        arguments: &[Term],
+        frames: &[Vec<Sort>],
+    ) -> Result<Term, TypeError> {
+        let parameters = parameters
+            .iter()
+            .map(|&declaration| DeclarationParameter {
+                declaration,
+                sort: Sort::Type,
+            })
+            .collect::<Vec<_>>();
         self.instantiate_parameters_in_scope(&parameters, arguments, frames)
     }
 
@@ -688,14 +778,19 @@ impl Term {
         arguments: &[Term],
         frames: &[Vec<Sort>],
     ) -> Result<Term, TypeError> {
-        if parameters.len()!=arguments.len() {
-            return Err(TypeError::ArgumentCount {expected:parameters.len(),actual:arguments.len()});
+        if parameters.len() != arguments.len() {
+            return Err(TypeError::ArgumentCount {
+                expected: parameters.len(),
+                actual: arguments.len(),
+            });
         }
         for (parameter, argument) in parameters.iter().zip(arguments) {
             argument.check_scope(frames)?;
-            require_sort(argument,parameter.sort)?;
+            require_sort(argument, parameter.sort)?;
         }
-        let result=self.abstract_parameters(parameters)?.substitute(arguments)?;
+        let result = self
+            .abstract_parameters(parameters)?
+            .substitute(arguments)?;
         result.check_scope(frames)?;
         Ok(result)
     }
@@ -800,7 +895,15 @@ impl Term {
                     .map(|(name, ty)| Ok((name.clone(), ty.rewrite(nesting, leaf)?)))
                     .collect::<Result<_, TypeError>>()?,
             ),
-            Self::NominalValue { ty, variant, fields } => Self::NominalValue { ty: Box::new(ty.rewrite(nesting, leaf)?), variant: *variant, fields: many(fields, leaf)? },
+            Self::NominalValue {
+                ty,
+                variant,
+                fields,
+            } => Self::NominalValue {
+                ty: Box::new(ty.rewrite(nesting, leaf)?),
+                variant: *variant,
+                fields: many(fields, leaf)?,
+            },
             Self::RecordValue(fields) => Self::RecordValue(
                 fields
                     .iter()
@@ -810,8 +913,10 @@ impl Term {
             Self::TupleValue(items) => Self::TupleValue(many(items, leaf)?),
             Self::TypeListValue(items) => Self::TypeListValue(many(items, leaf)?),
             Self::TypeListConcat(items) => {
-                let parts=many(items,leaf)?;
-                if parts.iter().any(|part|!part.is_type_list_component()) {return Err(TypeError::InvalidTypeListComponent);}
+                let parts = many(items, leaf)?;
+                if parts.iter().any(|part| !part.is_type_list_component()) {
+                    return Err(TypeError::InvalidTypeListComponent);
+                }
                 Self::type_list_concat(parts)
             }
             Self::ComptimeFunction(inner) => {
@@ -890,7 +995,9 @@ pub enum TypeError {
 impl fmt::Display for TypeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidTypeListComponent => f.write_str("type-list concatenation requires list operands"),
+            Self::InvalidTypeListComponent => {
+                f.write_str("type-list concatenation requires list operands")
+            }
             Self::WrongSort { expected, actual } => write!(f, "expected {expected}, got {actual}"),
             Self::MissingArgument(i) => write!(f, "missing substitution argument {i}"),
             Self::ArgumentCount { expected, actual } => {
@@ -913,7 +1020,9 @@ impl fmt::Display for TypeError {
                 "runtime identity {id} is unavailable in this environment"
             ),
             Self::DuplicateRecordField(name) => write!(f, "duplicate record field {name:?}"),
-            Self::InvalidNominalValueType => f.write_str("nominal value requires an explicit nominal type"),
+            Self::InvalidNominalValueType => {
+                f.write_str("nominal value requires an explicit nominal type")
+            }
             Self::BinderDepthOverflow => f.write_str("binder depth overflow"),
             Self::InvalidFunctionSignature => f.write_str("expected a function signature"),
             Self::InvalidComptimeFunctionSignature => {
@@ -1163,14 +1272,18 @@ fn collect_runtime_dependencies(term: &Term, result: &mut BTreeSet<RuntimeId>) {
         Term::Nominal { arguments, .. }
         | Term::NormalForm { arguments, .. }
         | Term::Tuple(arguments)
-        | Term::TypeListValue(arguments) | Term::TypeListConcat(arguments) | Term::TupleValue(arguments) => {
+        | Term::TypeListValue(arguments)
+        | Term::TypeListConcat(arguments)
+        | Term::TupleValue(arguments) => {
             for argument in arguments {
                 collect_runtime_dependencies(argument, result);
             }
         }
         Term::NominalValue { ty, fields, .. } => {
             collect_runtime_dependencies(ty, result);
-            for field in fields { collect_runtime_dependencies(field, result); }
+            for field in fields {
+                collect_runtime_dependencies(field, result);
+            }
         }
         Term::Record(fields) | Term::RecordValue(fields) => {
             for (_, ty) in fields {
@@ -1204,11 +1317,14 @@ fn collect_runtime_dependencies(term: &Term, result: &mut BTreeSet<RuntimeId>) {
         | Term::Rigid { .. }
         | Term::Unit
         | Term::Bool(_)
+        | Term::Float(_)
         | Term::Integer(_)
         | Term::BitVec(_)
-        | Term::Float32(_) | Term::Float64(_)
+        | Term::Float32(_)
+        | Term::Float64(_)
         | Term::Char(_)
-        | Term::String(_) | Term::Symbol(_)
+        | Term::String(_)
+        | Term::Symbol(_)
         | Term::Value { .. } => {}
     }
 }
@@ -1337,8 +1453,10 @@ fn validate(
         }
         Term::TypeListConcat(items) => {
             for item in items {
-                if !item.is_type_list_component() {return Err(TypeError::InvalidTypeListComponent);}
-                validate(item,holes,frames,allow_free,core)?;
+                if !item.is_type_list_component() {
+                    return Err(TypeError::InvalidTypeListComponent);
+                }
+                validate(item, holes, frames, allow_free, core)?;
             }
         }
         Term::Pointer(inner) => {
@@ -1347,19 +1465,31 @@ fn validate(
         }
         Term::NominalValue { ty, fields, .. } => {
             require_sort(ty, Sort::Type)?;
-            if !matches!(ty.as_ref(), Term::Nominal { .. }) { return Err(TypeError::InvalidNominalValueType); }
+            if !matches!(ty.as_ref(), Term::Nominal { .. }) {
+                return Err(TypeError::InvalidNominalValueType);
+            }
             validate(ty, holes, frames, allow_free, core)?;
             for field in fields {
-                if field.sort() == Sort::Runtime { return Err(TypeError::WrongSort {expected:Sort::ComptimeValue,actual:Sort::Runtime}); }
+                if field.sort() == Sort::Runtime {
+                    return Err(TypeError::WrongSort {
+                        expected: Sort::ComptimeValue,
+                        actual: Sort::Runtime,
+                    });
+                }
                 validate(field, holes, frames, allow_free, core)?;
             }
         }
         Term::RecordValue(fields) => {
             let mut names = BTreeSet::new();
             for (name, value) in fields {
-                if !names.insert(name) { return Err(TypeError::DuplicateRecordField(name.clone())); }
+                if !names.insert(name) {
+                    return Err(TypeError::DuplicateRecordField(name.clone()));
+                }
                 if value.sort() == Sort::Runtime {
-                    return Err(TypeError::WrongSort { expected: Sort::ComptimeValue, actual: Sort::Runtime });
+                    return Err(TypeError::WrongSort {
+                        expected: Sort::ComptimeValue,
+                        actual: Sort::Runtime,
+                    });
                 }
                 validate(value, holes, frames, allow_free, core)?;
             }
@@ -1527,10 +1657,19 @@ impl fmt::Display for Term {
                 }
                 f.write_str("))")
             }
-            Self::NominalValue { ty, variant, fields } => {
+            Self::NominalValue {
+                ty,
+                variant,
+                fields,
+            } => {
                 write!(f, "(nominal-value (type {ty}) (variant ")?;
-                match variant { Some(index) => write!(f, "{index}")?, None => f.write_str("none")? }
-                f.write_str(") (fields ")?; list(f, fields)?; f.write_str("))")
+                match variant {
+                    Some(index) => write!(f, "{index}")?,
+                    None => f.write_str("none")?,
+                }
+                f.write_str(") (fields ")?;
+                list(f, fields)?;
+                f.write_str("))")
             }
             Self::RecordValue(fields) => {
                 f.write_str("(record-value (fields")?;
@@ -1553,7 +1692,7 @@ impl fmt::Display for Term {
             }
             Self::TypeListConcat(items) => {
                 f.write_str("(type-list-concat ")?;
-                list(f,items)?;
+                list(f, items)?;
                 f.write_str(")")
             }
             Self::TupleValue(items) => {
@@ -1582,9 +1721,14 @@ impl fmt::Display for Term {
             Self::Float32(bits) => write!(f, "(float32-bits 0x{bits:08x})"),
             Self::Float64(bits) => write!(f, "(float64-bits 0x{bits:016x})"),
             Self::Integer(value) => write!(f, "{value}"),
+            Self::Float(value) => write!(f, "(comptime-float {value})"),
             Self::Char(value) => write!(f, "(char {})", *value as u32),
             Self::String(value) | Self::Symbol(value) => {
-                f.write_str(if matches!(self, Self::Symbol(_)) {"(symbol "} else {"(string "})?;
+                f.write_str(if matches!(self, Self::Symbol(_)) {
+                    "(symbol "
+                } else {
+                    "(string "
+                })?;
                 crate::display::string(f, value)?;
                 f.write_str(")")
             }

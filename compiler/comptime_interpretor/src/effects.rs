@@ -66,13 +66,18 @@ impl Interpreter<'_> {
     }
 
     fn effect_cleanup_context_work(
-        &self, frame: Option<&iir::InstanceKey>, context: &[iir::cleanup::ContextKey],
+        &self,
+        frame: Option<&iir::InstanceKey>,
+        context: &[iir::cleanup::ContextKey],
     ) -> Option<usize> {
         let mut work = context.len().checked_add(1)?;
-        for key in frame.into_iter().chain(context.iter().filter_map(|context| match context {
-            iir::cleanup::ContextKey::Function { callee, .. } => Some(callee),
-            _ => None,
-        })) {
+        for key in frame
+            .into_iter()
+            .chain(context.iter().filter_map(|context| match context {
+                iir::cleanup::ContextKey::Function { callee, .. } => Some(callee),
+                _ => None,
+            }))
+        {
             work = work.checked_add(1)?;
             for argument in &key.arguments {
                 work = work.checked_add(type_value_work(argument, &self.normal_forms)?)?;
@@ -175,9 +180,12 @@ impl Interpreter<'_> {
                         })
                         .and_then(|n| n.checked_add(environment.len()))
                         .and_then(|n| n.checked_add(previous.len()))
-                        .and_then(|n| n.checked_add(self.effect_cleanup_context_work(
-                            self.cleanup_frame.as_ref(), &self.cleanup_context,
-                        )?))
+                        .and_then(|n| {
+                            n.checked_add(self.effect_cleanup_context_work(
+                                self.cleanup_frame.as_ref(),
+                                &self.cleanup_context,
+                            )?)
+                        })
                         .ok_or_else(|| {
                             self.failure(ErrorKind::RepresentationSizeLimit, Some(expr.source))
                         })?;
@@ -249,7 +257,10 @@ impl Interpreter<'_> {
                             return Err(self.failure(ErrorKind::Arity, Some(expr.source)));
                         }
                         let provided = match self.effect_dispatch(
-                            entry.clone(), Value::Tuple(vec![]), expr.source, true,
+                            entry.clone(),
+                            Value::Tuple(vec![]),
+                            expr.source,
+                            true,
                         ) {
                             Ok(value) => Ok(value),
                             Err(error) => {
@@ -312,13 +323,14 @@ impl Interpreter<'_> {
                     );
                 }
                 this.transfer_prepared();
-                let delivered = match this.effect_dispatch(entry, Value::Tuple(values), expr.source, false) {
-                    Ok(delivered) => delivered,
-                    Err(error) => {
-                        this.cleanup_effect_failure(&error, expr.source, environment)?;
-                        return Err(error);
-                    }
-                };
+                let delivered =
+                    match this.effect_dispatch(entry, Value::Tuple(values), expr.source, false) {
+                        Ok(delivered) => delivered,
+                        Err(error) => {
+                            this.cleanup_effect_failure(&error, expr.source, environment)?;
+                            return Err(error);
+                        }
+                    };
                 if let Flow::Value(value) = &delivered {
                     if !this.has_type(value, result) {
                         return Err(this.failure(ErrorKind::Type, Some(expr.source)));
@@ -331,8 +343,16 @@ impl Interpreter<'_> {
                     self.failure(ErrorKind::InvalidControlFlow, Some(expr.source))
                 })?;
                 let value = value!(self.eval(value, environment));
-                self.cleanup_site(expr.source, iir::cleanup::Boundary::TemporaryEnd, environment)?;
-                self.cleanup_site(expr.source, iir::cleanup::Boundary::EffectResume, environment)?;
+                self.cleanup_site(
+                    expr.source,
+                    iir::cleanup::Boundary::TemporaryEnd,
+                    environment,
+                )?;
+                self.cleanup_site(
+                    expr.source,
+                    iir::cleanup::Boundary::EffectResume,
+                    environment,
+                )?;
                 Ok(Flow::EffectResume(target, value))
             }
             _ => unreachable!(),
@@ -364,7 +384,11 @@ impl Interpreter<'_> {
                 let result = match result {
                     Ok(Flow::Value(value)) => {
                         if matches!(expr.kind, K::CallPreparation { .. }) {
-                            self.cleanup_site(expr.source, iir::cleanup::Boundary::ScopeEnd, environment)?;
+                            self.cleanup_site(
+                                expr.source,
+                                iir::cleanup::Boundary::ScopeEnd,
+                                environment,
+                            )?;
                         } else {
                             self.cleanup_block(expr.source, environment)?;
                         }
@@ -399,16 +423,28 @@ impl Interpreter<'_> {
                     for arm in arms {
                         environment.retain(|id, _| existing.contains(id));
                         let (matched, bindings) = self.match_arm_guard_with_bindings(
-                            &arm.pattern, arm.guard.as_ref(), &value, environment,
+                            &arm.pattern,
+                            arm.guard.as_ref(),
+                            &value,
+                            environment,
                         )?;
                         match matched {
                             Flow::Value(Value::Bool(false)) => continue,
                             Flow::Value(Value::Bool(true)) => {
                                 self.retain_pattern_residual(arm.body.source, &value, &bindings)?;
-                                let result = self.eval_mapped_computation(&arm.body, environment, selected)?;
+                                let result =
+                                    self.eval_mapped_computation(&arm.body, environment, selected)?;
                                 if matches!(result, Flow::Value(_))
-                                    && !matches!(arm.body.kind, K::Block { .. } | K::CallPreparation { .. }) {
-                                    self.cleanup_site(arm.body.source, iir::cleanup::Boundary::ScopeEnd, environment)?;
+                                    && !matches!(
+                                        arm.body.kind,
+                                        K::Block { .. } | K::CallPreparation { .. }
+                                    )
+                                {
+                                    self.cleanup_site(
+                                        arm.body.source,
+                                        iir::cleanup::Boundary::ScopeEnd,
+                                        environment,
+                                    )?;
                                 }
                                 return Ok(result);
                             }
@@ -476,24 +512,42 @@ impl Interpreter<'_> {
                     self.tick(Some(source))?;
                     self.effect_charge(activation.environment.len(), Some(source))?;
                     let mut local = activation.environment.clone();
-                    let selected = self.with_effect_handler_resources(&activation, arm_index, source, |this| {
-                        let (matched, bindings) = this.match_arm_guard_with_bindings(
-                            &arm.pattern, arm.guard.as_ref(), &inputs, &mut local,
-                        )?;
-                        match matched {
-                            Flow::Value(Value::Bool(false)) => Ok(None),
-                            Flow::Value(Value::Bool(true)) => {
-                                this.retain_pattern_residual(arm.body.source, &inputs, &bindings)?;
-                                let result = this.eval(&arm.body, &mut local)?;
-                                if matches!(result, Flow::Value(_)) {
-                                    this.cleanup_site(arm.body.source, iir::cleanup::Boundary::HandlerEnd, &mut local)?;
+                    let selected = self.with_effect_handler_resources(
+                        &activation,
+                        arm_index,
+                        source,
+                        |this| {
+                            let (matched, bindings) = this.match_arm_guard_with_bindings(
+                                &arm.pattern,
+                                arm.guard.as_ref(),
+                                &inputs,
+                                &mut local,
+                            )?;
+                            match matched {
+                                Flow::Value(Value::Bool(false)) => Ok(None),
+                                Flow::Value(Value::Bool(true)) => {
+                                    this.retain_pattern_residual(
+                                        arm.body.source,
+                                        &inputs,
+                                        &bindings,
+                                    )?;
+                                    let result = this.eval(&arm.body, &mut local)?;
+                                    if matches!(result, Flow::Value(_)) {
+                                        this.cleanup_site(
+                                            arm.body.source,
+                                            iir::cleanup::Boundary::HandlerEnd,
+                                            &mut local,
+                                        )?;
+                                    }
+                                    Ok(Some(result))
                                 }
-                                Ok(Some(result))
+                                other => Ok(Some(other)),
                             }
-                            other => Ok(Some(other)),
-                        }
-                    })?;
-                    if selected.is_some() { return Ok(selected); }
+                        },
+                    )?;
+                    if selected.is_some() {
+                        return Ok(selected);
+                    }
                 }
                 Ok(None)
             })();
@@ -531,14 +585,23 @@ impl Interpreter<'_> {
     /// the suspended callee's. Validate before guards can observe/write state;
     /// restore the suspended frame on every result, including control transfer.
     fn with_effect_handler_resources<T>(
-        &mut self, activation: &Activation, arm: usize, source: SourceRange,
+        &mut self,
+        activation: &Activation,
+        arm: usize,
+        source: SourceRange,
         evaluate: impl FnOnce(&mut Self) -> Result<T, Error>,
     ) -> Result<T, Error> {
-        let Some(schedule) = self.cleanup_schedule else { return evaluate(self); };
+        let Some(schedule) = self.cleanup_schedule else {
+            return evaluate(self);
+        };
         if activation.cleanup_context.len() >= self.budget.depth {
             return Err(self.failure(ErrorKind::DepthExhausted, Some(source)));
         }
-        let work = self.effect_cleanup_context_work(activation.cleanup_frame.as_ref(), &activation.cleanup_context)
+        let work = self
+            .effect_cleanup_context_work(
+                activation.cleanup_frame.as_ref(),
+                &activation.cleanup_context,
+            )
             .ok_or_else(|| self.failure(ErrorKind::RepresentationSizeLimit, Some(source)))?;
         self.effect_charge(work, Some(source))?;
         let mut context = activation.cleanup_context.clone();
@@ -547,7 +610,9 @@ impl Interpreter<'_> {
             handler: activation.handler_index,
             arm,
         });
-        let frame = activation.cleanup_frame.as_ref()
+        let frame = activation
+            .cleanup_frame
+            .as_ref()
             .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
         let mut matches = 0;
         for candidate in &schedule.functions {
@@ -572,42 +637,80 @@ impl Interpreter<'_> {
     }
 
     pub(super) fn with_effect_loop(
-        &mut self, identity: LocalId, source: SourceRange,
+        &mut self,
+        identity: LocalId,
+        source: SourceRange,
         evaluate: impl FnOnce(&mut Self) -> Result<Flow, Error>,
     ) -> Result<Flow, Error> {
-        let work = self.effect_cleanup_context_work(None, &self.cleanup_context)
-            .ok_or_else(||self.failure(ErrorKind::RepresentationSizeLimit,Some(source)))?;
+        let work = self
+            .effect_cleanup_context_work(None, &self.cleanup_context)
+            .ok_or_else(|| self.failure(ErrorKind::RepresentationSizeLimit, Some(source)))?;
         self.effect_charge(work, Some(source))?;
         let floor = self.effect_state.loops.len();
-        self.effect_state.loops.push((self.effect_state.invocation, identity, self.cleanup_context.clone()));
+        self.effect_state.loops.push((
+            self.effect_state.invocation,
+            identity,
+            self.cleanup_context.clone(),
+        ));
         let result = evaluate(self);
         self.effect_state.loops.truncate(floor);
         result
     }
 
     pub(super) fn effect_transfer_targets_scope(&mut self) -> Result<bool, Error> {
-        let Some((target, flow)) = self.effect_state.transfer.as_ref() else { return Ok(false); };
-        if *target != self.effect_state.invocation { return Ok(false); }
+        let Some((target, flow)) = self.effect_state.transfer.as_ref() else {
+            return Ok(false);
+        };
+        if *target != self.effect_state.invocation {
+            return Ok(false);
+        }
         let identity = match flow {
             Flow::Break(id) | Flow::Continue(id) => *id,
-            _ => return Ok(!matches!(self.cleanup_context.last(),Some(iir::cleanup::ContextKey::EffectHandler { .. }))),
+            _ => {
+                return Ok(!matches!(
+                    self.cleanup_context.last(),
+                    Some(iir::cleanup::ContextKey::EffectHandler { .. })
+                ));
+            }
         };
-        let work = self.effect_state.loops.len().checked_mul(self.cleanup_context.len().saturating_add(1))
-            .ok_or_else(||self.failure(ErrorKind::RepresentationSizeLimit,None))?;
+        let work = self
+            .effect_state
+            .loops
+            .len()
+            .checked_mul(self.cleanup_context.len().saturating_add(1))
+            .ok_or_else(|| self.failure(ErrorKind::RepresentationSizeLimit, None))?;
         self.effect_charge(work, None)?;
-        Ok(self.effect_state.loops.iter().rev().any(|(invocation, target, context)|
-            *invocation == self.effect_state.invocation && *target == identity && *context == self.cleanup_context))
+        Ok(self
+            .effect_state
+            .loops
+            .iter()
+            .rev()
+            .any(|(invocation, target, context)| {
+                *invocation == self.effect_state.invocation
+                    && *target == identity
+                    && *context == self.cleanup_context
+            }))
     }
 
     pub(super) fn cleanup_effect_failure(
-        &mut self, error: &Error, source: SourceRange, environment: &mut Environment,
+        &mut self,
+        error: &Error,
+        source: SourceRange,
+        environment: &mut Environment,
     ) -> Result<(), Error> {
-        if self.cleanup_failed { return Ok(()); }
+        if self.cleanup_failed {
+            return Ok(());
+        }
         if error.kind == ErrorKind::EffectControlTransfer
-            && !self.effect_transfer_targets_scope()? {
+            && !self.effect_transfer_targets_scope()?
+        {
             self.cleanup_site(source, iir::cleanup::Boundary::EffectEscape, environment)?;
         } else if error.kind == ErrorKind::ProgramContractRejected {
-            self.cleanup_site(source, iir::cleanup::Boundary::PredicateFailure, environment)?;
+            self.cleanup_site(
+                source,
+                iir::cleanup::Boundary::PredicateFailure,
+                environment,
+            )?;
         }
         Ok(())
     }
@@ -687,101 +790,179 @@ mod resource_context_tests {
     use iir::cleanup::{ContextKey, FunctionSchedule, Schedule};
 
     fn key(local: u32) -> iir::InstanceKey {
-        iir::InstanceKey { declaration: DeclarationId {package:0,local}, arguments:vec![] }
+        iir::InstanceKey {
+            declaration: DeclarationId { package: 0, local },
+            arguments: vec![],
+        }
     }
     fn activation() -> Activation {
         Activation {
-            identity:1, invocation:1,
-            handler:EffectHandler {
-                operation:Operation {declaration:DeclarationId {package:0,local:3},arguments:vec![]},
-                abi:Abi::Direct,
-                signature:Term::Function {parameters:vec![],result:Box::new(Term::Primitive(Primitive::Bool))},
-                arms:vec![],fallback:None,
+            identity: 1,
+            invocation: 1,
+            handler: EffectHandler {
+                operation: Operation {
+                    declaration: DeclarationId {
+                        package: 0,
+                        local: 3,
+                    },
+                    arguments: vec![],
+                },
+                abi: Abi::Direct,
+                signature: Term::Function {
+                    parameters: vec![],
+                    result: Box::new(Term::Primitive(Primitive::Bool)),
+                },
+                arms: vec![],
+                fallback: None,
             },
-            environment:Environment::new(),outer:vec![],provided:Default::default(),copy_provided:false,
-            installation:SourceRange {start:10,end:20},handler_index:2,
-            cleanup_frame:Some(key(1)),cleanup_context:vec![],
+            environment: Environment::new(),
+            outer: vec![],
+            provided: Default::default(),
+            copy_provided: false,
+            installation: SourceRange { start: 10, end: 20 },
+            handler_index: 2,
+            cleanup_frame: Some(key(1)),
+            cleanup_context: vec![],
         }
     }
     fn context(activation: &Activation, arm: usize) -> ContextKey {
-        ContextKey::EffectHandler {installation:activation.installation,handler:activation.handler_index,arm}
+        ContextKey::EffectHandler {
+            installation: activation.installation,
+            handler: activation.handler_index,
+            arm,
+        }
     }
     fn schedule(activation: &Activation) -> Schedule {
-        Schedule {functions:vec![FunctionSchedule {
-            instance:key(1),context:vec![context(activation,0)],sites:vec![],discards:vec![],
-            transfers:vec![],copies:vec![],pattern_transfers:vec![],pattern_orders:vec![],
-        }],aliases:vec![]}
+        Schedule {
+            functions: vec![FunctionSchedule {
+                instance: key(1),
+                context: vec![context(activation, 0)],
+                sites: vec![],
+                discards: vec![],
+                transfers: vec![],
+                copies: vec![],
+                pattern_transfers: vec![],
+                pattern_orders: vec![],
+            }],
+            aliases: vec![],
+        }
     }
 
     #[test]
     fn handler_resource_context_restores_suspended_state_on_completion_and_failure() {
-        for fail in [false,true] {
-            let package=Package::default();
-            let activation=activation();
-            let schedule=schedule(&activation);
-            let mut vm=Interpreter::new(&package,Budget::default()).unwrap();
+        for fail in [false, true] {
+            let package = Package::default();
+            let activation = activation();
+            let schedule = schedule(&activation);
+            let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
             // Exercise the context primitive directly; public scheduled effect
             // admission remains closed until handler resource proofs exist.
-            vm.cleanup_schedule=Some(&schedule);
-            vm.cleanup_frame=Some(key(9));
-            let suspended_context=vec![ContextKey::Default {construction:SourceRange {start:30,end:40},parameter:4}];
-            vm.cleanup_context=suspended_context.clone();
-            vm.prepared_frames.push(cleanup::PreparedFrame {source:SourceRange {start:50,end:60},values:vec![]});
-            vm.residual_temporaries.push((SourceRange {start:70,end:80},Storage::new(Value::Bool(true))));
-            vm.pattern_binding_orders.insert((90,100),vec![LocalId {owner:9,index:2}]);
-            let result=vm.with_effect_handler_resources(&activation,0,activation.installation,|vm| {
-                assert_eq!(vm.cleanup_frame,Some(key(1)));
-                assert_eq!(vm.cleanup_context,vec![context(&activation,0)]);
-                assert!(vm.prepared_frames.is_empty());
-                assert!(vm.residual_temporaries.is_empty());
-                assert!(vm.pattern_binding_orders.is_empty());
-                vm.prepared_frames.push(cleanup::PreparedFrame {source:activation.installation,values:vec![]});
-                if fail {Err(vm.failure(ErrorKind::EffectControlTransfer,Some(activation.installation)))} else {Ok(42)}
+            vm.cleanup_schedule = Some(&schedule);
+            vm.cleanup_frame = Some(key(9));
+            let suspended_context = vec![ContextKey::Default {
+                construction: SourceRange { start: 30, end: 40 },
+                parameter: 4,
+            }];
+            vm.cleanup_context = suspended_context.clone();
+            vm.prepared_frames.push(cleanup::PreparedFrame {
+                source: SourceRange { start: 50, end: 60 },
+                values: vec![],
             });
-            if fail {assert_eq!(result.unwrap_err().kind,ErrorKind::EffectControlTransfer);} else {assert_eq!(result.unwrap(),42);}
-            assert_eq!(vm.cleanup_frame,Some(key(9)));
-            assert_eq!(vm.cleanup_context,suspended_context);
-            assert_eq!(vm.prepared_frames.len(),1);
-            assert_eq!(vm.prepared_frames[0].source,SourceRange {start:50,end:60});
-            assert_eq!(vm.residual_temporaries.len(),1);
-            assert_eq!(vm.residual_temporaries[0].0,SourceRange {start:70,end:80});
-            assert_eq!(vm.pattern_binding_orders[&(90,100)],vec![LocalId {owner:9,index:2}]);
+            vm.residual_temporaries.push((
+                SourceRange { start: 70, end: 80 },
+                Storage::new(Value::Bool(true)),
+            ));
+            vm.pattern_binding_orders
+                .insert((90, 100), vec![LocalId { owner: 9, index: 2 }]);
+            let result =
+                vm.with_effect_handler_resources(&activation, 0, activation.installation, |vm| {
+                    assert_eq!(vm.cleanup_frame, Some(key(1)));
+                    assert_eq!(vm.cleanup_context, vec![context(&activation, 0)]);
+                    assert!(vm.prepared_frames.is_empty());
+                    assert!(vm.residual_temporaries.is_empty());
+                    assert!(vm.pattern_binding_orders.is_empty());
+                    vm.prepared_frames.push(cleanup::PreparedFrame {
+                        source: activation.installation,
+                        values: vec![],
+                    });
+                    if fail {
+                        Err(vm.failure(
+                            ErrorKind::EffectControlTransfer,
+                            Some(activation.installation),
+                        ))
+                    } else {
+                        Ok(42)
+                    }
+                });
+            if fail {
+                assert_eq!(result.unwrap_err().kind, ErrorKind::EffectControlTransfer);
+            } else {
+                assert_eq!(result.unwrap(), 42);
+            }
+            assert_eq!(vm.cleanup_frame, Some(key(9)));
+            assert_eq!(vm.cleanup_context, suspended_context);
+            assert_eq!(vm.prepared_frames.len(), 1);
+            assert_eq!(
+                vm.prepared_frames[0].source,
+                SourceRange { start: 50, end: 60 }
+            );
+            assert_eq!(vm.residual_temporaries.len(), 1);
+            assert_eq!(
+                vm.residual_temporaries[0].0,
+                SourceRange { start: 70, end: 80 }
+            );
+            assert_eq!(
+                vm.pattern_binding_orders[&(90, 100)],
+                vec![LocalId { owner: 9, index: 2 }]
+            );
         }
     }
 
     #[test]
     fn handler_resource_context_rejects_missing_and_ambiguous_schedules_before_body() {
-        for count in [0,2] {
-            let package=Package::default();
-            let activation=activation();
-            let mut schedule=schedule(&activation);
-            let entry=schedule.functions[0].clone();
-            schedule.functions=vec![entry;count];
-            let mut vm=Interpreter::new(&package,Budget::default()).unwrap();
-            vm.cleanup_schedule=Some(&schedule);
-            vm.cleanup_frame=Some(key(9));
-            let mut evaluated=false;
-            let result=vm.with_effect_handler_resources(&activation,0,activation.installation,|_| {evaluated=true;Ok(())});
-            assert_eq!(result.unwrap_err().kind,ErrorKind::InvalidCallPlan);
+        for count in [0, 2] {
+            let package = Package::default();
+            let activation = activation();
+            let mut schedule = schedule(&activation);
+            let entry = schedule.functions[0].clone();
+            schedule.functions = vec![entry; count];
+            let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+            vm.cleanup_schedule = Some(&schedule);
+            vm.cleanup_frame = Some(key(9));
+            let mut evaluated = false;
+            let result =
+                vm.with_effect_handler_resources(&activation, 0, activation.installation, |_| {
+                    evaluated = true;
+                    Ok(())
+                });
+            assert_eq!(result.unwrap_err().kind, ErrorKind::InvalidCallPlan);
             assert!(!evaluated);
-            assert_eq!(vm.cleanup_frame,Some(key(9)));
+            assert_eq!(vm.cleanup_frame, Some(key(9)));
             assert!(vm.cleanup_context.is_empty());
         }
     }
 
     #[test]
     fn handler_resource_context_identity_distinguishes_installation_handler_and_arm() {
-        let activation=activation();
-        assert_ne!(context(&activation,0),context(&activation,1));
-        let mut other=self::activation();
-        other.handler_index+=1;
-        assert_ne!(context(&activation,0),context(&other,0));
-        other.handler_index=activation.handler_index;
-        other.installation.end+=1;
-        assert_ne!(context(&activation,0),context(&other,0));
-        assert_eq!(context(&activation,0).to_string(),
-            "(effect-handler-context (installation (source 10 20)) (handler 2) (arm 0))");
-        assert_eq!(iir::cleanup::Boundary::HandlerEnd.to_string(),"handler-end");
-        assert_eq!(iir::cleanup::Boundary::EffectResume.to_string(),"effect-resume");
+        let activation = activation();
+        assert_ne!(context(&activation, 0), context(&activation, 1));
+        let mut other = self::activation();
+        other.handler_index += 1;
+        assert_ne!(context(&activation, 0), context(&other, 0));
+        other.handler_index = activation.handler_index;
+        other.installation.end += 1;
+        assert_ne!(context(&activation, 0), context(&other, 0));
+        assert_eq!(
+            context(&activation, 0).to_string(),
+            "(effect-handler-context (installation (source 10 20)) (handler 2) (arm 0))"
+        );
+        assert_eq!(
+            iir::cleanup::Boundary::HandlerEnd.to_string(),
+            "handler-end"
+        );
+        assert_eq!(
+            iir::cleanup::Boundary::EffectResume.to_string(),
+            "effect-resume"
+        );
     }
 }

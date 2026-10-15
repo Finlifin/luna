@@ -289,11 +289,16 @@ impl Analyzer<'_, '_, '_, '_> {
             return Err("effect usage callable depth exhausted".into());
         }
         let key = match &callee.kind {
-            K::Call { callee: factory, .. } => {
+            K::Call {
+                callee: factory, ..
+            } => {
                 return self.returned_callable(factory, width(&callee.ty), fuel, depth + 1);
             }
             K::EffectRun { computation, .. } => {
-                if let K::Call { callee: factory, .. } = &computation.kind {
+                if let K::Call {
+                    callee: factory, ..
+                } = &computation.kind
+                {
                     return self.returned_callable(factory, width(&callee.ty), fuel, depth + 1);
                 }
                 None

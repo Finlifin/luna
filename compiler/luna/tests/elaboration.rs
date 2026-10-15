@@ -10,41 +10,110 @@ static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn extended_post_do_rejects_duplicate_inputs_and_ambiguous_markers() {
-    let schema="comptime fn schema(...properties:T)->T where T {properties} const SAMPLE=schema {flag:true};typealias Options=SAMPLE'type;";
-    rejected(&format!("{schema} fn apply(lambda action:fn()->bool,...properties:Options) {{}} fn run() {{apply {{flag:true,flag:false}} do {{true}};}}"), "property supplied more than once");
-    rejected(&format!("{schema} fn apply(lambda first:fn()->bool,lambda second:fn()->bool,...properties:Options) {{}} fn run() {{apply {{flag:true}} do {{true}};}}"), "ambiguous post do lambda parameter");
-    rejected(&format!("{schema} fn apply(lambda action:fn()->bool,...properties:Options) {{}} fn run() {{apply {{|| true,flag:true}} do {{true}};}}"), "positional inputs cannot append");
+    let schema = "comptime fn schema(...properties:T)->T where T {properties} const SAMPLE=schema {flag:true};typealias Options=SAMPLE'type;";
+    rejected(
+        &format!(
+            "{schema} fn apply(lambda action:fn()->bool,...properties:Options) {{}} fn run() {{apply {{flag:true,flag:false}} do {{true}};}}"
+        ),
+        "property supplied more than once",
+    );
+    rejected(
+        &format!(
+            "{schema} fn apply(lambda first:fn()->bool,lambda second:fn()->bool,...properties:Options) {{}} fn run() {{apply {{flag:true}} do {{true}};}}"
+        ),
+        "ambiguous post do lambda parameter",
+    );
+    rejected(
+        &format!(
+            "{schema} fn apply(lambda action:fn()->bool,...properties:Options) {{}} fn run() {{apply {{|| true,flag:true}} do {{true}};}}"
+        ),
+        "positional inputs cannot append",
+    );
 }
 
 #[test]
 fn tactic_lambda_rejects_missing_boundaries_out_of_range_and_unknown_arity() {
-    rejected("fn apply(action:fn(bool)->bool)->bool {action(true)} fn run()->bool {apply(_0)}", "lambda-marked argument");
-    rejected("fn apply(lambda action:fn(bool)->bool)->bool {action(true)} fn run()->bool {apply(_1)}", "exceeds target arity");
-    rejected("fn apply(lambda action:fn(bool)->bool)->bool {action(true)} fn run()->bool {apply((|| _0)())}", "lambda-marked argument");
+    rejected(
+        "fn apply(action:fn(bool)->bool)->bool {action(true)} fn run()->bool {apply(_0)}",
+        "lambda-marked argument",
+    );
+    rejected(
+        "fn apply(lambda action:fn(bool)->bool)->bool {action(true)} fn run()->bool {apply(_1)}",
+        "exceeds target arity",
+    );
+    rejected(
+        "fn apply(lambda action:fn(bool)->bool)->bool {action(true)} fn run()->bool {apply((|| _0)())}",
+        "lambda-marked argument",
+    );
     rejected("fn run()->bool {_0}", "lambda-marked argument");
-    rejected("fn apply(lambda action:T)->T where T {action} fn run() {let f=apply(_0);}", "context");
-    rejected("fn invalid(.value:bool=_0)->bool {value} fn apply(lambda action:fn(bool)->bool)->bool {action(true)} fn run()->bool {apply(invalid())}", "lambda-marked argument");
-    rejected("fn apply(action:fn()->bool)->bool {action()} fn run()->bool {apply() do {_0}}", "lambda-marked argument");
-    rejected("fn outer(lambda action:fn(bool)->bool)->bool {action(true)} fn inner(lambda action:fn(bool)->bool)->bool {action(false)} fn run()->bool {outer(inner(_0))}", "type");
+    rejected(
+        "fn apply(lambda action:T)->T where T {action} fn run() {let f=apply(_0);}",
+        "context",
+    );
+    rejected(
+        "fn invalid(.value:bool=_0)->bool {value} fn apply(lambda action:fn(bool)->bool)->bool {action(true)} fn run()->bool {apply(invalid())}",
+        "lambda-marked argument",
+    );
+    rejected(
+        "fn apply(action:fn()->bool)->bool {action()} fn run()->bool {apply() do {_0}}",
+        "lambda-marked argument",
+    );
+    rejected(
+        "fn outer(lambda action:fn(bool)->bool)->bool {action(true)} fn inner(lambda action:fn(bool)->bool)->bool {action(false)} fn run()->bool {outer(inner(_0))}",
+        "type",
+    );
 }
 
 #[test]
 fn post_do_rejects_missing_ambiguous_and_duplicate_targets() {
-    rejected("fn apply() {} fn run() {apply() do {true};}", "no anchored parameter target");
-    rejected("fn apply(lambda first:fn()->bool,lambda second:fn()->bool) {} fn run() {apply() do {true};}", "ambiguous post do lambda parameter");
-    rejected("fn apply(action:fn()->bool) {} fn run() {apply(|| true) do {false};}", "argument count mismatch");
-    rejected("fn apply(value:bool) {} fn run() {apply() do {true};}", "lambda target is not callable");
-    rejected("fn apply(lambda action:fn()->bool) {} fn run() {let callback=apply;}", "lambda-marked function values require parameter protocol metadata");
+    rejected(
+        "fn apply() {} fn run() {apply() do {true};}",
+        "no anchored parameter target",
+    );
+    rejected(
+        "fn apply(lambda first:fn()->bool,lambda second:fn()->bool) {} fn run() {apply() do {true};}",
+        "ambiguous post do lambda parameter",
+    );
+    rejected(
+        "fn apply(action:fn()->bool) {} fn run() {apply(|| true) do {false};}",
+        "argument count mismatch",
+    );
+    rejected(
+        "fn apply(value:bool) {} fn run() {apply() do {true};}",
+        "lambda target is not callable",
+    );
+    rejected(
+        "fn apply(lambda action:fn()->bool) {} fn run() {let callback=apply;}",
+        "lambda-marked function values require parameter protocol metadata",
+    );
 }
 
 #[test]
 fn implicit_explicit_supply_rejects_missing_duplicate_and_erased_protocols() {
-    rejected("fn take(implicit value:bool)->bool {value} fn run()->bool {take()}", "automatic supply protocol is not yet implemented");
-    rejected("fn take(implicit value:bool)->bool {value} fn run()->bool {take(true)}", "too many positional inputs");
-    rejected("fn take(implicit value:bool)->bool {value} fn run()->bool {take(.value=true,.value=false)}", "parameter supplied more than once");
-    rejected("fn take(implicit value:bool)->bool {value} fn run()->bool {take(.value='x')}", "type");
-    rejected("fn take(implicit value:bool)->bool {value} fn run()->bool {let callback=take;callback(true)}", "implicit function values require parameter protocol metadata");
-    rejected("trait Pick {fn pick(implicit value:bool)->bool;} impl Pick for bool {fn pick(implicit value:bool)->bool {value}} fn run()->bool {let callback=bool.as(Pick).pick;callback(true)}", "implicit function values require parameter protocol metadata");
+    rejected(
+        "fn take(implicit value:bool)->bool {value} fn run()->bool {take()}",
+        "automatic supply protocol is not yet implemented",
+    );
+    rejected(
+        "fn take(implicit value:bool)->bool {value} fn run()->bool {take(true)}",
+        "too many positional inputs",
+    );
+    rejected(
+        "fn take(implicit value:bool)->bool {value} fn run()->bool {take(.value=true,.value=false)}",
+        "parameter supplied more than once",
+    );
+    rejected(
+        "fn take(implicit value:bool)->bool {value} fn run()->bool {take(.value='x')}",
+        "type",
+    );
+    rejected(
+        "fn take(implicit value:bool)->bool {value} fn run()->bool {let callback=take;callback(true)}",
+        "implicit function values require parameter protocol metadata",
+    );
+    rejected(
+        "trait Pick {fn pick(implicit value:bool)->bool;} impl Pick for bool {fn pick(implicit value:bool)->bool {value}} fn run()->bool {let callback=bool.as(Pick).pick;callback(true)}",
+        "implicit function values require parameter protocol metadata",
+    );
 }
 
 struct Sandbox(PathBuf);
@@ -149,7 +218,12 @@ fn rejected(source: &str, message: &str) {
     let sandbox = Sandbox::new(source);
     fs::write(sandbox.0.join("result"), "previous output").unwrap();
     let output = sandbox.run(&["--emit", "nir", "--output", "result"]);
-    assert_eq!(output.status.code(), Some(1), "source: {source}\n{}", details(&output));
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "source: {source}\n{}",
+        details(&output)
+    );
     assert!(output.stdout.is_empty(), "{}", details(&output));
     assert!(
         String::from_utf8_lossy(&output.stderr).contains(message),
@@ -159,6 +233,77 @@ fn rejected(source: &str, message: &str) {
     assert_eq!(
         fs::read_to_string(sandbox.0.join("result")).unwrap(),
         "previous output"
+    );
+}
+
+#[test]
+fn symbol_indexed_trait_declarations_preserve_domains_and_select_complete_instances() {
+    let source = "typealias Symbol=.Symbol'builtin;
+        trait Indexed where suffix:Symbol,R {}
+        struct S {} impl Indexed<.px,bool> for S {}
+        fn need(value:T) where T :- Indexed<.px,bool> {}
+        fn run()->bool {need(S {});true}";
+    let dump = accepted(source);
+    assert!(
+        dump.contains("(parameter-types (primitive Symbol) (primitive Type))"),
+        "{dump}"
+    );
+    let executed = Sandbox::new(source).run(&["--interpret", "run"]);
+    assert!(executed.status.success(), "{}", details(&executed));
+    assert_eq!(
+        String::from_utf8_lossy(&executed.stdout).trim(),
+        "(bool true)"
+    );
+    rejected(
+        &source.replace("impl Indexed<.px,bool>", "impl Indexed<.em,bool>"),
+        "trait bound",
+    );
+    rejected(
+        &source.replace("Indexed<.px,bool> for S", "Indexed<\"px\",bool> for S"),
+        "mismatch",
+    );
+}
+
+#[test]
+fn symbol_trait_defaults_use_prior_inputs_and_do_not_become_types() {
+    let inherited = "typealias Symbol=.Symbol'builtin;
+        trait Parent where suffix:Symbol {}
+        trait Child :- Parent<suffix> where suffix:Symbol {}
+        struct S {} impl Parent<.px> for S {} impl Child<.px> for S {}
+        fn need(value:T) where T :- Parent<.px> {}
+        fn forward(value:T) where T :- Child<.px> {need(value);}
+        fn run()->bool {forward(S {});true}";
+    accepted(inherited);
+    let executed = Sandbox::new(inherited).run(&["--interpret", "run"]);
+    assert!(executed.status.success(), "{}", details(&executed));
+    assert_eq!(
+        String::from_utf8_lossy(&executed.stdout).trim(),
+        "(bool true)"
+    );
+    rejected(
+        &inherited.replace("impl Parent<.px>", "impl Parent<.em>"),
+        "parent",
+    );
+    for suffix in [".px", ".em"] {
+        accepted(&format!(
+            "typealias Symbol=.Symbol'builtin;
+            trait Indexed where suffix:Symbol,.again:Symbol=suffix,R {{}}
+            struct S {{}} impl Indexed<{suffix},bool> for S {{}}
+            fn need(value:T) where T :- Indexed<{suffix},bool,.again={suffix}> {{}}
+            fn run() {{need(S {{}});}}"
+        ));
+    }
+    rejected(
+        "typealias Symbol=.Symbol'builtin; trait Bad where suffix:Symbol { fn wrong()->suffix; }",
+        "cannot be used as a Type",
+    );
+    rejected(
+        "typealias Symbol=.Symbol'builtin; trait Bad where .suffix:Symbol=later,later:Symbol {}",
+        "later parameter",
+    );
+    rejected(
+        "typealias Symbol=.Symbol'builtin; trait Bad where .suffix:Symbol=true {}",
+        "mismatch",
     );
 }
 
@@ -268,16 +413,22 @@ fn logical_operators_keep_short_circuit_structure() {
     assert!(dump.contains("(or "));
 }
 #[test]
-fn unsupported_numeric_conversion_does_not_become_checked_nir() {
-    rejected("fn unsupported() { 1.25f32; }", "not yet implemented");
-    rejected("fn unsupported() { 123u32; }", "not yet implemented");
+fn unbound_numeric_suffix_does_not_become_checked_nir() {
+    rejected(
+        "fn unsupported() { 1.25f32; }",
+        "bound LiteralInto protocol",
+    );
+    rejected("fn unsupported() { 123u32; }", "bound LiteralInto protocol");
 }
 
 #[test]
 fn unprocessed_stage_and_attribute_information_blocks_nir() {
     let pure = accepted("pure fn checked() { }");
     assert!(pure.contains("(phase runtime) (inline false) (pure true)"));
-    rejected("^unknown fn pending() { }", "definition attribute or modifier");
+    rejected(
+        "^unknown fn pending() { }",
+        "definition attribute or modifier",
+    );
     rejected("fn pending() { comptime { true; } }", "ComptimeBlock");
 }
 
@@ -800,7 +951,9 @@ fn let_reassignment_is_rejected_but_var_and_field_writes_are_distinct() {
         ),
         "unknown struct field",
     );
-    accepted(&format!("{prefix} fn run() {{ let object = S {{ value: true }}; let writer = || {{ object.value = false; }}; }}"));
+    accepted(&format!(
+        "{prefix} fn run() {{ let object = S {{ value: true }}; let writer = || {{ object.value = false; }}; }}"
+    ));
     rejected(
         &format!(
             "{prefix} fn make() -> S {{ S {{ value: true }} }} fn run() {{ make().value = false; }}"
@@ -2284,14 +2437,17 @@ fn trait_required_method_defaults_are_checked_without_any_implementation() {
 }
 
 #[test]
-fn memory_defaults_copy_permission_does_not_authorize_pointee_observation() {
+fn memory_defaults_admit_stable_observation_but_not_pointer_writes() {
     for source in [
         "fn read(p:*bool,.value:bool=p.*)->bool {value}",
-        "fn read(p:*bool,.value:bool=do {p.* = false; true})->bool {value}",
         "fn helper(p:*bool)->bool {p.*} fn read(p:*bool,.value:bool=helper(p))->bool {value}",
     ] {
-        rejected(source, "default expression requires P3 stability");
+        accepted(source);
     }
+    rejected(
+        "fn read(p:*bool,.value:bool=do {p.* = false; true})->bool {value}",
+        "default expression requires P3 stability",
+    );
 }
 
 #[test]
@@ -2393,11 +2549,11 @@ fn float_runtime_proxies_reject_unsupported_targets_and_finite_overflow() {
     );
     rejected(
         "fn entry() -> .i32'builtin { 1.0 }",
-        "float runtime proxy requires an f32 or f64 target",
+        "float literal requires a Float, f32 or f64 target",
     );
     rejected(
         "fn entry() -> 0.1'type { 0.1 }",
-        "float runtime proxy requires an f32 or f64 target",
+        "comptime-only value cannot inhabit runtime storage",
     );
     let dump = accepted(
         "typealias Positive = 1.0e9999'type; typealias Negative = (-0.0)'type; fn check() where requires Positive == .Float'builtin and Negative == .Float'builtin {}",
@@ -2968,9 +3124,12 @@ fn normal_form_source_checks_arguments_body_and_opaque_identity() {
         "pure comptime fn Checked<T: .Type'builtin> -> .Type'builtin where requires T == true'type { T } typealias Bad = Checked<.u8'builtin>;",
         "type requirement is not satisfied",
     );
+    accepted(
+        "pure comptime fn Numeric<N: .Float'builtin> -> .Type'builtin { .u8'builtin } fn keep(value:Numeric<1.0000000000000000000000000000001>)->Numeric<10.000000000000000000000000000001e-1> {value}",
+    );
     rejected(
-        "pure comptime fn Numeric<N: .Float'builtin> -> .Type'builtin { .u8'builtin }",
-        "normal-form parameter type is not yet supported",
+        "pure comptime fn Numeric<N: .Float'builtin> -> .Type'builtin { .u8'builtin } fn bad(value:Numeric<1.0000000000000000000000000000001>)->Numeric<1.0000000000000000000000000000002> {value}",
+        "unresolved type equality",
     );
 
     rejected(
@@ -3638,7 +3797,9 @@ fn comptime_callable_types_cannot_erase_or_forge_execution_phases() {
 
 #[test]
 fn comptime_closure_environments_cannot_cross_phase_or_disappear() {
-    accepted("comptime fn run() { var value: .Integer'builtin = 0; let next = || { value = value + 1; value }; }");
+    accepted(
+        "comptime fn run() { var value: .Integer'builtin = 0; let next = || { value = value + 1; value }; }",
+    );
 
     for source in [
         "fn run() { let callback: comptime fn() -> true'type = || true; }",
@@ -4795,7 +4956,9 @@ fn runtime_callable_capture_assignment_records_environment_and_respects_mutabili
         "fn first()->bool {true} fn second()->bool {false} fn entry() {let callback=first;let replace=|| {callback=second;};}",
         "cannot reassign a let binding",
     );
-    accepted("comptime fn first()->bool {true} comptime fn second()->bool {false} comptime fn entry() {var callback=first;let replace=|| {callback=second;};}");
+    accepted(
+        "comptime fn first()->bool {true} comptime fn second()->bool {false} comptime fn entry() {var callback=first;let replace=|| {callback=second;};}",
+    );
 }
 
 #[test]
@@ -4831,13 +4994,19 @@ fn readonly_function_calls_preserve_scalar_field_and_relational_proofs() {
         "typealias Byte=.u8'builtin;fn touch() {} fn run(start:Byte,end:Byte)->Byte {assumes start <= end;touch();end - start}",
         "typealias Byte=.u8'builtin;fn touch() {} fn run(a:Byte,b:Byte,c:Byte)->Byte {assumes a <= b and b <= c;touch();c - a}",
         "typealias Byte=.u8'builtin;fn touch() {} fn run(start:Byte,end:Byte)->Byte {assumes start <= end;let pair=(start,end);touch();let (a,b)=pair;b - a}",
-    ] { accepted(source); }
+    ] {
+        accepted(source);
+    }
     // A callback has no route to unaddressed scalar-by-value storage.
-    accepted("fn run(value:.u8'builtin,unknown:fn())->.u8'builtin {assumes value < 255;unknown();value + 1}");
+    accepted(
+        "fn run(value:.u8'builtin,unknown:fn())->.u8'builtin {assumes value < 255;unknown();value + 1}",
+    );
     for source in [
         "fn run(value:.u8'builtin,unknown:fn(*.u8'builtin))->.u8'builtin {assumes value < 255;unknown(value.ref);value + 1}",
         "fn write(p:*.u8'builtin) {p.* = 255;} fn run(value:.u8'builtin)->.u8'builtin {assumes value < 255;write(value.ref);value + 1}",
-    ] { rejected(source,"machine arithmetic range is not proven"); }
+    ] {
+        rejected(source, "machine arithmetic range is not proven");
+    }
 }
 
 #[test]
@@ -4847,7 +5016,9 @@ fn direct_pointer_read_proofs_expire_after_target_writes() {
         "struct State {value:.u8'builtin} fn bad(state:State)->.u8'builtin {let old=state.ref.value.*;assumes old < 255;state.value=255;state.ref.value.* + 1}",
         "fn bad(flag:bool)->.u8'builtin {let n:.u8'builtin=0;if flag {n.ref.* = 255;}n.ref.* + 1}",
         "fn bad(p:*.u8'builtin)->.u8'builtin {p.* + 1}",
-    ] { rejected(source,"machine arithmetic range is not proven"); }
+    ] {
+        rejected(source, "machine arithmetic range is not proven");
+    }
 }
 
 #[test]
@@ -4855,376 +5026,782 @@ fn possible_pointer_write_does_not_prove_every_candidate_was_overwritten() {
     for source in [
         "fn bad(flag:bool)->.u8'builtin {let first:.u8'builtin=255;let second:.u8'builtin=0;let pointer=if flag {first.ref} else {second.ref};pointer.* = 0;first + 1}",
         "struct Cell {value:.u8'builtin} fn bad(flag:bool)->.u8'builtin {let first=Cell {value:255};let second=Cell {value:0};let pointer=if flag {first.ref} else {second.ref};pointer.value.* = 0;first.value + 1}",
-    ] {rejected(source,"machine arithmetic range is not proven");}
+    ] {
+        rejected(source, "machine arithmetic range is not proven");
+    }
 }
 
 #[test]
 fn variadic_routes_reject_duplicate_unknown_and_invalid_packages() {
     let declaration = "fn take(...items:(bool,'x''type))->(bool,'x''type) {items}";
-    for call in ["take(true,'x',.items=(false,'y'))", "take(.items=(false,'y'),true,'x')", "take(.items=(true,'x'),.items=(false,'y'))"] {
-        rejected(&format!("{declaration} fn run()->(bool,'x''type) {{{call}}}"), "parameter supplied more than once");
+    for call in [
+        "take(true,'x',.items=(false,'y'))",
+        "take(.items=(false,'y'),true,'x')",
+        "take(.items=(true,'x'),.items=(false,'y'))",
+    ] {
+        rejected(
+            &format!("{declaration} fn run()->(bool,'x''type) {{{call}}}"),
+            "parameter supplied more than once",
+        );
     }
-    rejected(&format!("{declaration} fn run()->(bool,'x''type) {{take(.item=(true,'x'))}}"), "no named parameter entry");
-    for call in ["take(true)", "take(true,'x',false)", "take('x',true)", "take(.items=true)"] {
-        rejected(&format!("{declaration} fn run()->(bool,'x''type) {{{call}}}"), "type");
+    rejected(
+        &format!("{declaration} fn run()->(bool,'x''type) {{take(.item=(true,'x'))}}"),
+        "no named parameter entry",
+    );
+    for call in [
+        "take(true)",
+        "take(true,'x',false)",
+        "take('x',true)",
+        "take(.items=true)",
+    ] {
+        rejected(
+            &format!("{declaration} fn run()->(bool,'x''type) {{{call}}}"),
+            "type",
+        );
     }
-    rejected("typealias Type = .Type'builtin; fn take(...items:Type)->Type {items} fn run()->Type {take(bool,'x''type)}", "collection requires a tuple type");
-    rejected("typealias Type = .Type'builtin; fn take(...items:T)->T where T {items} fn run()->Type {take(bool,'x''type)}", "collection requires a tuple type");
+    rejected(
+        "typealias Type = .Type'builtin; fn take(...items:Type)->Type {items} fn run()->Type {take(bool,'x''type)}",
+        "collection requires a tuple type",
+    );
+    rejected(
+        "typealias Type = .Type'builtin; fn take(...items:T)->T where T {items} fn run()->Type {take(bool,'x''type)}",
+        "collection requires a tuple type",
+    );
 }
 
 #[test]
 fn variadic_function_values_do_not_silently_erase_collection_protocols() {
-    rejected("fn take(...items:(bool,bool))->(bool,bool) {items} fn run() {let callback=take;}","variadic function values require parameter protocol metadata");
-    rejected("fn take(...items:T)->T where T {items} fn run() {let callback=take<(bool,bool)>;}","variadic function values require parameter protocol metadata");
-    rejected("fn take(...items:T)->T where T {items} fn accept(callback:fn((bool,bool))->(bool,bool)) {} fn run() {accept(take);}","variadic function values require parameter protocol metadata");
+    rejected(
+        "fn take(...items:(bool,bool))->(bool,bool) {items} fn run() {let callback=take;}",
+        "variadic function values require parameter protocol metadata",
+    );
+    rejected(
+        "fn take(...items:T)->T where T {items} fn run() {let callback=take<(bool,bool)>;}",
+        "variadic function values require parameter protocol metadata",
+    );
+    rejected(
+        "fn take(...items:T)->T where T {items} fn accept(callback:fn((bool,bool))->(bool,bool)) {} fn run() {accept(take);}",
+        "variadic function values require parameter protocol metadata",
+    );
 }
 
 #[test]
 fn tuple_collection_respects_equations_without_unfolding_normal_form_heads() {
-    let prefix="typealias Byte=.u8'builtin; pure comptime fn Identity<T> -> .Type'builtin {T} typealias Hidden=Identity<(Byte,bool)>; fn keep(...items:T)->T where T {items}";
-    rejected(&format!("{prefix} fn make()->Hidden {{keep<Hidden>(7,true)}}"),"structural type view remains unresolved");
-    rejected(&format!("{prefix} fn make()->Hidden {{(7,true)}}"),"type");
-    for (body,message) in [("keep<T>(7,7)","integer runtime proxy"),("keep<T>(7)","type"),("keep<T>(7,true,false)","type")] {
-        rejected(&format!("typealias Byte=.u8'builtin; fn keep(...items:T)->T where T {{items}} fn make()->T where T, requires T == (Byte,bool) {{{body}}}"),message);
+    let prefix = "typealias Byte=.u8'builtin; pure comptime fn Identity<T> -> .Type'builtin {T} typealias Hidden=Identity<(Byte,bool)>; fn keep(...items:T)->T where T {items}";
+    rejected(
+        &format!("{prefix} fn make()->Hidden {{keep<Hidden>(7,true)}}"),
+        "structural type view remains unresolved",
+    );
+    rejected(&format!("{prefix} fn make()->Hidden {{(7,true)}}"), "type");
+    for (body, message) in [
+        ("keep<T>(7,7)", "integer runtime proxy"),
+        ("keep<T>(7)", "type"),
+        ("keep<T>(7,true,false)", "type"),
+    ] {
+        rejected(
+            &format!(
+                "typealias Byte=.u8'builtin; fn keep(...items:T)->T where T {{items}} fn make()->T where T, requires T == (Byte,bool) {{{body}}}"
+            ),
+            message,
+        );
     }
-    accepted(&format!("{prefix} fn make()->Hidden where requires Hidden == (Byte,bool) {{keep<Hidden>(7,true)}}"));
+    accepted(&format!(
+        "{prefix} fn make()->Hidden where requires Hidden == (Byte,bool) {{keep<Hidden>(7,true)}}"
+    ));
 }
 
 #[test]
 fn tuple_spreads_reject_non_packets_wrong_arity_and_duplicate_supply() {
-    rejected("fn take(a:bool) {} fn run() {take(...true);}","type");
-    rejected("fn take(a:bool) {} fn run() {let packet=(true,false);take(...packet);}","spread tuple widths exceed positional slots");
-    rejected("fn take(a:bool,b:bool) {} fn run() {take(...(true,false,true));}","spread tuple widths exceed positional slots");
-    rejected("fn take(a:bool,b:bool) {} fn run() {take(...(true,));}","missing anchored parameter");
+    rejected("fn take(a:bool) {} fn run() {take(...true);}", "type");
+    rejected(
+        "fn take(a:bool) {} fn run() {let packet=(true,false);take(...packet);}",
+        "spread tuple widths exceed positional slots",
+    );
+    rejected(
+        "fn take(a:bool,b:bool) {} fn run() {take(...(true,false,true));}",
+        "spread tuple widths exceed positional slots",
+    );
+    rejected(
+        "fn take(a:bool,b:bool) {} fn run() {take(...(true,));}",
+        "missing anchored parameter",
+    );
     // The complete package reserves all slots before contextual spread checking.
-    rejected("fn keep(...items:(bool,bool)) {} fn run() {let packet=(true,false);keep(...packet,.items=(false,true));}","spread tuple widths exceed positional slots");
+    rejected(
+        "fn keep(...items:(bool,bool)) {} fn run() {let packet=(true,false);keep(...packet,.items=(false,true));}",
+        "spread tuple widths exceed positional slots",
+    );
 }
 
 #[test]
 fn tuple_spreads_reject_contextual_packet_element_and_method_shape_errors() {
-    rejected("fn apply(callback:fn(.u8'builtin,bool)->bool)->bool {callback(...do {(7,7)})}","integer runtime proxy");
-    rejected("struct Holder {} impl Holder {fn take(self,number:.u8'builtin,flag:bool)->bool {flag}} fn run()->bool {Holder {}.take(...do {(7,true,false)})}","spread tuple widths exceed positional slots");
-    rejected("fn apply(callback:F)->bool where F, requires F == fn(.u8'builtin,bool)->bool {callback(...do {(7,7)})}","integer runtime proxy");
+    rejected(
+        "fn apply(callback:fn(.u8'builtin,bool)->bool)->bool {callback(...do {(7,7)})}",
+        "integer runtime proxy",
+    );
+    rejected(
+        "struct Holder {} impl Holder {fn take(self,number:.u8'builtin,flag:bool)->bool {flag}} fn run()->bool {Holder {}.take(...do {(7,true,false)})}",
+        "spread tuple widths exceed positional slots",
+    );
+    rejected(
+        "fn apply(callback:F)->bool where F, requires F == fn(.u8'builtin,bool)->bool {callback(...do {(7,7)})}",
+        "integer runtime proxy",
+    );
 }
 
 #[test]
 fn tuple_spreads_layout_hints_do_not_accept_inconsistent_shapes_or_element_types() {
-    let head="fn take(a:.u8'builtin,b:bool,c:.u16'builtin,d:'x''type) {}";
-    rejected(&format!("{head} fn run(flag:bool) {{take(...if flag {{(7,true)}} else {{(7,true,false)}},...do {{(9,'x')}});}}"),"type");
-    rejected(&format!("{head} fn run() {{take(...do {{(7,true,false)}},...do {{(9,'x')}});}}"),"spread tuple widths exceed positional slots");
-    rejected(&format!("{head} fn run() {{take(...do {{(7,7)}},...do {{(9,'x')}});}}"),"integer runtime proxy");
-    rejected(&format!("{head} fn run() {{take(...do {{(7,true)}},...do {{(9,true)}});}}"),"type");
+    let head = "fn take(a:.u8'builtin,b:bool,c:.u16'builtin,d:'x''type) {}";
+    rejected(
+        &format!(
+            "{head} fn run(flag:bool) {{take(...if flag {{(7,true)}} else {{(7,true,false)}},...do {{(9,'x')}});}}"
+        ),
+        "type",
+    );
+    rejected(
+        &format!("{head} fn run() {{take(...do {{(7,true,false)}},...do {{(9,'x')}});}}"),
+        "spread tuple widths exceed positional slots",
+    );
+    rejected(
+        &format!("{head} fn run() {{take(...do {{(7,7)}},...do {{(9,'x')}});}}"),
+        "integer runtime proxy",
+    );
+    rejected(
+        &format!("{head} fn run() {{take(...do {{(7,true)}},...do {{(9,true)}});}}"),
+        "type",
+    );
 }
 
 #[test]
 fn constructor_spreads_reject_bad_payload_types_arities_and_named_inputs() {
-    let head="enum Choice {pair(.u8'builtin,bool)}";
-    for (input,message) in [
-        ("Choice.pair(...do {(7,7)})","integer runtime proxy"),
-        ("Choice.pair(...do {(7,true,false)})","spread tuple widths exceed positional slots"),
-        ("Choice.pair(...(7,))","enum payload argument count mismatch"),
-        ("Choice.pair(...true)","type"),
-        ("Choice.pair(...(7,),.flag=true)","positional enum payload requires positional arguments"),
+    let head = "enum Choice {pair(.u8'builtin,bool)}";
+    for (input, message) in [
+        ("Choice.pair(...do {(7,7)})", "integer runtime proxy"),
+        (
+            "Choice.pair(...do {(7,true,false)})",
+            "spread tuple widths exceed positional slots",
+        ),
+        (
+            "Choice.pair(...(7,))",
+            "enum payload argument count mismatch",
+        ),
+        ("Choice.pair(...true)", "type"),
+        (
+            "Choice.pair(...(7,),.flag=true)",
+            "positional enum payload requires positional arguments",
+        ),
     ] {
-        rejected(&format!("{head} fn run()->Choice {{{input}}}"),message);
+        rejected(&format!("{head} fn run()->Choice {{{input}}}"), message);
     }
-    rejected("enum Choice {none} fn run()->Choice {Choice.none(...(true,))}","unit enum variant does not take arguments");
+    rejected(
+        "enum Choice {none} fn run()->Choice {Choice.none(...(true,))}",
+        "unit enum variant does not take arguments",
+    );
 }
 
 #[test]
 fn extended_calls_do_not_confuse_properties_with_named_supply() {
-    rejected("fn take(.enabled:bool=false)->bool {enabled} fn run()->bool {take {enabled:true}}","properties are not named parameter supply");
+    rejected(
+        "fn take(.enabled:bool=false)->bool {enabled} fn run()->bool {take {enabled:true}}",
+        "properties are not named parameter supply",
+    );
     accepted("fn keep(...items:T)->T where T {items} fn run() {keep {value:true};}");
-    rejected("fn take(value:bool) {} fn run() {take {'x'};}","type");
-    rejected("fn take(value:bool) {} fn run() {take {};}","missing anchored parameter");
+    rejected("fn take(value:bool) {} fn run() {take {'x'};}", "type");
+    rejected(
+        "fn take(value:bool) {} fn run() {take {};}",
+        "missing anchored parameter",
+    );
     accepted("struct Holder {enabled:bool} fn run()->Holder {Holder {enabled:true}}");
 }
 
 #[test]
 fn property_collection_rejects_duplicate_missing_and_ambiguous_entries() {
-    let head="fn keep(...properties:T)->T where T {properties}";
-    rejected(&format!("{head} fn run() {{keep {{flag:true,flag:false}};}}"),"property supplied more than once");
-    rejected(&format!("{head} fn run()->bool {{let value=keep {{flag:true}};value.missing}}"),"unknown record field");
-    rejected(&format!("{head} fn run() {{keep {{true,flag:false}};}}"),"parameter supplied more than once");
-    rejected("fn keep(...first:T,...second:U) where T,U {} fn run() {keep {flag:true};}","one variadic entrance");
+    let head = "fn keep(...properties:T)->T where T {properties}";
+    rejected(
+        &format!("{head} fn run() {{keep {{flag:true,flag:false}};}}"),
+        "property supplied more than once",
+    );
+    rejected(
+        &format!("{head} fn run()->bool {{let value=keep {{flag:true}};value.missing}}"),
+        "unknown record field",
+    );
+    rejected(
+        &format!("{head} fn run() {{keep {{true,flag:false}};}}"),
+        "parameter supplied more than once",
+    );
+    rejected(
+        "fn keep(...first:T,...second:U) where T,U {} fn run() {keep {flag:true};}",
+        "one variadic entrance",
+    );
 }
 
 #[test]
 fn method_properties_require_a_collector_and_validate_declared_fields() {
-    rejected("struct Holder {} impl Holder {fn take(self,.flag:bool=false) {}} fn run() {Holder {}.take {flag:true};}", "one variadic entrance");
-    let head="comptime fn schema(...properties:T)->T where T {properties} const SAMPLE=schema {flag:true}; typealias Options=SAMPLE'type; struct Holder {} impl Holder {fn take(self,...properties:Options) {}}";
-    rejected(&format!("{head} fn run() {{Holder {{}}.take {{flag:true,flag:false}};}}"), "property supplied more than once");
-    rejected(&format!("{head} fn run() {{Holder {{}}.take {{flag:'x'}};}}"), "type");
-    rejected(&format!("{head} fn run() {{Holder {{}}.take {{missing:true}};}}"), "type equality");
+    rejected(
+        "struct Holder {} impl Holder {fn take(self,.flag:bool=false) {}} fn run() {Holder {}.take {flag:true};}",
+        "one variadic entrance",
+    );
+    let head = "comptime fn schema(...properties:T)->T where T {properties} const SAMPLE=schema {flag:true}; typealias Options=SAMPLE'type; struct Holder {} impl Holder {fn take(self,...properties:Options) {}}";
+    rejected(
+        &format!("{head} fn run() {{Holder {{}}.take {{flag:true,flag:false}};}}"),
+        "property supplied more than once",
+    );
+    rejected(
+        &format!("{head} fn run() {{Holder {{}}.take {{flag:'x'}};}}"),
+        "type",
+    );
+    rejected(
+        &format!("{head} fn run() {{Holder {{}}.take {{missing:true}};}}"),
+        "type equality",
+    );
 }
 
 #[test]
 fn anonymous_record_places_reject_missing_fields_and_wrong_updates() {
-    let head="fn keep(...properties:T)->T where T {properties}";
-    for body in ["let value=keep {flag:true};value.missing=false;", "let value=keep {flag:true};let p=value.ref;p.missing;", "let value=keep {flag:true};let p=value.ref;p.*.missing=false;"] {
-        rejected(&format!("{head} fn run() {{{body}}}"),"unknown record field");
+    let head = "fn keep(...properties:T)->T where T {properties}";
+    for body in [
+        "let value=keep {flag:true};value.missing=false;",
+        "let value=keep {flag:true};let p=value.ref;p.missing;",
+        "let value=keep {flag:true};let p=value.ref;p.*.missing=false;",
+    ] {
+        rejected(
+            &format!("{head} fn run() {{{body}}}"),
+            "unknown record field",
+        );
     }
-    rejected(&format!("{head} fn run() {{let value=keep {{flag:true}};value.flag='x';}}"),"type");
-    rejected(&format!("{head} fn run() {{let value=keep {{flag:true}};let p=value.ref;p.flag.* = 'x';}}"),"type");
+    rejected(
+        &format!("{head} fn run() {{let value=keep {{flag:true}};value.flag='x';}}"),
+        "type",
+    );
+    rejected(
+        &format!(
+            "{head} fn run() {{let value=keep {{flag:true}};let p=value.ref;p.flag.* = 'x';}}"
+        ),
+        "type",
+    );
 }
 
 #[test]
 fn mixed_property_inputs_reject_duplicate_collection_and_missing_anchors() {
-    let head="fn take(a:bool,...properties:T,b:bool) where T {}";
-    rejected(&format!("{head} fn run() {{take {{true,flag:true}};}}"),"missing anchored parameter");
-    rejected(&format!("{head} fn run() {{take {{true,false,true,flag:true}};}}"),"parameter supplied more than once");
-    rejected(&format!("{head} fn run() {{take {{true,flag:true,false,flag:false}};}}"),"property supplied more than once");
-    rejected(&format!("{head} fn run() {{take {{'x',flag:true,false}};}}"),"type");
+    let head = "fn take(a:bool,...properties:T,b:bool) where T {}";
+    rejected(
+        &format!("{head} fn run() {{take {{true,flag:true}};}}"),
+        "missing anchored parameter",
+    );
+    rejected(
+        &format!("{head} fn run() {{take {{true,false,true,flag:true}};}}"),
+        "parameter supplied more than once",
+    );
+    rejected(
+        &format!("{head} fn run() {{take {{true,flag:true,false,flag:false}};}}"),
+        "property supplied more than once",
+    );
+    rejected(
+        &format!("{head} fn run() {{take {{'x',flag:true,false}};}}"),
+        "type",
+    );
 }
 
 #[test]
 fn property_contexts_reject_overflow_and_do_not_unfold_normal_forms() {
-    let schema="comptime fn schema(...properties:T)->T where T {properties} const SAMPLE=schema {width:do {let n:.u8'builtin=0;n}};typealias Options=SAMPLE'type;";
-    rejected(&format!("{schema} fn keep(...properties:T)->T where T {{properties}} fn run() {{keep<Options> {{width:256}};}}"),"integer does not fit");
-    rejected(&format!("{schema} fn keep(...properties:T)->(bool,T) where T {{(true,properties)}} fn run()->(bool,Options) {{keep {{width:256}}}}"),"integer does not fit");
-    rejected(&format!("{schema} pure comptime fn Identity<T> -> .Type'builtin {{T}} fn keep(...properties:Identity<Options>) {{}} fn run() {{keep {{width:9}};}}"),"structural type view remains unresolved");
+    let schema = "comptime fn schema(...properties:T)->T where T {properties} const SAMPLE=schema {width:do {let n:.u8'builtin=0;n}};typealias Options=SAMPLE'type;";
+    rejected(
+        &format!(
+            "{schema} fn keep(...properties:T)->T where T {{properties}} fn run() {{keep<Options> {{width:256}};}}"
+        ),
+        "integer does not fit",
+    );
+    rejected(
+        &format!(
+            "{schema} fn keep(...properties:T)->(bool,T) where T {{(true,properties)}} fn run()->(bool,Options) {{keep {{width:256}}}}"
+        ),
+        "integer does not fit",
+    );
+    rejected(
+        &format!(
+            "{schema} pure comptime fn Identity<T> -> .Type'builtin {{T}} fn keep(...properties:Identity<Options>) {{}} fn run() {{keep {{width:9}};}}"
+        ),
+        "structural type view remains unresolved",
+    );
 }
 
 #[test]
 fn property_sibling_contexts_reject_overflow_and_conflicting_record_types() {
-    let head="fn keep(...properties:T)->T where T {properties} fn select(...properties:T,model:T)->T where T {properties}";
-    rejected(&format!("{head} fn run() {{let n:.u8'builtin=0;let model=keep {{width:n}};select {{width:256,model}};}}"),"integer does not fit");
-    rejected(&format!("{head} fn run() {{let n:.u8'builtin=0;let model=keep {{width:n}};select {{width:'x',model}};}}"),"inference");
+    let head = "fn keep(...properties:T)->T where T {properties} fn select(...properties:T,model:T)->T where T {properties}";
+    rejected(
+        &format!(
+            "{head} fn run() {{let n:.u8'builtin=0;let model=keep {{width:n}};select {{width:256,model}};}}"
+        ),
+        "integer does not fit",
+    );
+    rejected(
+        &format!(
+            "{head} fn run() {{let n:.u8'builtin=0;let model=keep {{width:n}};select {{width:'x',model}};}}"
+        ),
+        "inference",
+    );
 }
 
 #[test]
 fn multiple_collection_entries_require_unique_property_routing() {
-    let head="comptime fn schema(...properties:T)->T where T {properties} const SAMPLE=schema {flag:true};typealias Options=SAMPLE'type;";
-    rejected(&format!("{head} fn take(...left:Options,...right:Options) {{}} fn run() {{take {{flag:true}};}}"),"one variadic entrance");
-    rejected("fn take(...left:(bool,bool),...right:(bool,bool)) {} fn run() {take {true,flag:true,false};}","one variadic entrance");
-    rejected("fn take(...left:(bool,bool),...right:(bool,bool)) {} fn run() {take(true,false);}","multiple variadic positional collections");
-    rejected("fn take(...left:(bool,bool),...right:(bool,bool)) {} fn run() {take(.left=(true,false),.left=(false,true),true,false);}","parameter supplied more than once");
+    let head = "comptime fn schema(...properties:T)->T where T {properties} const SAMPLE=schema {flag:true};typealias Options=SAMPLE'type;";
+    rejected(
+        &format!(
+            "{head} fn take(...left:Options,...right:Options) {{}} fn run() {{take {{flag:true}};}}"
+        ),
+        "one variadic entrance",
+    );
+    rejected(
+        "fn take(...left:(bool,bool),...right:(bool,bool)) {} fn run() {take {true,flag:true,false};}",
+        "one variadic entrance",
+    );
+    rejected(
+        "fn take(...left:(bool,bool),...right:(bool,bool)) {} fn run() {take(true,false);}",
+        "multiple variadic positional collections",
+    );
+    rejected(
+        "fn take(...left:(bool,bool),...right:(bool,bool)) {} fn run() {take(.left=(true,false),.left=(false,true),true,false);}",
+        "parameter supplied more than once",
+    );
 }
 
 #[test]
 fn inherent_generic_methods_reject_incompatible_inputs() {
-    rejected("struct Holder {} impl Holder {fn choose(self,a:T,b:T)->T where T {a}} fn run()->bool {Holder {}.choose(true,'x')}","type mismatch");
+    rejected(
+        "struct Holder {} impl Holder {fn choose(self,a:T,b:T)->T where T {a}} fn run()->bool {Holder {}.choose(true,'x')}",
+        "type mismatch",
+    );
 }
 
 #[test]
 fn inherent_generic_methods_do_not_publish_incomplete_instances() {
-    rejected("struct Holder {} impl Holder {fn keep(self,value:T)->T where T {value}} fn run() {let value=Holder.keep;}","generic function value requires instantiation");
+    rejected(
+        "struct Holder {} impl Holder {fn keep(self,value:T)->T where T {value}} fn run() {let value=Holder.keep;}",
+        "generic function value requires instantiation",
+    );
 }
 
 #[test]
 fn inherent_generic_methods_require_bound_evidence() {
-    rejected("trait Allowed {} struct Holder {} impl Holder {fn keep(self,value:T)->T where T :- Allowed {value}} fn run()->bool {Holder {}.keep(true)}", "trait bound is not established");
+    rejected(
+        "trait Allowed {} struct Holder {} impl Holder {fn keep(self,value:T)->T where T :- Allowed {value}} fn run()->bool {Holder {}.keep(true)}",
+        "trait bound is not established",
+    );
 }
 
 #[test]
 fn generic_method_values_reject_missing_bound_evidence() {
-    rejected("trait Allowed {} struct Holder {} impl Holder {fn keep(value:T)->T where T :- Allowed {value}} fn run() {let action:fn(bool)->bool=Holder.keep;}","trait bound is not established");
+    rejected(
+        "trait Allowed {} struct Holder {} impl Holder {fn keep(value:T)->T where T :- Allowed {value}} fn run() {let action:fn(bool)->bool=Holder.keep;}",
+        "trait bound is not established",
+    );
 }
 
 #[test]
 fn generic_method_values_preserve_fixed_receiver_types() {
-    rejected("struct Holder where A {} impl Holder<A> where A {fn keep(self,value:B)->B where B {value}} fn run() {let action:fn(Holder<bool>,bool)->bool=Holder<.u8'builtin>.keep;}","generic function context inference failed");
+    rejected(
+        "struct Holder where A {} impl Holder<A> where A {fn keep(self,value:B)->B where B {value}} fn run() {let action:fn(Holder<bool>,bool)->bool=Holder<.u8'builtin>.keep;}",
+        "generic function context inference failed",
+    );
 }
 
 #[test]
 fn generic_method_values_do_not_invent_unused_type_arguments() {
-    rejected("struct Holder {} impl Holder {fn keep(value:T)->T where T,U {value}} fn run() {let action:fn(bool)->bool=Holder.keep;}","generic function context inference failed");
+    rejected(
+        "struct Holder {} impl Holder {fn keep(value:T)->T where T,U {value}} fn run() {let action:fn(bool)->bool=Holder.keep;}",
+        "generic function context inference failed",
+    );
 }
 
 #[test]
 fn explicit_generic_methods_check_arity_and_bounds() {
-    for call in ["Holder.keep<bool,bool>(true)","Holder.keep<bool,bool>"] {
-        rejected(&format!("struct Holder {{}} impl Holder {{fn keep(value:T)->T where T {{value}}}} fn run() {{let value={call};}}"),"method type argument count mismatch");
+    for call in ["Holder.keep<bool,bool>(true)", "Holder.keep<bool,bool>"] {
+        rejected(
+            &format!(
+                "struct Holder {{}} impl Holder {{fn keep(value:T)->T where T {{value}}}} fn run() {{let value={call};}}"
+            ),
+            "method type argument count mismatch",
+        );
     }
-    rejected("trait Allowed {} struct Holder {} impl Holder {fn keep(self,value:T)->T where T :- Allowed {value}} fn run()->bool {Holder {}.keep<bool>(true)}","trait bound is not established");
+    rejected(
+        "trait Allowed {} struct Holder {} impl Holder {fn keep(self,value:T)->T where T :- Allowed {value}} fn run()->bool {Holder {}.keep<bool>(true)}",
+        "trait bound is not established",
+    );
 }
 
 #[test]
 fn generic_trait_contracts_match_alpha_renamed_method_binders() {
-    let dump=accepted("trait Mapper {fn keep(value:T)->T where T;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->U where U {value}}");
+    let dump = accepted(
+        "trait Mapper {fn keep(value:T)->T where T;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->U where U {value}}",
+    );
     assert!(dump.contains("(type-parameters"));
-    accepted("trait Mapper where A {fn pair(a:A,b:B)->(A,B) where B;} struct Holder where X {} impl Mapper<X> for Holder<X> where X {fn pair(a:X,b:Y)->(X,Y) where Y {(a,b)}}");
-    accepted("trait Mapper {fn keep(value:T)->T where T {value}} struct Holder {} impl Mapper for Holder {}");
-    accepted("trait Mapper {fn keep(value:T)->T where T {value}} struct Holder {} impl Mapper for Holder {} struct Box where X {} impl Box<X> where X {fn flag()->bool {true}}");
+    accepted(
+        "trait Mapper where A {fn pair(a:A,b:B)->(A,B) where B;} struct Holder where X {} impl Mapper<X> for Holder<X> where X {fn pair(a:X,b:Y)->(X,Y) where Y {(a,b)}}",
+    );
+    accepted(
+        "trait Mapper {fn keep(value:T)->T where T {value}} struct Holder {} impl Mapper for Holder {}",
+    );
+    accepted(
+        "trait Mapper {fn keep(value:T)->T where T {value}} struct Holder {} impl Mapper for Holder {} struct Box where X {} impl Box<X> where X {fn flag()->bool {true}}",
+    );
 }
 
 #[test]
 fn generic_trait_contracts_reject_binder_and_signature_mismatches() {
-    rejected("trait Mapper {fn keep(value:T)->T where T;} struct Holder {} impl Mapper for Holder {fn keep(value:bool)->bool {value}}","method generic parameter count");
-    rejected("trait Mapper {fn keep(value:T)->T where T;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->bool where U {true}}","does not match its trait signature");
-    rejected("trait Mapper {fn keep(value:T)->T where T;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->U where U,requires U==bool {value}}","strengthens trait preconditions");
+    rejected(
+        "trait Mapper {fn keep(value:T)->T where T;} struct Holder {} impl Mapper for Holder {fn keep(value:bool)->bool {value}}",
+        "method generic parameter count",
+    );
+    rejected(
+        "trait Mapper {fn keep(value:T)->T where T;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->bool where U {true}}",
+        "does not match its trait signature",
+    );
+    rejected(
+        "trait Mapper {fn keep(value:T)->T where T;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->U where U,requires U==bool {value}}",
+        "strengthens trait preconditions",
+    );
 }
 
 #[test]
 fn generic_trait_contracts_preserve_capability_implication() {
-    accepted("trait Marker {} trait Mapper {fn keep(value:T)->T where T :- Marker;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->U where U :- Marker {value}}");
-    accepted("trait Marker {} trait Mapper {fn keep(value:T)->T where T :- Marker;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->U where U {value}}");
-    rejected("trait Marker {} trait Mapper {fn keep(value:T)->T where T;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->U where U :- Marker {value}}","strengthens trait capability requirements");
+    accepted(
+        "trait Marker {} trait Mapper {fn keep(value:T)->T where T :- Marker;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->U where U :- Marker {value}}",
+    );
+    accepted(
+        "trait Marker {} trait Mapper {fn keep(value:T)->T where T :- Marker;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->U where U {value}}",
+    );
+    rejected(
+        "trait Marker {} trait Mapper {fn keep(value:T)->T where T;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->U where U :- Marker {value}}",
+        "strengthens trait capability requirements",
+    );
 }
 
 #[test]
 fn generic_trait_contracts_use_parent_bounds_and_complete_implementation_world() {
-    accepted("trait Parent {} trait Child :- Parent {} trait Mapper {fn keep(value:T)->T where T :- Child;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->U where U :- Parent {value}}");
+    accepted(
+        "trait Parent {} trait Child :- Parent {} trait Mapper {fn keep(value:T)->T where T :- Child;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->U where U :- Parent {value}}",
+    );
     for marker in ["impl Marker for bool {}", ""] {
-        let source=format!("trait Marker {{}} trait Mapper {{fn keep(value:T)->T where T,requires T==bool;}} struct Holder {{}} impl Mapper for Holder {{fn keep(value:U)->U where U :- Marker,requires U==bool {{value}}}} {marker}");
-        if marker.is_empty() {rejected(&source,"strengthens trait capability requirements");} else {accepted(&source);}
+        let source = format!(
+            "trait Marker {{}} trait Mapper {{fn keep(value:T)->T where T,requires T==bool;}} struct Holder {{}} impl Mapper for Holder {{fn keep(value:U)->U where U :- Marker,requires U==bool {{value}}}} {marker}"
+        );
+        if marker.is_empty() {
+            rejected(&source, "strengthens trait capability requirements");
+        } else {
+            accepted(&source);
+        }
     }
 }
 
 #[test]
 fn generic_trait_contracts_publish_inferred_method_arguments() {
-    let dump=accepted("trait Mapper {fn keep(value:T)->T where T;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->U where U {value}} fn run()->bool {Holder.as(Mapper).keep(true)}");
+    let dump = accepted(
+        "trait Mapper {fn keep(value:T)->T where T;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->U where U {value}} fn run()->bool {Holder.as(Mapper).keep(true)}",
+    );
     assert!(dump.contains("(method-arguments (primitive bool))"));
-    accepted("trait Mapper {fn keep(self,value:T)->T where T;} fn use_mapper(value:S)->bool where S :- Mapper {value.as(Mapper).keep(true)}");
+    accepted(
+        "trait Mapper {fn keep(self,value:T)->T where T;} fn use_mapper(value:S)->bool where S :- Mapper {value.as(Mapper).keep(true)}",
+    );
 }
 
 #[test]
 fn generic_trait_invocation_checks_declared_requirements() {
-    rejected("trait Marker {} trait Mapper {fn keep(value:T)->T where T :- Marker;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->U where U {value}} fn run()->bool {Holder.as(Mapper).keep(true)}","trait bound is not established");
-    rejected("trait Mapper {fn keep(value:T)->T where T,requires T==bool;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->U where U {value}} fn run()->'x''type {Holder.as(Mapper).keep('x')}","requirement");
+    rejected(
+        "trait Marker {} trait Mapper {fn keep(value:T)->T where T :- Marker;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->U where U {value}} fn run()->bool {Holder.as(Mapper).keep(true)}",
+        "trait bound is not established",
+    );
+    rejected(
+        "trait Mapper {fn keep(value:T)->T where T,requires T==bool;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->U where U {value}} fn run()->'x''type {Holder.as(Mapper).keep('x')}",
+        "requirement",
+    );
 }
 
 #[test]
 fn generic_trait_invocation_enforces_program_preconditions() {
-    rejected("trait Mapper {fn keep(value:T,flag:bool)->T where T,requires flag;} struct Holder {} impl Mapper for Holder {fn keep(value:U,allowed:bool)->U where U {value}} fn run()->bool {Holder.as(Mapper).keep(true,false)}","program precondition is not proven");
+    rejected(
+        "trait Mapper {fn keep(value:T,flag:bool)->T where T,requires flag;} struct Holder {} impl Mapper for Holder {fn keep(value:U,allowed:bool)->U where U {value}} fn run()->bool {Holder.as(Mapper).keep(true,false)}",
+        "program precondition is not proven",
+    );
 }
 
 #[test]
 fn generic_trait_method_values_enforce_declared_bounds_and_fixed_types() {
-    rejected("trait Marker {} trait Mapper {fn keep(value:T)->T where T :- Marker;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->U where U {value}} fn run() {let action:fn(bool)->bool=Holder.as(Mapper).keep;}","trait bound is not established");
-    rejected("trait Mapper {fn keep(value:T)->T where T;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->U where U {value}} fn run() {let action=Holder.as(Mapper).keep;}","generic function value requires instantiation");
-    rejected("trait Mapper {fn keep(self,value:T)->T where T;} struct Holder {} impl Mapper for Holder {fn keep(self,value:U)->U where U {value}} fn run() {let action:fn(bool,bool)->bool=Holder.as(Mapper).keep;}","generic function context inference failed");
-    rejected("trait Mapper {fn keep(value:T)->T where T;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->U where U {value}} fn run() {let action=Holder.as(Mapper).keep<bool,bool>;}","method type argument count mismatch");
+    rejected(
+        "trait Marker {} trait Mapper {fn keep(value:T)->T where T :- Marker;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->U where U {value}} fn run() {let action:fn(bool)->bool=Holder.as(Mapper).keep;}",
+        "trait bound is not established",
+    );
+    rejected(
+        "trait Mapper {fn keep(value:T)->T where T;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->U where U {value}} fn run() {let action=Holder.as(Mapper).keep;}",
+        "generic function value requires instantiation",
+    );
+    rejected(
+        "trait Mapper {fn keep(self,value:T)->T where T;} struct Holder {} impl Mapper for Holder {fn keep(self,value:U)->U where U {value}} fn run() {let action:fn(bool,bool)->bool=Holder.as(Mapper).keep;}",
+        "generic function context inference failed",
+    );
+    rejected(
+        "trait Mapper {fn keep(value:T)->T where T;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->U where U {value}} fn run() {let action=Holder.as(Mapper).keep<bool,bool>;}",
+        "method type argument count mismatch",
+    );
 }
 
 #[test]
 fn generic_trait_method_values_do_not_erase_program_or_parameter_protocols() {
-    rejected("trait Mapper {fn keep(value:T,flag:bool)->T where T,requires flag;} struct Holder {} impl Mapper for Holder {fn keep(value:U,flag:bool)->U where U {value}} fn run() {let action:fn(bool,bool)->bool=Holder.as(Mapper).keep;}","trait method value would erase program contracts");
-    rejected("trait Mapper {fn keep(value:T,.flag:bool=true)->T where T;} struct Holder {} impl Mapper for Holder {fn keep(value:U,flag:bool)->U where U {value}} fn run() {let action=Holder.as(Mapper).keep<bool>;}","optional function values require parameter protocol metadata");
+    rejected(
+        "trait Mapper {fn keep(value:T,flag:bool)->T where T,requires flag;} struct Holder {} impl Mapper for Holder {fn keep(value:U,flag:bool)->U where U {value}} fn run() {let action:fn(bool,bool)->bool=Holder.as(Mapper).keep;}",
+        "trait method value would erase program contracts",
+    );
+    rejected(
+        "trait Mapper {fn keep(value:T,.flag:bool=true)->T where T;} struct Holder {} impl Mapper for Holder {fn keep(value:U,flag:bool)->U where U {value}} fn run() {let action=Holder.as(Mapper).keep<bool>;}",
+        "optional function values require parameter protocol metadata",
+    );
 }
 
 #[test]
 fn associated_values_require_complete_well_typed_implementations() {
-    rejected("trait Source {assoc capacity:.u8'builtin;} struct Holder {} impl Source for Holder {}","missing required associated value");
-    rejected("trait Source {assoc capacity:.u8'builtin;} struct Holder {} impl Source for Holder {assoc capacity:bool=true;}","does not match its declared type");
-    rejected("trait Source {assoc capacity:.u8'builtin;} struct Holder {} impl Source for Holder {assoc capacity:.u8'builtin;}","requires an initializer");
-    rejected("trait Source {} struct Holder {} impl Source for Holder {assoc capacity:.u8'builtin=9;}","unknown associated value");
-    rejected("assoc capacity:.u8'builtin=9;","parsing failed");
-    rejected("trait Source {assoc capacity:.u8'builtin=300;}","integer does not fit");
+    rejected(
+        "trait Source {assoc capacity:.u8'builtin;} struct Holder {} impl Source for Holder {}",
+        "missing required associated value",
+    );
+    rejected(
+        "trait Source {assoc capacity:.u8'builtin;} struct Holder {} impl Source for Holder {assoc capacity:bool=true;}",
+        "does not match its declared type",
+    );
+    rejected(
+        "trait Source {assoc capacity:.u8'builtin;} struct Holder {} impl Source for Holder {assoc capacity:.u8'builtin;}",
+        "requires an initializer",
+    );
+    rejected(
+        "trait Source {} struct Holder {} impl Source for Holder {assoc capacity:.u8'builtin=9;}",
+        "unknown associated value",
+    );
+    rejected("assoc capacity:.u8'builtin=9;", "parsing failed");
+    rejected(
+        "trait Source {assoc capacity:.u8'builtin=300;}",
+        "integer does not fit",
+    );
 }
 
 #[test]
 fn associated_values_do_not_confuse_value_and_type_members() {
-    rejected("trait Source {assoc capacity:.u8'builtin=9;} struct Holder {} impl Source for Holder {} fn run() {let value:Holder.as(Source).capacity=true;}","associated value used as a type");
-    rejected("trait Source {assoc capacity:.u8'builtin;} struct Holder {} impl Source for Holder {fn capacity()->.u8'builtin {9}}","associated value cannot be supplied by a method");
+    rejected(
+        "trait Source {assoc capacity:.u8'builtin=9;} struct Holder {} impl Source for Holder {} fn run() {let value:Holder.as(Source).capacity=true;}",
+        "associated value used as a type",
+    );
+    rejected(
+        "trait Source {assoc capacity:.u8'builtin;} struct Holder {} impl Source for Holder {fn capacity()->.u8'builtin {9}}",
+        "associated value cannot be supplied by a method",
+    );
 }
 
 #[test]
 fn associated_values_do_not_unfold_normal_form_heads() {
-    rejected("pure comptime fn Identity<T>->.Type'builtin {T} trait Source {assoc Element:.Type'builtin=Identity<bool>;} struct Holder {} impl Source for Holder {} fn run() {let value:Holder.as(Source).Element=true;}","unresolved type equality");
-    rejected("trait Source {assoc capacity:.u8'builtin=9;} struct Holder {} fn run()->.u8'builtin {Holder.as(Source).capacity}","associated value requires an established concrete implementation");
+    rejected(
+        "pure comptime fn Identity<T>->.Type'builtin {T} trait Source {assoc Element:.Type'builtin=Identity<bool>;} struct Holder {} impl Source for Holder {} fn run() {let value:Holder.as(Source).Element=true;}",
+        "unresolved type equality",
+    );
+    rejected(
+        "trait Source {assoc capacity:.u8'builtin=9;} struct Holder {} fn run()->.u8'builtin {Holder.as(Source).capacity}",
+        "associated value requires an established concrete implementation",
+    );
 }
 
 #[test]
 fn inherited_associated_values_reject_distinct_sources_and_missing_child_views() {
-    rejected("trait Left {assoc value:bool=true;} trait Right {assoc value:bool=false;} trait Child :- Left + Right {} struct Holder {} impl Left for Holder {} impl Right for Holder {} impl Child for Holder {} fn run()->bool {Holder.as(Child).value}","ambiguous inherited member");
-    rejected("trait Parent {assoc value:bool=true;} trait Child :- Parent {} struct Holder {} impl Parent for Holder {} fn run()->bool {Holder.as(Child).value}","requested interface view is not established");
-    rejected("trait Parent where T {assoc value:bool=true;} trait Child :- Parent<bool> + Parent<.u8'builtin> {} struct Holder {} impl Parent<bool> for Holder {} impl Parent<.u8'builtin> for Holder {} impl Child for Holder {} fn run()->bool {Holder.as(Child).value}","ambiguous inherited member");
+    rejected(
+        "trait Left {assoc value:bool=true;} trait Right {assoc value:bool=false;} trait Child :- Left + Right {} struct Holder {} impl Left for Holder {} impl Right for Holder {} impl Child for Holder {} fn run()->bool {Holder.as(Child).value}",
+        "ambiguous inherited member",
+    );
+    rejected(
+        "trait Parent {assoc value:bool=true;} trait Child :- Parent {} struct Holder {} impl Parent for Holder {} fn run()->bool {Holder.as(Child).value}",
+        "requested interface view is not established",
+    );
+    rejected(
+        "trait Parent where T {assoc value:bool=true;} trait Child :- Parent<bool> + Parent<.u8'builtin> {} struct Holder {} impl Parent<bool> for Holder {} impl Parent<.u8'builtin> for Holder {} impl Child for Holder {} fn run()->bool {Holder.as(Child).value}",
+        "ambiguous inherited member",
+    );
 }
 
 #[test]
 fn associated_callable_values_preserve_phase_and_member_contracts() {
-    rejected("fn action(value:bool)->bool {value} trait Source {assoc callback:fn(bool)->bool=action;} struct Holder {} impl Source for Holder {} comptime fn run()->bool {Holder.as(Source).callback(true)}", "callable type is unavailable in this execution phase");
-    rejected("fn action(.value:bool=true)->bool {value} trait Source {assoc callback:fn(bool)->bool=action;} struct Holder {} impl Source for Holder {}", "function value");
-    rejected("trait Left {assoc value:bool=true;} trait Right {fn value()->bool {false}} trait Child :- Left + Right {} struct Holder {} impl Left for Holder {} impl Right for Holder {} impl Child for Holder {} fn run()->bool {Holder.as(Child).value}", "ambiguous inherited member");
+    rejected(
+        "fn action(value:bool)->bool {value} trait Source {assoc callback:fn(bool)->bool=action;} struct Holder {} impl Source for Holder {} comptime fn run()->bool {Holder.as(Source).callback(true)}",
+        "callable type is unavailable in this execution phase",
+    );
+    rejected(
+        "fn action(.value:bool=true)->bool {value} trait Source {assoc callback:fn(bool)->bool=action;} struct Holder {} impl Source for Holder {}",
+        "function value",
+    );
+    rejected(
+        "trait Left {assoc value:bool=true;} trait Right {fn value()->bool {false}} trait Child :- Left + Right {} struct Holder {} impl Left for Holder {} impl Right for Holder {} impl Child for Holder {} fn run()->bool {Holder.as(Child).value}",
+        "ambiguous inherited member",
+    );
 }
 
 #[test]
 fn comptime_runtime_function_identity_does_not_authorize_invocation() {
     accepted("fn action(value:bool)->bool {value} comptime fn obtain()->fn(bool)->bool {action}");
-    rejected("fn action(value:bool)->bool {value} comptime fn bad()->bool {let callback=action;callback(true)}", "callable type is unavailable in this execution phase");
-    rejected("fn action(value:bool)->bool {value} const RESULT=action(true);comptime fn bad()->bool {RESULT}", "runtime function is unavailable during comptime");
+    rejected(
+        "fn action(value:bool)->bool {value} comptime fn bad()->bool {let callback=action;callback(true)}",
+        "callable type is unavailable in this execution phase",
+    );
+    rejected(
+        "fn action(value:bool)->bool {value} const RESULT=action(true);comptime fn bad()->bool {RESULT}",
+        "runtime function is unavailable during comptime",
+    );
 }
 
 #[test]
 fn computed_runtime_function_identities_reject_calls_and_contract_erasure() {
-    rejected("fn action(value:bool)->bool {value} comptime fn choose()->fn(bool)->bool {action} const RESULT=choose()(true);comptime fn run()->bool {RESULT}","callable type is unavailable in this execution phase");
-    rejected("fn action(value:bool)->bool where requires value {value} comptime fn choose()->fn(bool)->bool {action} trait Source {assoc action:fn(bool)->bool=choose();} struct Holder {} impl Source for Holder {}", "function value would erase program preconditions");
-    rejected("trait Allowed {} fn action(value:T)->T where T :- Allowed {value} comptime fn choose()->fn(bool)->bool {action<bool>} const ACTION=choose();comptime fn obtain()->fn(bool)->bool {ACTION}", "trait bound is not established");
+    rejected(
+        "fn action(value:bool)->bool {value} comptime fn choose()->fn(bool)->bool {action} const RESULT=choose()(true);comptime fn run()->bool {RESULT}",
+        "callable type is unavailable in this execution phase",
+    );
+    rejected(
+        "fn action(value:bool)->bool where requires value {value} comptime fn choose()->fn(bool)->bool {action} trait Source {assoc action:fn(bool)->bool=choose();} struct Holder {} impl Source for Holder {}",
+        "function value would erase program preconditions",
+    );
+    rejected(
+        "trait Allowed {} fn action(value:T)->T where T :- Allowed {value} comptime fn choose()->fn(bool)->bool {action<bool>} const ACTION=choose();comptime fn obtain()->fn(bool)->bool {ACTION}",
+        "trait bound is not established",
+    );
 }
 
 #[test]
 fn associated_value_dependencies_reject_cycles_and_failed_initializers() {
-    rejected("trait Source {assoc first:bool=Holder.as(Source).second;assoc second:bool=Holder.as(Source).first;} struct Holder {} impl Source for Holder {}", "cyclic or excessively deep associated value dependency");
-    rejected("trait Source {assoc Element:.Type'builtin=Holder.as(Source).Other;assoc Other:.Type'builtin=Holder.as(Source).Element;} struct Holder {} impl Source for Holder {}", "cyclic or excessively deep associated value dependency");
-    rejected("trait Source {assoc value:bool=true;} struct Holder {} impl Source for Holder {assoc value:bool='x';}", "type mismatch");
+    rejected(
+        "trait Source {assoc first:bool=Holder.as(Source).second;assoc second:bool=Holder.as(Source).first;} struct Holder {} impl Source for Holder {}",
+        "cyclic or excessively deep associated value dependency",
+    );
+    rejected(
+        "trait Source {assoc Element:.Type'builtin=Holder.as(Source).Other;assoc Other:.Type'builtin=Holder.as(Source).Element;} struct Holder {} impl Source for Holder {}",
+        "cyclic or excessively deep associated value dependency",
+    );
+    rejected(
+        "trait Source {assoc value:bool=true;} struct Holder {} impl Source for Holder {assoc value:bool='x';}",
+        "type mismatch",
+    );
 }
 
 #[test]
 fn associated_dependency_depth_is_bounded() {
-    for count in [8,80] {
-        let mut source=String::from("trait Source {assoc value:bool;}");
+    for count in [8, 80] {
+        let mut source = String::from("trait Source {assoc value:bool;}");
         for index in 0..count {
-            let value=if index+1==count {"true".into()} else {format!("Node{}.as(Source).value",index+1)};
-            source.push_str(&format!("struct Node{index} {{}} impl Source for Node{index} {{assoc value:bool={value};}}"));
+            let value = if index + 1 == count {
+                "true".into()
+            } else {
+                format!("Node{}.as(Source).value", index + 1)
+            };
+            source.push_str(&format!(
+                "struct Node{index} {{}} impl Source for Node{index} {{assoc value:bool={value};}}"
+            ));
         }
-        if count==8 {accepted(&source);} else {rejected(&source,"excessively deep");}
+        if count == 8 {
+            accepted(&source);
+        } else {
+            rejected(&source, "excessively deep");
+        }
     }
 }
 
 #[test]
 fn computed_trait_method_values_preserve_phase_and_declared_requirements() {
-    rejected("trait Mapper {fn keep(value:bool)->bool {value}} struct Holder {} impl Mapper for Holder {} comptime fn choose()->fn(bool)->bool {Holder.as(Mapper).keep} const VALUE=choose()(true);comptime fn run()->bool {VALUE}","callable type is unavailable in this execution phase");
-    rejected("trait Mapper {fn keep(value:bool)->bool where requires value;} struct Holder {} impl Mapper for Holder {fn keep(value:bool)->bool {value}} comptime fn choose()->fn(bool)->bool {Holder.as(Mapper).keep} trait Source {assoc action:fn(bool)->bool=choose();} impl Source for Holder {}", "trait method value would erase program preconditions");
+    rejected(
+        "trait Mapper {fn keep(value:bool)->bool {value}} struct Holder {} impl Mapper for Holder {} comptime fn choose()->fn(bool)->bool {Holder.as(Mapper).keep} const VALUE=choose()(true);comptime fn run()->bool {VALUE}",
+        "callable type is unavailable in this execution phase",
+    );
+    rejected(
+        "trait Mapper {fn keep(value:bool)->bool where requires value;} struct Holder {} impl Mapper for Holder {fn keep(value:bool)->bool {value}} comptime fn choose()->fn(bool)->bool {Holder.as(Mapper).keep} trait Source {assoc action:fn(bool)->bool=choose();} impl Source for Holder {}",
+        "trait method value would erase program preconditions",
+    );
 }
 
 #[test]
 fn computed_trait_method_values_do_not_inherit_weaker_implementation_bounds() {
-    rejected("trait Allowed {} impl Allowed for bool {} trait Mapper {fn keep(value:T)->T where T :- Allowed;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->U where U {value}} comptime fn choose()->fn('a''type)->'a''type {Holder.as(Mapper).keep<'a''type>} trait Source {assoc action:fn('a''type)->'a''type=choose();} impl Source for Holder {}", "trait bound is not established");
+    rejected(
+        "trait Allowed {} impl Allowed for bool {} trait Mapper {fn keep(value:T)->T where T :- Allowed;} struct Holder {} impl Mapper for Holder {fn keep(value:U)->U where U {value}} comptime fn choose()->fn('a''type)->'a''type {Holder.as(Mapper).keep<'a''type>} trait Source {assoc action:fn('a''type)->'a''type=choose();} impl Source for Holder {}",
+        "trait bound is not established",
+    );
 }
-
 
 #[test]
 fn associated_callable_values_do_not_recover_declaration_defaults_or_names() {
-    let prefix="trait Choose {fn choose(.flag:bool=true)->bool;} struct Host {} impl Choose for Host {fn choose(value:bool)->bool {value}} trait Source {assoc action:fn(bool)->bool=Host.as(Choose).choose;} struct Holder {} impl Source for Holder {}";
-    rejected(&format!("{prefix} fn run()->bool {{Holder.as(Source).action()}}"),"argument count mismatch");
-    rejected(&format!("{prefix} fn run()->bool {{Holder.as(Source).action(.flag=true)}}"),"named parameter");
+    let prefix = "trait Choose {fn choose(.flag:bool=true)->bool;} struct Host {} impl Choose for Host {fn choose(value:bool)->bool {value}} trait Source {assoc action:fn(bool)->bool=Host.as(Choose).choose;} struct Holder {} impl Source for Holder {}";
+    rejected(
+        &format!("{prefix} fn run()->bool {{Holder.as(Source).action()}}"),
+        "argument count mismatch",
+    );
+    rejected(
+        &format!("{prefix} fn run()->bool {{Holder.as(Source).action(.flag=true)}}"),
+        "named parameter",
+    );
 }
 
 #[test]
 fn associated_variadic_method_values_do_not_recover_collection_entries() {
-    rejected("trait Gather {fn gather(...items:(bool,bool))->bool;} struct Host {} impl Gather for Host {fn gather(items:(bool,bool))->bool {let (a,b)=items;a and not b}} trait Source {assoc action:fn((bool,bool))->bool=Host.as(Gather).gather;} struct Holder {} impl Source for Holder {} fn run()->bool {Holder.as(Source).action(true,false)}", "argument count mismatch");
+    rejected(
+        "trait Gather {fn gather(...items:(bool,bool))->bool;} struct Host {} impl Gather for Host {fn gather(items:(bool,bool))->bool {let (a,b)=items;a and not b}} trait Source {assoc action:fn((bool,bool))->bool=Host.as(Gather).gather;} struct Holder {} impl Source for Holder {} fn run()->bool {Holder.as(Source).action(true,false)}",
+        "argument count mismatch",
+    );
 }
 
 #[test]
 fn repeated_associated_value_queries_respect_the_copy_budget() {
-    let prefix=format!("trait Source {{assoc text:\"x\"'type=\"{}\";}} struct Holder {{}} impl Source for Holder {{}}", "x".repeat(32768));
-    for count in [2,40] {
-        let mut source=prefix.clone();
+    let prefix = format!(
+        "trait Source {{assoc text:\"x\"'type=\"{}\";}} struct Holder {{}} impl Source for Holder {{}}",
+        "x".repeat(32768)
+    );
+    for count in [2, 40] {
+        let mut source = prefix.clone();
         for index in 0..count {
-            source.push_str(&format!("comptime fn obtain{index}()->\"x\"'type {{Holder.as(Source).text}}"));
+            source.push_str(&format!(
+                "comptime fn obtain{index}()->\"x\"'type {{Holder.as(Source).text}}"
+            ));
         }
-        if count==2 {accepted(&source);} else {rejected(&source,"constant copy budget exhausted");}
+        if count == 2 {
+            accepted(&source);
+        } else {
+            rejected(&source, "constant copy budget exhausted");
+        }
     }
 }
 
 #[test]
 fn lexical_associated_references_preserve_cycles_and_value_type_distinction() {
-    rejected("trait Source {assoc first:bool;assoc second:bool;} struct Holder {} impl Source for Holder {assoc first:bool=second;assoc second:bool=first;}","cyclic or excessively deep associated value dependency");
-    rejected("trait Source {assoc value:bool;fn run();} struct Holder {} impl Source for Holder {assoc value:bool=true;fn run() {let item:value=true;}}", "associated value used as a type does not contain a completed Type");
-    accepted("trait Source {assoc value:bool=true;fn run()->bool {value}} struct Holder {} impl Source for Holder {assoc value:bool=false;}");
+    rejected(
+        "trait Source {assoc first:bool;assoc second:bool;} struct Holder {} impl Source for Holder {assoc first:bool=second;assoc second:bool=first;}",
+        "cyclic or excessively deep associated value dependency",
+    );
+    rejected(
+        "trait Source {assoc value:bool;fn run();} struct Holder {} impl Source for Holder {assoc value:bool=true;fn run() {let item:value=true;}}",
+        "associated value used as a type does not contain a completed Type",
+    );
+    accepted(
+        "trait Source {assoc value:bool=true;fn run()->bool {value}} struct Holder {} impl Source for Holder {assoc value:bool=false;}",
+    );
 }
 
 #[test]
 fn associated_signature_dependencies_reject_cycles_and_contract_mismatches() {
-    rejected("trait Source {assoc Element:.Type'builtin;assoc Other:.Type'builtin;fn keep(value:bool)->bool;} struct Holder {} impl Source for Holder {assoc Element:.Type'builtin=Other;assoc Other:.Type'builtin=Element;fn keep(value:Element)->Element {value}}", "cyclic or excessively deep associated signature dependency");
-    rejected("trait Source {assoc Element:.Type'builtin;fn keep(value:bool)->bool;} struct Holder {} impl Source for Holder {assoc Element:.Type'builtin='x''type;fn keep(value:Element)->Element {value}}", "does not match its trait signature");
+    rejected(
+        "trait Source {assoc Element:.Type'builtin;assoc Other:.Type'builtin;fn keep(value:bool)->bool;} struct Holder {} impl Source for Holder {assoc Element:.Type'builtin=Other;assoc Other:.Type'builtin=Element;fn keep(value:Element)->Element {value}}",
+        "cyclic or excessively deep associated signature dependency",
+    );
+    rejected(
+        "trait Source {assoc Element:.Type'builtin;fn keep(value:bool)->bool;} struct Holder {} impl Source for Holder {assoc Element:.Type'builtin='x''type;fn keep(value:Element)->Element {value}}",
+        "does not match its trait signature",
+    );
 }
 
 #[test]
 fn associated_signature_formation_preserves_opaque_heads_and_admission() {
-    rejected("pure comptime fn Identity<T>->.Type'builtin {T} trait Source {assoc Element:.Type'builtin;fn keep(value:bool)->bool;} struct Holder {} impl Source for Holder {assoc Element:.Type'builtin=Identity<bool>;fn keep(value:Element)->Element {value}}", "does not match its trait signature");
-    rejected("trait Source {fn keep(value:bool)->bool;} struct Holder {} impl Source for Holder {assoc Element:.Type'builtin=bool;fn keep(value:Element)->Element {value}}", "unknown associated value in implementation");
+    rejected(
+        "pure comptime fn Identity<T>->.Type'builtin {T} trait Source {assoc Element:.Type'builtin;fn keep(value:bool)->bool;} struct Holder {} impl Source for Holder {assoc Element:.Type'builtin=Identity<bool>;fn keep(value:Element)->Element {value}}",
+        "does not match its trait signature",
+    );
+    rejected(
+        "trait Source {fn keep(value:bool)->bool;} struct Holder {} impl Source for Holder {assoc Element:.Type'builtin=bool;fn keep(value:Element)->Element {value}}",
+        "unknown associated value in implementation",
+    );
 }
 
 #[test]
@@ -5245,85 +5822,189 @@ fn associated_signature_shared_dependencies_do_not_expand_exponentially() {
 
 #[test]
 fn abstract_associated_defaults_do_not_prove_their_own_result_types() {
-    rejected("trait Source {assoc Element:.Type'builtin=bool;fn value()->Element {true}}", "unresolved type equality");
-    rejected("trait Source {assoc Element:Element;fn keep(value:Element)->Element {value}}", "cyclic or excessively deep associated signature dependency");
+    rejected(
+        "trait Source {assoc Element:.Type'builtin=bool;fn value()->Element {true}}",
+        "unresolved type equality",
+    );
+    rejected(
+        "trait Source {assoc Element:Element;fn keep(value:Element)->Element {value}}",
+        "cyclic or excessively deep associated signature dependency",
+    );
 }
 
 #[test]
 fn selected_associated_method_inputs_reject_the_default_type_after_override() {
-    rejected("trait Source {assoc Element:.Type'builtin=bool;fn keep(value:Element)->Element {value}} struct Letters {} impl Source for Letters {assoc Element:.Type'builtin='x''type;} fn run()->'x''type {Letters.as(Source).keep(true)}", "type mismatch");
+    rejected(
+        "trait Source {assoc Element:.Type'builtin=bool;fn keep(value:Element)->Element {value}} struct Letters {} impl Source for Letters {assoc Element:.Type'builtin='x''type;} fn run()->'x''type {Letters.as(Source).keep(true)}",
+        "type mismatch",
+    );
 }
 
 #[test]
 fn associated_override_signature_equations_are_local_acyclic_and_opaque() {
-    rejected("trait Source {assoc Element:.Type'builtin;fn keep(value:Element)->Element;} struct Flags {} struct Letters {} impl Source for Flags {assoc Element:.Type'builtin=bool;fn keep(value:bool)->bool {value}} impl Source for Letters {assoc Element:.Type'builtin='x''type;fn keep(value:bool)->bool {value}}", "does not match its trait signature");
-    rejected("pure comptime fn Identity<T>->.Type'builtin {T} trait Source {assoc Element:.Type'builtin;fn keep(value:Element)->Element;} struct Flags {} impl Source for Flags {assoc Element:.Type'builtin=Identity<bool>;fn keep(value:bool)->bool {value}}", "does not match its trait signature");
-    rejected("trait Source {assoc Element:.Type'builtin = *Element;fn keep(value:Element)->Element;} struct Flags {} impl Source for Flags {fn keep(value:bool)->bool {value}}", "cyclic implementation associated type dependency");
+    rejected(
+        "trait Source {assoc Element:.Type'builtin;fn keep(value:Element)->Element;} struct Flags {} struct Letters {} impl Source for Flags {assoc Element:.Type'builtin=bool;fn keep(value:bool)->bool {value}} impl Source for Letters {assoc Element:.Type'builtin='x''type;fn keep(value:bool)->bool {value}}",
+        "does not match its trait signature",
+    );
+    rejected(
+        "pure comptime fn Identity<T>->.Type'builtin {T} trait Source {assoc Element:.Type'builtin;fn keep(value:Element)->Element;} struct Flags {} impl Source for Flags {assoc Element:.Type'builtin=Identity<bool>;fn keep(value:bool)->bool {value}}",
+        "does not match its trait signature",
+    );
+    rejected(
+        "trait Source {assoc Element:.Type'builtin = *Element;fn keep(value:Element)->Element;} struct Flags {} impl Source for Flags {fn keep(value:bool)->bool {value}}",
+        "cyclic implementation associated type dependency",
+    );
 }
 
 #[test]
 fn explicit_abstract_associated_views_require_evidence_and_preserve_opacity() {
-    rejected("trait Source {assoc Element:.Type'builtin=bool;} fn keep(value:T.as(Source).Element)->T.as(Source).Element where T {value}", "associated value requires an established concrete implementation");
-    rejected("trait Source {assoc Element:.Type'builtin=bool;} fn bad()->T.as(Source).Element where T :- Source {true}", "unresolved type equality");
-    rejected("trait Source {assoc Element:.Type'builtin=bool;} trait Child :- Source {} fn keep(value:T.as(Child).Element)->T.as(Source).Element where T :- Source {value}", "requested interface view is not established");
-    rejected("trait Left {assoc Element:.Type'builtin=bool;} trait Right {assoc Element:.Type'builtin=bool;} fn bad(value:T.as(Left).Element)->T.as(Right).Element where T :- Left + Right {value}", "unresolved type equality");
-    accepted("trait Source {assoc value:bool=true;} fn read()->bool where T :- Source {T.as(Source).value}");
+    rejected(
+        "trait Source {assoc Element:.Type'builtin=bool;} fn keep(value:T.as(Source).Element)->T.as(Source).Element where T {value}",
+        "associated value requires an established concrete implementation",
+    );
+    rejected(
+        "trait Source {assoc Element:.Type'builtin=bool;} fn bad()->T.as(Source).Element where T :- Source {true}",
+        "unresolved type equality",
+    );
+    rejected(
+        "trait Source {assoc Element:.Type'builtin=bool;} trait Child :- Source {} fn keep(value:T.as(Child).Element)->T.as(Source).Element where T :- Source {value}",
+        "requested interface view is not established",
+    );
+    rejected(
+        "trait Left {assoc Element:.Type'builtin=bool;} trait Right {assoc Element:.Type'builtin=bool;} fn bad(value:T.as(Left).Element)->T.as(Right).Element where T :- Left + Right {value}",
+        "unresolved type equality",
+    );
+    accepted(
+        "trait Source {assoc value:bool=true;} fn read()->bool where T :- Source {T.as(Source).value}",
+    );
 }
 
 #[test]
 fn declaration_associated_views_reject_missing_constraints_and_ambiguous_origins() {
-    rejected("trait Source {assoc Element:.Type'builtin=bool;} trait Apply {fn keep(value:T.as(Source).Element)->T.as(Source).Element where T;}", "declaration associated projection requires a given interface constraint");
-    rejected("trait Source {assoc Element:.Type'builtin=bool;} trait Child :- Source {} trait Apply {fn keep(value:T.as(Child).Element)->T.as(Source).Element where T :- Source;}", "declaration associated projection requires a given interface constraint");
-    rejected("trait Source where A {assoc Element:.Type'builtin=A;} trait Left :- Source<bool> {} trait Right :- Source<'x''type> {} trait Child :- Left + Right {fn keep(value:Self.as(Child).Element)->bool;}", "ambiguous inherited member");
-    rejected("trait Source {assoc Element:Self.as(Source).Element;fn keep(value:Self.as(Source).Element)->bool;}", "cyclic associated signature dependency");
-    rejected("trait Source {assoc Element:.Type'builtin;fn keep(value:Self.as(Source).Element)->Self.as(Source).Element;} struct Flags {} impl Source for Flags {assoc Element:.Type'builtin='x''type;fn keep(value:bool)->bool {value}}", "does not match its trait signature");
-    rejected("trait Source {assoc Element:.Type'builtin=bool;fn bad()->Self.as(Source).Element {true}}", "unresolved type equality");
+    rejected(
+        "trait Source {assoc Element:.Type'builtin=bool;} trait Apply {fn keep(value:T.as(Source).Element)->T.as(Source).Element where T;}",
+        "declaration associated projection requires a given interface constraint",
+    );
+    rejected(
+        "trait Source {assoc Element:.Type'builtin=bool;} trait Child :- Source {} trait Apply {fn keep(value:T.as(Child).Element)->T.as(Source).Element where T :- Source;}",
+        "declaration associated projection requires a given interface constraint",
+    );
+    rejected(
+        "trait Source where A {assoc Element:.Type'builtin=A;} trait Left :- Source<bool> {} trait Right :- Source<'x''type> {} trait Child :- Left + Right {fn keep(value:Self.as(Child).Element)->bool;}",
+        "ambiguous inherited member",
+    );
+    rejected(
+        "trait Source {assoc Element:Self.as(Source).Element;fn keep(value:Self.as(Source).Element)->bool;}",
+        "cyclic associated signature dependency",
+    );
+    rejected(
+        "trait Source {assoc Element:.Type'builtin;fn keep(value:Self.as(Source).Element)->Self.as(Source).Element;} struct Flags {} impl Source for Flags {assoc Element:.Type'builtin='x''type;fn keep(value:bool)->bool {value}}",
+        "does not match its trait signature",
+    );
+    rejected(
+        "trait Source {assoc Element:.Type'builtin=bool;fn bad()->Self.as(Source).Element {true}}",
+        "unresolved type equality",
+    );
 }
 
 #[test]
 fn declaration_associated_views_do_not_export_override_body_equations() {
-    rejected("trait Source {assoc Element:.Type'builtin;fn make()->Self.as(Source).Element;} struct Flags {} struct Letters {} impl Source for Flags {assoc Element:.Type'builtin=bool;fn make()->Self.as(Source).Element {true}} impl Source for Letters {assoc Element:.Type'builtin='x''type;fn make()->Self.as(Source).Element {true}}", "unresolved type equality");
-    rejected("trait Source {assoc Element:.Type'builtin;fn make()->Self.as(Source).Element;} struct Flags {} impl Source for Flags {assoc Element:.Type'builtin=bool;fn make()->Self.as(Source).Element {true}} fn bad()->T.as(Source).Element where T :- Source {true}", "unresolved type equality");
+    rejected(
+        "trait Source {assoc Element:.Type'builtin;fn make()->Self.as(Source).Element;} struct Flags {} struct Letters {} impl Source for Flags {assoc Element:.Type'builtin=bool;fn make()->Self.as(Source).Element {true}} impl Source for Letters {assoc Element:.Type'builtin='x''type;fn make()->Self.as(Source).Element {true}}",
+        "unresolved type equality",
+    );
+    rejected(
+        "trait Source {assoc Element:.Type'builtin;fn make()->Self.as(Source).Element;} struct Flags {} impl Source for Flags {assoc Element:.Type'builtin=bool;fn make()->Self.as(Source).Element {true}} fn bad()->T.as(Source).Element where T :- Source {true}",
+        "unresolved type equality",
+    );
 }
 
 #[test]
 fn associated_method_value_contexts_preserve_selected_types_and_phase() {
-    rejected("trait Source {assoc Element:.Type'builtin=bool;fn keep(value:Element)->Element {value}} struct Letters {} impl Source for Letters {assoc Element:.Type'builtin='x''type;} fn run()->bool {let action:fn(bool)->bool=Letters.as(Source).keep;action(true)}", "type mismatch");
-    rejected("trait Source {assoc Element:.Type'builtin=bool;comptime fn keep(value:Element)->Element {value}} struct Flags {} impl Source for Flags {} fn run()->bool {let action:fn(bool)->bool=Flags.as(Source).keep;action(true)}", "type mismatch");
-    rejected("trait Source {assoc Element:.Type'builtin=bool;fn keep(value:Element,other:T)->Element where T {value}} struct Letters {} impl Source for Letters {assoc Element:.Type'builtin='x''type;} fn run()->bool {let action:fn(bool,'x''type)->bool=Letters.as(Source).keep;action(true,'x')}", "generic function context inference failed");
+    rejected(
+        "trait Source {assoc Element:.Type'builtin=bool;fn keep(value:Element)->Element {value}} struct Letters {} impl Source for Letters {assoc Element:.Type'builtin='x''type;} fn run()->bool {let action:fn(bool)->bool=Letters.as(Source).keep;action(true)}",
+        "type mismatch",
+    );
+    rejected(
+        "trait Source {assoc Element:.Type'builtin=bool;comptime fn keep(value:Element)->Element {value}} struct Flags {} impl Source for Flags {} fn run()->bool {let action:fn(bool)->bool=Flags.as(Source).keep;action(true)}",
+        "type mismatch",
+    );
+    rejected(
+        "trait Source {assoc Element:.Type'builtin=bool;fn keep(value:Element,other:T)->Element where T {value}} struct Letters {} impl Source for Letters {assoc Element:.Type'builtin='x''type;} fn run()->bool {let action:fn(bool,'x''type)->bool=Letters.as(Source).keep;action(true,'x')}",
+        "generic function context inference failed",
+    );
 }
 
 #[test]
 fn associated_function_value_contexts_do_not_invent_evidence_or_erase_phase() {
-    rejected("trait Source {assoc Element:.Type'builtin=bool;} struct Letters {} impl Source for Letters {assoc Element:.Type'builtin='x''type;} fn keep(value:T.as(Source).Element)->T.as(Source).Element where T :- Source {value} fn run()->bool {let action:fn(bool)->bool=keep<Letters>;action(true)}", "type mismatch");
-    rejected("trait Source {assoc Element:.Type'builtin=bool;} struct Missing {} fn keep(value:T.as(Source).Element)->T.as(Source).Element where T :- Source {value} fn run()->bool {let action:fn(bool)->bool=keep<Missing>;action(true)}", "trait bound is not established");
-    rejected("trait Source {assoc Element:.Type'builtin=bool;} struct Flags {} impl Source for Flags {} comptime fn keep(value:T.as(Source).Element)->T.as(Source).Element where T :- Source {value} fn run()->bool {let action:fn(bool)->bool=keep<Flags>;action(true)}", "type mismatch");
+    rejected(
+        "trait Source {assoc Element:.Type'builtin=bool;} struct Letters {} impl Source for Letters {assoc Element:.Type'builtin='x''type;} fn keep(value:T.as(Source).Element)->T.as(Source).Element where T :- Source {value} fn run()->bool {let action:fn(bool)->bool=keep<Letters>;action(true)}",
+        "type mismatch",
+    );
+    rejected(
+        "trait Source {assoc Element:.Type'builtin=bool;} struct Missing {} fn keep(value:T.as(Source).Element)->T.as(Source).Element where T :- Source {value} fn run()->bool {let action:fn(bool)->bool=keep<Missing>;action(true)}",
+        "trait bound is not established",
+    );
+    rejected(
+        "trait Source {assoc Element:.Type'builtin=bool;} struct Flags {} impl Source for Flags {} comptime fn keep(value:T.as(Source).Element)->T.as(Source).Element where T :- Source {value} fn run()->bool {let action:fn(bool)->bool=keep<Flags>;action(true)}",
+        "type mismatch",
+    );
 }
 
 #[test]
 fn inferred_associated_calls_reject_wrong_values_and_do_not_invert_projections() {
-    rejected("trait Source {assoc Element:.Type'builtin=bool;} struct Letters {} impl Source for Letters {assoc Element:.Type'builtin='x''type;} fn keep(owner:T,value:T.as(Source).Element)->T.as(Source).Element where T :- Source {value} fn run()->bool {keep(Letters {},true)}", "generic call inference failed");
-    rejected("trait Source {assoc Element:.Type'builtin=bool;} struct Flags {} impl Source for Flags {} fn keep(value:T.as(Source).Element)->T.as(Source).Element where T :- Source {value} fn run()->bool {keep(true)}", "generic call inference failed");
+    rejected(
+        "trait Source {assoc Element:.Type'builtin=bool;} struct Letters {} impl Source for Letters {assoc Element:.Type'builtin='x''type;} fn keep(owner:T,value:T.as(Source).Element)->T.as(Source).Element where T :- Source {value} fn run()->bool {keep(Letters {},true)}",
+        "generic call inference failed",
+    );
+    rejected(
+        "trait Source {assoc Element:.Type'builtin=bool;} struct Flags {} impl Source for Flags {} fn keep(value:T.as(Source).Element)->T.as(Source).Element where T :- Source {value} fn run()->bool {keep(true)}",
+        "generic call inference failed",
+    );
 }
 
 #[test]
 fn associated_spreads_reject_wrong_packet_types_and_widths() {
-    rejected("trait Source {assoc Element:.Type'builtin=bool;fn apply(action:fn(Element)->Element,value:Element)->Element {action(value)}} struct Letters {} impl Source for Letters {assoc Element:.Type'builtin='x''type;} fn run()->'x''type {Letters.as(Source).apply(...do {(|value:bool| value,true)})}", "type mismatch");
-    rejected("trait Source {assoc Element:.Type'builtin=bool;fn keep(value:Element)->Element {value}} struct Flags {} impl Source for Flags {} fn run()->bool {Flags.as(Source).keep(...do {(true,false)})}", "argument count mismatch");
+    rejected(
+        "trait Source {assoc Element:.Type'builtin=bool;fn apply(action:fn(Element)->Element,value:Element)->Element {action(value)}} struct Letters {} impl Source for Letters {assoc Element:.Type'builtin='x''type;} fn run()->'x''type {Letters.as(Source).apply(...do {(|value:bool| value,true)})}",
+        "type mismatch",
+    );
+    rejected(
+        "trait Source {assoc Element:.Type'builtin=bool;fn keep(value:Element)->Element {value}} struct Flags {} impl Source for Flags {} fn run()->bool {Flags.as(Source).keep(...do {(true,false)})}",
+        "argument count mismatch",
+    );
 }
 
 #[test]
 fn joint_spread_inputs_reject_context_conflicts_and_missing_evidence() {
-    rejected("trait Source {assoc Element:.Type'builtin=bool;} struct Letters {} impl Source for Letters {assoc Element:.Type'builtin='x''type;} fn apply(owner:T,action:fn(T.as(Source).Element)->T.as(Source).Element,value:T.as(Source).Element)->T.as(Source).Element where T :- Source {action(value)} fn run()->'x''type {apply(Letters {},...do {(|value:bool| value,true)})}", "type mismatch");
-    rejected("trait Source {assoc Element:.Type'builtin=bool;} struct Missing {} fn apply(owner:T,action:fn(T.as(Source).Element)->T.as(Source).Element,value:T.as(Source).Element)->T.as(Source).Element where T :- Source {action(value)} fn run()->bool {apply(Missing {},...do {(|value| value,true)})}", "associated Type implementation selection is unresolved");
+    rejected(
+        "trait Source {assoc Element:.Type'builtin=bool;} struct Letters {} impl Source for Letters {assoc Element:.Type'builtin='x''type;} fn apply(owner:T,action:fn(T.as(Source).Element)->T.as(Source).Element,value:T.as(Source).Element)->T.as(Source).Element where T :- Source {action(value)} fn run()->'x''type {apply(Letters {},...do {(|value:bool| value,true)})}",
+        "type mismatch",
+    );
+    rejected(
+        "trait Source {assoc Element:.Type'builtin=bool;} struct Missing {} fn apply(owner:T,action:fn(T.as(Source).Element)->T.as(Source).Element,value:T.as(Source).Element)->T.as(Source).Element where T :- Source {action(value)} fn run()->bool {apply(Missing {},...do {(|value| value,true)})}",
+        "associated Type implementation selection is unresolved",
+    );
 }
 
 #[test]
 fn abstract_associated_scalars_do_not_become_types_or_unproved_capabilities() {
-    rejected("trait Flag {assoc enabled:bool=true;} fn read()->bool where T {T.as(Flag).enabled}","associated value requires an established concrete implementation");
-    rejected("trait Flag {assoc enabled:bool=true;fn invalid()->enabled;}","associated value used as a type does not contain a completed Type");
-    rejected("trait Source {assoc Item:.Type'builtin;assoc initial:Item;} struct Flags {} impl Source for Flags {assoc Item:.Type'builtin=bool;assoc initial:'x''type='x';}","does not match its declared type");
-    rejected("pure comptime fn Identity<T>->.Type'builtin {T} trait Source {assoc Item:.Type'builtin;assoc initial:Item;} struct Flags {} impl Source for Flags {assoc Item:.Type'builtin=Identity<bool>;assoc initial:bool=true;}","does not match its declared type");
+    rejected(
+        "trait Flag {assoc enabled:bool=true;} fn read()->bool where T {T.as(Flag).enabled}",
+        "associated value requires an established concrete implementation",
+    );
+    rejected(
+        "trait Flag {assoc enabled:bool=true;fn invalid()->enabled;}",
+        "associated value used as a type does not contain a completed Type",
+    );
+    rejected(
+        "trait Source {assoc Item:.Type'builtin;assoc initial:Item;} struct Flags {} impl Source for Flags {assoc Item:.Type'builtin=bool;assoc initial:'x''type='x';}",
+        "does not match its declared type",
+    );
+    rejected(
+        "pure comptime fn Identity<T>->.Type'builtin {T} trait Source {assoc Item:.Type'builtin;assoc initial:Item;} struct Flags {} impl Source for Flags {assoc Item:.Type'builtin=Identity<bool>;assoc initial:bool=true;}",
+        "does not match its declared type",
+    );
 }
 
 #[test]
@@ -5336,29 +6017,51 @@ fn associated_callback_selection_does_not_authorize_runtime_invocation_at_compti
 
 #[test]
 fn dependent_associated_initializers_reject_selected_cycles_and_runtime_calls() {
-    rejected("trait Flags {assoc a:bool=not b;assoc b:bool=not a;} impl Flags for bool {}", "cyclic");
-    rejected("trait Flags {assoc a:bool=Self.as(Flags).a;} impl Flags for bool {}", "cyclic");
-    rejected("fn compute(value:bool)->bool {value} trait Flags {assoc a:bool=true;assoc b:bool=compute(a);}", "runtime");
+    rejected(
+        "trait Flags {assoc a:bool=not b;assoc b:bool=not a;} impl Flags for bool {}",
+        "cyclic",
+    );
+    rejected(
+        "trait Flags {assoc a:bool=Self.as(Flags).a;} impl Flags for bool {}",
+        "cyclic",
+    );
+    rejected(
+        "fn compute(value:bool)->bool {value} trait Flags {assoc a:bool=true;assoc b:bool=compute(a);}",
+        "runtime",
+    );
 }
 
 #[test]
 fn inherited_associated_initializers_do_not_supply_missing_definition_evidence() {
-    rejected("trait Other {assoc seed:bool=true;} trait Child {assoc value:bool=Self.as(Other).seed;} impl Other for bool {} impl Child for bool {}", "associated value requires an established concrete implementation or a given interface constraint");
-    rejected("trait Allowed {} impl Allowed for bool {} trait Parent {assoc seed:bool=false;} trait Child :- Parent {assoc derived:bool=not Self.as(Parent).seed;} struct Host where X {} impl Parent for Host<X> where X :- Allowed {} impl Child for Host<X> where X :- Allowed {} fn leak(value:T)->bool where T {T.as(Parent).seed}", "associated value requires an established concrete implementation or a given interface constraint");
+    rejected(
+        "trait Other {assoc seed:bool=true;} trait Child {assoc value:bool=Self.as(Other).seed;} impl Other for bool {} impl Child for bool {}",
+        "associated value requires an established concrete implementation or a given interface constraint",
+    );
+    rejected(
+        "trait Allowed {} impl Allowed for bool {} trait Parent {assoc seed:bool=false;} trait Child :- Parent {assoc derived:bool=not Self.as(Parent).seed;} struct Host where X {} impl Parent for Host<X> where X :- Allowed {} impl Child for Host<X> where X :- Allowed {} fn leak(value:T)->bool where T {T.as(Parent).seed}",
+        "associated value requires an established concrete implementation or a given interface constraint",
+    );
 }
 
 #[test]
 fn associated_initializer_cycles_through_comptime_calls_are_rejected() {
-    rejected("comptime fn read()->bool where T :- Flags {T.as(Flags).value} trait Flags {assoc value:bool=read<Self>();} impl Flags for bool {}", "cyclic");
+    rejected(
+        "comptime fn read()->bool where T :- Flags {T.as(Flags).value} trait Flags {assoc value:bool=read<Self>();} impl Flags for bool {}",
+        "cyclic",
+    );
 }
 
 #[test]
 fn associated_type_predicates_reject_wrong_values_and_opaque_head_unfolding() {
-    for value in ["'x''type","Identity<bool>"] {
-        rejected(&format!("pure comptime fn Identity<T>->.Type'builtin {{T}} trait Source {{assoc Item:.Type'builtin;}} impl Source for bool {{assoc Item:.Type'builtin={value};}} comptime fn agrees()->bool where T :- Source, requires T.as(Source).Item == bool {{true}} trait Result {{assoc value:bool=agrees<bool>();}} impl Result for bool {{}}"),"type requirement");
+    for value in ["'x''type", "Identity<bool>"] {
+        rejected(
+            &format!(
+                "pure comptime fn Identity<T>->.Type'builtin {{T}} trait Source {{assoc Item:.Type'builtin;}} impl Source for bool {{assoc Item:.Type'builtin={value};}} comptime fn agrees()->bool where T :- Source, requires T.as(Source).Item == bool {{true}} trait Result {{assoc value:bool=agrees<bool>();}} impl Result for bool {{}}"
+            ),
+            "type requirement",
+        );
     }
 }
-
 
 #[test]
 fn associated_projection_initializer_order_does_not_accept_wrong_selected_types() {
@@ -5374,7 +6077,6 @@ fn associated_projection_initializer_order_does_not_accept_wrong_selected_types(
     }
 }
 
-
 #[test]
 fn projected_trait_subjects_require_evidence_for_the_projected_type() {
     rejected(
@@ -5386,7 +6088,6 @@ fn projected_trait_subjects_require_evidence_for_the_projected_type() {
         "type requirement is not satisfied",
     );
 }
-
 
 #[test]
 fn positive_requires_capabilities_are_checked_at_calls_and_nominal_formation() {
@@ -5502,291 +6203,680 @@ fn trait_absence_queries_do_not_guess_equalities_or_ignore_matching_impls() {
 
 #[test]
 fn effect_computation_labels_require_valid_instances() {
-    rejected("effect echo(value:T)->T where T, requires T == bool; fn take(value:#[echo<'x''type>] bool) {}", "type requirement");
-    rejected("effect enum IO where T, requires T == bool {read()->T,} fn take(value:#IO<'x''type> bool) {}", "type requirement");
-    rejected("effect enum IO where T, requires T == bool {read()->T,} fn take(value:#IO<'x''type>.read bool) {}", "type requirement");
-    rejected("trait Marker {} effect echo(value:T)->T where T :- Marker; fn take(value:#[echo<bool>] bool) {}", "trait bound is not established");
-    accepted("trait Marker {} impl Marker for bool {} effect echo(value:T)->T where T :- Marker; fn take(value:#[echo<bool>] bool) {}");
-    accepted("effect echo(value:T)->T where T, requires T == bool; fn take(value:#[echo<bool>] bool) {}");
-    accepted("effect enum IO where T, requires T == bool {read()->T,} fn take(value:#IO<bool> bool) {}");
-    rejected("effect echo(value:T)->T where T; fn take(value:#echo bool) {}", "effect operation Type argument count mismatch");
-    rejected("effect enum IO where T {read()->T,} fn take(value:#IO bool) {}", "effect group Type argument count mismatch");
-    rejected("struct Data {} fn take(value:#Data bool) {}", "effect row entry is not an effect operation or group");
-    rejected("effect enum IO {read()->bool,} fn take(value:#IO.missing bool) {}", "unknown effect group operation");
+    rejected(
+        "effect echo(value:T)->T where T, requires T == bool; fn take(value:#[echo<'x''type>] bool) {}",
+        "type requirement",
+    );
+    rejected(
+        "effect enum IO where T, requires T == bool {read()->T,} fn take(value:#IO<'x''type> bool) {}",
+        "type requirement",
+    );
+    rejected(
+        "effect enum IO where T, requires T == bool {read()->T,} fn take(value:#IO<'x''type>.read bool) {}",
+        "type requirement",
+    );
+    rejected(
+        "trait Marker {} effect echo(value:T)->T where T :- Marker; fn take(value:#[echo<bool>] bool) {}",
+        "trait bound is not established",
+    );
+    accepted(
+        "trait Marker {} impl Marker for bool {} effect echo(value:T)->T where T :- Marker; fn take(value:#[echo<bool>] bool) {}",
+    );
+    accepted(
+        "effect echo(value:T)->T where T, requires T == bool; fn take(value:#[echo<bool>] bool) {}",
+    );
+    accepted(
+        "effect enum IO where T, requires T == bool {read()->T,} fn take(value:#IO<bool> bool) {}",
+    );
+    rejected(
+        "effect echo(value:T)->T where T; fn take(value:#echo bool) {}",
+        "effect operation Type argument count mismatch",
+    );
+    rejected(
+        "effect enum IO where T {read()->T,} fn take(value:#IO bool) {}",
+        "effect group Type argument count mismatch",
+    );
+    rejected(
+        "struct Data {} fn take(value:#Data bool) {}",
+        "effect row entry is not an effect operation or group",
+    );
+    rejected(
+        "effect enum IO {read()->bool,} fn take(value:#IO.missing bool) {}",
+        "unknown effect group operation",
+    );
 }
 
 #[test]
 fn effect_row_equality_uses_scoped_label_and_generic_type_evidence() {
-    accepted("effect a()->bool; effect b()->bool; fn reorder(value:#[a,b,a] bool)->#[b,a,a] bool {value}");
-    accepted("effect echo(value:T)->T where T; fn reorder(value:#[echo<A>,echo<B>] bool)->#[echo<B>,echo<A>] bool where A, B, requires not (A == B) {value}");
-    accepted("effect echo(value:T)->T where T; fn reorder(value:#[echo<bool>,echo<'x''type>] bool)->#[echo<'x''type>,echo<bool>] bool {value}");
-    rejected("effect a()->bool; effect b()->bool; fn erase(value:#[a,b,a] bool)->#[b,a] bool {value}", "effect request has no complete handler route");
-    rejected("effect echo(value:T)->T where T; fn change(value:#[echo<A>] bool)->#[echo<B>] bool where A, B {value}", "effect operation identity needs further evidence");
+    accepted(
+        "effect a()->bool; effect b()->bool; fn reorder(value:#[a,b,a] bool)->#[b,a,a] bool {value}",
+    );
+    accepted(
+        "effect echo(value:T)->T where T; fn reorder(value:#[echo<A>,echo<B>] bool)->#[echo<B>,echo<A>] bool where A, B, requires not (A == B) {value}",
+    );
+    accepted(
+        "effect echo(value:T)->T where T; fn reorder(value:#[echo<bool>,echo<'x''type>] bool)->#[echo<'x''type>,echo<bool>] bool {value}",
+    );
+    rejected(
+        "effect a()->bool; effect b()->bool; fn erase(value:#[a,b,a] bool)->#[b,a] bool {value}",
+        "effect request has no complete handler route",
+    );
+    rejected(
+        "effect echo(value:T)->T where T; fn change(value:#[echo<A>] bool)->#[echo<B>] bool where A, B {value}",
+        "effect operation identity needs further evidence",
+    );
+}
+
+#[test]
+fn effect_qualified_types_are_operands_of_outer_type_requirements() {
+    accepted(
+        "effect a()->bool; fn same()->bool where requires #a bool == #a bool {true} fn run()->bool {same()}",
+    );
+    accepted(
+        "effect a()->bool; effect b()->bool; fn same()->bool where requires #[a,b] bool == #[b,a] bool {true} fn run()->bool {same()}",
+    );
+    accepted(
+        "effect a()->bool; fn same()->bool where requires #a fn()->bool == (#a fn()->bool) {true} fn run()->bool {same()}",
+    );
+    rejected(
+        "effect a()->bool; effect b()->bool; fn wrong()->bool where requires #a bool == #b bool {true} fn run()->bool {wrong()}",
+        "type requirement",
+    );
 }
 
 #[test]
 fn generic_calls_infer_effect_results_instances_and_residual_rows() {
-    accepted("effect a()->bool; fn retain(value:#a T)->#a T where T {value} fn caller(value:#a bool)->#a bool {retain(value)}");
-    accepted("effect a()->bool; effect b()->bool; fn retain(value:#a T)->#a T where T {value} fn caller(value:#[b,a] bool)->#[b,a] bool {retain(value)}");
-    accepted("effect echo(value:T)->T where T; fn retain(value:#[echo<T>,echo<bool>] bool)->#[echo<T>,echo<bool>] bool where T {value} fn caller(value:#[echo<bool>,echo<'x''type>] bool)->#[echo<bool>,echo<'x''type>] bool {retain(value)}");
-    accepted("effect echo(value:T)->T where T; fn keep(value:#[echo<T>,echo<U>] bool,witness:(T,U))->(T,U) where T,U {witness} fn caller(value:#[echo<bool>,echo<'x''type>] bool)->(bool,'x''type) {keep(value,(true,'x'))}");
+    accepted(
+        "effect a()->bool; fn retain(value:#a T)->#a T where T {value} fn caller(value:#a bool)->#a bool {retain(value)}",
+    );
+    accepted(
+        "effect a()->bool; effect b()->bool; fn retain(value:#a T)->#a T where T {value} fn caller(value:#[b,a] bool)->#[b,a] bool {retain(value)}",
+    );
+    accepted(
+        "effect echo(value:T)->T where T; fn retain(value:#[echo<T>,echo<bool>] bool)->#[echo<T>,echo<bool>] bool where T {value} fn caller(value:#[echo<bool>,echo<'x''type>] bool)->#[echo<bool>,echo<'x''type>] bool {retain(value)}",
+    );
+    accepted(
+        "effect echo(value:T)->T where T; fn keep(value:#[echo<T>,echo<U>] bool,witness:(T,U))->(T,U) where T,U {witness} fn caller(value:#[echo<bool>,echo<'x''type>] bool)->(bool,'x''type) {keep(value,(true,'x'))}",
+    );
 }
 
 #[test]
 fn source_effect_requests_require_allowed_rows_and_typed_operation_inputs() {
-    accepted("trait Marker {} effect echo(value:T)->T where T :- Marker; fn generic(value:T)->#[echo<T>] T where T :- Marker {echo<T>(value)#}");
-    rejected("effect read()->bool; fn missing()->bool {read()#}","effect request requires an explicit allowed effect row");
-    rejected("effect a()->bool; effect b()->bool; fn missing()->#a bool {b()#}","effect request has no complete handler route");
-    rejected("effect echo(value:bool)->bool; fn bad()->#echo bool {echo('x')#}","type mismatch");
-    rejected("effect echo(value:bool)->bool; fn bad()->#echo bool {echo()#}","effect request argument count mismatch");
-    rejected("effect read()->bool; comptime fn bad()->#read bool {read()#}","comptime effect requests are not implemented");
+    accepted(
+        "trait Marker {} effect echo(value:T)->T where T :- Marker; fn generic(value:T)->#[echo<T>] T where T :- Marker {echo<T>(value)#}",
+    );
+    rejected(
+        "effect read()->bool; fn missing()->bool {read()#}",
+        "effect request requires an explicit allowed effect row",
+    );
+    rejected(
+        "effect a()->bool; effect b()->bool; fn missing()->#a bool {b()#}",
+        "effect request has no complete handler route",
+    );
+    rejected(
+        "effect echo(value:bool)->bool; fn bad()->#echo bool {echo('x')#}",
+        "type mismatch",
+    );
+    rejected(
+        "effect echo(value:bool)->bool; fn bad()->#echo bool {echo()#}",
+        "effect request argument count mismatch",
+    );
+    rejected(
+        "effect read()->bool; comptime fn bad()->#read bool {read()#}",
+        "comptime effect requests are not implemented",
+    );
 }
 
 #[test]
 fn source_effect_requests_do_not_call_groups_or_capture_unannotated_lambda_environments() {
-    rejected("effect enum IO {read()->bool,} fn bad()->#IO bool {IO()#}","effect group is not an operation");
-    rejected("effect read()->bool; fn bad()->#read bool {let closure=|| read()#; read()#}","effect request requires an explicit allowed effect row");
+    rejected(
+        "effect enum IO {read()->bool,} fn bad()->#IO bool {IO()#}",
+        "effect group is not an operation",
+    );
+    rejected(
+        "effect read()->bool; fn bad()->#read bool {let closure=|| read()#; read()#}",
+        "effect request requires an explicit allowed effect row",
+    );
 }
 
 #[test]
 fn effect_results_keep_machine_arithmetic_checks_and_allow_post_request_guards() {
-    rejected("typealias Byte=.u8'builtin; effect read()->Byte; fn overflow()->#read Byte {read()# + 1}","machine arithmetic range is not proven");
-    accepted("typealias Byte=.u8'builtin; effect read()->Byte; fn guarded()->#read Byte {let value=read()#; if value < 255 {value + 1} else {0}}");
-    rejected("effect a()->bool; effect b()->bool; fn inner()->#b bool {b()#} fn outer()->#a bool {inner()}","effect request has no complete handler route");
+    rejected(
+        "typealias Byte=.u8'builtin; effect read()->Byte; fn overflow()->#read Byte {read()# + 1}",
+        "machine arithmetic range is not proven",
+    );
+    accepted(
+        "typealias Byte=.u8'builtin; effect read()->Byte; fn guarded()->#read Byte {let value=read()#; if value < 255 {value + 1} else {0}}",
+    );
+    rejected(
+        "effect a()->bool; effect b()->bool; fn inner()->#b bool {b()#} fn outer()->#a bool {inner()}",
+        "effect request has no complete handler route",
+    );
 }
 
 #[test]
 fn direct_passing_declarations_reject_arguments_async_and_missing_outer_supply() {
-    rejected("^attrs.effects.direct_passing effect bad(value:bool)->bool;", "direct passing effects must be synchronous and have no parameters");
-    rejected("^attrs.effects.direct_passing async effect bad()->bool;", "direct passing effects must be synchronous and have no parameters");
-    rejected("effect enum Config {^attrs.effects.direct_passing bad(value:bool)->bool,}", "direct passing effects must be synchronous and have no parameters");
-    rejected("^attrs.effects.direct_passing effect setting()->bool; fn run()->bool {setting()# {setting() if false=>true,}}", "partial effect handler requires an outer entry");
-    rejected("^attrs.effects.direct_passing effect setting()->bool; fn run()->bool {setting()# {setting()=>setting()#,}}", "explicit allowed effect row");
-    rejected("^attrs.effects.direct_passing effect setting()->bool; fn run()->bool {setting()# {setting()=>'x',}}", "type");
-    accepted("^attrs.effects.direct_passing inline effect setting()->bool; fn run()->bool {setting()# {setting()=>true,}}");
+    rejected(
+        "^attrs.effects.direct_passing effect bad(value:bool)->bool;",
+        "direct passing effects must be synchronous and have no parameters",
+    );
+    rejected(
+        "^attrs.effects.direct_passing async effect bad()->bool;",
+        "direct passing effects must be synchronous and have no parameters",
+    );
+    rejected(
+        "effect enum Config {^attrs.effects.direct_passing bad(value:bool)->bool,}",
+        "direct passing effects must be synchronous and have no parameters",
+    );
+    rejected(
+        "^attrs.effects.direct_passing effect setting()->bool; fn run()->bool {setting()# {setting() if false=>true,}}",
+        "partial effect handler requires an outer entry",
+    );
+    rejected(
+        "^attrs.effects.direct_passing effect setting()->bool; fn run()->bool {setting()# {setting()=>setting()#,}}",
+        "explicit allowed effect row",
+    );
+    rejected(
+        "^attrs.effects.direct_passing effect setting()->bool; fn run()->bool {setting()# {setting()=>'x',}}",
+        "type",
+    );
+    accepted(
+        "^attrs.effects.direct_passing inline effect setting()->bool; fn run()->bool {setting()# {setting()=>true,}}",
+    );
 }
 
 #[test]
 fn direct_passing_installation_invalidates_captured_arithmetic_facts_before_subject() {
-    rejected("typealias Byte=.u8'builtin; ^attrs.effects.direct_passing effect setting()->bool; fn run()->Byte {var value:Byte=0; do {value + 1}# {setting()=>{value=255;true},}}", "machine arithmetic range is not proven");
-    accepted("typealias Byte=.u8'builtin; ^attrs.effects.direct_passing effect setting()->bool; fn run()->Byte {var value:Byte=0; do {if value < 255 {value + 1} else {0}}# {setting()=>{value=255;true},}}");
+    rejected(
+        "typealias Byte=.u8'builtin; ^attrs.effects.direct_passing effect setting()->bool; fn run()->Byte {var value:Byte=0; do {value + 1}# {setting()=>{value=255;true},}}",
+        "machine arithmetic range is not proven",
+    );
+    accepted(
+        "typealias Byte=.u8'builtin; ^attrs.effects.direct_passing effect setting()->bool; fn run()->Byte {var value:Byte=0; do {if value < 255 {value + 1} else {0}}# {setting()=>{value=255;true},}}",
+    );
 }
 
 #[test]
 fn direct_effect_handlers_reject_wrong_signatures_and_missing_outer_routes() {
-    rejected("effect read()->bool; fn source()->#read bool {read()#} fn run()->bool {source()# {read(value)=>true,}}", "effect handler parameter count mismatch");
-    rejected("effect read()->bool; fn source()->#read bool {read()#} fn run()->bool {source()# {read()=>'x',}}", "type");
-    rejected("effect read(value:bool)->bool; fn source()->#read bool {read(true)#} fn run()->bool {source()# {read(true)=>false,}}", "partial effect handler requires an outer entry");
-    rejected("effect read()->bool; fn source()->#read bool {read()#} fn run()->bool {source()# {read()=>read()#,}}", "explicit allowed effect row");
-    rejected("effect read()->bool; fn source()->#read bool {read()#} fn run()->bool {source()# {read() if false=>true,}}", "partial effect handler requires an outer entry");
+    rejected(
+        "effect read()->bool; fn source()->#read bool {read()#} fn run()->bool {source()# {read(value)=>true,}}",
+        "effect handler parameter count mismatch",
+    );
+    rejected(
+        "effect read()->bool; fn source()->#read bool {read()#} fn run()->bool {source()# {read()=>'x',}}",
+        "type",
+    );
+    rejected(
+        "effect read(value:bool)->bool; fn source()->#read bool {read(true)#} fn run()->bool {source()# {read(true)=>false,}}",
+        "partial effect handler requires an outer entry",
+    );
+    rejected(
+        "effect read()->bool; fn source()->#read bool {read()#} fn run()->bool {source()# {read()=>read()#,}}",
+        "explicit allowed effect row",
+    );
+    rejected(
+        "effect read()->bool; fn source()->#read bool {read()#} fn run()->bool {source()# {read() if false=>true,}}",
+        "partial effect handler requires an outer entry",
+    );
 }
 
 #[test]
 fn direct_effect_handlers_check_arithmetic_inside_branches_without_capture_facts() {
-    let prefix="typealias Byte=.u8'builtin; effect read(value:Byte)->Byte; fn source()->#read Byte {read(0)#}";
-    accepted(&format!("{prefix} fn run()->Byte {{source()# {{read(value)=>if value < 255 {{value + 1}} else {{0}},}}}}"));
-    rejected(&format!("{prefix} fn run()->Byte {{source()# {{read(value)=>value + 1,}}}}"),"machine arithmetic range is not proven");
-    rejected(&format!("{prefix} fn run()->Byte {{var captured:Byte=0; source()# {{read(value)=>captured + 1,}}}}"),"machine arithmetic range is not proven");
-    accepted(&format!("{prefix} fn run()->#read Byte {{source()# {{read(value) if value < 255=>value + 1,}}}}"));
+    let prefix = "typealias Byte=.u8'builtin; effect read(value:Byte)->Byte; fn source()->#read Byte {read(0)#}";
+    accepted(&format!(
+        "{prefix} fn run()->Byte {{source()# {{read(value)=>if value < 255 {{value + 1}} else {{0}},}}}}"
+    ));
+    rejected(
+        &format!("{prefix} fn run()->Byte {{source()# {{read(value)=>value + 1,}}}}"),
+        "machine arithmetic range is not proven",
+    );
+    rejected(
+        &format!(
+            "{prefix} fn run()->Byte {{var captured:Byte=0; source()# {{read(value)=>captured + 1,}}}}"
+        ),
+        "machine arithmetic range is not proven",
+    );
+    accepted(&format!(
+        "{prefix} fn run()->#read Byte {{source()# {{read(value) if value < 255=>value + 1,}}}}"
+    ));
 }
 
 #[test]
 fn direct_effect_handlers_preserve_lexical_return_and_operation_result_distinction() {
-    accepted("effect read()->bool; fn source()->#read bool {read()#} fn run()->'x''type {source()# {read()=>return 'x',}; 'y'}");
-    rejected("effect read()->bool; fn source()->#read bool {read()#} fn run()->'x''type {source()# {read()=>return true,}; 'y'}","type");
-    rejected("effect enum IO {read()->bool,} fn source()->#IO bool {IO.read()#} fn run()->bool {source()# {IO()=>true,}}","effect group is not an operation");
-    rejected("effect a()->bool; effect b()->bool; fn source()->#[a,b] bool {a()# and b()#} fn run()->bool {source()# {a()=>b()#, b()=>true,}}","explicit allowed effect row");
-    rejected("effect read()->bool; fn source()->#read bool {read()#} fn run()->bool {source()# {read()=> {let f=|| read()#; true},}}","explicit allowed effect row");
+    accepted(
+        "effect read()->bool; fn source()->#read bool {read()#} fn run()->'x''type {source()# {read()=>return 'x',}; 'y'}",
+    );
+    rejected(
+        "effect read()->bool; fn source()->#read bool {read()#} fn run()->'x''type {source()# {read()=>return true,}; 'y'}",
+        "type",
+    );
+    rejected(
+        "effect enum IO {read()->bool,} fn source()->#IO bool {IO.read()#} fn run()->bool {source()# {IO()=>true,}}",
+        "effect group is not an operation",
+    );
+    rejected(
+        "effect a()->bool; effect b()->bool; fn source()->#[a,b] bool {a()# and b()#} fn run()->bool {source()# {a()=>b()#, b()=>true,}}",
+        "explicit allowed effect row",
+    );
+    rejected(
+        "effect read()->bool; fn source()->#read bool {read()#} fn run()->bool {source()# {read()=> {let f=|| read()#; true},}}",
+        "explicit allowed effect row",
+    );
 }
 
 #[test]
 fn direct_effect_handlers_resume_only_the_lexical_branch_and_do_not_cross_closures() {
     accepted("effect read()->bool; fn run()->bool {read()# {read()=> {resume true; false},}}");
-    accepted("effect read()->bool; fn run()->bool {read()# {read()=> {resume true while false; false},}}");
+    accepted(
+        "effect read()->bool; fn run()->bool {read()# {read()=> {resume true while false; false},}}",
+    );
     accepted("effect write(); fn run() {write()# {write()=>resume,}}");
     accepted("effect read()->bool; fn run()->bool {let f=|| read()# {read()=>true,}; f()}");
-    accepted("effect a()->bool; effect b()->'x''type; fn run()->bool {a()# {a()=> {b()# {b()=>resume 'x',}; resume true},}}");
-    rejected("effect read()->bool; fn run()->bool {read()# {read()=>resume 'x',}}", "type");
-    rejected("effect read()->bool; fn run()->bool {read()# {read()=> {let f=|| {resume true}; false},}}", "resume requires an enclosing direct effect branch");
-    rejected("fn run()->bool {resume true}", "resume requires an enclosing direct effect branch");
-    rejected("effect read()->bool; fn run()->bool {read()# {read()=>true,}; resume true}", "resume requires an enclosing direct effect branch");
+    accepted(
+        "effect a()->bool; effect b()->'x''type; fn run()->bool {a()# {a()=> {b()# {b()=>resume 'x',}; resume true},}}",
+    );
+    rejected(
+        "effect read()->bool; fn run()->bool {read()# {read()=>resume 'x',}}",
+        "type",
+    );
+    rejected(
+        "effect read()->bool; fn run()->bool {read()# {read()=> {let f=|| {resume true}; false},}}",
+        "resume requires an enclosing direct effect branch",
+    );
+    rejected(
+        "fn run()->bool {resume true}",
+        "resume requires an enclosing direct effect branch",
+    );
+    rejected(
+        "effect read()->bool; fn run()->bool {read()# {read()=>true,}; resume true}",
+        "resume requires an enclosing direct effect branch",
+    );
 }
 
 #[test]
 fn direct_effect_handlers_group_labels_only_with_scoped_identity_evidence() {
-    let prefix="effect echo(value:T)->T where T;";
-    rejected(&format!("{prefix} fn run(value:T)->T where T,U {{echo<T>(value)# {{echo<T>(x)=>x, echo<U>(y)=>y,}}}}"),"effect operation identity needs further evidence");
-    accepted(&format!("{prefix} fn run(value:T)->T where T,U,requires T == U {{echo<T>(value)# {{echo<T>(x)=>x, echo<U>(y)=>y,}}}}"));
+    let prefix = "effect echo(value:T)->T where T;";
+    rejected(
+        &format!(
+            "{prefix} fn run(value:T)->T where T,U {{echo<T>(value)# {{echo<T>(x)=>x, echo<U>(y)=>y,}}}}"
+        ),
+        "effect operation identity needs further evidence",
+    );
+    accepted(&format!(
+        "{prefix} fn run(value:T)->T where T,U,requires T == U {{echo<T>(value)# {{echo<T>(x)=>x, echo<U>(y)=>y,}}}}"
+    ));
 }
 
 #[test]
 fn source_effect_signature_expansion_is_bounded_before_argument_or_branch_checking() {
-    let parameter=format!("({})",vec!["T";256].join(","));
-    let argument=format!("({})",vec!["bool";512].join(","));
-    let prefix=format!("effect expanded(value:{parameter})->bool where T;");
+    let parameter = format!("({})", vec!["T"; 256].join(","));
+    let argument = format!("({})", vec!["bool"; 512].join(","));
+    let prefix = format!("effect expanded(value:{parameter})->bool where T;");
     // No argument is needed to trigger the request signature guard. It must
     // reject expansion before reporting the later source arity mismatch.
-    rejected(&format!("{prefix} fn request()->#[expanded<{argument}>] bool {{expanded<{argument}>()#}}"),"effect routing budget exhausted");
+    rejected(
+        &format!("{prefix} fn request()->#[expanded<{argument}>] bool {{expanded<{argument}>()#}}"),
+        "effect routing budget exhausted",
+    );
     // An unused handler must still form its operation signature safely.
-    rejected(&format!("{prefix} fn install()->bool {{true# {{expanded<{argument}>(_)=>true,}}}}"),"effect routing budget exhausted");
-    accepted("effect echo(value:T)->T where T; fn run()->bool {echo<bool>(true)# {echo<bool>(value)=>value,}}");
+    rejected(
+        &format!("{prefix} fn install()->bool {{true# {{expanded<{argument}>(_)=>true,}}}}"),
+        "effect routing budget exhausted",
+    );
+    accepted(
+        "effect echo(value:T)->T where T; fn run()->bool {echo<bool>(true)# {echo<bool>(value)=>value,}}",
+    );
 }
 
 #[test]
 fn source_effect_handlers_establish_operation_contracts_even_when_unused() {
-    let prefix="trait Marker {} effect echo(value:T)->T where T :- Marker;";
-    rejected(&format!("{prefix} fn run()->bool {{true# {{echo<bool>(value)=>value,}}}}"),"trait bound is not established");
-    accepted(&format!("{prefix} impl Marker for bool {{}} fn run()->bool {{true# {{echo<bool>(value)=>value,}}}}"));
-    accepted(&format!("{prefix} fn run(value:T)->T where T :- Marker {{echo<T>(value)# {{echo<T>(item)=>item,}}}}"));
+    let prefix = "trait Marker {} effect echo(value:T)->T where T :- Marker;";
+    rejected(
+        &format!("{prefix} fn run()->bool {{true# {{echo<bool>(value)=>value,}}}}"),
+        "trait bound is not established",
+    );
+    accepted(&format!(
+        "{prefix} impl Marker for bool {{}} fn run()->bool {{true# {{echo<bool>(value)=>value,}}}}"
+    ));
+    accepted(&format!(
+        "{prefix} fn run(value:T)->T where T :- Marker {{echo<T>(value)# {{echo<T>(item)=>item,}}}}"
+    ));
 }
 
 #[test]
 fn generic_effect_requests_reject_wrong_rows_missing_context_and_unproved_contracts() {
-    rejected("typealias Char='x''type; effect echo(value:T)->T where T; fn run()->#[echo<bool>] Char {echo('x')#}","effect request has no complete handler route");
-    rejected("effect choose()->T where T; fn run()->#[choose<bool>] bool {choose()#;true}","inference");
-    rejected("trait Mark {} effect echo(value:T)->T where T :- Mark; fn run()->bool {echo(true)# {echo<bool>(x)=>x,}}","trait bound is not established");
-    accepted("trait Mark {} effect echo(value:T)->T where T :- Mark; fn run(value:T)->#[echo<T>] T where T :- Mark {echo(value)#}");
-    rejected("effect echo(value:T)->T where T; fn run()->#[echo<bool>] bool {echo(true,false)#}","effect request argument count mismatch");
+    rejected(
+        "typealias Char='x''type; effect echo(value:T)->T where T; fn run()->#[echo<bool>] Char {echo('x')#}",
+        "effect request has no complete handler route",
+    );
+    rejected(
+        "effect choose()->T where T; fn run()->#[choose<bool>] bool {choose()#;true}",
+        "inference",
+    );
+    rejected(
+        "trait Mark {} effect echo(value:T)->T where T :- Mark; fn run()->bool {echo(true)# {echo<bool>(x)=>x,}}",
+        "trait bound is not established",
+    );
+    accepted(
+        "trait Mark {} effect echo(value:T)->T where T :- Mark; fn run(value:T)->#[echo<T>] T where T :- Mark {echo(value)#}",
+    );
+    rejected(
+        "effect echo(value:T)->T where T; fn run()->#[echo<bool>] bool {echo(true,false)#}",
+        "effect request argument count mismatch",
+    );
 }
-
 
 #[test]
 fn trait_type_defaults_reject_invalid_argument_routes_and_values() {
-    let prefix="typealias Type=.Type'builtin;";
+    let prefix = "typealias Type=.Type'builtin;";
     for (source, diagnostic) in [
-        ("trait Pick where .T:Type=bool {} impl Pick<bool> for bool {}", "argument count mismatch"),
-        ("trait Pick where .T:Type=bool {} impl Pick<.Other=bool> for bool {}", "unknown named type argument"),
-        ("trait Pick where .T:Type=bool {} impl Pick<.T=bool,.T=bool> for bool {}", "duplicate type argument"),
-        ("trait Pick where T,.U:Type=bool {} impl Pick for bool {}", "argument count mismatch"),
-        ("trait Pick where .T:Type=T {} impl Pick for bool {}", "type default references"),
-        ("trait Pick where .T:Type=false {} impl Pick for bool {}", "type"),
-    ] { rejected(&format!("{prefix}{source}"), diagnostic); }
+        (
+            "trait Pick where .T:Type=bool {} impl Pick<bool> for bool {}",
+            "argument count mismatch",
+        ),
+        (
+            "trait Pick where .T:Type=bool {} impl Pick<.Other=bool> for bool {}",
+            "unknown named type argument",
+        ),
+        (
+            "trait Pick where .T:Type=bool {} impl Pick<.T=bool,.T=bool> for bool {}",
+            "duplicate type argument",
+        ),
+        (
+            "trait Pick where T,.U:Type=bool {} impl Pick for bool {}",
+            "argument count mismatch",
+        ),
+        (
+            "trait Pick where .T:Type=T {} impl Pick for bool {}",
+            "type default references",
+        ),
+        (
+            "trait Pick where .T:Type=false {} impl Pick for bool {}",
+            "type",
+        ),
+    ] {
+        rejected(&format!("{prefix}{source}"), diagnostic);
+    }
 }
-
 
 #[test]
 fn trait_type_default_definitions_are_checked_even_when_unused_or_overridden() {
     for source in [
         "trait Pick where .T:.Type'builtin=false {}",
         "trait Pick where .T:.Type'builtin=false {} impl Pick<.T=bool> for bool {}",
-    ] { rejected(source, "type"); }
+    ] {
+        rejected(source, "type");
+    }
     for source in [
         "trait Pick where .T:.Type'builtin=T {}",
         "comptime fn Identity(value:.Type'builtin)->.Type'builtin {value} trait Pick where .T:.Type'builtin=Identity(T) {}",
-    ] { rejected(source, "type default references"); }
+    ] {
+        rejected(source, "type default references");
+    }
 }
-
 
 #[test]
 fn nominal_type_defaults_reject_invalid_declarations_and_routes() {
     for (source, diagnostic) in [
-        ("trait Mark {} impl Mark for bool {} struct Holder where .T:.Type'builtin=bool,requires T :- Mark {value:T,} fn bad()->Holder<.T='x''type> {Holder<.T='x''type> {value:'x'}}", "trait bound is not established"),
+        (
+            "trait Mark {} impl Mark for bool {} struct Holder where .T:.Type'builtin=bool,requires T :- Mark {value:T,} fn bad()->Holder<.T='x''type> {Holder<.T='x''type> {value:'x'}}",
+            "trait bound is not established",
+        ),
         ("struct Holder where .T:.Type'builtin=false {}", "type"),
-        ("enum Choice where .T:.Type'builtin=T {empty,}", "type default references"),
-        ("struct Holder where .T:.Type'builtin=bool {} typealias Bad=Holder<bool>;", "argument count mismatch"),
-        ("struct Holder where .T:.Type'builtin=bool {} typealias Bad=Holder<.T=bool,.T=bool>;", "duplicate type argument"),
-        ("struct Holder where .T:.Type'builtin=bool {} typealias Bad=Holder<.Other=bool>;", "unknown named type argument"),
-        ("struct Holder where A,.T:.Type'builtin=bool {} typealias Bad=Holder;", "requires explicit type arguments"),
-        ("struct Holder where .T:.Type'builtin=bool {value:T,} fn bad()->Holder {Holder {value:'x'}}", "type"),
-        ("struct Holder where .T:.Type'builtin=bool {value:T,} fn bad()->Holder<.T='x''type> {Holder {value:'x'}}", "type"),
-    ] { rejected(source,diagnostic); }
+        (
+            "enum Choice where .T:.Type'builtin=T {empty,}",
+            "type default references",
+        ),
+        (
+            "struct Holder where .T:.Type'builtin=bool {} typealias Bad=Holder<bool>;",
+            "argument count mismatch",
+        ),
+        (
+            "struct Holder where .T:.Type'builtin=bool {} typealias Bad=Holder<.T=bool,.T=bool>;",
+            "duplicate type argument",
+        ),
+        (
+            "struct Holder where .T:.Type'builtin=bool {} typealias Bad=Holder<.Other=bool>;",
+            "unknown named type argument",
+        ),
+        (
+            "struct Holder where A,.T:.Type'builtin=bool {} typealias Bad=Holder;",
+            "requires explicit type arguments",
+        ),
+        (
+            "struct Holder where .T:.Type'builtin=bool {value:T,} fn bad()->Holder {Holder {value:'x'}}",
+            "type",
+        ),
+        (
+            "struct Holder where .T:.Type'builtin=bool {value:T,} fn bad()->Holder<.T='x''type> {Holder {value:'x'}}",
+            "type",
+        ),
+    ] {
+        rejected(source, diagnostic);
+    }
 }
 
 #[test]
 fn typealias_defaults_reject_invalid_unused_defaults_and_missing_parameters() {
     for (source, diagnostic) in [
-        ("pure comptime fn Identity<T> -> .Type'builtin {T} typealias Alias<.T:.Type'builtin=Identity<bool>> = T;fn bad(value:Alias)->bool {value}", "unresolved type equality"),
+        (
+            "pure comptime fn Identity<T> -> .Type'builtin {T} typealias Alias<.T:.Type'builtin=Identity<bool>> = T;fn bad(value:Alias)->bool {value}",
+            "unresolved type equality",
+        ),
         ("typealias Bad<.T:.Type'builtin=false> = T;", "type"),
-        ("typealias Bad<.T:.Type'builtin=T> = T;", "type default references"),
-        ("typealias Pair<T,.U:.Type'builtin=T> = (T,U);typealias Bad=Pair;", "requires explicit type arguments"),
-        ("typealias Alias<.T:.Type'builtin=bool> = T;typealias Bad=Alias<bool>;", "argument count mismatch"),
-        ("typealias Alias<.T:.Type'builtin=bool> = T;typealias Bad=Alias<.T=bool,.T=bool>;", "duplicate type argument"),
-    ] { rejected(source,diagnostic); }
+        (
+            "typealias Bad<.T:.Type'builtin=T> = T;",
+            "type default references",
+        ),
+        (
+            "typealias Pair<T,.U:.Type'builtin=T> = (T,U);typealias Bad=Pair;",
+            "requires explicit type arguments",
+        ),
+        (
+            "typealias Alias<.T:.Type'builtin=bool> = T;typealias Bad=Alias<bool>;",
+            "argument count mismatch",
+        ),
+        (
+            "typealias Alias<.T:.Type'builtin=bool> = T;typealias Bad=Alias<.T=bool,.T=bool>;",
+            "duplicate type argument",
+        ),
+    ] {
+        rejected(source, diagnostic);
+    }
 }
 
 #[test]
 fn function_type_defaults_are_not_replaced_by_call_inference() {
     for (source, diagnostic) in [
-        ("fn keep(value:T)->T where .T:.Type'builtin=bool {value} fn bad() {keep('x');}", "type"),
-        ("fn keep(value:T)->T where .T:.Type'builtin=false {value}", "type"),
-        ("fn keep(value:T)->T where .T:.Type'builtin=T {value}", "type default references"),
-        ("fn keep(value:T)->T where .T:.Type'builtin=bool {value} fn bad() {keep<bool>(true);}", "argument count mismatch"),
-        ("fn keep(value:T)->T where .T:.Type'builtin=bool {value} fn bad() {let f:fn('x''type)->'x''type=keep;}", "type"),
-    ] {rejected(source,diagnostic);}
+        (
+            "fn keep(value:T)->T where .T:.Type'builtin=bool {value} fn bad() {keep('x');}",
+            "type",
+        ),
+        (
+            "fn keep(value:T)->T where .T:.Type'builtin=false {value}",
+            "type",
+        ),
+        (
+            "fn keep(value:T)->T where .T:.Type'builtin=T {value}",
+            "type default references",
+        ),
+        (
+            "fn keep(value:T)->T where .T:.Type'builtin=bool {value} fn bad() {keep<bool>(true);}",
+            "argument count mismatch",
+        ),
+        (
+            "fn keep(value:T)->T where .T:.Type'builtin=bool {value} fn bad() {let f:fn('x''type)->'x''type=keep;}",
+            "type",
+        ),
+    ] {
+        rejected(source, diagnostic);
+    }
 }
 
 #[test]
 fn inferred_type_defaults_cannot_be_bypassed_by_argument_or_result_types() {
-    let prefix="typealias Type=.Type'builtin;typealias char=.char'builtin;comptime fn Selected(value:Type)->Type {if value == bool {bool} else {char}}";
-    for (source,diagnostic) in [
-        ("fn keep(first:A,second:B)->B where A,.B:Type=Selected(A) {second} fn bad()->char {keep(true,'x')}", "inference"),
-        ("fn keep(first:A,second:B)->B where A,.B:Type=Selected(A) {second} fn bad() {let f:fn(bool,char)->char=keep;}", "inference"),
-        ("fn keep(value:B)->B where A,.B:Type=Selected(A) {value} fn bad()->bool {keep(true)}", "waiting for inferred inputs"),
-        ("comptime fn Invalid(value:Type)->Type {if value == bool {.BitVec'builtin<-1>} else {bool}} fn keep(first:A)->A where A,.B:Type=Invalid(A) {first} fn bad()->bool {keep(true)}", "required comptime evaluation failed"),
-    ] {rejected(&format!("{prefix}{source}"),diagnostic);}
+    let prefix = "typealias Type=.Type'builtin;typealias char=.char'builtin;comptime fn Selected(value:Type)->Type {if value == bool {bool} else {char}}";
+    for (source, diagnostic) in [
+        (
+            "fn keep(first:A,second:B)->B where A,.B:Type=Selected(A) {second} fn bad()->char {keep(true,'x')}",
+            "inference",
+        ),
+        (
+            "fn keep(first:A,second:B)->B where A,.B:Type=Selected(A) {second} fn bad() {let f:fn(bool,char)->char=keep;}",
+            "inference",
+        ),
+        (
+            "fn keep(value:B)->B where A,.B:Type=Selected(A) {value} fn bad()->bool {keep(true)}",
+            "waiting for inferred inputs",
+        ),
+        (
+            "comptime fn Invalid(value:Type)->Type {if value == bool {.BitVec'builtin<-1>} else {bool}} fn keep(first:A)->A where A,.B:Type=Invalid(A) {first} fn bad()->bool {keep(true)}",
+            "required comptime evaluation failed",
+        ),
+    ] {
+        rejected(&format!("{prefix}{source}"), diagnostic);
+    }
 }
 
 #[test]
 fn computed_type_defaults_keep_associated_contexts_candidate_local() {
     let prefix = "typealias Type=.Type'builtin; trait Source {assoc Item:Type;} impl Source for bool {assoc Item:Type=bool;} impl Source for 'x''type {assoc Item:Type='x''type;} comptime fn Selected(value:Type)->Type {if value == bool {bool} else {'x''type}} fn apply(value:A,item:B.as(Source).Item,callback:fn(B.as(Source).Item)->bool)->bool where A,.B:Type=Selected(A),requires B :- Source {callback(item)}";
-    rejected(&format!("{prefix} fn bad()->bool {{let valid=apply(true,false,|item| not item); apply('x','x',|item| not item)}}"), "type mismatch: expected (primitive bool), found (primitive char)");
+    rejected(
+        &format!(
+            "{prefix} fn bad()->bool {{let valid=apply(true,false,|item| not item); apply('x','x',|item| not item)}}"
+        ),
+        "type mismatch: expected (primitive bool), found (primitive char)",
+    );
 }
 
 #[test]
 fn normal_form_type_defaults_reject_bad_routing_and_preserve_opacity() {
     for (source, diagnostic) in [
-        ("pure comptime fn Identity<.T:.Type'builtin=bool>->.Type'builtin {T} fn bad(value:Identity<>)->bool {value}", "type"),
-        ("pure comptime fn Identity<.T:.Type'builtin=bool>->.Type'builtin {T} fn bad(value:Identity<bool>) {}", "argument count mismatch"),
-        ("pure comptime fn Identity<.T:.Type'builtin=bool>->.Type'builtin {T} fn bad(value:Identity<.T=bool,.T=bool>) {}", "duplicate type argument"),
-        ("pure comptime fn Identity<.T:.Type'builtin=T>->.Type'builtin {T}", "itself or a later parameter"),
-    ] {rejected(source,diagnostic);}
+        (
+            "pure comptime fn Identity<.T:.Type'builtin=bool>->.Type'builtin {T} fn bad(value:Identity<>)->bool {value}",
+            "type",
+        ),
+        (
+            "pure comptime fn Identity<.T:.Type'builtin=bool>->.Type'builtin {T} fn bad(value:Identity<bool>) {}",
+            "argument count mismatch",
+        ),
+        (
+            "pure comptime fn Identity<.T:.Type'builtin=bool>->.Type'builtin {T} fn bad(value:Identity<.T=bool,.T=bool>) {}",
+            "duplicate type argument",
+        ),
+        (
+            "pure comptime fn Identity<.T:.Type'builtin=T>->.Type'builtin {T}",
+            "itself or a later parameter",
+        ),
+    ] {
+        rejected(source, diagnostic);
+    }
 }
 
 #[test]
 fn mixed_normal_form_defaults_check_definition_scope_and_routing() {
-    for (source,diagnostic) in [
-        ("pure comptime fn Head<.N:bool=N>->.Type'builtin {bool}","itself or a later parameter"),
-        ("pure comptime fn Head<.N:bool=M,.M:bool=true>->.Type'builtin {bool}","itself or a later parameter"),
-        ("pure comptime fn Head<.N:bool='x'>->.Type'builtin {bool}","type mismatch"),
-        ("pure comptime fn Head<N:bool,.M:bool=N>->.Type'builtin {bool} fn bad(value:Head<true,.M=true,.M=false>) {}","duplicate normal-form argument"),
-        ("pure comptime fn Head<N:bool,.M:bool=N>->.Type'builtin {bool} fn bad(value:Head<>) {}","normal-form argument count mismatch"),
-    ] {rejected(source,diagnostic);}
+    for (source, diagnostic) in [
+        (
+            "pure comptime fn Head<.N:bool=N>->.Type'builtin {bool}",
+            "itself or a later parameter",
+        ),
+        (
+            "pure comptime fn Head<.N:bool=M,.M:bool=true>->.Type'builtin {bool}",
+            "itself or a later parameter",
+        ),
+        (
+            "pure comptime fn Head<.N:bool='x'>->.Type'builtin {bool}",
+            "type mismatch",
+        ),
+        (
+            "pure comptime fn Head<N:bool,.M:bool=N>->.Type'builtin {bool} fn bad(value:Head<true,.M=true,.M=false>) {}",
+            "duplicate normal-form argument",
+        ),
+        (
+            "pure comptime fn Head<N:bool,.M:bool=N>->.Type'builtin {bool} fn bad(value:Head<>) {}",
+            "normal-form argument count mismatch",
+        ),
+    ] {
+        rejected(source, diagnostic);
+    }
 }
 
 #[test]
 fn symbolic_normal_form_default_recovery_does_not_skip_constraints_or_unfold_heads() {
-    for (source,diagnostic) in [
-        ("typealias Type=.Type'builtin;pure comptime fn Head<T,N:bool,.M:bool=N>->Type where requires T == bool {T} fn bad(value:Head<T,true>) where T {}","requirement"),
-        ("typealias Type=.Type'builtin;pure comptime fn Head<T,N:bool,.M:bool=N>->Type {T} fn bad(value:Head<T,true>)->T where T {value}","type"),
-        ("typealias Type=.Type'builtin;typealias Integer=.Integer'builtin;comptime fn NeverReturns()->Integer {NeverReturns()} pure comptime fn Head<T,N:Integer,.M:Integer=NeverReturns()>->Type {T} typealias Bad=Head<bool,4>;", "required comptime evaluation failed"),
-    ] {rejected(source,diagnostic);}
+    for (source, diagnostic) in [
+        (
+            "typealias Type=.Type'builtin;pure comptime fn Head<T,N:bool,.M:bool=N>->Type where requires T == bool {T} fn bad(value:Head<T,true>) where T {}",
+            "requirement",
+        ),
+        (
+            "typealias Type=.Type'builtin;pure comptime fn Head<T,N:bool,.M:bool=N>->Type {T} fn bad(value:Head<T,true>)->T where T {value}",
+            "type",
+        ),
+        (
+            "typealias Type=.Type'builtin;typealias Integer=.Integer'builtin;comptime fn NeverReturns()->Integer {NeverReturns()} pure comptime fn Head<T,N:Integer,.M:Integer=NeverReturns()>->Type {T} typealias Bad=Head<bool,4>;",
+            "required comptime evaluation failed",
+        ),
+    ] {
+        rejected(source, diagnostic);
+    }
 }
 
 #[test]
 fn explicit_type_clauses_preserve_constraints_and_argument_sorts() {
-    rejected("fn keep(value:T)->T where T:.Type'builtin, requires T == bool {value} fn run() {keep('x');}", "type requirement");
-    rejected("struct Box where T:.Type'builtin, requires T == bool {value:T} fn run() {Box<'x''type> {value:'x'};}", "type requirement");
-    rejected("trait Allowed {} fn keep(value:T)->T where T:.Type'builtin, requires T :- Allowed {value} fn run() {keep(true);}", "trait bound is not established");
-    rejected("fn keep(value:T)->T where T:.Type'builtin {value} fn run() {keep<true>(true);}", "type");
-    accepted("typealias Kind=.Type'builtin; fn keep(value:T)->T where T:Kind {value} fn run()->bool {keep(true)}");
-    accepted("effect echo(value:T)->T where T:.Type'builtin; effect enum Channel where T:.Type'builtin {send(value:T)->T,} fn source()->#Channel<bool> bool {Channel<bool>.send(true)#}");
+    rejected(
+        "fn keep(value:T)->T where T:.Type'builtin, requires T == bool {value} fn run() {keep('x');}",
+        "type requirement",
+    );
+    rejected(
+        "struct Box where T:.Type'builtin, requires T == bool {value:T} fn run() {Box<'x''type> {value:'x'};}",
+        "type requirement",
+    );
+    rejected(
+        "trait Allowed {} fn keep(value:T)->T where T:.Type'builtin, requires T :- Allowed {value} fn run() {keep(true);}",
+        "trait bound is not established",
+    );
+    rejected(
+        "fn keep(value:T)->T where T:.Type'builtin {value} fn run() {keep<true>(true);}",
+        "type",
+    );
+    accepted(
+        "typealias Kind=.Type'builtin; fn keep(value:T)->T where T:Kind {value} fn run()->bool {keep(true)}",
+    );
+    accepted(
+        "effect echo(value:T)->T where T:.Type'builtin; effect enum Channel where T:.Type'builtin {send(value:T)->T,} fn source()->#Channel<bool> bool {Channel<bool>.send(true)#}",
+    );
 }
 
 #[test]
 fn comptime_parameters_reject_runtime_inputs_and_failed_required_invocations() {
-    rejected("fn choose(comptime flag:bool)->bool {flag} fn run(flag:bool)->bool {choose(flag)}", "comptime");
-    rejected("fn runtime()->bool {true} fn choose(comptime flag:bool)->bool {flag} fn run()->bool {choose(runtime())}", "comptime");
-    rejected("comptime fn never()->bool {never()} fn choose(comptime .flag:bool=never())->bool {flag} fn run()->bool {choose()}", "comptime");
+    rejected(
+        "fn choose(comptime flag:bool)->bool {flag} fn run(flag:bool)->bool {choose(flag)}",
+        "comptime",
+    );
+    rejected(
+        "fn runtime()->bool {true} fn choose(comptime flag:bool)->bool {flag} fn run()->bool {choose(runtime())}",
+        "comptime",
+    );
+    rejected(
+        "comptime fn never()->bool {never()} fn choose(comptime .flag:bool=never())->bool {flag} fn run()->bool {choose()}",
+        "comptime",
+    );
 }
 
 #[test]
 fn staged_aggregate_forwarding_does_not_admit_runtime_dependencies() {
-    rejected("fn choose(comptime pair:(bool,bool))->bool {let (a,b)=pair;a and b} fn forward(comptime flag:bool,value:bool)->bool {choose((flag,value))}","comptime");
+    rejected(
+        "fn choose(comptime pair:(bool,bool))->bool {let (a,b)=pair;a and b} fn forward(comptime flag:bool,value:bool)->bool {choose((flag,value))}",
+        "comptime",
+    );
 }
 
 #[test]
 fn staged_arithmetic_does_not_discharge_unsatisfied_program_contracts() {
-    rejected("typealias Byte=.u8'builtin; fn choose(comptime value:Byte)->Byte {value} fn scaled(comptime value:Byte)->Byte where requires value <= 10 {choose(value * value)} fn run()->Byte {scaled(11)}", "precondition");
+    rejected(
+        "typealias Byte=.u8'builtin; fn choose(comptime value:Byte)->Byte {value} fn scaled(comptime value:Byte)->Byte where requires value <= 10 {choose(value * value)} fn run()->Byte {scaled(11)}",
+        "precondition",
+    );
 }
 
 #[test]
@@ -5796,39 +6886,73 @@ fn staged_blocks_do_not_hide_runtime_dependencies() {
         "do {let local=flag;value;local}",
         "do {let local=runtime();flag and local}",
     ] {
-        rejected(&format!("fn runtime()->bool {{true}} fn choose(comptime flag:bool)->bool {{flag}} fn forward(comptime flag:bool,value:bool)->bool {{choose({body})}}"), "comptime");
+        rejected(
+            &format!(
+                "fn runtime()->bool {{true}} fn choose(comptime flag:bool)->bool {{flag}} fn forward(comptime flag:bool,value:bool)->bool {{choose({body})}}"
+            ),
+            "comptime",
+        );
     }
 }
 
 #[test]
 fn staged_pattern_bindings_do_not_discard_runtime_dependencies() {
     for input in ["(flag,value)", "(flag,runtime())"] {
-        rejected(&format!("fn runtime()->bool {{true}} fn choose(comptime flag:bool)->bool {{flag}} fn forward(comptime flag:bool,value:bool)->bool {{choose(do {{let (a,_)={input};a}})}}"), "comptime");
+        rejected(
+            &format!(
+                "fn runtime()->bool {{true}} fn choose(comptime flag:bool)->bool {{flag}} fn forward(comptime flag:bool,value:bool)->bool {{choose(do {{let (a,_)={input};a}})}}"
+            ),
+            "comptime",
+        );
     }
 }
 
 #[test]
 fn deferred_comptime_calls_reject_runtime_inputs() {
-    rejected("comptime fn invert(flag:bool)->bool {not flag} fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool,value:bool)->bool {choose(invert(flag and value))}","comptime");
+    rejected(
+        "comptime fn invert(flag:bool)->bool {not flag} fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool,value:bool)->bool {choose(invert(flag and value))}",
+        "comptime",
+    );
 }
 
 #[test]
 fn deferred_comptime_dispatch_preserves_phase_and_trait_requirements() {
-    rejected("trait Read {comptime fn read(flag:bool)->bool;} impl Read for bool {comptime fn read(flag:bool)->bool {flag}} fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool where T :- Read {choose(T.as(Read).read(flag))} fn run()->bool {forward<'x''type>(true)}", "trait");
-    rejected("trait Read {fn read(flag:bool)->bool;} impl Read for bool {fn read(flag:bool)->bool {flag}} fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool {choose(bool.as(Read).read(flag))}", "execution phase");
+    rejected(
+        "trait Read {comptime fn read(flag:bool)->bool;} impl Read for bool {comptime fn read(flag:bool)->bool {flag}} fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool where T :- Read {choose(T.as(Read).read(flag))} fn run()->bool {forward<'x''type>(true)}",
+        "trait",
+    );
+    rejected(
+        "trait Read {fn read(flag:bool)->bool;} impl Read for bool {fn read(flag:bool)->bool {flag}} fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool {choose(bool.as(Read).read(flag))}",
+        "execution phase",
+    );
 }
 
 #[test]
 fn deferred_comptime_associated_callables_reject_runtime_inputs() {
-    rejected("comptime fn keep(flag:bool)->bool {flag} trait Stored {assoc callback:comptime fn(bool)->bool;} impl Stored for bool {assoc callback:comptime fn(bool)->bool=keep;} fn choose(comptime flag:bool)->bool {flag} fn forward(value:bool)->bool {choose(bool.as(Stored).callback(value))}", "comptime");
+    rejected(
+        "comptime fn keep(flag:bool)->bool {flag} trait Stored {assoc callback:comptime fn(bool)->bool;} impl Stored for bool {assoc callback:comptime fn(bool)->bool=keep;} fn choose(comptime flag:bool)->bool {flag} fn forward(value:bool)->bool {choose(bool.as(Stored).callback(value))}",
+        "comptime",
+    );
 }
 
 #[test]
 fn deferred_comptime_local_control_flow_cannot_write_caller_storage() {
-    rejected("fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool {while true {choose(do {if flag {break;} false});break;}true}","comptime");
-    rejected("fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool {var outside=flag;choose(do {outside=not outside;outside})}","comptime");
-    rejected("fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool {choose(do {flag=not flag;flag})}","comptime");
-    rejected("fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool,runtime:bool)->bool {choose(do {var value=flag;while runtime {value=not value;} value})}","comptime");
+    rejected(
+        "fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool {while true {choose(do {if flag {break;} false});break;}true}",
+        "comptime",
+    );
+    rejected(
+        "fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool {var outside=flag;choose(do {outside=not outside;outside})}",
+        "comptime",
+    );
+    rejected(
+        "fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool {choose(do {flag=not flag;flag})}",
+        "comptime",
+    );
+    rejected(
+        "fn choose(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool,runtime:bool)->bool {choose(do {var value=flag;while runtime {value=not value;} value})}",
+        "comptime",
+    );
 }
 
 #[test]
@@ -5840,7 +6964,12 @@ fn deferred_comptime_matches_do_not_hide_runtime_dependencies() {
         "flag match {x and value is true=>x,_=>false,}",
         "flag match {true if runtime()=>true,_=>false,}",
     ] {
-        rejected(&format!("fn runtime()->bool {{true}} fn choose(comptime value:bool)->bool {{value}} fn forward(comptime flag:bool,value:bool)->bool {{choose({body})}}"),"comptime");
+        rejected(
+            &format!(
+                "fn runtime()->bool {{true}} fn choose(comptime value:bool)->bool {{value}} fn forward(comptime flag:bool,value:bool)->bool {{choose({body})}}"
+            ),
+            "comptime",
+        );
     }
 }
 
@@ -5852,7 +6981,12 @@ fn deferred_comptime_let_patterns_preserve_stage_and_control_boundaries() {
         "do {while true {let true=flag else {value;break;};break;} flag}",
         "do {let true=flag else {return false;};flag}",
     ] {
-        rejected(&format!("fn choose(comptime flag:bool)->bool {{flag}} fn forward(comptime flag:bool,value:bool)->bool {{choose({body})}}"),"comptime");
+        rejected(
+            &format!(
+                "fn choose(comptime flag:bool)->bool {{flag}} fn forward(comptime flag:bool,value:bool)->bool {{choose({body})}}"
+            ),
+            "comptime",
+        );
     }
 }
 
@@ -5865,7 +6999,12 @@ fn deferred_comptime_fields_reject_caller_storage_and_runtime_values() {
         "do {let local=Cell {flag:flag};local.flag=caller.flag;local.flag}",
         "do {let local=Cell {flag:flag};let pointer=caller.ref;pointer.flag.*=local.flag;true}",
     ] {
-        rejected(&format!("struct Cell {{flag:bool}} fn choose(comptime value:bool)->bool {{value}} fn forward(comptime flag:bool,caller:Cell)->bool {{choose({body})}}"),"comptime");
+        rejected(
+            &format!(
+                "struct Cell {{flag:bool}} fn choose(comptime value:bool)->bool {{value}} fn forward(comptime flag:bool,caller:Cell)->bool {{choose({body})}}"
+            ),
+            "comptime",
+        );
     }
 }
 
@@ -5877,18 +7016,37 @@ fn deferred_comptime_bitvec_rejects_runtime_reads_and_caller_writes() {
         "do {byte'bitvec[0..4]=3;byte}",
         "do {var local=byte;local'bitvec[0..4]=value'bitvec[0..4];local}",
     ] {
-        rejected(&format!("typealias Byte=.u8'builtin;fn choose(comptime value:Byte)->Byte {{value}} fn forward(comptime byte:Byte,value:Byte)->Byte {{choose({body})}}"),"comptime");
+        rejected(
+            &format!(
+                "typealias Byte=.u8'builtin;fn choose(comptime value:Byte)->Byte {{value}} fn forward(comptime byte:Byte,value:Byte)->Byte {{choose({body})}}"
+            ),
+            "comptime",
+        );
     }
 }
 
 #[test]
 fn deferred_comptime_bitvec_still_checks_static_width_contracts() {
-    for (body,message) in [
-        ("byte'bitvec[0..9].as(Byte)","BitVec index or slice is out of bounds"),
-        ("do {var local=byte;local'bitvec[0..4]=16;local}","integer literal does not fit the BitVec width"),
-        ("(byte'bitvec ++ byte'bitvec).as(Byte)","BitVec narrowing requires an explicit slice"),
+    for (body, message) in [
+        (
+            "byte'bitvec[0..9].as(Byte)",
+            "BitVec index or slice is out of bounds",
+        ),
+        (
+            "do {var local=byte;local'bitvec[0..4]=16;local}",
+            "integer literal does not fit the BitVec width",
+        ),
+        (
+            "(byte'bitvec ++ byte'bitvec).as(Byte)",
+            "BitVec narrowing requires an explicit slice",
+        ),
     ] {
-        rejected(&format!("typealias Byte=.u8'builtin;fn choose(comptime value:Byte)->Byte {{value}} fn forward(comptime byte:Byte)->Byte {{choose({body})}}"),message);
+        rejected(
+            &format!(
+                "typealias Byte=.u8'builtin;fn choose(comptime value:Byte)->Byte {{value}} fn forward(comptime byte:Byte)->Byte {{choose({body})}}"
+            ),
+            message,
+        );
     }
 }
 
@@ -5898,122 +7056,226 @@ fn deferred_comptime_local_closures_reject_runtime_captures_and_calls() {
         "do {let read:%{value:bool} comptime fn()->bool=|| value;read() and flag}",
         "do {let read:%{flag:bool} comptime fn()->bool=|| {runtime() and flag};read()}",
     ] {
-        rejected(&format!("fn runtime()->bool {{true}} fn choose(comptime value:bool)->bool {{value}} fn forward(comptime flag:bool,value:bool)->bool {{choose({body})}}"),"comptime");
+        rejected(
+            &format!(
+                "fn runtime()->bool {{true}} fn choose(comptime value:bool)->bool {{value}} fn forward(comptime flag:bool,value:bool)->bool {{choose({body})}}"
+            ),
+            "comptime",
+        );
     }
 }
 
 #[test]
 fn literal_spreads_do_not_promote_runtime_captures_to_comptime() {
-    rejected("fn choose(comptime flag:T)->T where T {flag} fn run(value:bool)->bool {choose(...(do {let read:%{value:bool} comptime fn()->bool=|| value;read()},))}","comptime");
+    rejected(
+        "fn choose(comptime flag:T)->T where T {flag} fn run(value:bool)->bool {choose(...(do {let read:%{value:bool} comptime fn()->bool=|| value;read()},))}",
+        "comptime",
+    );
 }
 
 #[test]
 fn computed_spreads_do_not_promote_runtime_packets_to_comptime() {
-    rejected("fn packet(flag:bool)->(bool,bool) {(flag,not flag)} fn choose(comptime a:bool,b:bool)->bool {a and b} fn run()->bool {choose(...packet(true))}","comptime");
-    rejected("comptime fn packet(flag:bool)->(bool,bool) {(flag,not flag)} fn choose(comptime a:bool,b:bool)->bool {a and b} fn run(flag:bool)->bool {choose(...packet(flag))}","comptime");
+    rejected(
+        "fn packet(flag:bool)->(bool,bool) {(flag,not flag)} fn choose(comptime a:bool,b:bool)->bool {a and b} fn run()->bool {choose(...packet(true))}",
+        "comptime",
+    );
+    rejected(
+        "comptime fn packet(flag:bool)->(bool,bool) {(flag,not flag)} fn choose(comptime a:bool,b:bool)->bool {a and b} fn run(flag:bool)->bool {choose(...packet(flag))}",
+        "comptime",
+    );
 }
 
 #[test]
 fn comptime_only_inputs_do_not_authorize_runtime_storage() {
-    rejected("typealias Type=.Type'builtin;fn bad(T:Type)->bool {true}","comptime-only value");
-    rejected("typealias Type=.Type'builtin;fn bad(comptime T:Type)->Type {T}","comptime-only value");
-    rejected("typealias Int=.Integer'builtin;fn bad(comptime n:Int)->Int {n}","comptime-only value");
+    rejected(
+        "typealias Type=.Type'builtin;fn bad(T:Type)->bool {true}",
+        "comptime-only value",
+    );
+    rejected(
+        "typealias Type=.Type'builtin;fn bad(comptime T:Type)->Type {T}",
+        "comptime-only value",
+    );
+    rejected(
+        "typealias Int=.Integer'builtin;fn bad(comptime n:Int)->Int {n}",
+        "comptime-only value",
+    );
 }
 
 #[test]
 fn dependent_comptime_type_inputs_reject_wrong_or_unavailable_types() {
-    rejected("typealias Type=.Type'builtin; fn identity(comptime T:Type,value:T)->T {value} fn run()->bool {identity(bool,'x')}", "type mismatch");
-    rejected("typealias Type=.Type'builtin; fn wrong(comptime A:Type,comptime B:Type,value:A)->B {value}", "unresolved type equality");
-    rejected("typealias Type=.Type'builtin; fn wrong(T:Type,value:T)->T {value}", "earlier comptime Type parameter");
-    rejected("typealias Type=.Type'builtin; pure comptime fn Identity<T>->Type {T} fn keep(comptime T:Type,value:T)->T {value} fn run()->bool {keep(Identity<bool>,true)}", "unresolved type equality");
+    rejected(
+        "typealias Type=.Type'builtin; fn identity(comptime T:Type,value:T)->T {value} fn run()->bool {identity(bool,'x')}",
+        "type mismatch",
+    );
+    rejected(
+        "typealias Type=.Type'builtin; fn wrong(comptime A:Type,comptime B:Type,value:A)->B {value}",
+        "unresolved type equality",
+    );
+    rejected(
+        "typealias Type=.Type'builtin; fn wrong(T:Type,value:T)->T {value}",
+        "earlier comptime Type parameter",
+    );
+    rejected(
+        "typealias Type=.Type'builtin; pure comptime fn Identity<T>->Type {T} fn keep(comptime T:Type,value:T)->T {value} fn run()->bool {keep(Identity<bool>,true)}",
+        "unresolved type equality",
+    );
 }
 
 #[test]
 fn dependent_type_defaults_reject_runtime_dependencies_and_wrong_values() {
-    rejected("typealias Type=.Type'builtin; typealias Char='x''type; comptime fn Select(flag:bool)->Type {if flag {bool} else {Char}} fn choose(flag:bool,comptime .T:Type=Select(flag),value:T)->T {value} fn run()->Char {choose(false,'x')}", "dependent comptime input cannot read a runtime argument");
-    rejected("typealias Type=.Type'builtin; fn identity(comptime .T:Type=bool,value:T)->T {value} fn run()->bool {identity('x')}", "type mismatch");
-    rejected("typealias Type=.Type'builtin; comptime fn Broken()->Type {Broken()} fn identity(comptime .T:Type=Broken(),value:T)->T {value} fn run()->bool {identity(true)}", "required comptime evaluation failed");
+    rejected(
+        "typealias Type=.Type'builtin; typealias Char='x''type; comptime fn Select(flag:bool)->Type {if flag {bool} else {Char}} fn choose(flag:bool,comptime .T:Type=Select(flag),value:T)->T {value} fn run()->Char {choose(false,'x')}",
+        "dependent comptime input cannot read a runtime argument",
+    );
+    rejected(
+        "typealias Type=.Type'builtin; fn identity(comptime .T:Type=bool,value:T)->T {value} fn run()->bool {identity('x')}",
+        "type mismatch",
+    );
+    rejected(
+        "typealias Type=.Type'builtin; comptime fn Broken()->Type {Broken()} fn identity(comptime .T:Type=Broken(),value:T)->T {value} fn run()->bool {identity(true)}",
+        "required comptime evaluation failed",
+    );
 }
 
 #[test]
 fn dependent_type_packets_reject_mismatched_elements_and_runtime_producers() {
-    rejected("typealias Type=.Type'builtin;typealias Char='x''type;comptime fn packet()->(Type,Char) {(bool,'x')} fn identity(comptime T:Type,value:T)->T {value} fn run()->bool {identity(...packet())}", "type mismatch");
-    rejected("typealias Type=.Type'builtin;fn packet()->(Type,bool) {(bool,true)} fn identity(comptime T:Type,value:T)->T {value} fn run()->bool {identity(...packet())}", "required comptime");
-    rejected("typealias Type=.Type'builtin;pure comptime fn Identity<T>->Type {T} comptime fn packet()->(Type,bool) {(Identity<bool>,true)} fn identity(comptime T:Type,value:T)->T {value} fn run()->bool {identity(...packet())}", "unresolved type equality");
+    rejected(
+        "typealias Type=.Type'builtin;typealias Char='x''type;comptime fn packet()->(Type,Char) {(bool,'x')} fn identity(comptime T:Type,value:T)->T {value} fn run()->bool {identity(...packet())}",
+        "type mismatch",
+    );
+    rejected(
+        "typealias Type=.Type'builtin;fn packet()->(Type,bool) {(bool,true)} fn identity(comptime T:Type,value:T)->T {value} fn run()->bool {identity(...packet())}",
+        "required comptime",
+    );
+    rejected(
+        "typealias Type=.Type'builtin;pure comptime fn Identity<T>->Type {T} comptime fn packet()->(Type,bool) {(Identity<bool>,true)} fn identity(comptime T:Type,value:T)->T {value} fn run()->bool {identity(...packet())}",
+        "unresolved type equality",
+    );
 }
 
 #[test]
 fn dependent_comptime_value_domain_refinement_does_not_allow_runtime_type_storage() {
-    rejected("typealias Type=.Type'builtin;fn keep(comptime T:Type,value:T)->bool {true} fn run()->bool {keep(Type,bool)}", "comptime-only value");
-    rejected("typealias Type=.Type'builtin;fn keep(comptime T:Type,comptime value:T)->bool {true} fn run()->bool {keep(bool,bool)}", "type mismatch");
+    rejected(
+        "typealias Type=.Type'builtin;fn keep(comptime T:Type,value:T)->bool {true} fn run()->bool {keep(Type,bool)}",
+        "comptime-only value",
+    );
+    rejected(
+        "typealias Type=.Type'builtin;fn keep(comptime T:Type,comptime value:T)->bool {true} fn run()->bool {keep(bool,bool)}",
+        "type mismatch",
+    );
 }
 
 #[test]
 fn mixed_dependent_generic_inputs_check_domains_and_trait_requirements() {
-    rejected("typealias Type=.Type'builtin;fn pair(comptime T:Type,value:T,other:G)->(T,G) where G {(value,other)} fn run()->(bool,bool) {pair(bool,'x',true)}", "type mismatch");
-    rejected("typealias Type=.Type'builtin;trait Allowed {} impl Allowed for bool {} fn pair(comptime T:Type,value:T,other:G)->(T,G) where G :- Allowed {(value,other)} fn run()->(bool,'x''type) {pair(bool,true,'x')}", "trait bound is not established");
+    rejected(
+        "typealias Type=.Type'builtin;fn pair(comptime T:Type,value:T,other:G)->(T,G) where G {(value,other)} fn run()->(bool,bool) {pair(bool,'x',true)}",
+        "type mismatch",
+    );
+    rejected(
+        "typealias Type=.Type'builtin;trait Allowed {} impl Allowed for bool {} fn pair(comptime T:Type,value:T,other:G)->(T,G) where G :- Allowed {(value,other)} fn run()->(bool,'x''type) {pair(bool,true,'x')}",
+        "trait bound is not established",
+    );
 }
 
 #[test]
 fn scoped_generic_calls_do_not_equate_distinct_enclosing_type_inputs() {
-    rejected("typealias Type=.Type'builtin;fn pair(comptime T:Type,value:T,other:G)->(T,G) where G {(value,other)} fn wrong(comptime A:Type,comptime B:Type,value:A)->(B,bool) {pair(A,value,true)}", "generic call inference failed");
+    rejected(
+        "typealias Type=.Type'builtin;fn pair(comptime T:Type,value:T,other:G)->(T,G) where G {(value,other)} fn wrong(comptime A:Type,comptime B:Type,value:A)->(B,bool) {pair(A,value,true)}",
+        "generic call inference failed",
+    );
 }
 
 #[test]
 fn scoped_generic_function_value_contexts_do_not_equate_different_type_inputs() {
-    rejected("typealias Type=.Type'builtin;fn identity(value:G)->G where G {value} fn wrong(comptime A:Type,comptime B:Type) {let action:fn(A)->B=identity;}","generic function context inference failed");
+    rejected(
+        "typealias Type=.Type'builtin;fn identity(value:G)->G where G {value} fn wrong(comptime A:Type,comptime B:Type) {let action:fn(A)->B=identity;}",
+        "generic function context inference failed",
+    );
 }
 
 #[test]
 fn scoped_computed_type_defaults_reject_conflicting_callback_contexts() {
-    rejected("typealias Type=.Type'builtin;
+    rejected(
+        "typealias Type=.Type'builtin;
         comptime fn Choose(T:Type)->Type {if T == bool {bool} else {'x''type}}
         fn pair(value:G,other:H,proof:K)->K where G,H,.K:Type=(G,Choose(H)) {proof}
         fn wrong(comptime A:Type,comptime B:Type) {
             let action:fn(A,bool,(B,bool))->(B,bool)=pair;
-        }", "generic function context inference failed");
+        }",
+        "generic function context inference failed",
+    );
 }
 
 #[test]
 fn generic_callback_contexts_do_not_supply_missing_trait_evidence() {
-    for body in ["let action:fn(A)->A=identity;action(value)", "apply(identity,value)"] {
-        rejected(&format!("trait Allowed {{}} impl Allowed for bool {{}}
+    for body in [
+        "let action:fn(A)->A=identity;action(value)",
+        "apply(identity,value)",
+    ] {
+        rejected(
+            &format!(
+                "trait Allowed {{}} impl Allowed for bool {{}}
             fn identity(value:G)->G where G :- Allowed {{value}}
             fn apply(action:fn(G)->G,value:G)->G where G {{action(value)}}
-            fn wrong(value:A)->A where A {{{body}}}"), "trait bound is not established");
+            fn wrong(value:A)->A where A {{{body}}}"
+            ),
+            "trait bound is not established",
+        );
     }
 }
 
 #[test]
 fn ordinary_type_input_capabilities_reject_wrong_actual_types_and_unpromised_forwarding() {
-    for call in ["checked('x''type)","forward('x''type)"] {
-        rejected(&format!("typealias Type=.Type'builtin;trait Allowed {{}} impl Allowed for bool {{}}
+    for call in ["checked('x''type)", "forward('x''type)"] {
+        rejected(
+            &format!(
+                "typealias Type=.Type'builtin;trait Allowed {{}} impl Allowed for bool {{}}
             fn checked(comptime A:Type)->bool where requires A :- Allowed {{true}}
             fn forward(comptime A:Type)->bool where requires A :- Allowed {{checked(A)}}
-            fn run()->bool {{{call}}}"), "ordinary input trait bound is not established");
+            fn run()->bool {{{call}}}"
+            ),
+            "ordinary input trait bound is not established",
+        );
     }
-    rejected("typealias Type=.Type'builtin;trait Allowed {} impl Allowed for bool {}
+    rejected(
+        "typealias Type=.Type'builtin;trait Allowed {} impl Allowed for bool {}
         fn checked(comptime A:Type)->bool where requires A :- Allowed {true}
-        fn wrong(comptime A:Type)->bool {checked(A)}", "ordinary input trait bound is not established");
+        fn wrong(comptime A:Type)->bool {checked(A)}",
+        "ordinary input trait bound is not established",
+    );
 }
 
 #[test]
 fn ordinary_associated_parameter_types_require_evidence_and_matching_values() {
     let prefix = "typealias Type=.Type'builtin;trait Source {assoc Item:Type;}
         impl Source for bool {assoc Item:Type=bool;}";
-    rejected(&format!("{prefix} fn bad(comptime A:Type,value:A.as(Source).Item)->bool {{true}}"),
-        "requires established trait evidence");
-    rejected(&format!("{prefix} fn bad(value:A.as(Source).Item,comptime A:Type)->bool where requires A :- Source {{true}}"),
-        "Unresolved identifier `A`");
-    rejected(&format!("{prefix} fn keep(comptime A:Type,value:A.as(Source).Item)->A.as(Source).Item where requires A :- Source {{value}} fn run()->bool {{keep(bool,'x')}}"),
-        "type mismatch");
-    rejected(&format!("{prefix} fn keep(comptime A:Type,comptime value:A.as(Source).Item,comptime .copy:A.as(Source).Item=value)->A.as(Source).Item where requires A :- Source {{copy}} fn run()->bool {{keep(bool,true,.copy='x')}}"),
-        "type mismatch");
+    rejected(
+        &format!("{prefix} fn bad(comptime A:Type,value:A.as(Source).Item)->bool {{true}}"),
+        "requires established trait evidence",
+    );
+    rejected(
+        &format!(
+            "{prefix} fn bad(value:A.as(Source).Item,comptime A:Type)->bool where requires A :- Source {{true}}"
+        ),
+        "Unresolved identifier `A`",
+    );
+    rejected(
+        &format!(
+            "{prefix} fn keep(comptime A:Type,value:A.as(Source).Item)->A.as(Source).Item where requires A :- Source {{value}} fn run()->bool {{keep(bool,'x')}}"
+        ),
+        "type mismatch",
+    );
+    rejected(
+        &format!(
+            "{prefix} fn keep(comptime A:Type,comptime value:A.as(Source).Item,comptime .copy:A.as(Source).Item=value)->A.as(Source).Item where requires A :- Source {{copy}} fn run()->bool {{keep(bool,true,.copy='x')}}"
+        ),
+        "type mismatch",
+    );
 }
 
 #[test]
 fn associated_input_domain_refinement_does_not_accept_the_wrong_value_sort() {
-    for call in ["inspect(bool,true)","inspect('x''type,bool)"] {
+    for call in ["inspect(bool,true)", "inspect('x''type,bool)"] {
         rejected(&format!("typealias Type=.Type'builtin;trait Source {{assoc Item:Type;}}
             impl Source for bool {{assoc Item:Type=Type;}}
             impl Source for 'x''type {{assoc Item:Type=bool;}}
@@ -6031,12 +7293,22 @@ fn demanded_associated_inputs_and_defaults_preserve_opaque_type_indices() {
         fn accept(comptime A:Type,comptime value:A.as(Source).Item,
                   comptime .copy:A.as(Source).Item=value,
                   witness:Tagged<A.as(Source).Item,copy>)->bool where requires A :- Source {true}";
-    let dump=accepted(&format!("{prefix}
+    let dump = accepted(&format!(
+        "{prefix}
         fn boolean(witness:Tagged<bool,true>)->bool {{accept(bool,true,witness)}}
-        fn character(witness:Tagged<'x''type,'x'>)->bool {{accept('x''type,'x',witness)}}"));
+        fn character(witness:Tagged<'x''type,'x'>)->bool {{accept('x''type,'x',witness)}}"
+    ));
     assert!(dump.contains("(normal-form (head"));
-    rejected(&format!("{prefix} fn wrong(witness:Tagged<bool,true>)->bool {{accept(bool,'x',witness)}}"), "type mismatch");
-    rejected(&format!("{prefix} fn wrong(witness:Tagged<bool,true>)->bool {{accept(bool,true,witness,.copy=false)}}"), "type equality");
+    rejected(
+        &format!("{prefix} fn wrong(witness:Tagged<bool,true>)->bool {{accept(bool,'x',witness)}}"),
+        "type mismatch",
+    );
+    rejected(
+        &format!(
+            "{prefix} fn wrong(witness:Tagged<bool,true>)->bool {{accept(bool,true,witness,.copy=false)}}"
+        ),
+        "type equality",
+    );
 }
 
 #[test]
@@ -6047,66 +7319,128 @@ fn demanded_associated_type_domains_accept_type_indices_and_defaults() {
         fn accept(comptime A:Type,comptime value:A.as(Source).Item,
                   comptime .copy:A.as(Source).Item=value,
                   witness:Tagged<A.as(Source).Item,copy>)->bool where requires A :- Source {true}";
-    accepted(&format!("{prefix}
+    accepted(&format!(
+        "{prefix}
         fn concrete(witness:Tagged<Type,bool>)->bool {{accept(bool,bool,witness)}}
-        fn forwarded(comptime T:Type,witness:Tagged<Type,T>)->bool {{accept(bool,T,witness)}}"));
-    let generic = prefix.replace("witness:Tagged<A.as(Source).Item,copy>)->bool where requires A :- Source {true}",
-        "witness:Tagged<A.as(Source).Item,copy>,extra:G)->G where G, requires A :- Source {extra}");
-    accepted(&format!("{generic}
-        fn forwarded(comptime T:Type,witness:Tagged<Type,T>)->bool {{accept(bool,T,witness,true)}}"));
-    rejected(&format!("{prefix} fn wrong(witness:Tagged<Type,bool>)->bool {{accept(bool,true,witness)}}"), "type mismatch");
-    rejected(&format!("{prefix} fn wrong(witness:Tagged<Type,bool>)->bool {{accept(bool,bool,witness,.copy='x''type)}}"), "type equality");
+        fn forwarded(comptime T:Type,witness:Tagged<Type,T>)->bool {{accept(bool,T,witness)}}"
+    ));
+    let generic = prefix.replace(
+        "witness:Tagged<A.as(Source).Item,copy>)->bool where requires A :- Source {true}",
+        "witness:Tagged<A.as(Source).Item,copy>,extra:G)->G where G, requires A :- Source {extra}",
+    );
+    accepted(&format!(
+        "{generic}
+        fn forwarded(comptime T:Type,witness:Tagged<Type,T>)->bool {{accept(bool,T,witness,true)}}"
+    ));
+    rejected(
+        &format!(
+            "{prefix} fn wrong(witness:Tagged<Type,bool>)->bool {{accept(bool,true,witness)}}"
+        ),
+        "type mismatch",
+    );
+    rejected(
+        &format!(
+            "{prefix} fn wrong(witness:Tagged<Type,bool>)->bool {{accept(bool,bool,witness,.copy='x''type)}}"
+        ),
+        "type equality",
+    );
 }
 
 #[test]
 fn scoped_structural_defaults_do_not_capture_same_index_callee_parameters() {
-    rejected("typealias Type=.Type'builtin;fn pair(comptime .T:Type=G,value:T,other:G)->(T,G) where G {(value,other)} fn wrong(comptime A:Type,comptime B:Type,left:A,right:B)->(A,B) {pair(left,right)}", "type equality");
+    rejected(
+        "typealias Type=.Type'builtin;fn pair(comptime .T:Type=G,value:T,other:G)->(T,G) where G {(value,other)} fn wrong(comptime A:Type,comptime B:Type,left:A,right:B)->(A,B) {pair(left,right)}",
+        "type equality",
+    );
 }
 
 #[test]
 fn ordinary_comptime_values_can_index_opaque_types_and_forward_without_unfolding() {
-    let dump=accepted("typealias Type=.Type'builtin;typealias Integer=.Integer'builtin;pure comptime fn Sized<N:Integer>->Type {bool} fn keep(comptime n:Integer,value:Sized<n>)->Sized<n> {value} fn forward(comptime n:Integer,value:Sized<n>)->Sized<n> {keep(n,value)}");
+    let dump = accepted(
+        "typealias Type=.Type'builtin;typealias Integer=.Integer'builtin;pure comptime fn Sized<N:Integer>->Type {bool} fn keep(comptime n:Integer,value:Sized<n>)->Sized<n> {value} fn forward(comptime n:Integer,value:Sized<n>)->Sized<n> {keep(n,value)}",
+    );
     assert!(dump.contains("(bound (depth 0) (index 0) (sort comptime-value))"));
     assert!(dump.contains("(normal-form (head"));
-    rejected("typealias Type=.Type'builtin;typealias Integer=.Integer'builtin;pure comptime fn Sized<N:Integer>->Type {bool} fn bad(n:Integer,value:Sized<n>)->bool {true}", "comptime");
-    rejected("typealias Type=.Type'builtin;typealias Integer=.Integer'builtin;pure comptime fn Sized<N:Integer>->Type {bool} fn bad(comptime n:bool,value:Sized<n>)->bool {true}", "type mismatch");
-    rejected("typealias Type=.Type'builtin;pure comptime fn Flag<B:bool>->Type {bool} fn bad(flag:bool,value:Flag<flag>)->bool {true}", "comptime");
+    rejected(
+        "typealias Type=.Type'builtin;typealias Integer=.Integer'builtin;pure comptime fn Sized<N:Integer>->Type {bool} fn bad(n:Integer,value:Sized<n>)->bool {true}",
+        "comptime",
+    );
+    rejected(
+        "typealias Type=.Type'builtin;typealias Integer=.Integer'builtin;pure comptime fn Sized<N:Integer>->Type {bool} fn bad(comptime n:bool,value:Sized<n>)->bool {true}",
+        "type mismatch",
+    );
+    rejected(
+        "typealias Type=.Type'builtin;pure comptime fn Flag<B:bool>->Type {bool} fn bad(flag:bool,value:Flag<flag>)->bool {true}",
+        "comptime",
+    );
 }
 
 #[test]
 fn earlier_comptime_inputs_are_available_to_normal_form_signature_plans() {
-    let prefix="typealias Type=.Type'builtin;typealias Integer=.Integer'builtin;pure comptime fn Shape<N:Integer,.storage:Integer=N>->Type {bool}";
-    let dump=accepted(&format!("{prefix} fn keep(comptime n:Integer,value:Shape<n>)->Shape<n,.storage=n> {{value}} fn forward(comptime n:Integer,value:Shape<n>)->Shape<n> {{keep(n,value)}}"));
+    let prefix = "typealias Type=.Type'builtin;typealias Integer=.Integer'builtin;pure comptime fn Shape<N:Integer,.storage:Integer=N>->Type {bool}";
+    let dump = accepted(&format!(
+        "{prefix} fn keep(comptime n:Integer,value:Shape<n>)->Shape<n,.storage=n> {{value}} fn forward(comptime n:Integer,value:Shape<n>)->Shape<n> {{keep(n,value)}}"
+    ));
     assert!(dump.contains("(arguments ((bound (depth 0) (index 0) (sort comptime-value)) (bound (depth 0) (index 0) (sort comptime-value))))"));
-    rejected(&format!("{prefix} fn bad(value:Shape<n>,comptime n:Integer)->bool {{true}}"),"Unresolved identifier `n`");
-    rejected("typealias Type=.Type'builtin;pure comptime fn Flag<B:bool,.copy:bool=B>->Type {bool} fn bad(flag:bool,value:Flag<flag>)->bool {true}","local binding is unavailable");
-    rejected(&format!("{prefix} fn bad(comptime n:bool,value:Shape<n>)->bool {{true}}"),"type mismatch");
+    rejected(
+        &format!("{prefix} fn bad(value:Shape<n>,comptime n:Integer)->bool {{true}}"),
+        "Unresolved identifier `n`",
+    );
+    rejected(
+        "typealias Type=.Type'builtin;pure comptime fn Flag<B:bool,.copy:bool=B>->Type {bool} fn bad(flag:bool,value:Flag<flag>)->bool {true}",
+        "local binding is unavailable",
+    );
+    rejected(
+        &format!("{prefix} fn bad(comptime n:bool,value:Shape<n>)->bool {{true}}"),
+        "type mismatch",
+    );
 }
 
 #[test]
 fn normal_form_type_defaults_use_the_active_caller_parameter_prefix() {
-    let dump=accepted("typealias Type=.Type'builtin;pure comptime fn Wrapper<T,.U:Type=T,.V:Type=U>->Type {T} fn keep(comptime A:Type,marker:bool,comptime B:Type,value:Wrapper<B>)->Wrapper<B> {value}");
+    let dump = accepted(
+        "typealias Type=.Type'builtin;pure comptime fn Wrapper<T,.U:Type=T,.V:Type=U>->Type {T} fn keep(comptime A:Type,marker:bool,comptime B:Type,value:Wrapper<B>)->Wrapper<B> {value}",
+    );
     assert!(dump.contains("(arguments ((bound (depth 0) (index 2) (sort type)) (bound (depth 0) (index 2) (sort type)) (bound (depth 0) (index 2) (sort type))))"));
 }
 
 #[test]
 fn mixed_ordinary_indices_check_the_dependent_value_domain() {
-    let head="typealias Type=.Type'builtin;pure comptime fn Tagged<T,value:T>->Type {T}";
-    let dump=accepted(&format!("{head} fn keep(comptime A:Type,comptime v:A,value:Tagged<A,v>)->Tagged<A,v> {{value}} fn forward(comptime A:Type,comptime v:A,value:Tagged<A,v>)->Tagged<A,v> {{keep(A,v,value)}}"));
+    let head = "typealias Type=.Type'builtin;pure comptime fn Tagged<T,value:T>->Type {T}";
+    let dump = accepted(&format!(
+        "{head} fn keep(comptime A:Type,comptime v:A,value:Tagged<A,v>)->Tagged<A,v> {{value}} fn forward(comptime A:Type,comptime v:A,value:Tagged<A,v>)->Tagged<A,v> {{keep(A,v,value)}}"
+    ));
     assert!(dump.contains("(arguments ((bound (depth 0) (index 0) (sort type)) (bound (depth 0) (index 1) (sort comptime-value))))"));
-    rejected(&format!("{head} fn wrong(comptime A:Type,comptime B:Type,comptime v:B,value:Tagged<A,v>)->bool {{true}}"),"type equality");
-    rejected(&format!("{head} fn wrong(comptime A:Type,v:A,value:Tagged<A,v>)->bool {{true}}"),"comptime");
+    rejected(
+        &format!(
+            "{head} fn wrong(comptime A:Type,comptime B:Type,comptime v:B,value:Tagged<A,v>)->bool {{true}}"
+        ),
+        "type equality",
+    );
+    rejected(
+        &format!("{head} fn wrong(comptime A:Type,v:A,value:Tagged<A,v>)->bool {{true}}"),
+        "comptime",
+    );
 }
 
 #[test]
 fn dependent_type_default_inference_does_not_override_the_computed_type() {
-    rejected("typealias Type=.Type'builtin;comptime fn Choose(T:Type)->Type {'x''type} fn pair(comptime .T:Type=Choose(G),value:T,other:G)->(T,G) where G {(value,other)} fn run()->(bool,bool) {pair(true,false)}", "type mismatch");
-    rejected("typealias Type=.Type'builtin;comptime fn Choose(T:Type)->Type {Choose(T)} fn pair(comptime .T:Type=Choose(G),value:T,other:G)->(T,G) where G {(value,other)} fn run()->(bool,bool) {pair(true,false)}", "required comptime evaluation failed");
+    rejected(
+        "typealias Type=.Type'builtin;comptime fn Choose(T:Type)->Type {'x''type} fn pair(comptime .T:Type=Choose(G),value:T,other:G)->(T,G) where G {(value,other)} fn run()->(bool,bool) {pair(true,false)}",
+        "type mismatch",
+    );
+    rejected(
+        "typealias Type=.Type'builtin;comptime fn Choose(T:Type)->Type {Choose(T)} fn pair(comptime .T:Type=Choose(G),value:T,other:G)->(T,G) where G {(value,other)} fn run()->(bool,bool) {pair(true,false)}",
+        "required comptime evaluation failed",
+    );
 }
 
 #[test]
 fn dependent_type_defaults_report_unresolved_inputs_before_invocation() {
-    rejected("typealias Type=.Type'builtin;comptime fn Choose(T:Type)->Type {if T == bool {bool} else {'x''type}} fn keep(comptime .T:Type=Choose(G),value:T,action:fn(G)->G)->T where G {value} fn run()->bool {keep(true,|n| n)}", "dependent Type computation awaits inferred type arguments");
+    rejected(
+        "typealias Type=.Type'builtin;comptime fn Choose(T:Type)->Type {if T == bool {bool} else {'x''type}} fn keep(comptime .T:Type=Choose(G),value:T,action:fn(G)->G)->T where G {value} fn run()->bool {keep(true,|n| n)}",
+        "dependent Type computation awaits inferred type arguments",
+    );
 }
 
 #[test]
@@ -6121,10 +7455,21 @@ fn ordinary_comptime_capability_indices_reject_wrong_or_unproven_inputs() {
                   comptime .copy:A.as(Source).Item=value)->bool
         where requires A :- Source, requires bool :- Allowed<Tagged<A.as(Source).Item,copy>> {true}";
     for call in ["accept(bool,'x''type)", "accept(bool,bool,.copy='x''type)"] {
-        rejected(&format!("{prefix} fn run()->bool {{{call}}}"), "ordinary input trait bound is not established");
+        rejected(
+            &format!("{prefix} fn run()->bool {{{call}}}"),
+            "ordinary input trait bound is not established",
+        );
     }
-    rejected(&format!("{prefix} fn run()->bool {{accept(bool,true)}}"), "type mismatch");
-    rejected(&format!("{prefix} fn forward(comptime A:Type,comptime value:A.as(Source).Item)->bool where requires A :- Source {{accept(A,value)}}"), "ordinary input trait bound is not established");
+    rejected(
+        &format!("{prefix} fn run()->bool {{accept(bool,true)}}"),
+        "type mismatch",
+    );
+    rejected(
+        &format!(
+            "{prefix} fn forward(comptime A:Type,comptime value:A.as(Source).Item)->bool where requires A :- Source {{accept(A,value)}}"
+        ),
+        "ordinary input trait bound is not established",
+    );
 }
 
 #[test]
@@ -6136,10 +7481,19 @@ fn inferred_comptime_capability_domains_do_not_invent_evidence_or_comptime_value
         fn accept(comptime value:T,extra:G)->G where T,G,
             requires bool :- Allowed<Tagged<T,value>> {extra}";
     for value in ["false", "bool", "'x'"] {
-        rejected(&format!("{prefix} fn run()->bool {{accept({value},true)}}"), "ordinary input trait bound is not established");
+        rejected(
+            &format!("{prefix} fn run()->bool {{accept({value},true)}}"),
+            "ordinary input trait bound is not established",
+        );
     }
-    rejected(&format!("{prefix} fn run(value:bool)->bool {{accept(value,true)}}"), "comptime");
-    rejected(&format!("{prefix} fn run()->'x''type {{accept(true,false)}}"), "type mismatch");
+    rejected(
+        &format!("{prefix} fn run(value:bool)->bool {{accept(value,true)}}"),
+        "comptime",
+    );
+    rejected(
+        &format!("{prefix} fn run()->'x''type {{accept(true,false)}}"),
+        "type mismatch",
+    );
 }
 
 #[test]
@@ -6152,9 +7506,17 @@ fn ordinary_capability_dependencies_do_not_assume_missing_or_circular_evidence()
         "requires (A :- Source) or (A :- Allowed), requires A.as(Source).Item :- Allowed",
         "requires not (A :- Source), requires A.as(Source).Item :- Allowed",
     ] {
-        rejected(&format!("{prefix} fn bad(comptime A:Type)->bool where {constraints} {{true}}"), "associated");
+        rejected(
+            &format!("{prefix} fn bad(comptime A:Type)->bool where {constraints} {{true}}"),
+            "associated",
+        );
     }
-    rejected(&format!("{prefix} fn bad(comptime A:Type)->bool where requires A.as(Source).Missing :- Allowed, requires A :- Source {{true}}"), "type expression");
+    rejected(
+        &format!(
+            "{prefix} fn bad(comptime A:Type)->bool where requires A.as(Source).Missing :- Allowed, requires A :- Source {{true}}"
+        ),
+        "type expression",
+    );
 }
 
 #[test]
@@ -6167,32 +7529,44 @@ fn declaration_capability_prerequisites_do_not_admit_unproven_projections() {
         "trait Checked where A, requires A.as(Source).Item :- Allowed {}",
         "struct Holder where A {} impl Allowed for Holder<A> where A, requires A.as(Source).Item :- Allowed {}",
     ] {
-        rejected(&format!("{prefix} {body}"), "associated projection requires a given interface constraint");
+        rejected(
+            &format!("{prefix} {body}"),
+            "associated projection requires a given interface constraint",
+        );
     }
 }
 
 #[test]
 fn implementation_projection_prerequisites_form_in_reverse_order() {
-    accepted("typealias Type=.Type'builtin;trait Source {assoc Item:Type;} trait Allowed {}
+    accepted(
+        "typealias Type=.Type'builtin;trait Source {assoc Item:Type;} trait Allowed {}
         trait Get {fn get()->bool;} struct Holder where A {}
         impl Get for Holder<A> where A,
-            requires A.as(Source).Item :- Allowed, requires A :- Source {fn get()->bool {true}}");
+            requires A.as(Source).Item :- Allowed, requires A :- Source {fn get()->bool {true}}",
+    );
 }
 
 #[test]
 fn implementation_projection_qualification_rejects_wrong_selected_domain() {
-    rejected("typealias Type=.Type'builtin;trait Source {assoc Item:Type;} trait Allowed {}
+    rejected(
+        "typealias Type=.Type'builtin;trait Source {assoc Item:Type;} trait Allowed {}
         impl Source for bool {assoc Item:Type='x''type;} impl Allowed for bool {}
         trait Get {fn get()->bool;} struct Holder where A {}
         impl Get for Holder<A> where A,
             requires A.as(Source).Item :- Allowed, requires A :- Source {fn get()->bool {true}}
-        fn run()->bool {Holder<bool>.as(Get).get()}", "method implementation is not uniquely established");
+        fn run()->bool {Holder<bool>.as(Get).get()}",
+        "method implementation is not uniquely established",
+    );
 }
 
 #[test]
 fn mixed_sugar_bounds_cannot_extract_source_evidence_from_negative_or_disjunctive_requirements() {
-    let prefix="typealias Type=.Type'builtin;trait Source {assoc Item:Type;} trait Accepts where T {} trait Other {}";
-    for tail in ["", ", requires not (A :- Source)", ", requires (A :- Source) or (A :- Other)"] {
+    let prefix = "typealias Type=.Type'builtin;trait Source {assoc Item:Type;} trait Accepts where T {} trait Other {}";
+    for tail in [
+        "",
+        ", requires not (A :- Source)",
+        ", requires (A :- Source) or (A :- Other)",
+    ] {
         for declaration in [
             format!("struct Bad where A :- Accepts<A.as(Source).Item>{tail} {{}}"),
             format!("fn bad(value:A)->bool where A :- Accepts<A.as(Source).Item>{tail} {{true}}"),
@@ -6204,7 +7578,7 @@ fn mixed_sugar_bounds_cannot_extract_source_evidence_from_negative_or_disjunctiv
 
 #[test]
 fn ordinary_type_predicates_reject_wrong_inputs_and_unproved_forwarding() {
-    let prefix="typealias Type=.Type'builtin;trait Forbidden {} impl Forbidden for bool {}
+    let prefix = "typealias Type=.Type'builtin;trait Forbidden {} impl Forbidden for bool {}
         fn same(comptime A:Type,comptime B:Type,value:A)->B where requires A == B {value}
         fn choice(comptime T:Type)->bool where requires T == bool or T == 'x''type {true}
         fn distinct(comptime A:Type,comptime B:Type)->bool where requires A != B {true}
@@ -6216,7 +7590,10 @@ fn ordinary_type_predicates_reject_wrong_inputs_and_unproved_forwarding() {
         "fn run()->bool {allowed(bool)}",
         "fn forward(comptime A:Type,comptime B:Type,value:A)->B {same(A,B,value)}",
     ] {
-        rejected(&format!("{prefix} {body}"),"ordinary input type requirement is not established");
+        rejected(
+            &format!("{prefix} {body}"),
+            "ordinary input type requirement is not established",
+        );
     }
 }
 
@@ -6224,12 +7601,22 @@ fn ordinary_type_predicates_reject_wrong_inputs_and_unproved_forwarding() {
 fn scoped_negative_trait_requirements_need_concrete_or_local_evidence() {
     let prefix = "typealias Type=.Type'builtin; trait Forbidden {}
         fn allowed(comptime T:Type)->bool where requires not (T :- Forbidden) {true}";
-    rejected(&format!("{prefix} fn forward(comptime T:Type)->bool {{allowed(T)}}"),
-        "ordinary input type requirement is not established");
-    rejected(&format!("{prefix} impl Forbidden for bool {{}} fn forward(comptime T:Type)->bool where requires T == bool {{allowed(T)}}"),
-        "ordinary input type requirement is not established");
-    rejected(&format!("{prefix} fn forward(comptime T:Type)->bool where requires T == bool or T == 'x''type {{allowed(T)}}"),
-        "ordinary input type requirement is not established");
+    rejected(
+        &format!("{prefix} fn forward(comptime T:Type)->bool {{allowed(T)}}"),
+        "ordinary input type requirement is not established",
+    );
+    rejected(
+        &format!(
+            "{prefix} impl Forbidden for bool {{}} fn forward(comptime T:Type)->bool where requires T == bool {{allowed(T)}}"
+        ),
+        "ordinary input type requirement is not established",
+    );
+    rejected(
+        &format!(
+            "{prefix} fn forward(comptime T:Type)->bool where requires T == bool or T == 'x''type {{allowed(T)}}"
+        ),
+        "ordinary input type requirement is not established",
+    );
 }
 
 #[test]
@@ -6241,9 +7628,11 @@ fn ordinary_input_method_contracts_use_interface_premises_in_the_method_scope() 
     accepted(&format!("{prefix}
         trait Service {{fn check(comptime A:Type)->bool where requires A :- Allowed;}}
         impl Service for bool {{fn check(comptime X:Type)->bool where requires X :- Allowed {{true}}}}"));
-    accepted(&format!("{prefix}
+    accepted(&format!(
+        "{prefix}
         trait Service {{fn check(comptime A:Type)->bool where requires A :- Allowed;}}
-        impl Service for bool {{fn check(comptime X:Type)->bool {{true}}}}"));
+        impl Service for bool {{fn check(comptime X:Type)->bool {{true}}}}"
+    ));
     rejected(&format!("{prefix}
         trait Service {{fn check(comptime A:Type)->bool;}}
         impl Service for bool {{fn check(comptime X:Type)->bool where requires X == bool {{true}}}}"),
@@ -6262,12 +7651,18 @@ fn staged_trait_calls_check_actual_ordinary_inputs() {
             fn permitted(comptime A:Type)->bool where requires A :- Allowed {true}
             fn generic(comptime A:Type,value:T)->T where T, requires A == Tag {value}
         } impl Service<bool> for bool {}";
-    rejected(&format!("{prefix} fn run()->bool {{bool.as(Service<bool>).same(bool,'x''type)}}"),
-        "ordinary input type requirement is not established");
-    rejected(&format!("{prefix} fn run()->bool {{bool.as(Service<bool>).permitted('x''type)}}"),
-        "ordinary input trait bound is not established");
-    rejected(&format!("{prefix} fn run()->bool {{bool.as(Service<bool>).generic('x''type,true)}}"),
-        "ordinary input type requirement is not established");
+    rejected(
+        &format!("{prefix} fn run()->bool {{bool.as(Service<bool>).same(bool,'x''type)}}"),
+        "ordinary input type requirement is not established",
+    );
+    rejected(
+        &format!("{prefix} fn run()->bool {{bool.as(Service<bool>).permitted('x''type)}}"),
+        "ordinary input trait bound is not established",
+    );
+    rejected(
+        &format!("{prefix} fn run()->bool {{bool.as(Service<bool>).generic('x''type,true)}}"),
+        "ordinary input type requirement is not established",
+    );
 }
 
 #[test]
@@ -6280,26 +7675,34 @@ fn method_signature_equivalence_cannot_use_implementation_only_equalities() {
         trait Service {fn same(comptime A:Type,comptime B:Type,value:A)->A where requires A == B or A == bool;}
         impl Service for bool {fn same(comptime A:Type,comptime B:Type,value:B)->B {value}}",
         "does not match its trait signature");
-    rejected("typealias Type=.Type'builtin;
+    rejected(
+        "typealias Type=.Type'builtin;
         trait Service {fn same(comptime A:Type,value:A)->A;}
         impl Service for bool {fn same(A:Type,value:bool)->bool {value}}",
-        "does not match its trait signature");
+        "does not match its trait signature",
+    );
 }
 
 #[test]
 fn runtime_default_forwarding_requires_scalar_type_evidence() {
-    rejected("typealias Type=.Type'builtin;
+    rejected(
+        "typealias Type=.Type'builtin;
         fn copy(comptime T:Type,value:T,.copy:T=value)->T {copy}",
-        "default expression requires P3");
-    rejected("typealias Type=.Type'builtin; struct Owned {}
+        "default expression requires P3",
+    );
+    rejected(
+        "typealias Type=.Type'builtin; struct Owned {}
         fn copy(comptime T:Type,value:T,.copy:T=value)->T where requires T == Owned {copy}",
-        "default expression requires P3");
+        "default expression requires P3",
+    );
     rejected("typealias Type=.Type'builtin;
         pure comptime fn Identity<T>->Type {T}
         fn copy(comptime T:Type,value:T,.copy:T=value)->T where requires T == Identity<bool> {copy}",
         "default expression requires P3");
-    accepted("typealias Type=.Type'builtin;
-        fn copy(comptime T:Type,value:T,.copy:T=value)->T where requires T == bool {copy}");
+    accepted(
+        "typealias Type=.Type'builtin;
+        fn copy(comptime T:Type,value:T,.copy:T=value)->T where requires T == bool {copy}",
+    );
 }
 
 #[test]
@@ -6316,7 +7719,7 @@ fn callback_signature_equivalence_requires_interface_evidence() {
 
 #[test]
 fn callback_normal_form_congruence_preserves_opaque_head_identity() {
-    let prefix="typealias Type=.Type'builtin; pure comptime fn Identity<T>->Type {T}";
+    let prefix = "typealias Type=.Type'builtin; pure comptime fn Identity<T>->Type {T}";
     accepted(&format!("{prefix}
         trait Service {{fn take(comptime A:Type,comptime B:Type,callback:Identity<fn(A)->A>) where requires A == B;}}
         impl Service for bool {{fn take(comptime A:Type,comptime B:Type,callback:Identity<fn(B)->B>) where requires A == B {{}}}}"));
@@ -6328,26 +7731,37 @@ fn callback_normal_form_congruence_preserves_opaque_head_identity() {
 
 #[test]
 fn ordinary_type_container_checks_preserve_field_types_and_exhaustiveness() {
-    rejected("typealias Type=.Type'builtin; struct Box where T {value:T,}
-        fn wrong(comptime T:Type,value:T)->Box<T> {Box<T>{value:true}}", "unresolved type equality");
+    rejected(
+        "typealias Type=.Type'builtin; struct Box where T {value:T,}
+        fn wrong(comptime T:Type,value:T)->Box<T> {Box<T>{value:true}}",
+        "unresolved type equality",
+    );
     rejected("typealias Type=.Type'builtin; struct Box where T {value:T,}
         fn wrong(comptime T:Type,original:Box<T>)->Box<T> {var value=original;value.value=true;value}", "unresolved type equality");
-    rejected("typealias Type=.Type'builtin; enum Choice where T {some(T),none,}
+    rejected(
+        "typealias Type=.Type'builtin; enum Choice where T {some(T),none,}
         fn wrong(comptime T:Type,value:Choice<T>)->T {value match {.some(item)=>item,}}",
-        "non-exhaustive");
+        "non-exhaustive",
+    );
 }
 
 #[test]
 fn ordinary_container_formation_requires_caller_type_evidence() {
-    rejected("typealias Type=.Type'builtin; struct Box where T, requires T == bool {value:T,}
-        fn wrong(comptime T:Type,value:T)->Box<T> {Box<T>{value:value}}", "type requirement");
-    rejected("typealias Type=.Type'builtin; enum Choice where T, requires T == bool {some(T),}
-        fn wrong(comptime T:Type,value:T)->Choice<T> {Choice<T>.some(value)}", "type requirement");
+    rejected(
+        "typealias Type=.Type'builtin; struct Box where T, requires T == bool {value:T,}
+        fn wrong(comptime T:Type,value:T)->Box<T> {Box<T>{value:value}}",
+        "type requirement",
+    );
+    rejected(
+        "typealias Type=.Type'builtin; enum Choice where T, requires T == bool {some(T),}
+        fn wrong(comptime T:Type,value:T)->Choice<T> {Choice<T>.some(value)}",
+        "type requirement",
+    );
 }
 
 #[test]
 fn ordinary_container_program_contracts_still_reject_wrong_fields_and_results() {
-    let prefix="typealias Type=.Type'builtin;struct Box where T {value:T,flag:bool,}";
+    let prefix = "typealias Type=.Type'builtin;struct Box where T {value:T,flag:bool,}";
     rejected(&format!("{prefix}
         fn read(comptime T:Type,box:Box<T>)->result:bool where requires box.flag, ensures result {{box.flag}}
         fn run()->bool {{read(bool,Box<bool>{{value:true,flag:false}})}}"), "precondition");
@@ -6362,18 +7776,37 @@ fn ordinary_type_memory_writes_invalidate_changed_field_facts() {
         fn clear(comptime T:Type,box:*Box<T>) {box.*.flag=false;}
         fn run()->result:bool where ensures result {var box=Box<bool>{value:true,flag:true};clear(bool,box.ref);box.flag}",
         "postcondition");
-    rejected("typealias Type=.Type'builtin;struct Box where T {value:T,flag:bool,}
-        fn wrong(comptime T:Type,box:*Box<T>) {box.*.flag='x';}", "type mismatch");
+    rejected(
+        "typealias Type=.Type'builtin;struct Box where T {value:T,flag:bool,}
+        fn wrong(comptime T:Type,box:*Box<T>) {box.*.flag='x';}",
+        "type mismatch",
+    );
 }
 
 #[test]
 fn pointer_scalar_identity_requires_proof_and_does_not_unfold_heads() {
-    let prefix="typealias Type=.Type'builtin;struct Owned {} pure comptime fn Identity<T>->Type {T}";
-    for condition in ["", "where requires T == Owned", "where requires T == Identity<bool>"] {
-        rejected(&format!("{prefix} fn read(comptime T:Type,p:*T)->T {condition} {{p.*}}"),"non-Copy pointer reads");
-        rejected(&format!("{prefix} fn write(comptime T:Type,p:*T,value:T) {condition} {{p.* = value;}}"),"non-Copy pointer writes");
+    let prefix =
+        "typealias Type=.Type'builtin;struct Owned {} pure comptime fn Identity<T>->Type {T}";
+    for condition in [
+        "",
+        "where requires T == Owned",
+        "where requires T == Identity<bool>",
+    ] {
+        rejected(
+            &format!("{prefix} fn read(comptime T:Type,p:*T)->T {condition} {{p.*}}"),
+            "non-Copy pointer reads",
+        );
+        rejected(
+            &format!(
+                "{prefix} fn write(comptime T:Type,p:*T,value:T) {condition} {{p.* = value;}}"
+            ),
+            "non-Copy pointer writes",
+        );
     }
-    rejected(&format!("{prefix} fn write(comptime T:Type,p:*T) where requires T == bool {{p.* = 'x';}}"),"unresolved type equality");
+    rejected(
+        &format!("{prefix} fn write(comptime T:Type,p:*T) where requires T == bool {{p.* = 'x';}}"),
+        "unresolved type equality",
+    );
 }
 
 #[test]
@@ -6386,96 +7819,249 @@ fn proved_scalar_memory_writes_do_not_preserve_overwritten_facts() {
 
 #[test]
 fn dependent_boolean_contracts_do_not_invent_value_or_type_proofs() {
-    let prefix="typealias Type=.Type'builtin;";
-    rejected(&format!("{prefix} fn keep(comptime T:Type,value:T)->result:T where requires T == bool, requires value, ensures result {{value}} fn run()->bool {{keep(bool,false)}}"),"precondition");
-    rejected(&format!("{prefix} fn wrong(comptime T:Type,value:T)->result:T where requires T == bool, requires value, ensures result {{false}}"),"postcondition");
-    rejected(&format!("{prefix} fn unproved(comptime T:Type,value:T)->result:T where requires T == bool, ensures result {{value}}"),"postcondition");
-    rejected(&format!("{prefix} fn missing(comptime T:Type,value:T) where requires value {{}}"),"type equality");
-    rejected(&format!("{prefix} pure comptime fn Identity<T>->Type {{T}} fn hidden_head(comptime T:Type,value:T) where requires T == Identity<bool>, requires value {{}}"),"type equality");
+    let prefix = "typealias Type=.Type'builtin;";
+    rejected(
+        &format!(
+            "{prefix} fn keep(comptime T:Type,value:T)->result:T where requires T == bool, requires value, ensures result {{value}} fn run()->bool {{keep(bool,false)}}"
+        ),
+        "precondition",
+    );
+    rejected(
+        &format!(
+            "{prefix} fn wrong(comptime T:Type,value:T)->result:T where requires T == bool, requires value, ensures result {{false}}"
+        ),
+        "postcondition",
+    );
+    rejected(
+        &format!(
+            "{prefix} fn unproved(comptime T:Type,value:T)->result:T where requires T == bool, ensures result {{value}}"
+        ),
+        "postcondition",
+    );
+    rejected(
+        &format!("{prefix} fn missing(comptime T:Type,value:T) where requires value {{}}"),
+        "type equality",
+    );
+    rejected(
+        &format!(
+            "{prefix} pure comptime fn Identity<T>->Type {{T}} fn hidden_head(comptime T:Type,value:T) where requires T == Identity<bool>, requires value {{}}"
+        ),
+        "type equality",
+    );
 }
 
 #[test]
 fn dependent_boolean_operators_require_unambiguous_type_and_value_evidence() {
-    let prefix="typealias Type=.Type'builtin;pure comptime fn Identity<T>->Type {T}";
-    for premise in ["", "where requires T == Identity<bool>", "where requires T == bool or T == 'x''type"] {
-        rejected(&format!("{prefix} fn negate(comptime T:Type,value:T) {premise} {{let ignored=not value;}}"),
-            if !premise.is_empty() {"structural type view remains unresolved"} else {"not requires bool or BitVec"});
-        rejected(&format!("{prefix} fn combine(comptime T:Type,value:T) {premise} {{let ignored=value and true;}}"),
-            if !premise.is_empty() {"structural type view remains unresolved"} else {"and/or require bool"});
+    let prefix = "typealias Type=.Type'builtin;pure comptime fn Identity<T>->Type {T}";
+    for premise in [
+        "",
+        "where requires T == Identity<bool>",
+        "where requires T == bool or T == 'x''type",
+    ] {
+        rejected(
+            &format!(
+                "{prefix} fn negate(comptime T:Type,value:T) {premise} {{let ignored=not value;}}"
+            ),
+            if !premise.is_empty() {
+                "structural type view remains unresolved"
+            } else {
+                "not requires bool or BitVec"
+            },
+        );
+        rejected(
+            &format!(
+                "{prefix} fn combine(comptime T:Type,value:T) {premise} {{let ignored=value and true;}}"
+            ),
+            if !premise.is_empty() {
+                "structural type view remains unresolved"
+            } else {
+                "and/or require bool"
+            },
+        );
     }
-    rejected(&format!("{prefix} fn wrong(comptime T:Type,value:T)->result:bool where requires T == bool, requires value, ensures result {{not value}}"),"postcondition");
-    rejected(&format!("{prefix} fn wrong(comptime T:Type,value:T)->result:bool where requires T == bool, requires value, ensures result {{value and false}}"),"postcondition");
+    rejected(
+        &format!(
+            "{prefix} fn wrong(comptime T:Type,value:T)->result:bool where requires T == bool, requires value, ensures result {{not value}}"
+        ),
+        "postcondition",
+    );
+    rejected(
+        &format!(
+            "{prefix} fn wrong(comptime T:Type,value:T)->result:bool where requires T == bool, requires value, ensures result {{value and false}}"
+        ),
+        "postcondition",
+    );
 }
 
 #[test]
 fn disjunctive_program_facts_do_not_survive_writes_or_authorize_each_arm() {
-    rejected("fn wrong(a:bool,b:bool)->result:bool where requires a or b, ensures result {a}","postcondition");
-    rejected("fn wrong(a:bool,b:bool)->result:bool where ensures result {var left=a;var right=b;assumes left or right;left=false;right=false;left or right}","postcondition");
-    rejected("fn either(a:bool,b:bool)->result:bool where requires a or b, ensures result {a or b} fn wrong()->bool {either(false,false)}","precondition");
+    rejected(
+        "fn wrong(a:bool,b:bool)->result:bool where requires a or b, ensures result {a}",
+        "postcondition",
+    );
+    rejected(
+        "fn wrong(a:bool,b:bool)->result:bool where ensures result {var left=a;var right=b;assumes left or right;left=false;right=false;left or right}",
+        "postcondition",
+    );
+    rejected(
+        "fn either(a:bool,b:bool)->result:bool where requires a or b, ensures result {a or b} fn wrong()->bool {either(false,false)}",
+        "precondition",
+    );
 }
 
 #[test]
 fn disjunctive_copy_facts_do_not_cross_writes_or_missing_sources() {
-    let prefix="fn accept(a:bool,b:bool)->bool where requires a or b {true}";
-    rejected(&format!("{prefix} fn wrong(a:bool,b:bool)->bool where requires a or b {{let x=a;accept(x,false)}}"),"precondition");
-    rejected(&format!("{prefix} fn wrong(a:bool,b:bool)->bool where requires a or b {{var x=a;var y=b;x=false;y=false;accept(x,y)}}"),"precondition");
-    rejected(&format!("{prefix} fn wrong(a:bool,b:bool,flag:bool)->bool where requires a or b {{var x=false;var y=false;if flag {{x=a;y=b;}};accept(x,y)}}"),"precondition");
-    rejected(&format!("{prefix} fn wrong(a:bool,b:bool)->bool where requires a or b {{let x=a;let call=|| accept(x,false);call()}}"),"precondition");
+    let prefix = "fn accept(a:bool,b:bool)->bool where requires a or b {true}";
+    rejected(
+        &format!(
+            "{prefix} fn wrong(a:bool,b:bool)->bool where requires a or b {{let x=a;accept(x,false)}}"
+        ),
+        "precondition",
+    );
+    rejected(
+        &format!(
+            "{prefix} fn wrong(a:bool,b:bool)->bool where requires a or b {{var x=a;var y=b;x=false;y=false;accept(x,y)}}"
+        ),
+        "precondition",
+    );
+    rejected(
+        &format!(
+            "{prefix} fn wrong(a:bool,b:bool,flag:bool)->bool where requires a or b {{var x=false;var y=false;if flag {{x=a;y=b;}};accept(x,y)}}"
+        ),
+        "precondition",
+    );
+    rejected(
+        &format!(
+            "{prefix} fn wrong(a:bool,b:bool)->bool where requires a or b {{let x=a;let call=|| accept(x,false);call()}}"
+        ),
+        "precondition",
+    );
 }
 
 #[test]
 fn regrouped_disjunctions_do_not_strengthen_or_drop_operands() {
-    rejected("fn accept(a:bool,b:bool,c:bool)->bool where requires a or (b and c) {true} fn wrong(a:bool,b:bool,c:bool)->bool where requires a or (b or c) {accept(a,b,c)}","precondition");
-    rejected("fn accept(a:bool,b:bool)->bool where requires a or b {true} fn wrong(a:bool,b:bool,c:bool)->bool where requires (a or b) or c {accept(a,b)}","precondition");
+    rejected(
+        "fn accept(a:bool,b:bool,c:bool)->bool where requires a or (b and c) {true} fn wrong(a:bool,b:bool,c:bool)->bool where requires a or (b or c) {accept(a,b,c)}",
+        "precondition",
+    );
+    rejected(
+        "fn accept(a:bool,b:bool)->bool where requires a or b {true} fn wrong(a:bool,b:bool,c:bool)->bool where requires (a or b) or c {accept(a,b)}",
+        "precondition",
+    );
 }
 
 #[test]
 fn dependent_scalar_closures_do_not_inherit_creator_value_guarantees() {
-    let prefix="typealias Type=.Type'builtin;typealias Byte=.u8'builtin;";
-    rejected(&format!("{prefix} fn wrong(comptime T:Type,value:T)->T where requires T == Byte, requires value < 255 {{let apply=|item:T| item + 1;apply(value)}}"),"machine arithmetic range is not proven");
-    rejected(&format!("{prefix} fn accept(value:bool)->bool where requires value {{value}} fn wrong(comptime T:Type,value:T)->bool where requires T == bool, requires value {{let apply=|item:T| accept(item);apply(value)}}"),"precondition");
-    rejected(&format!("{prefix} fn wrong(comptime T:Type,value:T)->Byte where requires T == bool {{let apply=|item:Byte| item + 1;apply(255)}}"),"machine arithmetic range is not proven");
+    let prefix = "typealias Type=.Type'builtin;typealias Byte=.u8'builtin;";
+    rejected(
+        &format!(
+            "{prefix} fn wrong(comptime T:Type,value:T)->T where requires T == Byte, requires value < 255 {{let apply=|item:T| item + 1;apply(value)}}"
+        ),
+        "machine arithmetic range is not proven",
+    );
+    rejected(
+        &format!(
+            "{prefix} fn accept(value:bool)->bool where requires value {{value}} fn wrong(comptime T:Type,value:T)->bool where requires T == bool, requires value {{let apply=|item:T| accept(item);apply(value)}}"
+        ),
+        "precondition",
+    );
+    rejected(
+        &format!(
+            "{prefix} fn wrong(comptime T:Type,value:T)->Byte where requires T == bool {{let apply=|item:Byte| item + 1;apply(255)}}"
+        ),
+        "machine arithmetic range is not proven",
+    );
 }
 
 #[test]
 fn symbolic_type_references_in_runtime_closures_do_not_enable_runtime_type_storage() {
-    let prefix="typealias Type=.Type'builtin;";
-    rejected(&format!("{prefix} fn wrong(comptime T:Type) {{let call=|| T;call();}}"),"comptime-only value cannot inhabit runtime storage");
-    rejected(&format!("{prefix} fn wrong(comptime T:Type) {{let call=|| {{let saved=T;true}};call();}}"),"comptime-only value cannot inhabit runtime storage");
-    rejected(&format!("{prefix} fn identity(comptime T:Type,value:T)->T {{value}} fn wrong(comptime T:Type,value:T)->T {{let call=|item:T| identity(bool,item);call(value)}}"),"type equality");
+    let prefix = "typealias Type=.Type'builtin;";
+    rejected(
+        &format!("{prefix} fn wrong(comptime T:Type) {{let call=|| T;call();}}"),
+        "comptime-only value cannot inhabit runtime storage",
+    );
+    rejected(
+        &format!("{prefix} fn wrong(comptime T:Type) {{let call=|| {{let saved=T;true}};call();}}"),
+        "comptime-only value cannot inhabit runtime storage",
+    );
+    rejected(
+        &format!(
+            "{prefix} fn identity(comptime T:Type,value:T)->T {{value}} fn wrong(comptime T:Type,value:T)->T {{let call=|item:T| identity(bool,item);call(value)}}"
+        ),
+        "type equality",
+    );
 }
 
 #[test]
 fn staged_value_capture_elision_does_not_admit_runtime_integer_storage() {
-    rejected("typealias Integer=.Integer'builtin;fn tag(comptime n:Integer)->bool {true} fn wrong(comptime n:Integer) {let call=|| {let saved=n;tag(n)};call();}","comptime-only value cannot inhabit runtime storage");
-    rejected("typealias Integer=.Integer'builtin;fn wrong(comptime n:Integer) {let call=|| n;call();}","comptime-only value cannot inhabit runtime storage");
+    rejected(
+        "typealias Integer=.Integer'builtin;fn tag(comptime n:Integer)->bool {true} fn wrong(comptime n:Integer) {let call=|| {let saved=n;tag(n)};call();}",
+        "comptime-only value cannot inhabit runtime storage",
+    );
+    rejected(
+        "typealias Integer=.Integer'builtin;fn wrong(comptime n:Integer) {let call=|| n;call();}",
+        "comptime-only value cannot inhabit runtime storage",
+    );
 }
 
 #[test]
 fn deferred_integer_comparisons_do_not_promote_runtime_dependencies() {
-    rejected("fn choose(comptime flag:bool)->bool {flag} fn wrong(value:.u8'builtin)->bool {choose(value < 3)}","comptime");
-    rejected("typealias Integer=.Integer'builtin;fn choose(comptime flag:bool)->bool {flag} fn wrong(comptime n:Integer,value:bool)->bool {choose(n == 3 and value)}","comptime");
-    rejected("typealias Integer=.Integer'builtin;fn choose(comptime flag:bool)->bool {flag} fn runtime()->bool {true} fn wrong(comptime n:Integer)->bool {choose(n == 3 or runtime())}","comptime");
+    rejected(
+        "fn choose(comptime flag:bool)->bool {flag} fn wrong(value:.u8'builtin)->bool {choose(value < 3)}",
+        "comptime",
+    );
+    rejected(
+        "typealias Integer=.Integer'builtin;fn choose(comptime flag:bool)->bool {flag} fn wrong(comptime n:Integer,value:bool)->bool {choose(n == 3 and value)}",
+        "comptime",
+    );
+    rejected(
+        "typealias Integer=.Integer'builtin;fn choose(comptime flag:bool)->bool {flag} fn runtime()->bool {true} fn wrong(comptime n:Integer)->bool {choose(n == 3 or runtime())}",
+        "comptime",
+    );
 }
 
 #[test]
 fn deferred_float_computations_still_reject_runtime_inputs() {
-    rejected("fn choose(comptime flag:bool)->bool {flag} fn wrong(value:.f64'builtin)->bool {choose(value + 1.0 > 0.0)}","comptime");
-    rejected("fn choose(comptime flag:bool)->bool {flag} fn wrong(comptime flag:bool,value:.f32'builtin)->bool {choose(if flag {value == 0.0} else {true})}","comptime");
+    rejected(
+        "fn choose(comptime flag:bool)->bool {flag} fn wrong(value:.f64'builtin)->bool {choose(value + 1.0 > 0.0)}",
+        "comptime",
+    );
+    rejected(
+        "fn choose(comptime flag:bool)->bool {flag} fn wrong(comptime flag:bool,value:.f32'builtin)->bool {choose(if flag {value == 0.0} else {true})}",
+        "comptime",
+    );
 }
 
 #[test]
 fn floating_comptime_inputs_reject_width_mismatch_and_runtime_values() {
-    rejected("typealias F32=.f32'builtin;typealias F64=.f64'builtin;comptime fn single()->F32 {1.0} fn accept(comptime value:F64)->bool {true} fn wrong()->bool {accept(single())}","type mismatch");
-    rejected("typealias F64=.f64'builtin;fn accept(comptime value:F64)->bool {true} fn wrong(value:F64)->bool {accept(value)}","comptime");
+    rejected(
+        "typealias F32=.f32'builtin;typealias F64=.f64'builtin;comptime fn single()->F32 {1.0} fn accept(comptime value:F64)->bool {true} fn wrong()->bool {accept(single())}",
+        "type mismatch",
+    );
+    rejected(
+        "typealias F64=.f64'builtin;fn accept(comptime value:F64)->bool {true} fn wrong(value:F64)->bool {accept(value)}",
+        "comptime",
+    );
 }
 
 #[test]
 fn staged_constant_availability_does_not_escape_to_runtime_arguments() {
-    rejected("const FLAG=true;fn take(value:bool)->bool {value} fn run()->bool {take(FLAG)}", "cross-stage Splice");
-    rejected("const FLAG=true;fn take(comptime flag:bool,value:bool)->bool {value} fn run()->bool {take(FLAG,FLAG)}", "cross-stage Splice");
-    rejected("const FLAG=true;fn take(comptime flag:bool)->bool {flag} fn run()->bool {let first=take(FLAG);FLAG}", "cross-stage Splice");
-    rejected("fn take(comptime flag:bool)->bool {flag} fn run(value:bool)->bool {take(value)}", "cannot read a runtime parameter");
+    rejected(
+        "const FLAG=true;fn take(value:bool)->bool {value} fn run()->bool {take(FLAG)}",
+        "cross-stage Splice",
+    );
+    rejected(
+        "const FLAG=true;fn take(comptime flag:bool,value:bool)->bool {value} fn run()->bool {take(FLAG,FLAG)}",
+        "cross-stage Splice",
+    );
+    rejected(
+        "const FLAG=true;fn take(comptime flag:bool)->bool {flag} fn run()->bool {let first=take(FLAG);FLAG}",
+        "cross-stage Splice",
+    );
+    rejected(
+        "fn take(comptime flag:bool)->bool {flag} fn run(value:bool)->bool {take(value)}",
+        "cannot read a runtime parameter",
+    );
 }
 
 #[test]
@@ -6486,77 +8072,277 @@ fn staged_input_phase_errors_precede_capture_and_execution() {
         "if false {runtime()} else {true}",
         "do {let flag=runtime();flag}",
     ] {
-        rejected(&format!("{prefix} fn run()->bool {{supply({body})}}"),
-            "runtime call in a comptime input");
+        rejected(
+            &format!("{prefix} fn run()->bool {{supply({body})}}"),
+            "runtime call in a comptime input",
+        );
     }
     for body in ["value", "not value", "if false {value} else {true}"] {
-        rejected(&format!("{prefix} fn run(value:bool)->bool {{supply({body})}}"),
-            "cannot read a runtime parameter");
+        rejected(
+            &format!("{prefix} fn run(value:bool)->bool {{supply({body})}}"),
+            "cannot read a runtime parameter",
+        );
     }
     // A pending comptime input remains legal to transport to another stage
     // boundary; failure above must not turn it into a runtime input.
-    accepted("fn supply(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool {supply(not flag)} fn run()->bool {forward(true)}");
+    accepted(
+        "fn supply(comptime flag:bool)->bool {flag} fn forward(comptime flag:bool)->bool {supply(not flag)} fn run()->bool {forward(true)}",
+    );
 }
 
 #[test]
 fn anonymous_record_patterns_reject_bad_fields_and_missing_coverage() {
-    let prefix="comptime fn schema(...properties:T)->T where T {properties} const SAMPLE=schema {flag:true,other:false};typealias Options=SAMPLE'type;";
-    rejected(&format!("{prefix} fn read(options:Options)->bool {{let {{absent}}=options;absent}}"),"unknown struct pattern field");
-    rejected(&format!("{prefix} fn read(options:Options)->bool {{let {{flag:a,flag:b}}=options;a}}"),"duplicate struct pattern field");
-    rejected(&format!("{prefix} fn read(options:Options)->bool {{options match {{{{flag:true}}=>true,}}}}"),"non-exhaustive match");
-    rejected(&format!("{prefix} fn read(options:Options)->bool {{options match {{{{flag:true,other:true}}=>true,{{flag:false,other:false}}=>false,}}}}"),"non-exhaustive match");
+    let prefix = "comptime fn schema(...properties:T)->T where T {properties} const SAMPLE=schema {flag:true,other:false};typealias Options=SAMPLE'type;";
+    rejected(
+        &format!("{prefix} fn read(options:Options)->bool {{let {{absent}}=options;absent}}"),
+        "unknown struct pattern field",
+    );
+    rejected(
+        &format!("{prefix} fn read(options:Options)->bool {{let {{flag:a,flag:b}}=options;a}}"),
+        "duplicate struct pattern field",
+    );
+    rejected(
+        &format!(
+            "{prefix} fn read(options:Options)->bool {{options match {{{{flag:true}}=>true,}}}}"
+        ),
+        "non-exhaustive match",
+    );
+    rejected(
+        &format!(
+            "{prefix} fn read(options:Options)->bool {{options match {{{{flag:true,other:true}}=>true,{{flag:false,other:false}}=>false,}}}}"
+        ),
+        "non-exhaustive match",
+    );
 }
 
 #[test]
 fn anonymous_record_patterns_require_evidence_without_unfolding_opaque_heads() {
-    rejected("fn read(value:T)->bool where T {let {flag}=value;flag}","record pattern requires a struct type");
-    let prefix="typealias Type=.Type'builtin;comptime fn schema(...properties:T)->T where T {properties} const SAMPLE=schema {flag:true};typealias Options=SAMPLE'type;pure comptime fn Identity<T>->Type {T}";
-    rejected(&format!("{prefix} fn read(value:Identity<Options>)->bool {{let {{flag}}=value;flag}}"),"structural type view remains unresolved");
+    rejected(
+        "fn read(value:T)->bool where T {let {flag}=value;flag}",
+        "record pattern requires a struct type",
+    );
+    let prefix = "typealias Type=.Type'builtin;comptime fn schema(...properties:T)->T where T {properties} const SAMPLE=schema {flag:true};typealias Options=SAMPLE'type;pure comptime fn Identity<T>->Type {T}";
+    rejected(
+        &format!("{prefix} fn read(value:Identity<Options>)->bool {{let {{flag}}=value;flag}}"),
+        "structural type view remains unresolved",
+    );
 }
 
 #[test]
 fn unsigned_division_requires_nonzero_and_does_not_invent_signed_rounding() {
-    rejected("fn divide(a:.u32'builtin,b:.u32'builtin)->.u32'builtin {a / b}","divisor is not proven nonzero");
-    rejected("fn divide(a:.u8'builtin)->.u8'builtin {a / 0}","divisor is not proven nonzero");
-    rejected("fn divide(a:.i32'builtin,b:.i32'builtin)->.i32'builtin where requires b > 0 {a / b}","Integer division operator rounding protocol");
-    rejected("fn divide(a:.u32'builtin,b:.u32'builtin)->result:.u32'builtin where requires b != 0, ensures result < a {a / b}","postcondition");
+    rejected(
+        "fn divide(a:.u32'builtin,b:.u32'builtin)->.u32'builtin {a / b}",
+        "divisor is not proven nonzero",
+    );
+    rejected(
+        "fn divide(a:.u8'builtin)->.u8'builtin {a / 0}",
+        "divisor is not proven nonzero",
+    );
+    rejected(
+        "fn divide(a:.i32'builtin,b:.i32'builtin)->.i32'builtin where requires b > 0 {a / b}",
+        "Integer division operator rounding protocol",
+    );
+    rejected(
+        "fn divide(a:.u32'builtin,b:.u32'builtin)->result:.u32'builtin where requires b != 0, ensures result < a {a / b}",
+        "postcondition",
+    );
 }
 
 #[test]
 fn unsigned_division_does_not_reuse_mutated_dividend_evidence() {
-    rejected("typealias Int=.u8'builtin;
+    rejected(
+        "typealias Int=.u8'builtin;
         fn denominator(p:*Int)->result:Int where ensures result == 1 {p.* = 0;1}
-        fn divide(a:Int)->result:Int where ensures result <= a {a / denominator(a.ref)}", "postcondition");
+        fn divide(a:Int)->result:Int where ensures result <= a {a / denominator(a.ref)}",
+        "postcondition",
+    );
 }
 
 #[test]
 fn unsigned_remainder_rejects_zero_false_contracts_and_unselected_rounding() {
-    rejected("fn remainder(a:.u32'builtin,b:.u32'builtin)->.u32'builtin {a % b}","divisor is not proven nonzero");
-    rejected("fn remainder(a:.u8'builtin)->.u8'builtin {a % 0}","divisor is not proven nonzero");
-    rejected("fn remainder(a:.u8'builtin,b:.u8'builtin)->result:.u8'builtin where requires b != 0, ensures result > 0 {a % b}","postcondition");
-    for ty in ["i32","Integer","f32","f64"] {
-        rejected(&format!("comptime fn remainder(a:.{ty}'builtin,b:.{ty}'builtin)->.{ty}'builtin {{a % b}}"),"remainder rounding for this type");
+    rejected(
+        "fn remainder(a:.u32'builtin,b:.u32'builtin)->.u32'builtin {a % b}",
+        "divisor is not proven nonzero",
+    );
+    rejected(
+        "fn remainder(a:.u8'builtin)->.u8'builtin {a % 0}",
+        "divisor is not proven nonzero",
+    );
+    rejected(
+        "fn remainder(a:.u8'builtin,b:.u8'builtin)->result:.u8'builtin where requires b != 0, ensures result > 0 {a % b}",
+        "postcondition",
+    );
+    for ty in ["i32", "Integer", "f32", "f64"] {
+        rejected(
+            &format!(
+                "comptime fn remainder(a:.{ty}'builtin,b:.{ty}'builtin)->.{ty}'builtin {{a % b}}"
+            ),
+            "remainder rounding for this type",
+        );
     }
 }
 
 #[test]
 fn unsigned_remainder_does_not_keep_a_bound_on_a_mutated_divisor() {
-    rejected("typealias Int=.u8'builtin;
+    rejected(
+        "typealias Int=.u8'builtin;
         fn zero(p:*Int) {p.* = 0;}
         fn remainder(a:Int,b:Int)->result:Int where requires b != 0, ensures result < b {
             let saved=a % b;zero(b.ref);saved
-        }", "postcondition");
+        }",
+        "postcondition",
+    );
 }
 
 #[test]
 fn unsigned_round_down_does_not_license_an_unrelated_or_mutated_multiplier() {
-    rejected("typealias UInt=.u32'builtin;
+    rejected(
+        "typealias UInt=.u32'builtin;
         fn bad(n:UInt,alignment:UInt,other:UInt)->UInt where requires alignment != 0 {
             (n / alignment) * other
-        }", "machine arithmetic range is not proven");
-    rejected("typealias UInt=.u32'builtin;
+        }",
+        "machine arithmetic range is not proven",
+    );
+    rejected(
+        "typealias UInt=.u32'builtin;
         fn change(p:*UInt) {p.* = 4294967295;}
         fn bad(n:UInt,alignment:UInt)->UInt where requires alignment != 0 {
             let q=n / alignment;change(alignment.ref);q * alignment
-        }", "machine arithmetic range is not proven");
+        }",
+        "machine arithmetic range is not proven",
+    );
+}
+
+#[test]
+fn symbol_indexed_trait_methods_select_complete_interfaces() {
+    let source = "typealias Symbol=.Symbol'builtin;
+        trait Choose where suffix:Symbol {fn choose(self)->bool;}
+        impl Choose<.px> for bool {fn choose(self)->bool {self}}
+        impl Choose<.em> for bool {fn choose(self)->bool {not self}}
+        fn generic(value:T)->bool where T :- Choose<.px> {value.choose()}
+        fn run()->bool {generic(true) and true.as(Choose<.px>).choose() and false.as(Choose<.em>).choose()}";
+    for source in [source.to_owned(), source
+        .replace("fn generic", "trait Child :- Choose<suffix> where suffix:Symbol {} impl Child<.px> for bool {} fn generic")
+        .replace("T :- Choose<.px>", "T :- Child<.px>")] {
+        accepted(&source);
+        let executed = Sandbox::new(&source).run(&["--interpret", "run"]);
+        assert!(executed.status.success(), "{}", details(&executed));
+        assert_eq!(String::from_utf8_lossy(&executed.stdout).trim(), "(bool true)");
+    }
+    rejected(&source.replace("{self}", "{()}"), "mismatch");
+}
+
+#[test]
+fn symbol_indexed_trait_program_contract_is_enforced() {
+    let source = "typealias Symbol=.Symbol'builtin;
+        trait Choose where suffix:Symbol {fn choose(self,flag:bool)->bool where requires flag;}
+        impl Choose<.px> for bool {fn choose(self,flag:bool)->bool {self}}
+        fn run()->bool {true.as(Choose<.px>).choose(true)}";
+    let executed = Sandbox::new(source).run(&["--interpret", "run"]);
+    assert!(executed.status.success(), "{}", details(&executed));
+    let failed =
+        Sandbox::new(&source.replace("choose(true)", "choose(false)")).run(&["--interpret", "run"]);
+    assert!(!failed.status.success(), "{}", details(&failed));
+    assert!(
+        details(&failed).contains("program precondition is not proven"),
+        "{}",
+        details(&failed)
+    );
+}
+
+#[test]
+fn symbol_indexed_trait_generic_methods_infer_local_types() {
+    let source = "typealias Symbol=.Symbol'builtin;
+        trait Keep where suffix:Symbol {fn keep(self,value:U)->U where U;}
+        impl Keep<.px> for bool {fn keep(self,value:U)->U where U {value}}
+        fn generic(value:T)->bool where T :- Keep<.px> {value.keep(true)}
+        fn run()->bool {generic(false) and false.as(Keep<.px>).keep(true)}";
+    for source in [
+        source.to_owned(),
+        source
+            .replace("value:U)->U", "value:U,.flag:bool=true)->bool")
+            .replace("where U {value}", "where U {flag}"),
+        source.replace(".keep(true)", ".keep<bool>(true)"),
+        format!(
+            "trait Flag {{}} impl Flag for bool {{}} {}",
+            source
+                .replace("where U;", "where U :- Flag;")
+                .replace("where U {", "where U :- Flag {")
+        ),
+    ] {
+        accepted(&source);
+        let executed = Sandbox::new(&source).run(&["--interpret", "run"]);
+        assert!(executed.status.success(), "{}", details(&executed));
+        assert_eq!(
+            String::from_utf8_lossy(&executed.stdout).trim(),
+            "(bool true)"
+        );
+    }
+    let constrained = format!(
+        "trait Flag {{}} {}",
+        source
+            .replace("where U;", "where U :- Flag;")
+            .replace("where U {", "where U :- Flag {")
+    );
+    rejected(&constrained, "trait bound");
+    rejected(
+        &source.replace(".keep(true)", ".keep<bool>(())"),
+        "mismatch",
+    );
+}
+
+#[test]
+fn symbol_indexed_trait_default_methods_execute_selected_bodies() {
+    let source = "typealias Symbol=.Symbol'builtin;
+        trait Choose where suffix:Symbol {fn choose(self)->bool {true}}
+        impl Choose<.px> for bool {}
+        impl Choose<.em> for bool {fn choose(self)->bool {self}}
+        fn generic(value:T)->bool where T :- Choose<.px> {value.choose()}
+        fn run()->bool {generic(false) and false.as(Choose<.px>).choose() and not false.as(Choose<.em>).choose()}";
+    for source in [
+        "typealias Symbol=.Symbol'builtin;
+         trait Keep where suffix:Symbol {fn keep(self,value:U)->U where U {value}}
+         impl Keep<.px> for bool {}
+         fn run()->bool {false.as(Keep<.px>).keep(true)}"
+            .to_owned(),
+        source.to_owned(),
+        source
+            .replace(
+                "fn choose(self)->bool",
+                "fn choose(self,flag:bool)->bool where requires flag",
+            )
+            .replace(".choose()", ".choose(true)"),
+    ] {
+        accepted(&source);
+        let executed = Sandbox::new(&source).run(&["--interpret", "run"]);
+        assert!(executed.status.success(), "{}", details(&executed));
+        assert_eq!(
+            String::from_utf8_lossy(&executed.stdout).trim(),
+            "(bool true)"
+        );
+    }
+}
+
+#[test]
+fn symbol_indexed_default_method_delegates_to_selected_member() {
+    let source = "typealias Symbol=.Symbol'builtin;
+        trait Choose where suffix:Symbol {
+            fn choose(self)->bool;
+            fn delegated(self)->bool {self.choose()}
+        }
+        impl Choose<.px> for bool {fn choose(self)->bool {self}}
+        impl Choose<.em> for bool {fn choose(self)->bool {not self}}
+        fn run()->bool {true.as(Choose<.px>).delegated() and false.as(Choose<.em>).delegated()}";
+    let inherited = source.replace("fn delegated(self)->bool {self.choose()}", "")
+        .replace("fn run()", "trait Delegate :- Choose<suffix> where suffix:Symbol {fn delegated(self)->bool {self.choose()}} impl Delegate<.px> for bool {} impl Delegate<.em> for bool {} fn run()")
+        .replace(".as(Choose<", ".as(Delegate<");
+    for source in [source.to_owned(), inherited] {
+        accepted(&source);
+        let executed = Sandbox::new(&source).run(&["--interpret", "run"]);
+        assert!(executed.status.success(), "{}", details(&executed));
+        assert_eq!(
+            String::from_utf8_lossy(&executed.stdout).trim(),
+            "(bool true)"
+        );
+    }
 }

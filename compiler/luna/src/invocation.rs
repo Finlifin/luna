@@ -9,7 +9,12 @@ pub fn invoke(package: &Package, entry: &str, fuel: u64) -> Result<Value, String
 }
 
 /// Invoke an entry belonging to a driver-selected semantic package identity.
-pub fn invoke_in_package(package: &Package, identity: u64, entry: &str, fuel: u64) -> Result<Value, String> {
+pub fn invoke_in_package(
+    package: &Package,
+    identity: u64,
+    entry: &str,
+    fuel: u64,
+) -> Result<Value, String> {
     invoke_selected(package, entry, Some(identity), fuel)
 }
 
@@ -188,7 +193,8 @@ pub(crate) fn prepare_entry_in_package<'a>(
             declaration,
             name: "<command-line-invocation>".into(),
             phase,
-            inline: false, pure: false,
+            inline: false,
+            pure: false,
             preconditions: vec![],
             postconditions: vec![],
             result_binding: None,

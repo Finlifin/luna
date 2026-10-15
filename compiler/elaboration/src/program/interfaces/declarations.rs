@@ -200,7 +200,10 @@ impl Checker<'_, '_> {
         if !established {
             return Err(Error {
                 needs_capability: true,
-                ..error(span, "declaration associated projection requires a given interface constraint")
+                ..error(
+                    span,
+                    "declaration associated projection requires a given interface constraint",
+                )
             });
         }
         if !self.active_associated_signatures.insert(member) {
@@ -221,9 +224,15 @@ impl Checker<'_, '_> {
             .instantiate_types(&parameters, &inputs)
             .map_err(|e| error(span, e.to_string()))?;
         if ty != p(P::Type) {
-            return Ok(Some(n::Expr {ty, source:source(span), kind:K::AssociatedValue {
-                interface:origin, member:contract.declaration, subject,
-            }}));
+            return Ok(Some(n::Expr {
+                ty,
+                source: source(span),
+                kind: K::AssociatedValue {
+                    interface: origin,
+                    member: contract.declaration,
+                    subject,
+                },
+            }));
         }
         Ok(Some(n::Expr {
             ty,

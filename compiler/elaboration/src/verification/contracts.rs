@@ -63,7 +63,10 @@ pub fn inherit(package: &mut Package, next: &mut u32) -> Result<(), flow::Error>
             // A required-invocation snapshot may carry only the identity of a
             // runtime method. It cannot invoke the body; the complete package
             // still performs inheritance and body verification later.
-            if package.runtime_function_identities.iter().any(|identity| identity.declaration == *body)
+            if package
+                .runtime_function_identities
+                .iter()
+                .any(|identity| identity.declaration == *body)
                 && !method.signature.is_comptime_callable()
                 && method.program.preconditions.is_empty()
             {
@@ -84,14 +87,37 @@ pub fn inherit(package: &mut Package, next: &mut u32) -> Result<(), flow::Error>
             // interface behavior promise. The complete body is checked later.
             actual.pure |= method.pure;
             let source = actual.body.source;
-            let parameters: Vec<_> = definition.parameters_with_self().into_iter()
-                .chain(method.type_parameters.iter().copied()).collect();
-            let method_arguments: Vec<_> = arguments.iter().cloned().chain(
-                actual.type_parameters.iter().skip(implementation.type_parameters.len()).map(|id| nir::Term::Rigid { declaration:*id, sort:nir::Sort::Type })
-            ).collect();
+            let parameters: Vec<_> = definition
+                .binders_with_self(&mut 100_000)
+                .map_err(|_| failure(source, "invalid trait parameter domains"))?
+                .into_iter()
+                .chain(
+                    method
+                        .type_parameters
+                        .iter()
+                        .map(|id| nir::DeclarationParameter {
+                            declaration: *id,
+                            sort: nir::Sort::Type,
+                        }),
+                )
+                .collect();
+            let method_arguments: Vec<_> = arguments
+                .iter()
+                .cloned()
+                .chain(
+                    actual
+                        .type_parameters
+                        .iter()
+                        .skip(implementation.type_parameters.len())
+                        .map(|id| nir::Term::Rigid {
+                            declaration: *id,
+                            sort: nir::Sort::Type,
+                        }),
+                )
+                .collect();
             let mut contract = method
                 .program
-                .instantiate_types(&parameters, &method_arguments)
+                .instantiate_parameters(&parameters, &method_arguments)
                 .map_err(|_| failure(source, "trait program contract substitution failed"))?;
             if method.parameter_bindings.len() != actual.parameters.len() {
                 return Err(failure(source, "trait program contract arity mismatch"));

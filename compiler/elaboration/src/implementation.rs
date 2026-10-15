@@ -60,9 +60,11 @@ impl Key {
                 | Term::Bool(_)
                 | Term::Integer(_)
                 | Term::BitVec(_)
-                | Term::Float32(_) | Term::Float64(_)
+                | Term::Float32(_)
+                | Term::Float64(_)
                 | Term::Char(_)
-                | Term::String(_) | Term::Symbol(_)
+                | Term::String(_)
+                | Term::Symbol(_)
                 | Term::Runtime(_)
                 | Term::Value { .. } => {
                     return Ok(Key::Leaf(ty.clone()));
@@ -84,11 +86,17 @@ impl Key {
                 }
                 Term::Pointer(inner) => (Head::Pointer, vec![inner]),
                 Term::Record(fields) => {
-                    let work = fields.iter().try_fold(fields.len(), |total, (name, _)| total.checked_add(name.len()))
+                    let work = fields
+                        .iter()
+                        .try_fold(fields.len(), |total, (name, _)| {
+                            total.checked_add(name.len())
+                        })
                         .ok_or(Error::BudgetExhausted)?;
                     *fuel = fuel.checked_sub(work).ok_or(Error::BudgetExhausted)?;
-                    (Head::Record(fields.iter().map(|(name, _)| name.clone()).collect()),
-                        fields.iter().map(|(_, ty)| ty).collect())
+                    (
+                        Head::Record(fields.iter().map(|(name, _)| name.clone()).collect()),
+                        fields.iter().map(|(_, ty)| ty).collect(),
+                    )
                 }
                 Term::ComptimeFunction(inner) => (Head::ComptimeFunction, vec![inner]),
                 Term::Function { parameters, result } => (
@@ -99,8 +107,12 @@ impl Key {
                         .chain(std::iter::once(result.as_ref()))
                         .collect(),
                 ),
-                Term::NominalValue { .. } |
-                Term::NormalForm { .. } | Term::TypeListValue(_) | Term::TypeListConcat(_) | Term::TupleValue(_) | Term::RecordValue(_) => {
+                Term::NominalValue { .. }
+                | Term::NormalForm { .. }
+                | Term::TypeListValue(_)
+                | Term::TypeListConcat(_)
+                | Term::TupleValue(_)
+                | Term::RecordValue(_) => {
                     // Validate and bound the complete opaque value before cloning.
                     let mut work = vec![(ty, depth)];
                     let mut open = false;
@@ -110,7 +122,9 @@ impl Key {
                             return Err(Error::BudgetExhausted);
                         }
                         match term {
-                            Term::AssociatedType { arguments, subject, .. } => {
+                            Term::AssociatedType {
+                                arguments, subject, ..
+                            } => {
                                 // Even a closed query can resolve to a different
                                 // structural head; it cannot prune candidates.
                                 open = true;
@@ -126,24 +140,38 @@ impl Key {
                             Term::NormalForm { arguments, .. }
                             | Term::Nominal { arguments, .. }
                             | Term::Tuple(arguments)
-                            | Term::TypeListValue(arguments) | Term::TypeListConcat(arguments) | Term::TupleValue(arguments) => {
+                            | Term::TypeListValue(arguments)
+                            | Term::TypeListConcat(arguments)
+                            | Term::TupleValue(arguments) => {
                                 if arguments.len() > *fuel {
                                     return Err(Error::BudgetExhausted);
                                 }
                                 work.extend(arguments.iter().map(|t| (t, d + 1)))
                             }
-                            Term::NominalValue {ty,fields,..} => {if fields.len().saturating_add(1)>*fuel {return Err(Error::BudgetExhausted);}work.push((ty,d+1));work.extend(fields.iter().map(|field|(field,d+1)));},
+                            Term::NominalValue { ty, fields, .. } => {
+                                if fields.len().saturating_add(1) > *fuel {
+                                    return Err(Error::BudgetExhausted);
+                                }
+                                work.push((ty, d + 1));
+                                work.extend(fields.iter().map(|field| (field, d + 1)));
+                            }
                             Term::Record(fields) | Term::RecordValue(fields) => {
-                                if fields.len() > *fuel { return Err(Error::BudgetExhausted); }
+                                if fields.len() > *fuel {
+                                    return Err(Error::BudgetExhausted);
+                                }
                                 for (name, ty) in fields {
-                                    *fuel = fuel.checked_sub(name.len()).ok_or(Error::BudgetExhausted)?;
+                                    *fuel = fuel
+                                        .checked_sub(name.len())
+                                        .ok_or(Error::BudgetExhausted)?;
                                     work.push((ty, d + 1));
                                 }
                             }
                             Term::Pointer(t) | Term::ComptimeFunction(t) => work.push((t, d + 1)),
                             // Dependent function/closure structure is not an
                             // implementation index contract yet. Do not prune it.
-                            Term::Function { .. } | Term::Closure { .. } | Term::Computation { .. } => {
+                            Term::Function { .. }
+                            | Term::Closure { .. }
+                            | Term::Computation { .. } => {
                                 return Ok(Key::Wildcard);
                             }
                             _ => {}
@@ -207,12 +235,24 @@ impl Key {
             match (a, b) {
                 (Self::Wildcard, _) | (_, Self::Wildcard) => {}
                 (
-                    Self::Leaf(Term::NormalForm { .. } | Term::TypeListValue(_) | Term::TypeListConcat(_) | Term::TupleValue(_) | Term::Value { .. }),
+                    Self::Leaf(
+                        Term::NormalForm { .. }
+                        | Term::TypeListValue(_)
+                        | Term::TypeListConcat(_)
+                        | Term::TupleValue(_)
+                        | Term::Value { .. },
+                    ),
                     _,
                 )
                 | (
                     _,
-                    Self::Leaf(Term::NormalForm { .. } | Term::TypeListValue(_) | Term::TypeListConcat(_) | Term::TupleValue(_) | Term::Value { .. }),
+                    Self::Leaf(
+                        Term::NormalForm { .. }
+                        | Term::TypeListValue(_)
+                        | Term::TypeListConcat(_)
+                        | Term::TupleValue(_)
+                        | Term::Value { .. },
+                    ),
                 ) => {}
                 (Self::Leaf(a), Self::Leaf(b)) if a == b => {}
                 (Self::Node(a, aa), Self::Node(b, ba)) if a == b && aa.len() == ba.len() => {
@@ -451,7 +491,9 @@ impl fmt::Display for Key {
                     Head::Tuple => f.write_str("tuple")?,
                     Head::Record(names) => {
                         f.write_str("(record")?;
-                        for name in names { write!(f, " {}", Term::String(name.clone().into()))?; }
+                        for name in names {
+                            write!(f, " {}", Term::String(name.clone().into()))?;
+                        }
                         f.write_str(")")?;
                     }
                     Head::Pointer => f.write_str("pointer")?,

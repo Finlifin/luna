@@ -41,8 +41,12 @@ fn closed(
     }
     let children: Vec<&Term> = match ty {
         Term::Nominal { arguments, .. } | Term::Tuple(arguments) => arguments.iter().collect(),
-        Term::NominalValue {ty,fields,..} => std::iter::once(ty.as_ref()).chain(fields.iter()).collect(),
-        Term::Record(fields) | Term::RecordValue(fields) => fields.iter().map(|(_, ty)| ty).collect(),
+        Term::NominalValue { ty, fields, .. } => {
+            std::iter::once(ty.as_ref()).chain(fields.iter()).collect()
+        }
+        Term::Record(fields) | Term::RecordValue(fields) => {
+            fields.iter().map(|(_, ty)| ty).collect()
+        }
         Term::Pointer(inner) => vec![inner],
         Term::Function { parameters, result } => parameters
             .iter()

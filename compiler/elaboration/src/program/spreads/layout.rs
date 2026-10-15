@@ -9,8 +9,13 @@ impl Checker<'_, '_> {
         types: &[Term],
         span: Span,
     ) -> Result<Vec<Option<Term>>, Error> {
-        self.spread_packet_layout(args, types, span)?.into_iter()
-            .map(|fields| fields.map(|fields| self.tuple_value_type(fields, span)).transpose())
+        self.spread_packet_layout(args, types, span)?
+            .into_iter()
+            .map(|fields| {
+                fields
+                    .map(|fields| self.tuple_value_type(fields, span))
+                    .transpose()
+            })
             .collect()
     }
 

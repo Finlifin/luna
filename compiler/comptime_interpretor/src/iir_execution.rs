@@ -4,7 +4,10 @@ use super::*;
 impl<'a> Interpreter<'a> {
     /// Execute concrete staged instances without granting runtime functions
     /// permission to run during comptime invocation.
-    pub fn from_iir_for_comptime(graph: &'a iir::Package, mut budget: Budget) -> Result<Self, Error> {
+    pub fn from_iir_for_comptime(
+        graph: &'a iir::Package,
+        mut budget: Budget,
+    ) -> Result<Self, Error> {
         Self::from_iir_for_comptime_metered(graph, &mut budget)
     }
 
@@ -26,10 +29,7 @@ impl<'a> Interpreter<'a> {
 
     /// Charge validation to the caller's allowance before publishing a VM.
     /// After success, the VM owns the remaining execution allowance.
-    pub fn from_iir_metered(
-        graph: &'a iir::Package,
-        budget: &mut Budget,
-    ) -> Result<Self, Error> {
+    pub fn from_iir_metered(graph: &'a iir::Package, budget: &mut Budget) -> Result<Self, Error> {
         let mut fuel = usize::try_from(budget.steps).unwrap_or(usize::MAX);
         let validation = graph.validate(&mut fuel);
         budget.steps = fuel as u64;
@@ -45,6 +45,7 @@ impl<'a> Interpreter<'a> {
             runtime_function_identities: BTreeMap::new(),
             graph: Some(graph),
             cleanup_schedule: None,
+            cleanup_effect_context: HashMap::new(),
             cleanup_frame: None,
             cleanup_failed: false,
             prepared_frames: vec![],
@@ -54,6 +55,7 @@ impl<'a> Interpreter<'a> {
             comptime_only: false,
             abstract_type_parameters: BTreeSet::new(),
             type_solver: None,
+            trait_parameter_sorts: BTreeMap::new(),
             method_parameters: HashMap::new(),
             method_contracts: HashMap::new(),
             assumed_interfaces: HashSet::new(),
@@ -77,6 +79,7 @@ impl<'a> Interpreter<'a> {
                 .map(|h| (h.declaration, h))
                 .collect(),
             structs: BTreeMap::new(),
+            newtypes: BTreeMap::new(),
             enums: BTreeMap::new(),
             budget: Budget {
                 steps: fuel as u64,

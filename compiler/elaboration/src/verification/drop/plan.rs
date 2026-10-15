@@ -34,7 +34,9 @@ impl AcquiredCleanup {
     ) -> Result<(), String> {
         self.visit_components(fuel, &mut |ty, resolution, fuel| {
             if !matches!(resolution, Resolution::NoCustomDrop(_)) {
-                return Err("custom or unresolved Drop responsibility prevents trivial cleanup".into());
+                return Err(
+                    "custom or unresolved Drop responsibility prevents trivial cleanup".into(),
+                );
             }
             check(ty, fuel)
         })
@@ -145,7 +147,9 @@ impl fmt::Display for CleanupStep {
         match self {
             Self::SelectVariantPlan { plans } => {
                 f.write_str("(select-variant-plan")?;
-                for plan in plans { write!(f, " {plan}")?; }
+                for plan in plans {
+                    write!(f, " {plan}")?;
+                }
                 f.write_str(")")
             }
             Self::IfConstructed { place, steps } => {
@@ -243,6 +247,18 @@ fn layout(package: &Package, ty: &Term, fuel: &mut usize) -> Result<Layout<Term>
                         .map(|v| v.fields)
                         .collect(),
                 ))
+            } else if let Some(definition) = package
+                .newtypes
+                .iter()
+                .find(|n| n.declaration == *declaration)
+            {
+                // Private representation responsibility; this does not expose a
+                // source field or inherit the representation's Drop impl.
+                Ok(Layout::Fields(vec![
+                    definition
+                        .representation_budgeted(arguments, &[], fuel)
+                        .map_err(|e| e.to_string())?,
+                ]))
             } else {
                 Err("cleanup nominal layout is missing".into())
             }
@@ -539,7 +555,9 @@ impl Planner<'_, '_> {
                 })?;
                 for (access, targets) in access.footprint.accesses.iter().zip(&access.targets) {
                     if access.read_value {
-                        for target in targets { super::access::check_retired(&self.retired, target, self.fuel)?; }
+                        for target in targets {
+                            super::access::check_retired(&self.retired, target, self.fuel)?;
+                        }
                     }
                 }
                 let invoke = CleanupStep::Invoke {
@@ -625,7 +643,9 @@ pub fn plan_cleanup_with_variants(
     variants: &[VariantSelection],
     fuel: &mut usize,
 ) -> Result<CleanupPlan, String> {
-    plan_cleanup_with_memory(package, world, acquired, state, receiver, variants, None, fuel)
+    plan_cleanup_with_memory(
+        package, world, acquired, state, receiver, variants, None, fuel,
+    )
 }
 
 pub fn plan_cleanup_with_memory(
@@ -714,6 +734,7 @@ pub struct CleanupSession<'a, 'w> {
     protocol: DeclarationId,
     budget: Budget,
     bindings: Vec<AcquiredCleanup>,
+    rejection_stack: Vec<Term>,
 }
 impl<'a, 'w> CleanupSession<'a, 'w> {
     pub fn new(
@@ -728,6 +749,7 @@ impl<'a, 'w> CleanupSession<'a, 'w> {
             protocol,
             budget,
             bindings: vec![],
+            rejection_stack: vec![],
         }
     }
     fn find<'b>(
@@ -777,6 +799,67 @@ impl<'a, 'w> CleanupSession<'a, 'w> {
     }
 }
 impl crate::verification::moves::CleanupPolicy for CleanupSession<'_, '_> {
+    fn may_reject(&mut self, ty: &Term, fuel: &mut usize) -> Result<bool, String> {
+        crate::verification::memory::bound_type(ty, fuel)?;
+        for active in &self.rejection_stack {
+            crate::verification::memory::bound_type(active, fuel)?;
+            if active == ty {
+                return Ok(true);
+            }
+        }
+        if self.rejection_stack.len() >= 64 {
+            return Err("cleanup rejection nesting budget exhausted".into());
+        }
+        self.acquire(ty, fuel)?;
+        let binding = self.find(ty, fuel)?.ok_or("missing acquired cleanup")?;
+        let mut methods = vec![];
+        let mut unresolved = false;
+        binding.visit_components(fuel, &mut |_, resolution, fuel| {
+            match resolution {
+                Resolution::NoCustomDrop(_) => {}
+                Resolution::Selected(selected) => {
+                    for argument in &selected.method.arguments {
+                        crate::verification::memory::bound_type(argument, fuel)?;
+                    }
+                    methods.push((selected.method.body, selected.method.arguments.clone()));
+                }
+                _ => unresolved = true,
+            }
+            Ok(())
+        })?;
+        if unresolved {
+            return Ok(true);
+        }
+        self.rejection_stack.push(ty.clone());
+        let result = (|| {
+            let package = self.package;
+            // Keep the contextual memory summary: it can resolve code identities
+            // which the structural rejection scan intentionally leaves unknown.
+            // If retirement is its only uncertainty, inspect nested cleanup
+            // against this same captured implementation world.
+            let mut rejection = crate::verification::rejection::Cache::new(Some(package));
+            for (method, arguments) in methods {
+                let summary = crate::verification::memory::infer_in_package(
+                    package, method, &arguments, fuel,
+                )?;
+                if summary.may_reject
+                    && rejection
+                        .function_may_reject_with_cleanup(
+                            method,
+                            &arguments,
+                            fuel,
+                            &mut |ty, fuel| self.may_reject(ty, fuel),
+                        )
+                        .map_err(str::to_owned)?
+                {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        })();
+        self.rejection_stack.pop();
+        result
+    }
     fn acquire(&mut self, ty: &Term, fuel: &mut usize) -> Result<(), String> {
         if self.find(ty, fuel)?.is_none() {
             let binding = acquire_cleanup(
@@ -802,8 +885,13 @@ impl crate::verification::moves::CleanupPolicy for CleanupSession<'_, '_> {
         self.plan_with_memory(ty, state, place, variants, None, fuel)
     }
     fn plan_with_memory(
-        &mut self, ty: &Term, state: &State, place: &Place,
-        variants: &[VariantSelection], pointers: Option<PointerMemory<'_>>, fuel: &mut usize,
+        &mut self,
+        ty: &Term,
+        state: &State,
+        place: &Place,
+        variants: &[VariantSelection],
+        pointers: Option<PointerMemory<'_>>,
+        fuel: &mut usize,
     ) -> Result<CleanupPlan, String> {
         let binding = self
             .find(ty, fuel)?
@@ -828,21 +916,46 @@ mod tuple_layout_tests {
 
     #[test]
     fn cleanup_tuple_layout_uses_trusted_identity_and_preserves_fields() {
-        let id = nir::DeclarationId { package: 9, local: 1 };
-        let fields = vec![Term::Primitive(nir::Primitive::Bool), Term::Primitive(nir::Primitive::U8)];
-        let ty = Term::NormalForm { head: id, sort: nir::Sort::Type,
-            arguments: vec![Term::TypeListValue(fields.clone())] };
-        let mut package = Package { normal_forms: vec![Head {
-            declaration: id, role: Role::Tuple, parameters: vec![nir::normal_forms::Parameter {
-                declaration: nir::DeclarationId { package: 9, local: 3 },
-                binding: nir::program::LocalId { owner: 1, index: 0 },
-                kind: nir::normal_forms::Kind::TypeList,
-                ty: Term::Nominal { declaration: nir::DeclarationId { package: 9, local: 2 },
-                    arguments: vec![Term::Primitive(nir::Primitive::Type)] },
-            }], requirements: vec![],
-        }], ..Default::default() };
+        let id = nir::DeclarationId {
+            package: 9,
+            local: 1,
+        };
+        let fields = vec![
+            Term::Primitive(nir::Primitive::Bool),
+            Term::Primitive(nir::Primitive::U8),
+        ];
+        let ty = Term::NormalForm {
+            head: id,
+            sort: nir::Sort::Type,
+            arguments: vec![Term::TypeListValue(fields.clone())],
+        };
+        let mut package = Package {
+            normal_forms: vec![Head {
+                declaration: id,
+                role: Role::Tuple,
+                parameters: vec![nir::normal_forms::Parameter {
+                    declaration: nir::DeclarationId {
+                        package: 9,
+                        local: 3,
+                    },
+                    binding: nir::program::LocalId { owner: 1, index: 0 },
+                    kind: nir::normal_forms::Kind::TypeList,
+                    ty: Term::Nominal {
+                        declaration: nir::DeclarationId {
+                            package: 9,
+                            local: 2,
+                        },
+                        arguments: vec![Term::Primitive(nir::Primitive::Type)],
+                    },
+                }],
+                requirements: vec![],
+            }],
+            ..Default::default()
+        };
         nir::normal_forms::validate(&package).unwrap();
-        let Layout::Fields(actual) = layout(&package, &ty, &mut 1000).unwrap() else { panic!("tuple layout"); };
+        let Layout::Fields(actual) = layout(&package, &ty, &mut 1000).unwrap() else {
+            panic!("tuple layout");
+        };
         assert_eq!(actual, fields);
         assert!(layout(&package, &ty, &mut 0).is_err());
         package.normal_forms[0].role = Role::Opaque;

@@ -27,12 +27,19 @@ pub(crate) fn resolve_source(
             if package.is_empty() || path.iter().any(|part| part.is_empty()) {
                 return Err("Splice protocol selector must be trait, package::trait or package::module::trait".into());
             }
-            let providers = packages.iter().filter(|(_, _, name)| *name == package).collect::<Vec<_>>();
+            let providers = packages
+                .iter()
+                .filter(|(_, _, name)| *name == package)
+                .collect::<Vec<_>>();
             let [provider] = providers.as_slice() else {
-                return Err(format!("Splice protocol package `{package}` is missing or ambiguous"));
+                return Err(format!(
+                    "Splice protocol package `{package}` is missing or ambiguous"
+                ));
             };
-            let owner = super::source::resolve_module_path(hir, provider.0, &path)
-                .ok_or_else(|| format!("Splice protocol `{selector}` is not a declared trait or is ambiguous"))?;
+            let owner =
+                super::source::resolve_module_path(hir, provider.0, &path).ok_or_else(|| {
+                    format!("Splice protocol `{selector}` is not a declared trait or is ambiguous")
+                })?;
             (Some(owner), *path.last().unwrap())
         }
         None if !selector.is_empty() => (None, selector),
@@ -73,5 +80,8 @@ pub(crate) fn resolve_source(
     if identities.splice.is_some_and(|previous| previous != *id) {
         return Err("Splice source selector conflicts with the driver's bound identity".into());
     }
-    Ok(elaboration::program::Protocols { splice: Some(*id), ..identities.clone() })
+    Ok(elaboration::program::Protocols {
+        splice: Some(*id),
+        ..identities.clone()
+    })
 }

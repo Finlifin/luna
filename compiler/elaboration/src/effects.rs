@@ -30,8 +30,15 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ArgumentCount {expected, actual} => return write!(f, "effect request argument count mismatch: expected {expected}, found {actual}"),
-            Self::ArgumentType {index} => return write!(f, "effect request argument {index} has an unproved type"),
+            Self::ArgumentCount { expected, actual } => {
+                return write!(
+                    f,
+                    "effect request argument count mismatch: expected {expected}, found {actual}"
+                );
+            }
+            Self::ArgumentType { index } => {
+                return write!(f, "effect request argument {index} has an unproved type");
+            }
             _ => {}
         }
         f.write_str(match self {
@@ -116,10 +123,12 @@ fn relation(a: &Operation, b: &Operation, context: &Context, budget: Budget) -> 
                 (Term::Bool(_), Term::Bool(_))
                     | (Term::Char(_), Term::Char(_))
                     | (Term::String(_), Term::String(_))
-                        | (Term::Symbol(_), Term::Symbol(_))
+                    | (Term::Symbol(_), Term::Symbol(_))
                     | (Term::Integer(_), Term::Integer(_))
+                    | (Term::Float(_), Term::Float(_))
                     | (Term::BitVec(_), Term::BitVec(_))
-                    | (Term::Float32(_), Term::Float32(_)) | (Term::Float64(_), Term::Float64(_))
+                    | (Term::Float32(_), Term::Float32(_))
+                    | (Term::Float64(_), Term::Float64(_))
             ) {
                 return Relation::Different;
             }
@@ -170,10 +179,14 @@ fn charge(term: &Term, fuel: &mut usize, depth: usize) -> Result<(), Error> {
     }
     match term {
         Term::Computation { effects, result } => {
-            if effects.len() > *fuel { return Err(Error::BudgetExhausted); }
+            if effects.len() > *fuel {
+                return Err(Error::BudgetExhausted);
+            }
             *fuel -= effects.len();
             charge(result, fuel, depth - 1)?;
-            for operation in effects { terms(&operation.arguments, fuel, depth - 1)?; }
+            for operation in effects {
+                terms(&operation.arguments, fuel, depth - 1)?;
+            }
             Ok(())
         }
         Term::Primitive(_)
@@ -184,15 +197,25 @@ fn charge(term: &Term, fuel: &mut usize, depth: usize) -> Result<(), Error> {
         | Term::Unit
         | Term::Bool(_)
         | Term::Char(_)
-        | Term::Float32(_) | Term::Float64(_)
+        | Term::Float32(_)
+        | Term::Float64(_)
         | Term::Value { .. } => Ok(()),
         Term::String(value) | Term::Symbol(value) => bytes(fuel, value.len()),
         Term::Integer(value) => bytes(fuel, value.bit_len().div_ceil(32)),
+        Term::Float(value) => bytes(
+            fuel,
+            value
+                .digits()
+                .len()
+                .saturating_add(value.exponent().bit_len().div_ceil(32)),
+        ),
         Term::BitVec(value) => bytes(fuel, value.words().len()),
         Term::Nominal { arguments, .. }
         | Term::NormalForm { arguments, .. }
         | Term::Tuple(arguments)
-        | Term::TypeListValue(arguments) | Term::TypeListConcat(arguments) | Term::TupleValue(arguments) => terms(arguments, fuel, depth - 1),
+        | Term::TypeListValue(arguments)
+        | Term::TypeListConcat(arguments)
+        | Term::TupleValue(arguments) => terms(arguments, fuel, depth - 1),
         Term::AssociatedType {
             subject, arguments, ..
         } => {
@@ -216,7 +239,16 @@ fn charge(term: &Term, fuel: &mut usize, depth: usize) -> Result<(), Error> {
             }
             charge(result, fuel, depth - 1)
         }
-        Term::NominalValue {ty,fields,..} => {if fields.len().saturating_add(1)>*fuel {return Err(Error::BudgetExhausted);}charge(ty,fuel,depth-1)?;for field in fields {charge(field,fuel,depth-1)?;}Ok(())},
+        Term::NominalValue { ty, fields, .. } => {
+            if fields.len().saturating_add(1) > *fuel {
+                return Err(Error::BudgetExhausted);
+            }
+            charge(ty, fuel, depth - 1)?;
+            for field in fields {
+                charge(field, fuel, depth - 1)?;
+            }
+            Ok(())
+        }
         Term::Record(fields) | Term::RecordValue(fields) => {
             if fields.len() > *fuel {
                 return Err(Error::BudgetExhausted);

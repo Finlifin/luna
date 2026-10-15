@@ -224,15 +224,27 @@ impl Checker<'_, '_> {
                 ));
             }
         }
-        let structural_result = self.structural_result_context.as_ref()
-            .filter(|(id, _)| *id == expr.hir_id).map(|(_, context)| context.clone());
-        let inferred = self.infer_effect_request(head, arguments, expected, structural_result.as_ref(), expr.span)?;
+        let structural_result = self
+            .structural_result_context
+            .as_ref()
+            .filter(|(id, _)| *id == expr.hir_id)
+            .map(|(_, context)| context.clone());
+        let inferred = self.infer_effect_request(
+            head,
+            arguments,
+            expected,
+            structural_result.as_ref(),
+            expr.span,
+        )?;
         let (operation, inferred_arguments) = if let Some((operation, checked)) = inferred {
             (operation, Some(checked))
         } else {
             let operations = self.effect_row(head, 0)?;
             if operations.len() != 1 {
-                return Err(error(expr.span, "effect request requires one independent operation"));
+                return Err(error(
+                    expr.span,
+                    "effect request requires one independent operation",
+                ));
             }
             (operations.into_iter().next().unwrap(), None)
         };
@@ -255,25 +267,38 @@ impl Checker<'_, '_> {
                 "runtime-dependent effect request source lowering is not yet implemented",
             ));
         }
-        let checked = if let Some(checked) = inferred_arguments {checked} else {
+        let checked = if let Some(checked) = inferred_arguments {
+            checked
+        } else {
             let mut checked = Vec::new();
             for (argument, parameter) in arguments.iter().zip(parameters) {
                 let Arg::Positional(value) = argument else {
-                    return Err(error(expr.span, "effect request requires positional arguments"));
+                    return Err(error(
+                        expr.span,
+                        "effect request requires positional arguments",
+                    ));
                 };
                 checked.push(self.expr(value, Some(&parameter.ty))?);
             }
             checked
         };
-        let symbolic: Vec<_> = checked.iter().enumerate().map(|(index, value)| crate::calls::Argument {
-            value: Term::Runtime(nir::RuntimeId {
-                instance: u64::from(expr.hir_id.owner.def_id.raw()),
-                local: index as u32,
-            }),
-            // A diverging input never reaches the request. Its source IR keeps
-            // Never; the (unreachable) completed input has the expected type.
-            ty: if is_never(&value.ty) { parameters[index].ty.clone() } else { value.ty.clone() },
-        }).collect();
+        let symbolic: Vec<_> = checked
+            .iter()
+            .enumerate()
+            .map(|(index, value)| crate::calls::Argument {
+                value: Term::Runtime(nir::RuntimeId {
+                    instance: u64::from(expr.hir_id.owner.def_id.raw()),
+                    local: index as u32,
+                }),
+                // A diverging input never reaches the request. Its source IR keeps
+                // Never; the (unreachable) completed input has the expected type.
+                ty: if is_never(&value.ty) {
+                    parameters[index].ty.clone()
+                } else {
+                    value.ty.clone()
+                },
+            })
+            .collect();
         let assumptions = self
             .signature_owner
             .and_then(|owner| self.capabilities.get(&owner))
@@ -340,8 +365,14 @@ impl Checker<'_, '_> {
         let saved_resume = self.effect_resume_result.take();
         let saved_environment = std::mem::replace(&mut self.effect_environment, effects.clone());
         let saved_result = std::mem::replace(&mut self.result, value_type.cloned());
-        let saved_partial_return = std::mem::replace(&mut self.partial_return_context,
-            if value_type.is_none() { input.cloned() } else { None });
+        let saved_partial_return = std::mem::replace(
+            &mut self.partial_return_context,
+            if value_type.is_none() {
+                input.cloned()
+            } else {
+                None
+            },
+        );
         let checked = match (value_type, input) {
             (None, Some(input)) => self.input_context_expression(body, input),
             _ => self.expr(body, value_type),

@@ -30,6 +30,10 @@ impl Interpreter<'_> {
         }
         self.tick(None)?;
         match value {
+            Value::Newtype { ty, value } => {
+                self.admit_type(ty, depth + 1)?;
+                self.admit_value_types(value, depth + 1)?;
+            }
             Value::Record {
                 declaration,
                 arguments,
@@ -94,6 +98,8 @@ impl Interpreter<'_> {
                         (&s.type_parameters, &s.requirements, &s.capabilities)
                     } else if let Some(e) = self.enums.get(declaration) {
                         (&e.type_parameters, &e.requirements, &e.capabilities)
+                    } else if let Some(n) = self.newtypes.get(declaration) {
+                        (&n.type_parameters, &n.requirements, &n.capabilities)
                     } else {
                         return Err(self.failure(ErrorKind::Type, None));
                     };
@@ -130,13 +136,31 @@ impl Interpreter<'_> {
                     .normal_forms
                     .get(head)
                     .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-                let mut fuel=usize::try_from(self.budget.steps).unwrap_or(usize::MAX).min(100_000);
-                let before=fuel;
-                let checked=metadata.check_closed_arguments_budgeted(arguments, |head|
-                    self.normal_forms.get(&head).is_some_and(|head|head.role==nir::normal_forms::Role::Tuple),
-                    |ty,variant,fuel|self.normal_value_fields(ty,variant,fuel), &mut fuel);
-                self.budget.steps-=(before-fuel) as u64;
-                checked.map_err(|_|self.failure(if fuel==0 {ErrorKind::StepsExhausted} else {ErrorKind::Type},None))?;
+                let mut fuel = usize::try_from(self.budget.steps)
+                    .unwrap_or(usize::MAX)
+                    .min(100_000);
+                let before = fuel;
+                let checked = metadata.check_closed_arguments_budgeted(
+                    arguments,
+                    |head| {
+                        self.normal_forms
+                            .get(&head)
+                            .is_some_and(|head| head.role == nir::normal_forms::Role::Tuple)
+                    },
+                    |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
+                    &mut fuel,
+                );
+                self.budget.steps -= (before - fuel) as u64;
+                checked.map_err(|_| {
+                    self.failure(
+                        if fuel == 0 {
+                            ErrorKind::StepsExhausted
+                        } else {
+                            ErrorKind::Type
+                        },
+                        None,
+                    )
+                })?;
                 let parameters: Vec<_> =
                     metadata.parameters.iter().map(|p| p.declaration).collect();
                 for p in &metadata.requirements {
@@ -150,12 +174,20 @@ impl Interpreter<'_> {
                     self.admit_type(ty, depth + 1)?;
                 }
             }
-            Term::Tuple(types) | Term::TypeListValue(types) | Term::TypeListConcat(types) | Term::TupleValue(types) => {
+            Term::Tuple(types)
+            | Term::TypeListValue(types)
+            | Term::TypeListConcat(types)
+            | Term::TupleValue(types) => {
                 for ty in types {
                     self.admit_type(ty, depth + 1)?;
                 }
             }
-            Term::NominalValue { ty, fields, .. } => { self.admit_type(ty,depth+1)?;for field in fields {self.admit_type(field,depth+1)?;} },
+            Term::NominalValue { ty, fields, .. } => {
+                self.admit_type(ty, depth + 1)?;
+                for field in fields {
+                    self.admit_type(field, depth + 1)?;
+                }
+            }
             Term::Record(fields) | Term::RecordValue(fields) => {
                 for (_, ty) in fields {
                     self.admit_type(ty, depth + 1)?;
@@ -191,7 +223,8 @@ impl Interpreter<'_> {
                         .signature
                         .instantiate_types(&declaration.type_parameters, &operation.arguments)
                         .map_err(|_| self.failure(ErrorKind::Type, None))?;
-                    let work = self.type_description_work(&signature)
+                    let work = self
+                        .type_description_work(&signature)
                         .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
                     self.integer_operation(None, |budget| budget.consume(work))?;
                     signature
@@ -220,8 +253,10 @@ impl Interpreter<'_> {
                 }
                 self.admit_type(result, depth + 1)?;
             }
-            Term::Rigid { declaration, sort: nir::Sort::Type }
-                if self.abstract_type_parameters.contains(declaration) => {}
+            Term::Rigid {
+                declaration,
+                sort: nir::Sort::Type,
+            } if self.abstract_type_parameters.contains(declaration) => {}
             Term::AssociatedType { .. }
             | Term::Rigid { .. }
             | Term::Runtime(_)

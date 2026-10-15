@@ -19,13 +19,129 @@ pub fn expressions_in_scope<'a>(
 ) -> Result<(), String> {
     walk(function, fuel, visit, false)
 }
+/// Include candidate computations belonging to this runtime scope, without
+/// treating them as preconditions or entering nested handler/closure scopes.
+pub fn expressions_in_scope_with_observations<'a>(
+    function: &'a Function,
+    observations: &'a [Expr],
+    fuel: &mut usize,
+    mut visit: impl FnMut(&'a Expr, &mut usize) -> Result<(), String>,
+) -> Result<(), String> {
+    let roots = std::iter::once(&function.body)
+        .chain(&function.preconditions)
+        .chain(&function.postconditions)
+        .chain(observations);
+    walk_roots(
+        roots,
+        fuel,
+        |expr, fuel| visit(expr, fuel).map(|_| true),
+        false,
+    )
+}
+
+/// Extract only expression roots from a pattern. Descendants remain attached
+/// to their root so a later expression walk observes every runtime node once.
+pub fn into_pattern_observations(pattern: P, fuel: &mut usize) -> Result<Vec<Expr>, String> {
+    let mut pending = vec![pattern];
+    let mut roots = vec![];
+    while let Some(pattern) = pending.pop() {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or("pattern observation budget exhausted")?;
+        match pattern {
+            P::Then { first, value, next } => {
+                roots.push(*value);
+                pending.push(*next);
+                pending.push(*first);
+            }
+            P::Guard { pattern, condition } => {
+                roots.push(*condition);
+                pending.push(*pattern);
+            }
+            P::Remap { pattern, .. } | P::Binding { inner: pattern, .. } => pending.push(*pattern),
+            P::Tuple(fields)
+            | P::TypeTuple(fields)
+            | P::Or(fields)
+            | P::Record { fields, .. }
+            | P::AnonymousRecord { fields, .. }
+            | P::Variant { fields, .. }
+            | P::NormalForm {
+                arguments: fields, ..
+            } => {
+                *fuel = fuel
+                    .checked_sub(fields.len())
+                    .ok_or("pattern observation field budget exhausted")?;
+                pending.extend(fields.into_iter().rev());
+            }
+            P::Wild | P::Unit | P::Literal(_) => (),
+        }
+    }
+    Ok(roots)
+}
+/// Borrow pattern computation roots in structural evaluation order. This does
+/// not decide which alternatives execute; callers retain that obligation.
+pub fn pattern_observations<'a>(pattern: &'a P, fuel: &mut usize) -> Result<Vec<&'a Expr>, String> {
+    enum Node<'a> {
+        Pattern(&'a P),
+        Expr(&'a Expr),
+    }
+    let mut pending = vec![Node::Pattern(pattern)];
+    let mut roots = vec![];
+    while let Some(node) = pending.pop() {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or("pattern observation budget exhausted")?;
+        let pattern = match node {
+            Node::Expr(expr) => {
+                roots.push(expr);
+                continue;
+            }
+            Node::Pattern(pattern) => pattern,
+        };
+        match pattern {
+            P::Then { first, value, next } => {
+                pending.push(Node::Pattern(next));
+                pending.push(Node::Expr(value));
+                pending.push(Node::Pattern(first));
+            }
+            P::Guard { pattern, condition } => {
+                pending.push(Node::Expr(condition));
+                pending.push(Node::Pattern(pattern));
+            }
+            P::Remap { pattern, .. } | P::Binding { inner: pattern, .. } => {
+                pending.push(Node::Pattern(pattern))
+            }
+            P::Tuple(fields)
+            | P::TypeTuple(fields)
+            | P::Or(fields)
+            | P::Record { fields, .. }
+            | P::AnonymousRecord { fields, .. }
+            | P::Variant { fields, .. }
+            | P::NormalForm {
+                arguments: fields, ..
+            } => {
+                *fuel = fuel
+                    .checked_sub(fields.len())
+                    .ok_or("pattern observation field budget exhausted")?;
+                pending.extend(fields.iter().rev().map(Node::Pattern));
+            }
+            P::Wild | P::Unit | P::Literal(_) => (),
+        }
+    }
+    Ok(roots)
+}
 /// Visit a complete expression tree, including nested closure bodies and defaults.
 pub fn expression<'a>(
     expression: &'a Expr,
     fuel: &mut usize,
     mut visit: impl FnMut(&'a Expr, &mut usize) -> Result<(), String>,
 ) -> Result<(), String> {
-    walk_roots(std::iter::once(expression), fuel, |expr,fuel| visit(expr,fuel).map(|_|true), true)
+    walk_roots(
+        std::iter::once(expression),
+        fuel,
+        |expr, fuel| visit(expr, fuel).map(|_| true),
+        true,
+    )
 }
 /// Returning false delegates this subtree to a scope-aware validator.
 pub fn expression_pruned<'a>(
@@ -51,8 +167,13 @@ fn walk<'a>(
                 .filter(|_| include_defaults)
                 .map(|(_, expression)| expression),
         );
-    let mut visit=visit;
-    walk_roots(roots, fuel, |expr,fuel| visit(expr,fuel).map(|_|true), include_defaults)
+    let mut visit = visit;
+    walk_roots(
+        roots,
+        fuel,
+        |expr, fuel| visit(expr, fuel).map(|_| true),
+        include_defaults,
+    )
 }
 fn walk_roots<'a>(
     roots: impl Iterator<Item = &'a Expr>,
@@ -99,22 +220,36 @@ fn walk_roots<'a>(
                 P::Wild | P::Unit | P::Literal(_) => {}
             },
             Node::Expr(expr) => {
-                if !visit(expr, fuel)? {continue;}
+                if !visit(expr, fuel)? {
+                    continue;
+                }
                 match &expr.kind {
-                    K::EffectHandle {computation, handlers, ..} => {
+                    K::EffectHandle {
+                        computation,
+                        handlers,
+                        ..
+                    } => {
                         work.push(Node::Expr(computation));
                         if include_defaults {
                             for handler in handlers {
                                 for arm in &handler.arms {
                                     work.push(Node::Pattern(&arm.pattern));
-                                    if let Some(guard) = &arm.guard {work.push(Node::Expr(guard));}
+                                    if let Some(guard) = &arm.guard {
+                                        work.push(Node::Expr(guard));
+                                    }
                                     work.push(Node::Expr(&arm.body));
                                 }
                             }
                         }
                     }
-                    K::EffectResume(body) | K::EffectComputation {body, ..} | K::EffectRun {computation:body, ..} => work.push(Node::Expr(body)),
-                    K::EffectRequest {arguments, ..} => work.extend(arguments.iter().map(Node::Expr)),
+                    K::EffectResume(body)
+                    | K::EffectComputation { body, .. }
+                    | K::EffectRun {
+                        computation: body, ..
+                    } => work.push(Node::Expr(body)),
+                    K::EffectRequest { arguments, .. } => {
+                        work.extend(arguments.iter().map(Node::Expr))
+                    }
                     K::Closure { captures, body, .. } => {
                         if include_defaults {
                             work.push(Node::Expr(body));
@@ -126,8 +261,14 @@ fn walk_roots<'a>(
                                 .map(Node::Expr),
                         );
                     }
-                    K::NormalFormType { arguments, plan, .. } => {
-                        work.extend(plan.iter().flat_map(|p| &p.preparations).map(|p| Node::Expr(&p.expression)));
+                    K::NormalFormType {
+                        arguments, plan, ..
+                    } => {
+                        work.extend(
+                            plan.iter()
+                                .flat_map(|p| &p.preparations)
+                                .map(|p| Node::Expr(&p.expression)),
+                        );
                         work.extend(
                             arguments
                                 .iter()
@@ -149,7 +290,8 @@ fn walk_roots<'a>(
                         work.push(Node::Expr(signature));
                     }
                     K::Variant { fields, .. }
-                    | K::AnonymousRecord { fields } | K::Record { fields, .. }
+                    | K::AnonymousRecord { fields }
+                    | K::Record { fields, .. }
                     | K::NominalType {
                         arguments: fields, ..
                     }
@@ -159,11 +301,14 @@ fn walk_roots<'a>(
                     | K::TupleType(fields)
                     | K::Tuple(fields) => work.extend(fields.iter().map(Node::Expr)),
                     K::BitAssign { value, .. }
-                    | K::AnonymousField { value, .. } | K::Field { value, .. }
+                    | K::AnonymousField { value, .. }
+                    | K::Field { value, .. }
                     | K::Let { value, .. }
                     | K::Assign { value, .. }
                     | K::Discard(value)
-                    | K::RequirePredicate(value) | K::EnsurePredicate(value) | K::CheckPredicate(value)
+                    | K::RequirePredicate(value)
+                    | K::EnsurePredicate(value)
+                    | K::CheckPredicate(value)
                     | K::BitSlice { value, .. }
                     | K::AddressOf(value)
                     | K::ReadPointer(value)
@@ -174,21 +319,45 @@ fn walk_roots<'a>(
                     | K::IntegerNegate(value)
                     | K::FloatNegate(value)
                     | K::BitConvert(value)
-                    | K::Snapshot(value) | K::TakeBits(value) | K::SymbolName(value) | K::EnumName(value)
+                    | K::NewtypeConvert(value)
+                    | K::Snapshot(value)
+                    | K::TakeBits(value)
+                    | K::SymbolName(value)
+                    | K::EnumName(value)
                     | K::Not(value)
                     | K::Loop { body: value, .. } => work.push(Node::Expr(value)),
-                    K::BitWritePointer {pointer,selections,value} => {
-                        *fuel = fuel.checked_sub(selections.len()).ok_or("bit selection traversal budget exhausted")?;
+                    K::BitWritePointer {
+                        pointer,
+                        selections,
+                        value,
+                    } => {
+                        *fuel = fuel
+                            .checked_sub(selections.len())
+                            .ok_or("bit selection traversal budget exhausted")?;
                         work.push(Node::Expr(pointer));
-                        work.extend(selections.iter().flat_map(crate::program::BitSelection::expressions).map(Node::Expr));
+                        work.extend(
+                            selections
+                                .iter()
+                                .flat_map(crate::program::BitSelection::expressions)
+                                .map(Node::Expr),
+                        );
                         work.push(Node::Expr(value));
                     }
-                    K::BitUpdate {selections, value, ..} => {
-                        *fuel = fuel.checked_sub(selections.len()).ok_or("bit selection traversal budget exhausted")?;
-                        work.extend(selections.iter().flat_map(crate::program::BitSelection::expressions).map(Node::Expr));
+                    K::BitUpdate {
+                        selections, value, ..
+                    } => {
+                        *fuel = fuel
+                            .checked_sub(selections.len())
+                            .ok_or("bit selection traversal budget exhausted")?;
+                        work.extend(
+                            selections
+                                .iter()
+                                .flat_map(crate::program::BitSelection::expressions)
+                                .map(Node::Expr),
+                        );
                         work.push(Node::Expr(value));
                     }
-                    K::BitWindow {value, start, end} => {
+                    K::BitWindow { value, start, end } => {
                         work.push(Node::Expr(value));
                         work.push(Node::Expr(start));
                         work.push(Node::Expr(end));
@@ -259,14 +428,16 @@ fn walk_roots<'a>(
                     | K::TypeEqual(a, b)
                     | K::TypeListIndex(a, b)
                     | K::BitEqual(a, b)
-                    | K::BitConcat(a, b) | K::BitIndex(a, b)
+                    | K::BitConcat(a, b)
+                    | K::BitIndex(a, b)
                     | K::And(a, b)
                     | K::Or(a, b) => {
                         work.push(Node::Expr(a));
                         work.push(Node::Expr(b));
                     }
-                    K::AssociatedValue {..}
-                    | K::TypeValue(_) | K::TypeListValue(_)
+                    K::AssociatedValue { .. }
+                    | K::TypeValue(_)
+                    | K::TypeListValue(_)
                     | K::Literal(_)
                     | K::Local(_)
                     | K::Unit
@@ -288,9 +459,11 @@ fn walk_roots<'a>(
 pub fn expression_mut(
     expression: &mut Expr,
     fuel: &mut usize,
-    mut visit: impl FnMut(&mut Expr, &mut usize) -> Result<(),String>,
-) -> Result<(),String> {
-    expression_mut_pruned(expression, fuel, |expr,fuel| visit(expr,fuel).map(|_|true))
+    mut visit: impl FnMut(&mut Expr, &mut usize) -> Result<(), String>,
+) -> Result<(), String> {
+    expression_mut_pruned(expression, fuel, |expr, fuel| {
+        visit(expr, fuel).map(|_| true)
+    })
 }
 
 /// Bounded rewriting with explicit subtree ownership. Returning false leaves
@@ -299,8 +472,8 @@ pub fn expression_mut(
 pub fn expression_mut_pruned(
     expression: &mut Expr,
     fuel: &mut usize,
-    mut visit: impl FnMut(&mut Expr, &mut usize) -> Result<bool,String>,
-) -> Result<(),String> {
+    mut visit: impl FnMut(&mut Expr, &mut usize) -> Result<bool, String>,
+) -> Result<(), String> {
     enum Node<'a> {
         Expr(&'a mut Expr),
         Pattern(&'a mut P),
@@ -316,18 +489,28 @@ pub fn expression_mut_pruned(
             Node::Argument(argument) => {
                 use crate::program::NormalFormArgument as A;
                 match argument {
-                    A::TypeListSpread(value) | A::Value(value)=>work.push(Node::Expr(value)),
-                    A::Unit {..} | A::Integer {..}=>{},
-                    A::If {condition,then_input,else_input,..}=> {
+                    A::TypeListSpread(value) | A::Value(value) => work.push(Node::Expr(value)),
+                    A::Unit { .. } | A::Integer { .. } => {}
+                    A::If {
+                        condition,
+                        then_input,
+                        else_input,
+                        ..
+                    } => {
                         work.push(Node::Expr(condition));
-                        work.push(Node::Argument(then_input));work.push(Node::Argument(else_input));
+                        work.push(Node::Argument(then_input));
+                        work.push(Node::Argument(else_input));
                     }
-                    A::Block {statements,result,..}=> {
+                    A::Block {
+                        statements, result, ..
+                    } => {
                         work.extend(statements.iter_mut().map(Node::Expr));
                         work.extend(result.as_deref_mut().map(Node::Argument));
                     }
-                    A::TypeList {items,..} | A::Tuple {items,..}=>work.extend(items.iter_mut().map(Node::Argument)),
-                    A::Match {value,arms,..}=> {
+                    A::TypeList { items, .. } | A::Tuple { items, .. } => {
+                        work.extend(items.iter_mut().map(Node::Argument))
+                    }
+                    A::Match { value, arms, .. } => {
                         work.push(Node::Expr(value));
                         for arm in arms {
                             work.push(Node::Pattern(&mut arm.pattern));
@@ -365,20 +548,34 @@ pub fn expression_mut_pruned(
                 P::Wild | P::Unit | P::Literal(_) => {}
             },
             Node::Expr(expr) => {
-                if !visit(expr, fuel)? {continue;}
+                if !visit(expr, fuel)? {
+                    continue;
+                }
                 match &mut expr.kind {
-                    K::EffectHandle {computation, handlers, ..} => {
+                    K::EffectHandle {
+                        computation,
+                        handlers,
+                        ..
+                    } => {
                         work.push(Node::Expr(computation));
                         for handler in handlers {
                             for arm in &mut handler.arms {
                                 work.push(Node::Pattern(&mut arm.pattern));
-                                if let Some(guard) = &mut arm.guard {work.push(Node::Expr(guard));}
+                                if let Some(guard) = &mut arm.guard {
+                                    work.push(Node::Expr(guard));
+                                }
                                 work.push(Node::Expr(&mut arm.body));
                             }
                         }
                     }
-                    K::EffectResume(body) | K::EffectComputation {body, ..} | K::EffectRun {computation:body, ..} => work.push(Node::Expr(body)),
-                    K::EffectRequest {arguments, ..} => work.extend(arguments.iter_mut().map(Node::Expr)),
+                    K::EffectResume(body)
+                    | K::EffectComputation { body, .. }
+                    | K::EffectRun {
+                        computation: body, ..
+                    } => work.push(Node::Expr(body)),
+                    K::EffectRequest { arguments, .. } => {
+                        work.extend(arguments.iter_mut().map(Node::Expr))
+                    }
                     K::Closure { captures, body, .. } => {
                         work.push(Node::Expr(std::sync::Arc::make_mut(body)));
                         work.extend(
@@ -388,8 +585,14 @@ pub fn expression_mut_pruned(
                                 .map(Node::Expr),
                         );
                     }
-                    K::NormalFormType { arguments, plan, .. } => {
-                        work.extend(plan.iter_mut().flat_map(|p| &mut p.preparations).map(|p| Node::Expr(&mut p.expression)));
+                    K::NormalFormType {
+                        arguments, plan, ..
+                    } => {
+                        work.extend(
+                            plan.iter_mut()
+                                .flat_map(|p| &mut p.preparations)
+                                .map(|p| Node::Expr(&mut p.expression)),
+                        );
                         work.extend(arguments.iter_mut().map(Node::Argument));
                     }
                     K::ClosureType {
@@ -400,7 +603,8 @@ pub fn expression_mut_pruned(
                         work.push(Node::Expr(signature));
                     }
                     K::Variant { fields, .. }
-                    | K::AnonymousRecord { fields } | K::Record { fields, .. }
+                    | K::AnonymousRecord { fields }
+                    | K::Record { fields, .. }
                     | K::NominalType {
                         arguments: fields, ..
                     }
@@ -410,11 +614,14 @@ pub fn expression_mut_pruned(
                     | K::TupleType(fields)
                     | K::Tuple(fields) => work.extend(fields.iter_mut().map(Node::Expr)),
                     K::BitAssign { value, .. }
-                    | K::AnonymousField { value, .. } | K::Field { value, .. }
+                    | K::AnonymousField { value, .. }
+                    | K::Field { value, .. }
                     | K::Let { value, .. }
                     | K::Assign { value, .. }
                     | K::Discard(value)
-                    | K::RequirePredicate(value) | K::EnsurePredicate(value) | K::CheckPredicate(value)
+                    | K::RequirePredicate(value)
+                    | K::EnsurePredicate(value)
+                    | K::CheckPredicate(value)
                     | K::BitSlice { value, .. }
                     | K::AddressOf(value)
                     | K::ReadPointer(value)
@@ -425,21 +632,45 @@ pub fn expression_mut_pruned(
                     | K::IntegerNegate(value)
                     | K::FloatNegate(value)
                     | K::BitConvert(value)
-                    | K::Snapshot(value) | K::TakeBits(value) | K::SymbolName(value) | K::EnumName(value)
+                    | K::NewtypeConvert(value)
+                    | K::Snapshot(value)
+                    | K::TakeBits(value)
+                    | K::SymbolName(value)
+                    | K::EnumName(value)
                     | K::Not(value)
                     | K::Loop { body: value, .. } => work.push(Node::Expr(value)),
-                    K::BitWritePointer {pointer,selections,value} => {
-                        *fuel = fuel.checked_sub(selections.len()).ok_or("bit selection traversal budget exhausted")?;
+                    K::BitWritePointer {
+                        pointer,
+                        selections,
+                        value,
+                    } => {
+                        *fuel = fuel
+                            .checked_sub(selections.len())
+                            .ok_or("bit selection traversal budget exhausted")?;
                         work.push(Node::Expr(pointer));
-                        work.extend(selections.iter_mut().flat_map(crate::program::BitSelection::expressions_mut).map(Node::Expr));
+                        work.extend(
+                            selections
+                                .iter_mut()
+                                .flat_map(crate::program::BitSelection::expressions_mut)
+                                .map(Node::Expr),
+                        );
                         work.push(Node::Expr(value));
                     }
-                    K::BitUpdate {selections, value, ..} => {
-                        *fuel = fuel.checked_sub(selections.len()).ok_or("bit selection traversal budget exhausted")?;
-                        work.extend(selections.iter_mut().flat_map(crate::program::BitSelection::expressions_mut).map(Node::Expr));
+                    K::BitUpdate {
+                        selections, value, ..
+                    } => {
+                        *fuel = fuel
+                            .checked_sub(selections.len())
+                            .ok_or("bit selection traversal budget exhausted")?;
+                        work.extend(
+                            selections
+                                .iter_mut()
+                                .flat_map(crate::program::BitSelection::expressions_mut)
+                                .map(Node::Expr),
+                        );
                         work.push(Node::Expr(value));
                     }
-                    K::BitWindow {value, start, end} => {
+                    K::BitWindow { value, start, end } => {
                         work.push(Node::Expr(value));
                         work.push(Node::Expr(start));
                         work.push(Node::Expr(end));
@@ -481,11 +712,7 @@ pub fn expression_mut_pruned(
                         callee, arguments, ..
                     } => {
                         work.push(Node::Expr(callee));
-                        work.extend(
-                            arguments
-                                .iter_mut()
-                                .map(|a| Node::Expr(&mut a.value)),
-                        );
+                        work.extend(arguments.iter_mut().map(|a| Node::Expr(&mut a.value)));
                     }
                     K::WritePointer {
                         pointer: a,
@@ -509,14 +736,16 @@ pub fn expression_mut_pruned(
                     | K::TypeEqual(a, b)
                     | K::TypeListIndex(a, b)
                     | K::BitEqual(a, b)
-                    | K::BitConcat(a, b) | K::BitIndex(a, b)
+                    | K::BitConcat(a, b)
+                    | K::BitIndex(a, b)
                     | K::And(a, b)
                     | K::Or(a, b) => {
                         work.push(Node::Expr(a));
                         work.push(Node::Expr(b));
                     }
-                    K::AssociatedValue {..}
-                    | K::TypeValue(_) | K::TypeListValue(_)
+                    K::AssociatedValue { .. }
+                    | K::TypeValue(_)
+                    | K::TypeListValue(_)
                     | K::Literal(_)
                     | K::Local(_)
                     | K::Unit
@@ -532,12 +761,22 @@ pub fn expression_mut_pruned(
     Ok(())
 }
 
-fn validate_record_pattern(names: &[String], fields: usize, fuel: &mut usize) -> Result<(), String> {
-    if names.len() != fields { return Err("anonymous record pattern arity mismatch".into()); }
+fn validate_record_pattern(
+    names: &[String],
+    fields: usize,
+    fuel: &mut usize,
+) -> Result<(), String> {
+    if names.len() != fields {
+        return Err("anonymous record pattern arity mismatch".into());
+    }
     let mut seen = std::collections::BTreeSet::new();
     for name in names {
-        *fuel = fuel.checked_sub(name.len().saturating_add(1)).ok_or("anonymous record pattern budget exhausted")?;
-        if !seen.insert(name) { return Err("duplicate anonymous record pattern label".into()); }
+        *fuel = fuel
+            .checked_sub(name.len().saturating_add(1))
+            .ok_or("anonymous record pattern budget exhausted")?;
+        if !seen.insert(name) {
+            return Err("duplicate anonymous record pattern label".into());
+        }
     }
     Ok(())
 }

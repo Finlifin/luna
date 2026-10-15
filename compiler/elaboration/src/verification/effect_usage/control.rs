@@ -160,9 +160,39 @@ impl Analyzer<'_, '_, '_, '_> {
                 prefix.then(branches, fuel)?;
                 Ok(prefix)
             }
-            K::BitWritePointer {pointer,selections,value} => self.sequence(std::iter::once(pointer.as_ref()).chain(selections.iter().flat_map(nir::program::BitSelection::expressions)).chain(std::iter::once(value.as_ref())),n,fuel,depth),
-            K::BitUpdate {selections,value,..} => self.sequence(selections.iter().flat_map(nir::program::BitSelection::expressions).chain(std::iter::once(value.as_ref())),n,fuel,depth),
-            K::BitWindow {value, start, end} => self.sequence([value.as_ref(), start.as_ref(), end.as_ref()], n, fuel, depth),
+            K::BitWritePointer {
+                pointer,
+                selections,
+                value,
+            } => self.sequence(
+                std::iter::once(pointer.as_ref())
+                    .chain(
+                        selections
+                            .iter()
+                            .flat_map(nir::program::BitSelection::expressions),
+                    )
+                    .chain(std::iter::once(value.as_ref())),
+                n,
+                fuel,
+                depth,
+            ),
+            K::BitUpdate {
+                selections, value, ..
+            } => self.sequence(
+                selections
+                    .iter()
+                    .flat_map(nir::program::BitSelection::expressions)
+                    .chain(std::iter::once(value.as_ref())),
+                n,
+                fuel,
+                depth,
+            ),
+            K::BitWindow { value, start, end } => self.sequence(
+                [value.as_ref(), start.as_ref(), end.as_ref()],
+                n,
+                fuel,
+                depth,
+            ),
             K::Match { value, arms } => self.match_control(value, arms, None, n, fuel, depth + 1),
             K::LetPattern {
                 pattern,
@@ -303,7 +333,10 @@ impl Analyzer<'_, '_, '_, '_> {
             | K::AddressOf(value)
             | K::ReadPointer(value)
             | K::BitConvert(value)
-            | K::Snapshot(value) | K::TakeBits(value) | K::SymbolName(value) | K::EnumName(value)
+            | K::Snapshot(value)
+            | K::TakeBits(value)
+            | K::SymbolName(value)
+            | K::EnumName(value)
             | K::BitSlice { value, .. }
             | K::BitAssign { value, .. }
             | K::Field { value, .. }
@@ -328,7 +361,8 @@ impl Analyzer<'_, '_, '_, '_> {
             | K::ScalarGreater(left, right)
             | K::ScalarGreaterEqual(left, right)
             | K::BitEqual(left, right)
-            | K::BitConcat(left, right) | K::BitIndex(left, right) => {
+            | K::BitConcat(left, right)
+            | K::BitIndex(left, right) => {
                 self.sequence([left.as_ref(), right.as_ref()], n, fuel, depth)
             }
             _ => {

@@ -151,34 +151,62 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 for &entry in self.ast.get_multi_child_slice(children[1]).unwrap_or(&[]) {
                     let parts = self.ast.get_children(entry);
                     let name = self.node_to_ident(parts[0]);
-                    let default = if self.resolve(name).is_ok_and(|resolved| matches!(resolved.kind,
-                        BindingKind::Local(_) | BindingKind::FnParam(_))) {
+                    let default = if self.resolve(name).is_ok_and(|resolved| {
+                        matches!(
+                            resolved.kind,
+                            BindingKind::Local(_) | BindingKind::FnParam(_)
+                        )
+                    }) {
                         let value = self.lower_expr(ctx, parts[0]);
                         Some(&*self.arena.alloc_expr(value))
-                    } else { None };
+                    } else {
+                        None
+                    };
                     let ty = self.lower_expr(ExprContext::Type, parts[1]);
                     let hir_id = self.next_hir_id();
                     self.define_local(name, entry, hir_id);
-                    bindings.push(hir::expr::CodeContextBinding { hir_id, name, ty: self.arena.alloc_expr(ty), default });
+                    bindings.push(hir::expr::CodeContextBinding {
+                        hir_id,
+                        name,
+                        ty: self.arena.alloc_expr(ty),
+                        default,
+                    });
                 }
                 let result = self.lower_expr(ExprContext::Type, children[0]);
                 self.local_exit(scope);
-                Expr { hir_id: self.next_hir_id(), span,
-                    kind: ExprKind::ContextualExprType(bindings, self.arena.alloc_expr(result)) }
+                Expr {
+                    hir_id: self.next_hir_id(),
+                    span,
+                    kind: ExprKind::ContextualExprType(bindings, self.arena.alloc_expr(result)),
+                }
             }
             NodeKind::QuoteExpr | NodeKind::SpliceExpr => {
                 let body = self.lower_expr(ctx, children[0]);
-                let substitutions = self.ast.get_multi_child_slice(children[1]).unwrap_or(&[])
-                    .iter().map(|&entry| {
+                let substitutions = self
+                    .ast
+                    .get_multi_child_slice(children[1])
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(|&entry| {
                         let parts = self.ast.get_children(entry);
                         let port = self.node_to_ident(parts[0]);
                         let binding = self.lower_expr(ctx, parts[1]);
-                        hir::expr::CodeSubstitution { port, binding: self.arena.alloc_expr(binding) }
-                    }).collect();
+                        hir::expr::CodeSubstitution {
+                            port,
+                            binding: self.arena.alloc_expr(binding),
+                        }
+                    })
+                    .collect();
                 let body = self.arena.alloc_expr(body);
-                Expr { hir_id: self.next_hir_id(), span, kind: if kind == NodeKind::QuoteExpr {
-                    ExprKind::CodeQuote(body, substitutions)
-                } else { ExprKind::CodeSplice(body, substitutions) } }
+                Expr {
+                    hir_id: self.next_hir_id(),
+                    span,
+                    kind: if kind == NodeKind::QuoteExpr {
+                        ExprKind::CodeQuote(body, substitutions)
+                    } else {
+                        ExprKind::CodeSplice(body, substitutions)
+                    },
+                }
             }
             NodeKind::Id => self.lower_id_expr(ctx, node),
             NodeKind::SelfLower => Expr {
@@ -206,8 +234,11 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     }
                     "tag_name" => {
                         let value = self.lower_expr(ctx, children[0]);
-                        Expr { hir_id: self.next_hir_id(),
-                            kind: ExprKind::TakeTagName(self.arena.alloc_expr(value)), span }
+                        Expr {
+                            hir_id: self.next_hir_id(),
+                            kind: ExprKind::TakeTagName(self.arena.alloc_expr(value)),
+                            span,
+                        }
                     }
                     "bitvec" => {
                         let inner_expr = self.lower_expr(ctx, children[0]);
@@ -365,7 +396,10 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 let interface = self.lower_expr(ctx, children[1]);
                 Expr {
                     hir_id: self.next_hir_id(),
-                    kind: ExprKind::TraitBound(self.arena.alloc_expr(subject), self.arena.alloc_expr(interface)),
+                    kind: ExprKind::TraitBound(
+                        self.arena.alloc_expr(subject),
+                        self.arena.alloc_expr(interface),
+                    ),
                     span,
                 }
             }
@@ -521,14 +555,20 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 let result = self.lower_expr(ExprContext::Type, children[1]);
                 Expr {
                     hir_id: self.next_hir_id(),
-                    kind: ExprKind::EffectQualifiedType(self.arena.alloc_expr(effects), self.arena.alloc_expr(result)),
+                    kind: ExprKind::EffectQualifiedType(
+                        self.arena.alloc_expr(effects),
+                        self.arena.alloc_expr(result),
+                    ),
                     span,
                 }
             }
             NodeKind::OptionPropagation => {
                 let value = self.lower_expr(ctx, children[0]);
-                Expr { hir_id: self.next_hir_id(), span,
-                    kind: ExprKind::OptionPropagate(self.arena.alloc_expr(value)) }
+                Expr {
+                    hir_id: self.next_hir_id(),
+                    span,
+                    kind: ExprKind::OptionPropagate(self.arena.alloc_expr(value)),
+                }
             }
             NodeKind::EffectPropagation => {
                 let computation = self.lower_expr(ctx, children[0]);
@@ -542,8 +582,15 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 // Reuse lexical pattern binding, not match evaluation semantics.
                 let computation = self.lower_expr(ctx, children[0]);
                 let computation = self.arena.alloc_expr(computation);
-                let nodes = self.ast.get_multi_child_slice(children[1]).unwrap_or(&[]).to_vec();
-                let arms: Vec<_> = nodes.into_iter().map(|node| self.lower_match_arm(ctx, node)).collect();
+                let nodes = self
+                    .ast
+                    .get_multi_child_slice(children[1])
+                    .unwrap_or(&[])
+                    .to_vec();
+                let arms: Vec<_> = nodes
+                    .into_iter()
+                    .map(|node| self.lower_match_arm(ctx, node))
+                    .collect();
                 Expr {
                     hir_id: self.next_hir_id(),
                     kind: ExprKind::EffectHandle(computation, self.arena.alloc_arm_slice(arms)),
@@ -572,9 +619,14 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 self.refinement_depth += 1;
                 let requirement = self.lower_expr(ExprContext::ComptimeProposition, children[0]);
                 self.refinement_depth -= 1;
-                Expr { hir_id: self.next_hir_id(), span, kind: ExprKind::RefinedType {
-                    requirement: self.arena.alloc_expr(requirement), base: self.arena.alloc_expr(base),
-                }}
+                Expr {
+                    hir_id: self.next_hir_id(),
+                    span,
+                    kind: ExprKind::RefinedType {
+                        requirement: self.arena.alloc_expr(requirement),
+                        base: self.arena.alloc_expr(base),
+                    },
+                }
             }
             NodeKind::Defer => {
                 let value = self.lower_expr(ctx, children[0]);
@@ -749,7 +801,11 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let identifier = self.node_to_ident(node);
         let next_hir_id = self.next_hir_id();
         if self.refinement_depth > 0 && identifier.name.as_str() == "Itself" {
-            return Expr { hir_id: next_hir_id, kind: ExprKind::RefinementSubject, span };
+            return Expr {
+                hir_id: next_hir_id,
+                kind: ExprKind::RefinementSubject,
+                span,
+            };
         }
         if let Some(digits) = identifier.name.as_str().strip_prefix('_') {
             if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -1050,13 +1106,25 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             let label = self.node_to_ident(children[0]);
             self.define_loop_label(label, children[0], identity);
             Some(label)
-        } else {None};
+        } else {
+            None
+        };
         let (pattern, guard) = self.lower_arm_head(ctx, children[1]);
         let pat = self.arena.alloc_pattern(pattern);
         let body = self.lower_block(ctx, children[3]);
         let body = self.arena.alloc_block(body);
         self.local_exit(scope);
-        Expr {hir_id:identity,kind:ExprKind::For {label,pat,guard,iter,body},span}
+        Expr {
+            hir_id: identity,
+            kind: ExprKind::For {
+                label,
+                pat,
+                guard,
+                iter,
+                body,
+            },
+            span,
+        }
     }
 
     fn lower_binary_expr(
@@ -1391,16 +1459,27 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         span: Span,
     ) -> Expr<'hir> {
         let callee = self.lower_expr(ctx, callee_node);
-        let lambda = if self.ast.get_node(lambda_node).is_some_and(|(kind, _, _)| kind == NodeKind::Lambda) {
+        let lambda = if self
+            .ast
+            .get_node(lambda_node)
+            .is_some_and(|(kind, _, _)| kind == NodeKind::Lambda)
+        {
             self.lower_expr(ctx, lambda_node)
         } else {
             let rib = self.local_enter(RibKind::Lambda);
             let body_expr = self.lower_expr(ctx, lambda_node);
-            let body = Body { params: &[], value: self.arena.alloc_expr(body_expr) };
+            let body = Body {
+                params: &[],
+                value: self.arena.alloc_expr(body_expr),
+            };
             let id = self.next_hir_id();
             let body_id = self.alloc_body(id, body);
             self.local_exit(rib);
-            Expr { hir_id: id, kind: ExprKind::PostLambdaBody(body_id), span }
+            Expr {
+                hir_id: id,
+                kind: ExprKind::PostLambdaBody(body_id),
+                span,
+            }
         };
         let lambda_ref = self.arena.alloc_expr(lambda);
         let (callee_ref, mut args, extended) = match callee.kind {
@@ -1412,8 +1491,11 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let args_slice = self.arena.alloc_arg_slice(args);
         Expr {
             hir_id: self.next_hir_id(),
-            kind: if extended { ExprKind::ExtendedApplication(callee_ref, args_slice) }
-                else { ExprKind::Application(callee_ref, args_slice) },
+            kind: if extended {
+                ExprKind::ExtendedApplication(callee_ref, args_slice)
+            } else {
+                ExprKind::Application(callee_ref, args_slice)
+            },
             span,
         }
     }
@@ -1801,14 +1883,24 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             None
         };
 
-        let code_scope = if let Some(Expr { kind: ExprKind::ContextualExprType(bindings, _), .. }) = ty {
+        let code_scope = if let Some(Expr {
+            kind: ExprKind::ContextualExprType(bindings, _),
+            ..
+        }) = ty
+        {
             let scope = self.local_enter(resolve::RibKind::MatchBody);
             let type_children = self.ast.get_children(children[1]);
-            for (binding, &node) in bindings.iter().zip(self.ast.get_multi_child_slice(type_children[1]).unwrap_or(&[])) {
+            for (binding, &node) in bindings.iter().zip(
+                self.ast
+                    .get_multi_child_slice(type_children[1])
+                    .unwrap_or(&[]),
+            ) {
                 self.define_local(binding.name, node, binding.hir_id);
             }
             Some(scope)
-        } else { None };
+        } else {
+            None
+        };
         let init = if children[2] != 0 {
             let init_expr = self.lower_expr(ctx, children[2]);
             Some(self.arena.alloc_expr(init_expr) as &_)
@@ -1816,10 +1908,15 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             None
         };
 
-        if let Some(scope) = code_scope { self.local_exit(scope); }
+        if let Some(scope) = code_scope {
+            self.local_exit(scope);
+        }
 
         // Failure executes in the preceding scope, before success bindings exist.
-        let otherwise = if let Some(&node) = children.get(3).filter(|&&node| kind != NodeKind::ConstDecl && node != 0) {
+        let otherwise = if let Some(&node) = children
+            .get(3)
+            .filter(|&&node| kind != NodeKind::ConstDecl && node != 0)
+        {
             let expr = self.lower_expr(ctx, node);
             Some(&*self.arena.alloc_expr(expr))
         } else {
@@ -1873,11 +1970,15 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
     }
 
     fn lower_match_arm(&mut self, ctx: ExprContext, node: NodeIndex) -> PatternArm<'hir> {
-        if let Some((NodeKind::Attribute | NodeKind::AttributeSetTrue, span, children)) = self.ast.get_node(node) {
+        if let Some((NodeKind::Attribute | NodeKind::AttributeSetTrue, span, children)) =
+            self.ast.get_node(node)
+        {
             // Multi-entry parsing applies attributes to the whole arm. Keep the
             // pending semantic obligation instead of treating it as a CaseArm
             // and panicking or silently accepting an unimplemented attribute.
-            self.package.pending_semantics.push((span, "case arm attribute".into()));
+            self.package
+                .pending_semantics
+                .push((span, "case arm attribute".into()));
             return self.lower_match_arm(ctx, children[1]);
         }
         let Some((NodeKind::CaseArm, span, children)) = self.ast.get_node(node) else {

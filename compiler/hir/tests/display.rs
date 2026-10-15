@@ -149,24 +149,47 @@ fn parsed(value: &impl std::fmt::Display) -> Sexp {
 
 #[test]
 fn contextual_code_dump_preserves_bindings_stage_and_substitution_direction() {
-    let ty=expr(ExprKind::TyVoid,200);
-    let value=expr(ExprKind::ResolvedLocal(Symbol::intern("value"),id(201)),202);
-    let context=ExprKind::ContextualExprType(vec![hir::expr::CodeContextBinding {
-        hir_id:id(203),name:name("port"),ty:&ty,default:Some(&value),
-    }],&ty);
-    let dump=parsed(&context);
-    assert_eq!(dump.tag(),"contextual-expr-type");
-    let entry=dump.field("context");
-    assert_eq!(entry.tag(),"binding");
-    assert_id(entry.field("id"),7,203);
-    assert_eq!(entry.field("default").tag(),"some");
-    for kind in [ExprKind::CodeQuote(&value,vec![hir::expr::CodeSubstitution {port:name("port"),binding:&value}]),
-        ExprKind::CodeSplice(&value,vec![hir::expr::CodeSubstitution {port:name("port"),binding:&value}])] {
-        let dump=parsed(&kind);
-        assert_eq!(dump.field("body").tag(),"expr");
-        let substitution=dump.field("substitutions");
-        assert_eq!(substitution.tag(),"substitute");
-        assert_eq!(substitution.field("binding").tag(),"expr");
+    let ty = expr(ExprKind::TyVoid, 200);
+    let value = expr(
+        ExprKind::ResolvedLocal(Symbol::intern("value"), id(201)),
+        202,
+    );
+    let context = ExprKind::ContextualExprType(
+        vec![hir::expr::CodeContextBinding {
+            hir_id: id(203),
+            name: name("port"),
+            ty: &ty,
+            default: Some(&value),
+        }],
+        &ty,
+    );
+    let dump = parsed(&context);
+    assert_eq!(dump.tag(), "contextual-expr-type");
+    let entry = dump.field("context");
+    assert_eq!(entry.tag(), "binding");
+    assert_id(entry.field("id"), 7, 203);
+    assert_eq!(entry.field("default").tag(), "some");
+    for kind in [
+        ExprKind::CodeQuote(
+            &value,
+            vec![hir::expr::CodeSubstitution {
+                port: name("port"),
+                binding: &value,
+            }],
+        ),
+        ExprKind::CodeSplice(
+            &value,
+            vec![hir::expr::CodeSubstitution {
+                port: name("port"),
+                binding: &value,
+            }],
+        ),
+    ] {
+        let dump = parsed(&kind);
+        assert_eq!(dump.field("body").tag(), "expr");
+        let substitution = dump.field("substitutions");
+        assert_eq!(substitution.tag(), "substitute");
+        assert_eq!(substitution.field("binding").tag(), "expr");
     }
 }
 fn assert_id(value: &Sexp, owner: u32, local: u32) {
@@ -460,8 +483,16 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
         ),
         (ExprKind::Path(path), "path-expr", vec![]),
         (ExprKind::TacticParameter(3), "tactic-parameter", vec![]),
-        (ExprKind::TacticArgument(&a), "tactic-argument", vec![("value", &a_tree)]),
-        (ExprKind::PostLambdaBody(body_id), "post-lambda-body", vec![]),
+        (
+            ExprKind::TacticArgument(&a),
+            "tactic-argument",
+            vec![("value", &a_tree)],
+        ),
+        (
+            ExprKind::PostLambdaBody(body_id),
+            "post-lambda-body",
+            vec![],
+        ),
         (
             ExprKind::UnresolvedIdent(Symbol::intern("lost")),
             "unresolved-ident",
@@ -540,8 +571,17 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
         (ExprKind::When(&conds), "when", vec![]),
         (ExprKind::Block(&block), "block-expr", vec![]),
         (ExprKind::Loop(&block), "loop", vec![]),
-        (ExprKind::For {label:Some(name("outer")),pat:&wild,guard:Some(&b),iter:&a,body:&block},
-            "for",vec![("iterable",&a_tree)]),
+        (
+            ExprKind::For {
+                label: Some(name("outer")),
+                pat: &wild,
+                guard: Some(&b),
+                iter: &a,
+                body: &block,
+            },
+            "for",
+            vec![("iterable", &a_tree)],
+        ),
         (
             ExprKind::Match(&a, &arms),
             "match",
@@ -611,8 +651,16 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
             vec![("condition", &a_tree), ("then", &b_tree)],
         ),
         (ExprKind::InlineMatch(&arms), "inline-match", vec![]),
-        (ExprKind::EffectRequest(&a), "effect-request", vec![("computation", &a_tree)]),
-        (ExprKind::EffectHandle(&a, &arms), "effect-handle", vec![("computation", &a_tree)]),
+        (
+            ExprKind::EffectRequest(&a),
+            "effect-request",
+            vec![("computation", &a_tree)],
+        ),
+        (
+            ExprKind::EffectHandle(&a, &arms),
+            "effect-handle",
+            vec![("computation", &a_tree)],
+        ),
         (
             ExprKind::InlineFor {
                 label: Some(name("loop")),
@@ -650,7 +698,11 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
         (ExprKind::TyType, "ty-type", vec![]),
         (ExprKind::TySelf, "ty-self", vec![]),
         (ExprKind::TermTypedWith, "term-typed-with", vec![]),
-        (ExprKind::TraitBound(&a, &b), "trait-bound", vec![("subject", &a_tree), ("interface", &b_tree)]),
+        (
+            ExprKind::TraitBound(&a, &b),
+            "trait-bound",
+            vec![("subject", &a_tree), ("interface", &b_tree)],
+        ),
         (ExprKind::LambdaBound, "lambda-bound", vec![]),
         (ExprKind::TermTraitBound, "term-trait-bound", vec![]),
         (ExprKind::Implication, "implication", vec![]),
@@ -664,7 +716,11 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
             vec![("value", &a_tree)],
         ),
         (ExprKind::TypeOf(&a), "type-of", vec![("value", &a_tree)]),
-        (ExprKind::TakeTagName(&a), "take-tag-name", vec![("value", &a_tree)]),
+        (
+            ExprKind::TakeTagName(&a),
+            "take-tag-name",
+            vec![("value", &a_tree)],
+        ),
         (
             ExprKind::MultiDeref(&a),
             "multi-deref",
@@ -1188,6 +1244,7 @@ fn item_definitions_include_fields_variants_nested_owners_and_import_styles() {
             "trait",
         ),
         (ItemKind::TypeAlias(&ty, &[], &[]), "type-alias"),
+        (ItemKind::Newtype(&ty, &clauses, &constraints), "newtype"),
         (
             ItemKind::Use(UsePath {
                 path: path.clone(),
@@ -1253,6 +1310,12 @@ fn item_definitions_include_fields_variants_nested_owners_and_import_styles() {
                 tree.field("items").list()[1].list()[1].atom(1);
             }
             "type-alias" => assert_eq!(tree.field("type"), &parsed(&ty)),
+            "newtype" => {
+                assert_eq!(tree.field("representation"), &parsed(&ty));
+                assert_eq!(tree.field("parameters").list(), [parsed(&clauses[0])]);
+                assert_eq!(tree.field("constraints").list(), [parsed(&constraints[0])]);
+                assert_eq!(DefKind::from_item_kind(&kind), DefKind::Newtype);
+            }
             "const" => {
                 assert_eq!(tree.field("type"), &parsed(&ty));
                 assert_eq!(tree.field("value"), &parsed(&value));
@@ -1389,20 +1452,34 @@ fn absent_optional_payloads_and_operator_spelling_are_explicit() {
 
 #[test]
 fn collected_properties_dump_preserves_nested_fields_and_escaping() {
-    let label="key\"\\\n";
-    let value=expr(ExprKind::Lit(Lit {kind:LitKind::String("value\"\\\n".into()),span:DUMMY_SP}),901);
-    let inner_fields=[FieldExpr {ident:name(label),expr:&value,span:DUMMY_SP}];
-    let inner=expr(ExprKind::CollectedProperties(&inner_fields),902);
-    let outer_fields=[FieldExpr {ident:name("nested"),expr:&inner,span:DUMMY_SP}];
-    let outer=expr(ExprKind::CollectedProperties(&outer_fields),903);
-    let tree=parsed(&outer);
-    let kind=tree.field("kind");
-    assert_eq!(kind.tag(),"collected-properties");
-    let nested=&kind.field("fields").list()[0];
-    assert_eq!(nested.field("value"),&parsed(&inner));
-    let inner_tree=parsed(&inner);
-    let field=&inner_tree.field("kind").field("fields").list()[0];
+    let label = "key\"\\\n";
+    let value = expr(
+        ExprKind::Lit(Lit {
+            kind: LitKind::String("value\"\\\n".into()),
+            span: DUMMY_SP,
+        }),
+        901,
+    );
+    let inner_fields = [FieldExpr {
+        ident: name(label),
+        expr: &value,
+        span: DUMMY_SP,
+    }];
+    let inner = expr(ExprKind::CollectedProperties(&inner_fields), 902);
+    let outer_fields = [FieldExpr {
+        ident: name("nested"),
+        expr: &inner,
+        span: DUMMY_SP,
+    }];
+    let outer = expr(ExprKind::CollectedProperties(&outer_fields), 903);
+    let tree = parsed(&outer);
+    let kind = tree.field("kind");
+    assert_eq!(kind.tag(), "collected-properties");
+    let nested = &kind.field("fields").list()[0];
+    assert_eq!(nested.field("value"), &parsed(&inner));
+    let inner_tree = parsed(&inner);
+    let field = &inner_tree.field("kind").field("fields").list()[0];
     field.field("name").field("name").text(label);
-    assert_eq!(field.field("value"),&parsed(&value));
+    assert_eq!(field.field("value"), &parsed(&value));
     println!("PROPERTY_HIR_DUMP={outer}\nPROPERTY_HIR_END");
 }
