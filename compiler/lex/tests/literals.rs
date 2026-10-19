@@ -475,3 +475,9 @@ fn bit_pattern_radix_prefixes_are_distinct_from_integer_values() {
         assert_literal(source, kind);
     }
 }
+
+#[test]
+fn extern_is_an_ordinary_identifier() {
+    assert_eq!(tokens("extern"), [(TokenKind::Id, "extern")]);
+    assert_eq!(tokens("extern_name"), [(TokenKind::Id, "extern_name")]);
+}

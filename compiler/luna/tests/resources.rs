@@ -5,6 +5,1435 @@ use luna::{
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn memory_summaries_preserve_owned_input_pointer_field_origins() {
+    use elaboration::verification::memory;
+    let package = compile(
+        "struct Link {target:*bool}struct Outer {inner:Link}
+        newtype Pointer=*bool;struct Wrapped {target:Pointer}
+        struct Generic where T {target:*T}struct Offset {ready:bool,target:*bool}
+        fn wrapped(link:Wrapped)->bool {link.target.as(*bool).*}
+        fn generic(link:Generic<bool>)->bool {link.target.*}
+        fn offset(link:Offset)->bool {link.target.*}
+        fn read(link:Link)->bool {link.target.*}
+        fn alias(link:Link)->bool {let saved=link;saved.target.*}
+        fn nested(link:Outer)->bool {link.inner.target.*}
+        fn select(flag:bool,left:Link,right:Link)->bool {
+            var selected=left;if flag {selected=right;}selected.target.*
+        }
+        fn replace(left:Link,right:Link)->bool {
+            var selected=left;selected=right;selected.target.*
+        }
+        fn self_assign(link:Link)->bool {var saved=link;saved=saved;saved.target.*}
+        fn project(link:Outer)->bool {let saved=link.inner;saved.target.*}
+        fn write(link:Link) {link.target.* = true;}
+        fn borrow(link:Link)->*bool {link.target}
+        fn forward(link:Link)->bool {read(link)}
+        fn forward_nested(link:Outer)->bool {read(link.inner)}
+        fn forward_alias(left:Link,right:Link)->bool {let selected=right;forward(selected)}
+        fn forward_result(link:Link)->bool {borrow(link).*}
+        fn forward_write(link:Link) {write(link);}
+        fn reorder(left:Link,right:Link)->bool {select(true,right,left)}
+        fn default_pointer(link:Link,.p:*bool=link.target)->bool {p.*}
+        fn use_default(link:Link)->bool {default_pointer(link)}",
+    );
+    for (name, origins) in [
+        ("read", vec![(0, vec![0])]),
+        ("alias", vec![(0, vec![0])]),
+        ("nested", vec![(0, vec![0, 0])]),
+        ("wrapped", vec![(0, vec![0])]),
+        ("generic", vec![(0, vec![0])]),
+        ("offset", vec![(0, vec![1])]),
+        ("replace", vec![(1, vec![0])]),
+        ("self_assign", vec![(0, vec![0])]),
+        ("project", vec![(0, vec![0, 0])]),
+        ("select", vec![(1, vec![0]), (2, vec![0])]),
+        ("forward", vec![(0, vec![0])]),
+        ("forward_nested", vec![(0, vec![0, 0])]),
+        ("forward_alias", vec![(1, vec![0])]),
+        ("forward_result", vec![(0, vec![0])]),
+        ("reorder", vec![(0, vec![0]), (1, vec![0])]),
+        ("use_default", vec![(0, vec![0])]),
+    ] {
+        let id = package
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .declaration;
+        let summary = memory::infer_in_package(&package, id, &[], &mut 100_000).unwrap();
+        let found = summary
+            .accesses
+            .iter()
+            .filter(|a| a.read_value)
+            .map(|a| (a.target.parameter, a.target.input_fields.clone()))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(found, origins.into_iter().collect(), "{summary}");
+        assert!(
+            summary
+                .accesses
+                .iter()
+                .all(|a| a.target.through.is_empty() && a.target.fields.is_empty())
+        );
+    }
+    let write = package
+        .functions
+        .iter()
+        .find(|f| f.name == "forward_write")
+        .unwrap();
+    let summary = memory::infer_in_package(&package, write.declaration, &[], &mut 100_000).unwrap();
+    assert!(
+        summary
+            .accesses
+            .iter()
+            .any(|a| a.write && a.target.input_fields == vec![0])
+    );
+    let id = package
+        .functions
+        .iter()
+        .find(|f| f.name == "borrow")
+        .unwrap()
+        .declaration;
+    let summary = memory::infer_in_package(&package, id, &[], &mut 100_000).unwrap();
+    let targets = summary.result_targets.unwrap();
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets.first().unwrap().input_fields, vec![0]);
+    assert!(memory::infer_in_package(&package, id, &[], &mut 1).is_err());
+    assert!(memory::infer_in_package(&package, id, &[], &mut 100_000).is_ok());
+}
+
+#[test]
+fn memory_call_input_paths_are_not_pointee_projections() {
+    use elaboration::verification::memory;
+    let package = compile(
+        "struct Cell {unused:bool,value:bool}
+        struct Link {target:*Cell}struct Outer {pad:bool,link:Link}
+        fn read(link:Link)->bool {link.target.value.*}
+        fn read_pointer(p:*Cell)->bool {p.value.*}
+        fn borrow(link:Link)->*Cell {link.target}
+        fn forward(outer:Outer)->bool {read(outer.link)}
+        fn direct(outer:Outer)->bool {read_pointer(outer.link.target)}
+        fn returned(outer:Outer)->bool {borrow(outer.link).value.*}",
+    );
+    for name in ["forward", "direct", "returned"] {
+        let function = package.functions.iter().find(|f| f.name == name).unwrap();
+        let summary =
+            memory::infer_in_package(&package, function.declaration, &[], &mut 100_000).unwrap();
+        let accesses = summary
+            .accesses
+            .iter()
+            .filter(|a| a.read_value)
+            .collect::<Vec<_>>();
+        assert_eq!(accesses.len(), 1, "{summary}");
+        let target = &accesses[0].target;
+        assert_eq!(target.parameter, 0);
+        assert_eq!(target.input_fields, vec![1, 0], "{summary}");
+        assert!(target.through.is_empty(), "{summary}");
+        assert_eq!(
+            target
+                .fields
+                .iter()
+                .map(|(_, index)| *index)
+                .collect::<Vec<_>>(),
+            vec![1],
+            "{summary}"
+        );
+    }
+}
+
+#[test]
+fn aggregate_pointer_calls_check_actual_storage_lifetimes() {
+    use elaboration::verification::moves::{Delivery, analyze_in_package};
+    for (body, accepted) in [
+        (
+            "let value=Cell {value:false};let seen=read(Link {target:value.ref});",
+            true,
+        ),
+        (
+            "let value=Cell {value:false};write(do {Link {target:value.ref}});",
+            true,
+        ),
+        (
+            "let value=Cell {value:false};let seen=late_read(Link {target:value.ref},do {let moved=value;false});",
+            false,
+        ),
+        (
+            "let value=Cell {value:false};let link=Link {target:value.ref};let seen=read(link);",
+            true,
+        ),
+        (
+            "let value=Cell {value:false};let link=Link {target:value.ref};write(link);",
+            true,
+        ),
+        (
+            "let value=Cell {value:false};let link=Link {target:value.ref};let seen=borrow(link).value.*;",
+            true,
+        ),
+        (
+            "let value=Cell {value:false};let link=Link {target:value.ref};let seen=default_read(link);",
+            true,
+        ),
+        (
+            "let value=Cell {value:false};let link=Link {target:value.ref};let moved=value;let seen=read(link);",
+            false,
+        ),
+        (
+            "let value=Cell {value:false};let link=Link {target:value.ref};let seen=late_read(link,do {let moved=value;false});",
+            false,
+        ),
+        (
+            "let link=do {let value=Cell {value:false};Link {target:value.ref}};let seen=read(link);",
+            false,
+        ),
+    ] {
+        let source = format!(
+            "struct Cell {{value:bool}}struct Link {{target:*Cell}}
+            fn read(link:Link)->bool {{link.target.value.*}}
+            fn write(link:Link) {{link.target.value.* = true;}}
+            fn borrow(link:Link)->*Cell {{link.target}}
+            fn default_read(link:Link,.p:*Cell=link.target)->bool {{p.value.*}}
+            fn late_read(link:Link,flag:bool)->bool {{link.target.value.*}}
+            fn run() {{{body}}}"
+        );
+        let package = compile(&source);
+        let function = package.functions.iter().find(|f| f.name == "run").unwrap();
+        let result = analyze_in_package(
+            &package,
+            function,
+            |ty| {
+                Ok(
+                    if matches!(ty, nir::Term::Primitive(_) | nir::Term::Pointer(_)) {
+                        Delivery::Copy
+                    } else {
+                        Delivery::Move
+                    },
+                )
+            },
+            100_000,
+        );
+        assert_eq!(result.is_ok(), accepted, "{body}: {result:?}");
+    }
+}
+
+#[test]
+fn owned_pointer_field_helpers_execute_with_checked_cleanup_premises() {
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Link {target:*bool}
+        fn write(link:Link) {link.target.* = true;}
+        fn read(link:Link)->bool {link.target.*}
+        fn borrow(link:Link)->*bool {link.target}
+        fn default_read(link:Link,.p:*bool=link.target)->bool {p.*}
+        fn via(link:Link,f:fn(Link)->bool)->bool {f(link)}
+        fn run()->bool {let value=false;write(Link {target:value.ref});
+            read(Link {target:value.ref}) and default_read(Link {target:value.ref})
+            and borrow(Link {target:value.ref}).* and via(Link {target:value.ref},read)}",
+    );
+    assert_eq!(
+        luna::execution::interpret_with_protocols(&package, "run", "Duplicate", "Retire", 100_000)
+            .unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn owned_pointer_field_premises_are_explicit_and_layout_checked() {
+    use elaboration::verification::moves::{self, BorrowedField, Delivery};
+    let package = compile("struct Link {target:*bool}fn read(link:Link)->bool {link.target.*}");
+    let function = package.functions.iter().find(|f| f.name == "read").unwrap();
+    let delivery = |ty: &nir::Term| {
+        Ok(
+            if matches!(ty, nir::Term::Primitive(_) | nir::Term::Pointer(_)) {
+                Delivery::Copy
+            } else {
+                Delivery::Move
+            },
+        )
+    };
+    assert!(moves::analyze_in_package(&package, function, delivery, 100_000).is_err());
+    let forwarded = compile(
+        "struct Link {target:*bool}fn read(link:Link)->bool {link.target.*}fn forward(link:Link)->bool {read(link)}",
+    );
+    let forward = forwarded
+        .functions
+        .iter()
+        .find(|f| f.name == "forward")
+        .unwrap();
+    assert!(moves::analyze_in_package(&forwarded, forward, delivery, 100_000).is_err());
+    let field = BorrowedField {
+        parameter: 0,
+        fields: vec![0],
+        pointee: nir::Term::Primitive(nir::Primitive::Bool),
+    };
+    let analyze = |fields: &[BorrowedField]| {
+        moves::analyze_in_package_with_field_context(
+            &package,
+            function,
+            delivery,
+            100_000,
+            None,
+            &[],
+            &[],
+            &[],
+            vec![],
+            fields,
+        )
+    };
+    let report = analyze(std::slice::from_ref(&field)).unwrap();
+    assert_eq!(report.borrowed_fields, vec![field.clone()]);
+    assert!(
+        report
+            .to_string()
+            .contains("(borrowed-field (parameter 0) (fields 0)")
+    );
+    assert!(analyze(&[field.clone(), field.clone()]).is_err());
+    for bad in [
+        BorrowedField {
+            fields: vec![],
+            ..field.clone()
+        },
+        BorrowedField {
+            fields: vec![1],
+            ..field.clone()
+        },
+        BorrowedField {
+            parameter: 1,
+            ..field.clone()
+        },
+        BorrowedField {
+            pointee: nir::Term::Primitive(nir::Primitive::Void),
+            ..field
+        },
+    ] {
+        assert!(analyze(&[bad]).is_err());
+    }
+}
+
+#[test]
+fn pointer_field_callback_factories_keep_checked_input_origins() {
+    let prefix = "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Link {target:*bool}
+        fn yes()->bool {true}fn no()->bool {false}
+        fn choose(link:Link)->fn()->bool {if link.target.* {yes}else {no}}
+        fn relay(link:Link)->fn()->bool {choose(link)}
+        fn typed(comptime T:.Type'builtin,link:Link)->fn()->bool {choose(link)}
+        fn staged(comptime pick:bool,link:Link)->fn()->bool {if pick {choose(link)}else {no}}
+        fn apply(link:Link,f:fn(Link)->fn()->bool)->bool {let callback=f(link);callback()}";
+    for (body, expected) in [
+        (
+            "let flag=true;let a=staged(true,Link {target:flag.ref});let b=staged(false,Link {target:flag.ref});a() and not b()",
+            true,
+        ),
+        (
+            "let flag=true;let callback=typed(bool,Link {target:flag.ref});callback()",
+            true,
+        ),
+        (
+            "let flag=true;let callback=choose(Link {target:flag.ref});callback()",
+            true,
+        ),
+        (
+            "let flag=false;let callback=relay(Link {target:flag.ref});callback()",
+            false,
+        ),
+        ("let flag=true;apply(Link {target:flag.ref},relay)", true),
+    ] {
+        let package = compile(&format!("{prefix}fn run()->bool {{{body}}}"));
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                "run",
+                "Duplicate",
+                "Retire",
+                100_000
+            )
+            .unwrap_or_else(|e| panic!("{body}: {e}")),
+            comptime_interpretor::Value::Bool(expected)
+        );
+    }
+    let package = compile(&format!(
+        "{prefix}fn run()->bool {{let link=do {{let flag=true;Link {{target:flag.ref}}}};let callback=relay(link);callback()}}"
+    ));
+    assert!(
+        luna::execution::interpret_with_protocols(&package, "run", "Duplicate", "Retire", 100_000)
+            .is_err()
+    );
+}
+
+#[test]
+fn constructed_pointer_fields_snapshot_initializers_and_project_through_wrappers() {
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Link {target:*bool}struct Outer {inner:Link}
+        struct Tagged {target:*bool,marker:bool}newtype Wrapped=Link;
+        fn read(link:Link)->bool {link.target.*}
+        fn built(p:*bool)->bool {read(Link {target:p})}
+        fn nested(p:*bool)->bool {let outer=Outer {inner:Link {target:p}};outer.inner.target.*}
+        fn projected(p:*bool)->bool {(Link {target:p}).target.*}
+        fn wrapped(p:*bool)->bool {let value=(Link {target:p}).as(Wrapped);value.as(Link).target.*}
+        fn snapshot(p:*bool,q:*bool)->bool {var selected=p;
+            let tagged=Tagged {target:selected,marker:do {selected=q;false}};tagged.target.*}
+        fn run()->bool {let first=true;let second=false;built(first.ref) and nested(first.ref)
+            and projected(first.ref) and wrapped(first.ref) and snapshot(first.ref,second.ref)}",
+    );
+    assert_eq!(
+        luna::execution::interpret_with_protocols(&package, "run", "Duplicate", "Retire", 100_000)
+            .unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn constructed_pointer_cleanup_cannot_hide_a_dead_call_target() {
+    let prefix="trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Cell {flag:bool}impl Retire for Cell {fn drop(*self) {}}
+        struct Holder {target:*Cell}impl Retire for Holder {fn drop(*self) {let target=self.target.*;target.flag.* = true;}}
+        fn retire(p:*Cell) {let holder=Holder {target:p};}
+        fn make_holder(p:*Cell)->Holder {Holder {target:p}}
+        fn relay_holder(p:*Cell)->Holder {make_holder(p)}
+        fn returned(p:*Cell) {let holder=relay_holder(p);}
+        fn discarded_return(p:*Cell) {relay_holder(p);}
+        fn consume_holder(holder:Holder) {}
+        fn forwarded_return(p:*Cell) {consume_holder(relay_holder(p));}
+        fn captured_return(p:*Cell) {let make=|| Holder {target:p};let holder=make();}
+        fn argument_return(p:*Cell) {let make=|q:*Cell| Holder {target:q};let holder=make(p);}
+        fn immediate_return(p:*Cell) {let holder=(|| Holder {target:p})();}
+        fn discarded_closure_return(p:*Cell) {let make=|| Holder {target:p};make();}
+        fn relay(p:*Cell) {retire(p);}
+        fn noop() {}
+        fn apply(p:*Cell,done:fn()) {let holder=Holder {target:p};done();}
+        fn higher(p:*Cell) {apply(p,noop);}
+        fn immediate(p:*Cell) {(|| {let holder=Holder {target:p};})();}
+        fn closed(p:*Cell) {let callback=|| {let holder=Holder {target:p};};callback();}
+        fn closure_argument(p:*Cell) {let callback=|q:*Cell| {let holder=Holder {target:q};};callback(p);}";
+    for helper in [
+        "retire",
+        "returned",
+        "discarded_return",
+        "forwarded_return",
+        "captured_return",
+        "argument_return",
+        "immediate_return",
+        "discarded_closure_return",
+        "relay",
+        "higher",
+        "closure_argument",
+        "immediate",
+        "closed",
+    ] {
+        let package = compile(&format!(
+            "{prefix} fn run()->bool {{let cell=Cell {{flag:false}};{helper}(cell.ref);cell.flag}}"
+        ));
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                "run",
+                "Duplicate",
+                "Retire",
+                100_000
+            )
+            .unwrap_or_else(|e| panic!("{helper}: {e}")),
+            comptime_interpretor::Value::Bool(true),
+            "{helper}"
+        );
+        let package = compile(&format!(
+            "{prefix} fn run()->bool {{let cell=Cell {{flag:false}};let pointer=cell.ref;let moved=cell;{helper}(pointer);true}}"
+        ));
+        let error = luna::execution::interpret_with_protocols(
+            &package,
+            "run",
+            "Duplicate",
+            "Retire",
+            100_000,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("cannot prepare resource-checked execution"),
+            "{helper}: {error}"
+        );
+    }
+}
+
+#[test]
+fn acquired_cleanup_footprints_are_keyed_validated_and_displayed() {
+    use elaboration::verification::memory;
+    let mut package = compile("fn helper(p:*bool) {}fn relay(p:*bool) {helper(p);}");
+    let helper = package
+        .functions
+        .iter()
+        .find(|f| f.name == "helper")
+        .unwrap()
+        .clone();
+    let relay = package
+        .functions
+        .iter()
+        .find(|f| f.name == "relay")
+        .unwrap()
+        .declaration;
+    package
+        .runtime_instances
+        .push(nir::program::RuntimeInstance {
+            declaration: helper.declaration,
+            arguments: vec![],
+            function: helper,
+            cleanup_accesses: vec![nir::program::RuntimeCleanupAccess {
+                parameter: 0,
+                input_fields: vec![],
+                through: vec![],
+                fields: vec![],
+                write: true,
+                read_value: true,
+                ty: nir::Term::Primitive(nir::Primitive::Bool),
+            }],
+        });
+    let summary = memory::infer_in_package(&package, relay, &[], &mut 10000).unwrap();
+    assert_eq!(summary.accesses.len(), 1);
+    assert!(summary.accesses[0].write);
+    assert!(
+        package
+            .to_string()
+            .contains("(cleanup-access (parameter 0)")
+    );
+    assert!(memory::infer_in_package(&package, relay, &[], &mut 0).is_err());
+    assert_eq!(
+        memory::infer_in_package(&package, relay, &[], &mut 10000).unwrap(),
+        summary
+    );
+    package.runtime_instances[0].cleanup_accesses[0].parameter = 1;
+    assert!(
+        memory::infer_in_package(&package, relay, &[], &mut 10000)
+            .unwrap_err()
+            .contains("parameter is missing")
+    );
+    package.runtime_instances[0].cleanup_accesses[0].parameter = 0;
+    package.runtime_instances[0].cleanup_accesses[0].ty = nir::Term::Primitive(nir::Primitive::U8);
+    assert!(
+        memory::infer_in_package(&package, relay, &[], &mut 10000)
+            .unwrap_err()
+            .contains("target type mismatch")
+    );
+}
+
+#[test]
+fn stored_pointer_closures_snapshot_and_separate_candidate_origins() {
+    use elaboration::verification::memory;
+    let package=compile("trait Duplicate {}trait Retire {fn drop(*self);}
+        struct Pair {left:bool,right:bool}
+        fn alias(p:*bool)->bool {let callback=||p.*;let saved=callback;saved()}
+        fn snapshot(p:*bool,q:*bool)->bool {var selected=p;let callback=||selected.*;selected=q;callback()}
+        fn choose(flag:bool,p:*bool,q:*bool)->*bool {let callback=if flag {||p} else {||q};callback()}
+        fn branch(flag:bool,a:*Pair,b:*Pair)->bool {let callback=if flag {||a.left.*} else {||b.right.*};callback()}
+        fn peek(p:*bool)->bool {p.*}
+        fn clear(p:*bool)->bool {p.* = false;false}
+        fn evolving(p:*bool)->bool {var action=peek;let callback=|| {let result=action(p);action=clear;result};let first=callback();let second=callback();first and not second}
+        fn run()->bool {let first=true;let second=false;let a=Pair {left:true,right:false};let b=Pair {left:false,right:true};
+            alias(first.ref) and snapshot(first.ref,second.ref) and choose(true,first.ref,second.ref).*
+            and not choose(false,first.ref,second.ref).* and branch(true,a.ref,b.ref) and branch(false,a.ref,b.ref) and evolving(first.ref)}");
+    assert_eq!(
+        luna::execution::interpret_with_protocols(&package, "run", "Duplicate", "Retire", 200_000)
+            .unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    for name in ["alias", "snapshot", "choose", "branch", "evolving"] {
+        let function = package.functions.iter().find(|f| f.name == name).unwrap();
+        let summary =
+            memory::infer_in_package(&package, function.declaration, &[], &mut 100000).unwrap();
+        assert!(memory::infer_in_package(&package, function.declaration, &[], &mut 1).is_err());
+        assert_eq!(
+            memory::infer_in_package(&package, function.declaration, &[], &mut 100000).unwrap(),
+            summary
+        );
+        if name == "evolving" {
+            assert!(summary.accesses.iter().any(|a| a.write), "{summary}");
+        }
+        if name == "snapshot" {
+            assert!(
+                summary.accesses.iter().all(|a| a.target.parameter == 0),
+                "{summary}"
+            );
+        }
+        if name == "branch" {
+            let reads = summary
+                .accesses
+                .iter()
+                .filter(|a| a.read_value)
+                .map(|a| {
+                    (
+                        a.target.parameter,
+                        a.target.fields.iter().map(|(_, i)| *i).collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                reads,
+                std::collections::BTreeSet::from([(1, vec![0]), (2, vec![1])]),
+                "{summary}"
+            );
+        }
+    }
+    let rebound = compile(
+        "fn inspect(p:*bool,q:*bool)->bool {var current=p;let callback=|| {current=q;current.*};callback()}",
+    );
+    let function = rebound
+        .functions
+        .iter()
+        .find(|f| f.name == "inspect")
+        .unwrap();
+    let summary =
+        memory::infer_in_package(&rebound, function.declaration, &[], &mut 100000).unwrap();
+    assert!(
+        summary
+            .accesses
+            .iter()
+            .any(|access| access.read_value && access.target.parameter == 1),
+        "{summary}"
+    );
+    assert!(
+        summary
+            .accesses
+            .iter()
+            .all(|access| access.target.parameter == 1),
+        "{summary}"
+    );
+}
+
+#[test]
+fn conditional_aggregate_pointer_results_keep_branch_origins() {
+    use elaboration::verification::memory;
+    let prefix="trait Duplicate {}trait Retire {fn drop(*self);}
+        struct Link {target:*bool}struct Outer {inner:Link}newtype Wrapped=Link;
+        fn read(link:Link)->bool {link.target.*}
+        fn pick(flag:bool,p:*bool,q:*bool)->bool {let link=if flag {Link {target:p}} else {Link {target:q}};read(link)}
+        fn matched(flag:bool,p:*bool,q:*bool)->bool {let link=flag match {true=>Link {target:p},false=>Link {target:q}};link.target.*}
+        fn nested(flag:bool,p:*bool,q:*bool)->bool {let outer=if flag {Outer {inner:Link {target:p}}} else {Outer {inner:Link {target:q}}};outer.inner.target.*}
+        fn wrapped(flag:bool,p:*bool,q:*bool)->bool {let value=if flag {(Link {target:p}).as(Wrapped)} else {(Link {target:q}).as(Wrapped)};value.as(Link).target.*}
+        fn saved(flag:bool,p:*bool,q:*bool)->bool {var selected=p;let link=if flag {let saved=Link {target:selected};selected=q;saved} else {Link {target:p}};selected=q;link.target.*}
+        fn guarded(flag:bool,p:*bool,q:*bool)->bool {let link=flag match {_ if false=>Link {target:q},_=>Link {target:p}};link.target.*}
+        fn early(flag:bool,p:*bool,q:*bool)->bool {let link=if flag {return false;} else {Link {target:p}};link.target.*}
+        fn early_match(flag:bool,p:*bool,q:*bool)->bool {let link=flag match {true=>return false,false=>Link {target:p}};link.target.*}";
+    let package=compile(&format!("{prefix} fn run()->bool {{let first=true;let second=false;
+        pick(true,first.ref,second.ref) and not pick(false,first.ref,second.ref)
+        and matched(true,first.ref,second.ref) and not matched(false,first.ref,second.ref)
+        and nested(true,first.ref,second.ref) and not nested(false,first.ref,second.ref)
+        and wrapped(true,first.ref,second.ref) and not wrapped(false,first.ref,second.ref)
+        and saved(true,first.ref,second.ref) and saved(false,first.ref,second.ref) and guarded(false,first.ref,second.ref) and early(false,first.ref,second.ref) and early_match(false,first.ref,second.ref)}}"));
+    assert_eq!(
+        luna::execution::interpret_with_protocols(&package, "run", "Duplicate", "Retire", 200_000)
+            .unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    for name in [
+        "pick",
+        "matched",
+        "nested",
+        "wrapped",
+        "guarded",
+        "saved",
+        "early",
+        "early_match",
+    ] {
+        let function = package.functions.iter().find(|f| f.name == name).unwrap();
+        let summary =
+            memory::infer_in_package(&package, function.declaration, &[], &mut 100000).unwrap();
+        let roots = summary
+            .accesses
+            .iter()
+            .filter(|a| a.read_value)
+            .map(|a| a.target.parameter)
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = if ["guarded", "saved", "early", "early_match"].contains(&name) {
+            std::collections::BTreeSet::from([1])
+        } else {
+            std::collections::BTreeSet::from([1, 2])
+        };
+        assert_eq!(roots, expected, "{name}: {summary}");
+        assert!(memory::infer_in_package(&package, function.declaration, &[], &mut 1).is_err());
+        assert_eq!(
+            memory::infer_in_package(&package, function.declaration, &[], &mut 100000).unwrap(),
+            summary
+        );
+    }
+    for name in ["pick", "matched", "nested", "wrapped"] {
+        let invalid = compile(&format!(
+            "{prefix} fn run()->bool {{let live=true;let expired=do {{let local=false;local.ref}};{name}(false,live.ref,expired)}}"
+        ));
+        let error = luna::execution::interpret_with_protocols(
+            &invalid,
+            "run",
+            "Duplicate",
+            "Retire",
+            200_000,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("cannot prepare resource-checked execution"),
+            "{name}: {error}"
+        );
+    }
+}
+
+#[test]
+fn conditional_owned_inputs_preserve_pointer_field_paths() {
+    use elaboration::verification::memory;
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}
+        struct Input {left:*bool,right:*bool}struct Link {target:*bool}
+        fn choose(flag:bool,a:Input,b:Input)->bool {
+            let link=if flag {Link {target:a.left}} else {Link {target:b.right}};
+            link.target.*
+        }
+        fn matched(flag:bool,a:Input,b:Input)->bool {
+            let link=flag match {true=>Link {target:a.left},false=>Link {target:b.right}};
+            link.target.*
+        }";
+    for name in ["choose", "matched"] {
+        for flag in ["true", "false"] {
+            let package = compile(&format!(
+                "{prefix} fn run()->bool {{let yes=true;let no=false;
+                {name}({flag},Input {{left:yes.ref,right:no.ref}},Input {{left:no.ref,right:yes.ref}})}}"
+            ));
+            assert_eq!(
+                luna::execution::interpret_with_protocols(
+                    &package,
+                    "run",
+                    "Duplicate",
+                    "Retire",
+                    200_000
+                )
+                .unwrap(),
+                comptime_interpretor::Value::Bool(true),
+                "{name}({flag})"
+            );
+            let function = package.functions.iter().find(|f| f.name == name).unwrap();
+            let summary =
+                memory::infer_in_package(&package, function.declaration, &[], &mut 100_000)
+                    .unwrap();
+            let reads = summary
+                .accesses
+                .iter()
+                .filter(|access| access.read_value)
+                .map(|access| (access.target.parameter, access.target.input_fields.clone()))
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                reads,
+                std::collections::BTreeSet::from([(1, vec![0]), (2, vec![1])]),
+                "{summary}"
+            );
+
+            let (left, right) = if flag == "true" {
+                ("expired", "live.ref")
+            } else {
+                ("live.ref", "expired")
+            };
+            let invalid = compile(&format!(
+                "{prefix} fn run()->bool {{let live=true;let expired=do {{let local=false;local.ref}};
+                {name}({flag},Input {{left:{left},right:live.ref}},Input {{left:live.ref,right:{right}}})}}"
+            ));
+            let error = luna::execution::interpret_with_protocols(
+                &invalid,
+                "run",
+                "Duplicate",
+                "Retire",
+                200_000,
+            )
+            .unwrap_err();
+            assert!(
+                error.contains("cannot prepare resource-checked execution"),
+                "{name}({flag}): {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn owned_pointer_patterns_keep_subject_origins() {
+    use elaboration::verification::memory;
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}
+        struct Link {target:*bool}struct Outer {inner:Link}
+        fn bound(link:Link)->bool {let {target}=link;target.*}
+        fn matched(link:Link)->bool {link match {{target}=>target.*}}
+        fn whole(link:Link)->bool {link match {saved=>saved.target.*}}
+        fn nested(outer:Outer)->bool {let {inner:{target}}=outer;target.*}
+        fn nested_match(outer:Outer)->bool {outer match {{inner:{target}}=>target.*}}";
+    for (name, nested) in [
+        ("bound", false),
+        ("matched", false),
+        ("whole", false),
+        ("nested", true),
+        ("nested_match", true),
+    ] {
+        let argument = |target: &str| {
+            let link = format!("Link {{target:{target}}}");
+            if nested {
+                format!("Outer {{inner:{link}}}")
+            } else {
+                link
+            }
+        };
+        let package = compile(&format!(
+            "{prefix} fn run()->bool {{let yes=true;{name}({})}}",
+            argument("yes.ref")
+        ));
+        let function = package.functions.iter().find(|f| f.name == name).unwrap();
+        let summary =
+            memory::infer_in_package(&package, function.declaration, &[], &mut 100_000).unwrap();
+        let reads = summary
+            .accesses
+            .iter()
+            .filter(|a| a.read_value)
+            .map(|a| (a.target.parameter, a.target.input_fields.clone()))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            reads,
+            std::collections::BTreeSet::from([(0, if nested { vec![0, 0] } else { vec![0] })]),
+            "{name}: {summary}"
+        );
+        assert!(memory::infer_in_package(&package, function.declaration, &[], &mut 1).is_err());
+        assert_eq!(
+            memory::infer_in_package(&package, function.declaration, &[], &mut 100_000).unwrap(),
+            summary
+        );
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                "run",
+                "Duplicate",
+                "Retire",
+                200_000
+            )
+            .unwrap(),
+            comptime_interpretor::Value::Bool(true),
+            "{name}"
+        );
+        let invalid = compile(&format!(
+            "{prefix} fn run()->bool {{let expired=do {{let local=false;local.ref}};{name}({})}}",
+            argument("expired")
+        ));
+        let error = luna::execution::interpret_with_protocols(
+            &invalid,
+            "run",
+            "Duplicate",
+            "Retire",
+            200_000,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("cannot prepare resource-checked execution"),
+            "{name}: {error}"
+        );
+    }
+}
+
+#[test]
+fn owned_pointer_or_patterns_merge_remapped_field_origins() {
+    use elaboration::verification::memory;
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}
+        struct Choice {flag:bool,left:*bool,right:*bool}
+        fn choose(value:Choice)->bool {
+            value match {({flag:true,left:p} or {flag:false,right:p})=>p.*}
+        }
+        fn bound(value:Choice)->bool {
+            let ({flag:true,left:p} or {flag:false,right:p})=value else {return false;};p.*
+        }
+        fn whole(value:Choice)->bool {
+            value match {({flag:true} or {flag:false}) as saved=>saved.left.*}
+        }";
+    for name in ["choose", "bound", "whole"] {
+        let package = compile(&format!(
+            "{prefix} fn run()->bool {{let yes=true;
+            {name}(Choice {{flag:true,left:yes.ref,right:yes.ref}})
+            and {name}(Choice {{flag:false,left:yes.ref,right:yes.ref}})}}"
+        ));
+        let function = package.functions.iter().find(|f| f.name == name).unwrap();
+        let summary =
+            memory::infer_in_package(&package, function.declaration, &[], &mut 100_000).unwrap();
+        let fields = summary
+            .accesses
+            .iter()
+            .filter(|a| a.read_value)
+            .map(|a| a.target.input_fields.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let expected = if name == "whole" {
+            vec![vec![1]]
+        } else {
+            vec![vec![1], vec![2]]
+        };
+        assert_eq!(fields, expected.into_iter().collect(), "{name}: {summary}");
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                "run",
+                "Duplicate",
+                "Retire",
+                200_000
+            )
+            .unwrap(),
+            comptime_interpretor::Value::Bool(true),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn named_aggregate_returns_preserve_pointer_field_origins() {
+    use elaboration::verification::memory;
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}
+        struct Link {target:*bool}struct Outer {inner:Link}newtype Wrapped=Link;
+        fn make(p:*bool)->Link {Link {target:p}}
+        fn relay(p:*bool)->Link {make(p)}
+        fn forward(link:Link)->Link {link}
+        fn recursive(flag:bool,p:*bool)->Link {if flag {make(p)} else {recursive(true,p)}}
+        fn explicit(p:*bool)->Link {return Link {target:p};}
+        fn select(flag:bool,p:*bool,q:*bool)->Link {
+            if flag {return make(p);} Link {target:q}
+        }
+        fn nested(p:*bool)->Outer {Outer {inner:relay(p)}}
+        fn wrapped(p:*bool)->Wrapped {(make(p)).as(Wrapped)}";
+    for (name, path, call, access) in [
+        ("make", vec![0], "make(yes.ref)", "target.*"),
+        ("relay", vec![0], "relay(yes.ref)", "target.*"),
+        ("forward", vec![0], "forward(make(yes.ref))", "target.*"),
+        ("recursive", vec![0], "recursive(false,yes.ref)", "target.*"),
+        ("explicit", vec![0], "explicit(yes.ref)", "target.*"),
+        (
+            "select",
+            vec![0],
+            "select(false,no.ref,yes.ref)",
+            "target.*",
+        ),
+        ("nested", vec![0, 0], "nested(yes.ref)", "inner.target.*"),
+        (
+            "wrapped",
+            vec![0, 0],
+            "wrapped(yes.ref)",
+            "as(Link).target.*",
+        ),
+    ] {
+        let package = compile(&format!(
+            "{prefix} fn run()->bool {{let yes=true;let no=false;let result={call};result.{access}}}"
+        ));
+        let function = package.functions.iter().find(|f| f.name == name).unwrap();
+        let summary =
+            memory::infer_in_package(&package, function.declaration, &[], &mut 100_000).unwrap();
+        let origins = summary.pointer_fields.get(&path).unwrap().as_ref().unwrap();
+        let parameters = origins
+            .iter()
+            .map(|p| p.parameter)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            parameters,
+            if name == "select" {
+                [1, 2].into_iter().collect()
+            } else if name == "recursive" {
+                [1].into_iter().collect()
+            } else {
+                [0].into_iter().collect()
+            },
+            "{name}: {summary}"
+        );
+        if name == "forward" {
+            assert!(origins.iter().all(|origin| origin.input_fields == vec![0]));
+        }
+        assert!(summary.to_string().contains("(pointer-fields (leaf (path"));
+        assert!(memory::infer_in_package(&package, function.declaration, &[], &mut 1).is_err());
+        assert_eq!(
+            memory::infer_in_package(&package, function.declaration, &[], &mut 100_000).unwrap(),
+            summary
+        );
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                "run",
+                "Duplicate",
+                "Retire",
+                200_000
+            )
+            .unwrap(),
+            comptime_interpretor::Value::Bool(true),
+            "{name}"
+        );
+        let expired_call = call.replace("yes.ref", "expired");
+        let invalid = compile(&format!(
+            "{prefix} fn run()->bool {{let no=false;let expired=do {{let local=true;local.ref}};let result={expired_call};result.{access}}}"
+        ));
+        let error = luna::execution::interpret_with_protocols(
+            &invalid,
+            "run",
+            "Duplicate",
+            "Retire",
+            200_000,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("cannot prepare resource-checked execution"),
+            "{name}: {error}"
+        );
+    }
+    let invalid = compile(
+        "struct Link {target:*bool} fn escape()->Link {let local=true;Link {target:local.ref}}",
+    );
+    let function = invalid
+        .functions
+        .iter()
+        .find(|f| f.name == "escape")
+        .unwrap();
+    assert!(memory::infer_in_package(&invalid, function.declaration, &[], &mut 100_000).is_err());
+}
+
+#[test]
+fn local_named_aggregate_returns_merge_candidate_origins() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}
+        struct Link {target:*bool}
+        fn left(p:*bool,q:*bool)->Link {Link {target:p}}
+        fn right(p:*bool,q:*bool)->Link {Link {target:q}}
+        fn single(p:*bool,q:*bool)->bool {let action=left;let result=action(p,q);result.target.*}
+        fn choose(flag:bool,p:*bool,q:*bool)->bool {
+            let action=if flag {left} else {right};let result=action(p,q);result.target.*
+        }";
+    let package=compile(&format!("{prefix} fn run()->bool {{let yes=true;let no=false;
+        single(yes.ref,no.ref) and choose(true,yes.ref,no.ref) and not choose(false,yes.ref,no.ref)}}"));
+    assert_eq!(
+        luna::execution::interpret_with_protocols(&package, "run", "Duplicate", "Retire", 200_000)
+            .unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    let function = package
+        .functions
+        .iter()
+        .find(|f| f.name == "choose")
+        .unwrap();
+    let summary = elaboration::verification::memory::infer_in_package(
+        &package,
+        function.declaration,
+        &[],
+        &mut 100_000,
+    )
+    .unwrap();
+    let reads = summary
+        .accesses
+        .iter()
+        .filter(|a| a.read_value)
+        .map(|a| a.target.parameter)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(reads, [1, 2].into_iter().collect());
+    for call in [
+        "single(expired,live.ref)",
+        "choose(true,expired,live.ref)",
+        "choose(false,live.ref,expired)",
+    ] {
+        let invalid = compile(&format!(
+            "{prefix} fn run()->bool {{let live=true;let expired=do {{let local=false;local.ref}};{call}}}"
+        ));
+        let error = luna::execution::interpret_with_protocols(
+            &invalid,
+            "run",
+            "Duplicate",
+            "Retire",
+            200_000,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("cannot prepare resource-checked execution"),
+            "{call}: {error}"
+        );
+    }
+}
+
+#[test]
+fn temporary_named_aggregate_calls_keep_origins_and_evaluation_order() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}
+        struct Link {target:*bool}struct Factory {make:fn(*bool,*bool)->Link}
+        fn left(p:*bool,q:*bool)->Link {Link {target:p}}
+        fn right(p:*bool,q:*bool)->Link {Link {target:q}}
+        fn selected(flag:bool,p:*bool,q:*bool)->bool {
+            let result=(if flag {left} else {right})(p,q);result.target.*
+        }
+        fn projected(p:*bool,q:*bool)->bool {
+            let result=(Factory {make:left}).make(p,q);result.target.*
+        }
+        fn ordered(p:*bool,q:*bool)->bool {
+            var before=false;
+            let result=(do {before=not before;left})(do {if not before {return false;}p},q);
+            result.target.*
+        }";
+    let package = compile(&format!(
+        "{prefix} fn run()->bool {{let yes=true;let no=false;
+        selected(true,yes.ref,no.ref) and not selected(false,yes.ref,no.ref)
+        and projected(yes.ref,no.ref) and ordered(yes.ref,no.ref)}}"
+    ));
+    assert_eq!(
+        luna::execution::interpret_with_protocols(&package, "run", "Duplicate", "Retire", 200_000)
+            .unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    for call in [
+        "selected(true,expired,live.ref)",
+        "selected(false,live.ref,expired)",
+        "projected(expired,live.ref)",
+        "ordered(expired,live.ref)",
+    ] {
+        let invalid = compile(&format!(
+            "{prefix} fn run()->bool {{let live=true;let expired=do {{let local=false;local.ref}};{call}}}"
+        ));
+        let error = luna::execution::interpret_with_protocols(
+            &invalid,
+            "run",
+            "Duplicate",
+            "Retire",
+            200_000,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("cannot prepare resource-checked execution"),
+            "{call}: {error}"
+        );
+    }
+}
+
+#[test]
+fn aggregate_result_origins_survive_until_read_and_cleanup() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}
+        struct Cell {flag:bool}impl Retire for Cell {fn drop(*self) {}}
+        struct Link {target:*Cell}
+        fn make(p:*Cell)->Link {Link {target:p}}
+        fn relay(p:*Cell)->Link {make(p)}
+        fn local(p:*Cell)->Link {let action=make;action(p)}
+        fn selected(p:*Cell)->Link {let action=if true {make} else {relay};action(p)}
+        fn temporary(p:*Cell)->Link {(do {make})(p)}
+        fn captured(p:*Cell)->Link {let build=|| Link {target:p};build()}
+        fn argument(p:*Cell)->Link {let build=|q:*Cell| Link {target:q};build(p)}
+        fn immediate(p:*Cell)->Link {(|| Link {target:p})()}
+        fn early(p:*Cell)->Link {let build=|| {return Link {target:p};};build()}";
+    for name in [
+        "make",
+        "relay",
+        "local",
+        "selected",
+        "temporary",
+        "captured",
+        "argument",
+        "immediate",
+        "early",
+    ] {
+        for moved in [false, true] {
+            let invalidate = if moved { "let moved=cell;" } else { "" };
+            let package = compile(&format!(
+                "{prefix} fn run()->bool {{let cell=Cell {{flag:true}};
+                let result={name}(cell.ref);{invalidate}result.target.flag.*}}"
+            ));
+            let result = luna::execution::interpret_with_protocols(
+                &package,
+                "run",
+                "Duplicate",
+                "Retire",
+                200_000,
+            );
+            if moved {
+                let error = result.unwrap_err();
+                assert!(
+                    error.contains("cannot prepare resource-checked execution"),
+                    "read {name}: {error}"
+                );
+            } else {
+                assert_eq!(
+                    result.unwrap(),
+                    comptime_interpretor::Value::Bool(true),
+                    "read {name}"
+                );
+            }
+
+            // The negative case performs no explicit read after the move: only
+            // the returned owner's destructor can expose the stale dependency.
+            let result_expression = if moved { "true" } else { "cell.flag" };
+            let package=compile(&format!("{prefix}
+                impl Retire for Link {{fn drop(*self) {{let target=self.target.*;target.flag.* = true;}}}}
+                fn run()->bool {{let cell=Cell {{flag:false}};
+                    do {{let result={name}(cell.ref);{invalidate}}};{result_expression}}}"));
+            let result = luna::execution::interpret_with_protocols(
+                &package,
+                "run",
+                "Duplicate",
+                "Retire",
+                200_000,
+            );
+            if moved {
+                let error = result.unwrap_err();
+                assert!(
+                    error.contains("cannot prepare resource-checked execution"),
+                    "cleanup {name}: {error}"
+                );
+            } else {
+                assert_eq!(
+                    result.unwrap(),
+                    comptime_interpretor::Value::Bool(true),
+                    "cleanup {name}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn closure_aggregate_returns_preserve_arguments_captures_and_branches() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}
+        struct Cell {flag:bool}impl Retire for Cell {fn drop(*self) {}}
+        struct Link {target:*bool}
+        struct Outer {link:Link}
+        struct Mixed {target:*bool,action:fn(*bool)->*bool}
+        fn relay_pointer(p:*bool)->*bool {p}
+        fn argument(flag:bool,p:*bool,q:*bool)->Link {let make=|target:*bool| Link {target:target};make(p)}
+        fn captured(flag:bool,p:*bool,q:*bool)->Link {let make=|| Link {target:p};make()}
+        fn owned_capture(flag:bool,p:*bool,q:*bool)->Link {let link=Link {target:p};let make=|| Link {target:link.target};make()}
+        fn owned_immediate(flag:bool,p:*bool,q:*bool)->Link {let link=Link {target:p};(|| Link {target:link.target})()}
+        fn owned_nested(flag:bool,p:*bool,q:*bool)->Link {let outer=Outer {link:Link {target:p}};let make=|| Link {target:outer.link.target};make()}
+        fn owned_mixed(flag:bool,p:*bool,q:*bool)->Link {let mixed=Mixed {target:p,action:relay_pointer};let make=|| Link {target:mixed.action(mixed.target)};make()}
+        fn owned_snapshot(flag:bool,p:*bool,q:*bool)->Link {var current=p;let link=Link {target:current};let make=|| Link {target:link.target};current=q;make()}
+        fn owned_selected(flag:bool,p:*bool,q:*bool)->Link {let left=Link {target:p};let right=Link {target:q};(if flag {|| Link {target:left.target}} else {|| Link {target:right.target}})()}
+        fn immediate(flag:bool,p:*bool,q:*bool)->Link {(|| Link {target:p})()}
+        fn early(flag:bool,p:*bool,q:*bool)->Link {let make=|| {if flag {return Link {target:p};}Link {target:q}};make()}
+        fn selected(flag:bool,p:*bool,q:*bool)->Link {(if flag {|| Link {target:p}} else {|| Link {target:q}})()}";
+    for (name, flag, first) in [
+        ("argument", true, true),
+        ("captured", true, true),
+        ("owned_capture", true, true),
+        ("owned_immediate", true, true),
+        ("owned_nested", true, true),
+        ("owned_mixed", true, true),
+        ("owned_snapshot", true, true),
+        ("owned_selected", true, true),
+        ("owned_selected", false, false),
+        ("immediate", true, true),
+        ("early", true, true),
+        ("early", false, false),
+        ("selected", true, true),
+        ("selected", false, false),
+    ] {
+        for moved in [false, true] {
+            let invalidate = if !moved {
+                ""
+            } else if first {
+                "let moved=first;"
+            } else {
+                "let moved=second;"
+            };
+            let package=compile(&format!("{prefix} fn run()->bool {{let first=Cell {{flag:true}};let second=Cell {{flag:false}};
+                let result={name}({flag},first.flag.ref,second.flag.ref);{invalidate}result.target.*}}"));
+            let result = luna::execution::interpret_with_protocols(
+                &package,
+                "run",
+                "Duplicate",
+                "Retire",
+                300_000,
+            );
+            if moved {
+                let error = result.unwrap_err();
+                assert!(
+                    error.contains("cannot prepare resource-checked execution"),
+                    "{name}({flag}): {error}"
+                );
+            } else {
+                use elaboration::verification::memory;
+                let function = package.functions.iter().find(|f| f.name == name).unwrap();
+                let summary =
+                    memory::infer_in_package(&package, function.declaration, &[], &mut 100_000)
+                        .unwrap();
+                let fields = summary
+                    .pointer_fields
+                    .get(&vec![0])
+                    .unwrap()
+                    .as_ref()
+                    .unwrap();
+                let roots = fields
+                    .iter()
+                    .map(|target| target.parameter)
+                    .collect::<std::collections::BTreeSet<_>>();
+                assert_eq!(
+                    roots,
+                    if ["early", "selected", "owned_selected"].contains(&name) {
+                        [1, 2].into_iter().collect()
+                    } else {
+                        [1].into_iter().collect()
+                    },
+                    "{name}: {summary}"
+                );
+                assert!(
+                    memory::infer_in_package(&package, function.declaration, &[], &mut 1).is_err()
+                );
+                assert_eq!(
+                    memory::infer_in_package(&package, function.declaration, &[], &mut 100_000)
+                        .unwrap(),
+                    summary
+                );
+                assert_eq!(
+                    result.unwrap_or_else(|error| panic!("{name}({flag}): {error}")),
+                    comptime_interpretor::Value::Bool(first)
+                );
+            }
+        }
+    }
+    let invalid = compile(&format!(
+        "{prefix} fn escape()->Link {{(|| {{let local=true;Link {{target:local.ref}}}})()}}"
+    ));
+    let function = invalid
+        .functions
+        .iter()
+        .find(|f| f.name == "escape")
+        .unwrap();
+    let error = elaboration::verification::memory::infer_in_package(
+        &invalid,
+        function.declaration,
+        &[],
+        &mut 100_000,
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("local memory target cannot escape"),
+        "{error}"
+    );
+}
+
+#[test]
+fn aggregate_pointer_captures_check_accesses_and_reject_storage_addresses() {
+    use elaboration::verification::memory;
+    for immediate in [false, true] {
+        let invoke = if immediate {
+            "(|| {link.target.* = true;link.target.*})()"
+        } else {
+            "let action=|| {link.target.* = true;link.target.*};action()"
+        };
+        let prefix = format!(
+            "trait Duplicate {{}}trait Retire {{fn drop(*self);}}
+            struct Cell {{flag:bool}}impl Retire for Cell {{fn drop(*self) {{}}}}
+            struct Link {{target:*bool}}
+            fn write(p:*bool)->bool {{let link=Link {{target:p}};{invoke}}}"
+        );
+        for moved in [false, true] {
+            let invalidation = if moved { "let moved=cell;" } else { "" };
+            let package = compile(&format!(
+                "{prefix} fn run()->bool {{let cell=Cell {{flag:false}};let pointer=cell.flag.ref;{invalidation}write(pointer)}}"
+            ));
+            let function = package
+                .functions
+                .iter()
+                .find(|f| f.name == "write")
+                .unwrap();
+            let summary =
+                memory::infer_in_package(&package, function.declaration, &[], &mut 100_000)
+                    .unwrap();
+            assert!(
+                summary
+                    .accesses
+                    .iter()
+                    .any(|access| access.target.parameter == 0 && access.write),
+                "{summary}"
+            );
+            assert!(
+                summary
+                    .accesses
+                    .iter()
+                    .any(|access| access.target.parameter == 0 && access.read_value),
+                "{summary}"
+            );
+            let result = luna::execution::interpret_with_protocols(
+                &package,
+                "run",
+                "Duplicate",
+                "Retire",
+                200_000,
+            );
+            if moved {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .contains("cannot prepare resource-checked execution")
+                );
+            } else {
+                assert_eq!(result.unwrap(), comptime_interpretor::Value::Bool(true));
+            }
+        }
+    }
+    for (body, expected) in [(
+        "let slot=link.target.ref;link.target.*",
+        "addressing captured pointer storage",
+    )] {
+        let package = compile(&format!(
+            "struct Link {{target:*bool}}fn inspect(p:*bool,q:*bool)->bool {{var link=Link {{target:p}};let action=|| {{{body}}};action()}}"
+        ));
+        let function = package
+            .functions
+            .iter()
+            .find(|f| f.name == "inspect")
+            .unwrap();
+        let error = memory::infer_in_package(&package, function.declaration, &[], &mut 100_000)
+            .unwrap_err();
+        assert!(error.contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn aggregate_defaults_keep_prepared_parameter_pointer_origins() {
+    let prefix = "trait Duplicate {}trait Retire {fn drop(*self);}
+        struct Cell {flag:bool}impl Retire for Cell {fn drop(*self) {}}
+        struct Link {target:*bool}struct Outer {inner:Link}
+        pure fn make(p:*bool)->Link {Link {target:p}}
+        fn direct(p:*bool,.link:Link=do {Link {target:p}})->bool {link.target.*}
+        fn factory(p:*bool,.link:Link=make(p))->bool {link.target.*}
+        fn nested(p:*bool,.outer:Outer=do {Outer {inner:Link {target:p}}})->bool {outer.inner.target.*}
+        fn chained(p:*bool,.link:Link=do {Link {target:p}},.q:*bool=link.target)->bool {q.*}
+        fn later(p:*bool,ignored:bool,.link:Link=do {Link {target:p}})->bool {link.target.*}";
+    for name in ["direct", "factory", "nested", "chained"] {
+        let package = compile(&format!(
+            "{prefix} fn run()->bool {{let cell=Cell {{flag:true}};{name}(cell.flag.ref)}}"
+        ));
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                "run",
+                "Duplicate",
+                "Retire",
+                200_000
+            )
+            .unwrap_or_else(|e| panic!("{name}: {e}")),
+            comptime_interpretor::Value::Bool(true)
+        );
+        let invalid = compile(&format!(
+            "{prefix} fn run()->bool {{let cell=Cell {{flag:true}};let pointer=cell.flag.ref;let moved=cell;{name}(pointer)}}"
+        ));
+        let error = luna::execution::interpret_with_protocols(
+            &invalid,
+            "run",
+            "Duplicate",
+            "Retire",
+            200_000,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("cannot prepare resource-checked execution"),
+            "{name}: {error}"
+        );
+    }
+    let snapshot = compile(&format!(
+        "{prefix} fn run()->bool {{let first=Cell {{flag:true}};let second=Cell {{flag:false}};
+        var selected=first.flag.ref;later(selected,do {{selected=second.flag.ref;true}})}}"
+    ));
+    assert_eq!(
+        luna::execution::interpret_with_protocols(&snapshot, "run", "Duplicate", "Retire", 200_000)
+            .unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    let invalid = compile(&format!(
+        "{prefix} fn run()->bool {{let first=Cell {{flag:true}};
+        later(first.flag.ref,do {{let moved=first;true}})}}"
+    ));
+    let error =
+        luna::execution::interpret_with_protocols(&invalid, "run", "Duplicate", "Retire", 200_000)
+            .unwrap_err();
+    assert!(
+        error.contains("cannot prepare resource-checked execution"),
+        "{error}"
+    );
+}
+
 fn compile(source: &str) -> nir::program::Package {
     compile_in(source, 0)
 }
@@ -2692,15 +4121,31 @@ fn local_pointer_call_boundary_does_not_hide_dependencies_in_aggregates() {
     for (source, accepted) in [
         (
             "struct Holder { pointer:*bool, } fn consume(holder:Holder) {} fn run() { let value = false; consume(Holder { pointer:value.ref }); }",
-            false,
+            true,
         ),
         (
             "struct Holder { pointer:*bool, } fn consume(holder:Holder) {} fn run() { let value = false; let holder = Holder { pointer:value.ref }; consume(holder); }",
-            false,
+            true,
         ),
         (
             "fn action() { let value = false; let pointer = value.ref; } fn run() { let value = false; let unused = do { let pointer = value.ref; false }; action(); }",
             true,
+        ),
+        (
+            "struct Holder { pointer:*bool, } fn consume(holder:Holder) { let seen=holder.pointer.*; } fn run() { let value=false; consume(Holder {pointer:value.ref}); }",
+            true,
+        ),
+        (
+            "struct Holder { pointer:*bool, } fn consume(holder:Holder) { holder.pointer.* = true; } fn run() { let value=false; let holder=Holder {pointer:value.ref}; consume(holder); }",
+            true,
+        ),
+        (
+            "struct Holder { pointer:*bool, } fn borrow(holder:Holder)->*bool {holder.pointer} fn run() {let value=false;let seen=borrow(Holder {pointer:value.ref}).*;}",
+            true,
+        ),
+        (
+            "struct Holder { pointer:*bool, } fn consume(holder:Holder) {let seen=holder.pointer.*;} fn run() {let holder=do {let value=false;Holder {pointer:value.ref}};consume(holder);}",
+            false,
         ),
     ] {
         let package = compile(source);
@@ -2725,7 +4170,9 @@ fn local_pointer_call_boundary_does_not_hide_dependencies_in_aggregates() {
         }
         let error = result.unwrap_err();
         assert!(
-            error.reason.contains("memory contract"),
+            error.reason.contains("field provenance")
+                || error.reason.contains("unavailable")
+                || error.reason.contains("memory contract"),
             "{source}: {error}"
         );
     }
@@ -3451,14 +4898,19 @@ fn memory_conditional_indirect_branch_is_not_discarded() {
 fn memory_argument_dump_distinguishes_known_alternatives_from_unknown() {
     use elaboration::verification::memory::{ArgumentSummary, ParameterPlace};
     let mut summary = ArgumentSummary {
+        input_pointer_exits: Default::default(),
+        input_code_exits: Default::default(),
+        pointer_fields: Default::default(),
         code_fields: Default::default(),
         may_reject: false,
+        may_run_cleanup: false,
         accesses: vec![],
         result_targets: Some(
             [2, 1, 2]
                 .into_iter()
                 .map(|parameter| ParameterPlace {
                     parameter,
+                    input_fields: vec![],
                     through: vec![],
                     fields: vec![],
                 })
@@ -3467,12 +4919,12 @@ fn memory_argument_dump_distinguishes_known_alternatives_from_unknown() {
     };
     assert_eq!(
         summary.to_string(),
-        "(argument-memory (accesses) (may-reject false) (result-targets (parameter-place (parameter 1) (fields)) (parameter-place (parameter 2) (fields))) (code-fields))"
+        "(argument-memory (accesses) (may-reject false) (may-run-cleanup false) (result-targets (parameter-place (parameter 1) (fields)) (parameter-place (parameter 2) (fields))) (code-fields))"
     );
     summary.result_targets = None;
     assert_eq!(
         summary.to_string(),
-        "(argument-memory (accesses) (may-reject false) (result-targets unknown) (code-fields))"
+        "(argument-memory (accesses) (may-reject false) (may-run-cleanup false) (result-targets unknown) (code-fields))"
     );
 }
 
@@ -6128,7 +7580,7 @@ fn memory_rejection_summary_includes_signature_checks_and_keeps_access_requireme
 #[test]
 fn memory_owned_argument_footprints_check_layout_and_retain_reads() {
     use elaboration::verification::memory;
-    for (field, value, accepted) in [("bool", "p.*", true), ("*bool", "p", false)] {
+    for (field, value, reads) in [("bool", "p.*", true), ("*bool", "p", false)] {
         let package = compile(&format!(
             "struct Item {{value:{field},}} fn construct(p:*bool)->Item {{Item {{value:{value}}}}}"
         ));
@@ -6141,22 +7593,42 @@ fn memory_owned_argument_footprints_check_layout_and_retain_reads() {
             panic!("signature")
         };
         let prepared = [(function.parameters[0], parameters[0].ty.clone(), 3)];
-        let summary = memory::infer_argument(&package, &function.body, &prepared, &mut 100000);
-        if accepted {
-            let summary = summary.unwrap();
+        let summary =
+            memory::infer_argument(&package, &function.body, &prepared, &mut 100000).unwrap();
+        if reads {
             assert_eq!(summary.accesses.len(), 1, "{summary}");
             assert_eq!(summary.accesses[0].target.parameter, 3);
             assert!(summary.accesses[0].read_value);
             assert!(!summary.accesses[0].write);
             assert!(summary.result_targets.is_none());
-            assert!(memory::infer_argument(&package, &function.body, &prepared, &mut 0).is_err());
+            assert!(summary.pointer_fields.is_empty());
         } else {
+            assert!(summary.accesses.is_empty());
+            let targets = summary
+                .pointer_fields
+                .get(&vec![0])
+                .unwrap()
+                .as_ref()
+                .unwrap();
+            assert_eq!(targets.len(), 1);
+            let target = targets.first().unwrap();
+            assert_eq!(target.parameter, 3);
+            assert!(
+                target.input_fields.is_empty()
+                    && target.through.is_empty()
+                    && target.fields.is_empty()
+            );
             assert!(
                 summary
-                    .unwrap_err()
-                    .contains("aggregate pointer dependencies")
+                    .to_string()
+                    .contains("(pointer-fields (leaf (path 0)")
             );
         }
+        assert!(memory::infer_argument(&package, &function.body, &prepared, &mut 0).is_err());
+        assert_eq!(
+            memory::infer_argument(&package, &function.body, &prepared, &mut 100000).unwrap(),
+            summary
+        );
     }
 }
 
@@ -9960,11 +11432,11 @@ fn memory_local_capture_snapshots_never_borrow_later_code_identity() {
         .iter()
         .find(|f| f.name == "inspect")
         .unwrap();
-    assert!(
-        memory::infer_in_package(&package, function.declaration, &[], &mut 100000)
-            .unwrap_err()
-            .contains("memory contract")
-    );
+    let summary =
+        memory::infer_in_package(&package, function.declaration, &[], &mut 100000).unwrap();
+    assert_eq!(summary.accesses.len(), 1);
+    assert!(summary.accesses[0].read_value && !summary.accesses[0].write);
+    assert_eq!(summary.accesses[0].target.parameter, 0);
 }
 
 #[test]
@@ -10057,12 +11529,15 @@ fn memory_capture_code_invariants_do_not_freeze_invocation_arguments() {
         .iter()
         .find(|f| f.name == "inspect")
         .unwrap();
-    let error =
-        memory::infer_in_package(&package, function.declaration, &[], &mut 100000).unwrap_err();
-    assert!(
-        error.contains("invocation values") && error.contains("environment transition"),
-        "{error}"
-    );
+    let summary =
+        memory::infer_in_package(&package, function.declaration, &[], &mut 100000).unwrap();
+    let roots = summary
+        .accesses
+        .iter()
+        .filter(|access| access.read_value)
+        .map(|access| access.target.parameter)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(roots, [0, 1].into_iter().collect(), "{summary}");
 }
 
 #[test]
@@ -10864,9 +12339,15 @@ fn memory_match_capture_updates_do_not_freeze_invocation_inputs() {
         .iter()
         .find(|f| f.name == "inspect")
         .unwrap();
-    let error =
-        memory::infer_in_package(&package, inspect.declaration, &[], &mut 100000).unwrap_err();
-    assert!(error.contains("environment transition contract"), "{error}");
+    let summary =
+        memory::infer_in_package(&package, inspect.declaration, &[], &mut 100000).unwrap();
+    let roots = summary
+        .accesses
+        .iter()
+        .filter(|access| access.read_value)
+        .map(|access| access.target.parameter)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(roots, [0].into_iter().collect(), "{summary}");
 }
 
 #[test]
@@ -11369,7 +12850,10 @@ fn memory_capture_replacement_does_not_freeze_dynamic_environments() {
         .unwrap();
     let error =
         memory::infer_in_package(&package, inspect.declaration, &[], &mut 200000).unwrap_err();
-    assert!(error.contains("environment transition contract"), "{error}");
+    assert!(
+        error.contains("dynamic call requires a richer memory contract"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -11507,7 +12991,10 @@ fn memory_record_environment_replacement_rejects_hidden_code_capture() {
         .unwrap();
     let error =
         memory::infer_in_package(&package, inspect.declaration, &[], &mut 200000).unwrap_err();
-    assert!(error.contains("environment transition contract"), "{error}");
+    assert!(
+        error.contains("dynamic call requires a richer memory contract"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -12799,20 +14286,20 @@ fn data_match_memory_summary_tracks_guard_reads_and_generic_payload_writes() {
 }
 
 #[test]
-fn data_match_memory_summary_rejects_hidden_pointer_and_callable_subjects() {
+fn data_match_memory_summary_tracks_enum_pointers_and_rejects_unknown_callbacks() {
     use elaboration::verification::memory;
     for (source, expected) in [
         (
             "enum Choice {none,some(*bool)} fn subject(value:Choice)->bool {value match {.none=>false,.some(pointer)=>pointer.*}}",
-            "aggregate pointer dependencies require a richer memory contract",
+            Some(vec![usize::MAX, 1, 0]),
         ),
         (
             "typealias Callback=fn()->bool;enum Choice {none,some(Callback)} fn subject(value:Choice)->bool {value match {.none=>false,.some(callback)=>callback()}}",
-            "dynamic call requires a richer memory contract",
+            None,
         ),
         (
             "enum Choice {none,some(*bool)} fn subject(pointer:*bool)->bool {Choice.some(pointer) match {.none=>false,.some(value)=>value.*}}",
-            "aggregate pointer dependencies require a richer memory contract",
+            Some(vec![]),
         ),
     ] {
         let package = compile(source);
@@ -12821,9 +14308,21 @@ fn data_match_memory_summary_rejects_hidden_pointer_and_callable_subjects() {
             .iter()
             .find(|f| f.name == "subject")
             .unwrap();
-        let error =
-            memory::infer_in_package(&package, function.declaration, &[], &mut 100000).unwrap_err();
-        assert!(error.contains(expected), "{error}");
+        let result = memory::infer_in_package(&package, function.declaration, &[], &mut 100000);
+        if let Some(fields) = expected {
+            let summary = result.unwrap();
+            assert_eq!(summary.accesses.len(), 1, "{summary}");
+            let access = &summary.accesses[0];
+            assert_eq!(access.target.parameter, 0);
+            assert_eq!(access.target.input_fields, fields);
+            assert!(access.read_value && !access.write, "{summary}");
+        } else {
+            let error = result.unwrap_err();
+            assert!(
+                error.contains("dynamic call requires a richer memory contract"),
+                "{error}"
+            );
+        }
     }
 }
 
@@ -13364,7 +14863,10 @@ fn memory_enum_capture_updates_reject_dynamic_replacements_and_dead_later_target
         .unwrap();
     let error =
         memory::infer_in_package(&package, inspect.declaration, &[], &mut 300000).unwrap_err();
-    assert!(error.contains("environment transition contract"), "{error}");
+    assert!(
+        error.contains("closure capture code exit has unknown environment identity"),
+        "{error}"
+    );
     for retire in [false, true] {
         let retired = if retire { "consume(right);" } else { "" };
         let package=compile(&format!("{prefix}
@@ -13467,7 +14969,26 @@ fn memory_returned_enum_capture_updates_do_not_restore_pre_warmup_state() {
                 "Retire",
                 1200000
             )
-            .unwrap(),
+            .unwrap_or_else(|error| {
+                let summaries = package
+                    .functions
+                    .iter()
+                    .filter(|f| ["factory", "inspect", "run"].contains(&f.name.as_str()))
+                    .map(|f| {
+                        (
+                            f.name.clone(),
+                            elaboration::verification::memory::infer_in_package(
+                                &package,
+                                f.declaration,
+                                &[],
+                                &mut 1200000,
+                            )
+                            .map(|summary| summary.to_string()),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                panic!("warm={warm}, local={local}: {error}; {summaries:?}")
+            }),
             comptime_interpretor::Value::Bool(!warm)
         );
     }
@@ -13554,13 +15075,12 @@ fn local_storage_memory_summary_keeps_local_accesses_out_of_parameter_footprints
 }
 
 #[test]
-fn local_storage_memory_summary_rejects_escaping_and_pointer_slot_origins() {
+fn local_storage_memory_summary_rejects_escape_and_resolves_local_slots() {
     use elaboration::verification::memory;
     for source in [
         "fn subject()->*bool {let value=true;value.ref}",
         "fn identity(p:*bool)->*bool {p} fn subject()->*bool {let value=true;identity(value.ref)}",
         "fn subject(p:*bool,flag:bool)->*bool {let value=true;if flag {p} else {value.ref}}",
-        "fn subject(p:*bool)->bool {let slot=p.ref;slot.*.*}",
     ] {
         let package = compile(source);
         let function = package
@@ -13573,6 +15093,24 @@ fn local_storage_memory_summary_rejects_escaping_and_pointer_slot_origins() {
             "{source}"
         );
     }
+    let package = compile("fn subject(p:*bool)->bool {let slot=p.ref;slot.*.*}");
+    let function = package
+        .functions
+        .iter()
+        .find(|f| f.name == "subject")
+        .unwrap();
+    let summary =
+        memory::infer_in_package(&package, function.declaration, &[], &mut 200000).unwrap();
+    assert_eq!(summary.accesses.len(), 1, "{summary}");
+    let access = &summary.accesses[0];
+    assert_eq!(access.target.parameter, 0, "{summary}");
+    assert!(
+        access.target.input_fields.is_empty()
+            && access.target.through.is_empty()
+            && access.target.fields.is_empty(),
+        "{summary}"
+    );
+    assert!(access.read_value && !access.write, "{summary}");
 }
 
 #[test]
@@ -13840,10 +15378,30 @@ fn immediate_borrowed_aggregate_results_keep_reads_and_callable_fields() {
 }
 
 #[test]
-fn immediate_borrowed_results_do_not_hide_pointer_storage_or_unknown_code() {
+fn immediate_borrowed_results_retain_pointer_storage_and_reject_unknown_code() {
     use elaboration::verification::memory;
+    let package =
+        compile("struct Box {pointer:*bool} fn subject(p:*bool)->Box {(|| Box {pointer:p})()}");
+    let subject = package
+        .functions
+        .iter()
+        .find(|f| f.name == "subject")
+        .unwrap();
+    let summary =
+        memory::infer_in_package(&package, subject.declaration, &[], &mut 200000).unwrap();
+    let targets = summary
+        .pointer_fields
+        .get(&vec![0])
+        .unwrap()
+        .as_ref()
+        .unwrap();
+    assert_eq!(targets.len(), 1);
+    let target = targets.first().unwrap();
+    assert_eq!(target.parameter, 0);
+    assert!(
+        target.input_fields.is_empty() && target.fields.is_empty() && target.through.is_empty()
+    );
     for source in [
-        "struct Box {pointer:*bool} fn subject(p:*bool)->Box {(|| Box {pointer:p})()}",
         "fn subject(p:*bool)->*bool {(|| do {let value=p.*;value.ref})()}",
         "fn subject(p:*bool,action:fn(*bool)->bool)->bool {(|| do {let read=p.*;action})()(p)}",
     ] {

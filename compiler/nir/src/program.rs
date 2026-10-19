@@ -81,6 +81,18 @@ impl SourceRange {
     pub fn expansion_index(self) -> Option<u32> {
         (self.start == u32::MAX).then_some(self.end)
     }
+    /// Recover a source location without erasing the generated IR identity.
+    /// Missing entries and cycles are invalid provenance, not file offsets.
+    pub fn original(self, expansions: &[ExpansionSource]) -> Option<Self> {
+        let mut current = self;
+        for _ in 0..=expansions.len() {
+            match current.expansion_index() {
+                Some(index) => current = expansions.get(index as usize)?.original,
+                None => return (current.start <= current.end).then_some(current),
+            }
+        }
+        None
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExpansionSource {
@@ -777,6 +789,8 @@ pub enum ExprKind {
     TypeValue(Term),
     /// Completed immutable meta.List<Type> data, distinct from Type and tuple data.
     TypeListValue(Vec<Term>),
+    /// Ordered comptime construction of immutable meta.List<Type> data.
+    TypeList(Vec<Expr>),
     /// Checked comptime indexing of the compiler-bound meta.List<Type> value.
     TypeListIndex(Box<Expr>, Box<Expr>),
     /// A value selected by an interface member. Its declaration identity remains
@@ -799,6 +813,11 @@ pub enum ExprKind {
     /// Evaluates Type-valued fields in source order and constructs a tuple type.
     TupleType(Vec<Expr>),
     NominalType {
+        declaration: DeclarationId,
+        arguments: Vec<Expr>,
+    },
+    /// Comptime-only guard before expanding a transparent type alias.
+    CheckTypeAlias {
         declaration: DeclarationId,
         arguments: Vec<Expr>,
     },
@@ -1068,6 +1087,12 @@ pub struct Capture {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Pattern {
+    /// Read-only candidate-local alias of the current subject. The alias is
+    /// available while matching `inner`, but is never a successful export.
+    Observe {
+        binding: LocalId,
+        inner: Box<Pattern>,
+    },
     Then {
         first: Box<Pattern>,
         value: Box<Expr>,
@@ -1119,6 +1144,9 @@ pub struct MatchArm {
 impl fmt::Display for Pattern {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Observe { binding, inner } => {
+                write!(f, "(observe-pattern (subject {binding}) (inner {inner}))")
+            }
             Self::Then { first, value, next } => {
                 write!(f, "(and-is (first {first}) (value {value}) (next {next}))")
             }
@@ -1488,6 +1516,9 @@ impl fmt::Display for TraitRequirement {
 }
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Package {
+    /// Completed residual bodies supplied by a concrete runtime graph. Keys
+    /// retain both clause arguments and ordinary staged invocation inputs.
+    pub runtime_instances: Vec<RuntimeInstance>,
     /// Checked runtime code templates retained for deterministic expansion.
     /// These are not executable functions or runtime function identities.
     pub quote_templates: Vec<Function>,
@@ -1515,7 +1546,97 @@ pub struct Package {
     pub functions: Vec<Function>,
     pub structs: Vec<Struct>,
     pub newtypes: Vec<crate::newtypes::Newtype>,
+    pub alias_contracts: Vec<crate::type_aliases::Contract>,
     pub enums: Vec<Enum>,
+}
+
+/// Acquired cleanup accesses, expressed relative to one residual invocation's inputs.
+/// This supplements the body footprint; it is not a standalone safety certificate.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RuntimeCleanupAccess {
+    pub parameter: usize,
+    pub input_fields: Vec<usize>,
+    pub through: Vec<Vec<(FieldOwner, usize)>>,
+    pub fields: Vec<(FieldOwner, usize)>,
+    pub write: bool,
+    pub read_value: bool,
+    pub ty: Term,
+}
+impl fmt::Display for RuntimeCleanupAccess {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(cleanup-access (parameter {}) (input-fields",
+            self.parameter
+        )?;
+        for field in &self.input_fields {
+            write!(f, " {field}")?;
+        }
+        f.write_str(") (through")?;
+        for path in &self.through {
+            f.write_str(" (load-pointer")?;
+            for (owner, index) in path {
+                write!(f, " (field {owner} {index})")?;
+            }
+            f.write_str(")")?;
+        }
+        f.write_str(") (fields")?;
+        for (owner, index) in &self.fields {
+            write!(f, " (field {owner} {index})")?;
+        }
+        write!(
+            f,
+            ") (write {}) (read-value {}) (type {}))",
+            self.write, self.read_value, self.ty
+        )
+    }
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct RuntimeInstance {
+    pub declaration: DeclarationId,
+    pub arguments: Vec<Term>,
+    pub function: Function,
+    pub cleanup_accesses: Vec<RuntimeCleanupAccess>,
+}
+impl fmt::Display for RuntimeInstance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(runtime-instance {} (arguments", self.declaration)?;
+        for argument in &self.arguments {
+            write!(f, " {argument}")?;
+        }
+        f.write_str(") (cleanup-accesses")?;
+        for access in &self.cleanup_accesses {
+            write!(f, " {access}")?;
+        }
+        write!(f, ") {})", self.function)
+    }
+}
+impl Package {
+    /// Return the exact residual body when present. Completed bodies have no
+    /// remaining clause substitutions; their invocation identity stays in the key.
+    pub fn runtime_body<'a>(
+        &'a self,
+        declaration: DeclarationId,
+        arguments: &'a [Term],
+    ) -> Option<(&'a Function, &'a [Term])> {
+        let mut matches = self.runtime_instances.iter().filter(|instance| {
+            instance.declaration == declaration && instance.arguments == arguments
+        });
+        if let Some(instance) = matches.next() {
+            if matches.next().is_some()
+                || instance.function.declaration != declaration
+                || !instance.function.type_parameters.is_empty()
+            {
+                return None;
+            }
+            return Some((&instance.function, &[]));
+        }
+        self.functions
+            .iter()
+            .chain(&self.quote_templates)
+            .find(|function| function.declaration == declaration)
+            .map(|function| (function, arguments))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1684,12 +1805,14 @@ pub struct MethodContract {
     pub by_reference_receiver: bool,
     pub declaration: DeclarationId,
     pub name: String,
-    pub signature: Term,
+    pub signature: crate::code_interfaces::MethodSignature,
     pub requirements: Vec<TypePredicate>,
     pub default: Option<DeclarationId>,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Implementation {
+    /// Ordered declaration domains; empty denotes all Type parameters.
+    pub parameter_types: Vec<Term>,
     /// Values indexed by the originating interface member, in declaration order.
     pub associated: Vec<(DeclarationId, Expr)>,
     pub interface_arguments: Vec<Term>,
@@ -1786,11 +1909,20 @@ impl fmt::Display for MethodContract {
         write!(f, "))")
     }
 }
+impl Implementation {
+    pub fn parameter_binders(&self) -> Result<Vec<crate::DeclarationParameter>, crate::TypeError> {
+        crate::declaration_parameters(&self.type_parameters, &self.parameter_types)
+    }
+}
 impl fmt::Display for Implementation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(implementation {} (type-parameters", self.declaration)?;
         for parameter in &self.type_parameters {
             write!(f, " {parameter}")?;
+        }
+        write!(f, ") (parameter-types")?;
+        for domain in &self.parameter_types {
+            write!(f, " {domain}")?;
         }
         write!(f, ") (requires")?;
         for requirement in &self.requirements {
@@ -1824,6 +1956,8 @@ impl fmt::Display for Implementation {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Enum {
+    /// Ordered declaration input domains; empty is the compact all-Type form.
+    pub parameter_types: Vec<Term>,
     pub capabilities: Vec<TraitRequirement>,
     pub requirements: Vec<TypePredicate>,
     pub type_parameters: Vec<DeclarationId>,
@@ -1848,6 +1982,23 @@ pub enum VariantShape {
     Named(Vec<String>),
 }
 impl Enum {
+    /// Check completed indices before constructing a concrete layout instance.
+    pub fn validate_completed_arguments(
+        &self,
+        arguments: &[Term],
+        fuel: &mut usize,
+    ) -> Result<(), String> {
+        crate::nominal_parameters::validate_completed(
+            &self.type_parameters,
+            &self.parameter_types,
+            arguments,
+            fuel,
+        )
+    }
+
+    pub fn parameter_binders(&self) -> Result<Vec<crate::DeclarationParameter>, crate::TypeError> {
+        crate::nominal_parameters::binders(&self.type_parameters, &self.parameter_types)
+    }
     pub fn validate_encoding(&self) -> Result<(), &'static str> {
         let groups = self
             .groups
@@ -1980,11 +2131,8 @@ impl Enum {
         arguments: &[Term],
         frames: &[Vec<crate::Sort>],
     ) -> Result<Vec<Variant>, crate::TypeError> {
-        Term::Tuple(Vec::new()).instantiate_types_in_scope(
-            &self.type_parameters,
-            arguments,
-            frames,
-        )?;
+        let parameters = self.parameter_binders()?;
+        Term::Tuple(Vec::new()).instantiate_parameters_in_scope(&parameters, arguments, frames)?;
         self.variants
             .iter()
             .map(|variant| {
@@ -1995,7 +2143,7 @@ impl Enum {
                         .fields
                         .iter()
                         .map(|ty| {
-                            ty.instantiate_types_in_scope(&self.type_parameters, arguments, frames)
+                            ty.instantiate_parameters_in_scope(&parameters, arguments, frames)
                         })
                         .collect::<Result<_, _>>()?,
                 })
@@ -2010,6 +2158,10 @@ impl fmt::Display for Enum {
         f.write_str(") (type-parameters")?;
         for parameter in &self.type_parameters {
             write!(f, " {parameter}")?;
+        }
+        f.write_str(") (parameter-types")?;
+        for domain in &self.parameter_types {
+            write!(f, " {domain}")?;
         }
         f.write_str(") (capabilities")?;
         for capability in &self.capabilities {
@@ -2060,6 +2212,8 @@ impl fmt::Display for Enum {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Struct {
+    /// Ordered declaration input domains; empty is the compact all-Type form.
+    pub parameter_types: Vec<Term>,
     pub capabilities: Vec<TraitRequirement>,
     pub requirements: Vec<TypePredicate>,
     pub type_parameters: Vec<DeclarationId>,
@@ -2068,6 +2222,23 @@ pub struct Struct {
     pub fields: Vec<(String, Term)>,
 }
 impl Struct {
+    /// Check completed indices before constructing a concrete layout instance.
+    pub fn validate_completed_arguments(
+        &self,
+        arguments: &[Term],
+        fuel: &mut usize,
+    ) -> Result<(), String> {
+        crate::nominal_parameters::validate_completed(
+            &self.type_parameters,
+            &self.parameter_types,
+            arguments,
+            fuel,
+        )
+    }
+
+    pub fn parameter_binders(&self) -> Result<Vec<crate::DeclarationParameter>, crate::TypeError> {
+        crate::nominal_parameters::binders(&self.type_parameters, &self.parameter_types)
+    }
     pub fn instantiate_fields(
         &self,
         arguments: &[Term],
@@ -2080,17 +2251,14 @@ impl Struct {
         arguments: &[Term],
         frames: &[Vec<crate::Sort>],
     ) -> Result<Vec<(String, Term)>, crate::TypeError> {
-        Term::Tuple(Vec::new()).instantiate_types_in_scope(
-            &self.type_parameters,
-            arguments,
-            frames,
-        )?;
+        let parameters = self.parameter_binders()?;
+        Term::Tuple(Vec::new()).instantiate_parameters_in_scope(&parameters, arguments, frames)?;
         self.fields
             .iter()
             .map(|(name, ty)| {
                 Ok((
                     name.clone(),
-                    ty.instantiate_types_in_scope(&self.type_parameters, arguments, frames)?,
+                    ty.instantiate_parameters_in_scope(&parameters, arguments, frames)?,
                 ))
             })
             .collect()
@@ -2103,6 +2271,10 @@ impl fmt::Display for Struct {
         f.write_str(") (type-parameters")?;
         for parameter in &self.type_parameters {
             write!(f, " {parameter}")?;
+        }
+        f.write_str(") (parameter-types")?;
+        for domain in &self.parameter_types {
+            write!(f, " {domain}")?;
         }
         f.write_str(") (capabilities")?;
         for capability in &self.capabilities {
@@ -2463,6 +2635,13 @@ impl fmt::Display for ExprKind {
                 }
                 f.write_str(")")
             }
+            Self::TypeList(elements) => {
+                f.write_str("(type-list (elements")?;
+                for element in elements {
+                    write!(f, " {element}")?;
+                }
+                f.write_str("))")
+            }
             Self::NormalFormType {
                 head,
                 arguments,
@@ -2477,6 +2656,19 @@ impl fmt::Display for ExprKind {
                     write!(f, " {plan}")?;
                 }
                 f.write_str(")")
+            }
+            Self::CheckTypeAlias {
+                declaration,
+                arguments,
+            } => {
+                write!(
+                    f,
+                    "(check-type-alias (declaration {declaration}) (arguments"
+                )?;
+                for argument in arguments {
+                    write!(f, " {argument}")?;
+                }
+                f.write_str("))")
             }
             Self::NominalType {
                 declaration,
@@ -2637,6 +2829,10 @@ impl fmt::Display for Function {
 impl fmt::Display for Package {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(nir-package")?;
+        for instance in &self.runtime_instances {
+            write!(f, "\n {instance}")?;
+        }
+
         if !self.quote_templates.is_empty() {
             write!(f, " (quote-identity-cursor {})", self.quote_identity_cursor)?;
         }
@@ -2669,6 +2865,9 @@ impl fmt::Display for Package {
         }
         for definition in &self.enums {
             write!(f, "\n {definition}")?;
+        }
+        for contract in &self.alias_contracts {
+            write!(f, "\n {contract}")?;
         }
         for definition in &self.newtypes {
             write!(f, "\n {definition}")?;
@@ -2711,6 +2910,20 @@ impl Expr {
         Term::Tuple(Vec::new()).instantiate_parameters(parameters, arguments)?;
         let mut value = self.clone();
         value.rewrite_types(&mut |ty| ty.instantiate_parameters(parameters, arguments))?;
+        Ok(value)
+    }
+
+    pub fn instantiate_parameters_in_scope(
+        &self,
+        parameters: &[crate::DeclarationParameter],
+        arguments: &[Term],
+        frames: &[Vec<crate::Sort>],
+    ) -> Result<Self, crate::TypeError> {
+        Term::Tuple(Vec::new()).instantiate_parameters_in_scope(parameters, arguments, frames)?;
+        let mut value = self.clone();
+        value.rewrite_types(&mut |ty| {
+            ty.instantiate_parameters_in_scope(parameters, arguments, frames)
+        })?;
         Ok(value)
     }
 
@@ -2914,12 +3127,16 @@ impl Expr {
                 }
                 (signature).rewrite_with(rewriter)?;
             }
-            ExprKind::NominalType {
+            ExprKind::CheckTypeAlias {
+                arguments: fields, ..
+            }
+            | ExprKind::NominalType {
                 arguments: fields, ..
             }
             | ExprKind::FunctionType {
                 parameters: fields, ..
             }
+            | ExprKind::TypeList(fields)
             | ExprKind::TupleType(fields)
             | ExprKind::Tuple(fields)
             | ExprKind::AnonymousRecord { fields }
@@ -3363,9 +3580,9 @@ impl Pattern {
                 pattern.rewrite_with(rewriter)?;
                 condition.rewrite_with(rewriter)?;
             }
-            Self::Remap { pattern, .. } | Self::Binding { inner: pattern, .. } => {
-                pattern.rewrite_with(rewriter)?
-            }
+            Self::Observe { inner: pattern, .. }
+            | Self::Remap { pattern, .. }
+            | Self::Binding { inner: pattern, .. } => pattern.rewrite_with(rewriter)?,
             Self::NormalForm {
                 arguments: fields, ..
             }
@@ -3450,6 +3667,27 @@ pub fn checkable_predicate(expression: &Expr) -> bool {
                 left: a, right: b, ..
             } => pending.extend([a.as_ref(), b.as_ref()]),
             ExprKind::Tuple(fields) => pending.extend(fields),
+            ExprKind::Match { value, arms } => {
+                pending.push(value);
+                for arm in arms {
+                    if !predicate_pattern(&arm.pattern, &mut pending, &mut remaining) {
+                        return false;
+                    }
+                    pending.extend(arm.guard.as_ref());
+                    pending.push(&arm.body);
+                }
+            }
+            ExprKind::LetPattern {
+                pattern,
+                value,
+                guard: None,
+                otherwise: None,
+            } => {
+                if !predicate_pattern(pattern, &mut pending, &mut remaining) {
+                    return false;
+                }
+                pending.push(value);
+            }
             ExprKind::If {
                 condition,
                 then_branch,
@@ -3462,6 +3700,53 @@ pub fn checkable_predicate(expression: &Expr) -> bool {
             | ExprKind::CallPreparation { statements, result } => {
                 pending.extend(statements);
                 pending.extend(result.as_deref());
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
+// Source elaboration proves let-pattern irrefutability; this traversal checks
+// every embedded observation using the same expression budget as match.
+fn predicate_pattern<'a>(
+    pattern: &'a Pattern,
+    pending: &mut Vec<&'a Expr>,
+    remaining: &mut usize,
+) -> bool {
+    let mut patterns = vec![pattern];
+    while let Some(pattern) = patterns.pop() {
+        if *remaining == 0 {
+            return false;
+        }
+        *remaining -= 1;
+        match pattern {
+            Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => {}
+            Pattern::Then { first, value, next } => {
+                patterns.extend([first.as_ref(), next.as_ref()]);
+                pending.push(value);
+            }
+            Pattern::Remap { pattern, bindings } => {
+                if bindings.len() > *remaining {
+                    return false;
+                }
+                *remaining -= bindings.len();
+                patterns.push(pattern);
+            }
+            Pattern::Guard { pattern, condition } => {
+                patterns.push(pattern);
+                pending.push(condition);
+            }
+            Pattern::Observe { inner, .. } | Pattern::Binding { inner, .. } => patterns.push(inner),
+            Pattern::Tuple(fields)
+            | Pattern::Record { fields, .. }
+            | Pattern::AnonymousRecord { fields, .. }
+            | Pattern::Or(fields)
+            | Pattern::Variant { fields, .. } => {
+                if fields.len() > *remaining {
+                    return false;
+                }
+                patterns.extend(fields);
             }
             _ => return false,
         }
@@ -3611,6 +3896,8 @@ pub fn intrinsic_pointer_value(ty: &Term) -> bool {
         Term::Pointer(_)
             | Term::Primitive(
                 crate::Primitive::Bool
+                    | crate::Primitive::Integer
+                    | crate::Primitive::Float
                     | crate::Primitive::Symbol
                     | crate::Primitive::Char
                     | crate::Primitive::BitVec(_)

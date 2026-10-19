@@ -176,6 +176,67 @@ fn quote_functions_obey_single_hole_and_cannot_escape_as_runtime_functions() {
 }
 
 #[test]
+fn quote_expansion_cycles_preserve_finite_nested_calls() {
+    let source = "quote fn identity(value:bool)->bool {value}
+        fn run()->bool {identity(identity(identity(true)))}";
+    assert_eq!(
+        execute(source, vec![]).0,
+        comptime_interpretor::Value::Bool(true)
+    );
+    let failure=compile("quote fn first(value:bool)->bool {second(value)} quote fn second(value:bool)->bool {first(value)} fn run()->bool {first(true)}",Emit::Nir).err().unwrap();
+    assert!(failure.contains("recursive concrete instance"), "{failure}");
+    // A failed cyclic package must not leave expansion state in a later one.
+    assert_eq!(
+        execute(source, vec![]).0,
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn quote_expansion_depth_limit_preserves_finite_chains() {
+    let mut source = String::from("quote fn q0(value:bool)->bool {value}");
+    for index in 1..32 {
+        source.push_str(&format!(
+            "quote fn q{index}(value:bool)->bool {{q{}(value)}}",
+            index - 1
+        ));
+    }
+    let valid = format!("{source}fn run()->bool {{q31(true)}}");
+    let nested = (0..32).fold(String::from("true"), |value, _| format!("q0({value})"));
+    for valid in [valid, format!("{source}fn run()->bool {{{nested}}}")] {
+        let Artifact::Nir(package) = compile(&valid, Emit::Nir).unwrap() else {
+            panic!("wrong stage");
+        };
+        let entry = package
+            .functions
+            .iter()
+            .find(|function| function.name == "run")
+            .unwrap();
+        nir::visit::expression(&entry.body, &mut 100_000, |expr, _| {
+            if matches!(expr.kind, nir::program::ExprKind::Call { .. }) {
+                return Err("unexpanded quote call".into());
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            execute(&valid, vec![]).0,
+            comptime_interpretor::Value::Bool(true)
+        );
+    }
+    // A shorter chain also checks the ordinary entry path.
+    assert_eq!(
+        execute(&format!("{source}fn run()->bool {{q7(true)}}"), vec![]).0,
+        comptime_interpretor::Value::Bool(true)
+    );
+    let invalid = format!(
+        "{source}quote fn q32(value:bool)->bool {{q31(value)}}fn run()->bool {{q32(true)}}"
+    );
+    let failure = compile(&invalid, Emit::Nir).err().unwrap();
+    assert!(failure.contains("expansion depth"), "{failure}");
+}
+
+#[test]
 fn quote_templates_keep_phase_purity_and_definition_checks() {
     for (source, anchor) in [
         (
@@ -1501,6 +1562,38 @@ fn effect_request_diverging_argument_returns_before_dispatch_for_ordinary_and_qu
             } else {
                 vec!["run", "argument"]
             }
+        );
+    }
+}
+
+#[test]
+fn quote_explicit_type_clause_domains_use_ordinary_instantiation() {
+    let source = "typealias Kind=.Type'builtin;
+        trait Flag {fn flag(self)->bool;} impl Flag for bool {fn flag(self)->bool {self}}
+        quote fn keep(value:T)->T where T:Kind {value}
+        quote fn pick(first:T,second:U)->U where T:Kind,.U:Kind=T {second}
+        quote fn flag(value:T)->bool where T:Kind, requires T :- Flag {value.as(Flag).flag()}
+        fn run()->bool {keep(true) and keep<.char'builtin>('a') == 'a'
+            and not pick(true,false) and pick<bool,.U=.char'builtin>(true,'b') == 'b'
+            and flag(true)}";
+    let (value, calls) = execute(source, vec![]);
+    assert_eq!(value, comptime_interpretor::Value::Bool(true));
+    assert_eq!(calls, ["run", "flag"]);
+}
+
+#[test]
+fn quote_explicit_type_clause_domains_reject_value_domains_and_failed_constraints() {
+    for source in [
+        "quote fn invalid()->bool where value:bool {value}",
+        "quote fn keep(value:T)->T where T:.Type'builtin {value} fn run()->bool {keep<bool>('x')}",
+        "trait Flag {} quote fn keep(value:T)->T where T:.Type'builtin, requires T :- Flag {value} fn run()->bool {keep(true)}",
+    ] {
+        let failure = compile(source, Emit::Nir)
+            .err()
+            .unwrap_or_else(|| panic!("accepted {source}"));
+        assert!(
+            failure.contains("elaboration failed"),
+            "{source}: {failure}"
         );
     }
 }

@@ -47,7 +47,8 @@ define_symbols! {
     sym_eq      => "Eq",
     sym_ord     => "Ord",
     sym_hash    => "Hash",
-    sym_iterator => "Iterator",
+    sym_iter    => "Iter",
+    sym_into_iterator => "IntoIterator",
     sym_into    => "Into",
     sym_from    => "From",
 }

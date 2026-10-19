@@ -23,6 +23,7 @@ fn node(n: u32, args: Vec<Term>) -> Term {
 }
 fn head(n: u32, subject: Term) -> ImplementationHead {
     ImplementationHead {
+        parameter_types: vec![],
         type_parameters: vec![id(1), id(2)],
         requirements: vec![],
         declaration: id(n),
@@ -33,6 +34,78 @@ fn head(n: u32, subject: Term) -> ImplementationHead {
 }
 fn add(index: &mut Index, n: u32, subject: Term) {
     index.insert(head(n, subject), Budget::default()).unwrap();
+}
+
+#[test]
+fn record_value_indices_retain_type_candidates_and_replay_field_proofs() {
+    use elaboration::ptc::{Context, Formula};
+    let record = |element| {
+        Term::RecordValue(vec![
+            ("element".into(), element),
+            ("flag".into(), Term::Bool(true)),
+        ])
+    };
+    let ab = Term::Record(vec![("a".into(), ty(P::Bool)), ("b".into(), ty(P::Char))]);
+    let ba = Term::Record(vec![("b".into(), ty(P::Char)), ("a".into(), ty(P::Bool))]);
+    let mut h = head(200, ty(P::Bool));
+    h.type_parameters.clear();
+    h.interface_arguments = vec![record(ab.clone())];
+    let query = vec![record(ba.clone())];
+    let mut index = Index::default();
+    index.insert(h.clone(), Budget::default()).unwrap();
+    assert!(
+        index
+            .candidates(Some(id(100)), &query, &ty(P::Bool), Budget::default())
+            .unwrap()
+            .declarations()
+            .contains(&id(200))
+    );
+    let mut context = Context::default();
+    context.assume(Formula::equal(ab, ba));
+    let matched = h
+        .match_types(&ty(P::Bool), &query, &context, Budget::default())
+        .unwrap();
+    h.verify_head_match(&matched, &ty(P::Bool), &query, &context, Budget::default())
+        .unwrap();
+    assert!(
+        h.verify_head_match(
+            &matched,
+            &ty(P::Bool),
+            &query,
+            &Context::default(),
+            Budget::default()
+        )
+        .is_err()
+    );
+    assert!(
+        h.verify_head_match(
+            &matched,
+            &ty(P::Bool),
+            &[record(ty(P::Char))],
+            &context,
+            Budget::default()
+        )
+        .is_err()
+    );
+    let mut altered = query.clone();
+    let Term::RecordValue(fields) = &mut altered[0] else {
+        unreachable!()
+    };
+    fields[1].1 = Term::Bool(false);
+    assert!(
+        h.match_types(&ty(P::Bool), &altered, &context, Budget::default())
+            .is_err()
+    );
+    assert!(
+        h.verify_head_match(
+            &matched,
+            &ty(P::Bool),
+            &altered,
+            &context,
+            Budget::default()
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -509,94 +582,102 @@ fn context() -> elaboration::ptc::Context {
 }
 
 #[test]
-fn fixed_symbol_indices_select_infer_and_replay_without_value_equations() {
+fn fixed_scalar_indices_select_infer_and_replay_without_value_equations() {
     use elaboration::implementation::{PairAssessment, TypeAssessment};
-    let px = Term::Symbol("px".into());
-    let em = Term::Symbol("em".into());
-    let mut h = generic(200, ty(P::Integer), vec![id(1)]);
-    h.interface_arguments = vec![px.clone(), var(1)];
-    let context = context();
-    let inputs = [px.clone(), ty(P::U32)];
-    let assessment = h.assess_types(&ty(P::Integer), &inputs, &context, Budget::default());
-    let TypeAssessment::Applicable(evidence) = assessment else {
-        panic!("{assessment}")
-    };
-    assert_eq!(evidence.type_arguments, vec![ty(P::U32)]);
-    assert_eq!(evidence.head_proofs.len(), 2);
-    h.verify_type_evidence(
-        &evidence,
-        &ty(P::Integer),
-        &inputs,
-        &context,
-        Budget::default(),
-    )
-    .unwrap();
-    let wrong = [em.clone(), ty(P::U32)];
-    assert!(
+    for (px, em) in [
+        (Term::Symbol("px".into()), Term::Symbol("em".into())),
+        (Term::Bool(true), Term::Bool(false)),
+        (Term::Char('a'), Term::Char('b')),
+        (Term::String("one".into()), Term::String("two".into())),
+    ] {
+        let mut h = generic(200, ty(P::Integer), vec![id(1)]);
+        h.interface_arguments = vec![px.clone(), var(1)];
+        let context = context();
+        let inputs = [px.clone(), ty(P::U32)];
+        let assessment = h.assess_types(&ty(P::Integer), &inputs, &context, Budget::default());
+        let TypeAssessment::Applicable(evidence) = assessment else {
+            panic!("{assessment}")
+        };
+        assert_eq!(evidence.type_arguments, vec![ty(P::U32)]);
+        assert_eq!(evidence.head_proofs.len(), 2);
         h.verify_type_evidence(
             &evidence,
             &ty(P::Integer),
-            &wrong,
-            &context,
-            Budget::default()
-        )
-        .is_err()
-    );
-    let mismatch = h.assess_types(&ty(P::Integer), &wrong, &context, Budget::default());
-    assert!(
-        matches!(mismatch, TypeAssessment::SymbolMismatch { position: 0, .. }),
-        "{mismatch}"
-    );
-    assert_eq!(
-        mismatch.applicability(),
-        elaboration::implementation::Applicability::Excluded
-    );
-    assert!(mismatch.to_string().contains("(symbol-index-mismatch"));
-    let mut other = h.clone();
-    other.declaration = id(201);
-    other.interface_arguments[0] = em;
-    let PairAssessment::Disjoint(proof) =
-        h.assess_type_overlap(&other, &context, Budget::default())
-    else {
-        panic!("distinct suffixes must be disjoint")
-    };
-    assert!(h.verify_disjointness(&other, &proof, &context, Budget::default()));
-    other.interface_arguments[0] = px;
-    assert!(!h.verify_disjointness(&other, &proof, &context, Budget::default()));
-    assert!(
-        !h.assess_type_overlap(&other, &context, Budget::default())
-            .is_proved()
-    );
-    assert!(matches!(
-        h.assess_types(
-            &ty(P::Integer),
             &inputs,
             &context,
-            Budget {
-                steps: 1,
-                ..Budget::default()
-            }
-        ),
-        TypeAssessment::Pending(_)
-    ));
-    assert!(matches!(
-        h.assess_types(&ty(P::Integer), &inputs, &context, Budget::default()),
-        TypeAssessment::Applicable(_)
-    ));
-    let wide = Term::Symbol("x".repeat(10000).into());
-    h.interface_arguments[0] = wide.clone();
-    assert!(matches!(
-        h.assess_types(
-            &ty(P::Integer),
-            &[wide, ty(P::U32)],
-            &context,
-            Budget {
-                steps: 1000,
-                ..Budget::default()
-            }
-        ),
-        TypeAssessment::Pending(_)
-    ));
+            Budget::default(),
+        )
+        .unwrap();
+        let wrong = [em.clone(), ty(P::U32)];
+        assert!(
+            h.verify_type_evidence(
+                &evidence,
+                &ty(P::Integer),
+                &wrong,
+                &context,
+                Budget::default()
+            )
+            .is_err()
+        );
+        let mismatch = h.assess_types(&ty(P::Integer), &wrong, &context, Budget::default());
+        assert!(
+            matches!(
+                mismatch,
+                TypeAssessment::ValueIndexMismatch { position: 0, .. }
+            ),
+            "{mismatch}"
+        );
+        assert_eq!(
+            mismatch.applicability(),
+            elaboration::implementation::Applicability::Excluded
+        );
+        assert!(mismatch.to_string().contains("(value-index-mismatch"));
+        let mut other = h.clone();
+        other.declaration = id(201);
+        other.interface_arguments[0] = em;
+        let PairAssessment::Disjoint(proof) =
+            h.assess_type_overlap(&other, &context, Budget::default())
+        else {
+            panic!("distinct suffixes must be disjoint")
+        };
+        assert!(h.verify_disjointness(&other, &proof, &context, Budget::default()));
+        other.interface_arguments[0] = px;
+        assert!(!h.verify_disjointness(&other, &proof, &context, Budget::default()));
+        assert!(
+            !h.assess_type_overlap(&other, &context, Budget::default())
+                .is_proved()
+        );
+        assert!(matches!(
+            h.assess_types(
+                &ty(P::Integer),
+                &inputs,
+                &context,
+                Budget {
+                    steps: 1,
+                    ..Budget::default()
+                }
+            ),
+            TypeAssessment::Pending(_)
+        ));
+        assert!(matches!(
+            h.assess_types(&ty(P::Integer), &inputs, &context, Budget::default()),
+            TypeAssessment::Applicable(_)
+        ));
+        let wide = Term::Symbol("x".repeat(10000).into());
+        h.interface_arguments[0] = wide.clone();
+        assert!(matches!(
+            h.assess_types(
+                &ty(P::Integer),
+                &[wide, ty(P::U32)],
+                &context,
+                Budget {
+                    steps: 1000,
+                    ..Budget::default()
+                }
+            ),
+            TypeAssessment::Pending(_)
+        ));
+    }
 }
 
 #[test]
@@ -1034,6 +1115,7 @@ fn completed_type_resolution_is_invalidated_by_world_changes() {
 
 fn foreign_head(subject: Term, arguments: Vec<Term>) -> ImplementationHead {
     ImplementationHead {
+        parameter_types: vec![],
         declaration: Id {
             package: 1,
             local: 200,
@@ -1652,5 +1734,439 @@ fn type_list_inputs_keep_potentially_equal_opaque_candidates() {
             .candidates(Some(id(100)), &[], &query, Budget::default())
             .unwrap();
         assert!(candidates.declarations().contains(&id(200)));
+    }
+}
+
+#[test]
+fn scalar_index_keys_charge_payloads_and_keep_exact_floats_closed() {
+    let mut budget = comptime_runtime::Budget::default();
+    let decimal = Term::Float(
+        comptime_runtime::decimal::DecimalValue::parse_literal("1.25", &mut budget).unwrap(),
+    );
+    let key = Key::from_type(&decimal, Budget::default()).unwrap();
+    assert_eq!(key, Key::Leaf(decimal));
+    for value in [
+        Term::String("s".repeat(300).into()),
+        Term::Symbol("s".repeat(300).into()),
+        Term::Integer(
+            comptime_runtime::Integer::parse_literal(&"9".repeat(1000), &mut budget).unwrap(),
+        ),
+        Term::Float(
+            comptime_runtime::decimal::DecimalValue::parse_literal(
+                &format!("1.{}", "3".repeat(300)),
+                &mut budget,
+            )
+            .unwrap(),
+        ),
+    ] {
+        for term in [
+            value.clone(),
+            Term::NormalForm {
+                head: id(44),
+                sort: Sort::Type,
+                arguments: vec![value],
+            },
+        ] {
+            assert_eq!(
+                Key::from_type(
+                    &term,
+                    Budget {
+                        steps: 20,
+                        ..Budget::default()
+                    }
+                ),
+                Err(Error::BudgetExhausted)
+            );
+            assert!(Key::from_type(&term, Budget::default()).is_ok());
+        }
+    }
+}
+
+#[test]
+fn candidate_comparisons_charge_repeated_scalar_and_label_payloads() {
+    for record_subject in [false, true] {
+        let mut index = Index::default();
+        let payload = |i| format!("{}-{i}", "x".repeat(256));
+        for i in 0..8 {
+            let mut implementation = head(
+                200 + i,
+                if record_subject {
+                    Term::Record(vec![(payload(i), ty(P::Bool))])
+                } else {
+                    ty(P::Bool)
+                },
+            );
+            implementation.type_parameters.clear();
+            if !record_subject {
+                implementation.interface_arguments = vec![Term::Symbol(payload(i).into())];
+            }
+            index.insert(implementation, Budget::default()).unwrap();
+        }
+        let subject = if record_subject {
+            Term::Record(vec![(payload(5), ty(P::Bool))])
+        } else {
+            ty(P::Bool)
+        };
+        let arguments = if record_subject {
+            vec![]
+        } else {
+            vec![Term::Symbol(payload(5).into())]
+        };
+        let revision = index.revision();
+        assert!(matches!(
+            index.candidates(
+                Some(id(100)),
+                &arguments,
+                &subject,
+                Budget {
+                    steps: 1000,
+                    ..Budget::default()
+                }
+            ),
+            Err(Error::BudgetExhausted)
+        ));
+        assert_eq!(index.revision(), revision);
+        let candidates = index
+            .candidates(Some(id(100)), &arguments, &subject, Budget::default())
+            .unwrap();
+        assert_eq!(candidates.declarations(), &[id(205)]);
+    }
+}
+
+#[test]
+fn nominal_impl_value_parameters_infer_domains_and_replay() {
+    use elaboration::implementation::TypeAssessment;
+    use elaboration::ptc::Context;
+    let mut context = Context::default();
+    context.admit_nominal_constructor(id(800));
+    let mut h = head(
+        801,
+        node(
+            800,
+            vec![Term::Rigid {
+                declaration: id(1),
+                sort: Sort::ComptimeValue,
+            }],
+        ),
+    );
+    h.type_parameters = vec![id(1)];
+    h.parameter_types = vec![ty(P::Bool)];
+    for flag in [true, false] {
+        let subject = node(800, vec![Term::Bool(flag)]);
+        let result = h.assess_types(&subject, &[], &context, Budget::default());
+        let TypeAssessment::Applicable(evidence) = result else {
+            panic!("{result:?}")
+        };
+        assert_eq!(evidence.type_arguments, vec![Term::Bool(flag)]);
+        h.verify_type_evidence(&evidence, &subject, &[], &context, Budget::default())
+            .unwrap();
+        let mut changed = h.clone();
+        changed.parameter_types = vec![ty(P::Char)];
+        assert!(
+            changed
+                .verify_type_evidence(&evidence, &subject, &[], &context, Budget::default())
+                .is_err()
+        );
+        assert!(!matches!(
+            changed.assess_types(&subject, &[], &context, Budget::default()),
+            TypeAssessment::Applicable(_)
+        ));
+        let mut forged = evidence.clone();
+        forged.type_arguments = vec![Term::Bool(!flag)];
+        assert!(
+            h.verify_type_evidence(&forged, &subject, &[], &context, Budget::default())
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn nominal_impl_value_inference_preserves_dependent_domains_and_repeated_indices() {
+    use elaboration::implementation::TypeAssessment;
+    use elaboration::ptc::Context;
+    let mut context = Context::default();
+    context.admit_nominal_constructor(id(800));
+    let index = Term::Rigid {
+        declaration: id(2),
+        sort: Sort::ComptimeValue,
+    };
+    let mut h = head(801, node(800, vec![var(1), index.clone(), index]));
+    h.parameter_types = vec![ty(P::Type), var(1)];
+    let subject = node(800, vec![ty(P::Bool), Term::Bool(true), Term::Bool(true)]);
+    let result = h.assess_types(&subject, &[], &context, Budget::default());
+    let TypeAssessment::Applicable(evidence) = result else {
+        panic!("{result:?}")
+    };
+    assert_eq!(evidence.type_arguments, vec![ty(P::Bool), Term::Bool(true)]);
+    h.verify_type_evidence(&evidence, &subject, &[], &context, Budget::default())
+        .unwrap();
+    for invalid in [
+        node(800, vec![ty(P::Char), Term::Bool(true), Term::Bool(true)]),
+        node(800, vec![ty(P::Bool), Term::Bool(true), Term::Bool(false)]),
+    ] {
+        assert!(!matches!(
+            h.assess_types(&invalid, &[], &context, Budget::default()),
+            TypeAssessment::Applicable(_)
+        ));
+    }
+    assert!(!matches!(
+        h.assess_types(&subject, &[], &Context::default(), Budget::default()),
+        TypeAssessment::Applicable(_)
+    ));
+    assert!(!matches!(
+        h.assess_types(
+            &subject,
+            &[],
+            &context,
+            Budget {
+                steps: 0,
+                ..Budget::default()
+            }
+        ),
+        TypeAssessment::Applicable(_)
+    ));
+}
+
+#[test]
+fn direct_trait_value_parameters_infer_without_value_propositions() {
+    use elaboration::implementation::TypeAssessment;
+    use elaboration::ptc::Context;
+    let context = Context::default();
+    let mut h = head(801, ty(P::Bool));
+    h.type_parameters = vec![id(1)];
+    h.parameter_types = vec![ty(P::Bool)];
+    h.interface_arguments = vec![Term::Rigid {
+        declaration: id(1),
+        sort: Sort::ComptimeValue,
+    }];
+    for flag in [true, false] {
+        let arguments = vec![Term::Bool(flag)];
+        let result = h.assess_types(&ty(P::Bool), &arguments, &context, Budget::default());
+        let TypeAssessment::Applicable(evidence) = result else {
+            panic!("{result:?}")
+        };
+        assert_eq!(evidence.type_arguments, arguments);
+        assert_eq!(evidence.head_proofs.len(), 1);
+        h.verify_type_evidence(
+            &evidence,
+            &ty(P::Bool),
+            &arguments,
+            &context,
+            Budget::default(),
+        )
+        .unwrap();
+        assert!(
+            h.verify_type_evidence(
+                &evidence,
+                &ty(P::Bool),
+                &[Term::Bool(!flag)],
+                &context,
+                Budget::default()
+            )
+            .is_err()
+        );
+    }
+    assert!(!matches!(
+        h.assess_types(
+            &ty(P::Bool),
+            &[Term::Char('x')],
+            &context,
+            Budget::default()
+        ),
+        TypeAssessment::Applicable(_)
+    ));
+}
+
+#[test]
+fn interface_value_inference_checks_repeated_and_record_inputs() {
+    use elaboration::implementation::TypeAssessment;
+    use elaboration::ptc::Context;
+    let context = Context::default();
+    let mut h = head(801, ty(P::Bool));
+    let value = Term::Rigid {
+        declaration: id(2),
+        sort: Sort::ComptimeValue,
+    };
+    h.parameter_types = vec![ty(P::Type), var(1)];
+    let record = |a, b| Term::RecordValue(vec![("element".into(), a), ("flag".into(), b)]);
+    h.interface_arguments = vec![record(var(1), value.clone()), value];
+    let query = vec![record(ty(P::Bool), Term::Bool(true)), Term::Bool(true)];
+    let result = h.assess_types(&ty(P::Bool), &query, &context, Budget::default());
+    let TypeAssessment::Applicable(evidence) = result else {
+        panic!("{result:?}")
+    };
+    assert_eq!(evidence.type_arguments, vec![ty(P::Bool), Term::Bool(true)]);
+    h.verify_type_evidence(&evidence, &ty(P::Bool), &query, &context, Budget::default())
+        .unwrap();
+    let wrong = vec![query[0].clone(), Term::Bool(false)];
+    assert!(!matches!(
+        h.assess_types(&ty(P::Bool), &wrong, &context, Budget::default()),
+        TypeAssessment::Applicable(_)
+    ));
+    assert!(
+        h.verify_type_evidence(&evidence, &ty(P::Bool), &wrong, &context, Budget::default())
+            .is_err()
+    );
+}
+
+#[test]
+fn whole_record_value_binders_replay_their_type_leaves() {
+    use elaboration::implementation::TypeAssessment;
+    use elaboration::ptc::Context;
+    let context = Context::default();
+    let mut h = head(801, ty(P::Bool));
+    h.type_parameters = vec![id(1)];
+    h.parameter_types = vec![Term::Record(vec![
+        ("element".into(), ty(P::Type)),
+        ("flag".into(), ty(P::Bool)),
+    ])];
+    let value = Term::Rigid {
+        declaration: id(1),
+        sort: Sort::ComptimeValue,
+    };
+    h.interface_arguments = vec![value.clone(), value];
+    let actual = Term::RecordValue(vec![
+        ("element".into(), ty(P::Char)),
+        ("flag".into(), Term::Bool(true)),
+    ]);
+    let query = vec![actual.clone(), actual];
+    let result = h.assess_types(&ty(P::Bool), &query, &context, Budget::default());
+    let TypeAssessment::Applicable(evidence) = result else {
+        panic!("{result:?}")
+    };
+    assert_eq!(evidence.head_proofs.len(), 3);
+    h.verify_type_evidence(&evidence, &ty(P::Bool), &query, &context, Budget::default())
+        .unwrap();
+}
+
+#[test]
+fn unresolved_record_value_leaves_do_not_refute_candidates() {
+    use elaboration::implementation::TypeAssessment;
+    use elaboration::ptc::Context;
+    let record = |value| Term::RecordValue(vec![("flag".into(), value)]);
+    let mut h = head(801, ty(P::Bool));
+    h.type_parameters.clear();
+    h.interface_arguments = vec![record(Term::NormalForm {
+        head: id(900),
+        sort: Sort::ComptimeValue,
+        arguments: vec![],
+    })];
+    assert!(matches!(
+        h.assess_types(
+            &ty(P::Bool),
+            &[record(Term::Bool(true))],
+            &Context::default(),
+            Budget::default()
+        ),
+        TypeAssessment::Pending(_)
+    ));
+}
+
+#[test]
+fn partially_symbolic_record_indices_prove_and_replay_disjointness() {
+    use elaboration::implementation::PairAssessment;
+    use elaboration::ptc::Context;
+    let context = Context::default();
+    let record = |tag, leaf| {
+        Term::RecordValue(vec![(
+            "nested".into(),
+            Term::RecordValue(vec![
+                ("tag".into(), Term::Bool(tag)),
+                ("value".into(), leaf),
+            ]),
+        )])
+    };
+    let mut left = head(801, ty(P::Bool));
+    left.type_parameters = vec![id(1)];
+    left.parameter_types = vec![ty(P::Bool)];
+    let value = Term::Rigid {
+        declaration: id(1),
+        sort: Sort::ComptimeValue,
+    };
+    left.interface_arguments = vec![record(true, value.clone())];
+    let mut right = left.clone();
+    right.declaration = id(802);
+    right.interface_arguments = vec![record(false, value.clone())];
+    let PairAssessment::Disjoint(proof) =
+        left.assess_type_overlap(&right, &context, Budget::default())
+    else {
+        panic!("known tag must separate open records")
+    };
+    assert!(left.verify_disjointness(&right, &proof, &context, Budget::default()));
+    right.interface_arguments = vec![record(true, value)];
+    assert!(!left.verify_disjointness(&right, &proof, &context, Budget::default()));
+    assert!(
+        !left
+            .assess_type_overlap(&right, &context, Budget::default())
+            .is_proved()
+    );
+    right.interface_arguments = vec![Term::Rigid {
+        declaration: id(1),
+        sort: Sort::ComptimeValue,
+    }];
+    assert!(
+        !left
+            .assess_type_overlap(&right, &context, Budget::default())
+            .is_proved()
+    );
+    assert!(
+        !left
+            .assess_type_overlap(
+                &right,
+                &context,
+                Budget {
+                    steps: 0,
+                    ..Budget::default()
+                }
+            )
+            .is_proved()
+    );
+}
+
+#[test]
+fn disjoint_open_record_impls_select_and_infer_their_value_arguments() {
+    use elaboration::implementation::TypeAssessment;
+    use elaboration::ptc::Context;
+    let context = Context::default();
+    let record = |tag, value| {
+        Term::RecordValue(vec![
+            ("tag".into(), Term::Bool(tag)),
+            ("value".into(), value),
+        ])
+    };
+    let mut index = Index::default();
+    for (declaration, tag) in [(801, true), (802, false)] {
+        let mut h = head(declaration, ty(P::Bool));
+        h.type_parameters = vec![id(1)];
+        h.parameter_types = vec![ty(P::Bool)];
+        h.interface_arguments = vec![record(
+            tag,
+            Term::Rigid {
+                declaration: id(1),
+                sort: Sort::ComptimeValue,
+            },
+        )];
+        index.insert(h, Budget::default()).unwrap();
+    }
+    let coherence = index.check_type_coherence(&context, Budget::default());
+    assert!(index.verify_type_coherence(&coherence, &context, Budget::default()));
+    for (declaration, tag) in [(801, true), (802, false)] {
+        for value in [true, false] {
+            let resolution = index
+                .resolve_types(
+                    id(100),
+                    &[record(tag, Term::Bool(value))],
+                    &ty(P::Bool),
+                    &context,
+                    Budget::default(),
+                )
+                .unwrap();
+            assert_eq!(resolution.selection, Selection::Selected(id(declaration)));
+            let TypeAssessment::Applicable(evidence) = &resolution.assessments[&id(declaration)]
+            else {
+                panic!("missing selected evidence")
+            };
+            assert_eq!(evidence.type_arguments, vec![Term::Bool(value)]);
+        }
     }
 }

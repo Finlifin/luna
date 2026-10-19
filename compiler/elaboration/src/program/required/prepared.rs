@@ -1,6 +1,7 @@
 //! Checked source computations, separated from their invocation. This is an
 //! owned preparation result, not a Type or an inference-variable snapshot.
 use super::*;
+use comptime_interpretor::InvocationValue;
 
 pub(in crate::program) struct PreparedRequired {
     pub package: n::Package,
@@ -13,8 +14,10 @@ pub(in crate::program) struct PreparedRequired {
     pub input_frames: Vec<Vec<Sort>>,
     pub invocation_assumptions: Vec<n::TraitRequirement>,
     pub abstract_parameters: Vec<DeclarationId>,
+    pub abstract_value_parameters: Vec<(DeclarationId, Term)>,
     pub context: crate::ptc::Context,
     pub in_signature: bool,
+    pub copy_authority: Option<(DeclarationId, DeclarationId, std::sync::Arc<n::Package>)>,
 }
 
 impl PreparedRequired {
@@ -30,8 +33,10 @@ impl PreparedRequired {
             input_frames: self.input_frames.clone(),
             invocation_assumptions: self.invocation_assumptions.clone(),
             abstract_parameters: self.abstract_parameters.clone(),
+            abstract_value_parameters: self.abstract_value_parameters.clone(),
             context: self.context.clone(),
             in_signature: self.in_signature,
+            copy_authority: self.copy_authority.clone(),
         })
     }
 
@@ -81,6 +86,29 @@ impl PreparedRequired {
         span: Span,
     ) -> Result<(Value, Term), Error> {
         self.bind_inputs(values, span)?;
+        self.invoke_with_live_inputs(Vec::new(), steps, span)
+    }
+
+    /// Supply invocation-local values without exporting or rebuilding their
+    /// graphs. Frozen captures remain normal inputs; only pending captures may
+    /// be supplied. The preparation itself never retains a live graph.
+    pub(in crate::program) fn invoke_with_live_inputs(
+        self,
+        values: Vec<(n::LocalId, Value)>,
+        steps: &mut u64,
+        span: Span,
+    ) -> Result<(Value, Term), Error> {
+        let mut live = BTreeMap::new();
+        for (binding, value) in values {
+            match self.inputs.iter().find(|(id, _, _)| *id == binding) {
+                Some((_, _, None)) => {}
+                Some(_) => return Err(error(span, "deferred comptime input is already supplied")),
+                None => return Err(error(span, "unknown deferred comptime input")),
+            }
+            if live.insert(binding, value).is_some() {
+                return Err(error(span, "duplicate deferred comptime input"));
+            }
+        }
         let PreparedRequired {
             package,
             implementation_index,
@@ -92,13 +120,19 @@ impl PreparedRequired {
             input_frames,
             invocation_assumptions,
             abstract_parameters,
+            abstract_value_parameters,
             context,
             in_signature,
+            copy_authority,
         } = self;
         // Pending source captures are not values. Reject before constructing an
         // interpreter, so an incomplete invocation cannot perform effects.
         let inputs = inputs.into_iter().map(|(binding, ty, value)| {
-            value.map(|value| (binding, ty, value)).ok_or_else(|| error(span,
+            let value = match value {
+                Some(term) => Some(InvocationValue::Normal(term)),
+                None => live.remove(&binding).map(InvocationValue::Live),
+            };
+            value.map(|value| (ty, value)).ok_or_else(|| error(span,
                 "type computation depends on an unavailable function input; invocation-time type elaboration is not yet implemented"))
         }).collect::<Result<Vec<_>, _>>()?;
         let invocation_type_context = &context;
@@ -140,38 +174,80 @@ impl PreparedRequired {
                 _ => ContractOutcome::Unknown,
             }
         };
+        let copy_failure = std::cell::RefCell::new(None::<String>);
+        let pointer_copy = |ty: &Term, remaining: &mut u64| {
+            let Some((copy, drop, resources)) = &copy_authority else {
+                *copy_failure.borrow_mut() = Some(
+                    "aggregate pointer transfer requires bound Copy and Drop protocols".into(),
+                );
+                return false;
+            };
+            let mut fuel = usize::try_from(*remaining).unwrap_or(usize::MAX);
+            let before = fuel;
+            let world = crate::capabilities::World {
+                index: &implementation_index,
+                implementations: &resources.implementations,
+                traits: &resources.traits,
+                assumptions: &invocation_assumptions,
+                context: invocation_type_context,
+            };
+            let evidence = crate::verification::copy::acquire(
+                resources,
+                &world,
+                *copy,
+                *drop,
+                ty,
+                crate::ptc::Budget {
+                    steps: fuel,
+                    ..Default::default()
+                },
+                &mut fuel,
+            );
+            *remaining = remaining.saturating_sub((before - fuel) as u64);
+            let allowed = evidence.is_ok();
+            *copy_failure.borrow_mut() = evidence.err();
+            allowed
+        };
+        let with_copy_failure = |message: String| match copy_failure.borrow().as_ref() {
+            Some(reason) => format!("{message}; pointer Copy evidence: {reason}"),
+            None => message,
+        };
         if result_type == p(P::Type) {
             // Required Type computations use the same committed scheduler as
             // saved residual calls. Source capture has already excluded any
             // unavailable runtime input; no provisional Type is manufactured.
-            use crate::type_computations::{Input, Session, State};
+            use crate::type_computations::{PreparedInput, Session, State};
             let mut context = crate::InferenceContext::default();
-            let mut session = Session::new_in_scope(
+            let mut budget = Budget {
+                steps: *steps,
+                depth: 128,
+            };
+            let session = Session::new_in_scope_with_pointer_copy(
                 &package,
                 &context,
-                Budget {
-                    steps: *steps,
-                    depth: 128,
-                },
+                &mut budget,
                 &invocation_assumptions,
                 &abstract_parameters,
+                &abstract_value_parameters,
                 Some(&type_solver),
-            )
-            .map_err(|failure| {
+                Some(&pointer_copy),
+            );
+            *steps = budget.steps;
+            let mut session = session.map_err(|failure| {
                 error(
                     span,
                     format!("required comptime preparation failed: {failure}"),
                 )
             })?;
             let output = session
-                .enqueue(
+                .enqueue_prepared(
                     &mut context,
                     entry,
                     inputs
-                        .iter()
-                        .map(|(_, ty, value)| Input {
-                            ty: crate::InferenceTerm::Stable(ty.clone()),
-                            value: crate::InferenceTerm::Stable(value.clone()),
+                        .into_iter()
+                        .map(|(ty, value)| PreparedInput {
+                            ty: crate::InferenceTerm::Stable(ty),
+                            value,
                         })
                         .collect(),
                 )
@@ -192,7 +268,7 @@ impl PreparedRequired {
                 }
             };
             *steps = session.remaining_steps();
-            let value = result.map_err(|message| error(span, message))?;
+            let value = result.map_err(|message| error(span, with_copy_failure(message)))?;
             let Value::Type(ty) = value else {
                 unreachable!()
             };
@@ -216,27 +292,22 @@ impl PreparedRequired {
         )
         .map_err(|e| error(span, format!("required comptime preparation failed: {e}")))?;
         interpreter = interpreter.with_type_solver(&type_solver);
-        interpreter = interpreter
-            .with_abstract_type_parameters(&abstract_parameters)
-            .map_err(|e| error(span, format!("required comptime type scope failed: {e}")))?;
-        let value = if inputs.is_empty() {
-            interpreter.invoke(entry, vec![])
-        } else {
-            interpreter.invoke_with_normal_arguments(
-                entry,
-                inputs
-                    .iter()
-                    .map(|(_, ty, value)| (ty.clone(), value.clone()))
-                    .collect(),
-            )
-        };
+        interpreter = interpreter.with_budgeted_pointer_copy_permission(&pointer_copy);
+        let scope = interpreter
+            .authorize_abstract_type_parameters(&abstract_parameters)
+            .and_then(|()| {
+                interpreter.authorize_abstract_value_parameters(&abstract_value_parameters)
+            });
+        *steps = interpreter.remaining_steps();
+        scope.map_err(|e| error(span, format!("required comptime scope failed: {e}")))?;
+        let value = interpreter.invoke_with_prepared_arguments(entry, inputs);
         *steps = interpreter.remaining_steps();
         let value=value.map_err(|e| {
             if e.kind == comptime_interpretor::ErrorKind::MissingBinding
                 && in_signature {
                 return error(span,"type computation depends on an unavailable function input; invocation-time type elaboration is not yet implemented");
             }
-            error(span,format!("required comptime evaluation failed: {e}"))
+            error(span,with_copy_failure(format!("required comptime evaluation failed: {e}")))
         })?;
         let value = restore_required_packet(
             steps,
@@ -290,11 +361,19 @@ impl std::fmt::Display for PreparedRequired {
         for parameter in &self.abstract_parameters {
             write!(f, " {parameter}")?;
         }
+        write!(f, ") (abstract-value-parameters")?;
+        for (id, domain) in &self.abstract_value_parameters {
+            write!(f, " ({id} {domain})")?;
+        }
         write!(
             f,
-            ") (in-signature {}) (context {}) (implementation-index {}) (program {}))",
+            ") (in-signature {}) (context {}) (implementation-index {}) (program {})",
             self.in_signature, self.context, self.implementation_index, self.package
-        )
+        )?;
+        if let Some((copy, drop, package)) = &self.copy_authority {
+            write!(f, " (copy-authority (copy {copy}) (drop {drop}) {package})")?;
+        }
+        write!(f, ")")
     }
 }
 
@@ -353,8 +432,238 @@ mod tests {
             input_frames: vec![],
             invocation_assumptions: vec![],
             abstract_parameters: vec![],
+            abstract_value_parameters: vec![],
             context: crate::ptc::Context::default(),
             in_signature: false,
+            copy_authority: None,
+        }
+    }
+
+    #[test]
+    fn type_invocations_transport_abstract_inputs_but_do_not_observe_them() {
+        let declaration = DeclarationId {
+            package: 7,
+            local: 90,
+        };
+        let binding = n::LocalId {
+            owner: 11,
+            index: 0,
+        };
+        for observe in [false, true] {
+            let mut prepared = literal_preparation(true);
+            prepared.abstract_value_parameters = vec![(declaration, p(P::Bool))];
+            prepared.inputs = vec![(
+                binding,
+                p(P::Bool),
+                Some(Term::Rigid {
+                    declaration,
+                    sort: Sort::ComptimeValue,
+                }),
+            )];
+            let function = &mut prepared.package.functions[0];
+            function.parameters = vec![binding];
+            function.signature = Term::Function {
+                parameters: vec![Parameter {
+                    sort: Sort::Runtime,
+                    ty: p(P::Bool),
+                }],
+                result: Box::new(p(P::Type)),
+            };
+            if observe {
+                let result = function.body.clone();
+                function.body.kind = K::If {
+                    condition: Box::new(n::Expr {
+                        source: result.source,
+                        ty: p(P::Bool),
+                        kind: K::Local(binding),
+                    }),
+                    then_branch: Box::new(result.clone()),
+                    else_branch: Some(Box::new(result)),
+                };
+            }
+            let mut steps = 10_000;
+            let result = prepared.invoke(&mut steps, Span::default());
+            assert!(steps < 10_000);
+            if observe {
+                assert!(format!("{:?}", result.unwrap_err()).contains("AbstractValueUnresolved"));
+            } else {
+                assert_eq!(result.unwrap(), (Value::Type(p(P::U8)), p(P::Type)));
+            }
+        }
+    }
+
+    #[test]
+    fn abstract_type_invocation_failure_is_terminal_and_does_not_poison_other_calls() {
+        use crate::type_computations::{PreparedInput, Session, State};
+        let declaration = DeclarationId {
+            package: 7,
+            local: 90,
+        };
+        let binding = n::LocalId {
+            owner: 11,
+            index: 0,
+        };
+        let mut prepared = literal_preparation(true);
+        let function = &mut prepared.package.functions[0];
+        function.parameters = vec![binding];
+        function.signature = Term::Function {
+            parameters: vec![Parameter {
+                sort: Sort::Runtime,
+                ty: p(P::Bool),
+            }],
+            result: Box::new(p(P::Type)),
+        };
+        let output = function.body.clone();
+        function.body.kind = K::If {
+            condition: Box::new(n::Expr {
+                source: output.source,
+                ty: p(P::Bool),
+                kind: K::Local(binding),
+            }),
+            then_branch: Box::new(output.clone()),
+            else_branch: Some(Box::new(output)),
+        };
+        let mut context = crate::InferenceContext::default();
+        let mut session = Session::new_in_scope_with_pointer_copy(
+            &prepared.package,
+            &context,
+            &mut Budget {
+                steps: 10_000,
+                depth: 128,
+            },
+            &[],
+            &[],
+            &[(declaration, p(P::Bool))],
+            None,
+            None,
+        )
+        .unwrap();
+        let mut failed = Vec::new();
+        for (id, domain) in [
+            (declaration, p(P::Bool)),
+            (
+                DeclarationId {
+                    package: 7,
+                    local: 91,
+                },
+                p(P::Bool),
+            ),
+            (declaration, p(P::U8)),
+        ] {
+            let output = session
+                .enqueue_prepared(
+                    &mut context,
+                    prepared.entry,
+                    vec![PreparedInput {
+                        ty: crate::InferenceTerm::Stable(p(P::Bool)),
+                        value: InvocationValue::Live(Value::AbstractValue {
+                            declaration: id,
+                            ty: domain,
+                        }),
+                    }],
+                )
+                .unwrap();
+            assert!(matches!(
+                session.resume(&mut context, output).unwrap(),
+                State::Failed(_)
+            ));
+            assert!(context.freeze(&crate::InferenceTerm::Meta(output)).is_err());
+            let remaining = session.remaining_steps();
+            let diagnostic = format!("{}", session.state(output).unwrap());
+            assert_eq!(
+                format!("{}", session.resume(&mut context, output).unwrap()),
+                diagnostic
+            );
+            assert_eq!(session.remaining_steps(), remaining);
+            failed.push(output);
+        }
+        let output = session
+            .enqueue_prepared(
+                &mut context,
+                prepared.entry,
+                vec![PreparedInput {
+                    ty: crate::InferenceTerm::Stable(p(P::Bool)),
+                    value: InvocationValue::Live(Value::Bool(true)),
+                }],
+            )
+            .unwrap();
+        assert_eq!(
+            session.resume(&mut context, output).unwrap(),
+            &State::Complete(p(P::U8))
+        );
+        assert_eq!(
+            context.freeze(&crate::InferenceTerm::Meta(output)).unwrap(),
+            p(P::U8)
+        );
+        for output in failed {
+            assert!(matches!(session.state(output), Some(State::Failed(_))));
+        }
+    }
+
+    #[test]
+    fn rejected_scope_preparation_debits_the_shared_budget_on_both_paths() {
+        for type_result in [false, true] {
+            let mut prepared = literal_preparation(type_result);
+            let id = DeclarationId {
+                package: 7,
+                local: 90,
+            };
+            prepared.abstract_parameters = vec![id];
+            prepared.abstract_value_parameters = vec![(id, p(P::Bool))];
+            let mut steps = 1000;
+            assert!(prepared.invoke(&mut steps, Span::default()).is_err());
+            assert!(steps < 1000, "failed scope setup refunded its work");
+        }
+    }
+
+    #[test]
+    fn prepared_owned_inputs_keep_writeback_in_type_and_data_calls() {
+        for type_result in [false, true] {
+            let mut prepared = literal_preparation(type_result);
+            let binding = n::LocalId {
+                owner: 11,
+                index: 0,
+            };
+            let function = &mut prepared.package.functions[0];
+            function.parameters = vec![binding];
+            function.signature = Term::Function {
+                parameters: vec![Parameter {
+                    sort: Sort::Runtime,
+                    ty: p(P::Bool),
+                }],
+                result: Box::new(prepared.result_type.clone()),
+            };
+            let result = function.body.clone();
+            function.body.kind = K::Block {
+                statements: vec![n::Expr {
+                    source: result.source,
+                    ty: p(P::Void),
+                    kind: K::Assign {
+                        place: n::Place {
+                            root: binding,
+                            fields: vec![],
+                        },
+                        value: Box::new(n::Expr {
+                            source: result.source,
+                            ty: p(P::Bool),
+                            kind: K::Literal(n::Literal::Bool(false)),
+                        }),
+                    },
+                }],
+                result: Some(Box::new(result)),
+            };
+            prepared.inputs = vec![(binding, p(P::Bool), None)];
+            let owner = comptime_interpretor::Storage::new(Value::Bool(true));
+            let mut steps = 10_000;
+            prepared
+                .invoke_with_live_inputs(
+                    vec![(binding, Value::Storage(owner.clone()))],
+                    &mut steps,
+                    Span::default(),
+                )
+                .unwrap();
+            assert_eq!(owner.read().unwrap(), Value::Bool(false));
+            assert!(steps < 10_000);
         }
     }
 
@@ -492,6 +801,167 @@ mod tests {
     }
 
     #[test]
+    fn prepared_live_inputs_keep_shared_closures_across_type_and_value_invocations() {
+        use std::sync::Arc;
+        let span = Span::default();
+        for type_result in [false, true] {
+            let mut prepared = literal_preparation(type_result);
+            let result_type = prepared.result_type.clone();
+            let selector = n::LocalId {
+                owner: 11,
+                index: 0,
+            };
+            let frozen = n::LocalId {
+                owner: 11,
+                index: 1,
+            };
+            let flag = n::LocalId {
+                owner: 11,
+                index: 2,
+            };
+            let expr = |ty, kind| n::Expr {
+                ty,
+                kind,
+                source: n::SourceRange { start: 0, end: 1 },
+            };
+            let boolean = |value| expr(p(P::Bool), K::Literal(n::Literal::Bool(value)));
+            let read = || expr(p(P::Bool), K::Local(flag));
+            let callback_type = Term::Closure {
+                environment: vec![p(P::Bool)],
+                signature: Box::new(Term::ComptimeFunction(Box::new(Term::Function {
+                    parameters: vec![],
+                    result: Box::new(result_type.clone()),
+                }))),
+            };
+            let toggle = expr(
+                p(P::Void),
+                K::Assign {
+                    place: n::Place {
+                        root: flag,
+                        fields: vec![],
+                    },
+                    value: Box::new(expr(
+                        p(P::Bool),
+                        K::If {
+                            condition: Box::new(read()),
+                            then_branch: Box::new(boolean(false)),
+                            else_branch: Some(Box::new(boolean(true))),
+                        },
+                    )),
+                },
+            );
+            let selected = if type_result {
+                expr(
+                    p(P::Type),
+                    K::If {
+                        condition: Box::new(read()),
+                        then_branch: Box::new(expr(p(P::Type), K::TypeValue(p(P::Bool)))),
+                        else_branch: Some(Box::new(expr(p(P::Type), K::TypeValue(p(P::U8))))),
+                    },
+                )
+            } else {
+                read()
+            };
+            let mut factory = prepared.package.clone();
+            factory.functions[0].signature = Term::Function {
+                parameters: vec![],
+                result: Box::new(callback_type.clone()),
+            };
+            factory.functions[0].body = expr(
+                callback_type.clone(),
+                K::Closure {
+                    parameters: vec![],
+                    captures: vec![n::Capture {
+                        binding: flag,
+                        ty: p(P::Bool),
+                        value: Some(Box::new(boolean(false))),
+                    }],
+                    body: Arc::new(expr(
+                        result_type.clone(),
+                        K::Block {
+                            statements: vec![toggle],
+                            result: Some(Box::new(selected)),
+                        },
+                    )),
+                },
+            );
+            let mut producer = Interpreter::for_comptime(&factory, Budget::default()).unwrap();
+            let callback = producer.invoke(prepared.entry, vec![]).unwrap();
+            let function = &mut prepared.package.functions[0];
+            function.parameters = vec![selector, frozen];
+            function.signature = Term::Function {
+                parameters: vec![
+                    Parameter {
+                        sort: Sort::ComptimeValue,
+                        ty: callback_type.clone(),
+                    },
+                    Parameter {
+                        sort: Sort::ComptimeValue,
+                        ty: p(P::Bool),
+                    },
+                ],
+                result: Box::new(result_type.clone()),
+            };
+            function.body = expr(
+                result_type.clone(),
+                K::Call {
+                    callee: Box::new(expr(callback_type.clone(), K::Local(selector))),
+                    arguments: vec![],
+                    parameter_bindings: vec![],
+                },
+            );
+            prepared.inputs = vec![
+                (selector, callback_type, None),
+                (frozen, p(P::Bool), Some(Term::Bool(true))),
+            ];
+            let mut steps = 10_000;
+            // Routing errors must leave the shared callback untouched.
+            for invalid in [
+                vec![(frozen, Value::Bool(false))],
+                vec![(selector, callback.clone()), (selector, callback.clone())],
+                vec![(
+                    n::LocalId {
+                        owner: 99,
+                        index: 0,
+                    },
+                    callback.clone(),
+                )],
+            ] {
+                let before = steps;
+                assert!(
+                    prepared
+                        .fork(span)
+                        .unwrap()
+                        .invoke_with_live_inputs(invalid, &mut steps, span)
+                        .is_err()
+                );
+                assert_eq!(steps, before);
+            }
+            for expected in [true, false, true] {
+                let (value, ty) = prepared
+                    .fork(span)
+                    .unwrap()
+                    .invoke_with_live_inputs(vec![(selector, callback.clone())], &mut steps, span)
+                    .unwrap();
+                assert_eq!(ty, result_type);
+                if type_result {
+                    assert_eq!(
+                        value,
+                        Value::Type(p(if expected { P::Bool } else { P::U8 }))
+                    );
+                } else {
+                    assert_eq!(value, Value::Bool(expected));
+                }
+            }
+            assert!(steps < 10_000);
+            assert!(
+                prepared.inputs[0].2.is_none(),
+                "invocation must not modify the reusable preparation"
+            );
+        }
+    }
+
+    #[test]
     fn prepared_required_dump_preserves_scope_and_escaped_inputs() {
         let declaration = DeclarationId {
             package: 7,
@@ -523,8 +993,10 @@ mod tests {
             input_frames: vec![vec![Sort::Type, Sort::ComptimeValue]],
             invocation_assumptions: vec![],
             abstract_parameters: vec![declaration],
+            abstract_value_parameters: vec![],
             context: crate::ptc::Context::default(),
             in_signature: true,
+            copy_authority: None,
         };
         let dump = prepared.to_string();
         assert_eq!(dump, prepared.to_string());
@@ -653,6 +1125,7 @@ pub(super) fn implementation_index(
         index
             .insert(
                 crate::implementation::ImplementationHead {
+                    parameter_types: implementation.parameter_types.clone(),
                     declaration: implementation.declaration,
                     interface: implementation.interface,
                     interface_arguments: implementation.interface_arguments.clone(),

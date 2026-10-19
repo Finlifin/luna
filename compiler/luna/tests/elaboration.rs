@@ -2051,7 +2051,7 @@ fn nominal_trait_bounds_are_checked_at_all_formation_sites() {
         "fn bad(value: Box<S>) {}",
         "struct Bad { value: Box<S>, }",
         "fn bad() { Box<S> { value: S {} }; }",
-        "fn bad() { let x: Box<S>; }",
+        "fn bad() { let x: Box<S> = Box<S> { value: S {} }; }",
     ] {
         rejected(
             &format!(
@@ -4039,9 +4039,12 @@ fn computed_nominal_arguments_do_not_escape_formation_contracts() {
         "typealias Type = .Type'builtin; struct Disabled where T, requires false {} comptime fn DisabledType(value: Type) -> Type { Disabled<value> }",
         "type requirement is not satisfied",
     );
+    accepted(
+        "typealias Type = .Type'builtin; trait Marker {} impl Marker for bool {} struct Checked where T :- Marker {} comptime fn CheckedType(value: Type) -> Type { Checked<value> } typealias Valid = CheckedType(bool);",
+    );
     rejected(
-        "typealias Type = .Type'builtin; trait Marker {} struct Checked where T :- Marker {} comptime fn CheckedType(value: Type) -> Type { Checked<value> }",
-        "trait bound is not established",
+        "typealias Type = .Type'builtin; trait Marker {} struct Checked where T :- Marker {} comptime fn CheckedType(value: Type) -> Type { Checked<value> } typealias Invalid = CheckedType(bool);",
+        "TypeContractUnresolved",
     );
     rejected(
         "typealias Type = .Type'builtin; struct Box where T { value: T } fn RuntimeType() -> Type { true'type } comptime fn Bad() -> Type { Box<RuntimeType()> } typealias Invalid = Bad();",
@@ -4051,9 +4054,12 @@ fn computed_nominal_arguments_do_not_escape_formation_contracts() {
 
 #[test]
 fn dynamic_alias_arguments_keep_bounds_and_phase_checks() {
+    accepted(
+        "typealias Type = .Type'builtin; trait Marker {} impl Marker for bool {} typealias Checked<T :- Marker> = T; comptime fn CheckedType(value: Type) -> Type { Checked<value> } typealias Valid = CheckedType(bool);",
+    );
     rejected(
-        "typealias Type = .Type'builtin; trait Marker {} typealias Checked<T :- Marker> = T; comptime fn Bad(value: Type) -> Type { Checked<value> }",
-        "trait bound is not established",
+        "typealias Type = .Type'builtin; trait Marker {} typealias Checked<T :- Marker> = T; comptime fn CheckedType(value: Type) -> Type { Checked<value> } typealias Invalid = CheckedType(bool);",
+        "TypeContractUnresolved",
     );
     rejected(
         "typealias Type = .Type'builtin; typealias Pair<T> = (T, T); fn RuntimeType() -> Type { true'type } comptime fn Bad() -> Type { Pair<RuntimeType()> } typealias Invalid = Bad();",
@@ -4868,17 +4874,14 @@ fn pointer_operations_reject_unsupported_accesses() {
     );
     rejected("fn run() -> *true'type { true.ref }", "address");
     rejected(
-        "struct Cell { value: true'type, } fn run() -> Cell { let cell = Cell { value: true }; cell.ref.* }",
-        "non-Copy pointer reads",
+        "struct Cell { value:*bool } fn run(p:*Cell)->Cell {p.*}",
+        "pointer reads of non-intrinsic values",
     );
     rejected(
-        "struct Cell { value: true'type, } fn run() { let cell = Cell { value: true }; cell.ref.* = Cell { value: false }; }",
+        "struct Cell { value:*bool } fn run(p:*Cell,value:Cell) {p.* = value;}",
         "non-Copy pointer writes",
     );
-    rejected(
-        "comptime fn run() -> true'type { let value = true; value.ref.* }",
-        "comptime pointer operations",
-    );
+    accepted("comptime fn run() -> true'type { let value = true; value.ref.* }");
 }
 
 #[test]
@@ -4934,16 +4937,15 @@ fn dereferenced_field_places_reject_invalid_and_owned_deliveries() {
         "unknown struct field",
     );
     rejected(
-        "struct Cell {} struct Outer { cell: Cell, } fn run() -> Cell { let outer = Outer { cell: Cell {} }; outer.ref.*.cell }",
-        "non-Copy pointer reads",
+        "struct Cell {value:*bool} struct Outer {cell:Cell} fn run(p:*Outer)->Cell {p.*.cell}",
+        "pointer reads of non-intrinsic values",
     );
     rejected(
         "struct Cell { fn consume(self) {} } fn run() { let cell = Cell {}; cell.ref.*.consume(); }",
         "by-value pointer receiver requires memory transfer contracts",
     );
-    rejected(
+    accepted(
         "struct Cell { value: true'type, } comptime fn run() -> true'type { let cell = Cell { value: true }; cell.ref.*.value }",
-        "comptime pointer operations",
     );
 }
 
@@ -5337,7 +5339,7 @@ fn property_sibling_contexts_reject_overflow_and_conflicting_record_types() {
         &format!(
             "{head} fn run() {{let n:.u8'builtin=0;let model=keep {{width:n}};select {{width:'x',model}};}}"
         ),
-        "inference",
+        "unresolved type equality",
     );
 }
 
@@ -7794,7 +7796,7 @@ fn pointer_scalar_identity_requires_proof_and_does_not_unfold_heads() {
     ] {
         rejected(
             &format!("{prefix} fn read(comptime T:Type,p:*T)->T {condition} {{p.*}}"),
-            "non-Copy pointer reads",
+            "pointer reads of non-intrinsic values",
         );
         rejected(
             &format!(
@@ -8344,5 +8346,20 @@ fn symbol_indexed_default_method_delegates_to_selected_member() {
             String::from_utf8_lossy(&executed.stdout).trim(),
             "(bool true)"
         );
+    }
+}
+
+#[test]
+fn unresolved_abi_attributes_cannot_publish_default_abi_functions() {
+    for source in [
+        "^attrs.abi(.c) fn identity(value:bool)->bool {value}",
+        "^attrs.abi(.c) inline fn identity(value:bool)->bool {value}",
+        "^attrs.abi(.c) pure fn identity(value:bool)->bool {value}",
+        "^attrs.abi(.c) fn identity(value:bool)->bool {value} fn entry()->bool {identity(true)}",
+        "^attrs.abi(.c) fn identity(value:bool)->bool {value} fn entry()->fn(bool)->bool {identity}",
+        "trait Foreign { ^attrs.abi(.c) fn identity(value:bool)->bool; }",
+        "mod foreign { ^attrs.abi(.c) fn identity(value:bool)->bool {value} }",
+    ] {
+        rejected(source, "definition attribute or modifier");
     }
 }

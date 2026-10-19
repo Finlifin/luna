@@ -70,6 +70,28 @@ pub fn check_access_with_memory(
     pointers: Option<PointerMemory<'_>>,
     fuel: &mut usize,
 ) -> Result<AccessCheck, String> {
+    check_access_with_layout(
+        package,
+        world,
+        selected,
+        state,
+        receiver,
+        pointers,
+        &BTreeMap::new(),
+        fuel,
+    )
+}
+
+pub(super) fn check_access_with_layout(
+    package: &Package,
+    world: &World<'_>,
+    selected: &SelectedDrop,
+    state: &State,
+    receiver: &Place,
+    pointers: Option<PointerMemory<'_>>,
+    variant_layouts: &BTreeMap<Place, Vec<Term>>,
+    fuel: &mut usize,
+) -> Result<AccessCheck, String> {
     if *fuel == 0 {
         return Err("Drop access budget exhausted".into());
     }
@@ -84,8 +106,10 @@ pub fn check_access_with_memory(
         .ok_or("captured Drop implementation is missing")?;
     let subject = implementation
         .subject
-        .instantiate_types(
-            &implementation.type_parameters,
+        .instantiate_parameters(
+            &implementation
+                .parameter_binders()
+                .map_err(|e| e.to_string())?,
             &selected.implementation_arguments,
         )
         .map_err(|error| error.to_string())?;
@@ -160,12 +184,18 @@ pub fn check_access_with_memory(
             .iter()
             .any(|a| !a.target.through.is_empty())
     }) {
-        if place_type(package, pointers.types, receiver, fuel)? != selected.subject {
+        if place_type(package, pointers.types, receiver, variant_layouts, fuel)? != selected.subject
+        {
             return Err("Drop receiver type disagrees with memory snapshot".into());
         }
     }
     let mut resolved = Vec::new();
     for access in &footprint.accesses {
+        if !access.target.input_fields.is_empty() {
+            return Err(
+                "Drop receiver footprint cannot originate in a by-value input field".into(),
+            );
+        }
         if access.target.parameter != 0 {
             return Err("Drop access targets a non-receiver parameter".into());
         }
@@ -196,7 +226,9 @@ pub fn check_access_with_memory(
                     state.require_place(target).map_err(|e| {
                         format!("Drop pointer target {target} is unavailable: {e:?}")
                     })?;
-                    if place_type(package, pointers.types, target, fuel)? != *subject {
+                    if place_type(package, pointers.types, target, variant_layouts, fuel)?
+                        != *subject
+                    {
                         return Err("Drop pointer target type disagrees with slot pointee".into());
                     }
                     loaded.insert(target.clone());
@@ -264,6 +296,10 @@ fn field_type(
             .ok_or("Drop tuple field index is out of bounds".into());
     }
     match ty {
+        Term::Closure { environment, .. } => environment
+            .get(index)
+            .cloned()
+            .ok_or("Drop capture field index is out of bounds".into()),
         Term::Record(fields) => fields
             .get(index)
             .map(|(_, ty)| ty.clone())
@@ -323,6 +359,7 @@ fn place_type(
     package: &Package,
     types: &BTreeMap<PlaceId, Term>,
     place: &Place,
+    variant_layouts: &BTreeMap<Place, Vec<Term>>,
     fuel: &mut usize,
 ) -> Result<Term, String> {
     let ty = types
@@ -330,7 +367,42 @@ fn place_type(
         .ok_or("Drop pointer target type is missing")?;
     memory::bound_type(ty, fuel)?;
     let mut ty = ty.clone();
-    for index in &place.fields {
+    for (depth, index) in place.fields.iter().enumerate() {
+        charge(fuel, depth + 1)?;
+        let prefix = Place {
+            root: place.root,
+            fields: place.fields[..depth].to_vec(),
+        };
+        if let Some(fields) = variant_layouts.get(&prefix) {
+            let selected = fields
+                .get(*index)
+                .ok_or("Drop variant field index is out of bounds")?;
+            memory::bound_type(selected, fuel)?;
+            ty = selected.clone();
+            continue;
+        }
+        // Cleanup places include private representation children; source
+        // projections above still go through the public field layout only.
+        if let Term::Nominal {
+            declaration,
+            arguments,
+        } = &ty
+        {
+            if let Some(definition) = package
+                .newtypes
+                .iter()
+                .find(|definition| definition.declaration == *declaration)
+            {
+                charge(fuel, 1)?;
+                if *index != 0 {
+                    return Err("Drop newtype representation index is out of bounds".into());
+                }
+                ty = definition
+                    .representation_budgeted(arguments, &[], fuel)
+                    .map_err(|error| error.to_string())?;
+                continue;
+            }
+        }
         ty = field_type(package, &ty, *index, fuel)?;
     }
     Ok(ty)

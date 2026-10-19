@@ -226,6 +226,34 @@ pub fn analyze_cleanup_with_effect_context(
     enums: &[elaboration::verification::moves::EnumParameter],
     effects: Vec<elaboration::verification::moves::EffectResultInput>,
 ) -> Result<elaboration::verification::moves::Report, elaboration::verification::moves::Error> {
+    analyze_cleanup_with_field_context(
+        package,
+        world,
+        items,
+        function,
+        fuel,
+        query_budget,
+        borrows,
+        callables,
+        enums,
+        effects,
+        &[],
+    )
+}
+
+pub fn analyze_cleanup_with_field_context(
+    package: &nir::program::Package,
+    world: &World<'_>,
+    items: &LangItems,
+    function: &nir::program::Function,
+    fuel: usize,
+    query_budget: Budget,
+    borrows: &[(usize, nir::Term)],
+    callables: &[elaboration::verification::moves::CallableParameter],
+    enums: &[elaboration::verification::moves::EnumParameter],
+    effects: Vec<elaboration::verification::moves::EffectResultInput>,
+    fields: &[elaboration::verification::moves::BorrowedField],
+) -> Result<elaboration::verification::moves::Report, elaboration::verification::moves::Error> {
     use elaboration::verification::{drop::CleanupSession, moves};
     let Some(LangItemDef::UserDef(protocol)) = items.get(LangItem::Drop) else {
         return Err(moves::Error {
@@ -234,7 +262,7 @@ pub fn analyze_cleanup_with_effect_context(
         });
     };
     let mut session = CleanupSession::new(package, world, protocol, query_budget);
-    moves::analyze_in_package_with_effect_context(
+    moves::analyze_in_package_with_field_context(
         package,
         function,
         |ty| copy_delivery(package, world, items, ty, query_budget),
@@ -244,6 +272,7 @@ pub fn analyze_cleanup_with_effect_context(
         callables,
         enums,
         effects,
+        fields,
     )
 }
 

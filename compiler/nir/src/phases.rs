@@ -22,10 +22,30 @@ pub fn machine_arithmetic_functions(
     package: &Package,
 ) -> Result<std::collections::BTreeSet<crate::DeclarationId>, Error> {
     let mut machine_owners = std::collections::BTreeSet::new();
+    crate::type_aliases::validate(&package.alias_contracts).map_err(|message| Error {
+        source: SourceRange { start: 0, end: 0 },
+        message,
+    })?;
+    for definition in &package.structs {
+        definition.parameter_binders().map_err(|_| Error {
+            source: SourceRange { start: 0, end: 0 },
+            message: "invalid struct parameter domains",
+        })?;
+    }
     for definition in &package.enums {
+        definition.parameter_binders().map_err(|_| Error {
+            source: SourceRange { start: 0, end: 0 },
+            message: "invalid enum parameter domains",
+        })?;
         definition.validate_encoding().map_err(|message| Error {
             source: SourceRange { start: 0, end: 0 },
             message,
+        })?;
+    }
+    for definition in &package.implementations {
+        definition.parameter_binders().map_err(|_| Error {
+            source: SourceRange { start: 0, end: 0 },
+            message: "invalid implementation parameter domains",
         })?;
     }
     let mut quote_ids = BTreeSet::new();
@@ -210,7 +230,11 @@ pub fn machine_arithmetic_functions(
                         }
                         work.push(Work::Pattern(pattern, ct));
                     }
-                    Pattern::Binding {
+                    Pattern::Observe {
+                        inner: pattern,
+                        binding,
+                    }
+                    | Pattern::Binding {
                         inner: pattern,
                         binding,
                     } => {
@@ -275,19 +299,6 @@ pub fn machine_arithmetic_functions(
                     let error = |message| fail(expr.source, message);
                     if let Some(message) = crate::program::pointer_operation_error(expr) {
                         return Err(error(message));
-                    }
-                    if ct
-                        && matches!(
-                            expr.kind,
-                            K::AddressOf(_)
-                                | K::ReadPointer(_)
-                                | K::PointerAnonymousField { .. }
-                                | K::PointerField { .. }
-                                | K::WritePointer { .. }
-                                | K::BitWritePointer { .. }
-                        )
-                    {
-                        return Err(error("comptime pointer operations are not implemented"));
                     }
                     if let K::AddressOf(place) = &expr.kind {
                         let mut place = place.as_ref();
@@ -607,12 +618,41 @@ pub fn machine_arithmetic_functions(
                             work.extend(environment.iter().map(|e| Work::Expr(e, false, ct)));
                             work.push(Work::Expr(signature, false, ct));
                         }
+                        K::CheckTypeAlias {
+                            declaration,
+                            arguments,
+                        } => {
+                            if !ct {
+                                return Err(error(
+                                    "alias formation guard requires comptime execution",
+                                ));
+                            }
+                            let contract = package
+                                .alias_contracts
+                                .iter()
+                                .find(|contract| contract.declaration == *declaration)
+                                .ok_or_else(|| error("missing alias formation contract"))?;
+                            if arguments.len() != contract.parameters.len()
+                                || expr.ty != Term::Primitive(Primitive::Void)
+                                || arguments
+                                    .iter()
+                                    .any(|argument| argument.ty != Term::Primitive(Primitive::Type))
+                            {
+                                return Err(error("invalid alias formation guard inputs"));
+                            }
+                            work.extend(
+                                arguments
+                                    .iter()
+                                    .map(|argument| Work::Expr(argument, false, ct)),
+                            );
+                        }
                         K::NominalType {
                             arguments: fields, ..
                         }
                         | K::FunctionType {
                             parameters: fields, ..
                         }
+                        | K::TypeList(fields)
                         | K::TupleType(fields)
                         | K::Tuple(fields)
                         | K::Record { fields, .. }
@@ -829,30 +869,34 @@ pub fn machine_arithmetic_functions(
                                     let declared = match &statement.kind {
                                         K::Let { binding, .. } => vec![*binding],
                                         K::LetPattern {
-                                            pattern: Pattern::Tuple(fields),
+                                            pattern:
+                                                pattern @ (Pattern::Tuple(_)
+                                                | Pattern::Binding { .. }
+                                                | Pattern::Wild),
+                                            value,
                                             guard: None,
                                             otherwise: None,
-                                            ..
-                                        } => {
-                                            let mut declared = Vec::new();
-                                            for field in fields {
-                                                let Pattern::Binding { binding, inner } = field
-                                                else {
-                                                    return Err(fail(
-                                                        statement.source,
-                                                        "spread preparation requires tuple binding patterns",
-                                                    ));
-                                                };
-                                                if !matches!(inner.as_ref(), Pattern::Wild) {
-                                                    return Err(fail(
-                                                        statement.source,
-                                                        "spread preparation requires tuple binding patterns",
-                                                    ));
-                                                }
-                                                declared.push(*binding);
-                                            }
-                                            declared
-                                        }
+                                        } => crate::preparation::pattern_bindings(
+                                            &package.normal_forms,
+                                            pattern,
+                                            &value.ty,
+                                            &mut preparation_fuel,
+                                        )
+                                        .map_err(|_| {
+                                            fail(
+                                                statement.source,
+                                                "invalid or excessive preparation binding pattern",
+                                            )
+                                        })?
+                                        .ok_or_else(|| {
+                                            fail(
+                                                statement.source,
+                                                "spread preparation requires known tuple layouts",
+                                            )
+                                        })?
+                                        .into_iter()
+                                        .map(|(binding, _)| binding)
+                                        .collect(),
                                         _ => {
                                             return Err(fail(
                                                 statement.source,
@@ -881,15 +925,19 @@ pub fn machine_arithmetic_functions(
                                     ));
                                 }
                             }
-                            let staged = crate::preparation::inputs(expr, &mut preparation_fuel)
-                                .map_err(|_| {
-                                    fail(
-                                        expr.source,
-                                        "invalid or excessive staged preparation dependencies",
-                                    )
-                                })?
-                                .map(|(indices, _)| indices)
-                                .unwrap_or_default();
+                            let staged = crate::preparation::inputs_with_layouts(
+                                &package.normal_forms,
+                                expr,
+                                &mut preparation_fuel,
+                            )
+                            .map_err(|_| {
+                                fail(
+                                    expr.source,
+                                    "invalid or excessive staged preparation dependencies",
+                                )
+                            })?
+                            .map(|(indices, _)| indices)
+                            .unwrap_or_default();
                             work.extend(statements.iter().enumerate().map(|(index, e)| {
                                 Work::Expr(e, false, ct || staged.contains(&index))
                             }));

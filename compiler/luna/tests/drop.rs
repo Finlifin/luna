@@ -2,6 +2,114 @@
 #[path = "support/execution.rs"]
 mod finite_default_support;
 #[test]
+fn cleanup_access_export_retains_parameter_and_indirect_origins() {
+    use elaboration::verification::{memory, moves};
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Watch {target:*bool}impl Retire for Watch {fn drop(*self) {self.target.*.* = true;}}
+        fn direct(p:*bool) {let watch=Watch {target:p};}
+        fn indirect(p:**bool) {let target=p.*;let watch=Watch {target:target};}
+        struct Link {ready:bool,target:*bool}
+        fn field(link:Link) {let watch=Watch {target:link.target};}
+        fn local_only() {let flag=false;let watch=Watch {target:flag.ref};}",
+    );
+    world(&package, |world, items| {
+        let mut items = items.clone();
+        let copy = package
+            .traits
+            .iter()
+            .find(|t| t.name == "Duplicate")
+            .unwrap()
+            .declaration;
+        items
+            .bind_source_traits(&package, &[(LangItem::Copy, copy)])
+            .unwrap();
+        for (name, indirect) in [
+            ("direct", false),
+            ("indirect", true),
+            ("local_only", false),
+            ("field", false),
+        ] {
+            let function = package.functions.iter().find(|f| f.name == name).unwrap();
+            let subject = if indirect {
+                nir::Term::Pointer(Box::new(nir::Term::Primitive(nir::Primitive::Bool)))
+            } else {
+                nir::Term::Primitive(nir::Primitive::Bool)
+            };
+            let borrows = if name == "local_only" || name == "field" {
+                vec![]
+            } else {
+                vec![(0, subject)]
+            };
+            let fields = if name == "field" {
+                vec![moves::BorrowedField {
+                    parameter: 0,
+                    fields: vec![1],
+                    pointee: nir::Term::Primitive(nir::Primitive::Bool),
+                }]
+            } else {
+                vec![]
+            };
+            let mut report = luna::protocols::analyze_cleanup_with_field_context(
+                &package,
+                world,
+                &items,
+                function,
+                100_000,
+                Default::default(),
+                &borrows,
+                &[],
+                &[],
+                vec![],
+                &fields,
+            )
+            .unwrap();
+            let effects = report
+                .cleanup_memory_accesses(&package, &mut 10000)
+                .unwrap();
+            if name == "local_only" {
+                assert!(effects.is_empty());
+                continue;
+            }
+            assert_eq!(
+                effects,
+                vec![memory::Access {
+                    target: memory::ParameterPlace {
+                        parameter: 0,
+                        input_fields: if name == "field" { vec![1] } else { vec![] },
+                        through: if indirect { vec![vec![]] } else { vec![] },
+                        fields: vec![]
+                    },
+                    write: true,
+                    read_value: true,
+                    ty: nir::Term::Primitive(nir::Primitive::Bool),
+                }],
+                "{name}: {report}"
+            );
+            assert!(
+                report
+                    .to_string()
+                    .contains("(borrowed-roots (borrowed-root")
+            );
+            assert!(report.cleanup_memory_accesses(&package, &mut 0).is_err());
+            assert_eq!(
+                report
+                    .cleanup_memory_accesses(&package, &mut 10000)
+                    .unwrap(),
+                effects
+            );
+            report.borrowed_roots.clear();
+            assert!(
+                report
+                    .cleanup_memory_accesses(&package, &mut 10000)
+                    .unwrap_err()
+                    .contains("enclosing invocation context")
+            );
+        }
+    });
+}
+
+#[test]
 fn scheduled_computed_code_patterns_evaluate_each_attempt_once() {
     use comptime_interpretor::{Interpreter, Value};
     let package=compile("trait Duplicate {} trait Retire {fn drop(*self);}
@@ -825,7 +933,6 @@ fn scalar_then_patterns_do_not_admit_untracked_computed_owners_or_consumption() 
             "fn reject(flag:bool)->bool {assumes flag;flag}",
             "reject(flag)",
         ),
-        ("", "flag.ref"),
     ] {
         let package = compile(&format!(
             "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
@@ -836,7 +943,7 @@ fn scalar_then_patterns_do_not_admit_untracked_computed_owners_or_consumption() 
         ));
         let error = source_executable(&package, "entry")
             .err()
-            .expect("moved enum must be rejected");
+            .expect("untracked computation must be rejected");
         assert!(error.contains("failure-path"), "{error}");
     }
 }
@@ -1096,7 +1203,6 @@ fn scalar_call_pattern_guards_reject_transfer_and_contract_failure() {
             "fn accept(flag:bool)->bool {assumes flag;flag}",
             "accept(flag)",
         ),
-        ("fn accept(flag:*bool)->bool {flag.*}", "accept(flag.ref)"),
     ] {
         let package = compile(&format!(
             "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
@@ -3218,6 +3324,7 @@ fn world<T>(package: &nir::program::Package, run: impl FnOnce(&World<'_>, &LangI
         index
             .insert(
                 ImplementationHead {
+                    parameter_types: i.parameter_types.clone(),
                     declaration: i.declaration,
                     interface: i.interface,
                     interface_arguments: i.interface_arguments.clone(),
@@ -3491,8 +3598,13 @@ fn invalid_protocol_and_body_metadata_cannot_authorize_a_destructor() {
             0 => invalid.traits[0].methods[0].by_reference_receiver = false,
             1 => {
                 invalid.traits[0].methods[0].signature = nir::Term::ComptimeFunction(Box::new(
-                    invalid.traits[0].methods[0].signature.clone(),
+                    invalid.traits[0].methods[0]
+                        .signature
+                        .ordinary()
+                        .unwrap()
+                        .clone(),
                 ))
+                .into()
             }
             2 => invalid.functions[0].phase = nir::program::FunctionPhase::Comptime,
             _ => invalid.implementations[0].methods.clear(),
@@ -6829,12 +6941,28 @@ fn scheduled_receiver_rejection_cleans_destructor_locals_and_stops_outer_cleanup
 }
 
 #[test]
-fn scheduled_receiver_local_pointer_capture_requires_a_cleanup_footprint() {
+fn scheduled_receiver_local_pointer_capture_composes_cleanup_footprints() {
+    use comptime_interpretor::{ErrorKind, Interpreter, Value};
     let package = compile(
-        "trait Retire {fn drop(*self);} trait Duplicate {} struct Local {pointer:*bool,} struct Parent {flag:bool,} impl Retire for Local {fn drop(*self) {let flag=self.pointer.*.*;assumes flag;}} impl Retire for Parent {fn drop(*self) {let local=Local {pointer:self.flag};}} fn entry() {let value=Parent {flag:true};}",
+        "trait Retire {fn drop(*self);} trait Duplicate {} struct Local {pointer:*bool,} struct Parent {flag:bool,} impl Retire for Local {fn drop(*self) {let flag=self.pointer.*.*;assumes flag;}} impl Retire for Parent {fn drop(*self) {let local=Local {pointer:self.flag};}} fn entry(flag:bool) {let value=Parent {flag:flag};}",
     );
-    let error = source_executable(&package, "entry").unwrap_err();
-    assert!(error.contains("aggregate pointer dependencies"), "{error}");
+    let executable = source_executable(&package, "entry").unwrap();
+    for flag in [true, false] {
+        let mut interpreter = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        let result = interpreter.invoke_instance(&executable.entry, vec![Value::Bool(flag)]);
+        if flag {
+            assert_eq!(result.unwrap(), Value::Unit);
+        } else {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::ProgramContractRejected);
+        }
+        assert_eq!(
+            executed_names(&package, &executable, interpreter.events()),
+            ["entry", "drop Parent", "drop Local"]
+        );
+    }
 }
 
 #[test]
@@ -11144,18 +11272,21 @@ fn scheduled_mutable_capture_replacement_and_rejection_observe_updated_resources
 
 #[test]
 fn scheduled_mutable_capture_pointer_replacement_requires_memory_evidence() {
-    for source in [
-        "fn entry() {let source=true;var pointer=source.ref;let replace=|| {let local=false;pointer=local.ref;};replace();}",
-        "struct Holder {pointer:*bool,} fn entry() {let source=true;var holder=Holder {pointer:source.ref};let replace=|| {let local=false;holder=Holder {pointer:local.ref};};replace();}",
+    for (source, expected) in [
+        (
+            "fn entry()->bool {let source=true;var pointer=source.ref;let replace=|| {let seen=pointer.*;let local=false;pointer=local.ref;seen};replace();replace()}",
+            "memory call target unavailable",
+        ),
+        (
+            "struct Holder {pointer:*bool,} fn entry()->bool {let source=true;var holder=Holder {pointer:source.ref};let replace=|| {let seen=holder.pointer.*;let local=false;holder=Holder {pointer:local.ref};seen};replace();replace()}",
+            "memory call target unavailable",
+        ),
     ] {
         let package = compile(&format!(
             "trait Retire {{fn drop(*self);}} trait Duplicate {{}} {source}"
         ));
         let error = source_executable(&package, "entry").unwrap_err();
-        assert!(
-            error.contains("captured write requires an established memory contract"),
-            "{error}"
-        );
+        assert!(error.contains(expected), "{error}");
     }
 }
 
@@ -19244,11 +19375,10 @@ fn scheduled_borrowed_capture_failure_cleans_owned_environment_and_caller() {
 }
 
 #[test]
-fn scheduled_borrowed_capture_rejects_moved_targets_rebinding_and_escaping_results() {
+fn scheduled_borrowed_capture_rejects_moved_targets_and_escaping_results() {
     for source in [
         "struct Held {flag:bool} impl Retire for Held {fn drop(*self) {}} fn entry()->bool {let held=Held {flag:true};let pointer=held.ref;let read=|| pointer.flag.*;let moved=held;read()}",
         "fn entry()->*bool {let flag=true;let pointer=flag.ref;let address=|| pointer;address()}",
-        "fn entry()->bool {let first=true;let second=false;var pointer=first.ref;let other=second.ref;let replace=|| {pointer=other;pointer.*};replace()}",
     ] {
         let package = compile(&format!(
             "trait Duplicate {{}} trait Retire {{fn drop(*self);}} {source}"
@@ -19431,6 +19561,60 @@ fn compound_assignment_prepared_pointer_obeys_resource_scope() {
     assert_eq!(
         executed_names(&package, &executable, vm.events()),
         ["entry", "increment", "drop Counter"]
+    );
+}
+
+#[test]
+fn bit_compound_assignment_transfers_affine_rhs_and_cleans_early_exit() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source = "typealias Word=.u8'builtin;typealias Bits=.BitVec'builtin<4>;
+        trait Duplicate {}trait Retire {fn drop(*self);}
+        struct Delta {}impl Retire for Delta {fn drop(*self) {}}
+        trait Operation where Rhs {assoc Output:.Type'builtin;fn add(self,rhs:Rhs)->Output;}
+        impl Operation<Delta> for Bits {assoc Output:.Type'builtin=Bits;
+            fn add(self,rhs:Delta)->Bits {self or 2}}
+        fn apply(p:*Word) {p.*'bitvec[0..4] += Delta {};}
+        fn early(p:*Word) {p.*'bitvec[0..4] += do {let pending=Delta {};return;};}
+        fn run()->bool {let word:Word=0xA1;apply(word.ref);word == 0xA3}
+        fn cancelled()->bool {let word:Word=0xA1;early(word.ref);word == 0xA1}";
+    let mut selectors = luna::protocols::type_constructors::Selectors::default();
+    selectors.arithmetic[elaboration::arithmetic::Operator::Add as usize] =
+        Some("input::Operation");
+    let package = finite_default_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        selectors,
+    )
+    .unwrap();
+    for (entry, expected) in [
+        ("run", vec!["run", "apply", "add", "drop Delta"]),
+        ("cancelled", vec!["cancelled", "early", "drop Delta"]),
+    ] {
+        let executable = source_executable(&package, entry).unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(executed_names(&package, &executable, vm.events()), expected);
+    }
+    let reuse = format!(
+        "{source}fn consume(value:Delta) {{}}
+        fn invalid(p:*Word) {{let delta=Delta {{}};
+            p.*'bitvec[0..4] += delta;consume(delta);}}"
+    );
+    let package = finite_default_support::compile_with_source_bindings(
+        &reuse,
+        &Default::default(),
+        selectors,
+    )
+    .unwrap();
+    assert!(
+        source_executable(&package, "invalid").is_err(),
+        "compound assignment duplicated an affine RHS"
     );
 }
 
@@ -22659,7 +22843,7 @@ fn scheduled_effectful_closure_memory_observes_handler_alias_writes_in_order() {
 }
 
 #[test]
-fn scheduled_effectful_closure_memory_rejects_capture_slot_exposure_and_rebinding() {
+fn scheduled_effectful_closure_memory_rejects_capture_slot_exposure_and_local_escape() {
     for (body, expected) in [
         (
             "let slot=pointer.ref;poll()#",
@@ -22667,7 +22851,7 @@ fn scheduled_effectful_closure_memory_rejects_capture_slot_exposure_and_rebindin
         ),
         (
             "let other=false;pointer=other.ref;poll()#",
-            "captured write requires an established memory contract",
+            "captured pointer cannot retain invocation-local storage",
         ),
     ] {
         let package = compile(&format!(
@@ -25049,4 +25233,4365 @@ fn newtype_cleanup_executes_nested_representation_destructors_once() {
                 .is_err()
         );
     });
+}
+
+#[test]
+fn computed_pointer_pattern_keeps_subject_cleanup() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(
+        "trait Duplicate {}trait Retire {fn drop(*self);}struct Held {}impl Retire for Held {fn drop(*self) {}}fn entry(flag:bool)->bool {let item and flag.ref is derived=Held {};derived.*}",
+    );
+    let executable = source_executable(&package, "entry").unwrap();
+    for flag in [false, true] {
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![Value::Bool(flag)])
+                .unwrap(),
+            Value::Bool(flag)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "drop Held")
+                .count(),
+            1,
+            "{names:?}"
+        );
+    }
+}
+
+#[test]
+fn computed_pointer_condition_executes_once() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(
+        "trait Duplicate {}trait Retire {fn drop(*self);}fn decide(flag:bool)->bool {flag}fn entry(flag:bool)->bool {let a=true;let b=false;false match {_ and (if decide(flag) {a.ref}else{b.ref}) is p=>p.*}}",
+    );
+    let executable = source_executable(&package, "entry").unwrap();
+    for flag in [true, false] {
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![Value::Bool(flag)])
+                .unwrap(),
+            Value::Bool(flag)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.as_str() == "decide")
+                .count(),
+            1,
+            "{names:?}"
+        );
+    }
+}
+
+#[test]
+fn owned_default_argument_preparation_preserves_cleanup_order() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source = "trait Duplicate {}trait Retire {fn drop(*self);}struct First {}struct Second {}impl Retire for First {fn drop(*self) {}}impl Retire for Second {fn drop(*self) {}}fn consume(first:First,second:Second,flag:bool)->bool {flag}fn take(flag:bool,.value:bool=consume(First {},Second {},flag))->bool {value}fn run()->bool {take(true)}";
+    let selectors = luna::protocols::type_constructors::Selectors {
+        drop: Some("input::Retire"),
+        ..Default::default()
+    };
+    let package = finite_default_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        selectors,
+    )
+    .unwrap();
+    let executable = source_executable(&package, "run").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    let names = executed_names(&package, &executable, vm.events());
+    let drops = names
+        .iter()
+        .filter(|name| name.starts_with("drop "))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(drops, vec!["drop Second", "drop First"], "{names:?}");
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| name.as_str() == "consume")
+            .count(),
+        1,
+        "{names:?}"
+    );
+}
+
+#[test]
+fn owned_default_factories_preserve_preparation_and_delivery_boundaries() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source = "trait Duplicate {}trait Retire {fn drop(*self);}struct First {}struct Second {}impl Retire for First {fn drop(*self) {}}impl Retire for Second {fn drop(*self) {}}fn first()->First {First {}}fn second()->Second {Second {}}fn consume(a:First,b:Second)->bool {true}fn take(.value:bool=consume(first(),second()))->bool {value}fn run()->bool {take()}";
+    let selectors = luna::protocols::type_constructors::Selectors {
+        drop: Some("input::Retire"),
+        ..Default::default()
+    };
+    let package = finite_default_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        selectors,
+    )
+    .unwrap();
+    let executable = source_executable(&package, "run").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        executed_names(&package, &executable, vm.events()),
+        vec![
+            "run",
+            "first",
+            "second",
+            "consume",
+            "drop Second",
+            "drop First",
+            "take"
+        ]
+    );
+
+    let source = "trait Duplicate {}trait Retire {fn drop(*self);}struct Owned {flag:bool}impl Retire for Owned {fn drop(*self) {}}fn produce()->Owned {Owned {flag:true}}fn take(.item:Owned=produce())->bool {item.flag}fn run()->bool {take()}";
+    let selectors = luna::protocols::type_constructors::Selectors {
+        drop: Some("input::Retire"),
+        ..Default::default()
+    };
+    let package = finite_default_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        selectors,
+    )
+    .unwrap();
+    let executable = source_executable(&package, "run").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        executed_names(&package, &executable, vm.events()),
+        vec!["run", "produce", "take", "drop Owned"]
+    );
+}
+
+#[test]
+fn cleanup_variant_domains_validate_layout_and_recover_after_failure() {
+    use elaboration::verification::{
+        PlaceId,
+        drop::CleanupSession,
+        moves::{CleanupPolicy, VariantSelection},
+        ownership::{Place, Shape, State},
+    };
+    use std::collections::{BTreeMap, BTreeSet};
+    let package =
+        compile("trait Retire {fn drop(*self);}enum Choice {a,b,c}enum Outer {nested(Choice)}");
+    world(&package, |world, _| {
+        let mut session = CleanupSession::new(
+            &package,
+            world,
+            package.traits[0].declaration,
+            Budget::default(),
+        );
+        let ty = nir::Term::Nominal {
+            declaration: package
+                .enums
+                .iter()
+                .find(|item| item.name == "Choice")
+                .unwrap()
+                .declaration,
+            arguments: vec![],
+        };
+        let outer = nir::Term::Nominal {
+            declaration: package
+                .enums
+                .iter()
+                .find(|item| item.name == "Outer")
+                .unwrap()
+                .declaration,
+            arguments: vec![],
+        };
+        session.acquire(&ty, &mut 100000).unwrap();
+        session.acquire(&outer, &mut 100000).unwrap();
+        let root = PlaceId {
+            owner: 100,
+            local: 1,
+        };
+        let receiver = Place {
+            root,
+            fields: vec![],
+        };
+        let mut state = State::default();
+        state.declare(root, &Shape::Value, true, &mut 1000).unwrap();
+        for (subject, fields, tags, message) in [
+            (&ty, vec![], vec![], "invalid cleanup variant domain"),
+            (&ty, vec![], vec![3], "out of bounds"),
+            (&ty, vec![0], vec![0], "requires its enclosing variant"),
+            (
+                &outer,
+                vec![0],
+                vec![0, 2],
+                "requires its enclosing variant",
+            ),
+        ] {
+            let domains = BTreeMap::from([(fields, tags.into_iter().collect())]);
+            let error = session
+                .plan_with_domains(subject, &state, &receiver, &[], &domains, None, &mut 100000)
+                .unwrap_err();
+            assert!(error.contains(message), "{error}");
+        }
+        for path in [
+            vec![usize::MAX],
+            vec![usize::MAX, 3, 0],
+            vec![usize::MAX, 0],
+            vec![usize::MAX, 0, 9],
+        ] {
+            let domains = BTreeMap::from([(path, BTreeSet::from([0, 2]))]);
+            assert!(
+                session
+                    .plan_with_domains(&outer, &state, &receiver, &[], &domains, None, &mut 100000)
+                    .is_err()
+            );
+        }
+        let conditional = BTreeMap::from([(vec![usize::MAX, 0, 0], BTreeSet::from([0, 2]))]);
+        session
+            .plan_with_domains(
+                &outer,
+                &state,
+                &receiver,
+                &[],
+                &conditional,
+                None,
+                &mut 100000,
+            )
+            .unwrap();
+        let domains = BTreeMap::from([(vec![], BTreeSet::from([0, 2]))]);
+        assert!(
+            session
+                .plan_with_domains(&ty, &state, &receiver, &[], &domains, None, &mut 0)
+                .is_err()
+        );
+        let conflict = [VariantSelection {
+            fields: vec![],
+            index: 0,
+        }];
+        assert!(
+            session
+                .plan_with_domains(
+                    &ty,
+                    &state,
+                    &receiver,
+                    &conflict,
+                    &domains,
+                    None,
+                    &mut 100000
+                )
+                .unwrap_err()
+                .contains("invalid cleanup variant domain")
+        );
+        let plan = session
+            .plan_with_domains(&ty, &state, &receiver, &[], &domains, None, &mut 100000)
+            .unwrap();
+        let dump = plan.to_string();
+        assert!(dump.contains("variant"), "{dump}");
+        let domains = BTreeMap::from([(vec![0], BTreeSet::from([0, 2]))]);
+        session
+            .plan_with_domains(
+                &outer,
+                &state,
+                &receiver,
+                &conflict,
+                &domains,
+                None,
+                &mut 100000,
+            )
+            .unwrap();
+    });
+}
+
+#[test]
+fn inline_range_exits_retire_only_acquired_iteration_resources() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {} impl Retire for Held {fn drop(*self) {}}
+        fn make()->Held {Held {}}
+        fn visit() {}
+        fn filtered()->bool {
+            inline for i if i!=1 in 0..5 {
+                let held=make();
+                inline if i==0 {continue;}
+                visit();
+                inline if i==3 {break;}
+            } true
+        }
+        fn returned()->bool {
+            inline for i in 0..4 {
+                let held=make();
+                inline if i==1 {return true;}
+            } false
+        }
+        fn empty()->bool {
+            inline for i if false in 0..3 {let held=make();}
+            inline for i in 0..0 {let held=make();}
+            true
+        }",
+    );
+    for (entry, expected) in [
+        (
+            "filtered",
+            vec![
+                "filtered",
+                "make",
+                "drop Held",
+                "make",
+                "visit",
+                "drop Held",
+                "make",
+                "visit",
+                "drop Held",
+            ],
+        ),
+        (
+            "returned",
+            vec!["returned", "make", "drop Held", "make", "drop Held"],
+        ),
+        ("empty", vec!["empty"]),
+    ] {
+        let executable = source_executable(&package, entry).unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true),
+            "{entry}"
+        );
+        assert_eq!(
+            executed_names(&package, &executable, vm.events()),
+            expected,
+            "{entry}"
+        );
+    }
+}
+
+#[test]
+fn nested_inline_range_label_exits_preserve_cleanup_order() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Outer {} impl Retire for Outer {fn drop(*self) {}}
+        struct Inner {} impl Retire for Inner {fn drop(*self) {}}
+        fn outer()->Outer {Outer {}} fn inner()->Inner {Inner {}}
+        fn entry()->bool {
+            inline for:all i in 0..3 {
+                let a=outer();
+                inline for j in 0..3 {
+                    let b=inner();
+                    inline if i==0 {continue all;}
+                    break all;
+                }
+            } true
+        }",
+    );
+    let executable = source_executable(&package, "entry").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        executed_names(&package, &executable, vm.events()),
+        [
+            "entry",
+            "outer",
+            "inner",
+            "drop Inner",
+            "drop Outer",
+            "outer",
+            "inner",
+            "drop Inner",
+            "drop Outer"
+        ]
+    );
+}
+
+#[test]
+fn staged_mixed_packets_preserve_unused_field_cleanup_order() {
+    use comptime_interpretor::{Interpreter, Value};
+    for result in [
+        "consume(select,value)",
+        "consume(select,true)",
+        "return consume(select,true);",
+        "do {consume(select,true)}",
+    ] {
+        let source=format!("typealias Type=.Type'builtin;
+            trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct First {{}} struct Second {{}}
+            impl Retire for First {{fn drop(*self) {{}}}}
+            impl Retire for Second {{fn drop(*self) {{}}}}
+            comptime fn Boolean()->Type {{bool}}
+            fn consume(comptime select:comptime fn()->Type,value:defer select())->defer select() {{value}}
+            fn forward(comptime config:(comptime fn()->Type,First,Second,bool))->bool {{let (select,first,second,value)=config;{result}}}
+            fn run()->bool {{forward((Boolean,First {{}},Second {{}},true))}}");
+        let package = finite_default_support::compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                drop: Some("input::Retire"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let executable = source_executable(&package, "run").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        let drops = names
+            .iter()
+            .filter(|name| name.starts_with("drop "))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            drops,
+            vec!["drop Second", "drop First"],
+            "{result}: {names:?}"
+        );
+    }
+}
+
+#[test]
+fn staged_mixed_packets_retire_wildcard_fields_before_continuation() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source="typealias Type=.Type'builtin;
+        trait Duplicate {} trait Retire {fn drop(*self);}
+        struct First {} struct Second {}
+        impl Retire for First {fn drop(*self) {}}
+        impl Retire for Second {fn drop(*self) {}}
+        comptime fn Boolean()->Type {bool}
+        fn consume(comptime select:comptime fn()->Type,value:defer select())->defer select() {value}
+        fn forward(comptime config:(comptime fn()->Type,First,Second,bool))->bool {let (select,first,_,value)=config;consume(select,value)}
+        fn run()->bool {forward((Boolean,First {},Second {},true))}";
+    let package = finite_default_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            drop: Some("input::Retire"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let executable = source_executable(&package, "run").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    let names = executed_names(&package, &executable, vm.events());
+    assert_eq!(
+        names,
+        vec!["run", "forward", "drop Second", "consume", "drop First"]
+    );
+}
+
+#[test]
+fn staged_mixed_packets_preserve_runtime_parent_cleanup() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source="typealias Type=.Type'builtin;
+        trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Payload {flag:bool}
+        impl Retire for Payload {fn drop(*self) {assumes self.flag.*;}}
+        comptime fn Boolean()->Type {bool}
+        fn consume(comptime select:comptime fn()->Type,value:defer select())->defer select() {value}
+        fn forward(comptime config:(comptime fn()->Type,Payload))->bool {let (select,{flag})=config;consume(select,flag)}
+        fn run()->bool {forward((Boolean,Payload {flag:true}))}";
+    let package = finite_default_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            drop: Some("input::Retire"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let executable = source_executable(&package, "run").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        executed_names(&package, &executable, vm.events()),
+        vec!["run", "forward", "drop Payload", "consume"]
+    );
+}
+
+#[test]
+fn staged_mixed_packets_discard_enum_runtime_payloads() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source = "typealias Type=.Type'builtin;
+        trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Payload {} impl Retire for Payload {fn drop(*self) {}}
+        enum Config {some(comptime fn()->Type,Payload)}
+        comptime fn Boolean()->Type {bool}
+        comptime fn Selected(config:Config)->Type {bool}
+        fn forward(comptime config:Config)->defer Selected(config) {let _=config;true}
+        fn run()->bool {forward(Config.some(Boolean,Payload {}))}";
+    let package = finite_default_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            drop: Some("input::Retire"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let executable = source_executable(&package, "run").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        executed_names(&package, &executable, vm.events()),
+        vec!["run", "forward", "drop Payload"]
+    );
+}
+
+#[test]
+fn staged_mixed_runtime_alternatives_preserve_selected_cleanup_order() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source = "typealias Type=.Type'builtin;
+        trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {tag:bool}
+        impl Retire for Held {fn drop(*self) {if self.tag.* {left();} else {right();}}}
+        fn left() {} fn right() {}
+        comptime fn Boolean()->Type {bool}
+        fn consume(comptime select:comptime fn()->Type,value:defer select())->defer select() {value}
+        fn forward(comptime config:(comptime fn()->Type,(bool,Held,Held)))->bool {
+            let (select,((true,first,second) or (false,second,first)))=config;
+            consume(select,true)
+        }
+        fn yes()->bool {forward((Boolean,(true,Held {tag:true},Held {tag:false})))}
+        fn no()->bool {forward((Boolean,(false,Held {tag:true},Held {tag:false})))}";
+    let package = finite_default_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            drop: Some("input::Retire"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for entry in ["yes", "no"] {
+        let executable = source_executable(&package, entry).unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            executed_names(&package, &executable, vm.events()),
+            vec![
+                entry,
+                "forward",
+                "consume",
+                "drop Held",
+                "right",
+                "drop Held",
+                "left"
+            ]
+        );
+    }
+}
+
+#[test]
+fn staged_mixed_let_else_preserves_failure_exit_cleanup() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source = "typealias Type=.Type'builtin;
+        trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {} impl Retire for Held {fn drop(*self) {}}
+        comptime fn Boolean()->Type {bool}
+        fn failure()->bool {false}
+        fn consume(comptime select:comptime fn()->Type,value:defer select())->defer select() {value}
+        fn forward(comptime config:(comptime fn()->Type,bool,Held))->bool {
+            let (select,true,item)=config else {return failure();};consume(select,true)
+        }
+        fn yes()->bool {forward((Boolean,true,Held {}))}
+        fn no()->bool {forward((Boolean,false,Held {}))}
+        fn ordinary_failure()->bool {let (true,item)=(false,Held {}) else {return failure();};true}";
+    let package = finite_default_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            drop: Some("input::Retire"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for (entry, expected, names) in [
+        ("yes", true, vec!["yes", "forward", "consume", "drop Held"]),
+        ("no", false, vec!["no", "forward", "failure", "drop Held"]),
+        (
+            "ordinary_failure",
+            false,
+            vec!["ordinary_failure", "failure", "drop Held"],
+        ),
+    ] {
+        let executable = source_executable(&package, entry).unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(expected)
+        );
+        assert_eq!(executed_names(&package, &executable, vm.events()), names);
+    }
+}
+
+#[test]
+fn staged_mixed_guards_preserve_evaluation_and_cleanup_order() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source="typealias Type=.Type'builtin;
+        trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {} struct Scratch {}
+        impl Retire for Held {fn drop(*self) {}}
+        impl Retire for Scratch {fn drop(*self) {}}
+        comptime fn Boolean()->Type {bool}
+        fn accept(value:bool)->bool {let scratch=Scratch {};value}
+        fn failure()->bool {false}
+        fn consume(comptime select:comptime fn()->Type,value:defer select())->defer select() {value}
+        fn forward(comptime config:(comptime fn()->Type,bool,Held),ready:bool)->bool {
+            let (select,true,item) if accept(ready)=config else {return failure();};consume(select,true)
+        }
+        fn yes()->bool {forward((Boolean,true,Held {}),true)}
+        fn no()->bool {forward((Boolean,true,Held {}),false)}
+        fn unmatched()->bool {forward((Boolean,false,Held {}),true)}";
+    let package = finite_default_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            drop: Some("input::Retire"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for (entry, expected, names) in [
+        (
+            "yes",
+            true,
+            vec![
+                "yes",
+                "forward",
+                "accept",
+                "drop Scratch",
+                "consume",
+                "drop Held",
+            ],
+        ),
+        (
+            "no",
+            false,
+            vec![
+                "no",
+                "forward",
+                "accept",
+                "drop Scratch",
+                "failure",
+                "drop Held",
+            ],
+        ),
+        (
+            "unmatched",
+            false,
+            vec!["unmatched", "forward", "failure", "drop Held"],
+        ),
+    ] {
+        let executable = source_executable(&package, entry).unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(expected)
+        );
+        assert_eq!(executed_names(&package, &executable, vm.events()), names);
+    }
+}
+
+#[test]
+fn staged_mixed_pattern_computations_preserve_alternative_order() {
+    use comptime_interpretor::{Interpreter, Value};
+    for pattern in [
+        "(select,((true if accept(ready)) or (false if accept(ready))),item)",
+        "(select,(_ and accept(ready) is true),item)",
+    ] {
+        let source=format!("typealias Type=.Type'builtin;
+            trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Held {{}} struct Scratch {{}}
+            impl Retire for Held {{fn drop(*self) {{}}}}
+            impl Retire for Scratch {{fn drop(*self) {{}}}}
+            comptime fn Boolean()->Type {{bool}}
+            fn accept(value:bool)->bool {{let scratch=Scratch {{}};value}}
+            fn failure()->bool {{false}}
+            fn consume(comptime select:comptime fn()->Type,value:defer select())->defer select() {{value}}
+            fn forward(comptime config:(comptime fn()->Type,bool,Held),ready:bool)->bool {{
+                let {pattern}=config else {{return failure();}};let first=select;let second=first;consume(second,true)
+            }}
+            fn yes()->bool {{forward((Boolean,true,Held {{}}),true)}}
+            fn second()->bool {{forward((Boolean,false,Held {{}}),true)}}
+            fn no()->bool {{forward((Boolean,true,Held {{}}),false)}}");
+        let package = finite_default_support::compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                drop: Some("input::Retire"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for (entry, expected, continuation) in [
+            ("yes", true, "consume"),
+            ("second", true, "consume"),
+            ("no", false, "failure"),
+        ] {
+            let executable = source_executable(&package, entry).unwrap();
+            let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+            assert_eq!(
+                vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+                Value::Bool(expected)
+            );
+            assert_eq!(
+                executed_names(&package, &executable, vm.events()),
+                vec![
+                    entry,
+                    "forward",
+                    "accept",
+                    "drop Scratch",
+                    continuation,
+                    "drop Held"
+                ],
+                "{pattern}"
+            );
+        }
+    }
+}
+
+#[test]
+fn staged_nested_packet_destructuring_preserves_owned_siblings() {
+    use comptime_interpretor::{Interpreter, Value};
+    for continuation in ["consume(select,value)", "return consume(select,value);"] {
+        let source=format!("typealias Type=.Type'builtin;
+            trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct First {{}} struct Second {{}}
+            impl Retire for First {{fn drop(*self) {{}}}}
+            impl Retire for Second {{fn drop(*self) {{}}}}
+            comptime fn Boolean()->Type {{bool}}
+            fn consume(comptime select:comptime fn()->Type,value:defer select())->defer select() {{value}}
+            fn forward(comptime config:(((comptime fn()->Type,),),First,Second,bool))->bool {{
+                let (nested,first,second,value)=config;
+                let (callbacks,)=nested;let (select,)=callbacks;{continuation}
+            }}
+            fn run()->bool {{forward((((Boolean,),),First {{}},Second {{}},true))}}");
+        let package = finite_default_support::compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                drop: Some("input::Retire"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let executable = source_executable(&package, "run").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            executed_names(&package, &executable, vm.events()),
+            vec!["run", "forward", "consume", "drop Second", "drop First"],
+            "{continuation}"
+        );
+    }
+}
+
+#[test]
+fn staged_nested_guarded_packets_preserve_short_circuit_and_cleanup() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source = "typealias Type=.Type'builtin;
+        trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {} struct Scratch {}
+        impl Retire for Held {fn drop(*self) {}}
+        impl Retire for Scratch {fn drop(*self) {}}
+        comptime fn Boolean()->Type {bool}
+        fn first(value:bool)->bool {let scratch=Scratch {};value}
+        fn second(value:bool)->bool {let scratch=Scratch {};value}
+        fn failure()->bool {false}
+        fn consume(comptime select:comptime fn()->Type,value:defer select())->defer select() {value}
+        fn forward(comptime config:(((comptime fn()->Type,),),Held),a:bool,b:bool)->bool {
+            let (nested,held)=config;
+            let (callbacks,) if first(a)=nested else {return failure();};
+            let (select,) if second(b)=callbacks else {return failure();};
+            let copied=select;consume(copied,true)
+        }
+        fn yes()->bool {forward((((Boolean,),),Held {}),true,true)}
+        fn early()->bool {forward((((Boolean,),),Held {}),false,true)}
+        fn late()->bool {forward((((Boolean,),),Held {}),true,false)}";
+    let package = finite_default_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            drop: Some("input::Retire"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for (entry, expected, names) in [
+        (
+            "yes",
+            true,
+            vec![
+                "yes",
+                "forward",
+                "first",
+                "drop Scratch",
+                "second",
+                "drop Scratch",
+                "consume",
+                "drop Held",
+            ],
+        ),
+        (
+            "early",
+            false,
+            vec![
+                "early",
+                "forward",
+                "first",
+                "drop Scratch",
+                "failure",
+                "drop Held",
+            ],
+        ),
+        (
+            "late",
+            false,
+            vec![
+                "late",
+                "forward",
+                "first",
+                "drop Scratch",
+                "second",
+                "drop Scratch",
+                "failure",
+                "drop Held",
+            ],
+        ),
+    ] {
+        let executable = source_executable(&package, entry).unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(expected)
+        );
+        assert_eq!(executed_names(&package, &executable, vm.events()), names);
+    }
+}
+
+#[test]
+fn staged_alternative_bindings_preserve_runtime_selection_and_cleanup() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source="typealias Type=.Type'builtin;
+        trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {} struct Scratch {}
+        impl Retire for Held {fn drop(*self) {}}
+        impl Retire for Scratch {fn drop(*self) {}}
+        comptime fn Pick(flag:bool)->Type {if flag {bool} else {.u8'builtin}}
+        fn accept(value:bool)->bool {let scratch=Scratch {};value}
+        fn consume(comptime select:comptime fn(bool)->Type,comptime flag:bool,value:defer select(flag))->defer select(flag) {value}
+        fn forward(comptime config:(comptime fn(bool)->Type,(bool,bool),Held),ready:bool)->bool {
+            let (select,(((flag,other) if accept(ready)) or (other,flag)),held)=config;
+            consume(select,flag,other)
+        }
+        fn yes()->bool {forward((Pick,(true,true),Held {}),true)}
+        fn other()->bool {forward((Pick,(true,true),Held {}),false)}";
+    let package = finite_default_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            drop: Some("input::Retire"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for entry in ["yes", "other"] {
+        let executable = source_executable(&package, entry).unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            executed_names(&package, &executable, vm.events()),
+            vec![
+                entry,
+                "forward",
+                "accept",
+                "drop Scratch",
+                "consume",
+                "drop Held"
+            ]
+        );
+    }
+}
+
+#[test]
+fn staged_alternative_discriminants_preserve_runtime_guards_and_cleanup() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source="typealias Type=.Type'builtin;
+        trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {} struct Scratch {}
+        impl Retire for Held {fn drop(*self) {}}
+        impl Retire for Scratch {fn drop(*self) {}}
+        comptime fn Pick(flag:bool)->Type {if flag {bool} else {.u8'builtin}}
+        fn accept(value:bool)->bool {let scratch=Scratch {};value}
+        fn failure()->bool {false}
+        fn consume(comptime select:comptime fn(bool)->Type,comptime flag:bool,value:defer select(flag))->defer select(flag) {value}
+        fn forward(comptime config:(comptime fn(bool)->Type,(bool,bool,bool),Held),ready:bool)->bool {
+            let (select,(((true,flag,_) if accept(ready)) or (false,_,flag)),held)=config else {return failure();};
+            consume(select,flag,true)
+        }
+        fn first()->bool {forward((Pick,(true,true,false),Held {}),true)}
+        fn second()->bool {forward((Pick,(false,false,true),Held {}),false)}
+        fn failed()->bool {forward((Pick,(true,true,false),Held {}),false)}";
+    let package = finite_default_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            drop: Some("input::Retire"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for (entry, expected, names) in [
+        (
+            "first",
+            true,
+            vec![
+                "first",
+                "forward",
+                "accept",
+                "drop Scratch",
+                "consume",
+                "drop Held",
+            ],
+        ),
+        (
+            "second",
+            true,
+            vec!["second", "forward", "consume", "drop Held"],
+        ),
+        (
+            "failed",
+            false,
+            vec![
+                "failed",
+                "forward",
+                "accept",
+                "drop Scratch",
+                "failure",
+                "drop Held",
+            ],
+        ),
+    ] {
+        let executable = source_executable(&package, entry).unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(expected)
+        );
+        assert_eq!(executed_names(&package, &executable, vm.events()), names);
+    }
+}
+
+#[test]
+fn staged_enum_payloads_preserve_selected_resource_cleanup() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source="typealias Type=.Type'builtin;
+        trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {} impl Retire for Held {fn drop(*self) {}}
+        enum Choice where T {left(T,Held),right(Held,T)}
+        comptime fn Pick(flag:bool)->Type {if flag {bool} else {.u8'builtin}}
+        fn accept(value:bool)->bool {value}
+        fn failure()->bool {false}
+        fn consume(comptime select:comptime fn(bool)->Type,comptime flag:bool,value:defer select(flag))->defer select(flag) {value}
+        fn forward(comptime config:(comptime fn(bool)->Type,Choice<bool>),ready:bool)->bool {
+            let (select,(.left(flag,held) or .right(held,flag))) if accept(ready)=config else {return failure();};
+            consume(select,flag,true)
+        }
+        fn left()->bool {forward((Pick,Choice<bool>.left(true,Held {})),true)}
+        fn right()->bool {forward((Pick,Choice<bool>.right(Held {},true)),true)}
+        fn failed()->bool {forward((Pick,Choice<bool>.right(Held {},true)),false)}";
+    let package = finite_default_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            drop: Some("input::Retire"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for (entry, expected, continuation) in [
+        ("left", true, "consume"),
+        ("right", true, "consume"),
+        ("failed", false, "failure"),
+    ] {
+        let executable = source_executable(&package, entry).unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(expected)
+        );
+        assert_eq!(
+            executed_names(&package, &executable, vm.events()),
+            vec![entry, "forward", "accept", continuation, "drop Held"]
+        );
+    }
+}
+
+#[test]
+fn tuple_enumeration_preserves_iteration_and_unvisited_resource_cleanup() {
+    use comptime_interpretor::{Interpreter, Value};
+    for (guard, body, expected) in [
+        (
+            "",
+            "let held=element;visit();",
+            vec![
+                "run",
+                "source",
+                "visit",
+                "drop First",
+                "visit",
+                "drop Second",
+                "visit",
+                "drop Third",
+                "after",
+            ],
+        ),
+        (
+            "",
+            "let held=element;visit();inline if index==0 {break;}",
+            vec![
+                "run",
+                "source",
+                "visit",
+                "drop First",
+                "drop Third",
+                "drop Second",
+                "after",
+            ],
+        ),
+        (
+            "",
+            "let held=element;visit();continue;",
+            vec![
+                "run",
+                "source",
+                "visit",
+                "drop First",
+                "visit",
+                "drop Second",
+                "visit",
+                "drop Third",
+                "after",
+            ],
+        ),
+        (
+            "",
+            "let held=element;visit();return true;",
+            vec![
+                "run",
+                "source",
+                "visit",
+                "drop First",
+                "drop Third",
+                "drop Second",
+            ],
+        ),
+        (
+            "if index!=1",
+            "let held=element;visit();",
+            vec![
+                "run",
+                "source",
+                "visit",
+                "drop First",
+                "drop Second",
+                "visit",
+                "drop Third",
+                "after",
+            ],
+        ),
+    ] {
+        for element_pattern in ["element", "_"] {
+            let body = if element_pattern == "_" {
+                body.replace("let held=element;", "")
+            } else {
+                body.to_owned()
+            };
+            let source=format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct First {{}} struct Second {{}} struct Third {{}}
+            impl Retire for First {{fn drop(*self) {{}}}}
+            impl Retire for Second {{fn drop(*self) {{}}}}
+            impl Retire for Third {{fn drop(*self) {{}}}}
+            fn source()->(First,Second,Third) {{(First {{}},Second {{}},Third {{}})}}
+            fn visit() {{}} fn after() {{}}
+            fn run()->bool {{inline for (index,{element_pattern}) {guard} in source()'tuple_enumerate {{{body}}}after();true}}");
+            let package = finite_default_support::compile_with_source_bindings(
+                &source,
+                &Default::default(),
+                luna::protocols::type_constructors::Selectors {
+                    drop: Some("input::Retire"),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let executable = source_executable(&package, "run").unwrap();
+            let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+            assert_eq!(
+                vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+                Value::Bool(true),
+                "{body}"
+            );
+            assert_eq!(
+                executed_names(&package, &executable, vm.events()),
+                expected,
+                "{element_pattern}: {guard}: {body}"
+            );
+        }
+    }
+}
+
+#[test]
+fn tuple_enumeration_nested_label_exits_preserve_remaining_owners() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source = "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Outer {} struct Inner {}
+        impl Retire for Outer {fn drop(*self) {}}
+        impl Retire for Inner {fn drop(*self) {}}
+        fn outer()->Outer {Outer {}} fn inner()->Inner {Inner {}}
+        fn run()->bool {
+            inline for:all (i,a) in (outer(),outer())'tuple_enumerate {
+                inline for (j,b) in (inner(),inner())'tuple_enumerate {
+                    inline if i==0 {continue all;}
+                    break all;
+                }
+            }true
+        }";
+    let package = finite_default_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            drop: Some("input::Retire"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let executable = source_executable(&package, "run").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        executed_names(&package, &executable, vm.events()),
+        vec![
+            "run",
+            "outer",
+            "outer",
+            "inner",
+            "inner",
+            "drop Inner",
+            "drop Inner",
+            "drop Outer",
+            "inner",
+            "inner",
+            "drop Inner",
+            "drop Inner",
+            "drop Outer"
+        ]
+    );
+}
+
+#[test]
+fn tuple_field_dependencies_follow_or_candidate_binding_and_cleanup_order() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source = "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {ready:bool}
+        impl Retire for Held {fn drop(*self) {if self.ready {yes();} else {no();}}}
+        fn yes() {} fn no() {}
+        fn accept(value:bool)->bool {value}
+        fn run()->bool {
+            (Held {ready:false},Held {ready:true}) match {
+                (first,(second if accept(first.ready))) or
+                (second,(first if accept(first.ready))) => first.ready,
+                _=>false,
+            }
+        }";
+    let package = finite_default_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            drop: Some("input::Retire"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let executable = source_executable(&package, "run").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        executed_names(&package, &executable, vm.events()),
+        vec![
+            "run",
+            "accept",
+            "accept",
+            "drop Held",
+            "yes",
+            "drop Held",
+            "no"
+        ]
+    );
+}
+
+#[test]
+fn generic_tuple_iteration_specializes_transferred_and_remaining_cleanup() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source = "trait Retire {fn drop(*self);} trait Duplicate {}
+        struct First {} struct Second {}
+        impl Retire for First {fn drop(*self) {}}
+        impl Retire for Second {fn drop(*self) {}}
+        fn consume(value:T) where T {}
+        fn walk(values:(A,B)) where A,B {
+            inline for (index,element) in values'tuple_enumerate {
+                consume(element);
+                break;
+            }
+        }
+        fn run()->bool {walk((First {},Second {}));walk((Second {},First {}));true}";
+    let package = finite_default_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            drop: Some("input::Retire"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let executable = source_executable(&package, "run").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        executed_names(&package, &executable, vm.events()),
+        vec![
+            "run",
+            "walk",
+            "consume",
+            "drop First",
+            "drop Second",
+            "walk",
+            "consume",
+            "drop Second",
+            "drop First"
+        ]
+    );
+}
+
+#[test]
+fn open_loop_aggregate_return_cleans_only_prepared_fields() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source = "trait Retire {fn drop(*self);} trait Duplicate {}
+        struct Held {} impl Retire for Held {fn drop(*self) {}}
+        fn make()->Held {Held {}} fn unreachable_call() {}
+        fn choose(comptime enabled:bool,value:bool)->bool {
+            inline if enabled {}
+            while true {
+                let ignored=(make(),do {return value;},do {unreachable_call();break;false});
+            }
+        }
+        fn run()->bool {choose(true,true)}";
+    let package = finite_default_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            drop: Some("input::Retire"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let executable = source_executable(&package, "run").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        executed_names(&package, &executable, vm.events()),
+        vec!["run", "choose", "make", "drop Held"]
+    );
+}
+
+#[test]
+fn open_call_input_return_cleans_prepared_generic_argument() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source = "trait Retire {fn drop(*self);} trait Duplicate {}
+        struct Held {} impl Retire for Held {fn drop(*self) {}}
+        fn make()->Held {Held {}}
+        fn consume(first:T,second:bool,third:bool) where T {}
+        fn choose(comptime enabled:bool,value:bool)->bool {
+            inline if enabled {}
+            while true {consume(make(),do {return value;},do {break;false});}
+        }
+        fn run()->bool {choose(true,true)}";
+    let package = finite_default_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            drop: Some("input::Retire"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let executable = source_executable(&package, "run").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        executed_names(&package, &executable, vm.events()),
+        vec!["run", "choose", "make", "drop Held"]
+    );
+}
+
+#[test]
+fn open_call_tuple_spread_transfers_each_resource_once() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source = "trait Retire {fn drop(*self);} trait Duplicate {}
+        struct First {} struct Second {}
+        impl Retire for First {fn drop(*self) {}}
+        impl Retire for Second {fn drop(*self) {}}
+        fn packet()->(First,Second) {(First {},Second {})}
+        fn consume(first:First,second:Second) {}
+        fn choose(comptime enabled:bool)->bool {inline if enabled {} consume(...packet());true}
+        fn run()->bool {choose(true)}";
+    let package = finite_default_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            drop: Some("input::Retire"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let executable = source_executable(&package, "run").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        executed_names(&package, &executable, vm.events()),
+        vec![
+            "run",
+            "choose",
+            "packet",
+            "consume",
+            "drop Second",
+            "drop First"
+        ]
+    );
+}
+
+#[test]
+fn open_inline_packet_selection_transfers_only_the_selected_resources() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source="trait Retire {fn drop(*self);} trait Duplicate {}
+        struct First {} struct Second {}
+        impl Retire for First {fn drop(*self) {}}
+        impl Retire for Second {fn drop(*self) {}}
+        fn yes()->(First,Second) {(First {},Second {})}
+        fn no()->(First,Second) {(First {},Second {})}
+        fn consume(first:First,second:Second) {}
+        fn choose(comptime flag:bool)->bool {consume(...do {inline if flag {yes()} else {no()}});true}
+        fn run()->bool {choose(true)} fn other()->bool {choose(false)}";
+    let package = finite_default_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            drop: Some("input::Retire"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for (entry, packet) in [("run", "yes"), ("other", "no")] {
+        let executable = source_executable(&package, entry).unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            executed_names(&package, &executable, vm.events()),
+            vec![
+                entry,
+                "choose",
+                packet,
+                "consume",
+                "drop Second",
+                "drop First"
+            ]
+        );
+    }
+}
+
+#[test]
+fn open_literal_packet_forwarding_delivers_runtime_resources_once() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source = "trait Retire {fn drop(*self);} trait Duplicate {}
+        struct First {} struct Second {}
+        impl Retire for First {fn drop(*self) {}}
+        impl Retire for Second {fn drop(*self) {}}
+        fn first()->First {First {}} fn second()->Second {Second {}}
+        fn consume(comptime flag:bool,first:First,second:Second) {inline if flag {}}
+        fn choose(comptime flag:bool)->bool {consume(...(),...(flag,first()),second());true}
+        fn run()->bool {choose(true)} fn other()->bool {choose(false)}";
+    let package = finite_default_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            drop: Some("input::Retire"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for entry in ["run", "other"] {
+        let executable = source_executable(&package, entry).unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            executed_names(&package, &executable, vm.events()),
+            vec![
+                entry,
+                "choose",
+                "first",
+                "second",
+                "consume",
+                "drop Second",
+                "drop First"
+            ]
+        );
+    }
+}
+
+#[test]
+fn computed_packet_to_open_instance_is_prepared_and_cleaned_once() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source = "trait Retire {fn drop(*self);} trait Duplicate {}
+        struct First {} struct Second {}
+        impl Retire for First {fn drop(*self) {}}
+        impl Retire for Second {fn drop(*self) {}}
+        fn packet()->(First,Second) {(First {},Second {})}
+        fn consume(comptime flag:bool,first:First,second:Second) {inline if flag {}}
+        fn choose(comptime flag:bool)->bool {inline if flag {} consume(true,...packet());true}
+        fn run()->bool {choose(true)}";
+    let package = finite_default_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            drop: Some("input::Retire"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let executable = source_executable(&package, "run").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        executed_names(&package, &executable, vm.events()),
+        vec![
+            "run",
+            "choose",
+            "packet",
+            "consume",
+            "drop Second",
+            "drop First"
+        ]
+    );
+}
+
+#[test]
+fn pure_nested_closure_factories_retire_owned_captures_once() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source="trait Retire {fn drop(*self);} trait Duplicate {}
+        struct Token {flag:bool} impl Retire for Token {fn drop(*self) {}}
+        typealias Inner=%{token:Token} fn()->bool;
+        typealias Outer=%{inner:Inner} fn()->bool;
+        fn make(token:Token)->Inner {|| token.flag}
+        fn nest(inner:Inner)->Outer {|| inner()}
+        pure fn invoke()->bool {let callback=nest(make(Token {flag:true}));callback() and callback()}
+        pure fn discard()->bool {let unused=nest(make(Token {flag:true}));true}
+        fn run()->bool {invoke()} fn unused()->bool {discard()}";
+    let package = finite_default_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            drop: Some("input::Retire"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for (entry, body) in [("run", "invoke"), ("unused", "discard")] {
+        let executable = source_executable(&package, entry).unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            executed_names(&package, &executable, vm.events()),
+            vec![entry, body, "make", "nest", "drop Token"]
+        );
+    }
+}
+
+#[test]
+fn nested_owned_closures_keep_distinct_invocation_and_abandonment_order() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source="trait Retire {fn drop(*self);} trait Duplicate {}
+        struct First {flag:bool} struct Second {flag:bool} struct Tail {flag:bool}
+        impl Retire for First {fn drop(*self) {}}
+        impl Retire for Second {fn drop(*self) {}}
+        impl Retire for Tail {fn drop(*self) {}}
+        typealias Inner=%{first:First,second:Second} fn()->bool;
+        typealias Outer=%{inner:Inner,tail:Tail} fn()->bool;
+        fn consume(first:First,second:Second)->bool {first.flag and second.flag}
+        fn make(first:First,second:Second)->Inner {|| consume(first,second)}
+        fn nest(inner:Inner,tail:Tail)->Outer {|| inner() and tail.flag}
+        pure fn choose(stop:bool)->bool {let callback=nest(make(First {flag:true},Second {flag:true}),Tail {flag:true});if stop {return true;}callback()}
+        fn run()->bool {choose(false)} fn abandon()->bool {choose(true)}";
+    let package = finite_default_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            drop: Some("input::Retire"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for (entry, drops) in [
+        (
+            "run",
+            vec!["consume", "drop Second", "drop First", "drop Tail"],
+        ),
+        ("abandon", vec!["drop Tail", "drop Second", "drop First"]),
+    ] {
+        let executable = source_executable(&package, entry).unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        let mut expected = vec![entry, "choose", "make", "nest"];
+        expected.extend(drops);
+        assert_eq!(executed_names(&package, &executable, vm.events()), expected);
+    }
+    let invalid = source.replace(
+        "if stop {return true;}callback()}",
+        "if stop {return true;}callback() and callback()}",
+    );
+    let error = finite_default_support::compile_with_source_bindings(
+        &invalid,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            drop: Some("input::Retire"),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(error.contains("P4 evidence"), "{error}");
+}
+
+#[test]
+fn open_peer_spread_inference_preserves_owned_input_cleanup() {
+    use comptime_interpretor::{Interpreter, Value};
+    for (parameters, arguments, events) in [
+        (
+            "owner:T,number:.u8'builtin,value:T.as(Source).Element",
+            "make(),...do {(7,true)}",
+            vec!["run", "forward", "make", "consume", "drop Owner"],
+        ),
+        (
+            "owner:T,number:.u8'builtin,value:T.as(Source).Element",
+            "make(),...do {return true;(7,true)}",
+            vec!["run", "forward", "make", "drop Owner"],
+        ),
+        (
+            "number:.u8'builtin,value:T.as(Source).Element,owner:T",
+            "...do {return true;(7,true)},make()",
+            vec!["run", "forward"],
+        ),
+    ] {
+        let source=format!("trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            trait Source {{assoc Element:.Type'builtin=bool;}}
+            struct Owner {{}} impl Source for Owner {{}}
+            impl Retire for Owner {{fn drop(*self) {{}}}}
+            fn make()->Owner {{Owner {{}}}}
+            fn consume(comptime flag:bool,{parameters})->bool where T:-Source {{inline if flag {{true}} else {{false}}}}
+            fn forward(comptime flag:bool)->bool {{consume(flag,{arguments})}}
+            fn run()->bool {{forward(true)}}");
+        let package = finite_default_support::compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                drop: Some("input::Retire"),
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("{arguments}: {e}"));
+        let executable = source_executable(&package, "run").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            executed_names(&package, &executable, vm.events()),
+            events,
+            "{arguments}"
+        );
+    }
+}
+
+#[test]
+fn open_peer_spreads_do_not_duplicate_or_revive_moved_values() {
+    use comptime_interpretor::{Interpreter, Value};
+    let prefix="trait Retire {fn drop(*self);} trait Duplicate {}
+        struct Owner {} impl Retire for Owner {fn drop(*self) {}}
+        fn make()->Owner {Owner {}}
+        fn consume(comptime flag:bool,first:T,second:T)->bool where T {inline if flag {true} else {false}}";
+    for body in [
+        "let owner=make();consume(flag,owner,...do {(owner,)})",
+        "let owner=make();consume(flag,owner,...do {(make(),)});let again=owner;true",
+    ] {
+        let source = format!(
+            "{prefix} fn forward(comptime flag:bool)->bool {{{body}}} fn run()->bool {{forward(true)}}"
+        );
+        let package = finite_default_support::compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                drop: Some("input::Retire"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let error = source_executable(&package, "run").unwrap_err();
+        assert!(error.contains("unavailable"), "{body}: {error}");
+    }
+    let source = format!(
+        "{prefix} fn forward(comptime flag:bool)->bool {{
+        let owner=make();consume(flag,owner,...do {{(make(),)}});let another=make();true
+    }} fn run()->bool {{forward(true)}}"
+    );
+    let package = finite_default_support::compile_with_source_bindings(
+        &source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            drop: Some("input::Retire"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let executable = source_executable(&package, "run").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        executed_names(&package, &executable, vm.events()),
+        vec![
+            "run",
+            "forward",
+            "make",
+            "make",
+            "consume",
+            "drop Owner",
+            "drop Owner",
+            "make",
+            "drop Owner"
+        ]
+    );
+}
+
+#[test]
+fn inferred_collection_fields_preserve_owned_cleanup() {
+    use comptime_interpretor::{Interpreter, Value};
+    for (arguments, events) in [
+        (
+            "make(),.bias=bias(),|owner|true",
+            vec!["run", "make", "bias", "consume", "drop Owner"],
+        ),
+        (
+            "make(),.bias=do {return true;bias()},|owner|true",
+            vec!["run", "make", "drop Owner"],
+        ),
+        (
+            "make(),do {return true;|owner|true}",
+            vec!["run", "make", "drop Owner"],
+        ),
+        ("do {return true;make()},|owner:Owner|true", vec!["run"]),
+    ] {
+        let source = format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            struct Owner {{}} impl Retire for Owner {{fn drop(*self) {{}}}}
+            fn make()->Owner {{Owner {{}}}} fn bias()->bool {{true}}
+            fn consume(...items:(T,fn(T)->bool),.bias:bool=false)->bool where T {{true}}
+            fn run()->bool {{consume({arguments})}}"
+        );
+        let package = finite_default_support::compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                drop: Some("input::Retire"),
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("{arguments}: {e}"));
+        let executable =
+            source_executable(&package, "run").unwrap_or_else(|e| panic!("{arguments}: {e}"));
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            executed_names(&package, &executable, vm.events()),
+            events,
+            "{arguments}"
+        );
+    }
+}
+
+#[test]
+fn inferred_collection_fields_reject_duplicate_ownership() {
+    let prefix =
+        "trait Retire {fn drop(*self);} trait Duplicate {} struct Owner {} impl Retire for Owner {fn drop(*self) {}}
+        fn make()->Owner {Owner {}}
+        fn consume(...items:(T,T,fn(T)->bool))->bool where T {true}";
+    for body in [
+        "let owner=make();consume(owner,owner,|value|true)",
+        "let owner=make();consume(owner,make(),|value|true);let again=owner;true",
+    ] {
+        let source = format!("{prefix} fn run()->bool {{{body}}}");
+        let package = finite_default_support::compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                drop: Some("input::Retire"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let error = source_executable(&package, "run").unwrap_err();
+        assert!(error.contains("unavailable"), "{body}: {error}");
+    }
+}
+
+#[test]
+fn inferred_property_fields_preserve_owned_cleanup() {
+    use comptime_interpretor::{Interpreter, Value};
+    for (callback, events) in [
+        ("|owner|true", vec!["run", "make", "consume", "drop Owner"]),
+        (
+            "do {return true;|owner|true}",
+            vec!["run", "make", "drop Owner"],
+        ),
+    ] {
+        let source=format!("trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            struct Owner {{}} impl Retire for Owner {{fn drop(*self) {{}}}}
+            fn make()->Owner {{Owner {{}}}}
+            fn packet(...fields:T)->T where T {{fields}}
+            fn exemplar(value:T)->bool where T {{true}}
+            fn sample()->T where T {{sample<T>()}}
+            fn consume(...fields:(packet {{value:sample<T>(),callback:exemplar<T>}})'type)->bool where T {{true}}
+            fn run()->bool {{consume {{value:make(),callback:{callback}}}}}");
+        let package = finite_default_support::compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                drop: Some("input::Retire"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let executable = source_executable(&package, "run").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            executed_names(&package, &executable, vm.events()),
+            events,
+            "{callback}"
+        );
+    }
+}
+
+#[test]
+fn staged_factory_callees_transfer_owned_capture_and_retire_once() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source="trait Retire {fn drop(*self);} trait Duplicate {}
+        struct Token {flag:bool} impl Retire for Token {fn drop(*self) {}}
+        typealias Action=%{token:Token} fn(bool)->bool;
+        fn factory(comptime mode:bool,token:Token)->Action {inline if mode {|value:bool| token.flag and value} else {|value:bool| token.flag or value}}
+        fn input()->bool {true}
+        fn choose(comptime flag:bool)->bool {(do {factory(flag,Token {flag:true})})(input())}
+        fn abandon(comptime flag:bool)->bool {(do {factory(flag,Token {flag:true})})(do {return true;false})}
+        fn unused()->bool {abandon(true)}
+        fn run()->bool {choose(true) and choose(false)}";
+    let package = finite_default_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            drop: Some("input::Retire"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let executable = source_executable(&package, "run").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        executed_names(&package, &executable, vm.events()),
+        vec![
+            "run",
+            "choose",
+            "factory",
+            "input",
+            "drop Token",
+            "choose",
+            "factory",
+            "input",
+            "drop Token"
+        ]
+    );
+    let executable = source_executable(&package, "unused").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        executed_names(&package, &executable, vm.events()),
+        vec!["unused", "abandon", "factory", "drop Token"]
+    );
+}
+
+#[test]
+fn open_effect_handler_exit_cleans_staged_factory_inputs() {
+    use comptime_interpretor::{Interpreter, Value};
+    let source="trait Retire {fn drop(*self);} trait Duplicate {}
+        struct Token {flag:bool} impl Retire for Token {fn drop(*self) {}}
+        effect poll()->bool;typealias Action=%{token:Token} fn(bool)->bool;
+        fn factory(comptime mode:bool,token:Token)->#poll Action {poll()#;inline if mode {|value:bool| token.flag and value} else {|value:bool| token.flag or value}}
+        fn input()->bool {false}
+        fn choose(comptime mode:bool)->bool {(do {factory(mode,Token {flag:true})# {poll()=>{return true;},}})(input())}
+        fn run()->bool {choose(true) and choose(false)}";
+    for declaration in ["effect poll", "inline effect poll"] {
+        let source = source.replace("effect poll", declaration);
+        let package = finite_default_support::compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                drop: Some("input::Retire"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let executable = source_executable(&package, "run").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            executed_names(&package, &executable, vm.events()),
+            vec![
+                "run",
+                "choose",
+                "factory",
+                "drop Token",
+                "choose",
+                "factory",
+                "drop Token"
+            ]
+        );
+    }
+}
+
+#[test]
+fn staged_closure_instances_do_not_acquire_copy_from_captures() {
+    for copied in ["callback", "callback.ref.*"] {
+        let source = format!(
+            "trait Retire {{fn drop(*self);}} trait Duplicate {{}}
+            typealias Action=%{{flag:bool}} fn()->bool;
+            fn factory(comptime mode:bool,flag:bool)->Action {{
+                inline if mode {{|| flag}} else {{|| not flag}}
+            }}
+            fn choose(comptime mode:bool,flag:bool)->bool {{
+                let callback=factory(mode,flag);let other={copied};
+                callback() and other()
+            }}
+            fn run()->bool {{choose(true,true) and choose(false,false)}}"
+        );
+        let result = finite_default_support::compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                copy: Some("input::Duplicate"),
+                ..Default::default()
+            },
+        )
+        .and_then(|package| source_executable(&package, "run"));
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("call of unavailable value") || error.contains("Copy"),
+            "{copied}: {error}"
+        );
+        if copied == "callback" {
+            for source in [
+                source.replace("callback() and other()", "other()"),
+                source.replace("let callback=", "var callback=").replace(
+                    "callback() and other()",
+                    "callback=factory(mode,flag);callback() and other()",
+                ),
+            ] {
+                let package = finite_default_support::compile_with_source_bindings(
+                    &source,
+                    &Default::default(),
+                    luna::protocols::type_constructors::Selectors {
+                        copy: Some("input::Duplicate"),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let executable = source_executable(&package, "run").unwrap();
+                let mut vm = comptime_interpretor::Interpreter::from_iir(
+                    &executable.graph,
+                    Default::default(),
+                )
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+                assert_eq!(
+                    vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+                    comptime_interpretor::Value::Bool(true)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn staged_quote_effect_payloads_preserve_cleanup_across_handler_completion() {
+    use comptime_interpretor::{Interpreter, Value};
+    for effect in ["effect", "inline effect"] {
+        for finish in ["resume ticket.flag;", "return ticket.flag;"] {
+            let original = compile(&format!(
+                "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+                struct Ticket {{flag:bool}} struct Producer {{}} struct Sink {{}} struct Caller {{}}
+                impl Retire for Ticket {{fn drop(*self) {{}}}}
+                impl Retire for Producer {{fn drop(*self) {{}}}}
+                impl Retire for Sink {{fn drop(*self) {{}}}}
+                impl Retire for Caller {{fn drop(*self) {{}}}}
+                {effect} deliver(value:T)->bool where T;
+                quote fn produce(comptime enabled:bool,item:T)->#deliver<T> bool where T {{
+                    let producer=Producer {{}};
+                    if enabled {{return deliver<T>(item)#;}}false
+                }}
+                fn entry()->bool {{let caller=Caller {{}};
+                    produce(true,Ticket {{flag:true}})# {{
+                        deliver<Ticket>(ticket)=>do {{let sink=Sink {{}};{finish}}},
+                    }}
+                }}"
+            ));
+            for expanded in [false, true] {
+                let mut package = original.clone();
+                if expanded {
+                    elaboration::program::inlining::expand(&mut package, &mut 1_000_000).unwrap();
+                }
+                let executable = source_executable(&package, "entry").unwrap_or_else(|error| {
+                    panic!("{effect}, {finish}, expanded={expanded}: {error}")
+                });
+                if effect == "inline effect" {
+                    let entry = executable.graph.function(&executable.entry).unwrap();
+                    let mut remaining = 0;
+                    iir::visit::expression(&entry.function.body, &mut 100_000, |expression, _| {
+                        if matches!(
+                            expression.kind,
+                            nir::program::ExprKind::EffectHandle { .. }
+                                | nir::program::ExprKind::EffectRequest { .. }
+                        ) {
+                            remaining += 1;
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
+                    assert_eq!(
+                        remaining, 0,
+                        "staged inline effect must be eliminated: {finish}, expanded={expanded}"
+                    );
+                }
+                let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                    .unwrap()
+                    .with_cleanup_schedule(&executable.schedule)
+                    .unwrap();
+                assert_eq!(
+                    vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+                    Value::Bool(true)
+                );
+                let names = executed_names(&package, &executable, vm.events());
+                let drops = names
+                    .iter()
+                    .filter(|name| name.starts_with("drop "))
+                    .map(String::as_str)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    drops,
+                    ["drop Sink", "drop Ticket", "drop Producer", "drop Caller"],
+                    "{effect}, {finish}, expanded={expanded}"
+                );
+                assert!(!names.iter().any(|name| name == "produce"), "{names:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn staged_quote_effect_repeated_and_nested_calls_keep_unrequested_payload_ownership() {
+    use comptime_interpretor::{Interpreter, Value};
+    for nested in [false, true] {
+        let callee = if nested { "forward" } else { "produce" };
+        let source = format!(
+            "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Ticket {{flag:bool}} struct Producer {{}} struct Sink {{}} struct Caller {{}}
+            impl Retire for Ticket {{fn drop(*self) {{}}}}
+            impl Retire for Producer {{fn drop(*self) {{}}}}
+            impl Retire for Sink {{fn drop(*self) {{}}}}
+            impl Retire for Caller {{fn drop(*self) {{}}}}
+            effect deliver(value:T)->bool where T;
+            quote fn produce(comptime enabled:bool,item:T)->#deliver<T> bool where T {{
+                let producer=Producer {{}};
+                if enabled {{return deliver<T>(item)#;}}false
+            }}
+            quote fn forward(comptime enabled:bool,item:T)->#deliver<T> bool where T {{
+                produce(enabled,item)
+            }}
+            fn entry()->bool {{let caller=Caller {{}};
+                let first={callee}(false,Ticket {{flag:true}})# {{
+                    deliver<Ticket>(ticket)=>do {{let sink=Sink {{}};resume ticket.flag;}},
+                }};
+                let second={callee}(true,Ticket {{flag:true}})# {{
+                    deliver<Ticket>(ticket)=>do {{let sink=Sink {{}};resume ticket.flag;}},
+                }};
+                not first and second
+            }}"
+        );
+        let package = compile(&source);
+        let executable = source_executable(&package, "entry").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        let drops = names
+            .iter()
+            .filter(|name| name.starts_with("drop "))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            drops,
+            [
+                "drop Producer",
+                "drop Ticket",
+                "drop Sink",
+                "drop Ticket",
+                "drop Producer",
+                "drop Caller"
+            ],
+            "nested={nested}"
+        );
+        assert!(
+            !names
+                .iter()
+                .any(|name| name == "produce" || name == "forward"),
+            "{names:?}"
+        );
+    }
+}
+
+#[test]
+fn staged_quote_effect_postcondition_failure_cleans_transferred_and_retained_payloads() {
+    use comptime_interpretor::{ErrorKind, Interpreter};
+    for enabled in [false, true] {
+        let mut package = compile(&format!(
+            "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Ticket {{flag:bool}} struct Producer {{}} struct Sink {{}} struct Caller {{}}
+            impl Retire for Ticket {{fn drop(*self) {{}}}}
+            impl Retire for Producer {{fn drop(*self) {{}}}}
+            impl Retire for Sink {{fn drop(*self) {{}}}}
+            impl Retire for Caller {{fn drop(*self) {{}}}}
+            effect deliver(value:T)->bool where T;
+            quote fn produce(comptime enabled:bool,item:T)->result:#deliver<T> bool
+            where T, ensures result {{
+                let producer=Producer {{}};
+                if enabled {{deliver<T>(item)#;}}true
+            }}
+            fn entry()->bool {{let caller=Caller {{}};
+                produce({enabled},Ticket {{flag:true}})# {{
+                    deliver<Ticket>(ticket)=>do {{let sink=Sink {{}};resume ticket.flag;}},
+                }}
+            }}"
+        ));
+        // Exercise the runtime rejection path of a checked contract without
+        // weakening the source verifier to accept an unprovable postcondition.
+        let template = package
+            .quote_templates
+            .iter_mut()
+            .find(|function| function.name == "produce")
+            .unwrap();
+        template.postconditions[0].kind =
+            nir::program::ExprKind::Literal(nir::program::Literal::Bool(false));
+        let executable = source_executable(&package, "entry").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![])
+                .unwrap_err()
+                .kind,
+            ErrorKind::ProgramContractRejected
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        let drops = names
+            .iter()
+            .filter(|name| name.starts_with("drop "))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let expected = if enabled {
+            vec!["drop Sink", "drop Ticket", "drop Producer", "drop Caller"]
+        } else {
+            vec!["drop Producer", "drop Ticket", "drop Caller"]
+        };
+        assert_eq!(drops, expected, "enabled={enabled}");
+    }
+}
+
+#[test]
+fn staged_quote_effect_precondition_failure_retires_only_prepared_inputs() {
+    use comptime_interpretor::{ErrorKind, Interpreter};
+    let mut package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Ticket {flag:bool} struct Producer {} struct Sink {} struct Caller {}
+        impl Retire for Ticket {fn drop(*self) {}}
+        impl Retire for Producer {fn drop(*self) {}}
+        impl Retire for Sink {fn drop(*self) {}}
+        impl Retire for Caller {fn drop(*self) {}}
+        effect deliver(value:T)->bool where T;
+        quote fn produce(comptime enabled:bool,item:T)->#deliver<T> bool
+        where T, requires enabled or not enabled {
+            let producer=Producer {};
+            if enabled {return deliver<T>(item)#;}false
+        }
+        fn entry()->bool {let caller=Caller {};
+            produce(true,Ticket {flag:true})# {
+                deliver<Ticket>(ticket)=>do {let sink=Sink {};resume ticket.flag;},
+            }
+        }",
+    );
+    let template = package
+        .quote_templates
+        .iter_mut()
+        .find(|function| function.name == "produce")
+        .unwrap();
+    template.preconditions[0].kind =
+        nir::program::ExprKind::Literal(nir::program::Literal::Bool(false));
+    let executable = source_executable(&package, "entry").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![])
+            .unwrap_err()
+            .kind,
+        ErrorKind::ProgramContractRejected
+    );
+    let names = executed_names(&package, &executable, vm.events());
+    let drops = names
+        .iter()
+        .filter(|name| name.starts_with("drop "))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(drops, ["drop Ticket", "drop Caller"]);
+}
+
+#[test]
+fn materialized_inline_effects_expand_staged_partial_forwarding_with_owned_payloads() {
+    use comptime_interpretor::{Interpreter, Value};
+    for finish in ["resume ticket.flag;", "return ticket.flag;"] {
+        let source=format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Ticket {{flag:bool}} struct Producer {{}} struct Middle {{}} struct Sink {{}} struct Caller {{}}
+            impl Retire for Ticket {{fn drop(*self) {{}}}}
+            impl Retire for Producer {{fn drop(*self) {{}}}}
+            impl Retire for Middle {{fn drop(*self) {{}}}}
+            impl Retire for Sink {{fn drop(*self) {{}}}}
+            impl Retire for Caller {{fn drop(*self) {{}}}}
+            inline effect deliver(value:T)->bool where T;
+            quote fn produce(comptime enabled:bool,item:T)->#deliver<T> bool where T {{
+                let producer=Producer {{}};
+                if enabled {{return deliver<T>(item)#;}}false
+            }}
+            quote fn forward(comptime enabled:bool,item:T)->#deliver<T> bool where T {{
+                let middle=Middle {{}};
+                produce(enabled,item)# {{deliver<T>(ticket) if false=>false,}}
+            }}
+            fn entry()->bool {{let caller=Caller {{}};
+                forward(true,Ticket {{flag:true}})# {{
+                    deliver<Ticket>(ticket)=>do {{let sink=Sink {{}};{finish}}},
+                }}
+            }}");
+        let package = compile(&source);
+        let executable = source_executable(&package, "entry").unwrap();
+        let entry = executable.graph.function(&executable.entry).unwrap();
+        let mut remaining = 0;
+        iir::visit::expression(&entry.function.body, &mut 100_000, |expression, _| {
+            if matches!(
+                expression.kind,
+                nir::program::ExprKind::EffectHandle { .. }
+                    | nir::program::ExprKind::EffectRequest { .. }
+            ) {
+                remaining += 1;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(remaining, 0, "{finish}");
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        let drops = names
+            .iter()
+            .filter(|name| name.starts_with("drop "))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            drops,
+            [
+                "drop Sink",
+                "drop Ticket",
+                "drop Producer",
+                "drop Middle",
+                "drop Caller"
+            ],
+            "{finish}"
+        );
+    }
+}
+
+#[test]
+fn materialized_inline_effects_rollback_when_a_runtime_callee_remains() {
+    use comptime_interpretor::{Interpreter, Value};
+    let mut reference = None;
+    for effect in ["effect", "inline effect"] {
+        let source=format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Ticket {{flag:bool}} struct Leaf {{}} struct Producer {{}} struct Sink {{}} struct Caller {{}}
+            impl Retire for Ticket {{fn drop(*self) {{}}}}
+            impl Retire for Leaf {{fn drop(*self) {{}}}}
+            impl Retire for Producer {{fn drop(*self) {{}}}}
+            impl Retire for Sink {{fn drop(*self) {{}}}}
+            impl Retire for Caller {{fn drop(*self) {{}}}}
+            {effect} deliver(value:Ticket)->bool;
+            fn leaf(item:Ticket)->#deliver bool {{let leaf=Leaf {{}};deliver(item)#}}
+            quote fn produce(comptime enabled:bool,item:Ticket)->#deliver bool {{
+                let producer=Producer {{}};
+                if enabled {{return leaf(item);}}false
+            }}
+            fn entry()->bool {{let caller=Caller {{}};
+                produce(true,Ticket {{flag:true}})# {{
+                    deliver(ticket)=>do {{let sink=Sink {{}};resume ticket.flag;}},
+                }}
+            }}");
+        let package = compile(&source);
+        let executable = source_executable(&package, "entry").unwrap();
+        let entry = executable.graph.function(&executable.entry).unwrap();
+        let mut installations = 0;
+        iir::visit::expression(&entry.function.body, &mut 100_000, |expression, _| {
+            if matches!(expression.kind, nir::program::ExprKind::EffectHandle { .. }) {
+                installations += 1;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(installations, 1, "{effect}");
+        let metadata = (
+            executable.graph.expansion_sources.len(),
+            executable.graph.nominals.len(),
+        );
+        if let Some(reference) = reference {
+            assert_eq!(metadata, reference, "failed expansion published metadata");
+        } else {
+            reference = Some(metadata);
+        }
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        let drops = names
+            .iter()
+            .filter(|name| name.starts_with("drop "))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            drops,
+            [
+                "drop Sink",
+                "drop Ticket",
+                "drop Leaf",
+                "drop Producer",
+                "drop Caller"
+            ],
+            "{effect}"
+        );
+    }
+}
+
+#[test]
+fn materialized_inline_effects_follow_staged_quote_trait_selection_and_contracts() {
+    use comptime_interpretor::{ErrorKind, Interpreter, Value};
+    for (accepted, reject_interface) in [(false, false), (true, false), (true, true)] {
+        let mut package=compile(&format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Ticket {{flag:bool}} struct Batch {{item:Ticket}} struct ProducerFrame {{}} struct Sink {{}} struct Caller {{}}
+            impl Retire for Ticket {{fn drop(*self) {{}}}}
+            impl Retire for Batch {{fn drop(*self) {{}}}}
+            impl Retire for ProducerFrame {{fn drop(*self) {{}}}}
+            impl Retire for Sink {{fn drop(*self) {{}}}}
+            impl Retire for Caller {{fn drop(*self) {{}}}}
+            inline effect deliver(value:T)->bool where T;
+            trait Producer {{assoc Item:.Type'builtin;
+                quote fn produce(self,comptime enabled:bool)->result:#deliver<Item> bool
+                where requires enabled, ensures result;
+            }}
+            impl Producer for Batch {{assoc Item:.Type'builtin=Ticket;
+                quote fn produce(self,comptime enabled:bool)->#deliver<Ticket> bool {{
+                    let frame=ProducerFrame {{}};
+                    let result=deliver<Ticket>(self.item)#;assumes result;result
+                }}
+            }}
+            quote fn invoke(value:T,comptime enabled:bool)->#deliver<T.as(Producer).Item> bool
+            where T:-Producer, requires enabled {{value.as(Producer).produce(enabled)}}
+            fn entry()->bool {{let caller=Caller {{}};
+                invoke(Batch {{item:Ticket {{flag:{accepted}}}}},true)# {{
+                    deliver<Ticket>(ticket)=>do {{let sink=Sink {{}};resume ticket.flag;}},
+                }}
+            }}"));
+        if reject_interface {
+            // Distinguish the inherited interface postcondition from the
+            // implementation's own checked assumes and normal return value.
+            let interface = package
+                .traits
+                .iter_mut()
+                .find(|item| item.name == "Producer")
+                .unwrap();
+            interface.methods[0].program.postconditions[0].kind =
+                nir::program::ExprKind::Literal(nir::program::Literal::Bool(false));
+        }
+        let executable = source_executable(&package, "entry").unwrap();
+        let entry = executable.graph.function(&executable.entry).unwrap();
+        let mut remaining = 0;
+        iir::visit::expression(&entry.function.body, &mut 100_000, |expression, _| {
+            if matches!(
+                expression.kind,
+                nir::program::ExprKind::EffectHandle { .. }
+                    | nir::program::ExprKind::EffectRequest { .. }
+            ) {
+                remaining += 1;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(remaining, 0, "accepted={accepted}");
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        let result = vm.invoke_instance(&executable.entry, vec![]);
+        if accepted && !reject_interface {
+            assert_eq!(result.unwrap(), Value::Bool(true));
+        } else {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::ProgramContractRejected);
+        }
+        let names = executed_names(&package, &executable, vm.events());
+        let drops = names
+            .iter()
+            .filter(|name| name.starts_with("drop "))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            drops,
+            [
+                "drop Sink",
+                "drop Ticket",
+                "drop ProducerFrame",
+                "drop Batch",
+                "drop Caller"
+            ],
+            "accepted={accepted}"
+        );
+        assert!(
+            !names
+                .iter()
+                .any(|name| name == "produce" || name == "invoke"),
+            "{names:?}"
+        );
+    }
+}
+
+#[test]
+fn materialized_inline_effects_expand_nested_staged_ordinary_functions() {
+    use comptime_interpretor::{Interpreter, Value};
+    for effect in ["effect", "inline effect"] {
+        let source=format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Ticket {{flag:bool}} struct Leaf {{}} struct Producer {{}} struct Sink {{}} struct Caller {{}}
+            impl Retire for Ticket {{fn drop(*self) {{}}}}
+            impl Retire for Leaf {{fn drop(*self) {{}}}}
+            impl Retire for Producer {{fn drop(*self) {{}}}}
+            impl Retire for Sink {{fn drop(*self) {{}}}}
+            impl Retire for Caller {{fn drop(*self) {{}}}}
+            {effect} deliver(value:Ticket)->bool;
+            inline fn leaf(comptime enabled:bool,item:Ticket)->#deliver bool {{let leaf=Leaf {{}};deliver(item)#}}
+            inline fn produce(comptime enabled:bool,item:Ticket)->#deliver bool {{
+                let producer=Producer {{}};
+                if enabled {{return leaf(enabled,item);}}false
+            }}
+            fn entry()->bool {{let caller=Caller {{}};
+                produce(true,Ticket {{flag:true}})# {{
+                    deliver(ticket)=>do {{let sink=Sink {{}};resume ticket.flag;}},
+                }}
+            }}");
+        let package = compile(&source);
+        let executable = source_executable(&package, "entry").unwrap();
+        let entry = executable.graph.function(&executable.entry).unwrap();
+        let mut installations = 0;
+        iir::visit::expression(&entry.function.body, &mut 100_000, |expression, _| {
+            if matches!(expression.kind, nir::program::ExprKind::EffectHandle { .. }) {
+                installations += 1;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(installations, usize::from(effect == "effect"), "{effect}");
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        assert!(
+            !names.iter().any(|name| name == "produce" || name == "leaf"),
+            "{names:?}"
+        );
+        let drops = names
+            .iter()
+            .filter(|name| name.starts_with("drop "))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            drops,
+            [
+                "drop Sink",
+                "drop Ticket",
+                "drop Leaf",
+                "drop Producer",
+                "drop Caller"
+            ],
+            "{effect}"
+        );
+    }
+}
+
+#[test]
+fn materialized_inline_effects_follow_staged_inline_trait_selection_and_contracts() {
+    use comptime_interpretor::{ErrorKind, Interpreter, Value};
+    for (accepted, reject_interface) in [(false, false), (true, false), (true, true)] {
+        let mut package=compile(&format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Ticket {{flag:bool}} struct Batch {{item:Ticket}} struct ProducerFrame {{}} struct Sink {{}} struct Caller {{}}
+            impl Retire for Ticket {{fn drop(*self) {{}}}}
+            impl Retire for Batch {{fn drop(*self) {{}}}}
+            impl Retire for ProducerFrame {{fn drop(*self) {{}}}}
+            impl Retire for Sink {{fn drop(*self) {{}}}}
+            impl Retire for Caller {{fn drop(*self) {{}}}}
+            inline effect deliver(value:T)->bool where T;
+            trait Producer {{assoc Item:.Type'builtin;
+                inline fn produce(self,comptime enabled:bool)->result:#deliver<Item> bool
+                where requires enabled, ensures result;
+            }}
+            impl Producer for Batch {{assoc Item:.Type'builtin=Ticket;
+                inline fn produce(self,comptime enabled:bool)->#deliver<Ticket> bool {{
+                    let frame=ProducerFrame {{}};
+                    let result=deliver<Ticket>(self.item)#;assumes result;result
+                }}
+            }}
+            inline fn invoke(value:T,comptime enabled:bool)->#deliver<T.as(Producer).Item> bool
+            where T:-Producer, requires enabled {{value.as(Producer).produce(enabled)}}
+            fn entry()->bool {{let caller=Caller {{}};
+                invoke(Batch {{item:Ticket {{flag:{accepted}}}}},true)# {{
+                    deliver<Ticket>(ticket)=>do {{let sink=Sink {{}};resume ticket.flag;}},
+                }}
+            }}"));
+        if reject_interface {
+            // Distinguish the inherited interface postcondition from the
+            // implementation's own checked assumes and normal return value.
+            let interface = package
+                .traits
+                .iter_mut()
+                .find(|item| item.name == "Producer")
+                .unwrap();
+            interface.methods[0].program.postconditions[0].kind =
+                nir::program::ExprKind::Literal(nir::program::Literal::Bool(false));
+        }
+        let executable = source_executable(&package, "entry").unwrap();
+        let entry = executable.graph.function(&executable.entry).unwrap();
+        let mut remaining = 0;
+        iir::visit::expression(&entry.function.body, &mut 100_000, |expression, _| {
+            if matches!(
+                expression.kind,
+                nir::program::ExprKind::EffectHandle { .. }
+                    | nir::program::ExprKind::EffectRequest { .. }
+            ) {
+                remaining += 1;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(remaining, 0, "accepted={accepted}");
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        let result = vm.invoke_instance(&executable.entry, vec![]);
+        if accepted && !reject_interface {
+            assert_eq!(result.unwrap(), Value::Bool(true));
+        } else {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::ProgramContractRejected);
+        }
+        let names = executed_names(&package, &executable, vm.events());
+        let drops = names
+            .iter()
+            .filter(|name| name.starts_with("drop "))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            drops,
+            [
+                "drop Sink",
+                "drop Ticket",
+                "drop ProducerFrame",
+                "drop Batch",
+                "drop Caller"
+            ],
+            "accepted={accepted}"
+        );
+        assert!(
+            !names
+                .iter()
+                .any(|name| name == "produce" || name == "invoke"),
+            "{names:?}"
+        );
+    }
+}
+
+#[test]
+fn staged_ordinary_inline_recursion_retains_finite_runtime_fallbacks() {
+    use comptime_interpretor::{Interpreter, Value};
+    for definitions in [
+        "inline fn choose(comptime flag:bool,again:bool)->bool {if again {choose(not flag,false)} else {flag}}",
+        "inline fn choose(comptime flag:bool,again:bool)->bool {if again {other(false)} else {flag}} inline fn other(again:bool)->bool {choose(false,again)}",
+        "inline fn choose(comptime flag:bool,again:bool)->bool {if again {other(not flag,false)} else {flag}} inline fn other(comptime flag:bool,again:bool)->bool {choose(flag,again)}",
+    ] {
+        let package = compile(&format!(
+            "trait Duplicate {{}} trait Retire {{fn drop(*self);}} {definitions} fn entry()->(bool,bool) {{(choose(true,false),choose(true,true))}}"
+        ));
+        let executable = source_executable(&package, "entry").unwrap();
+        assert!(executable.graph.functions.len() <= 5);
+        assert!(
+            executable
+                .graph
+                .functions
+                .iter()
+                .any(|f| f.function.name == "choose")
+        );
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Tuple(vec![Value::Bool(true), Value::Bool(false)])
+        );
+    }
+}
+
+#[test]
+fn staged_ordinary_inline_evaluates_runtime_arguments_once_before_contracts() {
+    use comptime_interpretor::{ErrorKind, Interpreter, Value};
+    for rejected in [false, true] {
+        let mut package = compile(
+            "trait Duplicate {} trait Retire {fn drop(*self);}
+            struct Ticket {flag:bool} struct Prepared {} struct Body {}
+            impl Retire for Ticket {fn drop(*self) {}}
+            impl Retire for Prepared {fn drop(*self) {}}
+            impl Retire for Body {fn drop(*self) {}}
+            fn prepare()->Ticket {let marker=Prepared {};Ticket {flag:true}}
+            inline fn consume(comptime enabled:bool,item:Ticket)->bool
+                where requires enabled {let body=Body {};item.flag and item.flag}
+            fn entry()->bool {consume(true,prepare())}",
+        );
+        if rejected {
+            let function = package
+                .functions
+                .iter_mut()
+                .find(|f| f.name == "consume")
+                .unwrap();
+            function.preconditions[0].kind =
+                nir::program::ExprKind::Literal(nir::program::Literal::Bool(false));
+        }
+        let executable = source_executable(&package, "entry").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        let result = vm.invoke_instance(&executable.entry, vec![]);
+        if rejected {
+            assert!(matches!(
+                result.unwrap_err().kind,
+                ErrorKind::ProgramContractRejected
+            ));
+        } else {
+            assert_eq!(result.unwrap(), Value::Bool(true));
+        }
+        let names = executed_names(&package, &executable, vm.events());
+        assert_eq!(
+            names.iter().filter(|n| *n == "prepare").count(),
+            1,
+            "{names:?}"
+        );
+        assert!(!names.iter().any(|n| n == "consume"));
+        let drops = names
+            .iter()
+            .filter(|n| n.starts_with("drop "))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let expected = if rejected {
+            vec!["drop Prepared", "drop Ticket"]
+        } else {
+            vec!["drop Prepared", "drop Body", "drop Ticket"]
+        };
+        assert_eq!(drops, expected);
+    }
+}
+
+#[test]
+fn staged_ordinary_inline_cannot_erase_type_requirements() {
+    let mut package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        inline fn choose(comptime flag:bool)->bool {flag}
+        fn entry()->bool {choose(true)}",
+    );
+    package
+        .functions
+        .iter_mut()
+        .find(|f| f.name == "choose")
+        .unwrap()
+        .requirements
+        .push(nir::program::TypePredicate::Bool(false));
+    let failure = luna::instantiation::instantiate(&package, "entry", 100_000)
+        .err()
+        .unwrap();
+    assert!(
+        failure.contains("inline function type requirement"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn materialized_inline_effects_expand_mixed_staged_and_runtime_inline_calls() {
+    use comptime_interpretor::{Interpreter, Value};
+    for effect in ["effect", "inline effect"] {
+        let source=format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Ticket {{flag:bool}} struct Leaf {{}} struct Producer {{}} struct Sink {{}} struct Caller {{}}
+            impl Retire for Ticket {{fn drop(*self) {{}}}}
+            impl Retire for Leaf {{fn drop(*self) {{}}}}
+            impl Retire for Producer {{fn drop(*self) {{}}}}
+            impl Retire for Sink {{fn drop(*self) {{}}}}
+            impl Retire for Caller {{fn drop(*self) {{}}}}
+            {effect} deliver(value:Ticket)->bool;
+            inline fn leaf(item:Ticket)->#deliver bool {{let leaf=Leaf {{}};deliver(item)#}}
+            inline fn produce(comptime enabled:bool,item:Ticket)->#deliver bool {{
+                let producer=Producer {{}};
+                if enabled {{return leaf(item);}}false
+            }}
+            fn entry()->bool {{let caller=Caller {{}};
+                produce(true,Ticket {{flag:true}})# {{
+                    deliver(ticket)=>do {{let sink=Sink {{}};resume ticket.flag;}},
+                }}
+            }}");
+        let package = compile(&source);
+        let executable = source_executable(&package, "entry").unwrap();
+        let entry = executable.graph.function(&executable.entry).unwrap();
+        let mut installations = 0;
+        iir::visit::expression(&entry.function.body, &mut 100_000, |expression, _| {
+            if matches!(expression.kind, nir::program::ExprKind::EffectHandle { .. }) {
+                installations += 1;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(installations, usize::from(effect == "effect"), "{effect}");
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        assert!(
+            !names.iter().any(|name| name == "produce" || name == "leaf"),
+            "{names:?}"
+        );
+        let drops = names
+            .iter()
+            .filter(|name| name.starts_with("drop "))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            drops,
+            [
+                "drop Sink",
+                "drop Ticket",
+                "drop Leaf",
+                "drop Producer",
+                "drop Caller"
+            ],
+            "{effect}"
+        );
+    }
+}
+
+#[test]
+fn materialized_inline_effects_follow_runtime_inline_methods_inside_staged_calls() {
+    use comptime_interpretor::{ErrorKind, Interpreter, Value};
+    for (accepted, reject_interface) in [(false, false), (true, false), (true, true)] {
+        let mut package=compile(&format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Ticket {{flag:bool}} struct Batch {{item:Ticket}} struct ProducerFrame {{}} struct Sink {{}} struct Caller {{}}
+            impl Retire for Ticket {{fn drop(*self) {{}}}}
+            impl Retire for Batch {{fn drop(*self) {{}}}}
+            impl Retire for ProducerFrame {{fn drop(*self) {{}}}}
+            impl Retire for Sink {{fn drop(*self) {{}}}}
+            impl Retire for Caller {{fn drop(*self) {{}}}}
+            inline effect deliver(value:T)->bool where T;
+            trait Producer {{assoc Item:.Type'builtin;
+                inline fn produce(self)->result:#deliver<Item> bool
+                where ensures result;
+            }}
+            impl Producer for Batch {{assoc Item:.Type'builtin=Ticket;
+                inline fn produce(self)->#deliver<Ticket> bool {{
+                    let frame=ProducerFrame {{}};
+                    let result=deliver<Ticket>(self.item)#;assumes result;result
+                }}
+            }}
+            inline fn invoke(value:T,comptime enabled:bool)->#deliver<T.as(Producer).Item> bool
+            where T:-Producer, requires enabled {{value.as(Producer).produce()}}
+            fn entry()->bool {{let caller=Caller {{}};
+                invoke(Batch {{item:Ticket {{flag:{accepted}}}}},true)# {{
+                    deliver<Ticket>(ticket)=>do {{let sink=Sink {{}};resume ticket.flag;}},
+                }}
+            }}"));
+        if reject_interface {
+            // Distinguish the inherited interface postcondition from the
+            // implementation's own checked assumes and normal return value.
+            let interface = package
+                .traits
+                .iter_mut()
+                .find(|item| item.name == "Producer")
+                .unwrap();
+            interface.methods[0].program.postconditions[0].kind =
+                nir::program::ExprKind::Literal(nir::program::Literal::Bool(false));
+        }
+        let executable = source_executable(&package, "entry").unwrap();
+        let entry = executable.graph.function(&executable.entry).unwrap();
+        let mut remaining = 0;
+        iir::visit::expression(&entry.function.body, &mut 100_000, |expression, _| {
+            if matches!(
+                expression.kind,
+                nir::program::ExprKind::EffectHandle { .. }
+                    | nir::program::ExprKind::EffectRequest { .. }
+            ) {
+                remaining += 1;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(remaining, 0, "accepted={accepted}");
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        let result = vm.invoke_instance(&executable.entry, vec![]);
+        if accepted && !reject_interface {
+            assert_eq!(result.unwrap(), Value::Bool(true));
+        } else {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::ProgramContractRejected);
+        }
+        let names = executed_names(&package, &executable, vm.events());
+        let drops = names
+            .iter()
+            .filter(|name| name.starts_with("drop "))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            drops,
+            [
+                "drop Sink",
+                "drop Ticket",
+                "drop ProducerFrame",
+                "drop Batch",
+                "drop Caller"
+            ],
+            "accepted={accepted}"
+        );
+        assert!(
+            !names
+                .iter()
+                .any(|name| name == "produce" || name == "invoke"),
+            "{names:?}"
+        );
+    }
+}
+
+#[test]
+fn materialized_inline_effects_expand_generic_runtime_leaves_after_staging() {
+    use comptime_interpretor::{Interpreter, Value};
+    for effect in ["effect", "inline effect"] {
+        let source=format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Ticket {{flag:bool}} struct Leaf {{}} struct Producer {{}} struct Sink {{}} struct Caller {{}}
+            impl Retire for Ticket {{fn drop(*self) {{}}}}
+            impl Retire for Leaf {{fn drop(*self) {{}}}}
+            impl Retire for Producer {{fn drop(*self) {{}}}}
+            impl Retire for Sink {{fn drop(*self) {{}}}}
+            impl Retire for Caller {{fn drop(*self) {{}}}}
+            {effect} deliver(value:T)->bool where T;
+            inline fn leaf(item:T)->#deliver<T> bool where T {{let leaf=Leaf {{}};deliver<T>(item)#}}
+            inline fn produce(comptime enabled:bool,item:Ticket)->#deliver<Ticket> bool {{
+                let producer=Producer {{}};
+                if enabled {{return leaf(item);}}false
+            }}
+            fn entry()->bool {{let caller=Caller {{}};
+                produce(true,Ticket {{flag:true}})# {{
+                    deliver<Ticket>(ticket)=>do {{let sink=Sink {{}};resume ticket.flag;}},
+                }}
+            }}");
+        let package = compile(&source);
+        let executable = source_executable(&package, "entry").unwrap();
+        let entry = executable.graph.function(&executable.entry).unwrap();
+        let mut installations = 0;
+        iir::visit::expression(&entry.function.body, &mut 100_000, |expression, _| {
+            if matches!(expression.kind, nir::program::ExprKind::EffectHandle { .. }) {
+                installations += 1;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(installations, usize::from(effect == "effect"), "{effect}");
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        assert!(
+            !names.iter().any(|name| name == "produce" || name == "leaf"),
+            "{names:?}"
+        );
+        let drops = names
+            .iter()
+            .filter(|name| name.starts_with("drop "))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            drops,
+            [
+                "drop Sink",
+                "drop Ticket",
+                "drop Leaf",
+                "drop Producer",
+                "drop Caller"
+            ],
+            "{effect}"
+        );
+    }
+}
+
+#[test]
+fn materialized_inline_effects_keep_recursive_runtime_leaf_and_handler() {
+    use comptime_interpretor::{Interpreter, Value};
+    for effect in ["effect", "inline effect"] {
+        let source=format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Ticket {{flag:bool}} struct Leaf {{}} struct Producer {{}} struct Sink {{}} struct Caller {{}}
+            impl Retire for Ticket {{fn drop(*self) {{}}}}
+            impl Retire for Leaf {{fn drop(*self) {{}}}}
+            impl Retire for Producer {{fn drop(*self) {{}}}}
+            impl Retire for Sink {{fn drop(*self) {{}}}}
+            impl Retire for Caller {{fn drop(*self) {{}}}}
+            {effect} deliver(value:Ticket)->bool;
+            inline fn leaf(item:Ticket,again:bool)->#deliver bool {{if again {{return leaf(item,false);}}let leaf=Leaf {{}};deliver(item)#}}
+            inline fn produce(comptime enabled:bool,item:Ticket)->#deliver bool {{
+                let producer=Producer {{}};
+                if enabled {{return leaf(item,true);}}false
+            }}
+            fn entry()->bool {{let caller=Caller {{}};
+                produce(true,Ticket {{flag:true}})# {{
+                    deliver(ticket)=>do {{let sink=Sink {{}};resume ticket.flag;}},
+                }}
+            }}");
+        let package = compile(&source);
+        let executable = source_executable(&package, "entry").unwrap();
+        let entry = executable.graph.function(&executable.entry).unwrap();
+        let mut installations = 0;
+        iir::visit::expression(&entry.function.body, &mut 100_000, |expression, _| {
+            if matches!(expression.kind, nir::program::ExprKind::EffectHandle { .. }) {
+                installations += 1;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(installations, 1, "{effect}");
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        assert!(!names.iter().any(|name| name == "produce"), "{names:?}");
+        let drops = names
+            .iter()
+            .filter(|name| name.starts_with("drop "))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            drops,
+            [
+                "drop Sink",
+                "drop Ticket",
+                "drop Leaf",
+                "drop Producer",
+                "drop Caller"
+            ],
+            "{effect}"
+        );
+    }
+}
+
+#[test]
+fn materialized_inline_effects_expand_immediate_runtime_function_aliases() {
+    use comptime_interpretor::{Interpreter, Value};
+    for effect in ["effect", "inline effect"] {
+        let source=format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Ticket {{flag:bool}} struct Leaf {{}} struct Producer {{}} struct Sink {{}} struct Caller {{}}
+            impl Retire for Ticket {{fn drop(*self) {{}}}}
+            impl Retire for Leaf {{fn drop(*self) {{}}}}
+            impl Retire for Producer {{fn drop(*self) {{}}}}
+            impl Retire for Sink {{fn drop(*self) {{}}}}
+            impl Retire for Caller {{fn drop(*self) {{}}}}
+            {effect} deliver(value:Ticket)->bool;
+            inline fn leaf(item:Ticket)->#deliver bool {{let leaf=Leaf {{}};deliver(item)#}}
+            inline fn produce(comptime enabled:bool,item:Ticket)->#deliver bool {{
+                let producer=Producer {{}};
+                let first=leaf;let action=first;action(item)
+            }}
+            fn entry()->bool {{let caller=Caller {{}};
+                produce(true,Ticket {{flag:true}})# {{
+                    deliver(ticket)=>do {{let sink=Sink {{}};resume ticket.flag;}},
+                }}
+            }}");
+        let package = compile(&source);
+        let executable = source_executable(&package, "entry").unwrap();
+        let entry = executable.graph.function(&executable.entry).unwrap();
+        let mut installations = 0;
+        iir::visit::expression(&entry.function.body, &mut 100_000, |expression, _| {
+            if matches!(expression.kind, nir::program::ExprKind::EffectHandle { .. }) {
+                installations += 1;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(installations, usize::from(effect == "effect"), "{effect}");
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        assert!(
+            !names.iter().any(|name| name == "produce" || name == "leaf"),
+            "{names:?}"
+        );
+        let drops = names
+            .iter()
+            .filter(|name| name.starts_with("drop "))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            drops,
+            [
+                "drop Sink",
+                "drop Ticket",
+                "drop Leaf",
+                "drop Producer",
+                "drop Caller"
+            ],
+            "{effect}"
+        );
+    }
+}
+
+#[test]
+fn materialized_inline_effects_preserve_alias_mutation_during_argument_evaluation() {
+    use comptime_interpretor::{Interpreter, Value};
+    for effect in ["effect", "inline effect"] {
+        let source=format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Ticket {{flag:bool}} struct Leaf {{}} struct Producer {{}} struct Sink {{}} struct Caller {{}}
+            impl Retire for Ticket {{fn drop(*self) {{}}}}
+            impl Retire for Leaf {{fn drop(*self) {{}}}}
+            impl Retire for Producer {{fn drop(*self) {{}}}}
+            impl Retire for Sink {{fn drop(*self) {{}}}}
+            impl Retire for Caller {{fn drop(*self) {{}}}}
+            {effect} deliver(value:Ticket)->bool;
+            inline fn leaf(item:Ticket)->#deliver bool {{let leaf=Leaf {{}};deliver(item)#}}
+            inline fn other(item:Ticket)->#deliver bool {{leaf(item)}}
+            inline fn produce(comptime enabled:bool,item:Ticket)->#deliver bool {{
+                let producer=Producer {{}};
+                var action=leaf;action(do {{action=other;item}})
+            }}
+            fn entry()->bool {{let caller=Caller {{}};
+                produce(true,Ticket {{flag:true}})# {{
+                    deliver(ticket)=>do {{let sink=Sink {{}};resume ticket.flag;}},
+                }}
+            }}");
+        let package = compile(&source);
+        let executable = source_executable(&package, "entry").unwrap();
+        let entry = executable.graph.function(&executable.entry).unwrap();
+        let mut installations = 0;
+        iir::visit::expression(&entry.function.body, &mut 100_000, |expression, _| {
+            if matches!(expression.kind, nir::program::ExprKind::EffectHandle { .. }) {
+                installations += 1;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(installations, 1, "{effect}");
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        assert!(
+            !names
+                .iter()
+                .any(|name| name == "produce" || name == "other"),
+            "{names:?}"
+        );
+        let drops = names
+            .iter()
+            .filter(|name| name.starts_with("drop "))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            drops,
+            [
+                "drop Sink",
+                "drop Ticket",
+                "drop Leaf",
+                "drop Producer",
+                "drop Caller"
+            ],
+            "{effect}"
+        );
+    }
+}
+
+#[test]
+fn conditional_staged_calls_preserve_owned_argument_scopes_and_selection_order() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Ticket {flag:bool} struct Prepared {} struct Selected {} struct Caller {}
+        impl Retire for Ticket {fn drop(*self) {}}
+        impl Retire for Prepared {fn drop(*self) {}}
+        impl Retire for Selected {fn drop(*self) {}}
+        impl Retire for Caller {fn drop(*self) {}}
+        fn first(comptime enabled:bool,item:Ticket)->bool {enabled and item.flag}
+        fn second(comptime enabled:bool,item:Ticket)->bool {not (enabled and item.flag)}
+        comptime fn prepared(config:bool)->bool {not not config}
+        fn choose(comptime config:bool,flag:bool)->bool {let caller=Caller {};var selected=false;
+            let action=if (do {let marker=Selected {};selected=true;flag}) {first} else {second};
+            action(prepared(config),do {let marker=Prepared {};let item=Ticket {flag:selected};item})
+        }
+        fn entry()->(bool,bool) {(choose(true,true),choose(true,false))}",
+    );
+    let executable = source_executable(&package, "entry").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Tuple(vec![Value::Bool(true), Value::Bool(false)])
+    );
+    let names = executed_names(&package, &executable, vm.events());
+    let drops = names
+        .iter()
+        .filter(|n| n.starts_with("drop "))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        drops,
+        [
+            "drop Selected",
+            "drop Prepared",
+            "drop Ticket",
+            "drop Caller",
+            "drop Selected",
+            "drop Prepared",
+            "drop Ticket",
+            "drop Caller"
+        ]
+    );
+}
+
+#[test]
+fn conditional_staged_argument_copies_keep_outer_loop_transfers() {
+    use comptime_interpretor::{Interpreter, Value};
+    for flag in [false, true] {
+        let package = compile(&format!(
+            "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Ticket {{}} struct Prepared {{}} struct Caller {{}}
+            impl Retire for Ticket {{fn drop(*self) {{}}}}
+            impl Retire for Prepared {{fn drop(*self) {{}}}}
+            impl Retire for Caller {{fn drop(*self) {{}}}}
+            fn first(comptime enabled:bool,item:Ticket)->bool {{enabled}}
+            fn second(comptime enabled:bool,item:Ticket)->bool {{not enabled}}
+            fn run(flag:bool)->bool {{
+                while:outer true {{let caller=Caller {{}};
+                    (if flag {{first}} else {{second}})(true,do {{let marker=Prepared {{}};break outer;}});
+                }}
+                true
+            }} fn entry()->bool {{run({flag})}}"
+        ));
+        let executable = source_executable(&package, "entry").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        assert!(!names.iter().any(|n| n == "first" || n == "second"));
+        let drops = names
+            .iter()
+            .filter(|n| n.starts_with("drop "))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(drops, ["drop Prepared", "drop Caller"]);
+    }
+}
+
+#[test]
+fn conditional_staged_argument_copies_preserve_owned_closure_captures() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Ticket {flag:bool} struct Prepared {}
+        impl Retire for Ticket {fn drop(*self) {}}
+        impl Retire for Prepared {fn drop(*self) {}}
+        fn consume(item:Ticket)->bool {item.flag}
+        fn first(comptime enabled:bool,action:%{item:Ticket} fn()->bool)->bool {enabled and action()}
+        fn second(comptime enabled:bool,action:%{item:Ticket} fn()->bool)->bool {not first(enabled,action)}
+        fn choose(flag:bool)->bool {let item=Ticket {flag:true};
+            let action=if flag {first} else {second};
+            action(true,do {let marker=Prepared {};||consume(item)})
+        }
+        fn entry()->(bool,bool) {(choose(true),choose(false))}",
+    );
+    let executable = source_executable(&package, "entry").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Tuple(vec![Value::Bool(true), Value::Bool(false)])
+    );
+    let names = executed_names(&package, &executable, vm.events());
+    let drops = names
+        .iter()
+        .filter(|n| n.starts_with("drop "))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        drops,
+        [
+            "drop Prepared",
+            "drop Ticket",
+            "drop Prepared",
+            "drop Ticket"
+        ]
+    );
+}
+
+#[test]
+fn matched_staged_calls_retire_selector_and_arm_resources_before_arguments() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Selector {flag:bool} struct Arm {} struct Ticket {flag:bool} struct Prepared {} struct Selected {} struct Caller {}
+        impl Retire for Selector {fn drop(*self) {}} impl Retire for Arm {fn drop(*self) {}} impl Retire for Ticket {fn drop(*self) {}}
+        impl Retire for Prepared {fn drop(*self) {}}
+        impl Retire for Selected {fn drop(*self) {}}
+        impl Retire for Caller {fn drop(*self) {}}
+        fn first(comptime enabled:bool,item:Ticket)->bool {enabled and item.flag}
+        fn second(comptime enabled:bool,item:Ticket)->bool {not (enabled and item.flag)}
+        fn choose(flag:bool)->bool {let caller=Caller {};var selected=false;
+            let action=(do {let marker=Selected {};selected=true;Selector {flag:flag}}) match {{flag:true}=>do {let arm=Arm {};first},_=>do {let arm=Arm {};second}};
+            action(true,do {let marker=Prepared {};let item=Ticket {flag:selected};item})
+        }
+        fn entry()->(bool,bool) {(choose(true),choose(false))}",
+    );
+    let executable = source_executable(&package, "entry").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Tuple(vec![Value::Bool(true), Value::Bool(false)])
+    );
+    let names = executed_names(&package, &executable, vm.events());
+    let drops = names
+        .iter()
+        .filter(|n| n.starts_with("drop "))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        drops,
+        [
+            "drop Selected",
+            "drop Arm",
+            "drop Selector",
+            "drop Prepared",
+            "drop Ticket",
+            "drop Caller",
+            "drop Selected",
+            "drop Arm",
+            "drop Selector",
+            "drop Prepared",
+            "drop Ticket",
+            "drop Caller"
+        ]
+    );
+}
+
+#[test]
+fn matched_staged_calls_preserve_guard_order_nested_selection_and_single_arguments() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Ticket {flag:bool} struct Prepared {} struct Caller {}
+        impl Retire for Ticket {fn drop(*self) {}}
+        impl Retire for Prepared {fn drop(*self) {}}
+        impl Retire for Caller {fn drop(*self) {}}
+        fn reject()->bool {false}
+        fn first(comptime enabled:bool,item:Ticket)->bool {enabled and item.flag}
+        fn second(comptime enabled:bool,item:Ticket)->bool {not (enabled and item.flag)}
+        fn choose(outer:bool,inner:bool)->bool {let caller=Caller {};
+            let action=outer match {
+                true if reject()=>first,
+                true=>if inner {first} else {second},
+                false=>false match {_=>second},
+            };
+            action(true,do {let marker=Prepared {};Ticket {flag:true}})
+        }
+        fn entry()->(bool,bool,bool) {(choose(true,true),choose(true,false),choose(false,true))}",
+    );
+    let executable = source_executable(&package, "entry").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Tuple(vec![
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(false)
+        ])
+    );
+    let names = executed_names(&package, &executable, vm.events());
+    assert_eq!(names.iter().filter(|n| *n == "reject").count(), 2);
+    let drops = names
+        .iter()
+        .filter(|n| n.starts_with("drop "))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        drops,
+        [
+            "drop Prepared",
+            "drop Ticket",
+            "drop Caller",
+            "drop Prepared",
+            "drop Ticket",
+            "drop Caller",
+            "drop Prepared",
+            "drop Ticket",
+            "drop Caller"
+        ]
+    );
+}
+
+#[test]
+fn matched_staged_callee_return_skips_argument_construction() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Ticket {} struct Prepared {} struct Caller {}
+        impl Retire for Ticket {fn drop(*self) {}}
+        impl Retire for Prepared {fn drop(*self) {}}
+        impl Retire for Caller {fn drop(*self) {}}
+        fn first(comptime enabled:bool,item:Ticket)->bool {enabled}
+        fn choose(stop:bool)->bool {let caller=Caller {};
+            let action=stop match {true=>return false,false=>first};
+            action(true,do {let marker=Prepared {};Ticket {}})
+        }
+        fn entry()->(bool,bool) {(choose(true),choose(false))}",
+    );
+    let executable = source_executable(&package, "entry").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Tuple(vec![Value::Bool(false), Value::Bool(true)])
+    );
+    let names = executed_names(&package, &executable, vm.events());
+    assert_eq!(names.iter().filter(|n| *n == "first").count(), 1);
+    let drops = names
+        .iter()
+        .filter(|n| n.starts_with("drop "))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        drops,
+        ["drop Caller", "drop Prepared", "drop Ticket", "drop Caller"]
+    );
+}
+
+#[test]
+fn scoped_staged_callees_preserve_if_when_and_block_resource_order() {
+    use comptime_interpretor::{Interpreter, Value};
+    for selector in [
+        "if flag {let marker=Selected {};selected=true;first} else {let marker=Selected {};selected=true;second}",
+        "when {flag=>do {let marker=Selected {};selected=true;first},else=>do {let marker=Selected {};selected=true;second}}",
+        "do {let marker=Selected {};selected=true;if flag {first} else {second}}",
+    ] {
+        let package=compile(&format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Ticket {{flag:bool}} struct Selected {{}} struct Prepared {{}} struct Caller {{}}
+            impl Retire for Ticket {{fn drop(*self) {{}}}}
+            impl Retire for Selected {{fn drop(*self) {{}}}}
+            impl Retire for Prepared {{fn drop(*self) {{}}}}
+            impl Retire for Caller {{fn drop(*self) {{}}}}
+            fn first(comptime enabled:bool,item:Ticket)->bool {{enabled and item.flag}}
+            fn second(comptime enabled:bool,item:Ticket)->bool {{not (enabled and item.flag)}}
+            fn choose(flag:bool)->bool {{let caller=Caller {{}};var selected=false;
+                let action={selector};action(true,do {{let marker=Prepared {{}};Ticket {{flag:selected}}}})
+            }}
+            fn entry()->(bool,bool) {{(choose(true),choose(false))}}"));
+        let executable = source_executable(&package, "entry").unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Tuple(vec![Value::Bool(true), Value::Bool(false)]),
+            "{selector}"
+        );
+        let names = executed_names(&package, &executable, vm.events());
+        let drops = names
+            .iter()
+            .filter(|n| n.starts_with("drop "))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            drops,
+            [
+                "drop Selected",
+                "drop Prepared",
+                "drop Ticket",
+                "drop Caller",
+                "drop Selected",
+                "drop Prepared",
+                "drop Ticket",
+                "drop Caller"
+            ],
+            "{selector}"
+        );
+    }
+}
+
+#[test]
+fn scoped_staged_callee_return_skips_argument_construction() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Ticket {} struct Prepared {} struct Caller {}
+        impl Retire for Ticket {fn drop(*self) {}}
+        impl Retire for Prepared {fn drop(*self) {}}
+        impl Retire for Caller {fn drop(*self) {}}
+        fn first(comptime enabled:bool,item:Ticket)->bool {enabled}
+        fn choose(stop:bool)->bool {let caller=Caller {};
+            let action=if stop {return false;} else {first};
+            action(true,do {let marker=Prepared {};Ticket {}})
+        }
+        fn entry()->(bool,bool) {(choose(true),choose(false))}",
+    );
+    let executable = source_executable(&package, "entry").unwrap();
+    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+        .unwrap()
+        .with_cleanup_schedule(&executable.schedule)
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+        Value::Tuple(vec![Value::Bool(false), Value::Bool(true)])
+    );
+    let names = executed_names(&package, &executable, vm.events());
+    assert_eq!(names.iter().filter(|n| *n == "first").count(), 1);
+    let drops = names
+        .iter()
+        .filter(|n| n.starts_with("drop "))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        drops,
+        ["drop Caller", "drop Prepared", "drop Ticket", "drop Caller"]
+    );
+}
+
+#[test]
+fn materialized_inline_effects_expand_runtime_selected_inline_targets() {
+    use comptime_interpretor::{Interpreter, Value};
+    for selector in [
+        "if choice {let selected=Selected {};first} else {let selected=Selected {};second}",
+        "choice match {true=>do {let selected=Selected {};first},false=>do {let selected=Selected {};second}}",
+        "when {choice=>do {let selected=Selected {};first},else=>do {let selected=Selected {};second}}",
+        "do {let selected=Selected {};if choice {first} else {second}}",
+    ] {
+        for inline_second in [true, false] {
+            for finish in ["resume", "return"] {
+                let second_modifier = if inline_second { "inline " } else { "" };
+                let package=compile(&format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Ticket {{flag:bool}} struct Selected {{}} struct Prepared {{}} struct Left {{}} struct Right {{}} struct Producer {{}} struct Sink {{}} struct Caller {{}}
+            impl Retire for Ticket {{fn drop(*self) {{}}}}
+            impl Retire for Selected {{fn drop(*self) {{}}}}
+            impl Retire for Prepared {{fn drop(*self) {{}}}}
+            impl Retire for Left {{fn drop(*self) {{}}}}
+            impl Retire for Right {{fn drop(*self) {{}}}}
+            impl Retire for Producer {{fn drop(*self) {{}}}}
+            impl Retire for Sink {{fn drop(*self) {{}}}}
+            impl Retire for Caller {{fn drop(*self) {{}}}}
+            inline effect deliver(value:Ticket)->bool;
+            inline fn first(item:Ticket)->#deliver bool {{let left=Left {{}};deliver(item)#}}
+            {second_modifier}fn second(item:Ticket)->#deliver bool {{let right=Right {{}};deliver(item)#}}
+            inline fn produce(comptime enabled:bool,choice:bool)->#deliver bool {{
+                let producer=Producer {{}};let action={selector};
+                action(do {{let prepared=Prepared {{}};Ticket {{flag:choice}}}})
+            }}
+            fn run(choice:bool)->bool {{let caller=Caller {{}};
+                produce(true,choice)# {{deliver(ticket)=>do {{let sink=Sink {{}};{finish} ticket.flag;}},}}
+            }}
+            fn entry()->(bool,bool) {{(run(true),run(false))}}"));
+                let executable = source_executable(&package, "entry").unwrap();
+                let run = executable
+                    .graph
+                    .functions
+                    .iter()
+                    .find(|f| f.function.name == "run")
+                    .unwrap();
+                let mut remaining = 0;
+                iir::visit::expression(&run.function.body, &mut 100_000, |expr, _| {
+                    remaining += usize::from(matches!(
+                        expr.kind,
+                        nir::program::ExprKind::EffectHandle { .. }
+                            | nir::program::ExprKind::EffectRequest { .. }
+                    ));
+                    Ok(())
+                })
+                .unwrap();
+                if inline_second {
+                    assert_eq!(remaining, 0, "{selector}");
+                } else {
+                    assert!(remaining > 0, "{selector}");
+                }
+                let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                    .unwrap()
+                    .with_cleanup_schedule(&executable.schedule)
+                    .unwrap();
+                assert_eq!(
+                    vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+                    Value::Tuple(vec![Value::Bool(true), Value::Bool(false)]),
+                    "{selector}"
+                );
+                let names = executed_names(&package, &executable, vm.events());
+                assert!(
+                    !names
+                        .iter()
+                        .any(|n| matches!(n.as_str(), "produce" | "first")),
+                    "{names:?}"
+                );
+                assert_eq!(
+                    names.iter().filter(|n| *n == "second").count(),
+                    usize::from(!inline_second)
+                );
+                let drops = names
+                    .iter()
+                    .filter(|n| n.starts_with("drop "))
+                    .map(String::as_str)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    drops,
+                    [
+                        "drop Selected",
+                        "drop Prepared",
+                        "drop Sink",
+                        "drop Ticket",
+                        "drop Left",
+                        "drop Producer",
+                        "drop Caller",
+                        "drop Selected",
+                        "drop Prepared",
+                        "drop Sink",
+                        "drop Ticket",
+                        "drop Right",
+                        "drop Producer",
+                        "drop Caller"
+                    ],
+                    "{selector}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn direct_owned_guard_calls_retire_arguments_before_success_or_fallback() {
+    use comptime_interpretor::{Interpreter, Value};
+    for guard in [
+        "inspect(Held {flag:value})",
+        "inspect(make(value))",
+        "with_default(value)",
+        "with_seen(Held {flag:value})",
+        "inspect_pair((Held {flag:value},true))",
+    ] {
+        let package = compile(&format!(
+            "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Held {{flag:bool}} struct Caller {{}}
+            fn held_retired() {{}} fn caller_retired() {{}} fn observed() {{}}
+            impl Retire for Held {{fn drop(*self) {{held_retired();}}}}
+            impl Retire for Caller {{fn drop(*self) {{caller_retired();}}}}
+            inline fn make(flag:bool)->Held {{Held {{flag:flag}}}}
+            inline fn inspect(held:Held)->bool {{observed();held.flag}}
+            inline fn with_default(flag:bool,.held:Held=make(flag))->bool {{observed();held.flag}}
+            inline fn with_seen(held:Held,.flag:bool=held.flag)->bool {{observed();flag}}
+            inline fn inspect_pair(pair:(Held,bool))->bool {{let (held,flag)=pair;observed();held.flag and flag}}
+            fn selected()->bool {{true}} fn fallback()->bool {{false}}
+            fn entry(value:bool)->bool {{let caller=Caller {{}};false match {{
+                _ if {guard}=>selected(),_=>fallback(),
+            }}}}"
+        ));
+        for expanded in [false, true] {
+            let mut package = package.clone();
+            if expanded {
+                assert!(
+                    elaboration::program::inlining::expand(&mut package, &mut 1000000)
+                        .unwrap()
+                        .expanded
+                        > 0
+                );
+            }
+            let executable = source_executable(&package, "entry")
+                .unwrap_or_else(|error| panic!("{guard}, expanded={expanded}: {error}"));
+            for value in [false, true] {
+                let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                    .unwrap()
+                    .with_cleanup_schedule(&executable.schedule)
+                    .unwrap();
+                assert_eq!(
+                    vm.invoke_instance(&executable.entry, vec![Value::Bool(value)])
+                        .unwrap(),
+                    Value::Bool(value)
+                );
+                let events = executed_names(&package, &executable, vm.events())
+                    .into_iter()
+                    .filter(|name| {
+                        matches!(
+                            name.as_str(),
+                            "observed"
+                                | "held_retired"
+                                | "caller_retired"
+                                | "selected"
+                                | "fallback"
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    events,
+                    [
+                        "observed",
+                        "held_retired",
+                        if value { "selected" } else { "fallback" },
+                        "caller_retired"
+                    ],
+                    "{guard}, expanded={expanded}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn direct_owned_guard_calls_cannot_consume_subjects_or_external_owners() {
+    for source in [
+        "fn entry(outer:Held)->bool {false match {_ if inspect(outer)=>true,_=>false}}",
+        "fn entry(outer:Held)->bool {outer match {item if inspect(item)=>true,_=>false}}",
+        "fn entry(outer:Held)->bool {false match {_ if inspect(do {outer})=>true,_=>false}}",
+        "fn entry(outer:Held)->bool {false match {_ if inspect_pair((outer,true))=>true,_=>false}}",
+    ] {
+        let package = compile(&format!(
+            "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Held {{flag:bool}} impl Retire for Held {{fn drop(*self) {{}}}}
+            fn inspect(held:Held)->bool {{held.flag}}
+            fn inspect_pair(pair:(Held,bool))->bool {{let (held,flag)=pair;held.flag and flag}}
+            {source}"
+        ));
+        let failure = source_executable(&package, "entry").unwrap_err();
+        assert!(
+            failure.contains("caller resources") || failure.contains("observation"),
+            "{source}: {failure}"
+        );
+    }
+}
+
+#[test]
+fn direct_owned_guard_calls_reject_fallible_cleanup_and_calls() {
+    for (retire, definitions, guard) in [
+        (
+            "assumes false;",
+            "fn inspect(held:Held)->bool {held.flag}",
+            "inspect(Held {flag:true})",
+        ),
+        (
+            "",
+            "fn inspect(held:Held)->bool {assumes false;held.flag}",
+            "inspect(Held {flag:true})",
+        ),
+        (
+            "",
+            "fn reject(flag:bool)->bool {assumes false;flag} fn inspect(held:Held)->bool {reject(held.flag)}",
+            "inspect(Held {flag:true})",
+        ),
+        (
+            "",
+            "fn make()->Held {assumes false;Held {flag:true}} fn inspect(held:Held)->bool {held.flag}",
+            "inspect(make())",
+        ),
+    ] {
+        let package = compile(&format!(
+            "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Held {{flag:bool}} impl Retire for Held {{fn drop(*self) {{{retire}}}}}
+            {definitions}
+            fn entry()->bool {{false match {{_ if {guard}=>true,_=>false}}}}"
+        ));
+        let failure = source_executable(&package, "entry").unwrap_err();
+        assert!(failure.contains("failure-path"), "{guard}: {failure}");
+    }
+}
+
+#[test]
+fn temporary_guard_projections_preserve_factory_and_cleanup_order() {
+    use comptime_interpretor::{Interpreter, Value};
+    for (guard, observed) in [
+        ("make(value).flag", false),
+        ("inspect_bool(make(value).flag)", true),
+        ("Box {held:make(value)}.held.flag", false),
+        ("inspect_bool((Box {held:make(value)}).held.flag)", true),
+    ] {
+        for wrapped in [false, true] {
+            let guard = if wrapped {
+                format!("do {{{guard}}}")
+            } else {
+                guard.to_string()
+            };
+            let package = compile(&format!(
+                "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+                struct Held {{flag:bool}} struct Box {{held:Held}} struct Caller {{}}
+                fn created() {{}} fn held_retired() {{}} fn caller_retired() {{}} fn observed() {{}}
+                impl Retire for Held {{fn drop(*self) {{held_retired();}}}}
+                impl Retire for Caller {{fn drop(*self) {{caller_retired();}}}}
+                inline fn make(flag:bool)->Held {{created();Held {{flag:flag}}}}
+                inline fn inspect_bool(flag:bool)->bool {{observed();flag}}
+                fn selected()->bool {{true}} fn fallback()->bool {{false}}
+                fn entry(value:bool)->bool {{let caller=Caller {{}};false match {{
+                    _ if {guard}=>selected(),_=>fallback(),
+                }}}}"
+            ));
+            for expanded in [false, true] {
+                let mut package = package.clone();
+                if expanded {
+                    assert!(
+                        elaboration::program::inlining::expand(&mut package, &mut 1000000)
+                            .unwrap()
+                            .expanded
+                            > 0
+                    );
+                }
+                let executable = source_executable(&package, "entry")
+                    .unwrap_or_else(|error| panic!("{guard}, expanded={expanded}: {error}"));
+                for value in [false, true] {
+                    let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                        .unwrap()
+                        .with_cleanup_schedule(&executable.schedule)
+                        .unwrap();
+                    assert_eq!(
+                        vm.invoke_instance(&executable.entry, vec![Value::Bool(value)])
+                            .unwrap(),
+                        Value::Bool(value)
+                    );
+                    let trace = executed_names(&package, &executable, vm.events())
+                        .into_iter()
+                        .filter(|name| {
+                            matches!(
+                                name.as_str(),
+                                "created"
+                                    | "held_retired"
+                                    | "observed"
+                                    | "selected"
+                                    | "fallback"
+                                    | "caller_retired"
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    let mut expected = vec!["created"];
+                    if observed {
+                        expected.push("observed");
+                    }
+                    expected.extend([
+                        "held_retired",
+                        if value { "selected" } else { "fallback" },
+                        "caller_retired",
+                    ]);
+                    assert_eq!(
+                        trace, expected,
+                        "{guard}, expanded={expanded}, value={value}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn temporary_guard_projections_keep_owners_until_the_complete_condition_finishes() {
+    use comptime_interpretor::{Interpreter, Value};
+    for wrapped in [false, true] {
+        let guard = if wrapped {
+            "do {left(value).flag and right().flag}"
+        } else {
+            "left(value).flag and right().flag"
+        };
+        let package=compile(&format!(
+            "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Left {{flag:bool}} struct Right {{flag:bool}}
+            fn left_created() {{}} fn right_created() {{}} fn left_retired() {{}} fn right_retired() {{}}
+            impl Retire for Left {{fn drop(*self) {{left_retired();}}}}
+            impl Retire for Right {{fn drop(*self) {{right_retired();}}}}
+            inline fn left(flag:bool)->Left {{left_created();Left {{flag:flag}}}}
+            inline fn right()->Right {{right_created();Right {{flag:true}}}}
+            fn selected()->bool {{true}} fn fallback()->bool {{false}}
+            fn entry(value:bool)->bool {{false match {{_ if {guard}=>selected(),_=>fallback()}}}}"
+        ));
+        for expanded in [false, true] {
+            let mut package = package.clone();
+            if expanded {
+                assert!(
+                    elaboration::program::inlining::expand(&mut package, &mut 1000000)
+                        .unwrap()
+                        .expanded
+                        > 0
+                );
+            }
+            let executable = source_executable(&package, "entry")
+                .unwrap_or_else(|error| panic!("{guard}, expanded={expanded}: {error}"));
+            for value in [false, true] {
+                let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                    .unwrap()
+                    .with_cleanup_schedule(&executable.schedule)
+                    .unwrap();
+                assert_eq!(
+                    vm.invoke_instance(&executable.entry, vec![Value::Bool(value)])
+                        .unwrap(),
+                    Value::Bool(value)
+                );
+                let trace = executed_names(&package, &executable, vm.events())
+                    .into_iter()
+                    .filter(|name| {
+                        matches!(
+                            name.as_str(),
+                            "left_created"
+                                | "right_created"
+                                | "left_retired"
+                                | "right_retired"
+                                | "selected"
+                                | "fallback"
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let expected = if value {
+                    vec![
+                        "left_created",
+                        "right_created",
+                        "right_retired",
+                        "left_retired",
+                        "selected",
+                    ]
+                } else {
+                    vec!["left_created", "left_retired", "fallback"]
+                };
+                assert_eq!(trace, expected, "{guard}, expanded={expanded}");
+            }
+        }
+    }
+}
+
+#[test]
+fn temporary_guard_projections_reject_consumed_callers_and_fallible_owners() {
+    for source in [
+        "fn take(held:Held)->Held {held} fn entry(outer:Held)->bool {false match {_ if take(outer).flag=>true,_=>false}}",
+        "fn take(held:Held)->Held {held} fn entry(outer:Held)->bool {outer match {held if take(held).flag=>true,_=>false}}",
+        "fn make()->Held {assumes false;Held {flag:true}} fn entry()->bool {false match {_ if make().flag=>true,_=>false}}",
+    ] {
+        let package = compile(&format!(
+            "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Held {{flag:bool}} impl Retire for Held {{fn drop(*self) {{}}}}
+            {source}"
+        ));
+        let failure = source_executable(&package, "entry").unwrap_err();
+        assert!(failure.contains("failure-path"), "{source}: {failure}");
+    }
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {flag:bool} impl Retire for Held {fn drop(*self) {assumes false;}}
+        fn make()->Held {Held {flag:true}}
+        fn entry()->bool {false match {_ if make().flag=>true,_=>false}}",
+    );
+    let failure = source_executable(&package, "entry").unwrap_err();
+    assert!(failure.contains("failure-path"), "{failure}");
+}
+
+#[test]
+fn temporary_guard_enum_names_preserve_payload_cleanup_and_short_circuit() {
+    use comptime_interpretor::{Interpreter, Value};
+    for wrapped in [false, true] {
+        let guard = "make(value)'tag_name == \"on\" and make(true)'tag_name == \"on\"";
+        let guard = if wrapped {
+            format!("do {{{guard}}}")
+        } else {
+            guard.to_string()
+        };
+        let package=compile(&format!(
+            "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Held {{}} enum Choice {{off(Held),on(Held)}}
+            fn created() {{}} fn retired() {{}}
+            impl Retire for Held {{fn drop(*self) {{retired();}}}}
+            inline fn make(flag:bool)->Choice {{created();if flag {{Choice.on(Held {{}})}} else {{Choice.off(Held {{}})}}}}
+            fn selected()->bool {{true}} fn fallback()->bool {{false}}
+            fn entry(value:bool)->bool {{false match {{_ if {guard}=>selected(),_=>fallback()}}}}"
+        ));
+        for expanded in [false, true] {
+            let mut package = package.clone();
+            if expanded {
+                assert!(
+                    elaboration::program::inlining::expand(&mut package, &mut 1000000)
+                        .unwrap()
+                        .expanded
+                        > 0
+                );
+            }
+            let executable = source_executable(&package, "entry")
+                .unwrap_or_else(|error| panic!("{guard}, expanded={expanded}: {error}"));
+            for value in [false, true] {
+                let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                    .unwrap()
+                    .with_cleanup_schedule(&executable.schedule)
+                    .unwrap();
+                assert_eq!(
+                    vm.invoke_instance(&executable.entry, vec![Value::Bool(value)])
+                        .unwrap(),
+                    Value::Bool(value)
+                );
+                let trace = executed_names(&package, &executable, vm.events())
+                    .into_iter()
+                    .filter(|name| {
+                        matches!(
+                            name.as_str(),
+                            "created" | "retired" | "selected" | "fallback"
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let expected = if value {
+                    vec!["created", "created", "retired", "retired", "selected"]
+                } else {
+                    vec!["created", "retired", "fallback"]
+                };
+                assert_eq!(trace, expected, "{guard}, expanded={expanded}");
+            }
+        }
+    }
+}
+
+#[test]
+fn temporary_guard_newtype_unwraps_keep_construction_and_candidate_order() {
+    use comptime_interpretor::{Interpreter, Value};
+    for guard in [
+        "make(value).as(bool)",
+        "make(value).as(bool) or make(true).as(bool)",
+    ] {
+        let always_true = guard.contains(" or ");
+        let package = compile(&format!(
+            "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            newtype Flag=bool; fn created() {{}}
+            inline fn make(flag:bool)->Flag {{created();flag.as(Flag)}}
+            fn selected()->bool {{true}} fn fallback()->bool {{false}}
+            fn entry(value:bool)->bool {{false match {{_ if {guard}=>selected(),_=>fallback()}}}}"
+        ));
+        for expanded in [false, true] {
+            let mut package = package.clone();
+            if expanded {
+                assert!(
+                    elaboration::program::inlining::expand(&mut package, &mut 1000000)
+                        .unwrap()
+                        .expanded
+                        > 0
+                );
+            }
+            let executable = source_executable(&package, "entry")
+                .unwrap_or_else(|error| panic!("{guard}, expanded={expanded}: {error}"));
+            for value in [false, true] {
+                let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                    .unwrap()
+                    .with_cleanup_schedule(&executable.schedule)
+                    .unwrap();
+                assert_eq!(
+                    vm.invoke_instance(&executable.entry, vec![Value::Bool(value)])
+                        .unwrap(),
+                    Value::Bool(value || always_true)
+                );
+                let trace = executed_names(&package, &executable, vm.events());
+                assert_eq!(
+                    trace
+                        .iter()
+                        .filter(|name| name.as_str() == "created")
+                        .count(),
+                    if always_true && !value { 2 } else { 1 },
+                    "{guard}: {trace:?}"
+                );
+                assert_eq!(
+                    trace.last().unwrap(),
+                    if value || always_true {
+                        "selected"
+                    } else {
+                        "fallback"
+                    }
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn variant_payload_patterns_preserve_earlier_owners_across_guard_failure() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {value:bool} enum Packet {data(bool,Held,bool),other}
+        fn retired() {} impl Retire for Held {fn drop(*self) {retired();}}
+        fn accept(value:bool)->bool {value} fn selected() {} fn fallback() {}
+        fn entry(flag:bool)->bool {
+            let packet=Packet.data(flag,Held {value:not flag},true);
+            packet match {
+                .data(first,item,(_ if accept(first and not item.value)))=>{selected();item.value},
+                .data(_,item,_)=>{fallback();item.value},
+                .other=>false,
+            }
+        }",
+    );
+    let executable = source_executable(&package, "entry").unwrap();
+    for flag in [false, true] {
+        let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![Value::Bool(flag)])
+                .unwrap(),
+            Value::Bool(!flag)
+        );
+        let trace = executed_names(&package, &executable, vm.events())
+            .into_iter()
+            .filter(|name| {
+                matches!(
+                    name.as_str(),
+                    "accept" | "selected" | "fallback" | "retired"
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            trace,
+            [
+                "accept",
+                if flag { "selected" } else { "fallback" },
+                "retired"
+            ]
+        );
+    }
+}
+
+#[test]
+fn named_field_candidates_preserve_owned_fields_until_selection() {
+    use comptime_interpretor::{Interpreter, Value};
+    for (declaration, construction, guarded, fallback) in [
+        (
+            "struct Packet {first:bool,item:Held,last:bool}",
+            "Packet {first:flag,item:Held {value:not flag},last:true}",
+            "{first,item,last:(_ if accept(first and not item.value))}",
+            "{item}",
+        ),
+        (
+            "enum Packet {data {first:bool,item:Held,last:bool}}",
+            "Packet.data {first:flag,item:Held {value:not flag},last:true}",
+            ".data {first,item,last:(_ if accept(first and not item.value))}",
+            ".data {item}",
+        ),
+    ] {
+        let package = compile(&format!(
+            "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            struct Held {{value:bool}} {declaration}
+            fn retired() {{}} impl Retire for Held {{fn drop(*self) {{retired();}}}}
+            fn accept(value:bool)->bool {{value}} fn selected() {{}} fn fallback() {{}}
+            fn entry(flag:bool)->bool {{
+                let packet={construction};
+                packet match {{
+                    {guarded}=>{{selected();item.value}},
+                    {fallback}=>{{fallback();item.value}},
+                }}
+            }}"
+        ));
+        let executable = source_executable(&package, "entry").unwrap();
+        for flag in [false, true] {
+            let mut vm = Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+            assert_eq!(
+                vm.invoke_instance(&executable.entry, vec![Value::Bool(flag)])
+                    .unwrap(),
+                Value::Bool(!flag)
+            );
+            let trace = executed_names(&package, &executable, vm.events())
+                .into_iter()
+                .filter(|name| {
+                    matches!(
+                        name.as_str(),
+                        "accept" | "selected" | "fallback" | "retired"
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                trace,
+                [
+                    "accept",
+                    if flag { "selected" } else { "fallback" },
+                    "retired"
+                ]
+            );
+        }
+    }
+}
+
+#[test]
+fn readonly_pointer_guard_calls_preserve_the_subject_and_caller_storage() {
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Held {} fn retired() {} impl Retire for Held {fn drop(*self) {retired();}}
+        fn accept(flag:*bool)->bool {flag.*} fn selected() {} fn fallback() {}
+        fn entry(flag:bool)->bool {
+            Held {} match {item if accept(flag.ref)=>{selected();},_=>{fallback();}};
+            flag
+        }",
+    );
+    let executable = source_executable(&package, "entry").unwrap();
+    for flag in [false, true] {
+        let mut vm =
+            comptime_interpretor::Interpreter::from_iir(&executable.graph, Default::default())
+                .unwrap()
+                .with_cleanup_schedule(&executable.schedule)
+                .unwrap();
+        assert_eq!(
+            vm.invoke_instance(
+                &executable.entry,
+                vec![comptime_interpretor::Value::Bool(flag)]
+            )
+            .unwrap(),
+            comptime_interpretor::Value::Bool(flag)
+        );
+        let names = executed_names(&package, &executable, vm.events())
+            .into_iter()
+            .filter(|name| {
+                matches!(
+                    name.as_str(),
+                    "accept" | "selected" | "fallback" | "retired"
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "accept",
+                if flag { "selected" } else { "fallback" },
+                "retired"
+            ]
+        );
+    }
+}
+
+#[test]
+fn pointer_guard_arguments_cannot_hide_mutation_in_address_selection() {
+    let package = compile(
+        "trait Duplicate {} trait Retire {fn drop(*self);}
+        fn mutate(flag:*bool)->bool {flag.* = false;true}
+        fn accept(flag:*bool)->bool {flag.*}
+        fn entry()->bool {
+            var flag=true;
+            true match {_ if accept(if mutate(flag.ref) {flag.ref} else {flag.ref})=>true,_=>flag}
+        }",
+    );
+    let failure = source_executable(&package, "entry")
+        .err()
+        .expect("address selection must remain an observation");
+    assert!(failure.contains("guard pointer observation"), "{failure}");
 }

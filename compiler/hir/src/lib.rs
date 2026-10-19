@@ -46,6 +46,27 @@ pub use node::Node;
 pub use owner::{OwnerInfo, OwnerNode, OwnerNodes, ParentedNode};
 pub use pattern::{FieldPat, Pattern, PatternArm, PatternKind};
 
+/// Distinguish an enclosing definition from a specific member within it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttributeTarget {
+    Definition(OwnerId),
+    Member(HirId),
+}
+
+/// A definition attribute awaiting ordinary name resolution and comptime
+/// evaluation. The expression is retained verbatim, without treating its
+/// spelling as a compiler intrinsic. Entries for one target are stored in
+/// application order (inner prefix first).
+#[derive(Debug, Clone)]
+pub struct DeferredDefinitionAttribute {
+    pub target: AttributeTarget,
+    pub lexical_owner: OwnerId,
+    pub expression: String,
+    /// Some for a configuration of the enclosing definition, None for a prefix Object.
+    pub configuration_key: Option<String>,
+    pub span: rustc_span::Span,
+}
+
 /// The top-level HIR container for a single Flurry package.
 ///
 /// All `&'hir` references inside point into the [`HirArena`] owned by
@@ -56,6 +77,15 @@ pub struct Package<'hir> {
     pub root_mod: OwnerId,
     /// Semantic information not yet represented by dedicated HIR nodes.
     pub pending_semantics: Vec<(rustc_span::Span, String)>,
+    pub definition_attributes: Vec<DeferredDefinitionAttribute>,
+    /// Resolver-selected members whose parameterized base must survive lowering.
+    pub member_projections: FxHashMap<HirId, symbol::DefId>,
+    /// Accessible static members for a base whose container is known only after
+    /// elaboration. Each pair is (container, member), resolved at the use site.
+    pub deferred_member_projections:
+        FxHashMap<HirId, std::sync::Arc<[(symbol::DefId, symbol::DefId)]>>,
+    /// Use-site permissions for methods selected from a receiver's inferred type.
+    pub member_access: FxHashMap<HirId, std::sync::Arc<[(symbol::DefId, symbol::DefId)]>>,
     definitions: FxHashMap<symbol::DefId, OwnerId>,
     owner_definitions: FxHashMap<OwnerId, symbol::DefId>,
 }
@@ -67,6 +97,10 @@ impl<'hir> Package<'hir> {
             bodies: FxHashMap::default(),
             root_mod: OwnerId::INVALID,
             pending_semantics: Vec::new(),
+            definition_attributes: Vec::new(),
+            member_projections: FxHashMap::default(),
+            deferred_member_projections: FxHashMap::default(),
+            member_access: FxHashMap::default(),
             definitions: FxHashMap::default(),
             owner_definitions: FxHashMap::default(),
         }

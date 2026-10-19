@@ -147,7 +147,7 @@ fn deeply_nested_record_inputs_are_bounded() {
         vm.invoke(package.functions[0].declaration, vec![value])
             .unwrap_err()
             .kind,
-        ErrorKind::Type
+        ErrorKind::DepthExhausted
     );
 }
 
@@ -230,4 +230,48 @@ fn anonymous_record_pattern_checks_labels_and_has_stable_dump() {
         vm.invoke(id, vec![valid()]).unwrap_err().kind,
         ErrorKind::Type
     );
+}
+
+#[test]
+fn unused_wide_arguments_still_pay_for_invocation_preparation() {
+    let fields = (0..64)
+        .map(|i| (format!("field_{i}"), Term::Primitive(P::Bool)))
+        .collect();
+    let mut package = identity(Term::Record(fields));
+    let Term::Function { result, .. } = &mut package.functions[0].signature else {
+        panic!()
+    };
+    *result = Box::new(Term::Primitive(P::Bool));
+    package.functions[0].body = Expr {
+        ty: Term::Primitive(P::Bool),
+        source: SourceRange { start: 3, end: 4 },
+        kind: K::Literal(nir::program::Literal::Bool(true)),
+    };
+    let id = package.functions[0].declaration;
+    for owned in [false, true] {
+        let value = Value::AnonymousRecord(
+            (0..64)
+                .map(|i| (format!("field_{i}"), Value::Bool(false)))
+                .collect(),
+        );
+        let value = if owned {
+            Value::Storage(comptime_interpretor::Storage::new(value))
+        } else {
+            value
+        };
+        let mut limited = Interpreter::new(
+            &package,
+            Budget {
+                steps: 8,
+                depth: 128,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            limited.invoke(id, vec![value.clone()]).unwrap_err().kind,
+            ErrorKind::StepsExhausted
+        );
+        let mut complete = Interpreter::new(&package, Budget::default()).unwrap();
+        assert_eq!(complete.invoke(id, vec![value]).unwrap(), Value::Bool(true));
+    }
 }

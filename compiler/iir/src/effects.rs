@@ -165,7 +165,9 @@ fn pattern(
                 depth + 1,
             )?;
         }
-        Pattern::Binding { inner, .. } | Pattern::Remap { pattern: inner, .. } => {
+        Pattern::Observe { inner, .. }
+        | Pattern::Binding { inner, .. }
+        | Pattern::Remap { pattern: inner, .. } => {
             pattern(package, inner, row, resume, runtime, fuel, depth + 1)?
         }
         Pattern::Tuple(items)

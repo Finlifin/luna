@@ -16,6 +16,38 @@ const VALID: &str = "fn requested_entry() {}\n";
 const OLD_OUTPUT: &[u8] = b"previous output: preserve these bytes\n\0";
 
 #[test]
+fn inline_control_flow_keeps_its_expansion_requirement_in_hir() {
+    let sandbox = Sandbox::new();
+    for (body, control) in [
+        ("inline if true {} else {}", "(if "),
+        ("inline when {true=>{},else=>{},}", "(when "),
+        ("inline if true is true do {} else {}", "(match "),
+        ("inline for item in (true,false) {let used=item;}", "(for "),
+    ] {
+        sandbox.write("input.fl", &format!("fn run() {{{body}}}"));
+        let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+        let dump = success(&output);
+        assert!(dump.contains("(inline-control "), "{body}: {dump}");
+        assert!(dump.contains(control), "{body}: {dump}");
+        let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+        if control == "(if " || control == "(when " || control == "(match " {
+            success(&output);
+            continue;
+        }
+        failure(&output, 1);
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("inline for currently requires a bounded comptime Integer range"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    sandbox.write("input.fl", "fn run() {inline true;}");
+    let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+    failure(&output, 1);
+}
+
+#[test]
 fn tuple_selectors_work_in_single_file_and_sysroot_commands() {
     let sandbox = Sandbox::new();
     sandbox.write(
@@ -2364,7 +2396,6 @@ fn owned_default_cli_rejects_hidden_cleanup_reads_and_unknown_calls() {
         "fn target(.flag:bool=(Item {flag:true}).flag)->bool {flag}",
         "fn target(.item:Item=do {let old=Item {flag:true};Item {flag:true}})->bool {item.flag}",
         "fn make()->Item {make()} fn target(.item:Item=make())->bool {item.flag}",
-        "typealias Byte=.u8'builtin; struct Pair {item:Item,count:Byte,} fn target(value:Byte,.pair:Pair=do {Pair {item:Item {flag:true},count:value + 1}}) {}",
         "fn target(pointer:*bool,.item:Item=do {pointer.* = true;Item {flag:pointer.*}})->bool {item.flag}",
     ] {
         sandbox.write("input.fl", format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}} struct Item {{flag:bool,}} impl Retire for Item {{fn drop(*self) {{assumes false;}}}} {declaration} fn entry() {{}}"));
@@ -2388,6 +2419,46 @@ fn owned_default_cli_rejects_hidden_cleanup_reads_and_unknown_calls() {
             "{declaration}: {}",
             String::from_utf8_lossy(&result.stderr)
         );
+    }
+}
+
+#[test]
+fn owned_default_cli_checks_arithmetic_before_publishing() {
+    let sandbox = Sandbox::new();
+    for (operation, accepted) in [("value + 1", false), ("value + 0", true)] {
+        sandbox.write("input.fl", format!("trait Duplicate {{}} trait Retire {{fn drop(*self);}} struct Item {{flag:bool,}} impl Retire for Item {{fn drop(*self) {{}}}} typealias Byte=.u8'builtin; struct Pair {{item:Item,count:Byte,}} fn target(value:Byte,.pair:Pair=do {{Pair {{item:Item {{flag:true}},count:{operation}}}}})->bool {{pair.count==value}} fn entry()->bool {{target(255)}}"));
+        sandbox.write("result.lisp", OLD_OUTPUT);
+        let result = sandbox.run(&[
+            "input.fl",
+            "--interpret",
+            "entry",
+            "--copy-protocol",
+            "Duplicate",
+            "--drop-protocol",
+            "Retire",
+            "--output",
+            "result.lisp",
+        ]);
+        assert_eq!(
+            result.status.code(),
+            Some(if accepted { 0 } else { 1 }),
+            "{operation}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        if accepted {
+            assert_eq!(
+                fs::read_to_string(sandbox.path("result.lisp"))
+                    .unwrap()
+                    .trim(),
+                "(bool true)"
+            );
+        } else {
+            assert!(
+                String::from_utf8_lossy(&result.stderr)
+                    .contains("machine arithmetic range is not proven")
+            );
+            assert_eq!(fs::read(sandbox.path("result.lisp")).unwrap(), OLD_OUTPUT);
+        }
     }
 }
 
@@ -4280,4 +4351,794 @@ fn literal_result_inference_uses_implementation_equalities_without_assuming_them
         "{}",
         details(&rejected)
     );
+}
+
+#[test]
+fn deferred_definition_attributes_keep_target_scope_and_application_order() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        r#"
+        ^attrs.note("outer")
+        ^attrs.note("inner")
+        fn selected() {}
+        mod nested {
+            ^attrs.note("quote\" and slash\\")
+            fn member() {}
+        }
+    "#,
+    );
+    let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+    let dump = hir_dump(&output);
+    let attributes = hir_form(dump, "definition-attributes");
+    assert_eq!(
+        attributes.matches("(deferred-attribute ").count(),
+        3,
+        "{attributes}"
+    );
+    assert_eq!(
+        attributes
+            .matches("(target (owner-id 1)) (lexical-owner (owner-id 0))")
+            .count(),
+        2,
+        "{attributes}"
+    );
+    assert!(
+        attributes.contains("(target (owner-id 3)) (lexical-owner (owner-id 2))"),
+        "{attributes}"
+    );
+    assert!(
+        attributes.find("inner").unwrap() < attributes.find("outer").unwrap(),
+        "{attributes}"
+    );
+    for expression in [
+        r#"attrs.note("outer")"#,
+        r#"attrs.note("inner")"#,
+        r#"attrs.note("quote\" and slash\\")"#,
+    ] {
+        assert!(
+            attributes.contains(&format!("(expression {expression:?})")),
+            "{attributes}"
+        );
+    }
+    let again = sandbox.run(&["input.fl", "--emit", "hir"]);
+    assert_eq!(dump, hir_dump(&again));
+    let rejected = sandbox.run(&["input.fl", "--emit", "nir"]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("definition attribute or modifier"));
+}
+
+#[test]
+fn configurations_belong_to_the_enclosing_definition_before_prefix_attributes() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        r#"
+        .mode options.make(true),
+        ^attrs.note("outer")
+        ^attrs.note("inner")
+        struct Selected {
+            .mode false,
+            .label "quoted",
+            value: bool,
+        }
+        mod nested {
+            .mode true,
+            fn member() {}
+        }
+    "#,
+    );
+    let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+    let dump = hir_dump(&output);
+    let attributes = hir_form(dump, "definition-attributes");
+    assert_eq!(
+        attributes.matches("(deferred-configuration ").count(),
+        4,
+        "{attributes}"
+    );
+    assert_eq!(
+        attributes.matches("(deferred-attribute ").count(),
+        2,
+        "{attributes}"
+    );
+    assert!(attributes.contains("(target (owner-id 0)) (lexical-owner (owner-id 0)) (key \"mode\") (expression \"options.make(true)\")"),"{attributes}");
+    assert!(
+        attributes.contains("(target (owner-id 1)) (lexical-owner (owner-id 1)) (key \"mode\")"),
+        "{attributes}"
+    );
+    assert!(
+        attributes.contains("(target (owner-id 2)) (lexical-owner (owner-id 2)) (key \"mode\")"),
+        "{attributes}"
+    );
+    assert!(
+        attributes.find("quoted").unwrap() < attributes.find("inner").unwrap(),
+        "{attributes}"
+    );
+    assert!(
+        attributes.find("inner").unwrap() < attributes.find("outer").unwrap(),
+        "{attributes}"
+    );
+    let result = sandbox.run(&["input.fl", "--emit", "nir"]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("definition configuration"));
+    for source in [
+        ".mode , fn next() {}",
+        "struct Broken { .mode , value:bool, }",
+        "mod broken { .mode , fn next() {} }",
+    ] {
+        sandbox.write("bad.fl", source);
+        let result = sandbox.run(&["bad.fl", "--emit", "ast"]);
+        assert!(!result.status.success(), "{source}");
+        assert!(
+            String::from_utf8_lossy(&result.stderr)
+                .contains("Expected a value after configuration name")
+        );
+    }
+}
+
+#[test]
+fn object_expressions_preserve_interleaved_source_entries() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        r#"
+        fn mark(value:bool)->bool {value}
+        fn base()->bool {true}
+        fn build() {
+            let value = {first:mark(true),base(),second:{nested:"quote\""},first:false};
+            let empty = {};
+        }
+    "#,
+    );
+    let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+    let dump = hir_dump(&output);
+    let object = hir_form(dump, "object");
+    let first = object.find("first").unwrap();
+    let positional = object.find("(object-value ").unwrap();
+    let second = object.find("second").unwrap();
+    let last = object.rfind("first").unwrap();
+    assert!(
+        first < positional && positional < second && second < last,
+        "{object}"
+    );
+    assert_eq!(object.matches("(object-property ").count(), 4, "{object}");
+    assert!(dump.contains("(object (entries ()))"), "{dump}");
+    assert!(object.contains("nested"));
+    let result = sandbox.run(&["input.fl", "--emit", "nir"]);
+    assert!(
+        !result.status.success(),
+        "Object evaluation is not implemented yet"
+    );
+}
+
+#[test]
+fn field_attribute_chains_keep_member_targets_and_application_order() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        r#"
+        struct Pair {
+            ^attrs.note("outer")
+            ^attrs.note("inner")
+            left: bool,
+            ^attrs.note("alias")
+            typealias Flag = bool;
+            ^attrs.note("right")
+            right: bool,
+        }
+    "#,
+    );
+    let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+    let dump = hir_dump(&output);
+    let fields = hir_form(dump, "fields");
+    assert_eq!(fields.matches("(field (id ").count(), 2, "{fields}");
+    let attributes = hir_form(dump, "definition-attributes");
+    assert_eq!(
+        attributes.matches("(deferred-attribute ").count(),
+        4,
+        "{attributes}"
+    );
+    assert_eq!(
+        attributes
+            .matches("(target (hir-id (owner 1) (local 1)))")
+            .count(),
+        2,
+        "{attributes}"
+    );
+    assert_eq!(
+        attributes
+            .matches("(target (hir-id (owner 1) (local 3)))")
+            .count(),
+        1,
+        "{attributes}"
+    );
+    assert_eq!(
+        attributes.matches("(lexical-owner (owner-id 1))").count(),
+        4,
+        "{attributes}"
+    );
+    assert!(
+        attributes.find("inner").unwrap() < attributes.find("outer").unwrap(),
+        "{attributes}"
+    );
+    assert!(
+        attributes.find("outer").unwrap() < attributes.find("right").unwrap(),
+        "{attributes}"
+    );
+    assert!(
+        attributes.contains("(target (owner-id 2)) (lexical-owner (owner-id 1))"),
+        "{attributes}"
+    );
+    let result = sandbox.run(&["input.fl", "--emit", "nir"]);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("struct member attribute"));
+    let prefixes = (0..140)
+        .map(|i| format!("^attrs.note({i})\n"))
+        .collect::<String>();
+    sandbox.write(
+        "deep.fl",
+        &format!("struct Deep {{{prefixes} value:bool,}}"),
+    );
+    let output = sandbox.run(&["deep.fl", "--emit", "hir"]);
+    let dump = hir_dump(&output);
+    let attributes = hir_form(dump, "definition-attributes");
+    assert_eq!(attributes.matches("(deferred-attribute ").count(), 140);
+    assert!(attributes.find("note(139)").unwrap() < attributes.find("note(0)").unwrap());
+}
+
+#[test]
+fn interface_bodies_preserve_nested_definitions() {
+    let sandbox = Sandbox::new();
+    for (index, body) in [
+        "trait Container {struct Nested {flag:bool,} enum Choice {First, Second} mod helpers {fn ready()->bool {true}}}",
+        "struct Container {} impl Container {struct Nested {flag:bool,} enum Choice {First, Second} mod helpers {fn ready()->bool {true}}}",
+        "trait Interface {} struct Container {} impl Interface for Container {struct Nested {flag:bool,} enum Choice {First, Second} mod helpers {fn ready()->bool {true}}}",
+    ].into_iter().enumerate() {
+        sandbox.write("input.fl", body);
+        let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+        let dump = hir_dump(&output);
+        for name in ["Nested", "flag", "Choice", "First", "Second", "helpers", "ready"] {
+            assert!(dump.contains(name), "case {index} lost {name}: {dump}");
+        }
+        let checked = sandbox.run(&["input.fl", "--emit", "nir"]);
+        assert!(
+            !checked.status.success()
+                && String::from_utf8_lossy(&checked.stderr)
+                    .contains("elaboration failed:")
+                && !String::from_utf8_lossy(&checked.stderr).contains("panicked"),
+            "{}",
+            details(&checked)
+        );
+    }
+}
+
+#[test]
+fn interface_body_statements_cannot_disappear_from_checked_programs() {
+    let sandbox = Sandbox::new();
+    for prefix in [
+        "trait Interface",
+        "struct Container {} impl Container",
+        "trait Interface {} struct Container {} impl Interface for Container",
+    ] {
+        for statement in ["let ignored = true;", "ignored: true,", "while true {}"] {
+            sandbox.write(
+                "input.fl",
+                format!("{prefix} {{{statement}}} fn run()->bool {{true}}"),
+            );
+            let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+            assert!(
+                !output.status.success(),
+                "silently discarded {statement}: {}",
+                details(&output)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("unsupported trait/implementation body entry"),
+                "{}",
+                details(&output)
+            );
+        }
+    }
+}
+
+#[test]
+fn interface_imports_are_lexical_bindings_not_method_requirements() {
+    let sandbox = Sandbox::new();
+    let helpers = "mod helpers {pub fn yes()->bool {true} pub fn no()->bool {false} pub typealias Flag=bool;}";
+    for imports in [
+        "use @helpers.yes;use @helpers.no;use @helpers.Flag;",
+        "use @helpers.*;",
+        "private use @helpers.*;",
+        "pub use @helpers.{yes,no,Flag};",
+        "use @helpers.{yes,no,Flag};",
+        "use @helpers.yes as yes;use @helpers.no as no;use @helpers.Flag as Flag;",
+    ] {
+        for body in [
+            format!(
+                "trait Ready {{{imports} fn ready(self)->Flag {{yes() and not no()}}}} struct Value {{}} impl Ready for Value {{}} fn run()->bool {{Value{{}}.as(Ready).ready()}}"
+            ),
+            format!(
+                "trait Ready {{fn ready(self)->bool;}} struct Value {{}} impl Ready for Value {{{imports} fn ready(self)->Flag {{yes() and not no()}}}} fn run()->bool {{Value{{}}.as(Ready).ready()}}"
+            ),
+            format!(
+                "struct Value {{}} impl Value {{{imports} fn ready(self)->Flag {{yes() and not no()}}}} fn run()->bool {{Value{{}}.ready()}}"
+            ),
+        ] {
+            sandbox.write("input.fl", format!("{helpers}{body}"));
+            let output = sandbox.run(&["input.fl", "--interpret", "run"]);
+            assert_eq!(success(&output).trim(), "(bool true)");
+        }
+    }
+    sandbox.write("input.fl", format!("{helpers} trait Ready {{fn ready(self)->bool;}} struct Value {{}} impl Ready for Value {{use @helpers.yes as ready;}}"));
+    let missing = sandbox.run(&["input.fl", "--emit", "nir"]);
+    assert!(!missing.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("missing required trait method"),
+        "{}",
+        details(&missing)
+    );
+    sandbox.write("input.fl", format!("{helpers} trait Ready {{use @helpers.yes as local_only;fn ready(self)->bool {{local_only()}}}} fn outside()->bool {{local_only()}}"));
+    let leaked = sandbox.run(&["input.fl", "--emit", "nir"]);
+    assert!(!leaked.status.success(), "import escaped its lexical scope");
+    assert!(!String::from_utf8_lossy(&leaked.stderr).contains("panicked"));
+}
+
+#[test]
+fn nominal_body_imports_support_methods_fields_and_variants() {
+    let sandbox = Sandbox::new();
+    let helpers = "mod helpers {pub fn yes()->bool {true} pub typealias Flag=bool;}";
+    for imports in [
+        "use @helpers.{yes,Flag};",
+        "private use @helpers.*;",
+        "pub use @helpers.yes;pub use @helpers.Flag;",
+        "use @helpers.yes as yes;use @helpers.Flag as Flag;",
+    ] {
+        for body in [
+            format!(
+                "struct Value {{{imports} flag:Flag=yes(),fn ready(self)->Flag {{self.flag and yes()}}}} fn run()->bool {{Value{{}}.ready()}}"
+            ),
+            format!(
+                "enum Value {{{imports} First(Flag), Second, fn ready(self)->Flag {{yes()}}}} fn run()->bool {{Value.First(true).ready()}}"
+            ),
+        ] {
+            sandbox.write("input.fl", format!("{helpers}{body}"));
+            let output = sandbox.run(&["input.fl", "--interpret", "run"]);
+            assert_eq!(success(&output).trim(), "(bool true)");
+        }
+    }
+    // Visibility checking still belongs to name resolution; accepting the
+    // wrapper during lowering must not make a package-only source public.
+    for definition in ["struct Value", "enum Value", "trait Value"] {
+        sandbox.write("input.fl", format!("mod helpers {{fn hidden()->bool {{true}}}} {definition} {{pub use @helpers.hidden;}}"));
+        let rejected = sandbox.run(&["input.fl", "--emit", "hir"]);
+        assert!(!rejected.status.success(), "{}", details(&rejected));
+    }
+}
+
+#[test]
+fn interface_nested_modules_are_checked_as_lexical_namespaces() {
+    let sandbox = Sandbox::new();
+    let module = "mod helpers {typealias Flag=bool;fn identity(value:T)->T where T {value} mod nested {fn ready()->bool {true}} fn ready()->Flag {identity(nested.ready())}}";
+    for body in [
+        format!(
+            "trait Ready {{{module} fn ready(self)->bool {{helpers.ready()}}}} struct Value {{}} impl Ready for Value {{}} fn run()->bool {{Value{{}}.as(Ready).ready()}}"
+        ),
+        format!(
+            "trait Ready {{fn ready(self)->bool;}} struct Value {{}} impl Ready for Value {{{module} fn ready(self)->bool {{helpers.ready()}}}} fn run()->bool {{Value{{}}.as(Ready).ready()}}"
+        ),
+        format!(
+            "struct Value {{}} impl Value {{{module} fn ready(self)->bool {{helpers.ready()}}}} fn run()->bool {{Value{{}}.ready()}}"
+        ),
+        format!(
+            "struct Value {{{module} flag:bool=helpers.ready(),fn ready(self)->bool {{self.flag and helpers.ready()}}}} fn run()->bool {{Value{{}}.ready()}}"
+        ),
+        format!(
+            "enum Value {{{module} First,fn ready(self)->bool {{helpers.ready()}}}} fn run()->bool {{Value.First.ready()}}"
+        ),
+    ] {
+        for visibility in ["", "pub ", "private "] {
+            sandbox.write(
+                "input.fl",
+                body.replacen("mod helpers", &format!("{visibility}mod helpers"), 1),
+            );
+            let output = sandbox.run(&["input.fl", "--interpret", "run"]);
+            assert_eq!(success(&output).trim(), "(bool true)");
+        }
+        sandbox.write("input.fl", body.replace("identity(nested.ready())", "'x'"));
+        let invalid = sandbox.run(&["input.fl", "--emit", "nir"]);
+        assert!(
+            !invalid.status.success(),
+            "nested function body was not checked"
+        );
+        assert!(
+            String::from_utf8_lossy(&invalid.stderr).contains("elaboration failed:"),
+            "{}",
+            details(&invalid)
+        );
+    }
+}
+
+#[test]
+fn enum_variant_attributes_preserve_payloads_and_target_identity() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        r#"enum Choice {
+        ^attrs.note("outer") ^attrs.note("inner") Empty,
+        ^attrs.note("tuple") Pair(bool, bool),
+        ^attrs.note("record") Record {flag:bool,},
+    }"#,
+    );
+    let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+    let dump = hir_dump(&output);
+    let variants = hir_form(dump, "variants");
+    assert_eq!(variants.matches("(variant (id ").count(), 3, "{variants}");
+    for name in ["Empty", "Pair", "Record", "flag"] {
+        assert!(variants.contains(name), "{variants}");
+    }
+    let attributes = hir_form(dump, "definition-attributes");
+    assert_eq!(
+        attributes.matches("(deferred-attribute ").count(),
+        4,
+        "{attributes}"
+    );
+    assert_eq!(
+        attributes
+            .matches("(target (hir-id (owner 1) (local 0)))")
+            .count(),
+        2,
+        "{attributes}"
+    );
+    assert_eq!(
+        attributes.matches("(lexical-owner (owner-id 1))").count(),
+        4,
+        "{attributes}"
+    );
+    assert!(attributes.find("inner").unwrap() < attributes.find("outer").unwrap());
+    let checked = sandbox.run(&["input.fl", "--emit", "nir"]);
+    assert!(!checked.status.success());
+    assert!(
+        String::from_utf8_lossy(&checked.stderr).contains("enum variant attribute"),
+        "{}",
+        details(&checked)
+    );
+    sandbox.write(
+        "nested.fl",
+        r#"enum Choice {
+        ^attrs.note("record") Record {^attrs.note("field") flag:bool,},
+        ^attrs.note("group") Group.{^attrs.note("leaf") Leaf,},
+    }"#,
+    );
+    let output = sandbox.run(&["nested.fl", "--emit", "hir"]);
+    let dump = hir_dump(&output);
+    for name in ["Record", "flag", "Group", "Leaf"] {
+        assert!(dump.contains(name), "{dump}");
+    }
+    let attributes = hir_form(dump, "definition-attributes");
+    assert_eq!(
+        attributes.matches("(deferred-attribute ").count(),
+        4,
+        "{attributes}"
+    );
+    for local in [1, 2, 3, 4] {
+        assert_eq!(
+            attributes
+                .matches(&format!("(target (hir-id (owner 1) (local {local})))"))
+                .count(),
+            1,
+            "{attributes}"
+        );
+    }
+    let checked = sandbox.run(&["nested.fl", "--emit", "nir"]);
+    assert!(!checked.status.success());
+    assert!(
+        String::from_utf8_lossy(&checked.stderr).contains("enum variant attribute"),
+        "{}",
+        details(&checked)
+    );
+    sandbox.write(
+        "field.fl",
+        "enum Choice {Record {^attrs.note(true) flag:bool,}} ",
+    );
+    let checked = sandbox.run(&["field.fl", "--emit", "nir"]);
+    assert!(!checked.status.success());
+    assert!(
+        String::from_utf8_lossy(&checked.stderr).contains("struct field attribute"),
+        "{}",
+        details(&checked)
+    );
+}
+
+#[test]
+fn catch_parameters_do_not_degrade_to_ordinary_inputs() {
+    let sandbox = Sandbox::new();
+    for source in [
+        "fn receive(catch continuation:bool)->bool {continuation} fn run()->bool {receive(true)}",
+        "trait Handler {fn receive(catch continuation:bool)->bool;}",
+        "effect receive(catch continuation:bool)->bool;",
+        "comptime fn receive(catch continuation:bool)->bool {continuation}",
+    ] {
+        sandbox.write("input.fl", source);
+        let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+        let dump = hir_dump(&output);
+        assert!(dump.contains("(flags 64)"), "{dump}");
+        let checked = sandbox.run(&["input.fl", "--emit", "nir"]);
+        assert!(!checked.status.success(), "catch role was erased");
+        assert!(
+            String::from_utf8_lossy(&checked.stderr)
+                .contains("catch parameters require continuation binding"),
+            "{}",
+            details(&checked)
+        );
+    }
+}
+
+#[test]
+fn parameter_attributes_preserve_bindings_defaults_and_roles() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        r#"fn selected(
+        ^attrs.note("outer") ^attrs.note("inner") value:bool,
+        ^attrs.note("default").enabled .fallback:bool=value,
+        ^attrs.note("implicit") implicit context:bool,
+        ^attrs.note("stage") comptime stage:bool,
+    )->bool {value and fallback and context and stage}"#,
+    );
+    let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+    let dump = hir_dump(&output);
+    let parameters = hir_form(dump, "params");
+    assert_eq!(parameters.matches("(fn-param ").count(), 4, "{parameters}");
+    for index in 0..4 {
+        assert!(
+            parameters.contains(&format!("(index {index})")),
+            "{parameters}"
+        );
+    }
+    assert!(parameters.contains("(flags 1)"), "{parameters}");
+    assert!(parameters.contains("(flags 2)"), "{parameters}");
+    assert!(parameters.contains("optional"), "{parameters}");
+    let attributes = hir_form(dump, "definition-attributes");
+    assert_eq!(
+        attributes.matches("(deferred-attribute ").count(),
+        5,
+        "{attributes}"
+    );
+    assert_eq!(
+        attributes
+            .matches("(target (hir-id (owner 1) (local 1)))")
+            .count(),
+        2,
+        "{attributes}"
+    );
+    assert_eq!(
+        attributes.matches("(lexical-owner (owner-id 1))").count(),
+        5,
+        "{attributes}"
+    );
+    assert!(attributes.find("inner").unwrap() < attributes.find("outer").unwrap());
+    assert!(attributes.contains(".enabled"), "{attributes}");
+    let checked = sandbox.run(&["input.fl", "--emit", "nir"]);
+    assert!(!checked.status.success());
+    assert!(
+        String::from_utf8_lossy(&checked.stderr).contains("function parameter attribute"),
+        "{}",
+        details(&checked)
+    );
+}
+
+#[test]
+fn interface_typealiases_are_definitions_not_abstract_methods() {
+    let sandbox = Sandbox::new();
+    for source in [
+        "trait Ready {typealias Flag=bool;fn ready(self)->Flag {true}} struct Value {} impl Ready for Value {} fn run()->bool {Value{}.as(Ready).ready()}",
+        "trait Ready {fn ready(self)->bool;} struct Value {} impl Ready for Value {typealias Flag=bool;fn ready(self)->Flag {true}} fn run()->bool {Value{}.as(Ready).ready()}",
+        "struct Value {} impl Value {typealias Subject=Self;fn identity(self)->Subject {self} fn ready(self)->bool {true}} fn run()->bool {Value{}.identity().ready()}",
+        "trait Identity {typealias Subject=Self;fn identity(self)->Subject {self}} struct Value {} impl Identity for Value {} fn run()->bool {let value=Value{}.as(Identity).identity();true}",
+    ] {
+        sandbox.write("input.fl", source);
+        let output = sandbox.run(&["input.fl", "--interpret", "run"]);
+        assert_eq!(success(&output).trim(), "(bool true)");
+    }
+    for ordinary in ["typealias Element=bool;", "const Element=bool;"] {
+        sandbox.write("input.fl", format!("typealias Type=.Type'builtin;trait Collection {{assoc Element:Type;}} struct Value {{}} impl Collection for Value {{{ordinary}}}"));
+        let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("missing required associated value"),
+            "{}",
+            details(&output)
+        );
+    }
+}
+
+#[test]
+fn interface_constants_remain_checked_lexical_definitions() {
+    let sandbox = Sandbox::new();
+    let protocol = "typealias Type=.Type'builtin;trait Splice {assoc RuntimeTarget:Type;fn splice(comptime data:Self)->RuntimeTarget;} impl Splice for bool {assoc RuntimeTarget:Type=bool;fn splice(comptime data:bool)->bool {data}}";
+    for source in [
+        "trait Ready {const FLAG:bool=true;fn ready(self)->bool {FLAG}} struct Value {} impl Ready for Value {} fn run()->bool {Value{}.as(Ready).ready()}",
+        "trait Ready {fn ready(self)->bool;} struct Value {} impl Ready for Value {const FLAG:bool=true;fn ready(self)->bool {FLAG}} fn run()->bool {Value{}.as(Ready).ready()}",
+        "struct Value {} impl Value {const FLAG:bool=true;fn ready(self)->bool {FLAG}} fn run()->bool {Value{}.ready()}",
+    ] {
+        sandbox.write("input.fl", format!("{protocol}{source}"));
+        let output = sandbox.run(&[
+            "input.fl",
+            "--interpret",
+            "run",
+            "--splice-protocol",
+            "input::Splice",
+        ]);
+        assert_eq!(success(&output).trim(), "(bool true)");
+        sandbox.write(
+            "input.fl",
+            format!(
+                "{protocol}{}",
+                source.replace("FLAG:bool=true", "FLAG:bool='x'")
+            ),
+        );
+        let invalid = sandbox.run(&[
+            "input.fl",
+            "--emit",
+            "nir",
+            "--splice-protocol",
+            "input::Splice",
+        ]);
+        assert!(!invalid.status.success());
+        assert!(
+            String::from_utf8_lossy(&invalid.stderr).contains("elaboration failed:"),
+            "{}",
+            details(&invalid)
+        );
+    }
+}
+
+#[test]
+fn interface_aliases_preserve_generic_formation_requirements() {
+    let sandbox = Sandbox::new();
+    let checked = "struct Checked where T, requires T == bool {value:T,}";
+    for (body, required, unconstrained) in [
+        (
+            "trait Ready where T, requires T == bool {typealias Item=Checked<T>;fn ready(self,value:Item)->bool {value.value}} struct Value {} impl Ready<bool> for Value {} fn run()->bool {Value{}.as(Ready<bool>).ready(Checked<bool>{value:true})}",
+            "trait Ready where T, requires T == bool",
+            "trait Ready where T",
+        ),
+        (
+            "struct Value where T {} impl Value<T> where T, requires T == bool {typealias Item=Checked<T>;fn ready(self,value:Item)->bool {value.value}} fn run()->bool {Value<bool>{}.ready(Checked<bool>{value:true})}",
+            "impl Value<T> where T, requires T == bool",
+            "impl Value<T> where T",
+        ),
+        (
+            "trait Ready where T {fn ready(self,value:Checked<bool>)->bool;} struct Value where T {} impl Ready<T> for Value<T> where T, requires T == bool {typealias Item=Checked<T>;fn ready(self,value:Item)->bool {value.value}} fn run()->bool {Value<bool>{}.as(Ready<bool>).ready(Checked<bool>{value:true})}",
+            "impl Ready<T> for Value<T> where T, requires T == bool",
+            "impl Ready<T> for Value<T> where T",
+        ),
+    ] {
+        sandbox.write("input.fl", format!("{checked}{body}"));
+        let output = sandbox.run(&["input.fl", "--interpret", "run"]);
+        assert_eq!(success(&output).trim(), "(bool true)");
+        sandbox.write(
+            "input.fl",
+            format!("{checked}{}", body.replace(required, unconstrained)),
+        );
+        let invalid = sandbox.run(&["input.fl", "--emit", "nir"]);
+        assert!(
+            !invalid.status.success(),
+            "alias lost its formation requirement"
+        );
+        assert!(
+            String::from_utf8_lossy(&invalid.stderr).contains("elaboration failed:"),
+            "{}",
+            details(&invalid)
+        );
+    }
+}
+
+#[test]
+fn interface_aliases_inherit_trait_bounds_without_inventing_evidence() {
+    let sandbox = Sandbox::new();
+    let prefix =
+        "trait Allowed {} impl Allowed for bool {} struct Checked where T :- Allowed {value:T,}";
+    for (body, bounded, unbounded) in [
+        (
+            "trait Ready where T :- Allowed {typealias Item=Checked<T>;fn ready(self,value:Item)->bool {true}} struct Value {} impl Ready<bool> for Value {} fn run()->bool {Value{}.as(Ready<bool>).ready(Checked<bool>{value:true})}",
+            "trait Ready where T :- Allowed",
+            "trait Ready where T",
+        ),
+        (
+            "struct Value where T {} impl Value<T> where T :- Allowed {typealias Item=Checked<T>;fn ready(self,value:Item)->bool {true}} fn run()->bool {Value<bool>{}.ready(Checked<bool>{value:true})}",
+            "impl Value<T> where T :- Allowed",
+            "impl Value<T> where T",
+        ),
+        (
+            "trait Ready :- Allowed {typealias Item=Checked<Self>;fn ready(self,value:Item)->bool {true}} struct Value {} impl Allowed for Value {} impl Ready for Value {} fn run()->bool {Value{}.as(Ready).ready(Checked<Value>{value:Value{}})}",
+            "trait Ready :- Allowed",
+            "trait Ready",
+        ),
+    ] {
+        sandbox.write("input.fl", format!("{prefix}{body}"));
+        let output = sandbox.run(&["input.fl", "--interpret", "run"]);
+        assert_eq!(success(&output).trim(), "(bool true)");
+        sandbox.write(
+            "input.fl",
+            format!("{prefix}{}", body.replace(bounded, unbounded)),
+        );
+        let invalid = sandbox.run(&["input.fl", "--emit", "nir"]);
+        assert!(!invalid.status.success(), "alias fabricated trait evidence");
+        assert!(
+            String::from_utf8_lossy(&invalid.stderr).contains("elaboration failed:"),
+            "{}",
+            details(&invalid)
+        );
+    }
+}
+
+#[test]
+fn interface_newtypes_keep_nominal_identity_and_explicit_views() {
+    let sandbox = Sandbox::new();
+    for body in [
+        "trait Ready {newtype Flag=bool;newtype Other=bool;newtype Wrapped<T> = T;fn ready(self)->bool {true.as(Flag).as(bool).as(Wrapped<bool>).as(bool)}} struct Value {} impl Ready for Value {} fn run()->bool {Value{}.as(Ready).ready()}",
+        "trait Ready {fn ready(self)->bool;} struct Value {} impl Ready for Value {newtype Flag=bool;newtype Other=bool;newtype Wrapped<T> = T;fn ready(self)->bool {true.as(Flag).as(bool).as(Wrapped<bool>).as(bool)}} fn run()->bool {Value{}.as(Ready).ready()}",
+        "struct Value {} impl Value {newtype Flag=bool;newtype Other=bool;newtype Wrapped<T> = T;fn ready(self)->bool {true.as(Flag).as(bool).as(Wrapped<bool>).as(bool)}} fn run()->bool {Value{}.ready()}",
+    ] {
+        sandbox.write("input.fl", body);
+        let output = sandbox.run(&["input.fl", "--interpret", "run"]);
+        assert_eq!(success(&output).trim(), "(bool true)");
+        sandbox.write(
+            "input.fl",
+            body.replace(
+                "true.as(Flag).as(bool).as(Wrapped<bool>).as(bool)",
+                "let flag:Other=true.as(Flag);true",
+            ),
+        );
+        let invalid = sandbox.run(&["input.fl", "--emit", "nir"]);
+        assert!(!invalid.status.success(), "distinct newtypes became equal");
+        assert!(
+            String::from_utf8_lossy(&invalid.stderr).contains("elaboration failed:"),
+            "{}",
+            details(&invalid)
+        );
+    }
+}
+
+#[test]
+fn tuple_enumeration_view_retains_operand_and_loop_structure_in_hir() {
+    let sandbox = Sandbox::new();
+    for (body, runtime_view) in [
+        ("let view=values'tuple_enumerate;", true),
+        (
+            "inline for (index,element) in values'tuple_enumerate {let used=element;}",
+            false,
+        ),
+    ] {
+        sandbox.write(
+            "input.fl",
+            &format!("fn run(values:(bool,bool)) {{{body}}}"),
+        );
+        let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+        let dump = success(&output);
+        assert!(dump.contains("(take-tuple-enumerate (value"), "{dump}");
+        assert!(dump.contains("values"), "{dump}");
+        assert!(!dump.contains("(invalid)"), "{dump}");
+        let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+        if runtime_view {
+            failure(&output, 1);
+            let diagnostic = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                diagnostic.contains("comptime-only value cannot inhabit runtime storage")
+                    || diagnostic.contains("runtime elements cannot be evaluated at comptime"),
+                "{diagnostic}"
+            );
+        } else {
+            assert!(success(&output).starts_with("(nir-package"));
+        }
+    }
+    sandbox.write(
+        "input.fl",
+        "fn run() {inline for (index,element) in (true,false)'tuple_enumerate {let used=element;}}",
+    );
+    let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+    assert!(success(&output).starts_with("(nir-package"));
+    sandbox.write("input.fl", "fn run() {let view=missing'tuple_enumerate;}");
+    failure(&sandbox.run(&["input.fl", "--emit", "hir"]), 1);
 }

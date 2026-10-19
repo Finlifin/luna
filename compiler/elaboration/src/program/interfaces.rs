@@ -5,6 +5,7 @@ use crate::ptc::{Budget, Formula, Outcome};
 mod associated;
 mod declarations;
 mod parents;
+mod program_contracts;
 mod signatures;
 
 impl Checker<'_, '_> {
@@ -24,7 +25,7 @@ impl Checker<'_, '_> {
             _ => {
                 return Err(error(
                     item.span,
-                    "associated values require trait substitution not yet implemented",
+                    "this declaration kind is not yet supported as an interface member",
                 ));
             }
         };
@@ -76,7 +77,13 @@ impl Checker<'_, '_> {
         }
         let saved_context = std::mem::replace(&mut self.context, context);
         let saved_locals = std::mem::take(&mut self.locals);
+        let mut code_signature = None;
         let program = (|| {
+            if self.is_code_generator(owner) {
+                let (signature, program) = self.code_method_contract(owner, item.span)?;
+                code_signature = Some(signature);
+                return Ok(program);
+            }
             let ty = self
                 .signatures
                 .get(&owner)
@@ -131,14 +138,19 @@ impl Checker<'_, '_> {
                 .first()
                 .is_some_and(|p| matches!(p.ty.kind, TyParamKind::Itself { is_ref: false })),
             name: item.ident.name.to_string(),
-            signature: self.callable_type(
-                owner,
-                self.signatures
-                    .get(&owner)
-                    .or_else(|| self.interface_signatures.get(&owner))
-                    .unwrap()
-                    .clone(),
-            ),
+            signature: if let Some(signature) = code_signature {
+                nir::code_interfaces::MethodSignature::Generator(signature)
+            } else {
+                self.callable_type(
+                    owner,
+                    self.signatures
+                        .get(&owner)
+                        .or_else(|| self.interface_signatures.get(&owner))
+                        .unwrap()
+                        .clone(),
+                )
+                .into()
+            },
             requirements: self.requirements[&owner].clone(),
             default,
         })
@@ -159,6 +171,16 @@ impl Checker<'_, '_> {
             let mut associated = Vec::new();
             for member in &def.items {
                 let member_item = self.package.item(*member).unwrap();
+                if matches!(
+                    member_item.kind,
+                    ItemKind::Use(_)
+                        | ItemKind::Mod(_)
+                        | ItemKind::TypeAlias(..)
+                        | ItemKind::Newtype(..)
+                        | ItemKind::Const(..)
+                ) {
+                    continue;
+                }
                 if !names.insert(member_item.ident.name.to_string()) {
                     return Err(error(item.span, "duplicate trait member"));
                 }
@@ -209,6 +231,11 @@ impl Checker<'_, '_> {
                 if !matches!(
                     self.package.item(*member).unwrap().kind,
                     ItemKind::Associated(_)
+                        | ItemKind::Use(_)
+                        | ItemKind::Mod(_)
+                        | ItemKind::TypeAlias(..)
+                        | ItemKind::Newtype(..)
+                        | ItemKind::Const(..)
                 ) {
                     methods.push(self.method_contract(*member, owner, Some(&premise_traits))?);
                 }
@@ -334,6 +361,11 @@ impl Checker<'_, '_> {
                 index
                     .insert(
                         crate::implementation::ImplementationHead {
+                            parameter_types: self
+                                .trait_parameter_types
+                                .get(&owner)
+                                .cloned()
+                                .unwrap_or_default(),
                             declaration: declaration(self.package, &self.package_identities, owner),
                             interface: Some(interface),
                             subject: subject.clone(),
@@ -363,6 +395,16 @@ impl Checker<'_, '_> {
             let mut supplied_names = BTreeSet::new();
             for member in &members {
                 let member_item = self.package.item(*member).unwrap();
+                if matches!(
+                    member_item.kind,
+                    ItemKind::Use(_)
+                        | ItemKind::Mod(_)
+                        | ItemKind::TypeAlias(..)
+                        | ItemKind::Newtype(..)
+                        | ItemKind::Const(..)
+                ) {
+                    continue;
+                }
                 if !supplied_names.insert(member_item.ident.name.to_string()) {
                     return Err(error(item.span, "duplicate implementation member"));
                 }
@@ -419,24 +461,71 @@ impl Checker<'_, '_> {
                                 "method generic parameter count does not match its trait contract",
                             ));
                         }
-                        let substitution_parameters: Vec<_> = traits[&interface]
-                            .binders_with_self(&mut 100_000)
-                            .map_err(|e| error(item.span, e))?
-                            .into_iter()
-                            .chain(contract.type_parameters.iter().map(|id| {
-                                nir::DeclarationParameter {
+                        if let (
+                            nir::code_interfaces::MethodSignature::Generator(expected),
+                            nir::code_interfaces::MethodSignature::Generator(supplied),
+                        ) = (&contract.signature, &actual.signature)
+                        {
+                            if expected.clause_domains.len() != contract.type_parameters.len()
+                                || supplied.clause_domains.len() != actual.type_parameters.len()
+                                || expected
+                                    .clause_domains
+                                    .iter()
+                                    .zip(&supplied.clause_domains)
+                                    .any(|(a, b)| (*a == p(P::Type)) != (*b == p(P::Type)))
+                            {
+                                return Err(error(
+                                    item.span,
+                                    "method clause domains do not match its trait signature",
+                                ));
+                            }
+                        }
+                        let substitution_parameters: Vec<_> =
+                            traits[&interface]
+                                .binders_with_self(&mut 100_000)
+                                .map_err(|e| error(item.span, e))?
+                                .into_iter()
+                                .chain(contract.type_parameters.iter().enumerate().map(
+                                    |(slot, id)| {
+                                        nir::DeclarationParameter {
+                                        declaration: *id,
+                                        sort: match &contract.signature {
+                                            nir::code_interfaces::MethodSignature::Generator(
+                                                signature,
+                                            ) if signature
+                                                .clause_domains
+                                                .get(slot)
+                                                .is_some_and(|domain| *domain != p(P::Type)) =>
+                                            {
+                                                Sort::ComptimeValue
+                                            }
+                                            _ => Sort::Type,
+                                        },
+                                    }
+                                    },
+                                ))
+                                .collect();
+                        let substitution_arguments: Vec<_> = std::iter::once(subject.clone())
+                            .chain(interface_arguments.iter().cloned())
+                            .chain(actual.type_parameters.iter().enumerate().map(|(slot, id)| {
+                                Term::Rigid {
                                     declaration: *id,
-                                    sort: Sort::Type,
+                                    sort: match &actual.signature {
+                                        nir::code_interfaces::MethodSignature::Generator(
+                                            signature,
+                                        ) if signature
+                                            .clause_domains
+                                            .get(slot)
+                                            .is_some_and(|domain| *domain != p(P::Type)) =>
+                                        {
+                                            Sort::ComptimeValue
+                                        }
+                                        _ => Sort::Type,
+                                    },
                                 }
                             }))
                             .collect();
-                        let substitution_arguments: Vec<_> = std::iter::once(subject.clone())
-                            .chain(interface_arguments.iter().cloned())
-                            .chain(actual.type_parameters.iter().map(|id| Term::Rigid {
-                                declaration: *id,
-                                sort: Sort::Type,
-                            }))
-                            .collect();
+                        let actual_signature = &actual.signature;
                         let expected_signature = contract
                             .signature
                             .instantiate_parameters(
@@ -447,8 +536,8 @@ impl Checker<'_, '_> {
                         // Compatibility assumes the interface contract, never the
                         // implementation method's own (possibly stronger) premises.
                         let base = self.definition_context(owner);
-                        let scope = match actual.signature.callable_signature() {
-                            Term::Function { parameters, .. } if !parameters.is_empty() => {
+                        let scope = match actual_signature.callable_signature() {
+                            Ok(Term::Function { parameters, .. }) if !parameters.is_empty() => {
                                 vec![parameters.iter().map(|parameter| parameter.sort).collect()]
                             }
                             _ => Vec::new(),
@@ -458,11 +547,15 @@ impl Checker<'_, '_> {
                             context.assume(assumption.clone());
                         }
                         let scoped_parameters = substitution_parameters.clone();
+                        // This tuple only collects type dependencies for associated
+                        // equations. Signature category/context checks stay separate.
+                        let signature_types = expected_signature
+                            .type_terms()
+                            .chain(actual_signature.type_terms())
+                            .map(|ty| self.copy_alias_type(ty, item.span))
+                            .collect::<Result<Vec<_>, _>>()?;
                         let equations = self.candidate_associated_equations(
-                            &Term::Tuple(vec![
-                                expected_signature.clone(),
-                                actual.signature.clone(),
-                            ]),
+                            &Term::Tuple(signature_types),
                             &traits[&interface],
                             &subject,
                             &interface_arguments,
@@ -505,31 +598,59 @@ impl Checker<'_, '_> {
                         // Open matching function binders in the contract's input
                         // frame. Comparing only the closed function terms would
                         // hide A == B premises from their parameter/result types.
-                        let goal = match (&expected_signature, &actual.signature) {
+                        use nir::code_interfaces::MethodSignature;
+                        let goal = match (&expected_signature, actual_signature) {
                             (
-                                Term::Function {
-                                    parameters: expected,
-                                    result: left,
-                                },
-                                Term::Function {
-                                    parameters: supplied_parameters,
-                                    result: right,
-                                },
-                            ) if expected.len() == supplied_parameters.len()
-                                && expected
-                                    .iter()
-                                    .zip(supplied_parameters)
-                                    .all(|(a, b)| a.sort == b.sort)
-                                && expected_signature.check_scope(&[]).is_ok()
-                                && actual.signature.check_scope(&[]).is_ok() =>
-                            {
-                                if signatures::equivalent(
-                                    &context,
-                                    expected
+                                MethodSignature::Callable(expected_signature),
+                                MethodSignature::Callable(actual_signature),
+                            ) => match (expected_signature, actual_signature) {
+                                (
+                                    Term::Function {
+                                        parameters: expected,
+                                        result: left,
+                                    },
+                                    Term::Function {
+                                        parameters: supplied_parameters,
+                                        result: right,
+                                    },
+                                ) if expected.len() == supplied_parameters.len()
+                                    && expected
                                         .iter()
                                         .zip(supplied_parameters)
-                                        .map(|(a, b)| (&a.ty, &b.ty))
-                                        .chain(std::iter::once((left.as_ref(), right.as_ref()))),
+                                        .all(|(a, b)| a.sort == b.sort)
+                                    && expected_signature.check_scope(&[]).is_ok()
+                                    && actual_signature.check_scope(&[]).is_ok() =>
+                                {
+                                    if signatures::equivalent(
+                                        &context,
+                                        expected
+                                            .iter()
+                                            .zip(supplied_parameters)
+                                            .map(|(a, b)| (&a.ty, &b.ty))
+                                            .chain(std::iter::once((
+                                                left.as_ref(),
+                                                right.as_ref(),
+                                            ))),
+                                        Budget::default(),
+                                    ) {
+                                        Formula::True
+                                    } else {
+                                        Formula::False
+                                    }
+                                }
+                                _ => Formula::equal(
+                                    expected_signature.clone(),
+                                    actual_signature.clone(),
+                                ),
+                            },
+                            (
+                                MethodSignature::Generator(expected),
+                                MethodSignature::Generator(actual),
+                            ) => {
+                                if signatures::equivalent_code(
+                                    &context,
+                                    expected,
+                                    actual,
                                     Budget::default(),
                                 ) {
                                     Formula::True
@@ -537,7 +658,7 @@ impl Checker<'_, '_> {
                                     Formula::False
                                 }
                             }
-                            _ => Formula::equal(expected_signature, actual.signature.clone()),
+                            _ => Formula::False,
                         };
                         if !matches!(context.prove(goal, Budget::default()), Outcome::Entailed(_)) {
                             return Err(error(
@@ -563,6 +684,15 @@ impl Checker<'_, '_> {
                                 ));
                             }
                         }
+                        if matches!(actual.signature, MethodSignature::Generator(_)) {
+                            self.check_code_method_preconditions(
+                                contract,
+                                actual,
+                                &substitution_parameters,
+                                &substitution_arguments,
+                                item.span,
+                            )?;
+                        }
                         // Retain only definition equations for this method's
                         // body, never the compatibility proof's assumptions.
                         self.associated_definition_equations
@@ -584,6 +714,11 @@ impl Checker<'_, '_> {
                 inherent_index
                     .insert(
                         crate::implementation::InherentHead {
+                            parameter_types: self
+                                .trait_parameter_types
+                                .get(&owner)
+                                .cloned()
+                                .unwrap_or_default(),
                             declaration: declaration(self.package, &self.package_identities, owner),
                             subject: subject.clone(),
                             type_parameters: parameters.clone(),
@@ -683,6 +818,11 @@ impl Checker<'_, '_> {
                 ));
             }
             implementations.push(n::Implementation {
+                parameter_types: self
+                    .trait_parameter_types
+                    .get(&owner)
+                    .cloned()
+                    .unwrap_or_default(),
                 associated,
                 interface_arguments: interface_arguments.clone(),
                 capabilities: self.capabilities[&owner].clone(),
@@ -711,7 +851,12 @@ impl Checker<'_, '_> {
                     let item = info.node.expect_item();
                     (matches!(item.kind, ItemKind::Impl(_))
                         && pair.is_none_or(|(_, right, _)| {
-                            declaration(self.package, &self.package_identities, owner) == *right
+                            matches_declaration(
+                                self.package,
+                                &self.package_identities,
+                                owner,
+                                *right,
+                            )
                         }))
                     .then_some(item.span)
                 })
@@ -759,9 +904,13 @@ impl Checker<'_, '_> {
                     .package
                     .owners()
                     .find_map(|(owner, _)| {
-                        (declaration(self.package, &self.package_identities, owner)
-                            == implementation.declaration)
-                            .then_some(owner)
+                        (matches_declaration(
+                            self.package,
+                            &self.package_identities,
+                            owner,
+                            implementation.declaration,
+                        ))
+                        .then_some(owner)
                     })
                     .unwrap();
                 let span = self.package.item(owner).unwrap().span;
@@ -848,7 +997,7 @@ impl Checker<'_, '_> {
 impl Checker<'_, '_> {
     // Method routing recognizes Type inputs without changing their ordinary
     // expression representation, which carries value/provenance bindings.
-    fn is_static_method_subject(&self, value: &Expr<'_>) -> bool {
+    pub(super) fn is_static_method_subject(&self, value: &Expr<'_>) -> bool {
         self.is_type_head(value)
             || matches!(&value.kind,H::ResolvedFnParam(_,id)
             if self.type_input_bindings.contains_key(&local(*id)))
@@ -859,6 +1008,7 @@ impl Checker<'_, '_> {
         value: &Expr<'_>,
         name: &str,
         span: Span,
+        projection: hir::HirId,
     ) -> Result<Option<n::Expr>, Error> {
         if let H::ResolvedDef { def_id, .. } = value.kind {
             if self.package.definition_owner(def_id).is_some_and(|owner| {
@@ -905,7 +1055,118 @@ impl Checker<'_, '_> {
         } else {
             self.type_identity_view(&subject, span)?
         };
-        self.selected_method(subject, interface, name, span)
+        let selected = self.selected_method(subject, interface, name, span)?;
+        self.check_selected_method_access(selected.as_ref(), projection, span)?;
+        Ok(selected)
+    }
+
+    fn check_selected_method_access(
+        &self,
+        method: Option<&n::Expr>,
+        projection: hir::HirId,
+        span: Span,
+    ) -> Result<(), Error> {
+        let target = method.and_then(|method| match method.kind {
+            K::Function(declaration) | K::FunctionInstance { declaration, .. } => Some(declaration),
+            _ => None,
+        });
+        self.check_method_declaration_access(target, projection, span)
+    }
+
+    pub(super) fn check_method_declaration_access(
+        &self,
+        target: Option<DeclarationId>,
+        projection: hir::HirId,
+        span: Span,
+    ) -> Result<(), Error> {
+        if let (Some(candidates), Some(target)) = (
+            self.package
+                .member_access
+                .get(&projection)
+                .or_else(|| self.package.deferred_member_projections.get(&projection)),
+            target,
+        ) {
+            if let Some(owner) = Some(target).and_then(|target| {
+                self.package.owners().find_map(|(owner, _)| {
+                    matches_declaration(self.package, &self.package_identities, owner, target)
+                        .then_some(owner)
+                })
+            }) {
+                if let Some(parent) = self.self_containers.get(&owner).copied().filter(|parent| {
+                    self.package.item(*parent).is_some_and(|item| {
+                        matches!(item.kind, ItemKind::Struct(_) | ItemKind::Enum(_))
+                    })
+                }) {
+                    let container = self.package.owner_definition(parent);
+                    let member = self.package.owner_definition(owner);
+                    if !candidates
+                        .iter()
+                        .any(|(candidate_container, candidate_member)| {
+                            Some(*candidate_container) == container
+                                && Some(*candidate_member) == member
+                        })
+                    {
+                        return Err(error(
+                            span,
+                            "method is not accessible through this type projection",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn select_inherent_method_implementation(
+        &mut self,
+        subject: &Term,
+        name: &str,
+        span: Span,
+    ) -> Result<Option<(DeclarationId, Vec<Term>)>, Error> {
+        let resolution = self
+            .resolve_inherent_capability(name, subject, Budget::default())
+            .map_err(|e| error(span, format!("inherent method query failed: {e:?}")))?;
+        Ok(match resolution.types.selection {
+            crate::implementation::Selection::Selected(id) => {
+                let Some(crate::implementation::TypeAssessment::Applicable(evidence)) =
+                    resolution.types.assessments.get(&id)
+                else {
+                    return Err(error(
+                        span,
+                        "selected inherent implementation has no type evidence",
+                    ));
+                };
+                let assumptions = self.capability_assumptions();
+                crate::capabilities::World {
+                    index: &self.implementation_index,
+                    implementations: &self.checked_implementations,
+                    traits: &self.checked_traits,
+                    assumptions: &assumptions,
+                    context: &self.context,
+                }
+                .verify_inherent_evidence(
+                    &self.inherent_index,
+                    name,
+                    subject,
+                    &resolution,
+                    Budget::default(),
+                )
+                .map_err(|e| {
+                    error(
+                        span,
+                        format!("inherent method evidence replay failed: {e:?}"),
+                    )
+                })?;
+                Some((id, evidence.type_arguments.clone()))
+            }
+            crate::implementation::Selection::NoApplicableCandidate => None,
+            other => {
+                return Err(error(
+                    span,
+                    format!("inherent method applicability is unresolved: {other}"),
+                ));
+            }
+        })
     }
 
     pub(super) fn selected_method(
@@ -956,6 +1217,8 @@ impl Checker<'_, '_> {
                 return Ok(Some(n::Expr {
                     ty: contract
                         .signature
+                        .ordinary()
+                        .map_err(|e| error(span, e.to_string()))?
                         .instantiate_parameters_in_scope(
                             &self.interface_parameter_binders(interface, span)?,
                             &self.interface_substitution(interface, &subject).1,
@@ -996,50 +1259,12 @@ impl Checker<'_, '_> {
                 }
             }
         } else {
-            let resolution = self
-                .resolve_inherent_capability(name, &subject, Budget::default())
-                .map_err(|e| error(span, format!("inherent method query failed: {e:?}")))?;
-            match resolution.types.selection {
-                crate::implementation::Selection::Selected(id) => {
-                    let Some(crate::implementation::TypeAssessment::Applicable(evidence)) =
-                        resolution.types.assessments.get(&id)
-                    else {
-                        return Err(error(
-                            span,
-                            "selected inherent implementation has no type evidence",
-                        ));
-                    };
-                    let assumptions = self.capability_assumptions();
-                    crate::capabilities::World {
-                        index: &self.implementation_index,
-                        implementations: &self.checked_implementations,
-                        traits: &self.checked_traits,
-                        assumptions: &assumptions,
-                        context: &self.context,
-                    }
-                    .verify_inherent_evidence(
-                        &self.inherent_index,
-                        name,
-                        &subject,
-                        &resolution,
-                        Budget::default(),
-                    )
-                    .map_err(|e| {
-                        error(
-                            span,
-                            format!("inherent method evidence replay failed: {e:?}"),
-                        )
-                    })?;
-                    implementation_arguments = evidence.type_arguments.clone();
-                    Some(id)
+            match self.select_inherent_method_implementation(&subject, name, span)? {
+                Some((selected, arguments)) => {
+                    implementation_arguments = arguments;
+                    Some(selected)
                 }
-                crate::implementation::Selection::NoApplicableCandidate => None,
-                other => {
-                    return Err(error(
-                        span,
-                        format!("inherent method applicability is unresolved: {other}"),
-                    ));
-                }
+                None => None,
             }
         };
         let Some(selected) = selected else {
@@ -1083,6 +1308,8 @@ impl Checker<'_, '_> {
             return Ok(Some(n::Expr {
                 ty: contract
                     .signature
+                    .ordinary()
+                    .map_err(|e| error(span, e.to_string()))?
                     .instantiate_parameters_in_scope(
                         &parameters,
                         &arguments,
@@ -1103,10 +1330,16 @@ impl Checker<'_, '_> {
             .package
             .owners()
             .find_map(|(owner, _)| {
-                (declaration(self.package, &self.package_identities, owner) == body)
+                (matches_declaration(self.package, &self.package_identities, owner, body))
                     .then_some(owner)
             })
             .unwrap();
+        if self.is_code_generator(owner) {
+            return Err(error(
+                span,
+                "code generator method invocation requires code-method dispatch, which is not yet implemented",
+            ));
+        }
         let arguments = if self.type_parameters[&owner].is_empty() {
             Vec::new()
         } else if self.self_containers.contains_key(&owner) {
@@ -1131,8 +1364,8 @@ impl Checker<'_, '_> {
         // remain rigid until invocation inference completes them; this value
         // must not escape as a published generic function instance.
         let ty = self.signatures[&owner]
-            .instantiate_types_in_scope(
-                &parameters[..arguments.len()],
+            .instantiate_parameters_in_scope(
+                &self.input_binders(&parameters[..arguments.len()]),
                 &arguments,
                 &self.call_input_frames(),
             )
@@ -1216,12 +1449,7 @@ impl Checker<'_, '_> {
         else {
             return Ok(());
         };
-        let caller = self.call_inference_scope();
-        let mut frames = if caller.is_empty() {
-            vec![]
-        } else {
-            vec![caller.iter().map(|p| p.sort).collect()]
-        };
+        let mut frames = self.call_input_frames();
         let specialized = signature
             .instantiate_parameters_in_scope(
                 &self.declaration_binders(owner),
@@ -1296,14 +1524,15 @@ impl Checker<'_, '_> {
 }
 
 impl Checker<'_, '_> {
-    fn nominal_self_type(&self, owner: OwnerId) -> Term {
+    pub(super) fn nominal_self_type(&self, owner: OwnerId) -> Term {
         Term::Nominal {
             declaration: declaration(self.package, &self.package_identities, owner),
-            arguments: self.type_parameters[&owner]
-                .iter()
+            arguments: self
+                .declaration_binders(owner)
+                .into_iter()
                 .map(|parameter| Term::Rigid {
-                    declaration: *parameter,
-                    sort: Sort::Type,
+                    declaration: parameter.declaration,
+                    sort: parameter.sort,
                 })
                 .collect(),
         }
@@ -1320,6 +1549,18 @@ impl Checker<'_, '_> {
                     };
                     self.self_types.insert(owner, ty.clone());
                     for member in &def.items {
+                        if matches!(
+                            self.package.item(*member).unwrap().kind,
+                            ItemKind::Use(_) | ItemKind::Mod(_)
+                        ) {
+                            continue;
+                        }
+                        if matches!(
+                            self.package.item(*member).unwrap().kind,
+                            ItemKind::TypeAlias(..) | ItemKind::Newtype(..) | ItemKind::Const(..)
+                        ) {
+                            self.self_containers.insert(*member, owner);
+                        }
                         self.self_types.insert(*member, ty.clone());
                     }
                 }
@@ -1334,7 +1575,13 @@ impl Checker<'_, '_> {
                     for member in members {
                         if matches!(
                             self.package.item(*member).map(|item| &item.kind),
-                            Some(ItemKind::Fn(..) | ItemKind::FnDeclaration(_))
+                            Some(
+                                ItemKind::Fn(..)
+                                    | ItemKind::FnDeclaration(_)
+                                    | ItemKind::TypeAlias(..)
+                                    | ItemKind::Newtype(..)
+                                    | ItemKind::Const(..)
+                            )
                         ) {
                             self.self_containers.insert(*member, owner);
                             self.self_types.insert(*member, ty.clone());
@@ -1345,6 +1592,12 @@ impl Checker<'_, '_> {
                     // Delay head interpretation until a member actually uses
                     // Self; unrelated signatures need not already be collected.
                     for member in &def.items {
+                        if matches!(
+                            self.package.item(*member).unwrap().kind,
+                            ItemKind::Use(_) | ItemKind::Mod(_)
+                        ) {
+                            continue;
+                        }
                         self.self_containers.insert(*member, owner);
                     }
                 }
@@ -1420,7 +1673,9 @@ impl Checker<'_, '_> {
             _ => false,
         };
         if projected_subject {
-            if let Some(method) = self.static_method(view, name.name.as_str(), callee.span)? {
+            if let Some(method) =
+                self.static_method(view, name.name.as_str(), callee.span, callee.hir_id)?
+            {
                 return Ok(Some((method, vec![])));
             }
         }
@@ -1525,6 +1780,7 @@ impl Checker<'_, '_> {
             depth += 1;
             subject = self.type_identity_view(&inner, base.span)?;
         };
+        self.check_selected_method_access(Some(&method), callee.hir_id, expr.span)?;
         let has_receiver = match &method.kind {
             K::TraitMethod {
                 interface, member, ..
@@ -1548,7 +1804,7 @@ impl Checker<'_, '_> {
                     .package
                     .owners()
                     .find_map(|(owner, _)| {
-                        (declaration(self.package, &self.package_identities, owner) == *body)
+                        (matches_declaration(self.package, &self.package_identities, owner, *body))
                             .then_some(owner)
                     })
                     .unwrap();
@@ -1638,8 +1894,13 @@ impl Checker<'_, '_> {
             .package
             .owners()
             .find_map(|(owner, _)| {
-                (declaration(self.package, &self.package_identities, owner) == contract.declaration)
-                    .then_some(owner)
+                (matches_declaration(
+                    self.package,
+                    &self.package_identities,
+                    owner,
+                    contract.declaration,
+                ))
+                .then_some(owner)
             })
             .ok_or_else(|| error(span, "missing trait method declaration"))?;
         let arguments = self.interface_substitution(interface, subject).1;
@@ -1654,8 +1915,43 @@ impl Checker<'_, '_> {
         arguments: &[Term],
         span: Span,
     ) -> Result<(), Error> {
+        self.check_capabilities_in_environment(
+            owner,
+            arguments,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            span,
+        )
+    }
+
+    pub(super) fn check_capabilities_in_environment(
+        &self,
+        owner: OwnerId,
+        arguments: &[Term],
+        environment: &BTreeMap<DeclarationId, std::sync::Arc<Term>>,
+        deferred: &BTreeSet<DeclarationId>,
+        span: Span,
+    ) -> Result<(), Error> {
         if let Some(requirements) = self.capabilities.get(&owner) {
             for requirement in requirements {
+                if (matches!(
+                    self.package.item(owner).map(|item| &item.kind),
+                    Some(ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::Newtype(..))
+                ) || self.normal_parameters.contains_key(&owner)
+                    || self.alias_contracts.contains_key(&declaration(
+                        self.package,
+                        &self.package_identities,
+                        owner,
+                    )))
+                    && deferred
+                        .iter()
+                        .any(|parameter| requirement.mentions_rigid(*parameter))
+                {
+                    // NominalType, normal-form heads and registered alias
+                    // guards retain the contract and check it after Type inputs.
+                    continue;
+                }
+
                 if std::iter::once(&requirement.subject)
                     .chain(&requirement.interface_arguments)
                     .any(|ty| {
@@ -1698,12 +1994,15 @@ impl Checker<'_, '_> {
                 )) {
                     continue;
                 }
-                let scope = self.call_inference_scope();
-                let frames = if scope.is_empty() {
-                    vec![]
-                } else {
-                    vec![scope.iter().map(|parameter| parameter.sort).collect()]
+                let n::TypePredicate::Trait(requirement) = self.instantiate_formation_environment(
+                    &n::TypePredicate::Trait(requirement.clone()),
+                    environment,
+                    span,
+                )?
+                else {
+                    unreachable!()
                 };
+                let frames = self.call_input_frames();
                 let parameters = self.declaration_binders(owner);
                 let requirement = requirement
                     .instantiate_parameters_in_scope(&parameters, arguments, &frames)
@@ -1715,7 +2014,7 @@ impl Checker<'_, '_> {
                 let mut requirement = requirement;
                 requirement.subject = self.callable_input_view(&requirement.subject, span)?;
                 for argument in &mut requirement.interface_arguments {
-                    *argument = self.callable_input_view(argument, span)?;
+                    *argument = self.capability_argument_view(argument, span)?;
                 }
                 let instance = requirement.interface_instance();
                 if self.symbolic_interface_evidence(&requirement.subject, &instance) {
@@ -1743,8 +2042,7 @@ impl Checker<'_, '_> {
     pub(super) fn capability_assumptions(&self) -> Vec<n::TraitRequirement> {
         let mut assumptions = self
             .signature_owner
-            .and_then(|owner| self.capabilities.get(&owner))
-            .cloned()
+            .map(|owner| self.binder_assumptions(owner))
             .unwrap_or_default();
         // Positive conjunctive type facts are local trait evidence. Do not
         // extract a branch of a disjunction or turn negative facts positive.
@@ -1774,14 +2072,17 @@ impl Checker<'_, '_> {
             assumptions.extend(implementation.capabilities.iter().cloned());
         }
         if let Some(interface) = self.default_interface() {
-            assumptions.push(n::TraitRequirement {
+            let requirement = n::TraitRequirement {
                 interface_arguments: interface.arguments,
                 interface: interface.declaration,
                 subject: Term::Rigid {
                     declaration: interface.declaration,
                     sort: Sort::Type,
                 },
-            });
+            };
+            if !assumptions.contains(&requirement) {
+                assumptions.push(requirement);
+            }
         }
         assumptions
     }
@@ -1802,7 +2103,7 @@ impl Checker<'_, '_> {
         .resolve_instance(interface, subject, budget)
         .map(|r| r.types)
     }
-    fn resolve_inherent_capability(
+    pub(super) fn resolve_inherent_capability(
         &self,
         name: &str,
         subject: &Term,
@@ -1848,7 +2149,8 @@ impl Checker<'_, '_> {
         self.package
             .owners()
             .find_map(|(owner, _)| {
-                (declaration(self.package, &self.package_identities, owner) == id).then_some(owner)
+                (matches_declaration(self.package, &self.package_identities, owner, id))
+                    .then_some(owner)
             })
             .map(|owner| (owner, arguments))
     }
@@ -1912,7 +2214,13 @@ impl Checker<'_, '_> {
             && self.runtime_value_context()
             && matches!(
                 callee.kind,
-                H::Application(..) | H::ExtendedApplication(..) | H::Block(_)
+                H::Application(..)
+                    | H::ExtendedApplication(..)
+                    | H::Block(_)
+                    | H::If(..)
+                    | H::Match(..)
+                    | H::When(_)
+                    | H::InlineControl(_)
             )
         {
             let saved = self.comptime_callee_result.replace(callee.hir_id);
@@ -1966,7 +2274,9 @@ impl Checker<'_, '_> {
                     },
                 });
             }
-            if let Some(method) = self.static_method(base, name.name.as_str(), callee.span)? {
+            if let Some(method) =
+                self.static_method(base, name.name.as_str(), callee.span, callee.hir_id)?
+            {
                 return Ok(method);
             }
         }
@@ -2070,12 +2380,7 @@ impl Checker<'_, '_> {
             unreachable!()
         };
         let method_arguments = arguments[inherited..].to_vec();
-        let scope = self.call_inference_scope();
-        let frames = if scope.is_empty() {
-            vec![]
-        } else {
-            vec![scope.iter().map(|p| p.sort).collect()]
-        };
+        let frames = self.call_input_frames();
         let signature = self
             .signatures
             .get(&owner)
@@ -2145,8 +2450,8 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<Term, Error> {
         // This view is also used for complete interface argument vectors.
-        // A finished symbol index has no associated Type projection to solve.
-        if matches!(signature, Term::Symbol(_)) {
+        // A finished scalar index has no associated Type projection to solve.
+        if signature.is_structural_index_value() {
             let mut fuel = budget.steps;
             crate::associated::charge_projection_copy(signature, &mut fuel)
                 .map_err(|e| error(span, e))?;
@@ -2159,6 +2464,7 @@ impl Checker<'_, '_> {
             .substitution_parameters()
             .map_err(|e| error(span, e.to_string()))?
             .is_empty()
+            && self.context.scope() != self.call_input_frames().as_slice()
         {
             let parameters = self.call_inference_scope();
             if parameters.is_empty() {

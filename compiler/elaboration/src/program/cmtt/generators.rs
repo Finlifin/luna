@@ -2,42 +2,61 @@
 //! evidence without inventing a runnable program; invocation supplies actual
 //! code witnesses before anything can enter the runtime package.
 use super::*;
+mod clauses;
+mod inference;
 mod matches;
+mod methods;
 mod places;
 mod spreads;
 mod statements;
 use statements::Control;
 
-#[derive(Clone)]
-enum Input {
-    Data(Term),
-    Code(Interface),
-}
+use nir::code_interfaces::{CodeFunctionSignature, CodeInput as Input};
 #[derive(Clone)]
 pub(in crate::program) struct Generator {
+    captures: Vec<(DeclarationId, Term)>,
     types: Vec<(DeclarationId, Term)>,
-    inputs: Vec<(n::LocalId, Input)>,
-    output: Interface,
+    signature: CodeFunctionSignature,
     defaults: Vec<(usize, hir::HirId)>,
     variadics: Vec<usize>,
-    body: hir::BodyId,
+    body: Option<hir::BodyId>,
     checked: bool,
 }
+impl std::ops::Deref for Generator {
+    type Target = CodeFunctionSignature;
+    fn deref(&self) -> &Self::Target {
+        &self.signature
+    }
+}
+impl std::ops::DerefMut for Generator {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.signature
+    }
+}
+
 enum Argument {
     Data(Option<n::Expr>),
+    LiveData(comptime_interpretor::Value),
     Code(Arc<ExpressionCode>),
 }
+// Entry snapshots copy parameter values, not the objects reached through pointers.
+type GeneratorEntryData = BTreeMap<n::LocalId, (n::Expr, Option<comptime_interpretor::Storage>)>;
 type GeneratorTypePlan = (
     Vec<DeclarationId>,
     Vec<Term>,
     Vec<(usize, Vec<DeclarationId>)>,
+    Vec<usize>,
 );
 
 impl fmt::Display for Generator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("(code-generator (types")?;
-        for (id, ty) in &self.types {
-            write!(f, " (type {id} {ty})")?;
+        f.write_str("(code-generator (captures")?;
+        for (id, value) in &self.captures {
+            write!(f, " (binding {id} {value})")?;
+        }
+        f.write_str(") (clauses")?;
+        for ((id, ty), domain) in self.types.iter().zip(&self.clause_domains) {
+            write!(f, " (input {id} (domain {domain}) (value {ty}))")?;
         }
         f.write_str(") (inputs")?;
         for (binding, input) in &self.inputs {
@@ -58,13 +77,12 @@ impl fmt::Display for Generator {
                 local(*expression)
             )?;
         }
-        write!(
-            f,
-            ") (output {}) (body {}) (checked {}))",
-            self.output,
-            local(self.body.hir_id),
-            self.checked
-        )
+        write!(f, ") (output {}) (body ", self.output)?;
+        match self.body {
+            Some(body) => write!(f, "{}", local(body.hir_id))?,
+            None => f.write_str("declaration")?,
+        }
+        write!(f, ") (checked {}))", self.checked)
     }
 }
 
@@ -97,8 +115,15 @@ impl Checker<'_, '_> {
                 .package
                 .item(owner)
                 .ok_or_else(|| error(span, "missing code generator declaration"))?;
-            let ItemKind::Fn(sig, body) = &item.kind else {
-                return Err(error(span, "code generator requires a body"));
+            let (sig, body) = match &item.kind {
+                ItemKind::Fn(sig, body) => (sig, Some(*body)),
+                ItemKind::FnDeclaration(sig) if self.self_types.contains_key(&owner) => (sig, None),
+                _ => {
+                    return Err(error(
+                        span,
+                        "a code generator declaration requires a trait contract",
+                    ));
+                }
             };
             if !sig.modifiers.is_comptime || sig.modifiers.is_normal_form_head {
                 return Err(error(
@@ -106,78 +131,119 @@ impl Checker<'_, '_> {
                     "an expression-code result requires an explicit comptime fn",
                 ));
             }
-            if !sig.modifiers.is_pure || self.self_containers.contains_key(&owner) {
-                return Err(error(
-                    span,
-                    "impure or method code generators are not yet implemented",
-                ));
+            // Keep the cached declaration symbolic. Selected invocations carry
+            // their enclosing binders separately from method-local clauses.
+            let mut visible_parameters = self.type_parameters[&owner].clone();
+            if let Some(parent) = self.self_containers.get(&owner) {
+                visible_parameters.extend(self.type_parameters[parent].iter().copied());
             }
+            if let Some(Term::Rigid {
+                declaration: self_parameter,
+                sort: Sort::Type,
+            }) = self.self_types.get(&owner)
+            {
+                visible_parameters.push(*self_parameter);
+                if let Some((parent, _)) = self.package.owners().find(|(parent, _)| {
+                    matches_declaration(
+                        self.package,
+                        &self.package_identities,
+                        *parent,
+                        *self_parameter,
+                    )
+                }) {
+                    visible_parameters.extend(self.type_parameters[&parent].iter().copied());
+                }
+            }
+            let mut domains = Vec::new();
             for parameter in sig.clause_params {
-                match parameter.kind {
+                let domain = match parameter.kind {
                     hir::clause::ClauseParamKind::Type(_)
-                    | hir::clause::ClauseParamKind::TraitBound(..) => {}
-                    hir::clause::ClauseParamKind::Optional(_, ty, _)
-                        if self.type_expr(ty)? == p(P::Type) => {}
+                    | hir::clause::ClauseParamKind::TraitBound(..) => p(P::Type),
+                    hir::clause::ClauseParamKind::Positional(_, ty)
+                    | hir::clause::ClauseParamKind::Optional(_, ty, _) => self.type_expr(ty)?,
                     _ => {
                         return Err(error(
                             parameter.span,
-                            "code generator clauses require Type parameters",
+                            "unsupported code generator clause protocol",
                         ));
                     }
+                };
+                if !nir::normal_forms::supported_input_type_with_layouts(
+                    &domain,
+                    &visible_parameters,
+                    |head| Some(head) == self.protocols.tuple,
+                    |id| {
+                        self.structs.contains_key(&id)
+                            || self.enums.contains_key(&id)
+                            || self.newtypes.contains_key(&id)
+                            || self.context.is_nominal_constructor(id)
+                    },
+                ) {
+                    return Err(error(
+                        parameter.span,
+                        "code generator clause requires an immutable value domain",
+                    ));
                 }
+                domains.push(domain);
             }
+            self.trait_parameter_types.insert(owner, domains.clone());
+            self.capabilities.entry(owner).or_default();
             self.prepare_parameter_capabilities(owner, sig.clause_params)?;
             self.ensure_contract(owner, span)?;
-            if !self.program_requirements[&owner].is_empty()
-                || !self.program_postconditions[&owner].is_empty()
-            {
-                return Err(error(
-                    span,
-                    "program contracts on code generators are not yet implemented",
-                ));
-            }
-            self.check_type_defaults(owner)?;
+            // Defaults are checked in the complete generator frame below,
+            // including enclosing value binders, as part of definition checking.
             self.context = self.definition_context(owner);
             let mut inputs = Vec::new();
             for parameter in sig.params {
                 let annotation = match parameter.ty.kind {
                     TyParamKind::Positional(annotation)
                     | TyParamKind::Optional(_, annotation, _)
-                    | TyParamKind::Varadic(_, annotation) => annotation,
+                    | TyParamKind::Varadic(_, annotation) => Some(annotation),
+                    TyParamKind::Itself { .. } => None,
                     _ => {
                         return Err(error(
                             parameter.span,
-                            "code generator receiver parameters are not yet implemented",
+                            "code generator reference receivers are not yet implemented",
                         ));
                     }
                 };
-                if parameter.ty.flags != 0 {
+                // All generator inputs are constructed at comptime. An
+                // explicit phase marker is redundant, while implicit inputs
+                // use the ordinary named-supply router (no contextual capture).
+                if parameter.ty.flags
+                    & !(hir::common::TPARAM_IMPLICIT
+                        | hir::common::TPARAM_COMPTIME
+                        | hir::common::TPARAM_LAMBDA)
+                    != 0
+                {
                     return Err(error(
                         parameter.span,
                         "code generator parameter protocols are not yet implemented",
                     ));
                 }
-                let input = if matches!(annotation.kind, H::ContextualExprType(..)) {
+                let input = if annotation
+                    .is_some_and(|annotation| matches!(annotation.kind, H::ContextualExprType(..)))
+                {
                     if matches!(parameter.ty.kind, TyParamKind::Varadic(..)) {
                         return Err(error(
                             parameter.span,
                             "code collections require code-container evidence not yet implemented",
                         ));
                     }
-                    Input::Code(self.code_interface(annotation)?)
+                    Input::Code(self.code_interface(annotation.unwrap())?)
                 } else {
-                    let ty = self.type_expr(annotation)?;
-                    if !nir::normal_forms::supported_input_type_with_layouts(
-                        &ty,
-                        &self.type_parameters[&owner],
-                        |head| Some(head) == self.protocols.tuple,
-                        |declaration| {
-                            self.structs.contains_key(&declaration)
-                                || self.enums.contains_key(&declaration)
-                                || self.newtypes.contains_key(&declaration)
-                                || self.context.is_nominal_constructor(declaration)
-                        },
-                    ) {
+                    let ty = match annotation {
+                        Some(annotation) => self.type_expr(annotation)?,
+                        None => {
+                            let ty = self.self_type(owner, parameter.span)?;
+                            if matches!(parameter.ty.kind, TyParamKind::Itself { is_ref: true }) {
+                                Term::Pointer(Box::new(ty))
+                            } else {
+                                ty
+                            }
+                        }
+                    };
+                    if !self.generator_data_domain(&ty, &visible_parameters) {
                         return Err(error(
                             parameter.span,
                             "code generator data parameter requires a supported immutable value domain",
@@ -185,24 +251,60 @@ impl Checker<'_, '_> {
                     }
                     Input::Data(ty)
                 };
+                if parameter.ty.is_lambda()
+                    && !matches!(&input, Input::Data(ty) if ty.is_comptime_callable())
+                {
+                    return Err(error(
+                        parameter.span,
+                        "generator lambda parameter requires a comptime callable type",
+                    ));
+                }
                 inputs.push((local(parameter.hir_id), input));
             }
             let output = self.code_interface(sig.return_ty.unwrap())?;
             Ok(Generator {
-                types: self.type_parameters[&owner]
-                    .iter()
-                    .map(|id| {
+                captures: self
+                    .input_binders(
+                        &visible_parameters
+                            .into_iter()
+                            .filter(|id| !self.type_parameters[&owner].contains(id))
+                            .collect::<BTreeSet<_>>()
+                            .into_iter()
+                            .collect::<Vec<_>>(),
+                    )
+                    .into_iter()
+                    .map(|binder| {
                         (
-                            *id,
+                            binder.declaration,
                             Term::Rigid {
-                                declaration: *id,
-                                sort: Sort::Type,
+                                declaration: binder.declaration,
+                                sort: binder.sort,
                             },
                         )
                     })
                     .collect(),
-                inputs,
-                output,
+                types: self.type_parameters[&owner]
+                    .iter()
+                    .zip(&domains)
+                    .map(|(id, domain)| {
+                        (
+                            *id,
+                            Term::Rigid {
+                                declaration: *id,
+                                sort: if *domain == p(P::Type) {
+                                    Sort::Type
+                                } else {
+                                    Sort::ComptimeValue
+                                },
+                            },
+                        )
+                    })
+                    .collect(),
+                signature: CodeFunctionSignature {
+                    clause_domains: domains,
+                    inputs,
+                    output,
+                },
                 variadics: sig
                     .params
                     .iter()
@@ -220,7 +322,7 @@ impl Checker<'_, '_> {
                         _ => None,
                     })
                     .collect(),
-                body: *body,
+                body,
                 checked: false,
             })
         })();
@@ -237,18 +339,28 @@ impl Checker<'_, '_> {
         owner: OwnerId,
         check: impl FnOnce(&mut Self) -> Result<R, Error>,
     ) -> Result<R, Error> {
+        let span = self.package.item(owner).unwrap().span;
+        let roots = self
+            .generator_cells
+            .values()
+            .map(|(_, cell)| comptime_interpretor::Value::Storage(cell.clone()))
+            .collect::<Vec<_>>();
+        let checkpoint = self.checkpoint_generator_cells(&roots, span)?;
         let outer = (
             self.context.clone(),
             std::mem::take(&mut self.type_input_bindings),
             std::mem::take(&mut self.value_input_bindings),
             self.default_input_scope.take(),
+            self.default_input_owner.take(),
             std::mem::take(&mut self.specialization_inputs),
             self.effect_environment.take(),
             self.partial_return_context.take(),
             self.return_observations.take(),
         );
         let aliases = std::mem::take(&mut self.alias_substitution);
+        let clause_bindings = std::mem::take(&mut self.normal_default_bindings);
         self.context = self.definition_context(owner);
+        let saved_cells = std::mem::take(&mut self.generator_cells);
         let saved = (
             std::mem::take(&mut self.locals),
             std::mem::take(&mut self.code_values),
@@ -267,7 +379,8 @@ impl Checker<'_, '_> {
         self.in_code_body = false;
         self.in_required_comptime = false;
         self.in_staged_input = false;
-        let result = check(self);
+        let mut result = check(self);
+        self.generator_cells = saved_cells;
         (
             self.locals,
             self.code_values,
@@ -288,12 +401,27 @@ impl Checker<'_, '_> {
             self.type_input_bindings,
             self.value_input_bindings,
             self.default_input_scope,
+            self.default_input_owner,
             self.specialization_inputs,
             self.effect_environment,
             self.partial_return_context,
             self.return_observations,
         ) = outer;
         self.alias_substitution = aliases;
+        self.normal_default_bindings = clause_bindings;
+        if result.is_ok() {
+            if let Err(failure) = self.refresh_generator_cells(span) {
+                result = Err(failure);
+            }
+        }
+        if result.is_err() {
+            checkpoint.restore().map_err(|failure| {
+                error(
+                    span,
+                    format!("generator call restoration failed: {failure:?}"),
+                )
+            })?;
+        }
         result
     }
 
@@ -348,12 +476,69 @@ impl Checker<'_, '_> {
             })
             .collect();
         let result = self.generator_frame(owner, |this| {
+            this.install_generator_captures(&definition, this.package.item(owner).unwrap().span)?;
+            this.check_generator_clause_defaults(owner, &definition)?;
             this.run_code_generator(&definition, arguments)
         });
         self.checking_code_generator = checking;
         result?;
         self.code_generators.get_mut(&owner).unwrap().checked = true;
         Ok(())
+    }
+
+    pub(in crate::program) fn code_method_contract(
+        &mut self,
+        owner: OwnerId,
+        span: Span,
+    ) -> Result<(CodeFunctionSignature, nir::contracts::ProgramContract), Error> {
+        let definition = self.copy_code_generator(owner, span)?;
+        let context = self.context.clone();
+        let checking = std::mem::replace(&mut self.checking_code_generator, true);
+        let result = self.generator_frame(owner, |this| {
+            this.context = context;
+            this.install_generator_captures(&definition,span)?;
+            let (ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) = &this.package.item(owner).unwrap().kind else {unreachable!()};
+            if sig.return_binding.is_some() {
+                return Err(error(span, "code method result bindings require code-value contract evidence not yet implemented"));
+            }
+            this.alias_substitution.extend(definition.types.iter().map(|(id,value)| (*id,Arc::new(value.clone()))));
+            for (((id,_),domain),clause) in definition.types.iter().zip(&definition.clause_domains).zip(sig.clause_params) {
+                if *domain != p(P::Type) {
+                    let binding = local(clause.hir_id);
+                    this.locals.insert(binding,domain.clone());
+                    this.generator_data.insert(binding,None);
+                    this.normal_default_bindings.insert(*id,(binding,domain.clone()));
+                }
+            }
+            for (binding,input) in &definition.inputs {
+                match input {
+                    Input::Data(ty) => {
+                        this.locals.insert(*binding,ty.clone());
+                        this.generator_data.insert(*binding,None);
+                    }
+                    Input::Code(interface) => {
+                        this.code_values.insert(*binding,Arc::new(ExpressionCode {
+                            body:None,result:interface.result.clone(),context:interface.context.clone(),
+                            ports:interface.ports.clone(),defaults:BTreeMap::new(),
+                        }));
+                    }
+                }
+            }
+            let preconditions = this.program_preconditions(owner)?;
+            let (postconditions,entry_snapshots) = this.program_postconditions_with_result(owner,None)?;
+            for snapshot in &entry_snapshots {
+                if !this.generator_data.contains_key(&snapshot.parameter) {
+                    return Err(error(span,"code method entry snapshot requires a data parameter"));
+                }
+                this.generator_data.insert(snapshot.binding,None);
+            }
+            for predicate in preconditions.iter().chain(&postconditions) {
+                this.validate_generator_data(predicate,span)?;
+            }
+            Ok(nir::contracts::ProgramContract {preconditions,postconditions,entry_snapshots,result_binding:None})
+        });
+        self.checking_code_generator = checking;
+        Ok((definition.signature, result?))
     }
 
     fn charge_code_generator(
@@ -363,31 +548,13 @@ impl Checker<'_, '_> {
     ) -> Result<(), Error> {
         let mut remaining = usize::try_from(*fuel).unwrap_or(usize::MAX);
         let result = (|| {
+            for (_, ty) in &definition.captures {
+                nir::type_computations::charge_term(ty, &mut remaining)?;
+            }
             for (_, ty) in &definition.types {
                 nir::type_computations::charge_term(ty, &mut remaining)?;
             }
-            for (_, input) in &definition.inputs {
-                match input {
-                    Input::Data(ty) => nir::type_computations::charge_term(ty, &mut remaining)?,
-                    Input::Code(interface) => {
-                        for ty in interface
-                            .context
-                            .values()
-                            .chain(std::iter::once(&interface.result))
-                        {
-                            nir::type_computations::charge_term(ty, &mut remaining)?;
-                        }
-                    }
-                }
-            }
-            for ty in definition
-                .output
-                .context
-                .values()
-                .chain(std::iter::once(&definition.output.result))
-            {
-                nir::type_computations::charge_term(ty, &mut remaining)?;
-            }
+            definition.signature.charge(&mut remaining)?;
             Ok::<_, nir::type_computations::Error>(())
         })();
         *fuel = remaining as u64;
@@ -397,7 +564,26 @@ impl Checker<'_, '_> {
     fn copy_code_generator(&mut self, owner: OwnerId, span: Span) -> Result<Generator, Error> {
         let definition = &self.code_generators[&owner];
         Self::charge_code_generator(definition, &mut self.required_steps, span)?;
-        Ok(definition.clone())
+        let mut definition = definition.clone();
+        if let Some(captures) = self.code_method_captures.get(&owner) {
+            let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+            let charged = captures
+                .iter()
+                .try_for_each(|(_, ty)| nir::type_computations::charge_term(ty, &mut fuel));
+            self.required_steps = fuel as u64;
+            charged.map_err(|e| error(span, e.to_string()))?;
+            let parameters =
+                self.input_binders(&captures.iter().map(|(id, _)| *id).collect::<Vec<_>>());
+            let values: Vec<_> = captures.iter().map(|(_, value)| value.clone()).collect();
+            definition.captures = captures.clone();
+            Self::charge_code_generator(&definition, &mut self.required_steps, span)?;
+            let mut substitute = |ty: &Term| {
+                ty.instantiate_parameters(&parameters, &values)
+                    .map_err(|e| error(span, e.to_string()))
+            };
+            definition.signature = definition.signature.try_map_types(&mut substitute)?;
+        }
+        Ok(definition)
     }
 
     fn instantiate_code_generator(
@@ -416,26 +602,13 @@ impl Checker<'_, '_> {
             .iter()
             .map(|(id, _)| *id)
             .collect::<Vec<_>>();
+        let binders = self.input_binders(&parameters);
         let mut substitute = |ty: &Term| -> Result<Term, Error> {
             let ty = self.copy_alias_type(ty, span)?;
-            ty.instantiate_types(&parameters, types)
+            ty.instantiate_parameters(&binders, types)
                 .map_err(|e| error(span, e.to_string()))
         };
-        for (_, input) in &mut definition.inputs {
-            match input {
-                Input::Data(ty) => *ty = substitute(ty)?,
-                Input::Code(interface) => {
-                    interface.result = substitute(&interface.result)?;
-                    for ty in interface.context.values_mut() {
-                        *ty = substitute(ty)?;
-                    }
-                }
-            }
-        }
-        definition.output.result = substitute(&definition.output.result)?;
-        for ty in definition.output.context.values_mut() {
-            *ty = substitute(ty)?;
-        }
+        definition.signature = definition.signature.try_map_types(&mut substitute)?;
         definition.types = parameters.into_iter().zip(types.iter().cloned()).collect();
         Ok(definition)
     }
@@ -446,11 +619,16 @@ impl Checker<'_, '_> {
         } else {
             callee
         };
-        let H::ResolvedDef { def_id, .. } = callee.kind else {
-            return None;
+        let definition = match callee.kind {
+            H::ResolvedDef { def_id, .. } => def_id,
+            H::Projection(..) => match self.package.member_projections.get(&callee.hir_id) {
+                Some(definition) => *definition,
+                None => return self.static_code_method_hint(callee),
+            },
+            _ => return None,
         };
         self.package
-            .definition_owner(def_id)
+            .definition_owner(definition)
             .filter(|owner| self.is_code_generator(*owner))
     }
 
@@ -494,8 +672,25 @@ impl Checker<'_, '_> {
         arguments: &[Arg<'_>],
         expected: Option<&Interface>,
     ) -> Result<Arc<ExpressionCode>, Error> {
+        self.with_code_method_callee(callee, |this, callee, receiver| {
+            let inputs = receiver
+                .into_iter()
+                .map(Arg::Positional)
+                .chain(arguments.iter().cloned())
+                .collect::<Vec<_>>();
+            this.invoke_property_generator_target(site, callee, &inputs, expected)
+        })
+    }
+
+    fn invoke_property_generator_target(
+        &mut self,
+        site: &Expr<'_>,
+        callee: &Expr<'_>,
+        arguments: &[Arg<'_>],
+        expected: Option<&Interface>,
+    ) -> Result<Arc<ExpressionCode>, Error> {
         if !arguments.iter().any(|arg| matches!(arg, Arg::Named(..))) {
-            return self.invoke_code_generator(site, callee, arguments, expected);
+            return self.invoke_generator_with_plan(site, callee, arguments, expected, None);
         }
         let owner = self
             .generator_owner(callee)
@@ -507,9 +702,10 @@ impl Checker<'_, '_> {
                 vec![],
                 self.type_clause_arguments(owner, types, None, site.span)?,
                 vec![],
+                vec![],
             )
         } else {
-            self.function_type_plan(owner, &[], site.span)?
+            self.generator_clause_plan(owner, site.span)?
         };
         let mut definition = self.instantiate_code_generator(&template, &type_plan.1, site.span)?;
         if !type_plan.0.is_empty()
@@ -540,7 +736,9 @@ impl Checker<'_, '_> {
                 site.span,
             )?;
         }
-        let ItemKind::Fn(signature, _) = &self.package.item(owner).unwrap().kind else {
+        let (ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
+            &self.package.item(owner).unwrap().kind
+        else {
             unreachable!()
         };
         let mut collectors = Vec::new();
@@ -610,7 +808,14 @@ impl Checker<'_, '_> {
         arguments: &[Arg<'_>],
         expected: Option<&Interface>,
     ) -> Result<Arc<ExpressionCode>, Error> {
-        self.invoke_generator_with_plan(site, callee, arguments, expected, None)
+        self.with_code_method_callee(callee, |this, callee, receiver| {
+            let inputs = receiver
+                .into_iter()
+                .map(Arg::Positional)
+                .chain(arguments.iter().cloned())
+                .collect::<Vec<_>>();
+            this.invoke_generator_with_plan(site, callee, &inputs, expected, None)
+        })
     }
 
     fn invoke_generator_with_plan(
@@ -658,26 +863,38 @@ impl Checker<'_, '_> {
         })?;
         self.ensure_code_generator(owner, site.span)?;
         let template = self.copy_code_generator(owner, site.span)?;
-        let ItemKind::Fn(signature, _) = &self.package.item(owner).unwrap().kind else {
+        let (ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
+            &self.package.item(owner).unwrap().kind
+        else {
             unreachable!()
         };
-        let (routes, _) = route_arguments(
+        let (mut routes, _) = route_arguments(
             arguments,
             Some(signature.params),
             template.inputs.len(),
             site.span,
         )?;
-        let (parameters, type_plan, pending) = if let Some(plan) = prepared_types {
-            plan
-        } else if let Some(explicit) = explicit {
-            (
-                vec![],
-                self.type_clause_arguments(owner, explicit, None, site.span)?,
-                vec![],
-            )
-        } else {
-            self.function_type_plan(owner, &[], site.span)?
-        };
+        for route in &mut routes {
+            if matches!(
+                signature.params[route.parameter].ty.kind,
+                TyParamKind::Varadic(..)
+            ) {
+                route.expand_literal_packet(&mut self.required_steps)?;
+            }
+        }
+        let (parameters, mut type_plan, pending, deferred_clauses) =
+            if let Some(plan) = prepared_types {
+                plan
+            } else if let Some(explicit) = explicit {
+                (
+                    vec![],
+                    self.type_clause_arguments(owner, explicit, None, site.span)?,
+                    vec![],
+                    vec![],
+                )
+            } else {
+                self.generator_clause_plan(owner, site.span)?
+            };
         let planned = self.instantiate_code_generator(&template, &type_plan, site.span)?;
         let output_shape = |interface: &Interface| {
             if expected.is_some_and(|expected| !expected.infer_context) {
@@ -714,7 +931,12 @@ impl Checker<'_, '_> {
                                 .collect()
                         })
                         .unwrap_or_default(),
-                    Input::Data(_) => self.locals.get(&id).into_iter().collect(),
+                    Input::Data(_) => self
+                        .locals
+                        .get(&id)
+                        .or_else(|| packets.field_type(id))
+                        .into_iter()
+                        .collect(),
                 };
                 let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
                 let checked = terms
@@ -729,6 +951,19 @@ impl Checker<'_, '_> {
                     });
                 }
             }
+        }
+        // A producer's established result is evidence even when its value is
+        // not available yet. Inspecting the signature must not evaluate any
+        // argument, default, contract, or producer body out of source order.
+        for route in &routes {
+            if route.is_collected()
+                || evidence[route.parameter].is_some()
+                || !matches!(planned.inputs[route.parameter].1, Input::Data(_))
+            {
+                continue;
+            }
+            let expression = route.expression(site);
+            evidence[route.parameter] = self.generator_expression_type_hint(&expression, 0)?;
         }
         let inference_signature = Term::Function {
             parameters: planned
@@ -754,17 +989,50 @@ impl Checker<'_, '_> {
                 .abstract_types(&parameters)
                 .map_err(|e| error(site.span, e.to_string()))?,
         };
+        let mut partial = vec![crate::calls::InputContext::Unknown; planned.inputs.len()];
+        for route in &routes {
+            let Input::Data(ty) = &planned.inputs[route.parameter].1 else {
+                continue;
+            };
+            if !parameters.iter().any(|id| ty.mentions_rigid(*id)) {
+                continue;
+            }
+            let expression = route.expression(site);
+            if matches!(expression.kind, H::Tuple(_) | H::CollectedProperties(_)) {
+                partial[route.parameter] = self.generator_partial_input_hint(
+                    &expression,
+                    Some(ty),
+                    &parameters,
+                    packets,
+                    0,
+                )?;
+            }
+        }
+        let mut completed = clauses::CompletedDefaults::default();
+        let mut input_contexts = vec![crate::calls::InputContext::Unknown; planned.inputs.len()];
         let mut hinted = if parameters.is_empty() {
             None
         } else {
-            let candidate = scheme
-                .infer_partial_types_in_context(
-                    &evidence,
-                    expected_type.as_ref(),
-                    &self.context,
-                    crate::ptc::Budget::default(),
-                )
-                .map_err(|e| call_inference_error(site.span, e))?;
+            let candidate = self.generator_call_candidate(
+                owner,
+                &parameters,
+                &mut type_plan,
+                &pending,
+                &deferred_clauses,
+                &mut completed,
+                &scheme,
+                &evidence,
+                &partial,
+                expected_type.as_ref(),
+                site.span,
+            )?;
+            input_contexts = (0..planned.inputs.len())
+                .map(|index| {
+                    candidate
+                        .parameter_input_context(index)
+                        .map_err(|e| call_inference_error(site.span, e))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             Some(self.generator_inference_view(
                 &template,
                 &parameters,
@@ -773,12 +1041,99 @@ impl Checker<'_, '_> {
                 site.span,
             )?)
         };
+        // Intrinsically typed literals and complete collections constrain a data slot before
+        // an earlier tactic callback is checked. This probe never invokes a
+        // producer, and numeric defaults remain disabled. Established target
+        // contexts take precedence over unconstrained literal types.
+        if !parameters.is_empty() {
+            let mut learned = false;
+            for route in &routes {
+                self.required_steps = self
+                    .required_steps
+                    .checked_sub(1)
+                    .ok_or_else(|| error(site.span, "generator input evidence budget exhausted"))?;
+                if evidence[route.parameter].is_some() {
+                    continue;
+                }
+                let Input::Data(Term::Rigid {
+                    declaration,
+                    sort: Sort::Type,
+                }) = &hinted.as_ref().unwrap_or(&planned).inputs[route.parameter].1
+                else {
+                    continue;
+                };
+                if !parameters.contains(declaration) {
+                    continue;
+                }
+                let expression = route.expression(site);
+                let hint = if route.is_collected() {
+                    let mut fields = Vec::new();
+                    let mut complete = true;
+                    for (_, input) in route.source_inputs() {
+                        let packet_type = match input.kind {
+                            H::ResolvedLocal(_, id) => packets.field_type(local(id)),
+                            _ => None,
+                        };
+                        let ty = if let Some(ty) = packet_type {
+                            Some(self.copy_alias_type(ty, input.span)?)
+                        } else {
+                            self.generator_intrinsic_input_hint(input, 0)?
+                        };
+                        let Some(ty) = ty else {
+                            complete = false;
+                            break;
+                        };
+                        fields.push(ty);
+                    }
+                    if complete {
+                        Some(self.tuple_value_type(fields, site.span)?)
+                    } else {
+                        None
+                    }
+                } else {
+                    self.generator_intrinsic_input_hint(&expression, 0)?
+                };
+                if let Some(ty) = hint {
+                    evidence[route.parameter] = Some(ty);
+                    learned = true;
+                }
+            }
+            if learned {
+                let candidate = self.generator_call_candidate(
+                    owner,
+                    &parameters,
+                    &mut type_plan,
+                    &pending,
+                    &deferred_clauses,
+                    &mut completed,
+                    &scheme,
+                    &evidence,
+                    &partial,
+                    expected_type.as_ref(),
+                    site.span,
+                )?;
+                input_contexts = (0..planned.inputs.len())
+                    .map(|index| {
+                        candidate
+                            .parameter_input_context(index)
+                            .map_err(|e| call_inference_error(site.span, e))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                hinted = Some(self.generator_inference_view(
+                    &template,
+                    &parameters,
+                    &type_plan,
+                    &candidate,
+                    site.span,
+                )?);
+            }
+        }
         let mut values: Vec<Option<Argument>> = std::iter::repeat_with(|| None)
             .take(template.inputs.len())
             .collect();
         let mut actual = vec![None; template.inputs.len()];
         let mut events = Vec::new();
-        let mut collected: Vec<Vec<(Option<n::Expr>, Term)>> = std::iter::repeat_with(Vec::new)
+        let mut collected: Vec<Vec<(Argument, Term)>> = std::iter::repeat_with(Vec::new)
             .take(routes.len())
             .collect();
         let mut collection_types = vec![None; routes.len()];
@@ -831,6 +1186,11 @@ impl Checker<'_, '_> {
                 continue;
             }
             let route = &routes[route_index];
+            let adapted = signature.params[route.parameter]
+                .ty
+                .is_lambda()
+                .then(|| route.expression(site));
+            let argument = adapted.as_ref().unwrap_or(argument);
             let (_, input) = &hinted.as_ref().unwrap_or(&planned).inputs[route.parameter];
             if route.is_collected() && collection_types[route_index].is_none() {
                 if let Input::Data(ty) = input {
@@ -885,6 +1245,26 @@ impl Checker<'_, '_> {
                     } else {
                         (!parameters.iter().any(|id| ty.mentions_rigid(*id))).then_some(ty)
                     };
+                    let context = if expected.is_some() {
+                        None
+                    } else {
+                        use crate::calls::InputContext as C;
+                        match (
+                            &input_contexts[route.parameter],
+                            route.is_collected(),
+                            properties[route_index],
+                        ) {
+                            (C::Tuple(fields) | C::NormalTuple { fields, .. }, true, _) => {
+                                fields.get(element)
+                            }
+                            (C::Record(fields), _, Some(properties)) => fields
+                                .get(element)
+                                .filter(|(name, _)| name == properties[element].ident.name.as_str())
+                                .map(|(_, context)| context),
+                            (context, false, None) => Some(context),
+                            _ => None,
+                        }
+                    };
                     if let Some((packet, element)) =
                         packets.fields.get(&local(argument.hir_id)).copied()
                     {
@@ -905,48 +1285,95 @@ impl Checker<'_, '_> {
                             argument.span,
                         )?
                     } else if self.checking_code_generator {
-                        let value = self.expr(argument, expected)?;
+                        let value = match context {
+                            Some(context) => self.input_context_expression(argument, context)?,
+                            None => self.expr(argument, expected)?,
+                        };
                         self.validate_generator_data(&value, argument.span)?;
                         (Argument::Data(None), value.ty)
                     } else {
-                        let (value, ty) = self.required_typed_expression(argument, expected)?;
+                        let (value, ty) =
+                            self.generator_data_expression_in_context(argument, expected, context)?;
                         (
-                            Argument::Data(Some(self.materialize_generator_data(
-                                value,
-                                ty.clone(),
-                                argument.span,
-                            )?)),
+                            if self.generator_value_needs_live_storage(&value, argument.span)? {
+                                Argument::LiveData(value)
+                            } else {
+                                Argument::Data(Some(self.materialize_generator_data(
+                                    value,
+                                    ty.clone(),
+                                    argument.span,
+                                )?))
+                            },
                             ty,
                         )
                     }
                 }
             };
             if route.is_collected() || properties[route_index].is_some() {
-                let Argument::Data(value) = value else {
-                    unreachable!()
-                };
+                if !parameters.is_empty() {
+                    use crate::calls::InputContext as C;
+                    // Publish only this completed field's type. Later fields keep
+                    // their provisional contexts and their original source positions.
+                    if !matches!(
+                        partial[route.parameter],
+                        C::Tuple(_) | C::NormalTuple { .. } | C::Record(_)
+                    ) {
+                        partial[route.parameter] = if let Some(fields) = properties[route_index] {
+                            C::Record(
+                                fields
+                                    .iter()
+                                    .map(|field| (field.ident.name.to_string(), C::Unknown))
+                                    .collect(),
+                            )
+                        } else {
+                            let fields = vec![C::Unknown; route.source_inputs().count()];
+                            match self.protocols.tuple {
+                                Some(head) => C::NormalTuple { head, fields },
+                                None => C::Tuple(fields),
+                            }
+                        };
+                    }
+                    let field = match &mut partial[route.parameter] {
+                        C::Tuple(fields) | C::NormalTuple { fields, .. } => &mut fields[element],
+                        C::Record(fields) => &mut fields[element].1,
+                        _ => unreachable!(),
+                    };
+                    *field = C::Known(ty.clone());
+                }
                 collected[route_index].push((value, ty));
             } else {
                 values[route.parameter] = Some(value);
                 actual[route.parameter] = Some(ty.clone());
                 evidence[route.parameter] = Some(ty);
-                if !parameters.is_empty() {
-                    let candidate = scheme
-                        .infer_partial_types_in_context(
-                            &evidence,
-                            expected_type.as_ref(),
-                            &self.context,
-                            crate::ptc::Budget::default(),
-                        )
-                        .map_err(|e| call_inference_error(site.span, e))?;
-                    hinted = Some(self.generator_inference_view(
-                        &template,
-                        &parameters,
-                        &type_plan,
-                        &candidate,
-                        site.span,
-                    )?);
-                }
+            }
+            if !parameters.is_empty() {
+                let candidate = self.generator_call_candidate(
+                    owner,
+                    &parameters,
+                    &mut type_plan,
+                    &pending,
+                    &deferred_clauses,
+                    &mut completed,
+                    &scheme,
+                    &evidence,
+                    &partial,
+                    expected_type.as_ref(),
+                    site.span,
+                )?;
+                input_contexts = (0..planned.inputs.len())
+                    .map(|index| {
+                        candidate
+                            .parameter_input_context(index)
+                            .map_err(|e| call_inference_error(site.span, e))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                hinted = Some(self.generator_inference_view(
+                    &template,
+                    &parameters,
+                    &type_plan,
+                    &candidate,
+                    site.span,
+                )?);
             }
         }
         for (route_index, route) in routes.iter().enumerate() {
@@ -968,14 +1395,54 @@ impl Checker<'_, '_> {
                     site.span,
                 )?
             };
+            let live = elements
+                .iter()
+                .any(|(value, _)| matches!(value, Argument::LiveData(_)));
             let value = if self.checking_code_generator {
-                None
+                Argument::Data(None)
+            } else if live {
+                // Rehydrate only already-frozen siblings. Source expressions have
+                // been evaluated once, in source order, above.
+                let mut fields = Vec::with_capacity(elements.len());
+                for (value, _) in elements {
+                    fields.push(match value {
+                        Argument::LiveData(value) => value,
+                        Argument::Data(Some(value)) => {
+                            self.required_normal_input(site, value, vec![])?.0
+                        }
+                        _ => {
+                            return Err(error(
+                                site.span,
+                                "generator collection requires completed data",
+                            ));
+                        }
+                    });
+                }
+                let value = if let Some(properties) = properties[route_index] {
+                    comptime_interpretor::Value::AnonymousRecord(
+                        properties
+                            .iter()
+                            .zip(fields)
+                            .map(|(field, value)| (field.ident.name.to_string(), value))
+                            .collect(),
+                    )
+                } else {
+                    comptime_interpretor::Value::Tuple(fields)
+                };
+                self.generator_value_needs_live_storage(&value, site.span)?;
+                Argument::LiveData(value)
             } else {
                 let fields = elements
                     .into_iter()
-                    .map(|(value, _)| value.unwrap())
-                    .collect();
-                Some(n::Expr {
+                    .map(|(value, _)| match value {
+                        Argument::Data(Some(value)) => Ok(value),
+                        _ => Err(error(
+                            site.span,
+                            "generator collection requires completed data",
+                        )),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Argument::Data(Some(n::Expr {
                     ty: ty.clone(),
                     source: source(site.span),
                     kind: if properties[route_index].is_some() {
@@ -983,9 +1450,9 @@ impl Checker<'_, '_> {
                     } else {
                         K::Tuple(fields)
                     },
-                })
+                }))
             };
-            values[route.parameter] = Some(Argument::Data(value));
+            values[route.parameter] = Some(value);
             actual[route.parameter] = Some(ty);
         }
         let types = if parameters.is_empty() {
@@ -993,20 +1460,25 @@ impl Checker<'_, '_> {
         } else {
             // This tuple is an internal inference product, never a Flurry Tuple
             // constructor or an erased code value. Context evidence stays in values.
-            let mut candidate = scheme
-                .infer_partial_types_in_context(
-                    &actual,
-                    expected_type.as_ref(),
-                    &self.context,
-                    crate::ptc::Budget::default(),
-                )
-                .map_err(|e| call_inference_error(site.span, e))?;
+            let mut candidate = self.generator_call_candidate(
+                owner,
+                &parameters,
+                &mut type_plan,
+                &pending,
+                &deferred_clauses,
+                &mut completed,
+                &scheme,
+                &actual,
+                &partial,
+                expected_type.as_ref(),
+                site.span,
+            )?;
             if !self.settle_function_defaults(
                 owner,
                 &parameters,
                 &type_plan,
                 &pending,
-                &mut BTreeMap::new(),
+                &mut completed.types,
                 &mut candidate,
                 site.span,
             )? {
@@ -1015,18 +1487,79 @@ impl Checker<'_, '_> {
                     "code generator type defaults remain unresolved",
                 ));
             }
+            let domains = self.trait_domains(owner)?;
+            let all = self.type_parameters[&owner].clone();
+            for &slot in &deferred_clauses {
+                if self.checking_code_generator {
+                    // Definition checking retains abstract clause inputs. A
+                    // real invocation validates defaults before emitting code.
+                    if domains[slot] == p(P::Type) {
+                        let index = parameters.iter().position(|id| *id == all[slot]).unwrap();
+                        if candidate
+                            .type_argument(index)
+                            .map_err(|e| call_inference_error(site.span, e))?
+                            .is_none()
+                        {
+                            candidate
+                                .constrain_type_argument(
+                                    index,
+                                    &Term::Rigid {
+                                        declaration: all[slot],
+                                        sort: Sort::Type,
+                                    },
+                                    crate::ptc::Budget::default(),
+                                )
+                                .map_err(|e| call_inference_error(site.span, e))?;
+                        }
+                    }
+                    continue;
+                }
+                if !completed.clauses.contains_key(&slot) {
+                    return Err(error(
+                        site.span,
+                        "code generator clause defaults remain unresolved",
+                    ));
+                }
+            }
             let instance = candidate
                 .finish()
                 .map_err(|e| call_inference_error(site.span, e))?;
-            type_plan
+            let mut types = type_plan
                 .iter()
                 .map(|ty| {
                     ty.instantiate_types(&parameters, &instance.type_arguments)
                         .map_err(|e| error(site.span, e.to_string()))
                 })
-                .collect::<Result<Vec<_>, _>>()?
+                .collect::<Result<Vec<_>, _>>()?;
+            for (slot, value) in completed.clauses {
+                types[slot] = value;
+            }
+            types
         };
-        self.check_type_application(owner, &types, site.span)?;
+        // Only the callee's contract sees its captured environment. Caller
+        // argument evaluation above must keep the caller's own instantiation.
+        let saved_captures = template
+            .captures
+            .iter()
+            .map(|(id, value)| {
+                (
+                    *id,
+                    self.alias_substitution.insert(*id, Arc::new(value.clone())),
+                )
+            })
+            .collect::<Vec<_>>();
+        let formation = self.check_type_application(owner, &types, site.span);
+        for (id, saved) in saved_captures {
+            match saved {
+                Some(saved) => {
+                    self.alias_substitution.insert(id, saved);
+                }
+                None => {
+                    self.alias_substitution.remove(&id);
+                }
+            }
+        }
+        formation?;
         let definition = self.instantiate_code_generator(&template, &types, site.span)?;
         for ((value, actual), (_, input)) in values.iter_mut().zip(&actual).zip(&definition.inputs)
         {
@@ -1034,7 +1567,7 @@ impl Checker<'_, '_> {
                 (Some(Argument::Code(code)), Input::Code(interface)) => {
                     *code = self.ascribe_code(code.clone(), Some(interface), site.span)?
                 }
-                (Some(Argument::Data(_)), Input::Data(ty)) => {
+                (Some(Argument::Data(_) | Argument::LiveData(_)), Input::Data(ty)) => {
                     self.require(actual.as_ref().unwrap(), ty, site.span)?
                 }
                 (None, _) => {}
@@ -1061,10 +1594,14 @@ impl Checker<'_, '_> {
                     self.validate_generator_data(&checked, value.span)?;
                     Ok(Argument::Data(None))
                 } else {
-                    let (data, ty) = self.required_typed_expression(value, Some(ty))?;
-                    Ok(Argument::Data(Some(
-                        self.materialize_generator_data(data, ty, value.span)?,
-                    )))
+                    let (data, ty) = self.generator_data_expression(value, Some(ty))?;
+                    if self.generator_value_needs_live_storage(&data, value.span)? {
+                        Ok(Argument::LiveData(data))
+                    } else {
+                        Ok(Argument::Data(Some(
+                            self.materialize_generator_data(data, ty, value.span)?,
+                        )))
+                    }
                 }
             }
             Input::Code(interface) => {
@@ -1082,27 +1619,70 @@ impl Checker<'_, '_> {
         definition: &Generator,
         arguments: Vec<Option<Argument>>,
     ) -> Result<Arc<ExpressionCode>, Error> {
+        self.install_generator_captures(
+            definition,
+            self.package
+                .item(self.signature_owner.unwrap())
+                .unwrap()
+                .span,
+        )?;
         self.alias_substitution.extend(
             definition
                 .types
                 .iter()
                 .map(|(id, ty)| (*id, Arc::new(ty.clone()))),
         );
-        for (id, ty) in &definition.types {
-            self.context.assume(crate::ptc::Formula::equal(
-                Term::Rigid {
-                    declaration: *id,
-                    sort: Sort::Type,
-                },
-                ty.clone(),
-            ));
+        let owner = self.signature_owner.expect("generator frame");
+        let (ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
+            &self.package.item(owner).unwrap().kind
+        else {
+            unreachable!()
+        };
+        for (((id, value), domain), clause) in definition
+            .types
+            .iter()
+            .zip(&definition.clause_domains)
+            .zip(signature.clause_params)
+        {
+            if *domain == p(P::Type) {
+                self.context.assume(crate::ptc::Formula::equal(
+                    Term::Rigid {
+                        declaration: *id,
+                        sort: Sort::Type,
+                    },
+                    value.clone(),
+                ));
+                continue;
+            }
+            let binding = local(clause.hir_id);
+            self.locals.insert(binding, domain.clone());
+            self.immutable.insert(binding);
+            self.normal_default_bindings
+                .insert(*id, (binding, domain.clone()));
+            let data = if self.checking_code_generator {
+                None
+            } else {
+                let site = Expr {
+                    hir_id: clause.hir_id,
+                    span: clause.span,
+                    kind: H::Unit,
+                };
+                let input = n::Expr {
+                    source: source(clause.span),
+                    ty: domain.clone(),
+                    kind: K::Local(binding),
+                };
+                let (data, ty) = self.required_normal_input(
+                    &site,
+                    input,
+                    vec![(binding, domain.clone(), value.clone())],
+                )?;
+                Some(self.materialize_generator_data(data, ty, clause.span)?)
+            };
+            self.generator_data.insert(binding, data);
         }
         self.locals.extend(definition.output.context.clone());
         let mut inherited: BTreeMap<n::LocalId, Option<n::LocalId>> = BTreeMap::new();
-        let owner = self.signature_owner.expect("generator frame");
-        let ItemKind::Fn(signature, _) = &self.package.item(owner).unwrap().kind else {
-            unreachable!()
-        };
         for (index, ((id, input), argument)) in definition.inputs.iter().zip(arguments).enumerate()
         {
             let default = match signature.params[index].ty.kind {
@@ -1131,6 +1711,17 @@ impl Checker<'_, '_> {
                     self.locals.insert(*id, ty.clone());
                     self.generator_data.insert(*id, value);
                 }
+                (Input::Data(ty), Argument::LiveData(value)) => {
+                    self.locals.insert(*id, ty.clone());
+                    let marker = n::Expr {
+                        source: source(signature.params[index].span),
+                        ty: ty.clone(),
+                        kind: K::Local(*id),
+                    };
+                    self.generator_data.insert(*id, Some(marker.clone()));
+                    self.generator_cells
+                        .insert(*id, (marker, comptime_interpretor::Storage::new(value)));
+                }
                 (Input::Code(interface), Argument::Code(code)) => {
                     let mut defaults = code.defaults.clone();
                     for (name, from) in &interface.ports {
@@ -1138,7 +1729,7 @@ impl Checker<'_, '_> {
                             self.require(
                                 &interface.context[from],
                                 &definition.output.context[to],
-                                self.package.body(definition.body).unwrap().value.span,
+                                signature.span,
                             )?;
                             defaults.insert(*from, *to);
                             let actual = code.defaults.get(from).copied().and_then(|actual| {
@@ -1170,16 +1761,51 @@ impl Checker<'_, '_> {
                 _ => unreachable!("checked generator argument kind"),
             }
         }
-        let body = self
-            .package
-            .body(definition.body)
-            .ok_or_else(|| error(rustc_span::DUMMY_SP, "missing generator body"))?;
+        // Contracts see the completed input frame, including defaults, but
+        // never gain access to the quoted runtime context. Definition checking
+        // validates them without invoking predicates on abstract data inputs.
+        self.generator_contracts(owner, false, signature.span, None)?;
+        let entry = self.capture_generator_entry_data(owner, signature.span)?;
+        if self.checking_code_generator {
+            self.generator_contracts(owner, true, signature.span, Some(&entry))?;
+        }
+        let dispatched = if !self.checking_code_generator {
+            self.run_selected_code_method(owner, definition, signature.span)?
+        } else {
+            None
+        };
         let mut output = definition.output.clone();
         output.defaults = inherited
             .iter()
             .filter_map(|(port, actual)| actual.map(|actual| (*port, actual)))
             .collect();
-        let code = self.code_value(body.value, Some(&output), 0)?;
+        let code = if let Some(code) = dispatched {
+            self.ascribe_code(code, Some(&output), signature.span)?
+        } else {
+            let Some(body_id) = definition.body else {
+                if !self.checking_code_generator {
+                    return Err(error(
+                        signature.span,
+                        "code generator declaration requires a selected implementation",
+                    ));
+                }
+                return Ok(Arc::new(ExpressionCode {
+                    body: None,
+                    result: definition.output.result.clone(),
+                    context: definition.output.context.clone(),
+                    ports: definition.output.ports.clone(),
+                    defaults: BTreeMap::new(),
+                }));
+            };
+            let body = self
+                .package
+                .body(body_id)
+                .ok_or_else(|| error(signature.span, "missing generator body"))?;
+            self.code_value(body.value, Some(&output), 0)?
+        };
+        if !self.checking_code_generator {
+            self.generator_contracts(owner, true, signature.span, Some(&entry))?;
+        }
         let mut result = Arc::try_unwrap(code).unwrap_or_else(|code| ExpressionCode {
             body: code.body.clone(),
             result: code.result.clone(),
@@ -1205,6 +1831,234 @@ impl Checker<'_, '_> {
             })
             .collect();
         Ok(Arc::new(result))
+    }
+
+    fn capture_generator_entry_data(
+        &mut self,
+        owner: OwnerId,
+        span: Span,
+    ) -> Result<GeneratorEntryData, Error> {
+        let mut entry = GeneratorEntryData::new();
+        if !self.checking_code_generator && !self.program_postconditions[&owner].is_empty() {
+            for (id, value) in &self.generator_data {
+                let Some(value) = value else { continue };
+                constants::charge_copy(value, &mut self.required_steps, span)?;
+                let cell = if matches!(value.kind, K::Local(binding) if binding == *id) {
+                    let cell = &self
+                        .generator_cells
+                        .get(id)
+                        .ok_or_else(|| error(span, "missing live generator entry storage"))?
+                        .1;
+                    let package = n::Package::default();
+                    let mut vm = comptime_interpretor::Interpreter::for_comptime(
+                        &package,
+                        comptime_interpretor::Budget {
+                            steps: self.required_steps,
+                            depth: 128,
+                        },
+                    )
+                    .map_err(|failure| {
+                        error(
+                            span,
+                            format!("generator entry preparation failed: {failure}"),
+                        )
+                    })?;
+                    let data = vm.copy_owned_value(cell);
+                    self.required_steps = vm.remaining_steps();
+                    let data = data.map_err(|failure| {
+                        error(span, format!("generator entry snapshot failed: {failure}"))
+                    })?;
+                    Some(comptime_interpretor::Storage::new(data))
+                } else {
+                    None
+                };
+                entry.insert(*id, (value.clone(), cell));
+            }
+        }
+        Ok(entry)
+    }
+
+    fn generator_contracts(
+        &mut self,
+        owner: OwnerId,
+        post: bool,
+        span: Span,
+        entry: Option<&GeneratorEntryData>,
+    ) -> Result<(), Error> {
+        if if post {
+            self.program_postconditions[&owner].is_empty()
+        } else {
+            self.program_requirements[&owner].is_empty()
+        } {
+            return Ok(());
+        }
+        self.required_steps = self
+            .required_steps
+            .checked_sub(self.generator_data.len() as u64)
+            .ok_or_else(|| error(span, "generator contract input budget exhausted"))?;
+        let concrete = std::mem::take(&mut self.generator_data);
+        self.generator_data
+            .extend(concrete.keys().map(|binding| (*binding, None)));
+        let checked = (|| {
+            let (predicates, snapshots) = if post {
+                self.program_postconditions_with_result(owner, None)?
+            } else {
+                (self.program_preconditions(owner)?, Vec::new())
+            };
+            for snapshot in &snapshots {
+                if !self.generator_data.contains_key(&snapshot.parameter) {
+                    return Err(error(
+                        span,
+                        "generator entry snapshot requires a data parameter",
+                    ));
+                }
+                self.generator_data.insert(snapshot.binding, None);
+            }
+            for predicate in &predicates {
+                self.validate_generator_data(predicate, span)?;
+            }
+            Ok((predicates, snapshots))
+        })();
+        self.generator_data = concrete;
+        let (predicates, snapshots) = checked?;
+        if self.checking_code_generator {
+            return Ok(());
+        }
+        let snapshots: BTreeMap<_, _> = snapshots
+            .into_iter()
+            .map(|snapshot| (snapshot.binding, snapshot.parameter))
+            .collect();
+        let sources = if post {
+            self.program_postconditions[&owner].clone()
+        } else {
+            self.program_requirements[&owner].clone()
+        };
+        for (source, mut predicate) in sources.into_iter().zip(predicates) {
+            // Parameters are immutable completed data. Substitute only after
+            // checking the abstract predicate, so literal record/enum storage
+            // does not change which operations qualify as a program predicate.
+            let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+            let before = fuel;
+            let substituted =
+                nir::visit::expression_mut_pruned(&mut predicate, &mut fuel, |node, fuel| {
+                    let K::Local(binding) = node.kind else {
+                        return Ok(true);
+                    };
+                    let old = snapshots.get(&binding).copied();
+                    let value = if let Some(parameter) = old {
+                        &entry
+                            .and_then(|entry| entry.get(&parameter))
+                            .ok_or_else(|| "missing generator entry snapshot".to_string())?
+                            .0
+                    } else {
+                        let Some(Some(value)) = self.generator_data.get(&binding) else {
+                            return Ok(true);
+                        };
+                        value
+                    };
+                    let mut remaining = *fuel as u64;
+                    constants::charge_copy(value, &mut remaining, source.span)
+                        .map_err(|error| error.message)?;
+                    *fuel = usize::try_from(remaining).unwrap_or(usize::MAX);
+                    *node = value.clone();
+                    if old.is_some() && matches!(node.kind, K::Local(_)) {
+                        node.kind = K::Local(binding);
+                    }
+                    if matches!(node.kind, K::Block { .. }) {
+                        self.freshen_constant_graph(node, source.span)
+                            .map_err(|error| error.message)?;
+                    }
+                    Ok(false)
+                });
+            self.required_steps = self
+                .required_steps
+                .checked_sub((before - fuel) as u64)
+                .ok_or_else(|| {
+                    error(
+                        source.span,
+                        "generator contract substitution budget exhausted",
+                    )
+                })?;
+            substituted.map_err(|message| error(source.span, message))?;
+            let mut live: Vec<_> = self
+                .generator_cells
+                .iter()
+                .filter(|(id, (snapshot, _))| matches!(snapshot.kind, K::Local(binding) if binding == **id))
+                .map(|(id, (snapshot, cell))| {
+                    (
+                        *id,
+                        snapshot.ty.clone(),
+                        comptime_interpretor::Value::Storage(cell.clone()),
+                    )
+                })
+                .collect();
+            for (binding, parameter) in &snapshots {
+                if let Some((value, Some(cell))) = entry.and_then(|entry| entry.get(parameter)) {
+                    live.push((
+                        *binding,
+                        value.ty.clone(),
+                        comptime_interpretor::Value::Storage(cell.clone()),
+                    ));
+                }
+            }
+            let (value, _) = self.required_live_input(source, predicate, Vec::new(), live)?;
+            if !matches!(value, comptime_interpretor::Value::Bool(true)) {
+                return Err(error(
+                    source.span,
+                    if post {
+                        "code generator postcondition rejected"
+                    } else {
+                        "code generator precondition rejected"
+                    },
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn require_code_branch(
+        &mut self,
+        reference: &ExpressionCode,
+        code: Arc<ExpressionCode>,
+        span: Span,
+    ) -> Result<(), Error> {
+        self.require_expression(&code.result, &reference.result, span)?;
+        if code.context == reference.context && code.ports == reference.ports {
+            return Ok(());
+        }
+        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let mut remaining = before;
+        let charged = reference
+            .context
+            .values()
+            .chain(std::iter::once(&reference.result))
+            .try_for_each(|ty| nir::type_computations::charge_term(ty, &mut remaining));
+        self.required_steps -= (before - remaining) as u64;
+        charged.map_err(|e| error(span, e.to_string()))?;
+        let work = reference
+            .context
+            .len()
+            .saturating_add(reference.defaults.len())
+            .saturating_add(
+                reference
+                    .ports
+                    .keys()
+                    .map(|name| name.len().saturating_add(1))
+                    .sum::<usize>(),
+            );
+        self.required_steps = self
+            .required_steps
+            .checked_sub(work as u64)
+            .ok_or_else(|| error(span, "code branch interface budget exhausted"))?;
+        let expected = Interface {
+            infer_context: false,
+            context: reference.context.clone(),
+            ports: reference.ports.clone(),
+            defaults: reference.defaults.clone(),
+            result: reference.result.clone(),
+        };
+        self.ascribe_code(code, Some(&expected), span)?;
+        Ok(())
     }
 
     pub(super) fn ascribe_code(
@@ -1264,12 +2118,12 @@ impl Checker<'_, '_> {
         }))
     }
 
-    pub(in crate::program) fn code_producer(&self, value: &Expr<'_>) -> bool {
+    pub(in crate::program) fn code_producer(&mut self, value: &Expr<'_>) -> bool {
         self.code_producer_in(value, &mut BTreeSet::new(), 0)
     }
 
     fn code_producer_in(
-        &self,
+        &mut self,
         value: &Expr<'_>,
         bindings: &mut BTreeSet<n::LocalId>,
         depth: usize,
@@ -1284,17 +2138,21 @@ impl Checker<'_, '_> {
             }
             H::Application(callee, _) | H::ExtendedApplication(callee, _) => {
                 self.generator_owner(callee).is_some()
+                    || self.generic_code_method_hint(callee).is_some()
             }
             H::Let(decl) => {
                 if decl
                     .init
                     .is_some_and(|value| self.code_producer_in(value, bindings, depth + 1))
+                    || decl
+                        .ty
+                        .is_some_and(|ty| matches!(ty.kind, H::ContextualExprType(..)))
                 {
                     bindings.extend(pattern_binding_ids(&decl.pattern));
                 }
                 false
             }
-            H::Return(Some(value)) | H::Semi(value) => {
+            H::Return(Some(value)) | H::Semi(value) | H::InlineControl(value) => {
                 self.code_producer_in(value, bindings, depth + 1)
             }
             H::If(_, yes, no) => {
@@ -1302,7 +2160,12 @@ impl Checker<'_, '_> {
                 let no = no.is_some_and(|value| self.code_producer_in(value, bindings, depth + 1));
                 yes || no
             }
-            H::Block(body) => self.code_block_producer(body, bindings, depth + 1),
+            H::Block(body) | H::Loop(body) | H::For { body, .. } => {
+                self.code_block_producer(body, bindings, depth + 1)
+            }
+            H::When(arms) => arms
+                .iter()
+                .any(|arm| self.code_producer_in(arm.body, bindings, depth + 1)),
             H::Match(_, arms) => arms
                 .iter()
                 .any(|arm| self.code_producer_in(arm.body, bindings, depth + 1)),
@@ -1311,7 +2174,7 @@ impl Checker<'_, '_> {
     }
 
     fn code_block_producer(
-        &self,
+        &mut self,
         body: &hir::Block<'_>,
         bindings: &mut BTreeSet<n::LocalId>,
         depth: usize,
@@ -1356,8 +2219,12 @@ impl Checker<'_, '_> {
                 }
             }
             if let Some(value) = block.expr {
+                let control_expr = match value.kind {
+                    H::InlineControl(inner) => inner,
+                    _ => value,
+                };
                 let tail = if matches!(
-                    value.kind,
+                    control_expr.kind,
                     H::Loop(_)
                         | H::If(_, _, None)
                         | H::Semi(_)
@@ -1368,7 +2235,9 @@ impl Checker<'_, '_> {
                         | H::BreakTo(_)
                         | H::Continue(_)
                         | H::ContinueTo(_)
-                ) || matches!(value.kind, H::Match(..)) && !this.code_producer(value)
+                ) || matches!(control_expr.kind, H::For {..})
+                    || matches!(control_expr.kind, H::When(arms) if !arms.iter().any(|arm| arm.cond.is_none()))
+                    || matches!(control_expr.kind, H::Match(..) | H::When(..)) && !this.code_producer(value)
                 {
                     this.generator_statement(value, interface, depth + 1, &mut loops)?
                 } else {
@@ -1408,17 +2277,7 @@ impl Checker<'_, '_> {
             let mut returns = flow.returns.into_iter();
             if let Some(first) = returns.next() {
                 for code in returns {
-                    this.require_expression(&code.result, &first.result, block.span)?;
-                    if code.context != first.context || code.ports != first.ports {
-                        let expected = Interface {
-                            infer_context: false,
-                            context: first.context.clone(),
-                            ports: first.ports.clone(),
-                            defaults: first.defaults.clone(),
-                            result: first.result.clone(),
-                        };
-                        this.ascribe_code(code, Some(&expected), block.span)?;
-                    }
+                    this.require_code_branch(&first, code, block.span)?;
                 }
                 Ok(first)
             } else {
@@ -1441,7 +2300,7 @@ impl Checker<'_, '_> {
         })
     }
 
-    fn generator_scope<R>(
+    pub(super) fn generator_scope<R>(
         &mut self,
         span: Span,
         action: impl FnOnce(&mut Self) -> Result<R, Error>,
@@ -1459,6 +2318,15 @@ impl Checker<'_, '_> {
         for value in self.generator_data.values().flatten() {
             constants::charge_copy(value, &mut self.required_steps, span)?;
         }
+        for (snapshot, _) in self.generator_cells.values() {
+            constants::charge_copy(snapshot, &mut self.required_steps, span)?;
+        }
+        let saved_cells = self.generator_cells.clone();
+        let roots = saved_cells
+            .values()
+            .map(|(_, cell)| comptime_interpretor::Value::Storage(cell.clone()))
+            .collect::<Vec<_>>();
+        let checkpoint = self.checkpoint_generator_cells(&roots, span)?;
         let mut saved = (
             self.locals.clone(),
             self.code_values.clone(),
@@ -1478,12 +2346,26 @@ impl Checker<'_, '_> {
                 }
             }
         }
+        let restoration = if result.is_err() {
+            self.generator_cells = saved_cells;
+            checkpoint.restore().map_err(|failure| {
+                error(
+                    span,
+                    format!("generator scope restoration failed: {failure:?}"),
+                )
+            })
+        } else {
+            self.generator_cells
+                .retain(|id, _| saved.2.contains_key(id));
+            Ok(())
+        };
         (
             self.locals,
             self.code_values,
             self.generator_data,
             self.immutable,
         ) = saved;
+        restoration?;
         result
     }
 
@@ -1512,7 +2394,11 @@ impl Checker<'_, '_> {
         let value = decl
             .init
             .ok_or_else(|| error(decl.span, "generator binding needs an initializer"))?;
-        if self.code_producer(value) {
+        if self.code_producer(value)
+            || decl
+                .ty
+                .is_some_and(|ty| matches!(ty.kind, H::ContextualExprType(..)))
+        {
             self.code_binding(decl, None, true)?;
         } else {
             let expected = decl.ty.map(|ty| self.type_expr(ty)).transpose()?;
@@ -1521,7 +2407,14 @@ impl Checker<'_, '_> {
                 self.validate_generator_data(&checked, value.span)?;
                 (checked.ty.clone(), checked)
             } else {
-                let (data, ty) = self.required_typed_expression(value, expected.as_ref())?;
+                let (data, ty) = if local_const {
+                    self.required_typed_expression(value, expected.as_ref())?
+                } else {
+                    self.generator_data_expression(value, expected.as_ref())?
+                };
+                if !local_const && self.generator_value_needs_live_storage(&data, value.span)? {
+                    return self.bind_live_generator_pattern(decl, data, ty);
+                }
                 let materialized = if local_const {
                     self.materialize_local_constant(data, ty.clone(), value.span)?
                 } else {
@@ -1541,7 +2434,7 @@ impl Checker<'_, '_> {
         depth: usize,
     ) -> Result<(), Error> {
         if !matches!(target.kind, H::ResolvedLocal(..) | H::ResolvedFnParam(..)) {
-            return self.assign_generator_place(target, value);
+            return self.assign_generator_place(target, value, None);
         }
         let id = binding(target)?;
         if self.immutable.contains(&id) {
@@ -1667,20 +2560,7 @@ impl Checker<'_, '_> {
                 }),
             );
         } else if self.generator_data.contains_key(&id) {
-            let ty = self
-                .locals
-                .get(&id)
-                .cloned()
-                .ok_or_else(|| error(target.span, "generator data binding has no type"))?;
-            let data = if self.checking_code_generator {
-                let checked = self.expr(value, Some(&ty))?;
-                self.validate_generator_data(&checked, value.span)?;
-                None
-            } else {
-                let (data, ty) = self.required_typed_expression(value, Some(&ty))?;
-                Some(self.materialize_generator_data(data, ty, value.span)?)
-            };
-            self.generator_data.insert(id, data);
+            self.assign_generator_place(target, value, None)?;
         } else {
             return Err(error(
                 target.span,
@@ -1688,6 +2568,58 @@ impl Checker<'_, '_> {
             ));
         }
         Ok(())
+    }
+
+    fn generator_data_domain(&self, ty: &Term, parameters: &[DeclarationId]) -> bool {
+        let mut pending = vec![(ty, 0usize)];
+        let mut remaining = 100_000usize;
+        while let Some((ty, depth)) = pending.pop() {
+            if depth >= 128 || remaining == 0 {
+                return false;
+            }
+            remaining -= 1;
+            match ty {
+                Term::Pointer(inner) => pending.push((inner, depth + 1)),
+                Term::ComptimeFunction(_) => {}
+                Term::Closure {
+                    environment,
+                    signature,
+                } if signature.is_comptime_callable() => {
+                    pending.extend(environment.iter().map(|ty| (ty, depth + 1)));
+                }
+
+                Term::Tuple(fields) => pending.extend(fields.iter().map(|ty| (ty, depth + 1))),
+                Term::Record(fields) => {
+                    pending.extend(fields.iter().map(|(_, ty)| (ty, depth + 1)))
+                }
+                Term::NormalForm {
+                    head,
+                    sort: Sort::Type,
+                    arguments,
+                } if Some(*head) == self.protocols.tuple => {
+                    let [Term::TypeListValue(fields)] = arguments.as_slice() else {
+                        return false;
+                    };
+                    pending.extend(fields.iter().map(|ty| (ty, depth + 1)));
+                }
+                _ if nir::normal_forms::supported_input_type_with_layouts(
+                    ty,
+                    parameters,
+                    |head| Some(head) == self.protocols.tuple,
+                    |declaration| {
+                        self.structs.contains_key(&declaration)
+                            || self.enums.contains_key(&declaration)
+                            || self.newtypes.contains_key(&declaration)
+                            || self.context.is_nominal_constructor(declaration)
+                    },
+                ) => {}
+                _ => return false,
+            }
+            if pending.len() > remaining {
+                return false;
+            }
+        }
+        true
     }
 
     pub(super) fn validate_generator_data(
@@ -1747,6 +2679,106 @@ impl Checker<'_, '_> {
         result.map_err(|message| error(span, message))
     }
 
+    fn bind_live_generator_pattern(
+        &mut self,
+        decl: &hir::decl::LetDecl<'_>,
+        value: comptime_interpretor::Value,
+        ty: Term,
+    ) -> Result<(), Error> {
+        if !decl.mutable {
+            self.immutable.extend(pattern_binding_ids(&decl.pattern));
+        }
+        let pattern = self.pattern(&decl.pattern, &ty)?;
+        if !self.pattern_exhaustive(&pattern, &ty) {
+            return Err(error(
+                decl.span,
+                "refutable generator let pattern requires a diverging else branch",
+            ));
+        }
+        let bindings = pattern_bindings(&decl.pattern)?
+            .into_values()
+            .map(|id| (id, self.locals[&id].clone()))
+            .collect::<Vec<_>>();
+        let input = self.spread_binding(decl.span)?;
+        let packet_type = self.tuple_value_type(
+            bindings.iter().map(|(_, ty)| ty.clone()).collect(),
+            decl.span,
+        )?;
+        let root = n::Expr {
+            source: source(decl.span),
+            ty: packet_type.clone(),
+            kind: K::Block {
+                statements: vec![n::Expr {
+                    source: source(decl.span),
+                    ty: p(P::Void),
+                    kind: K::LetPattern {
+                        pattern,
+                        value: Box::new(n::Expr {
+                            source: source(decl.span),
+                            ty: ty.clone(),
+                            kind: K::Local(input),
+                        }),
+                        guard: None,
+                        otherwise: None,
+                    },
+                }],
+                result: Some(Box::new(n::Expr {
+                    source: source(decl.span),
+                    ty: packet_type,
+                    kind: K::Tuple(
+                        bindings
+                            .iter()
+                            .map(|(id, ty)| n::Expr {
+                                source: source(decl.span),
+                                ty: ty.clone(),
+                                kind: K::Local(*id),
+                            })
+                            .collect(),
+                    ),
+                })),
+            },
+        };
+        self.generator_data.insert(input, None);
+        let checked = self.validate_generator_data(&root, decl.span);
+        self.generator_data.remove(&input);
+        checked?;
+        let (values, _) =
+            self.required_live_input(decl.init.unwrap(), root, vec![], vec![(input, ty, value)])?;
+        let comptime_interpretor::Value::Tuple(values) = values else {
+            return Err(error(
+                decl.span,
+                "live generator pattern produced an invalid packet",
+            ));
+        };
+        if values.len() != bindings.len() {
+            return Err(error(decl.span, "live generator pattern arity mismatch"));
+        }
+        let mut completed = Vec::new();
+        for ((id, ty), value) in bindings.into_iter().zip(values) {
+            let (snapshot, cell) = if self.generator_value_needs_live_storage(&value, decl.span)? {
+                (
+                    n::Expr {
+                        source: source(decl.span),
+                        ty,
+                        kind: K::Local(id),
+                    },
+                    Some(comptime_interpretor::Storage::new(value)),
+                )
+            } else {
+                (self.materialize_generator_data(value, ty, decl.span)?, None)
+            };
+            constants::charge_copy(&snapshot, &mut self.required_steps, decl.span)?;
+            completed.push((id, snapshot, cell));
+        }
+        for (id, snapshot, cell) in completed {
+            self.generator_data.insert(id, Some(snapshot.clone()));
+            if let Some(cell) = cell {
+                self.generator_cells.insert(id, (snapshot, cell));
+            }
+        }
+        Ok(())
+    }
+
     fn bind_generator_pattern(
         &mut self,
         decl: &hir::decl::LetDecl<'_>,
@@ -1764,10 +2796,105 @@ impl Checker<'_, '_> {
                 "refutable generator let pattern requires a diverging else branch",
             ));
         }
+        let mut known_types = BTreeMap::new();
+        if self.checking_code_generator && !decl.mutable {
+            // Retain Type witnesses already present in checked syntax. This
+            // is structural projection, not invocation or value sampling.
+            let mut pending = vec![(&pattern, &value)];
+            while let Some((pattern, value)) = pending.pop() {
+                self.required_steps = self
+                    .required_steps
+                    .checked_sub(1)
+                    .ok_or_else(|| error(decl.span, "generator type evidence budget exhausted"))?;
+                let mut value = value;
+                loop {
+                    self.required_steps = self.required_steps.checked_sub(1).ok_or_else(|| {
+                        error(decl.span, "generator type projection budget exhausted")
+                    })?;
+                    let projected = match &value.kind {
+                        K::Field {
+                            value: base,
+                            declaration,
+                            index,
+                        } => match &base.kind {
+                            K::Record {
+                                declaration: actual,
+                                fields,
+                            } if declaration == actual => fields.get(*index),
+                            _ => None,
+                        },
+                        K::AnonymousField {
+                            value: base,
+                            name,
+                            index,
+                        } => match (&base.kind, &base.ty) {
+                            (K::AnonymousRecord { fields }, Term::Record(types))
+                                if types.get(*index).is_some_and(|(actual, _)| name == actual) =>
+                            {
+                                fields.get(*index)
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    let Some(projected) = projected else { break };
+                    value = projected;
+                }
+                match (pattern, &value.kind) {
+                    (n::Pattern::Binding { binding, inner }, _) => {
+                        if let Some(known) = self.generator_known_type_data(value, decl.span)? {
+                            known_types.insert(*binding, known);
+                        }
+                        pending.push((inner, value));
+                    }
+                    (n::Pattern::Tuple(patterns), K::Tuple(values))
+                        if patterns.len() == values.len() =>
+                    {
+                        pending.extend(patterns.iter().zip(values));
+                    }
+                    (
+                        n::Pattern::Record {
+                            declaration,
+                            fields: patterns,
+                        },
+                        K::Record {
+                            declaration: actual,
+                            fields: values,
+                        },
+                    ) if declaration == actual && patterns.len() == values.len() => {
+                        pending.extend(patterns.iter().zip(values));
+                    }
+                    (
+                        n::Pattern::AnonymousRecord {
+                            names,
+                            fields: patterns,
+                        },
+                        K::AnonymousRecord { fields: values },
+                    ) if patterns.len() == values.len() => {
+                        if let Term::Record(types) = &value.ty
+                            && names.len() == types.len()
+                            && names
+                                .iter()
+                                .zip(types)
+                                .all(|(name, (actual, _))| name == actual)
+                        {
+                            pending.extend(patterns.iter().zip(values));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
         if let n::Pattern::Binding { binding, inner } = &pattern {
             if matches!(**inner, n::Pattern::Wild) {
-                self.generator_data
-                    .insert(*binding, (!self.checking_code_generator).then_some(value));
+                self.generator_data.insert(
+                    *binding,
+                    if self.checking_code_generator {
+                        known_types.remove(binding)
+                    } else {
+                        Some(value)
+                    },
+                );
                 return Ok(());
             }
         }
@@ -1827,7 +2954,7 @@ impl Checker<'_, '_> {
         self.validate_generator_data(&root, decl.span)?;
         if self.checking_code_generator {
             for (id, _) in bindings {
-                self.generator_data.insert(id, None);
+                self.generator_data.insert(id, known_types.remove(&id));
             }
             return Ok(());
         }
@@ -1850,5 +2977,36 @@ impl Checker<'_, '_> {
             self.generator_data.insert(id, Some(value));
         }
         Ok(())
+    }
+}
+
+impl Checker<'_, '_> {
+    fn generator_known_type_data(
+        &mut self,
+        value: &n::Expr,
+        span: Span,
+    ) -> Result<Option<n::Expr>, Error> {
+        if value.ty != p(P::Type) && !self.is_type_list_type(&value.ty) {
+            return Ok(None);
+        }
+        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let mut budget = comptime_runtime::Budget {
+            steps: before,
+            max_limbs: 4096,
+        };
+        let known = self.known_normal_input(value, 0, &mut budget);
+        self.required_steps -= (before - budget.steps) as u64;
+        let kind = match known {
+            Some(ty) if value.ty == p(P::Type) && ty.sort() == Sort::Type => K::TypeValue(ty),
+            Some(Term::TypeListValue(items)) if self.is_type_list_type(&value.ty) => {
+                K::TypeListValue(items)
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(n::Expr {
+            ty: self.copy_alias_type(&value.ty, span)?,
+            source: value.source,
+            kind,
+        }))
     }
 }

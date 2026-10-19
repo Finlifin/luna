@@ -64,7 +64,7 @@ impl Checker<'_, '_> {
                 .abstract_types(&binders)
                 .map_err(|e| error(span, e.to_string()))?,
         };
-        let caller_scope = self.call_inference_scope();
+        let caller_scope = self.call_inference_domains();
         let mut checked: Vec<Option<n::Expr>> = vec![None; inputs.len()];
         let type_arguments = loop {
             let actual: Vec<_> = checked
@@ -77,7 +77,7 @@ impl Checker<'_, '_> {
                 })
                 .collect();
             let mut candidate = scheme
-                .infer_scoped_types_mode(
+                .infer_sparse_scoped_types_mode(
                     &actual,
                     expected,
                     None,

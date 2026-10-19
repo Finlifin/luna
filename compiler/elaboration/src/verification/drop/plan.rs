@@ -2,10 +2,10 @@
 //! Steps require normal completion of prior steps; this is not cleanup execution.
 use super::*;
 use crate::verification::{
-    moves::VariantSelection,
+    moves::{VARIANT_PATH, VariantSelection},
     ownership::{Availability, CleanupTree, Place, Shape, State},
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug)]
 enum Layout<T> {
@@ -356,9 +356,12 @@ struct Planner<'a, 'w> {
     world: &'a World<'w>,
     base: &'a Place,
     variants: &'a [VariantSelection],
+    domains: &'a BTreeMap<Vec<usize>, BTreeSet<usize>>,
+    qualified_path: Vec<usize>,
     fuel: &'a mut usize,
     pointers: Option<PointerMemory<'a>>,
     retired: Vec<Place>,
+    variant_layouts: std::collections::BTreeMap<Place, Vec<Term>>,
 }
 impl Planner<'_, '_> {
     fn shape(&mut self, binding: &AcquiredCleanup, depth: usize) -> Result<Shape, String> {
@@ -406,11 +409,40 @@ impl Planner<'_, '_> {
             let field = fields
                 .get(index)
                 .ok_or("cleanup child index exceeds acquired layout")?;
-            self.visit(field, state, child, depth + 1, steps)?;
+            self.qualified_path.push(index);
+            let result = self.visit(field, state, child, depth + 1, steps);
+            self.qualified_path.pop();
+            result?;
         }
         Ok(())
     }
     fn variant_children(
+        &mut self,
+        index: usize,
+        fields: &[AcquiredCleanup],
+        state: &State,
+        tree: &CleanupTree,
+        depth: usize,
+        steps: &mut Vec<CleanupStep>,
+    ) -> Result<(), String> {
+        let mut layout = vec![];
+        for field in fields {
+            crate::verification::memory::bound_type(&field.ty, self.fuel)?;
+            layout.push(field.ty.clone());
+        }
+        step(self.fuel, tree.place.fields.len())?;
+        let previous = self.variant_layouts.insert(tree.place.clone(), layout);
+        self.qualified_path.extend([VARIANT_PATH, index]);
+        let result = self.variant_children_with_layout(fields, state, tree, depth, steps);
+        self.qualified_path.truncate(self.qualified_path.len() - 2);
+        if let Some(previous) = previous {
+            self.variant_layouts.insert(tree.place.clone(), previous);
+        } else {
+            self.variant_layouts.remove(&tree.place);
+        }
+        result
+    }
+    fn variant_children_with_layout(
         &mut self,
         fields: &[AcquiredCleanup],
         state: &State,
@@ -462,16 +494,25 @@ impl Planner<'_, '_> {
             let fields = variants
                 .get(evidence.index)
                 .ok_or("cleanup variant index is out of bounds")?;
-            self.variant_children(fields, state, tree, depth, steps)?;
+            self.variant_children(evidence.index, fields, state, tree, depth, steps)?;
         } else {
             if tree.children.is_some() {
                 return Err("decomposed enum cleanup requires active variant evidence".into());
             }
             let mut branches = vec![];
             for (index, fields) in variants.iter().enumerate() {
+                step(self.fuel, 0)?;
+                if self
+                    .domains
+                    .get(&self.qualified_path)
+                    .or_else(|| self.domains.get(relative))
+                    .is_some_and(|tags| !tags.contains(&index))
+                {
+                    continue;
+                }
                 let mut branch = vec![];
                 let retired_before = self.retired.len();
-                self.variant_children(fields, state, tree, depth, &mut branch)?;
+                self.variant_children(index, fields, state, tree, depth, &mut branch)?;
                 self.retired.truncate(retired_before);
                 branches.push(VariantCleanup {
                     index,
@@ -535,13 +576,14 @@ impl Planner<'_, '_> {
                 } else {
                     state
                 };
-                let access = check_access_with_memory(
+                let access = super::access::check_access_with_layout(
                     self.package,
                     self.world,
                     selected,
                     access_state,
                     &tree.place,
                     self.pointers,
+                    &self.variant_layouts,
                     self.fuel,
                 )
                 .map_err(|e| {
@@ -658,6 +700,30 @@ pub fn plan_cleanup_with_memory(
     pointers: Option<PointerMemory<'_>>,
     fuel: &mut usize,
 ) -> Result<CleanupPlan, String> {
+    plan_cleanup_with_domains(
+        package,
+        world,
+        acquired,
+        state,
+        receiver,
+        variants,
+        &BTreeMap::new(),
+        pointers,
+        fuel,
+    )
+}
+
+fn plan_cleanup_with_domains(
+    package: &Package,
+    world: &World<'_>,
+    acquired: &AcquiredCleanup,
+    state: &State,
+    receiver: &Place,
+    variants: &[VariantSelection],
+    domains: &BTreeMap<Vec<usize>, BTreeSet<usize>>,
+    pointers: Option<PointerMemory<'_>>,
+    fuel: &mut usize,
+) -> Result<CleanupPlan, String> {
     step(fuel, 0)?;
     let mut seen = BTreeSet::new();
     for variant in variants {
@@ -672,7 +738,74 @@ pub fn plan_cleanup_with_memory(
     // A field path through an enum is meaningful only under its selected tag.
     // Validate even evidence for moved positions; it must never leak into all
     // alternatives of a dynamic parent switch.
-    for variant in variants {
+    let mut validation = vec![];
+    for (fields, tags) in domains {
+        step(fuel, fields.len().saturating_add(tags.len()))?;
+        if tags.is_empty() || variants.iter().any(|v| &v.fields == fields) {
+            return Err("invalid cleanup variant domain".into());
+        }
+        if fields.contains(&VARIANT_PATH) {
+            let mut binding = acquired;
+            let mut position = 0;
+            let mut physical = vec![];
+            while position < fields.len() {
+                step(fuel, position)?;
+                let children = match &binding.layout {
+                    Layout::Fields(children) => children,
+                    Layout::Variants(alternatives) => {
+                        if fields[position] != VARIANT_PATH {
+                            return Err(
+                                "conditional cleanup domain requires a variant qualifier".into()
+                            );
+                        }
+                        let tag = *fields
+                            .get(position + 1)
+                            .ok_or("incomplete cleanup variant qualifier")?;
+                        if domains
+                            .get(&fields[..position])
+                            .is_some_and(|tags| !tags.contains(&tag))
+                            || variants
+                                .iter()
+                                .any(|v| v.fields == physical && v.index != tag)
+                        {
+                            return Err("cleanup domain traverses an excluded variant".into());
+                        }
+                        position += 2;
+                        alternatives
+                            .get(tag)
+                            .ok_or("cleanup variant index is out of bounds")?
+                    }
+                    Layout::Atomic => return Err("cleanup domain traverses an atomic value".into()),
+                };
+                let field = *fields
+                    .get(position)
+                    .ok_or("cleanup variant qualifier lacks a payload field")?;
+                binding = children
+                    .get(field)
+                    .ok_or("cleanup variant domain field is out of bounds")?;
+                physical.push(field);
+                position += 1;
+            }
+            match &binding.layout {
+                Layout::Variants(alternatives)
+                    if tags.iter().all(|tag| *tag < alternatives.len()) =>
+                {
+                    ()
+                }
+                Layout::Variants(_) => return Err("cleanup variant index is out of bounds".into()),
+                _ => return Err("cleanup variant domain does not identify an enum".into()),
+            }
+            continue;
+        }
+        for index in tags {
+            step(fuel, fields.len())?;
+            validation.push(VariantSelection {
+                fields: fields.clone(),
+                index: *index,
+            });
+        }
+    }
+    for variant in variants.iter().chain(&validation) {
         let mut binding = acquired;
         for (depth, index) in variant.fields.iter().enumerate() {
             step(fuel, depth)?;
@@ -711,9 +844,12 @@ pub fn plan_cleanup_with_memory(
             world,
             base: receiver,
             variants,
+            domains,
+            qualified_path: vec![],
             fuel,
             pointers,
             retired: vec![],
+            variant_layouts: Default::default(),
         }
         .visit(acquired, state, tree, 0, &mut steps)?;
     }
@@ -883,6 +1019,31 @@ impl crate::verification::moves::CleanupPolicy for CleanupSession<'_, '_> {
         fuel: &mut usize,
     ) -> Result<CleanupPlan, String> {
         self.plan_with_memory(ty, state, place, variants, None, fuel)
+    }
+    fn plan_with_domains(
+        &mut self,
+        ty: &Term,
+        state: &State,
+        place: &Place,
+        variants: &[VariantSelection],
+        domains: &BTreeMap<Vec<usize>, BTreeSet<usize>>,
+        pointers: Option<PointerMemory<'_>>,
+        fuel: &mut usize,
+    ) -> Result<CleanupPlan, String> {
+        let binding = self
+            .find(ty, fuel)?
+            .ok_or("cleanup responsibility has no acquired binding")?;
+        plan_cleanup_with_domains(
+            self.package,
+            self.world,
+            binding,
+            state,
+            place,
+            variants,
+            domains,
+            pointers,
+            fuel,
+        )
     }
     fn plan_with_memory(
         &mut self,

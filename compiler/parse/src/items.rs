@@ -422,13 +422,12 @@ impl Parser<'_> {
         })
     }
 
-    /// fn_type -> pure? comptime? inline? (unsafe | spec | verified)? (extern "ABI")? fn(parameter_type*)
-    /// Creates FnType node: flags_u32, abi_node, N(parameter_types).
+    /// fn_type -> pure? comptime? inline? (unsafe | spec | verified)? fn(parameter_type*)
+    /// Creates FnType node: flags_u32, N(parameter_types).
     /// The entry point in expressions is the `fn` token (or modifier keywords before `fn`).
     pub fn try_fn_type(&mut self) -> ParseResult {
         self.scoped(|p| {
             let mut flags: u32 = 0;
-            let mut abi_node: NodeIndex = 0;
 
             // Parse modifier keywords
             loop {
@@ -457,16 +456,6 @@ impl Parser<'_> {
                         flags |= ast::FN_MOD_VERIFIED;
                         p.eat_tokens(1);
                     }
-                    TokenKind::Extern => {
-                        flags |= ast::FN_MOD_EXTERN;
-                        p.eat_tokens(1);
-                        // Check for optional ABI string
-                        if p.peek(TokenKind::Str.as_ref()) {
-                            abi_node = NodeBuilder::new(NodeKind::Str, p.next_token_span())
-                                .build(&mut p.ast);
-                            p.eat_tokens(1);
-                        }
-                    }
                     _ => break,
                 }
             }
@@ -488,7 +477,6 @@ impl Parser<'_> {
 
             Ok(NodeBuilder::new(NodeKind::FnType, p.current_span())
                 .add_single_child(flags) // raw u32 modifier bitmask
-                .add_single_child(abi_node)
                 .add_multiple_children(params)
                 .build(&mut p.ast))
         })
@@ -656,6 +644,7 @@ impl Parser<'_> {
 
             let nodes = p.try_multi_with_bracket(
                 &[
+                    Rule::comma("configuration", |p| p.try_configuration()),
                     Rule::comma("struct field", |p| p.try_struct_field()),
                     Rule::comma("property", |p| p.try_property()),
                     Rule::semicolon("statement or definition", |p| {
@@ -1007,7 +996,7 @@ impl Parser<'_> {
         })
     }
 
-    // fn id? ( params ) (-> return_type)? (handles eff)? clauses?  (block | = expr)
+    // fn id? ( params ) (-> return_type)? clauses?  (block | = expr)
     pub(crate) fn try_normal_form_head_definition(&mut self) -> ParseResult {
         self.scoped(|p| {
             p.eat_tokens(3);
@@ -1067,8 +1056,6 @@ impl Parser<'_> {
                     p.next_token_span(),
                 ));
             }
-            // Reserved AST slot retained until all function consumers migrate.
-            let handles = 0;
 
             let clauses = p.try_clauses()?;
 
@@ -1097,7 +1084,6 @@ impl Parser<'_> {
                     .add_single_child(id)
                     .add_multiple_children(params)
                     .add_single_child(return_type)
-                    .add_single_child(handles)
                     .add_multiple_children(clauses)
                     .add_single_child(expr)
                     .build(&mut p.ast))
@@ -1120,7 +1106,6 @@ impl Parser<'_> {
                     .add_single_child(id)
                     .add_multiple_children(params)
                     .add_single_child(return_type)
-                    .add_single_child(handles)
                     .add_multiple_children(clauses)
                     .add_single_child(block)
                     .build(&mut p.ast))
@@ -1129,7 +1114,6 @@ impl Parser<'_> {
                     .add_single_child(id)
                     .add_multiple_children(params)
                     .add_single_child(return_type)
-                    .add_single_child(handles)
                     .add_multiple_children(clauses)
                     .add_single_child(0)
                     .build(&mut p.ast))
@@ -1159,6 +1143,7 @@ impl Parser<'_> {
 
             let nodes = p.try_multi_with_bracket(
                 &[
+                    Rule::comma("configuration", |p| p.try_configuration()),
                     Rule::comma("property", |p| p.try_property()),
                     Rule::semicolon("statement or definition", |p| {
                         p.try_statement_or_definition()

@@ -76,6 +76,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             CleanupReason::EffectEscape,
         )?;
         self.incomplete_exit(source, 0);
+        let capture_pointers = self.capture_pointer_snapshot(&escaped, source)?;
+        let capture_domains = self.capture_enum_snapshot(&escaped, source)?;
+        self.report.effect_capture_enum_exits.push(capture_domains);
+        self.report
+            .effect_capture_pointer_exits
+            .push(capture_pointers);
         self.report.effect_exits.push((source, escaped.state));
         self.effect_loop_checkpoints(flow, source)?;
         if self.effect_return_enabled && self.handler_result.is_none() {
@@ -835,11 +841,24 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         source: SourceRange,
     ) -> Result<(), Error> {
         self.stable_handler_pointees(caller, targets, source)?;
+        let ty = inner
+            .types
+            .get(&root(binding))
+            .ok_or_else(|| error(source, "closure borrowed binding type is missing"))?;
+        let (pointer_depth, _) =
+            super::super::memory::pointer_representation(self.package, ty, &mut self.fuel)
+                .map_err(|reason| error(source, reason))?
+                .ok_or_else(|| {
+                    error(
+                        source,
+                        "closure borrowed binding has no pointer representation",
+                    )
+                })?;
         let borrowed = inner
             .pointers
             .get(&Place {
                 root: root(binding),
-                fields: vec![],
+                fields: vec![0; pointer_depth],
             })
             .ok_or_else(|| error(source, "closure borrowed frame is missing"))?;
         self.pointer_work(borrowed, source)?;

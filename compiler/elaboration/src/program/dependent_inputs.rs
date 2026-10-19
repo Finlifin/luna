@@ -5,6 +5,7 @@ use super::*;
 pub(super) struct PreparedInputs {
     pub values: Vec<Option<n::Expr>>,
     pub symbols: Vec<Option<Term>>,
+    pub live: Vec<Option<comptime_interpretor::Value>>,
     pub defaults: Vec<Option<n::Expr>>,
     active: BTreeSet<usize>,
 }
@@ -14,6 +15,7 @@ impl PreparedInputs {
         Self {
             values: vec![None; count],
             symbols: vec![None; count],
+            live: vec![None; count],
             defaults: vec![None; count],
             active: BTreeSet::new(),
         }
@@ -67,8 +69,17 @@ impl Checker<'_, '_> {
         prefix: &[n::Expr],
         expr: &Expr<'_>,
         expected: Option<&Term>,
-    ) -> Result<(Vec<DeclarationId>, Vec<Term>, Vec<Option<n::Expr>>), Error> {
+    ) -> Result<
+        (
+            Vec<DeclarationId>,
+            Vec<Term>,
+            Vec<Option<n::Expr>>,
+            BTreeMap<usize, Vec<Option<n::Expr>>>,
+        ),
+        Error,
+    > {
         let mut values = vec![None; ordinary.len()];
+        let mut collected = BTreeMap::<usize, Vec<Option<n::Expr>>>::new();
         for (index, value) in prefix.iter().enumerate() {
             values[index] = Some(value.clone());
         }
@@ -139,7 +150,7 @@ impl Checker<'_, '_> {
                 result: Box::new(result),
             },
         };
-        let scope = self.call_inference_scope();
+        let scope = self.call_inference_domains();
         let discharge_effects = self.active_effect_environment().is_some()
             && !matches!(expected, Some(Term::Computation { .. }));
         let candidate = loop {
@@ -157,7 +168,7 @@ impl Checker<'_, '_> {
                 })
                 .collect::<Vec<_>>();
             let mut candidate = scheme
-                .infer_scoped_types_mode(
+                .infer_sparse_scoped_types_mode(
                     &actual,
                     expected,
                     None,
@@ -167,6 +178,26 @@ impl Checker<'_, '_> {
                     &scope,
                 )
                 .map_err(|e| call_inference_error(expr.span, e))?;
+            for (slot, fields) in &collected {
+                let Some(index) = indices.iter().position(|index| index == slot) else {
+                    continue;
+                };
+                if fields.is_empty()
+                    || values[*slot]
+                        .as_ref()
+                        .is_some_and(|value| !is_never(&value.ty))
+                {
+                    continue;
+                }
+                let route = routes
+                    .iter()
+                    .find(|route| route.parameter + offset == *slot)
+                    .unwrap();
+                let context = route.retained_collection_context(self, fields);
+                candidate
+                    .constrain_parameter_context(index, &context, crate::ptc::Budget::default())
+                    .map_err(|e| call_inference_error(expr.span, e))?;
+            }
             candidate
                 .refine_type_views(
                     |ty, budget| {
@@ -209,6 +240,22 @@ impl Checker<'_, '_> {
                     let input_context = candidate
                         .parameter_input_context(index)
                         .map_err(|e| call_inference_error(expr.span, e))?;
+                    if route.has_collection_fields() {
+                        let (value, advanced) = self.attempt_collection_fields(
+                            expr,
+                            route,
+                            &input_context,
+                            collected.entry(slot).or_default(),
+                            ordinary[slot].sort != Sort::Runtime,
+                            allow_defaults,
+                        )?;
+                        values[slot] = value;
+                        progress |= advanced;
+                        if advanced {
+                            break;
+                        }
+                        continue;
+                    }
                     values[slot] =
                         self.with_staged_input(ordinary[slot].sort != Sort::Runtime, |this| {
                             this.argument_attempt_with_input(
@@ -250,7 +297,29 @@ impl Checker<'_, '_> {
                 }
             }
         }
-        Ok((known, arguments, values))
+        Ok((known, arguments, values, collected))
+    }
+
+    pub(super) fn call_inference_domains(&self) -> Vec<(Sort, Option<Term>)> {
+        if let Some(domains) = self
+            .signature_owner
+            .and_then(|owner| self.signature_domains.get(&owner))
+        {
+            return domains.clone();
+        }
+        if let Some(scope) = &self.default_input_scope {
+            return scope.clone();
+        }
+        if let Some(definition) = self
+            .signature_owner
+            .and_then(|owner| self.open_functions.get(&owner))
+        {
+            return definition.input_domains();
+        }
+        self.call_inference_scope()
+            .into_iter()
+            .map(|parameter| (parameter.sort, Some(parameter.ty)))
+            .collect()
     }
 
     pub(super) fn call_inference_scope(&self) -> Vec<Parameter> {
@@ -261,7 +330,10 @@ impl Checker<'_, '_> {
             return prefix.clone();
         }
         if let Some(scope) = &self.default_input_scope {
-            return scope.clone();
+            return scope
+                .iter()
+                .map_while(|(sort, ty)| ty.clone().map(|ty| Parameter { sort: *sort, ty }))
+                .collect();
         }
         self.signature_owner
             .and_then(|owner| {
@@ -290,12 +362,7 @@ impl Checker<'_, '_> {
         inputs: &[Option<Term>],
         span: Span,
     ) -> Result<nir::FunctionCallBinding, Error> {
-        let scope = self.call_inference_scope();
-        let frames = if scope.is_empty() {
-            vec![]
-        } else {
-            vec![scope.iter().map(|p| p.sort).collect()]
-        };
+        let frames = self.call_input_frames();
         let signature = Term::Function {
             parameters: parameters.to_vec(),
             result: Box::new(Term::Primitive(P::Void)),
@@ -310,11 +377,27 @@ impl Checker<'_, '_> {
     }
 
     pub(super) fn call_input_frames(&self) -> Vec<Vec<Sort>> {
+        if let Some(domains) = self
+            .signature_owner
+            .and_then(|owner| self.signature_domains.get(&owner))
+        {
+            return if domains.is_empty() {
+                vec![]
+            } else {
+                vec![domains.iter().map(|entry| entry.0).collect()]
+            };
+        }
         // Scope inspection only needs sorts, not copies of dependent types.
+        if let Some(scope) = &self.default_input_scope {
+            return if scope.is_empty() {
+                vec![]
+            } else {
+                vec![scope.iter().map(|entry| entry.0).collect()]
+            };
+        }
         let scope = self
             .signature_owner
             .and_then(|owner| self.signature_prefixes.get(&owner))
-            .or(self.default_input_scope.as_ref())
             .map(Vec::as_slice)
             .or_else(|| {
                 self.signature_owner
@@ -348,12 +431,7 @@ impl Checker<'_, '_> {
         arguments: &[Term],
         span: Span,
     ) -> Result<Term, Error> {
-        let scope = self.call_inference_scope();
-        let frames = if scope.is_empty() {
-            vec![]
-        } else {
-            vec![scope.iter().map(|p| p.sort).collect()]
-        };
+        let frames = self.call_input_frames();
         ty.instantiate_parameters_in_scope(&self.input_binders(parameters), arguments, &frames)
             .map_err(|e| error(span, e.to_string()))
     }
@@ -516,12 +594,7 @@ impl Checker<'_, '_> {
         // Generic arguments arrive in the caller frame and must cross that
         // boundary before replacing declaration rigids. Later input preparation
         // removes the callee frame once, using its actual/defaulted Type inputs.
-        let caller = self.call_inference_scope();
-        let mut frames = if caller.is_empty() {
-            vec![]
-        } else {
-            vec![caller.iter().map(|p| p.sort).collect()]
-        };
+        let mut frames = self.call_input_frames();
         for argument in &arguments {
             argument
                 .check_scope(&frames)
@@ -730,10 +803,31 @@ impl Checker<'_, '_> {
                     {
                         (value.clone(), self.value_input_bindings[binding].0.clone())
                     }
-                    K::Local(binding) => match self.spread_input_symbol(*binding, source)? {
-                        Some(symbol) => (value, symbol),
-                        None => self.freeze_dependency_input(source, value, bindings)?,
-                    },
+                    K::Local(binding) => {
+                        // A prepared container input is supplied by the enclosing
+                        // invocation. Its declaration identity is enough to check
+                        // the callee telescope and container premises now; retain
+                        // the Local expression so execution receives the actual
+                        // value rather than freezing this symbolic identity.
+                        let captured = self
+                            .alias_value_bindings
+                            .iter()
+                            .find_map(|(parameter, id)| (id == binding).then_some(*parameter));
+                        if let Some(declaration) = captured {
+                            (
+                                value,
+                                Term::Rigid {
+                                    declaration,
+                                    sort: Sort::Type,
+                                },
+                            )
+                        } else {
+                            match self.spread_input_symbol(*binding, &value.ty, source)? {
+                                Some(symbol) => (value, symbol),
+                                None => self.freeze_dependency_input(source, value, bindings)?,
+                            }
+                        }
+                    }
                     _ => self.freeze_dependency_input(source, value, bindings)?,
                 }
             };
@@ -780,12 +874,7 @@ impl Checker<'_, '_> {
             .get(&owner)
             .or_else(|| self.interface_signatures.get(&owner))
             .ok_or_else(|| error(span, "ordinary type requirement needs a function signature"))?;
-        let caller = self.call_inference_scope();
-        let mut frames = if caller.is_empty() {
-            vec![]
-        } else {
-            vec![caller.iter().map(|p| p.sort).collect()]
-        };
+        let mut frames = self.call_input_frames();
         let signature = signature
             .instantiate_types_in_scope(&self.type_parameters[&owner], arguments, &frames)
             .map_err(|e| error(span, e.to_string()))?;

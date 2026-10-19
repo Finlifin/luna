@@ -136,8 +136,10 @@ fn decompose(
             _,
         ) if *binder == nesting => {
             // Strip local binders before exporting a component. A dependency
-            // on one of those binders cannot escape into a Type substitution.
-            if *sort == Sort::Type && actual.sort() == Sort::Type {
+            // on one of those binders cannot escape into a substitution.
+            // Value proposals occur only inside a matched type identity; the
+            // original enclosing Type obligation still validates the result.
+            if *sort == actual.sort() {
                 if let Some(actual) = extract(actual, actual_arguments, nesting, scope)? {
                     let argument = arguments.get(*index).ok_or_else(|| {
                         MatchError::Inference(InferenceError::InvalidSubstitution(
@@ -156,7 +158,7 @@ fn decompose(
                 sort,
             },
         ) if actual_arguments.is_some() && *binder == nesting => {
-            if *sort == Sort::Type && template.sort() == Sort::Type {
+            if *sort == template.sort() {
                 if let Some(template) = extract(template, Some(arguments), nesting, scope)? {
                     let argument = actual_arguments.unwrap().get(*index).ok_or_else(|| {
                         MatchError::Inference(InferenceError::InvalidSubstitution(

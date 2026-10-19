@@ -22,6 +22,57 @@ impl PairAssessment {
     }
 }
 
+// An overapproximation of value-index overlap. Known record/scalar
+// structure may refute overlap; unknown computations and values remain free.
+// Only Type leaves are emitted as propositions.
+fn index_overlap(
+    left: &Term,
+    right: &Term,
+    fuel: &mut usize,
+    max_depth: usize,
+) -> Result<Vec<Formula>, String> {
+    let mut pending = vec![(left, right, 0usize)];
+    let mut relations = Vec::new();
+    while let Some((left, right, depth)) = pending.pop() {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or("index overlap budget exhausted")?;
+        if depth >= max_depth.min(128) {
+            return Err("index overlap depth exhausted".into());
+        }
+        if left.sort() == Sort::Type && right.sort() == Sort::Type {
+            relations.push(Formula::equal(left.clone(), right.clone()));
+            continue;
+        }
+        if let (Term::RecordValue(a), Term::RecordValue(b)) = (left, right) {
+            if a.len() != b.len() || a.iter().zip(b).any(|((a, _), (b, _))| a != b) {
+                return Ok(vec![Formula::False]);
+            }
+            if a.len() > fuel.saturating_sub(pending.len()) {
+                return Err("index overlap budget exhausted".into());
+            }
+            pending.extend(
+                a.iter()
+                    .zip(b)
+                    .rev()
+                    .map(|((_, a), (_, b))| (a, b, depth + 1)),
+            );
+            continue;
+        }
+        let known = |term: &Term| {
+            term.sort() == Sort::Type
+                || term.scalar_index_domain().is_some()
+                || matches!(term, Term::RecordValue(_))
+        };
+        if known(left) && known(right) && left != right {
+            return Ok(vec![Formula::False]);
+        }
+        // A rigid or opaque value can match any supported value of its domain.
+        // Do not unfold it, invert it, or manufacture a PTC value equation.
+    }
+    Ok(relations)
+}
+
 // Input is fully bounded before cloning or invoking recursive substitutions.
 // Fresh rigid IDs are chosen deterministically outside all input rigid IDs.
 fn separation_goal(
@@ -127,7 +178,8 @@ fn separation_goal(
     let mut rename =
         |head: &ImplementationHead| -> Result<(Term, Vec<Term>, Vec<Formula>), String> {
             let mut replacements = Vec::new();
-            for _ in &head.type_parameters {
+            let parameters = head.parameter_binders().map_err(|e| e.to_string())?;
+            for parameter in &parameters {
                 loop {
                     fuel = fuel
                         .checked_sub(1)
@@ -142,14 +194,14 @@ fn separation_goal(
                     if used.insert(id) {
                         replacements.push(Term::Rigid {
                             declaration: id,
-                            sort: Sort::Type,
+                            sort: parameter.sort,
                         });
                         break;
                     }
                 }
             }
             let instantiate = |term: &Term| {
-                term.instantiate_types(&head.type_parameters, &replacements)
+                term.instantiate_parameters(&parameters, &replacements)
                     .map_err(|e| e.to_string())
             };
             let subject = instantiate(&head.subject)?;
@@ -162,7 +214,7 @@ fn separation_goal(
                 .requirements
                 .iter()
                 .map(|p| {
-                    p.instantiate_types(&head.type_parameters, &replacements)
+                    p.instantiate_parameters(&parameters, &replacements)
                         .map(|p| Formula::from_predicate(&p))
                         .map_err(|e| e.to_string())
                 })
@@ -176,18 +228,12 @@ fn separation_goal(
     }
     let mut overlap = vec![Formula::equal(a, b)];
     for (a, b) in aa.into_iter().zip(ba) {
-        match (&a, &b) {
-            (Term::Symbol(left), Term::Symbol(right)) => {
-                overlap.push(if left == right {
-                    Formula::True
-                } else {
-                    Formula::False
-                });
-            }
-            _ if a.sort() == Sort::Type && b.sort() == Sort::Type => {
-                overlap.push(Formula::equal(a, b))
-            }
-            _ => return Err("interface index overlap requires a declared supported domain".into()),
+        if a.sort() == Sort::Type && b.sort() == Sort::Type {
+            overlap.push(Formula::equal(a, b));
+        } else if a.sort() == Sort::ComptimeValue && b.sort() == Sort::ComptimeValue {
+            overlap.extend(index_overlap(&a, &b, &mut fuel, budget.max_depth)?);
+        } else {
+            return Err("interface index overlap requires a declared supported domain".into());
         }
     }
     overlap.extend(ar);

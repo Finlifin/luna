@@ -23,6 +23,7 @@ fn main() {
     index
         .insert(
             ImplementationHead {
+                parameter_types: vec![],
                 declaration: id(200),
                 interface: Some(id(100)),
                 interface_arguments: vec![],
@@ -36,6 +37,7 @@ fn main() {
     index
         .insert(
             ImplementationHead {
+                parameter_types: vec![],
                 declaration: id(201),
                 interface: Some(id(100)),
                 interface_arguments: vec![],
@@ -49,6 +51,7 @@ fn main() {
     index
         .insert(
             ImplementationHead {
+                parameter_types: vec![],
                 declaration: id(202),
                 interface: Some(id(100)),
                 interface_arguments: vec![],

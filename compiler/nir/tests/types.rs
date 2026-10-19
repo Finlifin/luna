@@ -2550,3 +2550,120 @@ fn type_list_inputs_retain_runtime_dependencies_inside_element_types() {
     );
     assert!(reference.check_runtime_bindings(&BTreeSet::new()).is_err());
 }
+
+#[test]
+fn frozen_function_values_preserve_declaration_identity_and_value_sort() {
+    let value = Term::FunctionValue {
+        declaration: IDENTITY,
+        arguments: vec![],
+    };
+    assert_eq!(value.sort(), Sort::ComptimeValue);
+    assert_ne!(
+        value,
+        Term::FunctionValue {
+            declaration: SENSOR,
+            arguments: vec![]
+        }
+    );
+    value.check_scope(&[]).unwrap();
+    assert_eq!(value.substitute_partial(&[]).unwrap(), value);
+    assert_eq!(
+        value.to_string(),
+        format!("(function-value {IDENTITY} (arguments))")
+    );
+}
+
+#[test]
+fn function_instance_values_rebind_and_charge_their_arguments() {
+    let instance = Term::FunctionValue {
+        declaration: IDENTITY,
+        arguments: vec![bound(0, 0, Sort::Type)],
+    };
+    assert!(instance.check_scope(&[]).is_err());
+    instance.check_scope(&[vec![Sort::Type]]).unwrap();
+    let boolean = primitive(Primitive::Bool);
+    let closed = instance
+        .substitute_partial(&[Some(boolean.clone())])
+        .unwrap();
+    assert_eq!(
+        closed,
+        Term::FunctionValue {
+            declaration: IDENTITY,
+            arguments: vec![boolean]
+        }
+    );
+    assert_ne!(
+        closed,
+        Term::FunctionValue {
+            declaration: IDENTITY,
+            arguments: vec![primitive(Primitive::U8)]
+        }
+    );
+    let mut fuel = 1;
+    assert!(nir::type_computations::charge_term(&closed, &mut fuel).is_err());
+    let mut fuel = 2;
+    nir::type_computations::charge_term(&closed, &mut fuel).unwrap();
+    assert_eq!(fuel, 0);
+    assert!(closed.to_string().contains("(arguments (primitive bool))"));
+}
+
+#[test]
+fn closure_snapshot_is_a_value_with_distinct_factory_identity() {
+    let value = Term::ClosureSnapshot {
+        factory: IDENTITY,
+        arguments: vec![],
+    };
+    assert_eq!(value.sort(), Sort::ComptimeValue);
+    value.check_scope(&[]).unwrap();
+    assert_ne!(
+        value,
+        Term::ClosureSnapshot {
+            factory: SENSOR,
+            arguments: vec![]
+        }
+    );
+    assert_eq!(
+        value.to_string(),
+        format!("(closure-snapshot (factory {IDENTITY}) (arguments))")
+    );
+}
+
+#[test]
+fn closure_snapshot_arguments_keep_their_scope_and_substitution() {
+    let snapshot = Term::ClosureSnapshot {
+        factory: IDENTITY,
+        arguments: vec![bound(0, 0, Sort::Type)],
+    };
+    assert!(snapshot.check_scope(&[]).is_err());
+    snapshot.check_scope(&[vec![Sort::Type]]).unwrap();
+    let closed = snapshot
+        .substitute_partial(&[Some(primitive(Primitive::Bool))])
+        .unwrap();
+    assert_eq!(
+        closed,
+        Term::ClosureSnapshot {
+            factory: IDENTITY,
+            arguments: vec![primitive(Primitive::Bool)]
+        }
+    );
+    assert_ne!(
+        closed,
+        Term::ClosureSnapshot {
+            factory: IDENTITY,
+            arguments: vec![primitive(Primitive::U8)]
+        }
+    );
+    let mut fuel = 1;
+    assert!(nir::type_computations::charge_term(&closed, &mut fuel).is_err());
+    nir::type_computations::charge_term(&closed, &mut 2).unwrap();
+    assert!(closed.to_string().contains("(arguments (primitive bool))"));
+}
+
+#[test]
+fn closure_snapshot_rejects_non_type_factory_inputs() {
+    let invalid = Term::ClosureSnapshot {
+        factory: IDENTITY,
+        arguments: vec![Term::Bool(true)],
+    };
+    assert!(invalid.check_scope(&[]).is_err());
+}

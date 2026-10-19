@@ -68,6 +68,85 @@ fn trait_package(ids: &[DeclarationId]) -> nir::program::Package {
 }
 
 #[test]
+fn iteration_protocols_have_independent_explicit_identities() {
+    let iterator = DeclarationId {
+        package: 7,
+        local: 1,
+    };
+    let container = DeclarationId {
+        package: 8,
+        local: 1,
+    };
+    // Both declarations deliberately have the same unrelated spelling.
+    let package = trait_package(&[iterator, container]);
+    let mut items = LangItems::new();
+    assert!(!items.has(LangItem::Iter));
+    assert!(!items.has(LangItem::IntoIterator));
+    items
+        .bind_source_traits(
+            &package,
+            &[
+                (LangItem::Iter, iterator),
+                (LangItem::IntoIterator, container),
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        items.get(LangItem::Iter),
+        Some(LangItemDef::UserDef(iterator))
+    );
+    assert_eq!(
+        items.get(LangItem::IntoIterator),
+        Some(LangItemDef::UserDef(container))
+    );
+    assert_eq!(LangItem::Iter.name(), "Iter");
+    assert_eq!(LangItem::IntoIterator.name(), "IntoIterator");
+    let before = items.to_string();
+    assert!(
+        items
+            .bind_source_traits(
+                &package,
+                &[
+                    (LangItem::Copy, iterator),
+                    (LangItem::IntoIterator, iterator),
+                ]
+            )
+            .is_err()
+    );
+    assert_eq!(items.to_string(), before);
+}
+
+#[test]
+fn iteration_binding_rejects_missing_and_ambiguous_declarations_atomically() {
+    let iterator = DeclarationId {
+        package: 7,
+        local: 1,
+    };
+    let container = DeclarationId {
+        package: 8,
+        local: 1,
+    };
+    for package in [
+        trait_package(&[iterator]),
+        trait_package(&[iterator, container, container]),
+    ] {
+        let mut items = LangItems::new();
+        assert!(
+            items
+                .bind_source_traits(
+                    &package,
+                    &[
+                        (LangItem::Iter, iterator),
+                        (LangItem::IntoIterator, container),
+                    ]
+                )
+                .is_err()
+        );
+        assert!(items.is_empty());
+    }
+}
+
+#[test]
 fn source_binding_is_atomic_and_package_qualified() {
     let first = DeclarationId {
         package: 7,

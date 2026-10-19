@@ -21,6 +21,7 @@ fn boxed(t: Term) -> Term {
 }
 fn head(n: u32, subject: Term, parameters: Vec<Id>, names: &[&str]) -> InherentHead {
     InherentHead {
+        parameter_types: vec![],
         declaration: id(n),
         subject,
         type_parameters: parameters,
@@ -201,6 +202,7 @@ fn inherent_admission_is_atomic_and_resolution_tracks_world_identity() {
 #[test]
 fn inherent_matching_does_not_resolve_an_open_trait_head() {
     let head = ImplementationHead {
+        parameter_types: vec![],
         declaration: id(20),
         subject: boxed(var(1)),
         type_parameters: vec![id(1)],

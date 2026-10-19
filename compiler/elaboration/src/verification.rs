@@ -441,6 +441,14 @@ impl Facts {
         truth: bool,
         limits: &mut Limits,
     ) -> Result<(), Unknown> {
+        // Literal truth adds no relation and cannot refine a value domain.
+        // In particular wildcard patterns should not copy and re-solve every
+        // existing polynomial each time they split their impossible failure.
+        if let Condition::Bool(value) = condition {
+            limits.step(1)?;
+            self.reachable &= *value == truth;
+            return Ok(());
+        }
         let mut next = self.fork(limits)?;
         next.assume_inner(condition, truth, 0, limits)?;
         next.remember_condition(condition, truth, limits)?;
@@ -666,6 +674,29 @@ impl Facts {
     ) -> Result<(), Unknown> {
         let constant = limits.integer(constant)?;
         let relation = if truth { relation } else { relation.negated() };
+        if self.value(id.place) != Some(id) {
+            return Err(Unknown::StaleValue(id));
+        }
+        match self.bound(id, limits) {
+            Err(Unknown::MissingBound(_)) => {
+                // An unbounded mathematical integer still has a stable value
+                // identity. Keep a half-line/excluded point without inventing
+                // a finite machine bound.
+                let condition = Condition::Compare {
+                    value: id,
+                    relation,
+                    constant,
+                };
+                if self.known_condition(&condition, limits)? == Some(false) {
+                    self.reachable = false;
+                    return Ok(());
+                }
+                self.remember_condition(&condition, true, limits)?;
+                return self.bound_from_retained_comparisons(id, limits);
+            }
+            Err(e) => return Err(e),
+            Ok(_) => {}
+        }
         match relation {
             Comparison::Equal => self.refine(id, Some(&constant), Some(&constant), limits),
             Comparison::LessEqual => self.refine(id, None, Some(&constant), limits),
@@ -1069,4 +1100,53 @@ pub fn constant_integer_difference(
         .map(|n| limits.integer(n))
         .transpose()
         .map(|n| Some(n.unwrap_or_else(Integer::zero)))
+}
+
+#[cfg(test)]
+mod constant_assumption_tests {
+    use super::*;
+
+    #[test]
+    fn constant_assumptions_preserve_facts_without_resolving_them() {
+        let mut setup = Limits::default();
+        let mut facts = Facts::default();
+        for index in 0..32 {
+            facts
+                .assign(
+                    PlaceId {
+                        owner: 0,
+                        local: index,
+                    },
+                    Interval::new(Integer::zero(), Integer::from_i128(1), &mut setup).unwrap(),
+                )
+                .unwrap();
+        }
+        let before = facts.to_string();
+        let mut limits = Limits::default();
+        limits.arithmetic.steps = 2;
+        facts
+            .assume(&Condition::Bool(true), true, &mut limits)
+            .unwrap();
+        facts
+            .assume(&Condition::Bool(false), false, &mut limits)
+            .unwrap();
+        assert_eq!(facts.to_string(), before);
+        assert_eq!(limits.arithmetic.steps, 0);
+        assert!(
+            facts
+                .assume(&Condition::Bool(false), true, &mut limits)
+                .is_err()
+        );
+        assert_eq!(facts.to_string(), before);
+        limits.arithmetic.steps = 1;
+        facts
+            .assume(&Condition::Bool(false), true, &mut limits)
+            .unwrap();
+        assert!(!facts.is_reachable());
+        limits.arithmetic.steps = 1;
+        facts
+            .assume(&Condition::Bool(true), true, &mut limits)
+            .unwrap();
+        assert!(!facts.is_reachable());
+    }
 }

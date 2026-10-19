@@ -109,3 +109,192 @@ fn bool_type_keyword_is_not_a_boolean_literal_or_bindable_identifier() {
         assert_eq!(ast.get_node_kind(node), Some(NodeKind::Bool));
     }
 }
+
+#[test]
+fn function_type_visitors_keep_flags_separate_from_parameter_nodes() {
+    let mut counts = Vec::new();
+    for source in ["fn(bool,fn(bool))", "comptime fn(bool,fn(bool))"] {
+        let map = SourceMap::new(FilePathMapping::empty());
+        let file = map.new_source_file(FileName::Custom("function-type.fl".into()), source.into());
+        let (tokens, symbols, errors) = lex::lex(source, file.start_pos);
+        assert!(errors.is_empty());
+        let mut parser = Parser::new(&map, tokens, symbols, file.start_pos);
+        let root = parser.try_expr().unwrap();
+        assert_eq!(parser.peek_next_token().kind, TokenKind::Eof);
+        let ast = parser.finalize();
+        let children = ast.get_children(root);
+        assert_eq!(children.len(), 2);
+        assert_eq!(ast.get_multi_child_slice(children[1]).unwrap().len(), 2);
+        let direct = ast.dump_to_s_expression(root, &map);
+        let visited = ast::ast_visitor::dump_ast_to_s_expression(&ast, root, &map);
+        assert_eq!(direct, visited);
+        assert_eq!(direct.contains("comptime"), source.starts_with("comptime"));
+        counts.push(ast::ast_visitor::count_ast_nodes(&ast, root, &map));
+    }
+    assert_eq!(counts[0], counts[1]);
+    assert!(counts[0] >= 4);
+}
+
+#[test]
+fn postfix_ranges_include_the_receiver_and_preserve_inner_ranges() {
+    for source in [
+        "module.factory(value).field[index]",
+        "constructor<T>(value).ref.*'type",
+        "provider {key:value}.field",
+        "receiver.as(Type)",
+        "items match {_=>true}",
+        "callback() do {true}",
+    ] {
+        let map = SourceMap::new(FilePathMapping::empty());
+        let file = map.new_source_file(FileName::Custom("postfix-span.fl".into()), source.into());
+        let (tokens, symbols, errors) = lex::lex(source, file.start_pos);
+        assert!(errors.is_empty(), "{source}: {errors:?}");
+        let mut parser = Parser::new(&map, tokens, symbols, file.start_pos);
+        let root = parser.try_expr().unwrap();
+        assert_eq!(parser.peek_next_token().kind, TokenKind::Eof, "{source}");
+        let ast = parser.finalize();
+        assert_eq!(
+            ast.source_content(root, &map).as_deref(),
+            Some(source),
+            "{source}"
+        );
+        if source.starts_with("module.") {
+            let projection = ast.get_children(root)[0];
+            let call = ast.get_children(projection)[0];
+            let callee = ast.get_children(call)[0];
+            assert_eq!(
+                ast.source_content(projection, &map).as_deref(),
+                Some("module.factory(value).field")
+            );
+            assert_eq!(
+                ast.source_content(call, &map).as_deref(),
+                Some("module.factory(value)")
+            );
+            assert_eq!(
+                ast.source_content(callee, &map).as_deref(),
+                Some("module.factory")
+            );
+        }
+    }
+}
+
+#[test]
+fn function_ast_visitors_preserve_parameters_clauses_and_body() {
+    for (source, has_body) in [
+        ("fn select(value:T)->T where T {value}", true),
+        ("fn select(value:T)->T where T = value", true),
+        ("fn select(value:T)->T where T;", false),
+    ] {
+        let map = SourceMap::new(FilePathMapping::empty());
+        let file =
+            map.new_source_file(FileName::Custom("function-layout.fl".into()), source.into());
+        let (tokens, symbols, errors) = lex::lex(source, file.start_pos);
+        assert!(errors.is_empty(), "{errors:?}");
+        let mut parser = Parser::new(&map, tokens, symbols, file.start_pos);
+        let root = parser.try_statement_or_definition().unwrap();
+        parser.eat_token(TokenKind::Semi);
+        assert_eq!(parser.peek_next_token().kind, TokenKind::Eof);
+        let ast = parser.finalize();
+        let children = ast.get_children(root);
+        assert_eq!(children.len(), 5);
+        assert_eq!(ast.get_multi_child_slice(children[1]).unwrap().len(), 1);
+        assert_eq!(ast.get_multi_child_slice(children[3]).unwrap().len(), 1);
+        assert_eq!(children[4] != 0, has_body);
+        let direct = ast.dump_to_s_expression(root, &map);
+        assert_eq!(
+            direct,
+            ast::ast_visitor::dump_ast_to_s_expression(&ast, root, &map)
+        );
+        assert!(direct.contains("select"), "{direct}");
+        assert!(direct.contains("value"), "{direct}");
+        assert!(ast::ast_visitor::count_ast_nodes(&ast, root, &map) >= 6);
+    }
+}
+
+#[test]
+fn associated_declaration_keeps_default_separate_from_clauses() {
+    let source = "trait Container {assoc Item:Type=bool where T;}";
+    let map = SourceMap::new(FilePathMapping::empty());
+    let file = map.new_source_file(FileName::Custom("assoc-layout.fl".into()), source.into());
+    let (tokens, symbols, errors) = lex::lex(source, file.start_pos);
+    assert!(errors.is_empty());
+    let mut parser = Parser::new(&map, tokens, symbols, file.start_pos);
+    let root = parser.try_statement_or_definition().unwrap();
+    let ast = parser.finalize();
+    let body = ast.get_children(root)[3];
+    let member = ast
+        .get_multi_child_slice(ast.get_children(body)[0])
+        .unwrap()[0];
+    let children = ast.get_children(member);
+    assert_eq!(
+        ast.source_content(children[3], &map).as_deref(),
+        Some("bool")
+    );
+    assert_eq!(ast.get_multi_child_slice(children[4]).unwrap().len(), 1);
+    let direct = ast.dump_to_s_expression(root, &map);
+    assert_eq!(
+        direct,
+        ast::ast_visitor::dump_ast_to_s_expression(&ast, root, &map)
+    );
+    assert!(direct.contains("bool"), "{direct}");
+    assert!(direct.contains("TypeDeclClause"), "{direct}");
+    assert!(ast::ast_visitor::count_ast_nodes(&ast, root, &map) >= 5);
+}
+
+#[test]
+fn postfix_pattern_ranges_include_the_entire_matched_pattern() {
+    for source in [
+        "Option.Some(value) as whole if whole == value",
+        "Container<T>.item(value)",
+        "0..=10 as value",
+        "true or false as value",
+        "(true or false) as value",
+        "Packet {flag:true} as whole",
+        "-3i32",
+        "-3..= -1 as value",
+        "(-3) or -4",
+        "-3.5 as value",
+    ] {
+        let map = SourceMap::new(FilePathMapping::empty());
+        let input = format!("{source} => true");
+        let file = map.new_source_file(FileName::Custom("pattern-span.fl".into()), input.clone());
+        let (tokens, symbols, errors) = lex::lex(&input, file.start_pos);
+        assert!(errors.is_empty(), "{source}: {errors:?}");
+        let mut parser = Parser::new(&map, tokens, symbols, file.start_pos);
+        let root = parser
+            .try_pattern()
+            .unwrap_or_else(|error| panic!("{source}: {error:?}"));
+        let ast = parser.finalize();
+        assert_eq!(
+            ast.source_content(root, &map).as_deref(),
+            Some(source),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn inline_control_is_an_expression_without_stealing_function_types() {
+    for source in [
+        "inline if flag {true} else {false}",
+        "inline when {flag=>true,else=>false}",
+        "inline if flag is do {true=>true,false=>false}",
+        "inline for i in 0..2 {}",
+    ] {
+        let (ast, root) = parse(source);
+        assert_eq!(
+            ast.get_node_kind(root),
+            Some(NodeKind::InlineStatement),
+            "{source}"
+        );
+        parse(&format!("consume({source})"));
+    }
+    let (ast, root) = parse("inline if flag {true} else {false} and enabled");
+    assert_eq!(ast.get_node_kind(root), Some(NodeKind::BoolAnd));
+    let (ast, root) = parse("inline fn(bool) -> bool");
+    assert_eq!(ast.get_node_kind(root), Some(NodeKind::Arrow));
+    assert_eq!(
+        ast.get_node_kind(ast.get_children(root)[0]),
+        Some(NodeKind::FnType)
+    );
+}

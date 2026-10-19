@@ -594,3 +594,189 @@ fn exact_float_capture_preserves_decimal_identity_and_checks_domain_and_budget()
         a.inputs()[0].value
     );
 }
+
+#[test]
+fn sparse_capture_keeps_unknown_runtime_positions_without_inventing_domains() {
+    use nir::program::{Expr, ExprKind as K, LocalId, SourceRange};
+    use nir::type_computations::capture_sparse_entry;
+    let binding = |index| LocalId { owner: 12, index };
+    let available = vec![
+        (binding(0), Sort::Runtime, None),
+        (
+            binding(1),
+            Sort::Type,
+            Some(Term::Primitive(Primitive::Type)),
+        ),
+        (binding(2), Sort::Runtime, None),
+        (binding(3), Sort::ComptimeValue, Some(slot(1, Sort::Type))),
+    ];
+    let body = Expr {
+        source: SourceRange { start: 0, end: 1 },
+        ty: slot(1, Sort::Type),
+        kind: K::Local(binding(3)),
+    };
+    assert!(matches!(
+        capture_sparse_entry(target(), "sparse".into(), body.clone(), &available, &mut 0),
+        Err(Error::Budget)
+    ));
+    let captured = capture_sparse_entry(
+        target(),
+        "sparse".into(),
+        body.clone(),
+        &available,
+        &mut 1000,
+    )
+    .unwrap();
+    assert_eq!(captured.slots, vec![1, 3]);
+    assert_eq!(
+        captured.source_scope(),
+        vec![
+            Sort::Runtime,
+            Sort::Type,
+            Sort::Runtime,
+            Sort::ComptimeValue
+        ]
+    );
+    assert_eq!(captured.function.parameters, vec![binding(1), binding(3)]);
+    assert_eq!(captured.function.body.ty, slot(0, Sort::Type));
+    captured.function.signature.check_scope(&[]).unwrap();
+    assert!(captured.to_string().starts_with("(captured-comptime-entry"));
+    let runtime = Expr {
+        ty: Term::Primitive(Primitive::Bool),
+        kind: K::Local(binding(2)),
+        ..body.clone()
+    };
+    assert!(matches!(
+        capture_sparse_entry(target(), "runtime".into(), runtime, &available, &mut 1000),
+        Err(Error::RuntimeInput(2))
+    ));
+    let mut missing = available.clone();
+    missing[3].2 = None;
+    assert!(
+        capture_sparse_entry(
+            target(),
+            "missing".into(),
+            body.clone(),
+            &missing,
+            &mut 1000
+        )
+        .is_err()
+    );
+    // A pending staged domain can retain its position, but may not enter the
+    // executable capture until its domain is known.
+    let independent = Expr {
+        ty: Term::Primitive(Primitive::Bool),
+        kind: K::Literal(nir::program::Literal::Bool(true)),
+        ..body
+    };
+    let captured = capture_sparse_entry(
+        target(),
+        "unused-staged".into(),
+        independent,
+        &missing,
+        &mut 1000,
+    )
+    .unwrap();
+    assert!(captured.slots.is_empty());
+    assert_eq!(captured.source_scope().len(), missing.len());
+}
+
+#[test]
+fn bounded_parameter_substitution_checks_expansion_before_allocating() {
+    use nir::type_computations::instantiate_parameters_bounded as instantiate;
+    let parameter = nir::DeclarationParameter {
+        declaration: target(),
+        sort: Sort::Type,
+    };
+    let rigid = Term::Rigid {
+        declaration: target(),
+        sort: Sort::Type,
+    };
+    let input = Term::Tuple(vec![Term::Primitive(Primitive::Bool); 100]);
+    let root = Term::NormalForm {
+        head: DeclarationId {
+            package: 2,
+            local: 0,
+        },
+        sort: Sort::Type,
+        arguments: vec![rigid; 20],
+    };
+    let args = [input.clone()];
+    assert!(matches!(
+        instantiate(&root, &[parameter], &args, &[], &mut 500),
+        Err(Error::Budget)
+    ));
+    let result = instantiate(&root, &[parameter], &args, &[], &mut 10_000).unwrap();
+    let Term::NormalForm {
+        head, arguments, ..
+    } = result
+    else {
+        panic!("opaque head")
+    };
+    assert_eq!(
+        head,
+        DeclarationId {
+            package: 2,
+            local: 0
+        }
+    );
+    assert_eq!(arguments, vec![input; 20]);
+    assert!(matches!(
+        instantiate(&root, &[parameter], &[Term::Bool(true)], &[], &mut 10_000),
+        Err(Error::Scope(_))
+    ));
+}
+
+#[test]
+fn bounded_parameter_substitution_is_simultaneous_and_checks_result_depth() {
+    use nir::type_computations::instantiate_parameters_bounded as instantiate;
+    let first = nir::DeclarationParameter {
+        declaration: target(),
+        sort: Sort::Type,
+    };
+    let second = nir::DeclarationParameter {
+        declaration: DeclarationId {
+            package: 1,
+            local: 3,
+        },
+        sort: Sort::Type,
+    };
+    let rigid = |binder: nir::DeclarationParameter| Term::Rigid {
+        declaration: binder.declaration,
+        sort: binder.sort,
+    };
+    let root = Term::Tuple(vec![rigid(first), rigid(second)]);
+    assert_eq!(
+        instantiate(
+            &root,
+            &[first, second],
+            &[rigid(second), Term::Primitive(Primitive::Bool)],
+            &[],
+            &mut 1000
+        )
+        .unwrap(),
+        Term::Tuple(vec![rigid(second), Term::Primitive(Primitive::Bool)])
+    );
+    let mut outer = rigid(first);
+    for _ in 0..80 {
+        outer = Term::Pointer(Box::new(outer));
+    }
+    let mut replacement = Term::Primitive(Primitive::Bool);
+    for _ in 0..80 {
+        replacement = Term::Pointer(Box::new(replacement));
+    }
+    assert!(matches!(
+        instantiate(&outer, &[first], &[replacement], &[], &mut 10_000),
+        Err(Error::Budget)
+    ));
+    assert!(
+        instantiate(
+            &outer,
+            &[first],
+            &[Term::Primitive(Primitive::Bool)],
+            &[],
+            &mut 10_000
+        )
+        .is_ok()
+    );
+}

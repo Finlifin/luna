@@ -6,6 +6,7 @@ pub struct Selectors<'a> {
     pub copy: Option<&'a str>,
     pub drop: Option<&'a str>,
     pub index: Option<&'a str>,
+    pub list_pattern: Option<&'a str>,
     pub literal_into: Option<&'a str>,
     pub arithmetic: [Option<&'a str>; 7],
     pub splice: Option<&'a str>,
@@ -33,6 +34,11 @@ pub(crate) fn resolve_source(
         })
         .chain([
             ("Index".into(), selectors.index, &mut result.index),
+            (
+                "ListPatternView".into(),
+                selectors.list_pattern,
+                &mut result.list_pattern,
+            ),
             (
                 "LiteralInto".into(),
                 selectors.literal_into,
@@ -228,7 +234,9 @@ pub(crate) fn validate(
             return Err(format!("{label} binding has no unique checked head"));
         };
         let valid = if label == "meta.List" {
-            head.parameters.len() == 1 && head.parameters[0].kind == Kind::Type
+            head.role == Role::TypeList
+                && head.parameters.len() == 1
+                && head.parameters[0].kind == Kind::Type
         } else {
             head.role == Role::Tuple
                 && head.parameters.len() == 1
@@ -251,6 +259,7 @@ pub(crate) struct SysrootBindings {
     copy: Option<String>,
     drop: Option<String>,
     index: Option<String>,
+    list_pattern: Option<String>,
     literal_into: Option<String>,
     arithmetic: [Option<String>; 7],
     splice: Option<String>,
@@ -307,6 +316,7 @@ impl SysrootBindings {
             }
             let target = match key {
                 "index-protocol" => &mut result.index,
+                "list-pattern-protocol" => &mut result.list_pattern,
                 "literal-into-protocol" => &mut result.literal_into,
                 "copy-protocol" => &mut result.copy,
                 "drop-protocol" => &mut result.drop,
@@ -373,6 +383,13 @@ impl SysrootBindings {
                     .then_some(self.index.as_deref())
                     .flatten()
             }),
+            list_pattern: explicit.list_pattern.or_else(|| {
+                identities
+                    .list_pattern
+                    .is_none()
+                    .then_some(self.list_pattern.as_deref())
+                    .flatten()
+            }),
             literal_into: explicit.literal_into.or_else(|| {
                 identities
                     .literal_into
@@ -423,6 +440,38 @@ impl SysrootBindings {
 #[cfg(test)]
 mod literal_binding_tests {
     use super::*;
+    #[test]
+    fn list_pattern_binding_configuration_preserves_driver_authority() {
+        let config =
+            SysrootBindings::parse("version = 1\nlist-pattern-protocol = builtin::ListView\n")
+                .unwrap();
+        assert_eq!(
+            config
+                .apply(Selectors::default(), &Protocols::default())
+                .list_pattern,
+            Some("builtin::ListView")
+        );
+        let explicit = Selectors {
+            list_pattern: Some("input::View"),
+            ..Default::default()
+        };
+        assert_eq!(
+            config.apply(explicit, &Protocols::default()).list_pattern,
+            explicit.list_pattern
+        );
+        let bound = Protocols {
+            list_pattern: Some(nir::DeclarationId {
+                package: 1,
+                local: 7,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            config.apply(Selectors::default(), &bound).list_pattern,
+            None
+        );
+        assert!(SysrootBindings::parse("version = 1\nlist-pattern-protocol = input::One\nlist-pattern-protocol = input::Two\n").is_err());
+    }
     #[test]
     fn literal_binding_configuration_preserves_explicit_authority() {
         let config =

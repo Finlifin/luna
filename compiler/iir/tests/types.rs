@@ -1,6 +1,122 @@
 use iir::completed_type;
 use nir::{DeclarationId, Parameter, Primitive, RuntimeId, Sort, Term};
 use std::collections::BTreeSet;
+
+#[test]
+fn staged_type_list_index_preserves_identity_and_checks_bounds_and_depth() {
+    use nir::normal_forms::{Head, Kind, Parameter as Input, Role};
+    use nir::program::{Expr, ExprKind as K, Literal, LocalId, SourceRange};
+    let id = DeclarationId {
+        package: 81,
+        local: 1,
+    };
+    let type_ty = Term::Primitive(Primitive::Type);
+    let list_ty = Term::NormalForm {
+        head: id,
+        sort: Sort::Type,
+        arguments: vec![type_ty.clone()],
+    };
+    let heads = [Head {
+        declaration: id,
+        role: Role::TypeList,
+        requirements: vec![],
+        parameters: vec![Input {
+            declaration: DeclarationId {
+                package: 81,
+                local: 2,
+            },
+            binding: LocalId { owner: 1, index: 0 },
+            kind: Kind::Type,
+            ty: type_ty.clone(),
+        }],
+    }];
+    let source = SourceRange { start: 10, end: 20 };
+    let opaque = Term::NormalForm {
+        head: id,
+        sort: Sort::Type,
+        arguments: vec![Term::Primitive(Primitive::Bool)],
+    };
+    let element = Expr {
+        source,
+        ty: type_ty.clone(),
+        kind: K::TypeValue(opaque.clone()),
+    };
+    let list = |elements| Expr {
+        source,
+        ty: list_ty.clone(),
+        kind: K::TypeList(elements),
+    };
+    let index = |values, position: &str| Expr {
+        source,
+        ty: type_ty.clone(),
+        kind: K::TypeListIndex(
+            Box::new(values),
+            Box::new(Expr {
+                source,
+                ty: Term::Primitive(Primitive::Integer),
+                kind: K::Literal(Literal::Integer(position.into())),
+            }),
+        ),
+    };
+    let valid = index(list(vec![element.clone()]), "0");
+    let fold =
+        |expr: &Expr, fuel: &mut usize| iir::staging::fold_value_with_layouts(&heads, expr, fuel);
+    assert_eq!(fold(&valid, &mut 10_000).unwrap(), element);
+    let invalid_index = index(list(vec![]), "0");
+    assert!(
+        fold(
+            &index(list(vec![element.clone(), invalid_index.clone()]), "0"),
+            &mut 10_000
+        )
+        .is_err()
+    );
+    let selected = Expr {
+        source,
+        ty: type_ty.clone(),
+        kind: K::If {
+            condition: Box::new(Expr {
+                source,
+                ty: Term::Primitive(Primitive::Bool),
+                kind: K::Literal(Literal::Bool(true)),
+            }),
+            then_branch: Box::new(element.clone()),
+            else_branch: Some(Box::new(invalid_index.clone())),
+        },
+    };
+    assert_eq!(
+        fold(&index(list(vec![selected]), "0"), &mut 10_000).unwrap(),
+        element
+    );
+    let discarded = Expr {
+        source,
+        ty: type_ty.clone(),
+        kind: K::Block {
+            statements: vec![invalid_index],
+            result: Some(Box::new(element.clone())),
+        },
+    };
+    assert!(fold(&discarded, &mut 10_000).is_err());
+    for position in ["-1", "1", "340282366920938463463374607431768211456"] {
+        assert!(
+            fold(&index(list(vec![element.clone()]), position), &mut 10_000)
+                .unwrap_err()
+                .contains("out of bounds")
+        );
+    }
+    assert!(fold(&index(list(vec![]), "0"), &mut 10_000).is_err());
+    assert!(fold(&valid, &mut 0).is_err());
+    assert_eq!(fold(&valid, &mut 10_000).unwrap(), element);
+    let mut nested = element.clone();
+    for _ in 0..40 {
+        nested = index(list(vec![nested]), "0");
+    }
+    assert_eq!(fold(&nested, &mut 100_000).unwrap(), element);
+    for _ in 0..40 {
+        nested = index(list(vec![nested]), "0");
+    }
+    assert!(fold(&nested, &mut 100_000).unwrap_err().contains("depth"));
+}
+
 #[test]
 fn unresolved_associated_types_cannot_enter_iir_even_with_closed_inputs() {
     let projection = Term::AssociatedType {
@@ -253,6 +369,41 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
             .unwrap_err()
             .contains("type-list constant")
     );
+    package.normal_forms[0].role = Role::TypeList;
+    package.validate(&mut 10_000).unwrap();
+    let value = package.functions[0].function.body.clone();
+    assert_eq!(
+        iir::staging::fold_value_with_layouts(&package.normal_forms, &value, &mut 10_000).unwrap(),
+        value
+    );
+    let construction = Expr {
+        source: value.source,
+        ty: value.ty.clone(),
+        kind: K::TypeList(vec![Expr {
+            source: value.source,
+            ty: primitive(Primitive::Type),
+            kind: K::TypeValue(primitive(Primitive::Bool)),
+        }]),
+    };
+    package.functions[0].function.body = construction.clone();
+    package.validate(&mut 10_000).unwrap();
+    assert_eq!(
+        iir::staging::fold_value_with_layouts(&package.normal_forms, &construction, &mut 10_000)
+            .unwrap(),
+        value
+    );
+    assert!(
+        iir::staging::fold_value_with_layouts(&package.normal_forms, &construction, &mut 0)
+            .is_err()
+    );
+    let K::TypeList(fields) = &mut package.functions[0].function.body.kind else {
+        unreachable!()
+    };
+    fields[0].ty = primitive(Primitive::Bool);
+    assert!(package.validate(&mut 10_000).is_err());
+    package.functions[0].function.body = construction;
+    package.normal_forms[0].parameters.clear();
+    assert!(package.validate(&mut 10_000).is_err());
 
     let mut contract_package = base;
     let list_value = contract_package.functions[0].function.body.clone();
@@ -282,7 +433,8 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
             signature: Term::Function {
                 parameters: vec![],
                 result: Box::new(primitive(Primitive::Bool)),
-            },
+            }
+            .into(),
             parameter_bindings: vec![],
             type_arguments: vec![],
             type_parameters: vec![],
@@ -333,6 +485,26 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
             }],
         });
     contract_package.validate(&mut 10_000).unwrap();
+    let mut forged = contract_package.clone();
+    forged.interfaces[0].methods[0].signature = nir::code_interfaces::MethodSignature::Generator(
+        nir::code_interfaces::CodeFunctionSignature {
+            clause_domains: vec![],
+            inputs: vec![],
+            output: nir::code_interfaces::ExpressionCodeInterface {
+                infer_context: false,
+                context: Default::default(),
+                ports: Default::default(),
+                defaults: Default::default(),
+                result: primitive(Primitive::Bool),
+            },
+        },
+    );
+    let failure = forged.validate(&mut 10_000).unwrap_err();
+    assert!(
+        failure.contains("not callable") || failure.contains("contextual code"),
+        "{failure}"
+    );
+    contract_package.validate(&mut 10_000).unwrap();
     let predicate = &mut contract_package.interfaces[0].methods[0]
         .program
         .preconditions[0];
@@ -379,4 +551,70 @@ fn incomplete_type_list_concatenation_cannot_enter_iir() {
         )
         .unwrap();
     completed_type(&completed, &BTreeSet::new(), &mut 100).unwrap();
+}
+
+#[test]
+fn staged_callable_keys_cannot_hide_unfinished_inputs() {
+    let declaration = DeclarationId {
+        package: 1,
+        local: 9,
+    };
+    let runtime = RuntimeId {
+        instance: 17,
+        local: 3,
+    };
+    for snapshot in [false, true] {
+        let runtime_type = Term::NormalForm {
+            head: declaration,
+            sort: Sort::Type,
+            arguments: vec![Term::Runtime(runtime)],
+        };
+        let key = |argument| {
+            if snapshot {
+                Term::ClosureSnapshot {
+                    factory: declaration,
+                    arguments: vec![argument],
+                }
+            } else {
+                Term::FunctionValue {
+                    declaration,
+                    arguments: vec![argument],
+                }
+            }
+        };
+        let rigid = Term::Rigid {
+            declaration,
+            sort: Sort::Type,
+        };
+        assert!(
+            completed_type(&key(rigid), &BTreeSet::new(), &mut 100)
+                .unwrap_err()
+                .contains("unresolved")
+        );
+        assert!(
+            completed_type(&key(runtime_type.clone()), &BTreeSet::new(), &mut 100)
+                .unwrap_err()
+                .contains("unavailable runtime")
+        );
+        completed_type(
+            &key(runtime_type.clone()),
+            &BTreeSet::from([runtime]),
+            &mut 100,
+        )
+        .unwrap();
+        assert!(
+            completed_type(
+                &key(Term::Primitive(Primitive::Bool)),
+                &BTreeSet::new(),
+                &mut 1
+            )
+            .is_err()
+        );
+        completed_type(
+            &key(Term::Primitive(Primitive::Bool)),
+            &BTreeSet::new(),
+            &mut 100,
+        )
+        .unwrap();
+    }
 }

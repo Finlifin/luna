@@ -276,7 +276,9 @@ fn scan<'a>(
             }
             Work::Pattern(pattern, context) => match pattern {
                 Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => (),
-                Pattern::Binding { inner: pattern, .. } | Pattern::Remap { pattern, .. } => {
+                Pattern::Observe { inner: pattern, .. }
+                | Pattern::Binding { inner: pattern, .. }
+                | Pattern::Remap { pattern, .. } => {
                     work.push(Work::Pattern(pattern, context.clone()))
                 }
                 Pattern::Guard { pattern, condition } => {

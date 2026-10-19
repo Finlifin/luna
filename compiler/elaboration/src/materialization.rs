@@ -76,8 +76,10 @@ enum Task {
     Type(Term),
 }
 struct Builder<'a> {
-    trait_parameter_sorts: std::collections::BTreeMap<Id, nir::Sort>,
+    declaration_parameter_sorts: std::collections::BTreeMap<Id, nir::Sort>,
     quote_cursor: u32,
+    inline_effects: BTreeSet<Id>,
+    active_staged_inlines: BTreeSet<Id>,
     quote_sources: Vec<n::ExpansionSource>,
     retain_templates: bool,
     package: &'a n::Package,
@@ -129,6 +131,24 @@ pub fn dispatch_instances_for_roots(
     .map(|(dispatch, _, _, _, _, _)| dispatch)
 }
 
+/// Prepare reachable dispatch while retaining ordinary Type telescopes for
+/// binding by the comptime interpreter at invocation time.
+pub fn dispatch_instances_for_invocation(
+    package: &n::Package,
+    roots: &[iir::InstanceKey],
+    budget: Budget,
+) -> Result<Vec<n::DispatchInstance>, String> {
+    build(
+        package,
+        budget,
+        Roots::Invocation(roots),
+        BTreeSet::new(),
+        &[],
+        None,
+    )
+    .map(|(dispatch, _, _, _, _, _)| dispatch)
+}
+
 /// Resolve one concrete method through the same checked dispatch closure used
 /// by execution. Consumers must still enforce the interface's call contract;
 /// the selected body identity alone is not permission to access memory.
@@ -165,6 +185,20 @@ pub fn resolve_method_instance(
 /// Normalize annotations on a private expansion candidate without invoking
 /// code, selecting bodies or publishing an executable instance. Unresolved
 /// definition-side projections remain views; opaque heads retain identity.
+struct InlineAnnotationRewriter<F>(F);
+impl<F: FnMut(&Term) -> Result<Term, String>> n::Rewriter for InlineAnnotationRewriter<F> {
+    type Error = String;
+    fn ty(&mut self, ty: &Term) -> Result<Term, String> {
+        (self.0)(ty)
+    }
+    fn expression(&mut self, expression: &mut n::Expr) -> Result<bool, String> {
+        // An interface reference retains the declaration-side signature. Its
+        // associated result is normalized on the enclosing call, not erased
+        // from the method contract before dispatch/materialization checks it.
+        Ok(!matches!(expression.kind, K::TraitMethod { .. }))
+    }
+}
+
 pub(crate) fn normalize_inline_annotations(
     package: &n::Package,
     function: &mut n::Function,
@@ -293,10 +327,43 @@ pub fn instantiate_with_types(
     output.validate(&mut validation_fuel)?;
     Ok(output)
 }
+/// Resolve associated-type annotations in the package's immutable dispatch
+/// world. This does not unfold normal-form heads or execute function bodies.
+pub(crate) fn normalize_concrete_type(
+    package: &n::Package,
+    ty: &Term,
+    fuel: &mut usize,
+) -> Result<Term, String> {
+    let mut normalized = None;
+    let result = build(
+        package,
+        Budget {
+            steps: *fuel,
+            ..Default::default()
+        },
+        Roots::TypeAnnotation(ty, &mut normalized),
+        BTreeSet::new(),
+        &[],
+        None,
+    );
+    match result {
+        Ok((_, _, _, _, remaining, _)) => {
+            *fuel = remaining;
+            normalized.ok_or_else(|| "type normalization produced no annotation".into())
+        }
+        Err(reason) => {
+            *fuel = 0;
+            Err(reason)
+        }
+    }
+}
+
 enum Roots<'a> {
     All,
+    TypeAnnotation(&'a Term, &'a mut Option<Term>),
     Annotations(&'a mut n::Function),
     Dispatch(&'a [iir::InstanceKey]),
+    Invocation(&'a [iir::InstanceKey]),
     Iir(&'a [iir::InstanceKey]),
     Method(&'a n::Expr, &'a mut Option<n::MethodInstance>),
     QuoteMethod(&'a n::Expr, &'a mut Option<n::MethodInstance>),
@@ -334,6 +401,7 @@ fn build(
             index
                 .insert(
                     ImplementationHead {
+                        parameter_types: implementation.parameter_types.clone(),
                         declaration: implementation.declaration,
                         interface: implementation.interface,
                         interface_arguments: implementation.interface_arguments.clone(),
@@ -347,15 +415,30 @@ fn build(
         }
     }
     let mut input_fuel = budget.steps;
-    let trait_parameter_sorts = package.trait_parameter_sorts(&mut input_fuel)?;
+    let declaration_parameter_sorts = package.declaration_parameter_sorts(&mut input_fuel)?;
+    let inline_effects = if matches!(roots, Roots::Iir(_)) {
+        input_fuel = input_fuel
+            .checked_sub(package.effects.len())
+            .ok_or("materialized inline effect index budget exhausted")?;
+        package
+            .effects
+            .iter()
+            .filter(|effect| effect.inline && effect.abi == nir::effects::Abi::Direct)
+            .map(|effect| effect.declaration)
+            .collect()
+    } else {
+        BTreeSet::new()
+    };
     let mut builder = Builder {
+        inline_effects,
+        active_staged_inlines: BTreeSet::new(),
         quote_cursor: package.quote_identity_cursor,
         quote_sources: if matches!(roots, Roots::Iir(_)) {
             package.expansion_sources.clone()
         } else {
             Vec::new()
         },
-        retain_templates: matches!(roots, Roots::All),
+        retain_templates: matches!(roots, Roots::All | Roots::Invocation(_)),
         package,
         index,
         context,
@@ -375,22 +458,26 @@ fn build(
         runtime_bindings,
         nominals: vec![],
         interface_contracts: vec![],
-        trait_parameter_sorts,
+        declaration_parameter_sorts,
     };
     for ty in type_roots {
         let ty = builder.normalized_type(ty)?;
         builder.queue.push_back(Task::Type(ty));
     }
-    if let Roots::Annotations(function) = roots {
+    if let Roots::TypeAnnotation(ty, output) = roots {
+        *output = Some(builder.normalized_type(ty)?);
+    } else if let Roots::Annotations(function) = roots {
         function.signature = builder.staging_type_view(&function.signature)?;
         for expression in std::iter::once(&mut function.body)
             .chain(function.defaults.iter_mut().map(|(_, value)| value))
             .chain(&mut function.preconditions)
             .chain(&mut function.postconditions)
         {
-            expression.rewrite_types(&mut |ty| builder.staging_type_view(ty))?;
+            expression.rewrite_with(&mut InlineAnnotationRewriter(|ty: &Term| {
+                builder.staging_type_view(ty)
+            }))?;
         }
-    } else if let Roots::Dispatch(roots) | Roots::Iir(roots) = roots {
+    } else if let Roots::Dispatch(roots) | Roots::Invocation(roots) | Roots::Iir(roots) = roots {
         for root in roots {
             builder.tick(0)?;
             for argument in &root.arguments {
@@ -574,7 +661,7 @@ impl Builder<'_> {
                 .map(|id| nir::DeclarationParameter {
                     declaration: *id,
                     sort: self
-                        .trait_parameter_sorts
+                        .declaration_parameter_sorts
                         .get(id)
                         .copied()
                         .unwrap_or(nir::Sort::Type),
@@ -634,7 +721,7 @@ impl Builder<'_> {
         }
         if self.instances.is_some() {
             iir::staging::forward_closed_locals_with_layouts(
-                &self.package.normal_forms,
+                self.package,
                 &mut function,
                 &mut self.fuel,
             )?;
@@ -721,7 +808,12 @@ impl Builder<'_> {
             .ok_or("missing selected implementation")?;
         for capability in &implementation.capabilities {
             let capability = capability
-                .instantiate_types(&implementation.type_parameters, &evidence.type_arguments)
+                .instantiate_parameters(
+                    &implementation
+                        .parameter_binders()
+                        .map_err(|e| e.to_string())?,
+                    &evidence.type_arguments,
+                )
                 .map_err(|e| e.to_string())?;
             self.queue.push_back(Task::Interface(
                 capability.interface_instance(),
@@ -798,7 +890,13 @@ impl Builder<'_> {
                     .instantiate_parameters(parameters, &inputs)
                     .map_err(|e| e.to_string())?;
                 self.normalize_method_contract(&mut method)?;
-                self.queue.push_back(Task::Type(method.signature.clone()));
+                self.queue.push_back(Task::Type(
+                    method
+                        .signature
+                        .ordinary()
+                        .map_err(|e| e.to_string())?
+                        .clone(),
+                ));
                 for expression in method
                     .program
                     .preconditions
@@ -955,8 +1053,13 @@ impl Builder<'_> {
             method_arguments: method_arguments.to_vec(),
         };
         self.output[slot].methods.push(method.clone());
-        self.queue
-            .push_back(Task::Type(specialized.signature.clone()));
+        self.queue.push_back(Task::Type(
+            specialized
+                .signature
+                .ordinary()
+                .map_err(|e| e.to_string())?
+                .clone(),
+        ));
         if self.instances.is_some() {
             for argument in method_arguments {
                 self.queue.push_back(Task::Type(argument.clone()));
@@ -1035,11 +1138,26 @@ impl Builder<'_> {
         parameters: &[Id],
         arguments: &[Term],
     ) -> Result<(), String> {
+        let parameters: Vec<_> = parameters
+            .iter()
+            .map(|id| nir::DeclarationParameter {
+                declaration: *id,
+                sort: nir::Sort::Type,
+            })
+            .collect();
+        self.formation_requirements_with_parameters(requirements, &parameters, arguments)
+    }
+    fn formation_requirements_with_parameters(
+        &mut self,
+        requirements: &[n::TypePredicate],
+        parameters: &[nir::DeclarationParameter],
+        arguments: &[Term],
+    ) -> Result<(), String> {
         if self.instances.is_none() {
             for requirement in requirements {
                 self.predicate_dependencies(
                     &requirement
-                        .instantiate_types(parameters, arguments)
+                        .instantiate_parameters(parameters, arguments)
                         .map_err(|e| e.to_string())?,
                     0,
                 )?;
@@ -1049,7 +1167,7 @@ impl Builder<'_> {
         for requirement in requirements {
             self.tick(0)?;
             let requirement = requirement
-                .instantiate_rigids(parameters, arguments)
+                .instantiate_parameters(parameters, arguments)
                 .map_err(|e| e.to_string())?;
             let requirement = self.normalized_predicate(&requirement, 0)?;
             if !matches!(
@@ -1064,7 +1182,9 @@ impl Builder<'_> {
         Ok(())
     }
     fn normalize_method_contract(&mut self, method: &mut n::MethodContract) -> Result<(), String> {
-        method.signature = self.normalized_type(&method.signature)?;
+        method.signature = self
+            .normalized_type(method.signature.ordinary().map_err(|e| e.to_string())?)?
+            .into();
         for argument in &mut method.type_arguments {
             *argument = self.normalized_type(argument)?;
         }
@@ -1090,8 +1210,18 @@ impl Builder<'_> {
         let mut fuel = self.fuel;
         let result = iir::visit::expression_mut(expression, &mut fuel, |expr, fuel| {
             self.fuel = *fuel;
-            Self::resolve_immediate_callable(expr, &mut self.fuel)?;
-            Self::resolve_conditional_callable(expr, &mut self.fuel)?;
+            Self::resolve_immediate_callable(
+                expr,
+                !self.active_staged_inlines.is_empty(),
+                &mut self.fuel,
+            )?;
+            Self::resolve_conditional_callable(
+                expr,
+                !self.active_staged_inlines.is_empty(),
+                &mut self.quote_cursor,
+                &mut self.quote_sources,
+                &mut self.fuel,
+            )?;
             if let K::AssociatedValue {
                 interface,
                 member,
@@ -1152,13 +1282,36 @@ impl Builder<'_> {
         }
         if self.instances.is_some() {
             let mut fuel = self.fuel;
-            let result = iir::visit::expression_mut(expression, &mut fuel, |expr, fuel| {
+            let result = iir::visit::expression_mut_pruned(expression, &mut fuel, |expr, fuel| {
                 self.fuel = *fuel;
                 let result = (|| {
-                    if let Some(plan) = iir::staging::preparation(expr, &mut self.fuel)? {
+                    if let Some(plan) =
+                        iir::staging::preparation_with_layouts(self.package, expr, &mut self.fuel)?
+                    {
                         let completed = self.invoke_staged_input(&plan.expression)?;
-                        plan.apply(expr, completed, &mut self.fuel)?;
+                        plan.apply_with_layouts(self.package, expr, completed, &mut self.fuel)?;
                     }
+                    let mut remaining = self.fuel;
+                    let completed = conditional_calls::complete_inputs(
+                        expr,
+                        self,
+                        &mut remaining,
+                        |this, input, fuel| {
+                            this.fuel = *fuel;
+                            let result = this.invoke_staged_input(input);
+                            *fuel = this.fuel;
+                            result
+                        },
+                    );
+                    self.fuel = remaining.min(self.fuel);
+                    completed?;
+                    Self::resolve_conditional_callable(
+                        expr,
+                        !self.active_staged_inlines.is_empty(),
+                        &mut self.quote_cursor,
+                        &mut self.quote_sources,
+                        &mut self.fuel,
+                    )?;
                     self.stage_direct_call(expr)
                 })();
                 *fuel = self.fuel;
@@ -1177,6 +1330,21 @@ impl Builder<'_> {
                 Ok(ty.clone())
             }
         })?;
+        if self.instances.is_some() {
+            // Staged quote calls only became lexical bodies above. Their
+            // installations could not be eliminated by the earlier NIR pass.
+            let mut generated = Vec::new();
+            crate::program::inlining::expand_materialized_effects(
+                self.package,
+                &self.inline_effects,
+                expression,
+                &mut self.quote_cursor,
+                &mut self.quote_sources,
+                &mut generated,
+                &mut self.fuel,
+            )?;
+            self.register_quote_layouts(generated)?;
+        }
         Ok(())
     }
 
@@ -1185,6 +1353,7 @@ impl Builder<'_> {
     // may observe the binding. Formation still precedes all argument evaluation.
     fn resolve_immediate_callable(
         expression: &mut n::Expr,
+        include_runtime: bool,
         fuel: &mut usize,
     ) -> Result<(), String> {
         let K::Block {
@@ -1211,17 +1380,26 @@ impl Builder<'_> {
                     | K::TraitMethod { .. }
                     | K::Local(_)
                     | K::If { .. }
+                    | K::Match { .. }
+                    | K::Block { .. }
             ) {
                 return Ok(());
             }
             if !matches!(value.ty.callable_signature(), Term::Function { parameters, .. }
-            if parameters.iter().any(|p| p.sort != nir::Sort::Runtime))
+            if include_runtime || parameters.iter().any(|p| p.sort != nir::Sort::Runtime))
             {
                 return Ok(());
             }
+            // Running an effect computation does not evaluate any intervening
+            // operand before its callee. Preserve the row mapping while looking
+            // through this immediate execution wrapper.
+            let mut call = result.as_ref();
+            while let K::EffectRun { computation, .. } = &call.kind {
+                call = computation;
+            }
             let K::Call {
                 callee, arguments, ..
-            } = &result.kind
+            } = &call.kind
             else {
                 return Ok(());
             };
@@ -1231,15 +1409,9 @@ impl Builder<'_> {
             }
             let mut escapes = false;
             for argument in arguments {
-                iir::visit::expression(&argument.value, fuel, |node, _| {
-                    // A closure can refer to a capture without an explicit Local
-                    // node in its capture list; conservatively keep its binding.
-                    escapes |= matches!(node.kind, K::Local(local) if local == *binding)
-                        || matches!(node.kind, K::Closure { .. })
-                        || matches!(&node.kind, K::Assign { place, .. } | K::BitAssign { place, .. } | K::BitUpdate {place,..}
-                        if place.root == *binding);
-                    Ok(())
-                })?;
+                // Include implicit captures and writes, but not unrelated
+                // closures or bindings declared inside the argument itself.
+                escapes |= nir::free_bindings::collect(&argument.value, fuel)?.contains(binding);
             }
             if escapes {
                 return Ok(());
@@ -1248,8 +1420,13 @@ impl Builder<'_> {
             let K::Let { value, .. } = statement.kind else {
                 unreachable!()
             };
-            let K::Call { callee, .. } = &mut result.kind else {
-                unreachable!()
+            let mut call = result.as_mut();
+            let callee = loop {
+                match &mut call.kind {
+                    K::EffectRun { computation, .. } => call = computation,
+                    K::Call { callee, .. } => break callee,
+                    _ => unreachable!(),
+                }
             };
             *callee = value;
         }
@@ -1282,7 +1459,35 @@ impl Builder<'_> {
         Ok(())
     }
 
-    fn stage_direct_call(&mut self, expression: &mut n::Expr) -> Result<(), String> {
+    fn stage_direct_call(&mut self, expression: &mut n::Expr) -> Result<bool, String> {
+        if !self.active_staged_inlines.is_empty() {
+            if let K::Call { callee, .. } = &expression.kind {
+                if matches!(callee.kind, K::TraitMethod { .. })
+                    && matches!(callee.ty.callable_signature(), Term::Function { parameters, .. }
+                        if parameters.iter().all(|p| p.sort == nir::Sort::Runtime))
+                {
+                    let selected = resolve_method_instance(self.package, callee, &mut self.fuel)?;
+                    let template = self
+                        .package
+                        .functions
+                        .iter()
+                        .find(|function| function.declaration == selected.body)
+                        .ok_or("missing selected inline method body")?;
+                    if !template.inline {
+                        return Ok(true);
+                    }
+                    let mut bound = template
+                        .instantiate_types(&template.type_parameters, &selected.arguments)
+                        .map_err(|e| e.to_string())?;
+                    bound.type_parameters.clear();
+                    // Keep the TraitMethod callee until expansion has merged its
+                    // interface contract and rebound the argument/default frame.
+                    return self
+                        .expand_inline_instance(&bound, expression)
+                        .map(|expanded| !expanded);
+                }
+            }
+        }
         let mut entry_contract = None;
         // A concrete trait selection determines the body before ordinary
         // comptime inputs can be bound. Keep the interface contract, but route
@@ -1372,7 +1577,7 @@ impl Builder<'_> {
                         .chain(method_arguments.iter().cloned())
                         .collect::<Vec<_>>();
                     let frames = match contract.signature.callable_signature() {
-                        Term::Function { parameters, .. } => {
+                        Ok(Term::Function { parameters, .. }) => {
                             vec![parameters.iter().map(|p| p.sort).collect()]
                         }
                         _ => return Err("staged method needs a function signature".into()),
@@ -1461,7 +1666,7 @@ impl Builder<'_> {
             }
         }
         let K::Call { callee, .. } = &expression.kind else {
-            return Ok(());
+            return Ok(true);
         };
         let (declaration, arguments) = match &callee.kind {
             K::Function(id) => (*id, vec![]),
@@ -1469,13 +1674,13 @@ impl Builder<'_> {
                 declaration,
                 arguments,
             } => (*declaration, arguments.clone()),
-            _ => return Ok(()),
+            _ => return Ok(true),
         };
         if self
             .staged_functions
             .contains_key(&(declaration, arguments.clone()))
         {
-            return Ok(());
+            return Ok(true);
         }
         let Some(template) = self
             .package
@@ -1484,13 +1689,25 @@ impl Builder<'_> {
             .chain(&self.package.quote_templates)
             .find(|f| f.declaration == declaration)
         else {
-            return Ok(());
+            return Ok(true);
         };
         let Term::Function { parameters, .. } = template.signature.callable_signature() else {
-            return Ok(());
+            return Ok(true);
         };
         if !parameters.iter().any(|p| p.sort != nir::Sort::Runtime) {
-            return Ok(());
+            // Continue ordinary inline calls exposed inside a staged expansion.
+            // Outside that expansion the explicit NIR optimization policy stays
+            // unchanged; a plain runtime function is not implicitly a quote.
+            if self.active_staged_inlines.is_empty() || !template.inline {
+                return Ok(true);
+            }
+            let mut bound = template
+                .instantiate_types(&template.type_parameters, &arguments)
+                .map_err(|e| e.to_string())?;
+            bound.type_parameters.clear();
+            return self
+                .expand_inline_instance(&bound, expression)
+                .map(|expanded| !expanded);
         }
         // Declaration substitution closes the type inputs before staged evaluation.
         let mut template = template
@@ -1516,7 +1733,7 @@ impl Builder<'_> {
         template.signature = self.staging_type_view(&template.signature)?;
         let mut fuel = self.fuel;
         let result = iir::staging::bind_call_with_layouts_and_type_views(
-            &self.package.normal_forms,
+            self.package,
             &template,
             &arguments,
             expression,
@@ -1574,11 +1791,7 @@ impl Builder<'_> {
                 let result = if invokes {
                     this.invoke_staged_input(input)
                 } else {
-                    iir::staging::fold_value_with_layouts(
-                        &this.package.normal_forms,
-                        input,
-                        &mut this.fuel,
-                    )
+                    iir::staging::fold_value_with_layouts(this.package, input, &mut this.fuel)
                 };
                 *fuel = this.fuel;
                 result
@@ -1593,33 +1806,13 @@ impl Builder<'_> {
         self.fuel = fuel.min(self.fuel);
         let (instance, call) = result?;
         *expression = call;
-        if self
+        let quote = self
             .package
             .quote_templates
             .iter()
-            .any(|template| template.declaration == declaration)
-        {
-            // Expansion removes the callable boundary, not its Type obligations.
-            // Check after staged substitution, as for a runtime instance.
-            for requirement in &instance.function.requirements {
-                let requirement = self.normalized_predicate(requirement, 0)?;
-                self.tick(0)?;
-                if !matches!(
-                    self.prove_requirement(&requirement)?,
-                    crate::ptc::Outcome::Entailed(_)
-                ) {
-                    return Err(format!(
-                        "quote function type requirement is not established: {requirement}"
-                    ));
-                }
-            }
-            for capability in &instance.function.capabilities {
-                let capability = self.normalized_capability(capability)?;
-                self.queue.push_back(Task::Interface(
-                    capability.interface_instance(),
-                    capability.subject,
-                ));
-            }
+            .any(|template| template.declaration == declaration);
+        if quote {
+            self.check_expanded_requirements(&instance.function, "quote")?;
             let mut generated = Vec::new();
             crate::program::expand_bound_quote(
                 self.package,
@@ -1631,13 +1824,78 @@ impl Builder<'_> {
                 &mut self.fuel,
             )?;
             self.register_quote_layouts(generated)?;
+        } else if self.expand_inline_instance(&instance.function, expression)? {
+            // The guarded expansion already normalized its descendants. Visiting
+            // again after releasing the guard would re-expand recursive calls.
+            return Ok(false);
         } else {
             self.staged_functions
                 .entry((instance.key.declaration, instance.key.arguments))
                 .or_insert(instance.function);
         }
+        Ok(true)
+    }
+    fn check_expanded_requirements(
+        &mut self,
+        function: &n::Function,
+        category: &str,
+    ) -> Result<(), String> {
+        for requirement in &function.requirements {
+            let requirement = self.normalized_predicate(requirement, 0)?;
+            self.tick(0)?;
+            if !matches!(
+                self.prove_requirement(&requirement)?,
+                crate::ptc::Outcome::Entailed(_)
+            ) {
+                return Err(format!(
+                    "{category} function type requirement is not established: {requirement}"
+                ));
+            }
+        }
+        for capability in &function.capabilities {
+            let capability = self.normalized_capability(capability)?;
+            self.queue.push_back(Task::Interface(
+                capability.interface_instance(),
+                capability.subject,
+            ));
+        }
         Ok(())
     }
+
+    fn expand_inline_instance(
+        &mut self,
+        function: &n::Function,
+        expression: &mut n::Expr,
+    ) -> Result<bool, String> {
+        let declaration = function.declaration;
+        if !function.inline
+            || function.phase != n::FunctionPhase::Runtime
+            || self.active_staged_inlines.contains(&declaration)
+            || self.active_staged_inlines.len() >= 64
+        {
+            return Ok(false);
+        }
+        let mut generated = Vec::new();
+        if !crate::program::inlining::expand_bound_inline(
+            self.package,
+            function,
+            expression,
+            &mut self.quote_cursor,
+            &mut self.quote_sources,
+            &mut generated,
+            &mut self.fuel,
+        )? {
+            return Ok(false);
+        }
+        self.check_expanded_requirements(function, "inline")?;
+        self.register_quote_layouts(generated)?;
+        self.active_staged_inlines.insert(declaration);
+        let result = self.normalize_expression(expression);
+        self.active_staged_inlines.remove(&declaration);
+        result?;
+        Ok(true)
+    }
+
     fn normalized_capability(
         &mut self,
         capability: &n::TraitRequirement,
@@ -1686,7 +1944,7 @@ impl Builder<'_> {
         }
         crate::associated::charge_projection_copy(input, &mut self.fuel)?;
         input.check_scope(&[]).map_err(|e| e.to_string())?;
-        if matches!(input, Term::Symbol(_)) {
+        if input.is_structural_index_value() {
             return Ok(input.clone());
         }
         Err("interface value input normalization requires domain evidence".into())
@@ -1720,7 +1978,7 @@ impl Builder<'_> {
     }
     fn staging_type_view(&mut self, ty: &Term) -> Result<Term, String> {
         // The annotation walker also visits complete interface identity inputs.
-        if matches!(ty, Term::Symbol(_)) {
+        if ty.is_structural_index_value() {
             crate::associated::charge_projection_copy(ty, &mut self.fuel)?;
             return Ok(ty.clone());
         }
@@ -1781,7 +2039,15 @@ impl Builder<'_> {
                     .iter()
                     .find(|s| s.declaration == *declaration)
                 {
-                    self.formation_requirements(&s.requirements, &s.type_parameters, arguments)?;
+                    if self.instances.is_some() {
+                        s.validate_completed_arguments(arguments, &mut self.fuel)?;
+                    }
+                    let parameters = s.parameter_binders().map_err(|e| e.to_string())?;
+                    self.formation_requirements_with_parameters(
+                        &s.requirements,
+                        &parameters,
+                        arguments,
+                    )?;
                     let mut fields = s.instantiate_fields(arguments).map_err(|e| e.to_string())?;
                     if self.instances.is_some() {
                         for (_, field) in &mut fields {
@@ -1792,13 +2058,13 @@ impl Builder<'_> {
                         definition.requirements = s
                             .requirements
                             .iter()
-                            .map(|r| r.instantiate_types(&s.type_parameters, arguments))
+                            .map(|r| r.instantiate_parameters(&parameters, arguments))
                             .collect::<Result<_, _>>()
                             .map_err(|e| e.to_string())?;
                         definition.capabilities = s
                             .capabilities
                             .iter()
-                            .map(|c| c.instantiate_types(&s.type_parameters, arguments))
+                            .map(|c| c.instantiate_parameters(&parameters, arguments))
                             .collect::<Result<_, _>>()
                             .map_err(|e| e.to_string())?;
                         for capability in &mut definition.capabilities {
@@ -1808,6 +2074,7 @@ impl Builder<'_> {
                             *requirement = self.normalized_predicate(requirement, 0)?;
                         }
                         definition.type_parameters.clear();
+                        definition.parameter_types.clear();
                         self.nominals.push(iir::NominalInstance {
                             ty: ty.clone(),
                             definition: iir::NominalDefinition::Struct(definition),
@@ -1816,7 +2083,7 @@ impl Builder<'_> {
 
                     for cap in &s.capabilities {
                         let cap = cap
-                            .instantiate_types(&s.type_parameters, arguments)
+                            .instantiate_parameters(&parameters, arguments)
                             .map_err(|e| e.to_string())?;
                         self.queue
                             .push_back(Task::Interface(cap.interface_instance(), cap.subject));
@@ -1828,7 +2095,15 @@ impl Builder<'_> {
                     .iter()
                     .find(|e| e.declaration == *declaration)
                 {
-                    self.formation_requirements(&e.requirements, &e.type_parameters, arguments)?;
+                    if self.instances.is_some() {
+                        e.validate_completed_arguments(arguments, &mut self.fuel)?;
+                    }
+                    let parameters = e.parameter_binders().map_err(|e| e.to_string())?;
+                    self.formation_requirements_with_parameters(
+                        &e.requirements,
+                        &parameters,
+                        arguments,
+                    )?;
                     let mut variants = e
                         .instantiate_variants(arguments)
                         .map_err(|e| e.to_string())?;
@@ -1843,13 +2118,13 @@ impl Builder<'_> {
                         definition.requirements = e
                             .requirements
                             .iter()
-                            .map(|r| r.instantiate_types(&e.type_parameters, arguments))
+                            .map(|r| r.instantiate_parameters(&parameters, arguments))
                             .collect::<Result<_, _>>()
                             .map_err(|e| e.to_string())?;
                         definition.capabilities = e
                             .capabilities
                             .iter()
-                            .map(|c| c.instantiate_types(&e.type_parameters, arguments))
+                            .map(|c| c.instantiate_parameters(&parameters, arguments))
                             .collect::<Result<_, _>>()
                             .map_err(|e| e.to_string())?;
                         for capability in &mut definition.capabilities {
@@ -1859,6 +2134,7 @@ impl Builder<'_> {
                             *requirement = self.normalized_predicate(requirement, 0)?;
                         }
                         definition.type_parameters.clear();
+                        definition.parameter_types.clear();
                         self.nominals.push(iir::NominalInstance {
                             ty: ty.clone(),
                             definition: iir::NominalDefinition::Enum(definition),
@@ -1867,7 +2143,7 @@ impl Builder<'_> {
 
                     for cap in &e.capabilities {
                         let cap = cap
-                            .instantiate_types(&e.type_parameters, arguments)
+                            .instantiate_parameters(&parameters, arguments)
                             .map_err(|e| e.to_string())?;
                         self.queue
                             .push_back(Task::Interface(cap.interface_instance(), cap.subject));
@@ -1879,7 +2155,13 @@ impl Builder<'_> {
                     .iter()
                     .find(|n| n.declaration == *declaration)
                 {
-                    self.formation_requirements(&n.requirements, &n.type_parameters, arguments)?;
+                    n.validate_completed_arguments(arguments, &mut self.fuel)?;
+                    let parameters = n.parameter_binders().map_err(|e| e.to_string())?;
+                    self.formation_requirements_with_parameters(
+                        &n.requirements,
+                        &parameters,
+                        arguments,
+                    )?;
                     let representation = n
                         .representation_budgeted(arguments, &[], &mut self.fuel)
                         .map_err(|e| e.to_string())?;
@@ -1889,13 +2171,13 @@ impl Builder<'_> {
                         definition.requirements = n
                             .requirements
                             .iter()
-                            .map(|r| r.instantiate_types(&n.type_parameters, arguments))
+                            .map(|r| r.instantiate_parameters(&parameters, arguments))
                             .collect::<Result<_, _>>()
                             .map_err(|e| e.to_string())?;
                         definition.capabilities = n
                             .capabilities
                             .iter()
-                            .map(|c| c.instantiate_types(&n.type_parameters, arguments))
+                            .map(|c| c.instantiate_parameters(&parameters, arguments))
                             .collect::<Result<_, _>>()
                             .map_err(|e| e.to_string())?;
                         for capability in &mut definition.capabilities {
@@ -1905,6 +2187,8 @@ impl Builder<'_> {
                             *requirement = self.normalized_predicate(requirement, 0)?;
                         }
                         definition.type_parameters.clear();
+                        definition.parameter_types.clear();
+                        definition.capture_count = 0;
                         self.nominals.push(iir::NominalInstance {
                             ty: ty.clone(),
                             definition: iir::NominalDefinition::Newtype(definition),
@@ -1912,7 +2196,7 @@ impl Builder<'_> {
                     }
                     for cap in &n.capabilities {
                         let cap = cap
-                            .instantiate_types(&n.type_parameters, arguments)
+                            .instantiate_parameters(&parameters, arguments)
                             .map_err(|e| e.to_string())?;
                         self.queue
                             .push_back(Task::Interface(cap.interface_instance(), cap.subject));
@@ -2056,9 +2340,9 @@ impl Builder<'_> {
                 self.pattern(pattern, depth + 1)?;
                 self.expr(condition, depth + 1)?;
             }
-            P::Remap { pattern, .. } | P::Binding { inner: pattern, .. } => {
-                self.pattern(pattern, depth + 1)?
-            }
+            P::Observe { inner: pattern, .. }
+            | P::Remap { pattern, .. }
+            | P::Binding { inner: pattern, .. } => self.pattern(pattern, depth + 1)?,
             P::Record { fields, .. }
             | P::AnonymousRecord { fields, .. }
             | P::Variant { fields, .. }
@@ -2077,6 +2361,31 @@ impl Builder<'_> {
         Ok(())
     }
     fn expr(&mut self, expr: &n::Expr, depth: usize) -> Result<(), String> {
+        // Lexical/preparation wrappers need no native recursion. Keep their
+        // visitation order and node fuel, reserving depth for recursive work.
+        let mut pending = vec![expr];
+        while let Some(expr) = pending.pop() {
+            if let K::Block { statements, result } | K::CallPreparation { statements, result } =
+                &expr.kind
+            {
+                self.tick(depth)?;
+                if self.instances.is_some() {
+                    iir::completed_type(&expr.ty, &self.runtime_bindings, &mut self.fuel)?;
+                }
+                self.queue.push_back(Task::Type(expr.ty.clone()));
+                if let Some(result) = result {
+                    pending.push(result);
+                }
+                pending.extend(statements.iter().rev());
+            } else {
+                self.expr_node(expr, depth)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn expr_node(&mut self, expr: &n::Expr, depth: usize) -> Result<(), String> {
         self.tick(depth)?;
         if self.instances.is_some() {
             iir::completed_type(&expr.ty, &self.runtime_bindings, &mut self.fuel)?;
@@ -2247,12 +2556,16 @@ impl Builder<'_> {
             K::Variant { fields, .. }
             | K::AnonymousRecord { fields }
             | K::Record { fields, .. }
+            | K::CheckTypeAlias {
+                arguments: fields, ..
+            }
             | K::NominalType {
                 arguments: fields, ..
             }
             | K::FunctionType {
                 parameters: fields, ..
             }
+            | K::TypeList(fields)
             | K::TupleType(fields)
             | K::Tuple(fields) => {
                 for e in fields {

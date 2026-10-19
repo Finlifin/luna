@@ -412,11 +412,59 @@ pub fn charge_term_with_depth(
     fuel: &mut usize,
     max_depth: usize,
 ) -> Result<(), Error> {
-    let mut work = vec![(root, 0usize)];
-    while let Some((term, depth)) = work.pop() {
+    charge_expanded_term(root, fuel, max_depth, &BTreeMap::new())
+}
+
+/// Preflight simultaneous substitution before allocating its expanded result.
+/// Repeated occurrences each charge the replacement payload. Replacements are
+/// not themselves substituted, and opaque heads are never evaluated.
+pub fn instantiate_parameters_bounded(
+    root: &Term,
+    parameters: &[crate::DeclarationParameter],
+    arguments: &[Term],
+    frames: &[Vec<Sort>],
+    fuel: &mut usize,
+) -> Result<Term, Error> {
+    if parameters.len() != arguments.len() {
+        return Err(Error::Scope(TypeError::ArgumentCount {
+            expected: parameters.len(),
+            actual: arguments.len(),
+        }));
+    }
+    *fuel = fuel.checked_sub(parameters.len()).ok_or(Error::Budget)?;
+    charge_term(root, fuel)?;
+    for argument in arguments {
+        charge_term(argument, fuel)?;
+    }
+    let replacements = parameters
+        .iter()
+        .zip(arguments)
+        .map(|(parameter, argument)| (parameter.declaration, argument))
+        .collect();
+    charge_expanded_term(root, fuel, 128, &replacements)?;
+    root.instantiate_parameters_in_scope(parameters, arguments, frames)
+        .map_err(Error::Scope)
+}
+
+fn charge_expanded_term(
+    root: &Term,
+    fuel: &mut usize,
+    max_depth: usize,
+    replacements: &BTreeMap<DeclarationId, &Term>,
+) -> Result<(), Error> {
+    let mut work = vec![(root, 0usize, true)];
+    while let Some((term, depth, substitute)) = work.pop() {
         *fuel = fuel.checked_sub(1).ok_or(Error::Budget)?;
         if depth >= max_depth.min(128) {
             return Err(Error::Budget);
+        }
+        if substitute {
+            if let Term::Rigid { declaration, .. } = term {
+                if let Some(replacement) = replacements.get(declaration) {
+                    work.push((replacement, depth, false));
+                    continue;
+                }
+            }
         }
         // Scalar payloads and empty effect occurrences cost space even when
         // they add no child term. Charge them before cloning or substitution.
@@ -447,7 +495,7 @@ pub fn charge_term_with_depth(
             if work.len() >= *fuel {
                 return Err(Error::Budget);
             }
-            work.push((term, depth + 1));
+            work.push((term, depth + 1, substitute));
             Ok(())
         };
         match term {
@@ -468,6 +516,8 @@ pub fn charge_term_with_depth(
                 }
             }
             Term::Nominal { arguments, .. }
+            | Term::ClosureSnapshot { arguments, .. }
+            | Term::FunctionValue { arguments, .. }
             | Term::NormalForm { arguments, .. }
             | Term::Tuple(arguments)
             | Term::TupleValue(arguments)
@@ -611,13 +661,49 @@ impl fmt::Display for CapturedEntry {
 pub fn capture_entry(
     declaration: DeclarationId,
     name: String,
-    mut body: Expr,
+    body: Expr,
     available: &[(LocalId, crate::Parameter)],
     fuel: &mut usize,
 ) -> Result<CapturedEntry, Error> {
     *fuel = fuel.checked_sub(available.len()).ok_or(Error::Budget)?;
+    let available = available
+        .iter()
+        .map(|(id, parameter)| (*id, parameter.sort, Some(&parameter.ty)))
+        .collect::<Vec<_>>();
+    capture_entry_domains(declaration, name, body, &available, fuel)
+}
+
+/// Capture a source telescope with unresolved domains. Such slots keep their
+/// positions and phase but cannot be captured until their domains are known.
+/// Runtime inputs remain forbidden even when their domains are known.
+pub fn capture_sparse_entry(
+    declaration: DeclarationId,
+    name: String,
+    body: Expr,
+    available: &[(LocalId, Sort, Option<Term>)],
+    fuel: &mut usize,
+) -> Result<CapturedEntry, Error> {
+    *fuel = fuel.checked_sub(available.len()).ok_or(Error::Budget)?;
+    let available = available
+        .iter()
+        .map(|(id, sort, domain)| (*id, *sort, domain.as_ref()))
+        .collect::<Vec<_>>();
+    capture_entry_domains(declaration, name, body, &available, fuel)
+}
+
+fn capture_entry_domains(
+    declaration: DeclarationId,
+    name: String,
+    mut body: Expr,
+    available: &[(LocalId, Sort, Option<&Term>)],
+    fuel: &mut usize,
+) -> Result<CapturedEntry, Error> {
+    *fuel = fuel.checked_sub(available.len()).ok_or(Error::Budget)?;
     let mut positions = BTreeMap::new();
-    for (slot, (id, _)) in available.iter().enumerate() {
+    for (slot, (id, sort, domain)) in available.iter().enumerate() {
+        if domain.is_none() && *sort == Sort::Type {
+            return Err(Error::Scope(TypeError::MissingArgument(slot)));
+        }
         if positions.insert(*id, slot).is_some() {
             return Err(Error::DuplicateBinding(*id));
         }
@@ -629,7 +715,7 @@ pub fn capture_entry(
     let frames = vec![
         available
             .iter()
-            .map(|(_, parameter)| parameter.sort)
+            .map(|(_, sort, _)| *sort)
             .collect::<Vec<_>>(),
     ];
     // Inspect every type-bearing operand, including capture environments and
@@ -650,16 +736,18 @@ pub fn capture_entry(
         if !inspected.insert(slot) {
             continue;
         }
-        let (_, parameter) = available
+        let (_, sort, domain) = available
             .get(slot)
             .ok_or(Error::Scope(TypeError::MissingArgument(slot)))?;
-        if parameter.sort == Sort::Runtime {
+        if *sort == Sort::Runtime {
             return Err(Error::RuntimeInput(slot));
         }
-        bounded(&parameter.ty, fuel)?;
-        parameter.ty.check_scope(&frames).map_err(Error::Scope)?;
-        for dependency in parameter
-            .ty
+        let domain = domain
+            .as_ref()
+            .ok_or(Error::Scope(TypeError::MissingArgument(slot)))?;
+        bounded(domain, fuel)?;
+        domain.check_scope(&frames).map_err(Error::Scope)?;
+        for dependency in domain
             .substitution_parameters()
             .map_err(Error::Scope)?
             .into_keys()
@@ -675,7 +763,7 @@ pub fn capture_entry(
         mapping[old] = Some(Term::Bound {
             depth: 0,
             index: new,
-            sort: available[old].1.sort,
+            sort: available[old].1,
         });
     }
     body.rewrite_types(&mut |ty| {
@@ -685,13 +773,14 @@ pub fn capture_entry(
     let inputs = slots
         .iter()
         .map(|slot| {
-            let (id, parameter) = &available[*slot];
+            let (id, sort, domain) = &available[*slot];
             Ok((
                 *id,
                 crate::Parameter {
-                    sort: parameter.sort,
-                    ty: parameter
-                        .ty
+                    sort: *sort,
+                    ty: domain
+                        .as_ref()
+                        .ok_or(Error::Scope(TypeError::MissingArgument(*slot)))?
                         .rebind_scope_partial(&mapping)
                         .map_err(Error::Scope)?,
                 },

@@ -524,6 +524,7 @@ fn copy_protocol_selection_uses_identity_and_explicit_declarations() {
         index
             .insert(
                 ImplementationHead {
+                    parameter_types: implementation.parameter_types.clone(),
                     declaration: implementation.declaration,
                     interface: implementation.interface,
                     interface_arguments: implementation.interface_arguments.clone(),
@@ -927,10 +928,12 @@ fn associated_value_nodes_validate_member_identity_type_and_selection() {
 #[test]
 fn inline_function_intent_survives_generic_and_staged_instantiation() {
     use comptime_interpretor::{Interpreter, Value};
+    // Keep one ordinary generic call outside the staged expansion and one
+    // recursive staged fallback: these are actual residual instance boundaries.
     let package = compile(
         "inline fn identity(value:T)->T where T {value}
-        inline fn select(comptime choose:bool,value:bool)->bool {if choose {value} else {not value}}
-        fn entry()->bool {select(true,identity(true))}",
+        inline fn select(comptime choose:bool,value:bool)->bool {if choose {select(false,not value)} else {not value}}
+        fn entry()->bool {identity(true) and select(true,identity(true))}",
     );
     for name in ["identity", "select"] {
         let function = package.functions.iter().find(|f| f.name == name).unwrap();
@@ -981,11 +984,15 @@ fn inline_function_calls_preserve_argument_order_and_effects() {
 
 #[test]
 fn inline_function_deferred_signature_preserves_intent() {
+    // Recursive fallback retains a callable whose deferred domain has completed.
+    // A nonrecursive identity is now eligible for late expansion instead.
     let package = compile(
         "typealias Type=.Type'builtin;
         comptime fn Pick(flag:bool)->Type {if flag {bool} else {.u8'builtin}}
-        inline fn identity(comptime flag:bool,value:defer Pick(flag))->defer Pick(flag) {value}
-        fn entry()->bool {identity(true,true)}",
+        inline fn identity(comptime flag:bool,value:defer Pick(flag),again:bool)->defer Pick(flag) {
+            if again {identity(flag,value,false)} else {value}
+        }
+        fn entry()->bool {identity(true,true,true)}",
     );
     let graph = luna::instantiation::instantiate(&package, "entry", 100_000).unwrap();
     assert!(
@@ -1952,4 +1959,26 @@ fn symbol_indexed_default_trait_method_has_a_complete_instance_key() {
     );
     let dump = graph.to_string();
     assert!(dump.contains("px") && dump.contains("em"), "{dump}");
+}
+
+#[test]
+fn staged_inline_expansion_keeps_results_without_requiring_residual_entrypoints() {
+    use comptime_interpretor::{Interpreter, Value};
+    for source in [
+        "inline fn identity(value:T)->T where T {value}
+         inline fn select(comptime choose:bool,value:bool)->bool {if choose {value} else {not value}}
+         fn entry()->bool {select(true,identity(true))}",
+        "typealias Type=.Type'builtin;
+         comptime fn Pick(flag:bool)->Type {if flag {bool} else {.u8'builtin}}
+         inline fn identity(comptime flag:bool,value:defer Pick(flag))->defer Pick(flag) {value}
+         fn entry()->bool {identity(true,true)}",
+    ] {
+        let package=compile(source);
+        assert!(package.functions.iter().filter(|f|f.name=="identity" || f.name=="select")
+            .all(|f|f.inline && f.phase==nir::program::FunctionPhase::Runtime));
+        let graph=luna::instantiation::instantiate(&package,"entry",100_000).unwrap();
+        assert!(!graph.functions.iter().any(|f|f.function.name=="identity" || f.function.name=="select"));
+        let mut vm=Interpreter::from_iir(&graph,Default::default()).unwrap();
+        assert_eq!(vm.invoke_instance(&graph.roots[0],vec![]).unwrap(),Value::Bool(true));
+    }
 }

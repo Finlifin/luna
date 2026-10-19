@@ -7,6 +7,8 @@ use nir::program::TypePredicate;
 
 #[derive(Clone, Debug)]
 pub struct InherentHead {
+    /// Ordered declaration domains; empty denotes all Type parameters.
+    pub parameter_types: Vec<Term>,
     pub declaration: DeclarationId,
     pub subject: Term,
     pub type_parameters: Vec<DeclarationId>,
@@ -16,6 +18,7 @@ pub struct InherentHead {
 impl InherentHead {
     fn matching_head(&self) -> ImplementationHead {
         ImplementationHead {
+            parameter_types: self.parameter_types.clone(),
             declaration: self.declaration,
             subject: self.subject.clone(),
             type_parameters: self.type_parameters.clone(),
@@ -214,6 +217,10 @@ impl fmt::Display for InherentHead {
         )?;
         for p in &self.type_parameters {
             write!(f, " {p}")?;
+        }
+        write!(f, ") (parameter-types")?;
+        for domain in &self.parameter_types {
+            write!(f, " {domain}")?;
         }
         write!(f, ") (requires")?;
         for p in &self.requirements {

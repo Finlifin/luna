@@ -11,11 +11,17 @@ pub(super) struct SpreadPlan<'h> {
 struct Packet<'h> {
     source: Expr<'h>,
     width: usize,
+    types: Option<Vec<Term>>,
     // Outer None: producer not evaluated. Empty slot: already delivered.
-    // An element without an expression is definition-checking type evidence.
-    values: Option<Vec<Option<(Option<n::Expr>, Term)>>>,
+    // Data(None) is definition-checking type evidence; LiveData retains
+    // invocation-local pointer identity without freezing the packet.
+    values: Option<Vec<Option<(Argument, Term)>>>,
 }
 impl SpreadPlan<'_> {
+    pub(super) fn field_type(&self, id: n::LocalId) -> Option<&Term> {
+        let (packet, element) = self.fields.get(&id)?;
+        self.packets.get(*packet)?.types.as_ref()?.get(*element)
+    }
     pub(super) fn source_start(&self, packet: usize) -> u32 {
         self.packets[packet].source.span.lo().0
     }
@@ -26,11 +32,20 @@ impl fmt::Display for SpreadPlan<'_> {
         for (index, packet) in self.packets.iter().enumerate() {
             write!(
                 f,
-                " (packet (index {index}) (source {}) (width {}) (prepared {}))",
+                " (packet (index {index}) (source {}) (width {}) (prepared {}) (types",
                 local(packet.source.hir_id),
                 packet.width,
                 packet.values.is_some()
             )?;
+            match &packet.types {
+                Some(types) => {
+                    for ty in types {
+                        write!(f, " {ty}")?;
+                    }
+                }
+                None => f.write_str(" unknown")?,
+            }
+            f.write_str("))")?;
         }
         f.write_str(") (fields")?;
         for (id, (packet, element)) in &self.fields {
@@ -79,7 +94,9 @@ impl Checker<'_, '_> {
                 )
             })?;
             self.ensure_code_generator(owner, site.span)?;
-            let ItemKind::Fn(signature, _) = &self.package.item(owner).unwrap().kind else {
+            let (ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
+                &self.package.item(owner).unwrap().kind
+            else {
                 unreachable!()
             };
             let unfilled_collection = signature.params.iter().any(|param| {
@@ -89,10 +106,21 @@ impl Checker<'_, '_> {
                         .any(|arg| matches!(arg,Arg::Named(name,_) if name.name==param.name.name))
             });
             if !unfilled_collection {
+                let post_target = arguments::post_lambda_target(
+                    arguments,
+                    Some(signature.params),
+                    signature.params.len(),
+                    site.span,
+                )?;
                 let anchored = signature
                     .params
                     .iter()
-                    .filter(|param| matches!(param.ty.kind, TyParamKind::Positional(_)))
+                    .enumerate()
+                    .filter(|(index, param)| {
+                        Some(*index) != post_target
+                            && !param.ty.is_implicit()
+                            && matches!(param.ty.kind, TyParamKind::Positional(_))
+                    })
                     .count();
                 let known = widths
                     .iter()
@@ -114,7 +142,7 @@ impl Checker<'_, '_> {
                             .ok_or_else(|| {
                                 error(packet.span, "generator argument expansion budget exhausted")
                             })?;
-                        flat.extend(fields.iter().map(|field| (None, field.clone())));
+                        flat.extend(fields.iter().map(|field| (None, field.clone(), false)));
                         continue;
                     }
                     let width=widths[position].ok_or_else(||error(packet.span,"generator spread width needs a known tuple interface or a unique destination layout"))?;
@@ -124,10 +152,13 @@ impl Checker<'_, '_> {
                         .ok_or_else(|| {
                             error(packet.span, "generator argument expansion budget exhausted")
                         })?;
+                    let types = self.generator_packet_type_hint(packet, 0)?;
+                    let types = types.filter(|types| types.len() == width);
                     let index = plan.packets.len();
                     plan.packets.push(Packet {
                         source: (**packet).clone(),
                         width,
+                        types,
                         values: None,
                     });
                     if width == 0 {
@@ -150,11 +181,13 @@ impl Checker<'_, '_> {
                                     id,
                                 ),
                             },
+                            false,
                         ));
                     }
                 }
-                Arg::Positional(value) => flat.push((None, (**value).clone())),
-                Arg::Named(name, value) => flat.push((Some(*name), (**value).clone())),
+                Arg::Positional(value) => flat.push((None, (**value).clone(), false)),
+                Arg::PostLambda(value) => flat.push((None, (**value).clone(), true)),
+                Arg::Named(name, value) => flat.push((Some(*name), (**value).clone(), false)),
                 _ => {
                     return Err(error(
                         site.span,
@@ -165,12 +198,32 @@ impl Checker<'_, '_> {
         }
         let inputs = flat
             .iter()
-            .map(|(name, value)| match name {
-                Some(name) => Arg::Named(*name, value),
-                None => Arg::Positional(value),
+            .map(|(name, value, post)| {
+                if *post {
+                    Arg::PostLambda(value)
+                } else {
+                    match name {
+                        Some(name) => Arg::Named(*name, value),
+                        None => Arg::Positional(value),
+                    }
+                }
             })
             .collect::<Vec<_>>();
         self.invoke_code_generator_inputs(site, callee, &inputs, expected, &mut plan, type_plan)
+    }
+
+    pub(super) fn generator_packet_type_hint(
+        &mut self,
+        value: &Expr<'_>,
+        depth: usize,
+    ) -> Result<Option<Vec<Term>>, Error> {
+        let Some(ty) = self.generator_expression_type_hint(value, depth)? else {
+            return Ok(None);
+        };
+        Ok(match self.structural_type(&ty, value.span)? {
+            Term::Tuple(fields) => Some(fields),
+            _ => None,
+        })
     }
 
     pub(super) fn generator_packet_context(
@@ -247,7 +300,7 @@ impl Checker<'_, '_> {
             self.validate_generator_data(&checked, source.span)?;
             (None, checked.ty)
         } else {
-            let (value, ty) = self.required_typed_expression(source, expected)?;
+            let (value, ty) = self.generator_data_expression(source, expected)?;
             (Some(value), ty)
         };
         let Term::Tuple(types) = self.structural_type(&ty, source.span)? else {
@@ -260,11 +313,13 @@ impl Checker<'_, '_> {
             ));
         }
         let values = if let Some(value) = value {
-            let materialized = self.materialize_generator_data(value, ty, source.span)?;
-            let K::Tuple(fields) = materialized.kind else {
+            // Validate the whole packet before splitting: a live pointer must
+            // not exempt a callback sibling from capture validation.
+            self.generator_value_needs_live_storage(&value, source.span)?;
+            let comptime_interpretor::Value::Tuple(fields) = value else {
                 return Err(error(
                     source.span,
-                    "generator spread did not freeze as a tuple",
+                    "generator spread did not produce a tuple",
                 ));
             };
             if fields.len() != types.len() {
@@ -273,9 +328,23 @@ impl Checker<'_, '_> {
                     "generator spread value/type width mismatch",
                 ));
             }
-            fields.into_iter().map(Some).collect::<Vec<_>>()
+            let mut values = Vec::with_capacity(fields.len());
+            for (value, ty) in fields.into_iter().zip(&types) {
+                values.push(
+                    if self.generator_value_needs_live_storage(&value, source.span)? {
+                        Argument::LiveData(value)
+                    } else {
+                        Argument::Data(Some(self.materialize_generator_data(
+                            value,
+                            ty.clone(),
+                            source.span,
+                        )?))
+                    },
+                );
+            }
+            values
         } else {
-            vec![None; types.len()]
+            (0..types.len()).map(|_| Argument::Data(None)).collect()
         };
         packet.values = Some(values.into_iter().zip(types).map(Some).collect());
         Ok(())
@@ -296,6 +365,6 @@ impl Checker<'_, '_> {
         if let Some(expected) = expected {
             self.require(&ty, expected, span)?;
         }
-        Ok((Argument::Data(value), ty))
+        Ok((value, ty))
     }
 }

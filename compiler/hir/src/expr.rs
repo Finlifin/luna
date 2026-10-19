@@ -94,6 +94,9 @@ pub enum ExprKind<'hir> {
     /// Explicit permission to retain the computation for instantiation.
     /// Does not relax ordinary definition-side operation checks.
     Defer(&'hir Expr<'hir>),
+    /// A source-level requirement to select/unroll control flow at comptime.
+    /// The wrapped control retains its bindings, labels and branch structure.
+    InlineControl(&'hir Expr<'hir>),
     RefinedType {
         requirement: &'hir Expr<'hir>,
         base: &'hir Expr<'hir>,
@@ -111,7 +114,8 @@ pub enum ExprKind<'hir> {
 
     Tuple(&'hir [Expr<'hir>]),
     List(&'hir [Expr<'hir>]),
-    Object(&'hir [Expr<'hir>], &'hir [FieldExpr<'hir>]),
+    /// Preserve source order across positional values and named properties.
+    Object(Vec<ObjectEntry<'hir>>),
 
     Ref(&'hir Expr<'hir>),
     Deref(&'hir Expr<'hir>),
@@ -201,6 +205,8 @@ pub enum ExprKind<'hir> {
     TakeOld(&'hir Expr<'hir>),
     TakeBitVec(&'hir Expr<'hir>),
     TakeTagName(&'hir Expr<'hir>),
+    /// Structural enumeration keeps runtime elements distinct from comptime shape.
+    TakeTupleEnumerate(&'hir Expr<'hir>),
     TypeOf(&'hir Expr<'hir>),
     MultiDeref(&'hir Expr<'hir>),
 
@@ -237,6 +243,12 @@ pub struct CondictionArm<'hir> {
     pub cond: Option<&'hir Expr<'hir>>,
     pub body: &'hir Expr<'hir>,
     pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ObjectEntry<'hir> {
+    Value(&'hir Expr<'hir>),
+    Property(FieldExpr<'hir>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

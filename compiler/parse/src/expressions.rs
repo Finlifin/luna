@@ -14,6 +14,7 @@ pub struct ExprOption {
     pub stop_at_pattern_gt: bool,
     pub stop_at_type_qualifier: bool,
     pub stop_at_call: bool,
+    pub stop_at_named_parameter: bool,
 }
 
 impl ExprOption {
@@ -25,6 +26,7 @@ impl ExprOption {
             stop_at_pattern_gt: false,
             stop_at_type_qualifier: false,
             stop_at_call: false,
+            stop_at_named_parameter: false,
         }
     }
 
@@ -75,6 +77,11 @@ impl Parser<'_> {
             // 循环处理操作符和右操作数
             loop {
                 let token = p.peek_next_token();
+                if option.stop_at_named_parameter
+                    && p.peek(&[TokenKind::Dot, TokenKind::Id, TokenKind::Colon])
+                {
+                    break;
+                }
                 if option.stop_at_call && token.kind == TokenKind::LParen {
                     break;
                 }
@@ -342,13 +349,18 @@ impl Parser<'_> {
                 }
                 TokenKind::Atomic => p.try_atomic_block_expr(),
 
-                // fn_type -> pure? comptime? inline? (unsafe|spec|verified)? (extern "ABI")? fn(parameter_type*)
+                // fn_type -> pure? comptime? inline? (unsafe|spec|verified)? fn(parameter_type*)
                 TokenKind::Fn => p.try_fn_type(),
-                TokenKind::Pure
-                | TokenKind::Inline
-                | TokenKind::Spec
-                | TokenKind::Verified
-                | TokenKind::Extern => p.try_fn_type(),
+                TokenKind::Inline
+                    if [TokenKind::If, TokenKind::When, TokenKind::For]
+                        .iter()
+                        .any(|next| p.peek(&[TokenKind::Inline, *next])) =>
+                {
+                    p.try_inline_statement()
+                }
+                TokenKind::Pure | TokenKind::Inline | TokenKind::Spec | TokenKind::Verified => {
+                    p.try_fn_type()
+                }
 
                 _ => Ok(0),
             }
@@ -1020,7 +1032,7 @@ impl Parser<'_> {
         left: NodeIndex,
         opt: ExprOption,
     ) -> ParseResult {
-        self.scoped(|p| match tag {
+        let node = self.scoped(|p| match tag {
             TokenKind::LParen => p.try_call_expr(left),
             TokenKind::Lt => p.try_diamond_call_expr(left),
             TokenKind::LBrace => p.try_extended_call_expr(left, opt),
@@ -1035,7 +1047,18 @@ impl Parser<'_> {
             TokenKind::Matches => p.try_matches_expr(left, opt),
             TokenKind::Id => p.try_literal_extension_expr(left),
             _ => Ok(0),
-        })
+        })?;
+        if node != 0 {
+            self.include_left_span(left, node);
+        }
+        Ok(node)
+    }
+
+    pub(crate) fn include_left_span(&mut self, left: NodeIndex, node: NodeIndex) {
+        let left_span = self.ast.get_span(left).expect("postfix receiver");
+        let span = self.ast.get_span(node).expect("postfix result");
+        self.ast.spans[node as usize] =
+            rustc_span::Span::new(left_span.lo().min(span.lo()), left_span.hi().max(span.hi()));
     }
 
     /// application -> expr(argument*)
@@ -1060,7 +1083,7 @@ impl Parser<'_> {
 
     /// normal_form_head_application -> expr<argument*>
     pub(crate) fn try_diamond_call_expr(&mut self, left: NodeIndex) -> ParseResult {
-        self.scoped_with_expected_prefix(&[TokenKind::Lt], |p| {
+        let node = self.scoped_with_expected_prefix(&[TokenKind::Lt], |p| {
             let args = p.try_multi_with_bracket(
                 &[
                     Rule::comma("optional argument", |p| p.try_optional_arg()),
@@ -1077,7 +1100,12 @@ impl Parser<'_> {
                     .add_multiple_children(args)
                     .build(&mut p.ast),
             )
-        })
+        })?;
+        if node != 0 {
+            // Also called directly by normal-form pattern parsing.
+            self.include_left_span(left, node);
+        }
+        Ok(node)
     }
 
     /// extended_application -> expr { (property | extend_arg | expr)* }

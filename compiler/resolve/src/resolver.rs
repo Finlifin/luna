@@ -1,3 +1,4 @@
+use std::{collections::HashMap, sync::Arc};
 use symbol::{DefId, Symbol};
 
 use crate::binding::{Binding, Resolution};
@@ -23,6 +24,9 @@ pub struct Resolver<'a> {
     tree: &'a ModuleTree,
     /// Rib stack for ordered (lexical) scopes.
     ribs: RibStack,
+    /// Scope-sensitive results over the immutable module tree. Shared with HIR
+    /// so repeated projections do not duplicate complete candidate lists.
+    type_members: HashMap<(ScopeId, Symbol), Arc<[(DefId, DefId)]>>,
 }
 
 impl<'a> Resolver<'a> {
@@ -31,6 +35,7 @@ impl<'a> Resolver<'a> {
         Self {
             tree,
             ribs: RibStack::new(),
+            type_members: HashMap::new(),
         }
     }
 
@@ -166,6 +171,41 @@ impl<'a> Resolver<'a> {
         })?;
         self.check_access(&binding, requester, span)?;
         Ok(Resolution::from_binding(&binding))
+    }
+
+    /// Resolve accessible candidates for a type container not yet known to the
+    /// elaborator. Inspect each ADT scope directly instead of repeatedly scanning
+    /// the scope tree through `find_scope_for_def`.
+    pub fn accessible_type_members(
+        &mut self,
+        name: Symbol,
+        requester: ScopeId,
+    ) -> Arc<[(DefId, DefId)]> {
+        if let Some(candidates) = self.type_members.get(&(requester, name)) {
+            return Arc::clone(candidates);
+        }
+        let candidates: Arc<[(DefId, DefId)]> = self
+            .scope_tree()
+            .iter()
+            .filter_map(|scope| {
+                if scope.kind != crate::scope::ScopeKind::AdtBody
+                    || scope.items.ambiguous_glob(name)
+                {
+                    return None;
+                }
+                let binding = self.lookup_in_scope(name, scope.id)?;
+                if !binding.accessible(self.scope_tree(), requester) {
+                    return None;
+                }
+                let crate::binding::BindingKind::Definition(member, _) = binding.kind else {
+                    return None;
+                };
+                Some((scope.owner_def, member))
+            })
+            .collect();
+        self.type_members
+            .insert((requester, name), Arc::clone(&candidates));
+        candidates
     }
 
     fn check_access(

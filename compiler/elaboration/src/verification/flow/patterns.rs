@@ -3,6 +3,11 @@ use super::*;
 use nir::program::{MatchArm, Pattern};
 use std::collections::BTreeSet;
 
+enum MatchCase<'a> {
+    Expression(&'a MatchArm),
+    Contextual(&'a nir::program::NormalMatchArm),
+}
+
 impl State {
     pub(super) fn merge(mut self, other: Self, limits: &mut Limits) -> Result<Self, Unknown> {
         self.join_aggregates(&other, limits)?;
@@ -72,9 +77,7 @@ impl Walker<'_> {
         let constant = match literal {
             Literal::SignedInteger(n) => Integer::from_i128(*n),
             Literal::UnsignedInteger(n) => Integer::from_u128(*n),
-            Literal::Integer(text) => {
-                Integer::parse_literal(text, &mut self.limits.arithmetic).map_err(Unknown::from)?
-            }
+            Literal::Integer(text) => self.integer_spelling(text)?,
             _ => return Ok(None),
         };
         Ok(match &input.scalar {
@@ -237,6 +240,22 @@ impl Walker<'_> {
                 let condition = self.literal_condition(input, literal, &state)?;
                 self.split_condition(state, condition.as_ref())
             }
+
+            Pattern::Observe { binding, inner } => {
+                let snapshot = input.snapshot(self.limits, 0)?;
+                bind_value(&mut state, *binding, ty, snapshot, self.limits)?;
+                let (mut yes, mut no) = self.pattern(inner, input, ty, state, depth)?;
+                for branch in [&mut yes, &mut no] {
+                    let retained = branch
+                        .domains
+                        .keys()
+                        .copied()
+                        .filter(|id| *id != place(*binding))
+                        .collect();
+                    branch.keep(&retained, self.limits)?;
+                }
+                Ok((yes, no))
+            }
             Pattern::Binding { binding, inner } => {
                 let (mut yes, no) = self.pattern(inner, input, ty, state, depth)?;
                 if yes.facts.is_reachable() {
@@ -389,6 +408,43 @@ impl Walker<'_> {
         depth: usize,
         tail: bool,
     ) -> Result<Value, Reason> {
+        self.match_cases(
+            value,
+            arms.iter().map(MatchCase::Expression),
+            result_type,
+            state,
+            depth,
+            tail,
+        )
+    }
+
+    pub(super) fn normal_match_input(
+        &mut self,
+        value: &Expr,
+        arms: &[nir::program::NormalMatchArm],
+        result_type: &Term,
+        state: &mut State,
+        depth: usize,
+    ) -> Result<Value, Reason> {
+        self.match_cases(
+            value,
+            arms.iter().map(MatchCase::Contextual),
+            result_type,
+            state,
+            depth,
+            false,
+        )
+    }
+
+    fn match_cases<'b>(
+        &mut self,
+        value: &Expr,
+        arms: impl Iterator<Item = MatchCase<'b>>,
+        result_type: &Term,
+        state: &mut State,
+        depth: usize,
+        tail: bool,
+    ) -> Result<Value, Reason> {
         let input = self.child(value, state, depth)?;
         let input = self.materialize_aggregate(input, &value.ty, state)?;
         let existing: BTreeSet<_> = state.domains.keys().copied().collect();
@@ -414,19 +470,33 @@ impl Walker<'_> {
         let mut joined_value = Value::default();
         let mut has_result = false;
         for arm in arms {
+            let (pattern, guard) = match &arm {
+                MatchCase::Expression(arm) => (&arm.pattern, arm.guard.as_ref()),
+                MatchCase::Contextual(arm) => (&arm.pattern, arm.guard.as_ref()),
+            };
             let (mut candidate, mut failure) =
-                self.pattern(&arm.pattern, &input, &value.ty, pending, depth)?;
-            if let Some(guard) = &arm.guard {
+                self.pattern(pattern, &input, &value.ty, pending, depth)?;
+            if let Some(guard) = guard {
                 let condition = self.child(guard, &mut candidate, depth)?.condition;
                 let (yes, no) = self.split_condition(candidate, condition.as_ref())?;
                 candidate = yes;
                 failure = failure.merge(no, self.limits)?;
             }
-            let result = if tail {
-                self.tail(&arm.body, &mut candidate, depth)?;
-                Value::default()
-            } else {
-                self.child(&arm.body, &mut candidate, depth)?
+            let result = match arm {
+                MatchCase::Expression(arm) if tail => {
+                    self.tail(&arm.body, &mut candidate, depth)?;
+                    Value::default()
+                }
+                MatchCase::Expression(arm) => self.child(&arm.body, &mut candidate, depth)?,
+                MatchCase::Contextual(arm) => {
+                    self.normal_input_value(
+                        &arm.body,
+                        Some(result_type),
+                        &mut candidate,
+                        depth + 1,
+                    )?
+                    .0
+                }
             };
             if candidate.facts.is_reachable() {
                 if let Some(root) = result_root {

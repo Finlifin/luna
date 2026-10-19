@@ -26,6 +26,7 @@ fn key_world<R>(
         index
             .insert(
                 ImplementationHead {
+                    parameter_types: i.parameter_types.clone(),
                     declaration: i.declaration,
                     interface: i.interface,
                     interface_arguments: i.interface_arguments.clone(),
@@ -76,6 +77,29 @@ fn key_method(
             Default::default(),
         )
     })
+}
+
+#[test]
+fn implicit_cleanup_invalidates_external_pointer_observations() {
+    let prefix = "typealias Byte=.u8'builtin;trait Retire {fn drop(*self);}
+        struct Watch {target:*Byte}impl Retire for Watch {fn drop(*self) {self.target.*.* = 0;}}
+        fn change(p:*Byte) {let watch=Watch {target:p};}
+        fn relay(p:*Byte) {change(p);}";
+    for call in ["change(p)", "relay(p)"] {
+        let source = format!(
+            "{prefix} fn rejected(p:*Byte)->result:bool where ensures result {{let before=p.*;{call};before==p.*}}"
+        );
+        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(error.contains("postcondition"), "{call}: {error}");
+        let checked = format!(
+            "{prefix} fn checked(p:*Byte)->result:bool where ensures result {{let before=p.*;{call};assumes before==p.*;before==p.*}}"
+        );
+        compile_with_protocols(&checked, &Default::default()).unwrap();
+    }
+    let stable = format!(
+        "{prefix} fn read(p:*Byte)->Byte {{p.*}}fn stable(p:*Byte)->result:bool where ensures result {{let before=p.*;read(p);before==p.*}}"
+    );
+    compile_with_protocols(&stable, &Default::default()).unwrap();
 }
 
 #[test]
@@ -4724,11 +4748,17 @@ fn splice_protocol_requires_bound_identity_and_runtime_staged_signature() {
             0 => {
                 interface.methods[0].signature = interface.methods[0]
                     .signature
+                    .ordinary()
+                    .unwrap()
                     .clone()
                     .with_comptime_phase(true)
+                    .into()
             }
             1 => {
-                if let nir::Term::Function { parameters, .. } = &mut interface.methods[0].signature
+                if let nir::code_interfaces::MethodSignature::Callable(nir::Term::Function {
+                    parameters,
+                    ..
+                }) = &mut interface.methods[0].signature
                 {
                     parameters[0].sort = nir::Sort::Runtime;
                 }
@@ -4738,7 +4768,11 @@ fn splice_protocol_requires_bound_identity_and_runtime_staged_signature() {
             4 => interface.associated.push(interface.associated[0].clone()),
             5 => interface.declaration.package += 1,
             6 => {
-                if let nir::Term::Function { result, .. } = &mut interface.methods[0].signature {
+                if let nir::code_interfaces::MethodSignature::Callable(nir::Term::Function {
+                    result,
+                    ..
+                }) = &mut interface.methods[0].signature
+                {
                     *result = Box::new(nir::Term::Primitive(nir::Primitive::Bool));
                 }
             }
@@ -11321,7 +11355,7 @@ fn parameterized_interface_package() -> Package {
             by_value_receiver: false,
             declaration: d(13),
             name: "echo".into(),
-            signature: signature(rigid(12)),
+            signature: signature(rigid(12)).into(),
             requirements: vec![],
             default: Some(d(14)),
         }],
@@ -11354,6 +11388,7 @@ fn parameterized_interface_package() -> Package {
     ] {
         let ty = T::Primitive(primitive);
         package.implementations.push(n::Implementation {
+            parameter_types: vec![],
             associated: vec![],
             declaration: d(20 + serial),
             subject: T::Primitive(P::Bool),
@@ -11589,6 +11624,7 @@ fn parameterized_interface_nir_parent_requirements_keep_their_arguments() {
     });
     for (n, primitive) in [(0, Primitive::Bool), (1, Primitive::Char)] {
         package.implementations.push(Implementation {
+            parameter_types: vec![],
             associated: vec![],
             declaration: d(50 + n),
             subject: Term::Primitive(Primitive::Bool),
@@ -16972,7 +17008,12 @@ fn comptime_methods_preserve_interface_phase_through_defaults_and_dispatch() {
         .flat_map(|interface| interface.methods.iter_mut())
         .find(|method| method.name == "read")
         .unwrap();
-    contract.signature = contract.signature.callable_signature().clone();
+    contract.signature = contract
+        .signature
+        .callable_signature()
+        .unwrap()
+        .clone()
+        .into();
     assert!(nir::phases::validate(&forged).is_err());
 }
 
@@ -24243,6 +24284,7 @@ fn associated_type_query_uses_evidence_from_the_compiled_implementation_world() 
         index
             .insert(
                 elaboration::implementation::ImplementationHead {
+                    parameter_types: item.parameter_types.clone(),
                     declaration: item.declaration,
                     interface: item.interface,
                     interface_arguments: item.interface_arguments.clone(),
@@ -24731,6 +24773,8 @@ fn retained_interface_method_signatures_resolve_associated_projections() {
                         .collect();
                     expr.ty = method
                         .signature
+                        .ordinary()
+                        .unwrap()
                         .instantiate_types(&parameters, &arguments)
                         .unwrap();
                 }
@@ -24795,7 +24839,9 @@ fn trait_signatures_and_default_bodies_preserve_abstract_associated_types() {
         "trait Source where X {assoc Element:.Type'builtin=bool;fn keep(value:Element)->Element {value}} fn run()->bool {true}",
     );
     let contract = package.traits.iter().find(|t| t.name == "Source").unwrap();
-    let nir::Term::Function { parameters, result } = &contract.methods[0].signature else {
+    let nir::Term::Function { parameters, result } =
+        contract.methods[0].signature.ordinary().unwrap()
+    else {
         panic!()
     };
     let nir::Term::AssociatedType {
@@ -26650,6 +26696,7 @@ fn effect_source_instances_check_contracts_before_constructing_routes() {
         index
             .insert(
                 ImplementationHead {
+                    parameter_types: implementation.parameter_types.clone(),
                     declaration: implementation.declaration,
                     interface: implementation.interface,
                     interface_arguments: implementation.interface_arguments.clone(),
@@ -34473,7 +34520,7 @@ fn bound_tuple_spread_widths_deliver_context_to_multiple_generic_producers() {
 }
 
 #[test]
-fn bound_tuple_memory_layout_preserves_callable_fields_and_rejects_pointer_storage() {
+fn bound_tuple_memory_layout_preserves_callable_and_pointer_fields() {
     use elaboration::verification::memory;
     let source = "typealias Type=.Type'builtin;
         pure comptime fn List<T> -> Type {T}
@@ -34498,10 +34545,31 @@ fn bound_tuple_memory_layout_preserves_callable_fields_and_rejects_pointer_stora
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
     );
-    let error =
+    let pointers =
         memory::infer_in_package(&package, id(&package, "pointer_packet"), &[], &mut 100_000)
-            .unwrap_err();
-    assert!(error.contains("memory contract"), "{error}");
+            .unwrap();
+    let targets = pointers
+        .pointer_fields
+        .get(&vec![0])
+        .unwrap()
+        .as_ref()
+        .unwrap();
+    assert_eq!(targets.len(), 1);
+    let target = targets.first().unwrap();
+    assert_eq!(target.parameter, 0);
+    assert!(
+        target.input_fields.is_empty() && target.through.is_empty() && target.fields.is_empty()
+    );
+    assert_eq!(
+        pointers.signature.callable_signature(),
+        package
+            .functions
+            .iter()
+            .find(|f| f.name == "pointer_packet")
+            .unwrap()
+            .signature
+            .callable_signature()
+    );
     assert!(memory::infer_in_package(&package, id(&package, "packet"), &[], &mut 0).is_err());
     assert_eq!(
         packet,
@@ -42304,7 +42372,6 @@ fn bitvec_pointer_writeback_checks_bounds_lifetimes_and_control_exits() {
         "fn rejected(p:*Word,i:Byte) {assumes i <= 16;p.*'bitvec[i]=1;}",
         "fn rejected(p:*Word,i:.i16'builtin) {assumes i < 16;p.*'bitvec[i]=1;}",
         "fn rejected(p:*bool) {p.*'bitvec[0]=1;}",
-        "comptime fn rejected(p:*Word) {p.*'bitvec[0]=1;}",
         "fn rejected()->Word {var word:Word=255;let p=word.ref;p.*'bitvec[0..16]=65535;word + 1}",
     ] {
         assert!(
@@ -43208,19 +43275,31 @@ fn external_pointer_observations_track_nested_field_paths() {
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
     );
+    // Reassigning the same origin preserves the address despite changing the
+    // local binding version. A genuinely different origin must not inherit it.
+    let rebound = source
+        .replace(
+            "let before=p.left.value.*;",
+            "var pointer=p;let before=pointer.left.value.*;",
+        )
+        .replace(
+            "let other=p.right.value.*;before == p.left.value.*",
+            "pointer=p;before == pointer.left.value.*",
+        );
+    let package = compile(&rebound);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let different = rebound
+        .replace("fn stable(p:*Outer)", "fn stable(p:*Outer,q:*Outer)")
+        .replace("pointer=p;before", "pointer=q;before")
+        .replace("stable(value.ref)", "stable(value.ref,value.ref)");
     for invalid in [
+        different,
         source.replace("{p.left.value.*}", "{p.right.value.*}"),
         source.replace("next(p.left.value)", "next(p.right.value)"),
         source.replace("let other=p.right.value.*;", "p.right.value.* = 0;"),
-        source
-            .replace(
-                "let before=p.left.value.*;",
-                "var pointer=p;let before=pointer.left.value.*;",
-            )
-            .replace(
-                "let other=p.right.value.*;before == p.left.value.*",
-                "pointer=p;before == pointer.left.value.*",
-            ),
     ] {
         assert!(
             compile_with_protocols(&invalid, &Default::default()).is_err(),
@@ -44631,4 +44710,1450 @@ fn literal_suffix_runtime_conversions_preserve_input_and_contracts() {
         let missing = source.replace(".flag,bool", ".other,bool");
         assert!(compile_with_source_bindings(&missing, &Default::default(), selectors).is_err());
     }
+}
+
+#[test]
+fn extern_identifier_survives_frontend_and_execution() {
+    let package = compile(
+        "fn extern(value:bool)->bool {value} fn run()->bool {let extern=extern(true);extern}",
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100000).unwrap(),
+        Value::Bool(true)
+    );
+    for source in [
+        "extern fn imported();",
+        "typealias Callback = extern fn(bool)->bool;",
+    ] {
+        assert!(
+            compile_with_protocols(source, &Default::default()).is_err(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn comptime_type_telescope_invocations_check_program_preconditions() {
+    let package = compile(
+        "typealias Type=.Type'builtin;comptime fn checked(comptime T:Type,allowed:bool)->bool where requires allowed {true}comptime fn Good()->bool {checked(bool,true)}",
+    );
+    assert_eq!(
+        luna::invocation::invoke(&package, "Good", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    // Exercise the interpreter boundary after source checking: its contract
+    // check must not disappear when Type inputs stay in NIR instead of IIR.
+    let mut rejected = package.clone();
+    let function = rejected
+        .functions
+        .iter_mut()
+        .find(|f| f.name == "checked")
+        .unwrap();
+    function.preconditions[0].kind =
+        nir::program::ExprKind::Literal(nir::program::Literal::Bool(false));
+    assert!(luna::invocation::invoke(&rejected, "Good", 100_000).is_err());
+    assert_eq!(
+        luna::invocation::invoke(&package, "Good", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn dependent_normal_inputs_preserve_literal_conversion_calls() {
+    for input in [
+        "42flag",
+        "do {42flag}",
+        "if flag {42flag} else {0flag}",
+        "flag match {true=>42flag,false=>0flag}",
+    ] {
+        let source = format!("typealias Type=.Type'builtin;typealias Symbol=.Symbol'builtin;typealias Integer=.Integer'builtin;
+            trait Convert where suffix:Symbol,R {{comptime fn literal_into(comptime value:Self)->R;}}
+            impl Convert<.flag,bool> for Integer {{comptime fn literal_into(comptime value:Integer)->bool {{value == 42}}}}
+            pure comptime fn Tagged<T,N:T,.M:T=N>->Type {{T}}
+            comptime fn Choose(flag:bool)->Type {{if flag {{bool}} else {{bool}}}}
+            comptime fn Build(flag:bool)->Type {{Tagged<Choose(flag),{input}>}}
+            comptime fn Run()->Type {{Build(true)}}");
+        let selectors = luna::protocols::type_constructors::Selectors {
+            literal_into: Some("input::Convert"),
+            ..Default::default()
+        };
+        let package =
+            compile_with_source_bindings(&source, &Default::default(), selectors).unwrap();
+        let Value::Type(nir::Term::NormalForm { arguments, .. }) =
+            luna::invocation::invoke(&package, "Run", 100_000).unwrap()
+        else {
+            panic!("normal form")
+        };
+        assert_eq!(
+            arguments,
+            vec![
+                nir::Term::Primitive(nir::Primitive::Bool),
+                nir::Term::Bool(true),
+                nir::Term::Bool(true)
+            ]
+        );
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        vm.invoke(id(&package, "Run"), vec![]).unwrap();
+        assert_eq!(
+            calls(&package, &vm)
+                .iter()
+                .filter(|name| *name == "literal_into")
+                .count(),
+            1,
+            "conversion must not repeat for a default input"
+        );
+        let rejected = source.replace("->R;", "->R where requires false;").replace(
+            "->bool {value == 42}",
+            "->bool where requires false {value == 42}",
+        );
+        let failure =
+            compile_with_source_bindings(&rejected, &Default::default(), selectors).unwrap_err();
+        assert!(failure.contains("precondition"), "{failure}");
+        let alternate = source.replace("Build(true)", "Build(false)");
+        let package =
+            compile_with_source_bindings(&alternate, &Default::default(), selectors).unwrap();
+        let Value::Type(nir::Term::NormalForm { arguments, .. }) =
+            luna::invocation::invoke(&package, "Run", 100_000).unwrap()
+        else {
+            panic!("normal form")
+        };
+        let expected = !input.contains("flag {") && !input.contains("flag match");
+        assert_eq!(
+            arguments,
+            vec![
+                nir::Term::Primitive(nir::Primitive::Bool),
+                nir::Term::Bool(expected),
+                nir::Term::Bool(expected)
+            ]
+        );
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        vm.invoke(id(&package, "Run"), vec![]).unwrap();
+        assert_eq!(
+            calls(&package, &vm)
+                .iter()
+                .filter(|name| *name == "literal_into")
+                .count(),
+            1,
+            "only the selected branch converts"
+        );
+        let mismatched = source.replace(
+            "if flag {bool} else {bool}",
+            "if flag {.char'builtin} else {.char'builtin}",
+        );
+        let package =
+            compile_with_source_bindings(&mismatched, &Default::default(), selectors).unwrap();
+        assert!(
+            luna::invocation::invoke(&package, "Run", 100_000).is_err(),
+            "converted bool cannot inhabit the computed char input domain"
+        );
+    }
+}
+
+#[test]
+fn normal_input_type_branches_select_contextual_literal_results() {
+    let mut constructors = std::collections::BTreeSet::new();
+    for (condition, expected) in [
+        ("not false", nir::Term::Bool(true)),
+        ("true and true", nir::Term::Bool(true)),
+        ("false or false", nir::Term::Char('x')),
+        ("do {let selected=true;selected}", nir::Term::Bool(true)),
+        ("true", nir::Term::Bool(true)),
+        ("false", nir::Term::Char('x')),
+        ("true or skipped()", nir::Term::Bool(true)),
+        ("false and skipped()", nir::Term::Char('x')),
+        ("3 < 4", nir::Term::Bool(true)),
+        ("'a' < 'b'", nir::Term::Bool(true)),
+        ("\"same\" == \"same\"", nir::Term::Bool(true)),
+        ("\"same\" == \"other\"", nir::Term::Char('x')),
+        ("do {let x:.i8'builtin=-3;x <= -3}", nir::Term::Bool(true)),
+        ("do {let x:.u8'builtin=255;x > 254}", nir::Term::Bool(true)),
+        (
+            "do {let x:.Float'builtin=0.1;let y:.Float'builtin=0.2;let z:.Float'builtin=0.3;x + y == z}",
+            nir::Term::Bool(true),
+        ),
+        (
+            "do {let x:.Float'builtin=1.25;let y:.Float'builtin=2.0;x * y >= y}",
+            nir::Term::Bool(true),
+        ),
+        (
+            "do {let x:.Float'builtin=1.25;let y:.Float'builtin=2.0;x - y < -x}",
+            nir::Term::Char('x'),
+        ),
+        (
+            "do {let zero:.f32'builtin=0.0;zero == -zero}",
+            nir::Term::Bool(true),
+        ),
+        (
+            "do {let zero:.f32'builtin=0.0;let nan=zero / zero;nan == nan}",
+            nir::Term::Char('x'),
+        ),
+        (
+            "do {let zero:.f32'builtin=0.0;let nan=zero / zero;nan <= zero}",
+            nir::Term::Char('x'),
+        ),
+        (
+            "do {let one:.f32'builtin=1.0;let zero:.f32'builtin=0.0;one / zero > one}",
+            nir::Term::Bool(true),
+        ),
+        (
+            "do {let zero:.f64'builtin=0.0;zero == -zero}",
+            nir::Term::Bool(true),
+        ),
+        (
+            "do {let zero:.f64'builtin=0.0;let nan=zero / zero;nan == nan}",
+            nir::Term::Char('x'),
+        ),
+        (
+            "do {let zero:.f64'builtin=0.0;let nan=zero / zero;nan <= zero}",
+            nir::Term::Char('x'),
+        ),
+        (
+            "do {let one:.f64'builtin=1.0;let zero:.f64'builtin=0.0;one / zero > one}",
+            nir::Term::Bool(true),
+        ),
+        (
+            "do {let (selected,other)=(true,false);selected and not other}",
+            nir::Term::Bool(true),
+        ),
+        (
+            "do {let (selected,(_,other))=(true,(false,false));selected and not other}",
+            nir::Term::Bool(true),
+        ),
+        (
+            "do {let selected=false;let (other,)=(true,);selected or other}",
+            nir::Term::Bool(true),
+        ),
+        (
+            "do {let flags=Flags {selected:true,other:false};flags.selected and not flags.other}",
+            nir::Term::Bool(true),
+        ),
+        (
+            "do {let {selected,other}=Flags {selected:false,other:false};selected and not other}",
+            nir::Term::Char('x'),
+        ),
+        (
+            "do {let choice=Choice.yes(true);choice match {.yes(selected)=>selected,.no=>false}}",
+            nir::Term::Bool(true),
+        ),
+        (
+            "do {let choice=Choice.no;choice match {.yes(selected)=>selected,.no=>false}}",
+            nir::Term::Char('x'),
+        ),
+        (
+            "do {let .yes(selected)=Choice.yes(true) else {return bool;};selected}",
+            nir::Term::Bool(true),
+        ),
+        ("bool == bool", nir::Term::Bool(true)),
+        ("bool == Char", nir::Term::Char('x')),
+        ("not (bool == Char)", nir::Term::Bool(true)),
+        ("Identity<bool> == Identity<bool>", nir::Term::Bool(true)),
+        (
+            "*(do {let selected=bool;selected}) == *bool",
+            nir::Term::Bool(true),
+        ),
+        (
+            ".BitVec'builtin<do {let n=8;n + 1}> == .BitVec'builtin<9>",
+            nir::Term::Bool(true),
+        ),
+        (
+            ".BitVec'builtin<8> == .BitVec'builtin<9>",
+            nir::Term::Char('x'),
+        ),
+        (
+            "(fn(do {let selected=bool;selected})->Char) == (fn(bool)->Char)",
+            nir::Term::Bool(true),
+        ),
+        (
+            "(comptime fn(do {let selected=bool;selected})->Char) == (comptime fn(bool)->Char)",
+            nir::Term::Bool(true),
+        ),
+        (
+            "(comptime fn(bool)->Char) == (fn(bool)->Char)",
+            nir::Term::Char('x'),
+        ),
+        (
+            "(%{value:do {let selected=bool;selected}} fn()->Char) == (%{value:bool} fn()->Char)",
+            nir::Term::Bool(true),
+        ),
+    ] {
+        let source = format!("typealias Type=.Type'builtin;typealias Symbol=.Symbol'builtin;typealias Integer=.Integer'builtin;typealias Char=.char'builtin;
+            struct Flags {{selected:bool,other:bool}} enum Choice {{yes(bool),no}}
+            trait Convert where suffix:Symbol,R {{comptime fn literal_into(comptime value:Self)->R;}}
+            impl Convert<.pick,bool> for Integer {{comptime fn literal_into(comptime value:Integer)->bool {{value == 42}}}}
+            impl Convert<.pick,Char> for Integer {{comptime fn literal_into(comptime value:Integer)->Char {{'x'}}}}
+            pure comptime fn Identity<T>->Type {{T}}
+            pure comptime fn Tagged<T,N:T,.M:T=N>->Type {{T}}
+            comptime fn skipped()->bool {{skipped()}}
+            comptime fn Run()->Type {{Tagged<if {condition} {{bool}} else {{Char}},42pick>}}");
+        for defaults in [false, true] {
+            let source = if defaults {
+                source.clone()
+            } else {
+                source.replace(",.M:T=N", "")
+            };
+            let package = compile_with_source_bindings(
+                &source,
+                &Default::default(),
+                luna::protocols::type_constructors::Selectors {
+                    literal_into: Some("input::Convert"),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let run = package.functions.iter().find(|f| f.name == "Run").unwrap();
+            nir::visit::expression(&run.body, &mut 100_000, |expr, _| {
+                use nir::program::ExprKind as K;
+                match &expr.kind {
+                    K::PointerType(_) => {
+                        constructors.insert("pointer");
+                    }
+                    K::BitVecType(_) => {
+                        constructors.insert("bits");
+                    }
+                    K::FunctionType { .. } => {
+                        constructors.insert("signature");
+                    }
+                    K::FunctionResultType { .. } => {
+                        constructors.insert("result");
+                    }
+                    K::ClosureType { .. } => {
+                        constructors.insert("environment");
+                    }
+                    _ => {}
+                }
+                Ok(())
+            })
+            .unwrap();
+            let Value::Type(nir::Term::NormalForm { arguments, .. }) =
+                luna::invocation::invoke(&package, "Run", 100_000).unwrap()
+            else {
+                panic!("normal form")
+            };
+            assert_eq!(arguments.len(), if defaults { 3 } else { 2 });
+            assert!(arguments[1..].iter().all(|value| value == &expected));
+            let context = elaboration::ptc::Context::from_package(&package).unwrap();
+            let solver = |predicate: &nir::program::TypePredicate| {
+                use comptime_interpretor::ContractOutcome;
+                use elaboration::ptc::{Formula, Outcome};
+                match context.prove(Formula::from_predicate(predicate), Default::default()) {
+                    Outcome::Entailed(_) => ContractOutcome::Satisfied,
+                    Outcome::NotEntailed(_) => ContractOutcome::Rejected,
+                    _ => ContractOutcome::Unknown,
+                }
+            };
+            let mut vm = Interpreter::for_comptime(&package, Budget::default())
+                .unwrap()
+                .with_type_solver(&solver);
+            vm.invoke(id(&package, "Run"), vec![]).unwrap();
+            let entered = calls(&package, &vm);
+            assert!(!entered.iter().any(|name| name == "skipped"));
+            assert_eq!(
+                entered
+                    .iter()
+                    .filter(|name| *name == "literal_into")
+                    .count(),
+                1
+            );
+        }
+    }
+    assert_eq!(
+        constructors,
+        std::collections::BTreeSet::from(["pointer", "bits", "signature", "result", "environment"])
+    );
+}
+
+#[test]
+fn normal_input_match_types_preserve_candidate_bindings_and_guards() {
+    for (expression, expected) in [
+        ("true match {true=>bool,false=>Char}", nir::Term::Bool(true)),
+        (
+            "false match {selected if selected=>bool,_=>Char}",
+            nir::Term::Char('x'),
+        ),
+        (
+            "true match {selected if selected=>bool,_=>Char}",
+            nir::Term::Bool(true),
+        ),
+        (
+            "(true,false) match {(left,right) if right=>Char,(left,right) if left=>bool,_=>Char}",
+            nir::Term::Bool(true),
+        ),
+        ("false match {true or false=>bool}", nir::Term::Bool(true)),
+        (
+            "(true,false) match {(false,value) or (value,false) if value=>bool,_=>Char}",
+            nir::Term::Bool(true),
+        ),
+        (
+            "true match {value and value is true=>bool,_=>Char}",
+            nir::Term::Bool(true),
+        ),
+        (
+            "false match {value and value is true=>bool,_=>Char}",
+            nir::Term::Char('x'),
+        ),
+        ("(-3) match { -3=>bool,_=>Char}", nir::Term::Bool(true)),
+        ("3 match { -3=>bool,_=>Char}", nir::Term::Char('x')),
+        ("'x' match { 'y'=>bool,_=>Char}", nir::Term::Char('x')),
+        (
+            "do {let x:.Float'builtin=1.0;x match {1.00=>bool,_=>Char}}",
+            nir::Term::Bool(true),
+        ),
+        (
+            "3 match {x if x < 2=>Char,x if x >= 3=>bool,_=>Char}",
+            nir::Term::Bool(true),
+        ),
+        (
+            "do {let zero:.f32'builtin=-0.0;zero match {0.0=>bool,_=>Char}}",
+            nir::Term::Bool(true),
+        ),
+        (
+            "do {let zero:.f32'builtin=0.0;let nan=zero / zero;nan match {0.0=>bool,_=>Char}}",
+            nir::Term::Char('x'),
+        ),
+        (
+            "do {let zero:.f64'builtin=-0.0;zero match {0.0=>bool,_=>Char}}",
+            nir::Term::Bool(true),
+        ),
+        (
+            "do {let zero:.f64'builtin=0.0;let nan=zero / zero;nan match {0.0=>bool,_=>Char}}",
+            nir::Term::Char('x'),
+        ),
+    ] {
+        let source = format!("typealias Type=.Type'builtin;typealias Symbol=.Symbol'builtin;typealias Integer=.Integer'builtin;typealias Char=.char'builtin;
+            trait Convert where suffix:Symbol,R {{comptime fn literal_into(comptime value:Self)->R;}}
+            impl Convert<.pick,bool> for Integer {{comptime fn literal_into(comptime value:Integer)->bool {{value == 42}}}}
+            impl Convert<.pick,Char> for Integer {{comptime fn literal_into(comptime value:Integer)->Char {{'x'}}}}
+            pure comptime fn Tagged<T,N:T,.M:T=N>->Type {{T}}
+            comptime fn Run()->Type {{Tagged<{expression},42pick>}}");
+        for defaults in [false, true] {
+            let source = if defaults {
+                source.clone()
+            } else {
+                source.replace(",.M:T=N", "")
+            };
+            let package = compile_with_source_bindings(
+                &source,
+                &Default::default(),
+                luna::protocols::type_constructors::Selectors {
+                    literal_into: Some("input::Convert"),
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("{expression}: {e}"));
+            let Value::Type(nir::Term::NormalForm { arguments, .. }) =
+                luna::invocation::invoke(&package, "Run", 100_000).unwrap()
+            else {
+                panic!("normal form")
+            };
+            assert_eq!(arguments.len(), if defaults { 3 } else { 2 });
+            assert!(
+                arguments[1..].iter().all(|value| value == &expected),
+                "{expression}"
+            );
+        }
+    }
+}
+
+#[test]
+fn known_normal_let_else_failure_preserves_function_transfer() {
+    let source = "typealias Type=.Type'builtin;enum Choice {yes(bool),no}
+        pure comptime fn Tagged<T,N:T>->Type {T}
+        comptime fn Run()->Type {Tagged<do {let .yes(flag)=Choice.no else {return bool;};if flag {bool} else {.char'builtin}},true>}";
+    let package = compile(source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "Run", 100_000).unwrap(),
+        Value::Type(nir::Term::Primitive(nir::Primitive::Bool))
+    );
+}
+
+#[test]
+fn known_collected_type_list_indices_supply_dependent_literal_contexts() {
+    for (index, expected) in [
+        ("0", nir::Term::Bool(true)),
+        ("1", nir::Term::Char('x')),
+        ("do {let first=0;first + 1}", nir::Term::Char('x')),
+        (
+            "do {let first=Es[0];let second=Es[1];if first == bool and second == Char {0} else {1}}",
+            nir::Term::Bool(true),
+        ),
+    ] {
+        let source = format!("typealias Type=.Type'builtin;typealias Integer=.Integer'builtin;typealias Symbol=.Symbol'builtin;typealias Char=.char'builtin;
+            pure comptime fn List<T>->Type {{List<T>}}
+            pure comptime fn Tuple<...Es:List<Type>>->Type {{Tuple<...Es>}}
+            trait Convert where suffix:Symbol,R {{comptime fn literal_into(comptime value:Self)->R;}}
+            impl Convert<.pick,bool> for Integer {{comptime fn literal_into(comptime value:Integer)->bool {{value == 42}}}}
+            impl Convert<.pick,Char> for Integer {{comptime fn literal_into(comptime value:Integer)->Char {{'x'}}}}
+            pure comptime fn Tagged<T,N:T,.M:T=N>->Type {{T}}
+            comptime fn Run()->Type {{Tagged<Tuple<bool,Char> match {{Tuple<Es> => Es[{index}],_=>bool}},42pick>}}");
+        let package = compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                meta_list: Some("input::List"),
+                tuple: Some("input::Tuple"),
+                literal_into: Some("input::Convert"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(package.to_string().contains("(type-list-index (values"));
+        let Value::Type(nir::Term::NormalForm { arguments, .. }) =
+            luna::invocation::invoke(&package, "Run", 100_000).unwrap()
+        else {
+            panic!("normal form")
+        };
+        assert_eq!(arguments[1..], [expected.clone(), expected]);
+    }
+}
+
+#[test]
+fn known_type_list_index_failures_remain_invocation_failures() {
+    for index in ["-1", "2", "340282366920938463463374607431768211456"] {
+        let source=format!("typealias Type=.Type'builtin;
+            pure comptime fn List<T>->Type {{List<T>}}
+            pure comptime fn Tuple<...Es:List<Type>>->Type {{Tuple<...Es>}}
+            pure comptime fn Tagged<T,N:T>->Type {{T}}
+            comptime fn Run()->Type {{Tagged<Tuple<bool,bool> match {{Tuple<Es> => Es[{index}],_=>bool}},true>}}");
+        let package = compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                meta_list: Some("input::List"),
+                tuple: Some("input::Tuple"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let error = luna::invocation::invoke(&package, "Run", 100_000).unwrap_err();
+        assert!(error.contains("IndexOutOfBounds"), "{index}: {error}");
+    }
+}
+
+#[test]
+fn live_type_computations_preserve_mutable_captures_and_never_replay() {
+    use elaboration::type_computations::{Error, LiveInput, Session, State};
+    use elaboration::{InferenceContext, InferenceTerm as I};
+    use nir::{Primitive as P, Sort, Term};
+    let package = compile(
+        "typealias Type=.Type'builtin;
+        typealias Selector=%{flag:bool} comptime fn()->Type;
+        comptime fn make()->Selector {
+            var flag=false;
+            || {flag=not flag; if flag {bool} else {.u8'builtin}}
+        }
+        comptime fn Invoke(select:Selector)->Type {select()}
+        comptime fn Reject(select:Selector)->Type {
+            let ignored=select(); assumes false; bool
+        }",
+    );
+    let mut producer = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let value = producer.invoke(id(&package, "make"), vec![]).unwrap();
+    let Value::Closure(closure) = &value else {
+        panic!("expected closure")
+    };
+    let domain = closure.ty().clone();
+    let mut context = InferenceContext::default();
+    let pending_domain = context.fresh(Sort::Type);
+    let mut session = Session::new(&package, &context, Budget::default()).unwrap();
+    let first = session
+        .enqueue_live(
+            &mut context,
+            id(&package, "Invoke"),
+            vec![LiveInput {
+                ty: I::Meta(pending_domain),
+                value: value.clone(),
+            }],
+        )
+        .unwrap();
+    let budget = session.remaining_steps();
+    assert!(
+        matches!(session.resume(&mut context, first).unwrap(), State::Waiting(ids) if ids.contains(&pending_domain))
+    );
+    assert_eq!(session.remaining_steps(), budget);
+    context
+        .assign(pending_domain, I::Stable(domain.clone()))
+        .unwrap();
+    assert!(
+        matches!(session.resume(&mut context, first).unwrap(), State::Complete(ty) if *ty == Term::Primitive(P::Bool))
+    );
+    let budget = session.remaining_steps();
+    session.resume(&mut context, first).unwrap();
+    assert_eq!(session.remaining_steps(), budget);
+    // A failed invocation toggles the very same environment and remains terminal.
+    let rejected = session
+        .enqueue_live(
+            &mut context,
+            id(&package, "Reject"),
+            vec![LiveInput {
+                ty: I::Stable(domain.clone()),
+                value: value.clone(),
+            }],
+        )
+        .unwrap();
+    assert!(
+        matches!(session.resume(&mut context, rejected).unwrap(), State::Failed(Error::Invocation(error)) if error.kind == ErrorKind::ProgramContractRejected)
+    );
+    let budget = session.remaining_steps();
+    session.resume(&mut context, rejected).unwrap();
+    assert_eq!(session.remaining_steps(), budget);
+    // Invalid advertised domains reject before executing the callback.
+    let invalid = session
+        .enqueue_live(
+            &mut context,
+            id(&package, "Invoke"),
+            vec![LiveInput {
+                ty: I::Stable(Term::Primitive(P::Bool)),
+                value: value.clone(),
+            }],
+        )
+        .unwrap();
+    assert!(
+        matches!(session.resume(&mut context, invalid).unwrap(), State::Failed(Error::Invocation(error)) if error.kind == ErrorKind::Type)
+    );
+    for expected in [P::Bool, P::U8, P::Bool] {
+        let next = session
+            .enqueue_live(
+                &mut context,
+                id(&package, "Invoke"),
+                vec![LiveInput {
+                    ty: I::Stable(domain.clone()),
+                    value: value.clone(),
+                }],
+            )
+            .unwrap();
+        assert!(
+            matches!(session.resume(&mut context, next).unwrap(), State::Complete(ty) if *ty == Term::Primitive(expected))
+        );
+    }
+    let dump = session.to_string();
+    assert!(dump.contains("(prepared-input (type"), "{dump}");
+    assert!(dump.contains("(consumed true)"), "{dump}");
+}
+
+#[test]
+fn live_type_computations_reject_invalid_contexts_and_cycles_before_effects() {
+    use elaboration::type_computations::{Error, LiveInput, Session, State};
+    use elaboration::{InferenceContext, InferenceTerm as I};
+    use nir::{Primitive as P, Sort, Term};
+    let package = compile(
+        "typealias Type=.Type'builtin;
+        typealias Selector=%{flag:bool} comptime fn()->Type;
+        comptime fn make()->Selector {
+            var flag=false;
+            || {flag=not flag; if flag {bool} else {.u8'builtin}}
+        }
+        comptime fn Invoke(select:Selector)->Type {select()}
+        fn runtime()->bool {true}",
+    );
+    let mut producer = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let value = producer.invoke(id(&package, "make"), vec![]).unwrap();
+    let Value::Closure(closure) = &value else {
+        panic!("expected closure")
+    };
+    let domain = closure.ty().clone();
+    let inputs = |ty| {
+        vec![LiveInput {
+            ty,
+            value: value.clone(),
+        }]
+    };
+    let mut context = InferenceContext::default();
+    let mut session = Session::new(&package, &context, Budget::default()).unwrap();
+    let mut foreign = InferenceContext::default();
+    assert_eq!(
+        session.enqueue_live(
+            &mut foreign,
+            id(&package, "Invoke"),
+            inputs(I::Stable(domain.clone()))
+        ),
+        Err(Error::ForeignContext)
+    );
+    let mut trial = context.trial();
+    assert_eq!(
+        session.enqueue_live(
+            &mut trial,
+            id(&package, "Invoke"),
+            inputs(I::Stable(domain.clone()))
+        ),
+        Err(Error::SpeculativeContext)
+    );
+    assert_eq!(
+        session.enqueue_live(&mut context, id(&package, "runtime"), vec![]),
+        Err(Error::InvalidTarget)
+    );
+    assert_eq!(
+        session.enqueue_live(&mut context, id(&package, "Invoke"), vec![]),
+        Err(Error::Arity)
+    );
+    let collision = session
+        .enqueue_live(
+            &mut context,
+            id(&package, "Invoke"),
+            inputs(I::Stable(domain.clone())),
+        )
+        .unwrap();
+    context
+        .assign(collision, I::Stable(Term::Primitive(P::Bool)))
+        .unwrap();
+    assert!(
+        matches!(session.resume(&mut context, collision).unwrap(), State::Failed(Error::Inference(elaboration::InferenceError::AlreadyAssigned(id))) if *id == collision)
+    );
+    let pending = context.fresh(Sort::Type);
+    let cycle = session
+        .enqueue_live(
+            &mut context,
+            id(&package, "Invoke"),
+            inputs(I::Meta(pending)),
+        )
+        .unwrap();
+    context.assign(pending, I::Meta(cycle)).unwrap();
+    assert!(matches!(
+        session.resume(&mut context, cycle).unwrap(),
+        State::Failed(Error::DependencyCycle(_))
+    ));
+    let dependent = session
+        .enqueue_live(&mut context, id(&package, "Invoke"), inputs(I::Meta(cycle)))
+        .unwrap();
+    assert!(
+        matches!(session.resume(&mut context, dependent).unwrap(), State::Failed(Error::DependencyFailed(id)) if *id == cycle)
+    );
+    assert!(session.events().is_empty());
+    let valid = session
+        .enqueue_live(
+            &mut context,
+            id(&package, "Invoke"),
+            inputs(I::Stable(domain)),
+        )
+        .unwrap();
+    assert!(
+        matches!(session.resume(&mut context, valid).unwrap(), State::Complete(ty) if *ty == Term::Primitive(P::Bool))
+    );
+}
+
+#[test]
+fn live_callback_graph_inspection_retains_body_dependencies_without_effects() {
+    use nir::program::ExprKind as K;
+    let package = compile(
+        "typealias Type=.Type'builtin;
+        typealias Selector=%{flag:bool} comptime fn()->Type;
+        comptime fn Select(flag:bool)->Type {if flag {bool} else {.u8'builtin}}
+        comptime fn make()->Selector {
+            var flag=false;
+            || {flag=not flag; Select(flag)}
+        }
+        comptime fn Invoke(select:Selector)->Type {select()}",
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let callback = vm.invoke(id(&package, "make"), vec![]).unwrap();
+    let graph = Value::Tuple(vec![callback.clone(), callback.clone()]);
+    let mut closures = 0;
+    let mut functions = std::collections::BTreeSet::new();
+    graph
+        .visit_owned_graph(&mut 1000, &mut |value, _| {
+            if let Value::Closure(closure) = value {
+                closures += 1;
+                nir::visit::expression(closure.body(), &mut 1000, |expression, _| {
+                    if let K::Function(id)
+                    | K::FunctionInstance {
+                        declaration: id, ..
+                    } = &expression.kind
+                    {
+                        functions.insert(*id);
+                    }
+                    Ok::<_, String>(())
+                })
+                .unwrap();
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(closures, 1);
+    assert!(functions.contains(&id(&package, "Select")));
+    for expected in [nir::Primitive::Bool, nir::Primitive::U8] {
+        assert_eq!(
+            vm.invoke(id(&package, "Invoke"), vec![callback.clone()])
+                .unwrap(),
+            Value::Type(nir::Term::Primitive(expected))
+        );
+    }
+}
+
+#[test]
+fn tuple_pattern_fields_observe_earlier_successful_bindings() {
+    let package = compile(
+        "fn equal(left:bool,right:bool)->bool {left==right}
+         fn read(value:(bool,bool))->bool {
+             value match {
+                 (first,(second if equal(first,second)))=>true,
+                 _=>false,
+             }
+         }
+         fn nested(value:(bool,(bool,bool)))->bool {
+             let (first,(second,(third and equal(first,second) is same)))=value;
+             same and third
+         }
+         fn run()->(bool,bool,bool,bool) {
+             (read((true,true)),read((true,false)),nested((true,(true,true))),nested((true,(false,true))))
+         }",
+    );
+    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(&package, "run"), vec![]).unwrap(),
+        Value::Tuple(vec![
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Bool(false)
+        ])
+    );
+    luna::instantiation::instantiate(&package, "run", 200_000).unwrap();
+}
+
+#[test]
+fn tuple_pattern_candidate_bindings_do_not_escape_failed_matches() {
+    let package = compile(
+        "fn run()->bool {
+             let first=false;
+             let (first,(_ if first))=(true,false) else {return first;};
+             first
+         }
+         fn failed()->bool {
+             let first=true;
+             let (first,(_ if first))=(false,true) else {return first;};
+             false
+         }",
+    );
+    for entry in ["run", "failed"] {
+        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        assert_eq!(
+            vm.invoke(id(&package, entry), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        luna::instantiation::instantiate(&package, entry, 200_000).unwrap();
+    }
+    for source in [
+        "fn bad(value:(bool,bool)) {let ((_ if later),later)=value else {return;};}",
+        "fn bad(value:(bool,bool)) {let (same,same)=value;}",
+        "fn bad(value:(bool,bool))->bool {value match {(first,(_ if first))=>first,_=>first,}}",
+    ] {
+        assert!(
+            compile_with_protocols(source, &Default::default()).is_err(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn property_collection_uses_peer_fields_to_infer_callback_inputs() {
+    let source="fn packet(...fields:T)->T where T {fields}
+        fn exemplar(value:T)->U where T,U {exemplar<T,U>(value)}
+        fn sample()->T where T {sample<T>()}
+        fn seed()->bool {false}
+        fn apply(...fields:(packet {value:sample<T>(),callback:exemplar<T,U>})'type)->U where T,U {fields.callback(fields.value)}
+        fn run()->bool {apply {value:seed(),callback:|value|not value}}";
+    assert_eq!(
+        luna::execution::interpret(&compile(source), "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let staged = source.replace("fn ", "comptime fn ");
+    assert_eq!(
+        luna::invocation::invoke(&compile(&staged), "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn property_peer_inference_preserves_producer_order_and_exits() {
+    let prefix="fn packet(...fields:T)->T where T {fields}
+        fn exemplar(value:T)->U where T,U {exemplar<T,U>(value)}
+        fn sample()->T where T {sample<T>()}
+        fn seed()->bool {false}
+        fn apply(...fields:(packet {value:sample<T>(),callback:exemplar<T,U>})'type)->U where T,U {fields.callback(fields.value)}";
+    for (properties, expected) in [
+        (
+            "value:do {state=false;seed()},callback:do {state=true;|value|not value}",
+            true,
+        ),
+        (
+            "callback:do {state=true;|value|not value},value:do {state=false;seed()}",
+            false,
+        ),
+    ] {
+        let prefix = if properties.starts_with("callback:") {
+            prefix.replace(
+                "value:sample<T>(),callback:exemplar<T,U>",
+                "callback:exemplar<T,U>,value:sample<T>()",
+            )
+        } else {
+            prefix.to_owned()
+        };
+        let source = format!(
+            "{prefix} fn run()->(bool,bool) {{var state=false;let result=apply {{{properties}}};(result,state)}}"
+        );
+        assert_eq!(
+            luna::execution::interpret(&compile(&source), "run", 100_000).unwrap(),
+            Value::Tuple(vec![Value::Bool(true), Value::Bool(expected)])
+        );
+        let wrong = source.replace("|value|not value", "|value|7");
+        assert!(compile_with_bindings(&wrong, &Default::default(), None).is_err());
+    }
+    let source = format!(
+        "{prefix} fn run()->bool {{apply {{value:seed(),callback:do {{return true;|value|not value}}}}}}"
+    );
+    assert_eq!(
+        luna::execution::interpret(&compile(&source), "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn nested_program_preconditions_stay_out_of_type_propositions() {
+    for predicate in [
+        "(if flag {true} else {false})",
+        "(if true {flag} else {false})",
+        "do {let selected=flag;selected}",
+        "do {flag}",
+        "do {let (selected,enabled)=(flag,true);selected and enabled}",
+    ] {
+        let package = compile(&format!(
+            "fn checked(flag:bool)->bool where requires {predicate} {{true}}"
+        ));
+        let function = package
+            .functions
+            .iter()
+            .find(|function| function.name == "checked")
+            .unwrap();
+        assert!(function.requirements.is_empty());
+        assert_eq!(function.preconditions.len(), 1);
+        for flag in [false, true] {
+            let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+            let result = vm.invoke(function.declaration, vec![Value::Bool(flag)]);
+            if flag {
+                assert_eq!(result.unwrap(), Value::Bool(true), "{predicate}");
+            } else {
+                assert_eq!(
+                    result.unwrap_err().kind,
+                    ErrorKind::ProgramContractRejected,
+                    "{predicate}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn destructuring_method_contracts_survive_trait_parameter_remapping() {
+    let source = "trait Checked {
+        fn keep(self,pair:(bool,bool))->bool where requires do {let (first,second)=pair;first and second};
+        }
+        struct Holder {}
+        impl Checked for Holder {fn keep(self,values:(bool,bool))->bool {true}}
+        fn invoke(flag:bool)->bool {assumes flag;Holder {}.as(Checked).keep((flag,true))}
+        fn run()->bool {invoke(true)}";
+    let package = compile(source);
+    let rejected =
+        compile_with_protocols(&source.replace("assumes flag;", ""), &Default::default())
+            .unwrap_err();
+    assert!(
+        rejected.contains("program precondition is not proven"),
+        "{rejected}"
+    );
+    for flag in [false, true] {
+        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        let result = vm.invoke(id(&package, "invoke"), vec![Value::Bool(flag)]);
+        if flag {
+            assert_eq!(result.unwrap(), Value::Bool(true));
+        } else {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::ProgramContractRejected);
+        }
+    }
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let holder = package
+        .structs
+        .iter()
+        .find(|item| item.name == "Holder")
+        .unwrap()
+        .declaration;
+    for flag in [false, true] {
+        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        let result = vm.invoke(
+            id(&package, "keep"),
+            vec![
+                Value::Record {
+                    declaration: holder,
+                    arguments: vec![],
+                    fields: vec![],
+                },
+                Value::Tuple(vec![Value::Bool(flag), Value::Bool(true)]),
+            ],
+        );
+        if flag {
+            assert_eq!(result.unwrap(), Value::Bool(true));
+        } else {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::ProgramContractRejected);
+        }
+    }
+    let with_post = source.replace("->bool where requires", "->result:bool where requires").replace(
+        "first and second};", "first and second}, ensures result == do {let (first,second)=pair'old;first and second};",
+    );
+    let checked = compile(&with_post);
+    assert_eq!(
+        luna::execution::interpret(&checked, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let quoted = compile(&with_post.replace("fn keep", "quote fn keep"));
+    assert_eq!(
+        luna::execution::interpret(&quoted, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+
+    for candidate in [
+        with_post.clone(),
+        with_post.replace("fn keep", "quote fn keep"),
+    ] {
+        let bad = candidate.replace(
+            "values:(bool,bool))->bool {true}",
+            "values:(bool,bool))->bool {false}",
+        );
+        let error = compile_with_protocols(&bad, &Default::default()).unwrap_err();
+        assert!(error.contains("postcondition"), "{error}");
+    }
+    let computed_post = with_post.replace(
+        "let (first,second)=",
+        "let (first,second) and first is ready=",
+    );
+    for candidate in [
+        computed_post.clone(),
+        computed_post.replace("fn keep", "quote fn keep"),
+    ] {
+        let package = compile(&candidate);
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+        let bad = candidate.replace(
+            "values:(bool,bool))->bool {true}",
+            "values:(bool,bool))->bool {false}",
+        );
+        let error = compile_with_protocols(&bad, &Default::default()).unwrap_err();
+        assert!(error.contains("postcondition"), "{error}");
+    }
+    let computed = source.replace(
+        "let (first,second)=",
+        "let (first,second) and first is ready=",
+    );
+    for candidate in [
+        computed.clone(),
+        computed.replace("fn keep", "quote fn keep"),
+        computed.replace("and first is ready", "and (first,second) is (left,right)"),
+        computed
+            .replace("and first is ready", "and (first,second) is (left,right)")
+            .replace("fn keep", "quote fn keep"),
+    ] {
+        let package = compile(&candidate);
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+        let unproven = candidate.replace("assumes flag;", "");
+        let error = compile_with_protocols(&unproven, &Default::default()).unwrap_err();
+        assert!(
+            error.contains("program precondition is not proven"),
+            "{error}"
+        );
+    }
+    let matched = source.replace(
+        "do {let (first,second)=pair;first and second}",
+        "(pair match {(first,true)=>first,_=>false})",
+    );
+    let checked = compile(&matched);
+    assert_eq!(
+        luna::execution::interpret(&checked, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let error = compile_with_protocols(&matched.replace("assumes flag;", ""), &Default::default())
+        .unwrap_err();
+    assert!(
+        error.contains("program precondition is not proven"),
+        "{error}"
+    );
+    let alternatives =
+        matched.replace("(first,true)=>first", "(first,true) or (true,first)=>first");
+    for source in [
+        alternatives.clone(),
+        alternatives.replace("fn keep", "quote fn keep"),
+    ] {
+        let package = compile(&source);
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+        let error =
+            compile_with_protocols(&source.replace("assumes flag;", ""), &Default::default())
+                .unwrap_err();
+        assert!(
+            error.contains("program precondition is not proven"),
+            "{error}"
+        );
+    }
+    let transformed = matched.replace(
+        "(first,true)=>first",
+        "(first,true) and first is ready=>ready",
+    );
+    for source in [
+        transformed.clone(),
+        transformed.replace("fn keep", "quote fn keep"),
+    ] {
+        let package = compile(&source);
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+        let error =
+            compile_with_protocols(&source.replace("assumes flag;", ""), &Default::default())
+                .unwrap_err();
+        assert!(
+            error.contains("program precondition is not proven"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn computed_tuple_let_patterns_preserve_evaluation_and_failure() {
+    let package = compile(
+        "fn run()->(bool,bool,bool) {
+            var observed=false;
+            let original and do {observed=true;(original,not original)} is (same,opposite)=true;
+            (observed,same,opposite)
+        }",
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Tuple(vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(false)
+        ])
+    );
+    let source = "fn select(flag:bool)->bool {
+        let original and (original,not original) is (true,other)=flag else {return false;};
+        not other
+    }";
+    let package = compile(source);
+    for flag in [false, true] {
+        assert_eq!(
+            Interpreter::new(&package, Budget::default())
+                .unwrap()
+                .invoke(id(&package, "select"), vec![Value::Bool(flag)])
+                .unwrap(),
+            Value::Bool(flag)
+        );
+    }
+    let error = compile_with_protocols(
+        &source.replace(" else {return false;}", ""),
+        &Default::default(),
+    )
+    .unwrap_err();
+    assert!(error.contains("refutable let pattern"), "{error}");
+}
+
+#[test]
+fn integer_computed_patterns_cover_ranges_and_keep_ordered_bindings() {
+    for ty in ["i32", "Integer"] {
+        let phase = if ty == "Integer" { "comptime" } else { "" };
+        let source = format!(
+            "typealias i32=.i32'builtin; typealias Integer=.Integer'builtin;
+            {phase} fn classify(input:{ty})->bool {{
+                input match {{
+                    value and (value < 0) is true=>false,
+                    value and (value >= 0) is true=>true,
+                }}
+            }}"
+        );
+        let package = compile(&source);
+        for value in [-9, -1, 0, 1, 9] {
+            let input = if ty == "i32" {
+                Value::SignedInteger(value)
+            } else {
+                Value::Integer(comptime_runtime::Integer::from_i128(value))
+            };
+            let result = Interpreter::new(&package, Budget::default())
+                .unwrap()
+                .invoke(id(&package, "classify"), vec![input])
+                .unwrap();
+            assert_eq!(result, Value::Bool(value >= 0));
+        }
+        let bad = source.replace("value >= 0", "value > 0");
+        let error = compile_with_protocols(&bad, &Default::default()).unwrap_err();
+        assert!(error.contains("exhaustive"), "{error}");
+    }
+}
+
+#[test]
+fn conditional_callables_complete_computed_inputs_before_branch_specialization() {
+    for definitions in [
+        "comptime fn prepared(config:bool)->bool {var flag=not config;flag=not flag;flag}
+         fn first(comptime option:bool,value:bool)->bool {option and value}
+         fn second(comptime option:bool,value:bool)->bool {not first(option,value)}",
+        "comptime fn Prepared(config:bool)->.Type'builtin {bool}
+         fn first(comptime T:.Type'builtin,value:bool)->bool where requires T == bool {value}
+         fn second(comptime T:.Type'builtin,value:bool)->bool where requires T == bool {not value}",
+        "struct Options {flag:bool} comptime fn prepared(config:bool)->Options {Options {flag:config}}
+         fn first(comptime option:Options,value:bool)->bool {option.flag and value}
+         fn second(comptime option:Options,value:bool)->bool {not first(option,value)}",
+        "enum Options {yes,no} comptime fn prepared(config:bool)->Options {.yes}
+         fn first(comptime option:Options,value:bool)->bool {option match {.yes=>value,.no=>false}}
+         fn second(comptime option:Options,value:bool)->bool {not first(option,value)}",
+    ] {
+        let producer = if definitions.contains("fn Prepared") {
+            "Prepared(config)"
+        } else {
+            "prepared(config)"
+        };
+        for selector in [
+            "if flag {first} else {second}",
+            "flag match {true=>first,false=>second}",
+            "do {if flag {first} else {second}}",
+        ] {
+            let package = compile(&format!(
+                "{definitions}
+                fn value()->bool {{true}}
+                fn choose(comptime config:bool,flag:bool)->bool {{let action={selector};action({producer},value())}}
+                fn entry()->(bool,bool) {{(choose(true,true),choose(true,false))}}"
+            ));
+            let graph = luna::instantiation::instantiate(&package, "entry", 200_000).unwrap();
+            assert!(
+                !graph
+                    .functions
+                    .iter()
+                    .any(|f| f.function.name == "prepared" || f.function.name == "Prepared")
+            );
+            let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
+            assert_eq!(
+                vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+                Value::Tuple(vec![Value::Bool(true), Value::Bool(false)]),
+                "{selector}: {definitions}"
+            );
+        }
+    }
+}
+
+#[test]
+fn variant_payload_patterns_observe_prior_bindings_and_nested_tuple_fields() {
+    let package = compile(
+        "enum Pair {pair(bool,bool),other(bool,bool),nested(bool,(bool,bool))}
+        fn equal(first:bool,second:bool)->bool {first==second}
+        fn read(value:Pair)->bool {value match {
+            .pair(first,(second if equal(first,second)))=>true,
+            .other(second,(first if equal(first,second)))=>true,
+            .nested(first,(second,(third and equal(first,second) is same)))=>same and third,
+            _=>false,
+        }}
+        fn run()->(bool,bool,bool,bool,bool,bool) {
+            (read(Pair.pair(true,true)),read(Pair.pair(true,false)),
+             read(Pair.other(false,false)),read(Pair.other(false,true)),
+             read(Pair.nested(true,(true,true))),read(Pair.nested(true,(false,true))))
+        }",
+    );
+    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(&package, "run"), vec![]).unwrap(),
+        Value::Tuple(
+            [true, false, true, false, true, false]
+                .into_iter()
+                .map(Value::Bool)
+                .collect()
+        )
+    );
+    luna::instantiation::instantiate(&package, "run", 200_000).unwrap();
+}
+
+#[test]
+fn variant_payload_pattern_scopes_preserve_fallbacks_and_alternative_remapping() {
+    let package=compile("enum Pair {pair(bool,bool),other(bool,bool)}
+        fn alternatives(value:Pair)->bool {value match {
+            .pair(first,(second if first == second)) or .other(second,(first if first == second))=>first and second,
+            _=>false,
+        }}
+        fn fallback()->bool {
+            let first=true;
+            let .pair(first,(_ if first))=Pair.pair(false,true) else {return first;};
+            false
+        }
+        fn run()->(bool,bool,bool,bool) {
+            (alternatives(Pair.pair(true,true)),alternatives(Pair.other(true,true)),
+             alternatives(Pair.other(false,true)),fallback())
+        }");
+    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(&package, "run"), vec![]).unwrap(),
+        Value::Tuple(
+            [true, true, false, true]
+                .into_iter()
+                .map(Value::Bool)
+                .collect()
+        )
+    );
+    luna::instantiation::instantiate(&package, "run", 200_000).unwrap();
+    for body in [
+        "fn bad(value:Pair) {let .pair((_ if later),later)=value else {return;};}",
+        "fn bad(value:Pair) {let .pair(same,same)=value else {return;};}",
+        "fn bad(value:Pair)->bool {value match {.pair(first,(_ if first))=>first,_=>first}}",
+    ] {
+        let source = format!("enum Pair {{pair(bool,bool),other(bool,bool)}} {body}");
+        assert!(
+            compile_with_protocols(&source, &Default::default()).is_err(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn pattern_guard_constructors_keep_expression_and_control_boundaries() {
+    let source="struct Box {flag:bool}
+        fn matched(value:bool)->bool {value match {
+            _ if Box {flag:value}.flag=>true,_=>false,
+        }}
+        fn bound(value:bool)->bool {
+            let flag if Box {flag:flag}.flag=value else {return false;};
+            flag
+        }
+        fn conditional(value:bool)->bool {
+            if value is flag if Box {flag:flag}.flag do {return flag;}
+            false
+        }
+        fn properties(...fields:T)->T where T {fields}
+        fn collected(value:bool)->bool {false match {
+            _ if properties {flag:value}.flag=>true,_=>false,
+        }}
+        fn looped()->bool {
+            var found=false;
+            inline for index if Box {flag:index == 1}.flag in 0..3 {found=true;}
+            found
+        }
+        fn run()->(bool,bool,bool,bool,bool,bool,bool,bool,bool) {
+            (matched(true),matched(false),bound(true),bound(false),conditional(true),conditional(false),
+             collected(true),collected(false),looped())
+        }";
+    let package = compile(source);
+    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(&package, "run"), vec![]).unwrap(),
+        Value::Tuple(
+            [true, false, true, false, true, false, true, false, true]
+                .into_iter()
+                .map(Value::Bool)
+                .collect()
+        )
+    );
+    luna::instantiation::instantiate(&package, "run", 200_000).unwrap();
+}
+
+#[test]
+fn named_field_candidates_observe_prior_bindings_across_record_kinds() {
+    let package = compile(
+        "struct Pair {first:bool,second:bool}
+        enum Choice {pair {first:bool,second:bool},none}
+        fn record(value:Pair)->bool {value match {
+            {first:a,second:(b if a == b)}=>a,_=>false,
+        }}
+        fn variant(value:Choice)->bool {value match {
+            .pair {first:a,second:(b if a == b)}=>a,_=>false,
+        }}
+        fn collect(...value:T)->T where T {value}
+        fn anonymous(second:bool)->bool {
+            let value=collect {first:true,second:second};
+            value match {{first:a,second:(b if a == b)}=>a,_=>false}
+        }
+        fn nested(value:Choice)->bool {value match {
+            .pair {first:a,second:(b and (a,b) is (true,true))}=>true,_=>false,
+        }}
+        fn run()->(bool,bool,bool,bool,bool,bool,bool,bool) {
+            (record(Pair {first:true,second:true}),record(Pair {first:true,second:false}),
+             variant(Choice.pair {first:true,second:true}),variant(Choice.pair {first:true,second:false}),
+             anonymous(true),anonymous(false),
+             nested(Choice.pair {first:true,second:true}),nested(Choice.pair {first:true,second:false}))
+        }",
+    );
+    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(&package, "run"), vec![]).unwrap(),
+        Value::Tuple(
+            [true, false, true, false, true, false, true, false]
+                .into_iter()
+                .map(Value::Bool)
+                .collect()
+        )
+    );
+    luna::instantiation::instantiate(&package, "run", 200_000).unwrap();
+}
+
+#[test]
+fn named_field_candidates_keep_fallback_scope_and_reject_unavailable_fields() {
+    let package = compile(
+        "struct Pair {first:bool,second:bool}
+        fn run()->bool {
+            let first=true;
+            let {first,second:(_ if first)}=Pair {first:false,second:true} else {return first;};
+            false
+        }",
+    );
+    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(&package, "run"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    luna::instantiation::instantiate(&package, "run", 200_000).unwrap();
+    for pattern in [
+        "{first:(a if b),second:b}",
+        "{second:b,first:(a if b)}",
+        "{first:a,second:a}",
+        "{first:a,first:b}",
+    ] {
+        let failure=compile_with_protocols(&format!(
+            "struct Pair {{first:bool,second:bool}} fn bad(value:Pair)->bool {{value match {{{pattern}=>true,_=>false}}}}"
+        ),&Default::default()).unwrap_err();
+        assert!(
+            failure.contains("HIR lowering") || failure.contains("elaboration failed"),
+            "{pattern}: {failure}"
+        );
+    }
+}
+
+#[test]
+fn named_field_candidates_remap_alternatives_and_keep_declaration_order() {
+    let package = compile(
+        "struct Pair {first:bool,second:bool}
+        fn first()->bool {true} fn second()->bool {true}
+        fn check(value:Pair)->bool {value match {
+            {first:a,second:(b if not a)} or {first:b,second:(a if a == b)}=>a and b,
+            _=>false,
+        }}
+        fn ordered(value:Pair)->bool {value match {
+            {second:(_ if second()),first:(_ if first())}=>true,_=>false,
+        }}
+        fn run()->(bool,bool,bool) {
+            (check(Pair {first:true,second:true}),check(Pair {first:true,second:false}),
+             ordered(Pair {first:true,second:true}))
+        }",
+    );
+    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(&package, "run"), vec![]).unwrap(),
+        Value::Tuple(vec![
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(true)
+        ])
+    );
+    let trace = calls(&package, &vm)
+        .into_iter()
+        .filter(|name| matches!(name.as_str(), "first" | "second"))
+        .collect::<Vec<_>>();
+    assert_eq!(trace, ["first", "second"]);
+    luna::instantiation::instantiate(&package, "run", 200_000).unwrap();
 }

@@ -247,6 +247,7 @@ pub fn compile_in_package_with_source_protocols(
 
 fn source_protocols(options: &Options) -> crate::protocols::type_constructors::Selectors<'_> {
     crate::protocols::type_constructors::Selectors {
+        list_pattern: None,
         copy: None,
         drop: None,
         index: options.index_protocol.as_deref(),

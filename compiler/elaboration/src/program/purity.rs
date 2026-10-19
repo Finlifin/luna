@@ -612,7 +612,11 @@ pub(super) fn validate_runtime_promises(
             .collect::<Vec<_>>();
         if !analysis.function(function.declaration, &types, 0) {
             return Err(Error {
-                source: function.body.source,
+                source: function
+                    .body
+                    .source
+                    .original(&package.expansion_sources)
+                    .unwrap_or(function.body.source),
                 message: format!(
                     "runtime pure function `{}` lacks P4 evidence for its calls, storage or resource behavior",
                     function.name
@@ -635,7 +639,7 @@ pub(super) fn validate_defaults(
     let mut analysis = Analysis::new(package, true);
     analysis.protocols = protocols.clone();
     for (value, span) in obligations {
-        if !analysis.expression(value, &mut BTreeSet::new(), false, 0) {
+        if !analysis.default_expression(value) {
             return Err(error(
                 *span,
                 "default expression requires P3 stability/termination evidence; call graph or operations could not be certified",
@@ -647,14 +651,20 @@ pub(super) fn validate_defaults(
 
 struct Analysis<'a> {
     package: &'a n::Package,
+    method_callees: crate::verification::memory::MethodCallees,
     protocols: Protocols,
     functions: HashMap<DeclarationId, &'a n::Function>,
     tuple_heads: HashSet<DeclarationId>,
     finite: bool,
     resource_scope: bool,
     callables: BTreeMap<CallablePlace, Codes>,
+    // Frame-local aliases to owned places. Assignments widen target sets; bindings
+    // crossing loop backedges are closed to a fixed point before acceptance.
+    // Storage liveness and Copy delivery remain resource-verifier obligations.
+    private_addresses: BTreeMap<n::LocalId, Vec<n::Expr>>,
     closures: Codes,
     result_code: Option<Codes>,
+    result_addresses: Option<Vec<n::Expr>>,
     result_fields: BTreeMap<Vec<usize>, Codes>,
     active: HashSet<Key>,
     proven: HashMap<Key, bool>,
@@ -665,6 +675,7 @@ impl<'a> Analysis<'a> {
     fn new(package: &'a n::Package, finite: bool) -> Self {
         Self {
             package,
+            method_callees: Default::default(),
             protocols: Protocols::default(),
             functions: package
                 .functions
@@ -680,8 +691,10 @@ impl<'a> Analysis<'a> {
             finite,
             resource_scope: false,
             callables: BTreeMap::new(),
+            private_addresses: BTreeMap::new(),
             closures: vec![],
             result_code: None,
+            result_addresses: None,
             result_fields: BTreeMap::new(),
             active: HashSet::new(),
             proven: HashMap::new(),
@@ -689,7 +702,177 @@ impl<'a> Analysis<'a> {
         }
     }
 
+    fn default_expression(&mut self, value: &n::Expr) -> bool {
+        if self.protocols.drop.is_none() {
+            return self.expression(value, &mut BTreeSet::new(), false, 0);
+        }
+        // Observation alone can certify calls delivering owned results with
+        // richer memory representations than the synthetic boundary handles.
+        // Keep this proof independent: a failed attempt must not leak callable
+        // or resource assumptions into the temporary-owning path below.
+        let mut observation = Self::new(self.package, self.finite);
+        observation.protocols = self.protocols.clone();
+        observation.fuel = self.fuel;
+        let observed = observation.expression(value, &mut BTreeSet::new(), false, 0);
+        self.fuel = observation.fuel;
+        if observed {
+            return true;
+        }
+        let Ok(free) = nir::free_bindings::collect(value, &mut self.fuel) else {
+            return false;
+        };
+        let mut types = BTreeMap::new();
+        if nir::visit::expression(value, &mut self.fuel, |node, fuel| {
+            crate::verification::memory::bound_type(&node.ty, fuel)?;
+            match &node.kind {
+                K::Assign { place, .. }
+                | K::BitAssign { place, .. }
+                | K::BitUpdate { place, .. }
+                    if free.contains(&place.root) =>
+                {
+                    return Err("default cannot mutate an external binding".into());
+                }
+                _ => {}
+            }
+            if let K::Local(binding) = &node.kind {
+                if free.contains(binding) {
+                    if types.get(binding).is_some_and(|ty| *ty != &node.ty) {
+                        return Err("default binding type mismatch".into());
+                    }
+                    types.insert(*binding, &node.ty);
+                }
+            }
+            Ok(())
+        })
+        .is_err()
+        {
+            return false;
+        }
+        // A synthetic resource boundary may own fresh argument temporaries,
+        // but must not acquire a caller's affine owner. Preserve the existing
+        // observation-only path for non-Copy external bindings.
+        if types.len() != free.len() || !self.default_inputs_are_copy(types.values().copied()) {
+            return self.expression(value, &mut BTreeSet::new(), false, 0);
+        }
+        let declaration = DeclarationId {
+            package: u64::MAX,
+            local: u32::MAX,
+        };
+        if self.functions.contains_key(&declaration) {
+            return false;
+        }
+        let mut fuel = self.fuel as u64;
+        let bounded = constants::charge_copy(value, &mut fuel, Span::default()).is_ok();
+        self.fuel = fuel as usize;
+        if !bounded {
+            return false;
+        }
+        let function = n::Function {
+            declaration,
+            name: "default-observation".into(),
+            phase: n::FunctionPhase::Runtime,
+            inline: false,
+            pure: false,
+            type_parameters: vec![],
+            parameters: types.keys().copied().collect(),
+            defaults: vec![],
+            preconditions: vec![],
+            postconditions: vec![],
+            result_binding: None,
+            entry_snapshots: vec![],
+            capabilities: vec![],
+            requirements: vec![],
+            signature: Term::Function {
+                parameters: types
+                    .values()
+                    .map(|ty| nir::Parameter {
+                        sort: Sort::Runtime,
+                        ty: (*ty).clone(),
+                    })
+                    .collect(),
+                result: Box::new(value.ty.clone()),
+            },
+            body: value.clone(),
+        };
+        let previous_scope = std::mem::replace(&mut self.resource_scope, true);
+        let valid = self.expression(value, &mut free.clone(), false, 0);
+        self.resource_scope = previous_scope;
+        valid && self.transfer_cleanup_is_pure(&function, &BTreeMap::new())
+    }
+
+    fn resource_world_parts(&self) -> Option<(crate::ptc::Context, crate::implementation::Index)> {
+        let context = crate::ptc::Context::from_package(self.package).ok()?;
+        let mut index = crate::implementation::Index::default();
+        let budget = crate::ptc::Budget {
+            steps: self.fuel,
+            ..Default::default()
+        };
+        for implementation in &self.package.implementations {
+            if implementation.interface.is_none() {
+                continue;
+            }
+            if index
+                .insert(
+                    crate::implementation::ImplementationHead {
+                        parameter_types: implementation.parameter_types.clone(),
+                        declaration: implementation.declaration,
+                        interface: implementation.interface,
+                        interface_arguments: implementation.interface_arguments.clone(),
+                        subject: implementation.subject.clone(),
+                        type_parameters: implementation.type_parameters.clone(),
+                        requirements: implementation.requirements.clone(),
+                    },
+                    budget,
+                )
+                .is_err()
+            {
+                return None;
+            }
+        }
+        Some((context, index))
+    }
+
+    fn default_inputs_are_copy<'t>(&mut self, types: impl Iterator<Item = &'t Term>) -> bool {
+        let types: Vec<_> = types.filter(|ty| !self.copy_type(ty)).collect();
+        if types.is_empty() {
+            return true;
+        }
+        let (Some(copy), Some(drop)) = (self.protocols.copy, self.protocols.drop) else {
+            return false;
+        };
+        let Some((context, index)) = self.resource_world_parts() else {
+            return false;
+        };
+        let world = crate::capabilities::World {
+            index: &index,
+            context: &context,
+            traits: &self.package.traits,
+            implementations: &self.package.implementations,
+            assumptions: &[],
+        };
+        types.into_iter().all(|ty| {
+            crate::verification::copy::acquire(
+                self.package,
+                &world,
+                copy,
+                drop,
+                ty,
+                crate::ptc::Budget {
+                    steps: self.fuel,
+                    ..Default::default()
+                },
+                &mut self.fuel,
+            )
+            .is_ok()
+        })
+    }
+
     fn copy_type(&self, ty: &Term) -> bool {
+        // Staged immutable scalar inputs have no runtime cleanup identity.
+        // P3 default validation keeps its runtime-only domain restriction.
+        if !self.finite && matches!(ty, Term::Primitive(P::Type | P::Integer | P::Float)) {
+            return true;
+        }
         fn inspect(ty: &Term, heads: &HashSet<DeclarationId>, depth: usize) -> bool {
             if depth >= 128 {
                 return false;
@@ -717,11 +900,38 @@ impl<'a> Analysis<'a> {
         depth: usize,
     ) -> bool {
         self.result_code = None;
+        self.result_addresses = None;
         self.result_fields.clear();
         let valid = self.check_expression(value, private, returns, depth);
         if !valid {
             self.result_fields.clear();
         }
+        let addresses = self.result_addresses.take();
+        self.result_addresses = if valid
+            && !self.finite
+            && matches!(
+                crate::verification::memory::pointer_representation(
+                    Some(self.package),
+                    &value.ty,
+                    &mut self.fuel,
+                ),
+                Ok(Some(_))
+            ) {
+            match &value.kind {
+                K::Local(_) | K::AddressOf(_) => self.private_targets(value, private, depth + 1),
+                K::If { .. }
+                | K::Match { .. }
+                | K::Block { .. }
+                | K::CallPreparation { .. }
+                | K::PointerField { .. }
+                | K::PointerAnonymousField { .. }
+                | K::ReadPointer(_)
+                | K::NewtypeConvert(_) => addresses,
+                _ => None,
+            }
+        } else {
+            None
+        };
         let returned = self.result_code.take();
         self.result_code = if valid {
             match &value.kind {
@@ -739,7 +949,9 @@ impl<'a> Analysis<'a> {
                 | K::Block { .. }
                 | K::CallPreparation { .. }
                 | K::Field { .. }
-                | K::AnonymousField { .. } => returned,
+                | K::AnonymousField { .. }
+                | K::NewtypeConvert(_)
+                | K::ReadPointer(_) => returned,
                 _ => None,
             }
         } else {
@@ -759,6 +971,8 @@ impl<'a> Analysis<'a> {
                 | K::CallPreparation { .. }
                 | K::Field { .. }
                 | K::AnonymousField { .. }
+                | K::NewtypeConvert(_)
+                | K::ReadPointer(_)
         ) {
             self.result_fields.clear();
         }
@@ -848,6 +1062,7 @@ impl<'a> Analysis<'a> {
         &mut self,
         pattern: &n::Pattern,
         fields: &BTreeMap<Vec<usize>, Codes>,
+        addresses: Option<&[n::Expr]>,
         path: &mut Vec<usize>,
         private: &mut BTreeSet<n::LocalId>,
         depth: usize,
@@ -857,8 +1072,24 @@ impl<'a> Analysis<'a> {
         }
         self.fuel -= 1;
         match pattern {
-            n::Pattern::Binding { binding, inner } => {
+            n::Pattern::Binding { binding, inner } | n::Pattern::Observe { binding, inner } => {
+                let observation = matches!(pattern, n::Pattern::Observe { .. });
+                // Observation subjects are fresh candidate-local aliases, not
+                // exports. Analyze all extractor computations in their scope.
+                if observation && private.contains(binding) {
+                    return false;
+                }
                 private.insert(*binding);
+                if path.is_empty() {
+                    if let Some(addresses) = addresses {
+                        let Some(targets) = self.copy_private_targets(addresses) else {
+                            return false;
+                        };
+                        self.private_addresses.insert(*binding, targets);
+                    } else {
+                        self.private_addresses.remove(binding);
+                    }
+                }
                 for (field, codes) in fields {
                     let Some(fuel) = self.fuel.checked_sub(field.len().saturating_add(1)) else {
                         self.fuel = 0;
@@ -879,7 +1110,14 @@ impl<'a> Analysis<'a> {
                         codes,
                     );
                 }
-                self.bind_code_pattern(inner, fields, path, private, depth + 1)
+                let valid =
+                    self.bind_code_pattern(inner, fields, addresses, path, private, depth + 1);
+                if observation {
+                    private.remove(binding);
+                    self.private_addresses.remove(binding);
+                    self.callables.retain(|place, _| place.binding != *binding);
+                }
+                valid
             }
             n::Pattern::Tuple(patterns)
             | n::Pattern::TypeTuple(patterns)
@@ -895,7 +1133,14 @@ impl<'a> Analysis<'a> {
             } => {
                 for (index, pattern) in patterns.iter().enumerate() {
                     path.push(index);
-                    let valid = self.bind_code_pattern(pattern, fields, path, private, depth + 1);
+                    let valid = self.bind_code_pattern(
+                        pattern,
+                        fields,
+                        addresses,
+                        path,
+                        private,
+                        depth + 1,
+                    );
                     path.pop();
                     if !valid {
                         return false;
@@ -911,7 +1156,14 @@ impl<'a> Analysis<'a> {
                 path.extend([VARIANT_FIELD, *index]);
                 for (field, pattern) in patterns.iter().enumerate() {
                     path.push(field);
-                    let valid = self.bind_code_pattern(pattern, fields, path, private, depth + 1);
+                    let valid = self.bind_code_pattern(
+                        pattern,
+                        fields,
+                        addresses,
+                        path,
+                        private,
+                        depth + 1,
+                    );
                     path.pop();
                     if !valid {
                         return false;
@@ -921,7 +1173,7 @@ impl<'a> Analysis<'a> {
                 true
             }
             n::Pattern::Remap { pattern, bindings } => {
-                if !self.bind_code_pattern(pattern, fields, path, private, depth + 1) {
+                if !self.bind_code_pattern(pattern, fields, addresses, path, private, depth + 1) {
                     return false;
                 }
                 let mut renamed = vec![];
@@ -951,6 +1203,13 @@ impl<'a> Analysis<'a> {
                         ));
                     }
                 }
+                let mut renamed_addresses = Vec::new();
+                for (from, to) in bindings {
+                    if let Some(targets) = self.private_addresses.remove(from) {
+                        renamed_addresses.push((*to, targets));
+                    }
+                }
+                self.private_addresses.extend(renamed_addresses);
                 self.callables
                     .retain(|place, _| !bindings.iter().any(|(from, _)| *from == place.binding));
                 self.callables.extend(renamed);
@@ -962,6 +1221,12 @@ impl<'a> Analysis<'a> {
                     .keys()
                     .map(|place| place.binding)
                     .collect::<BTreeSet<_>>();
+                let visible_addresses = self
+                    .private_addresses
+                    .keys()
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                let mut joined_addresses: Option<BTreeMap<n::LocalId, Vec<n::Expr>>> = None;
                 let mut joined: Option<BTreeMap<CallablePlace, Codes>> = None;
                 for pattern in patterns {
                     if self.code_pattern_absent(pattern, fields, path, depth + 1) {
@@ -969,7 +1234,8 @@ impl<'a> Analysis<'a> {
                     }
                     // Failed alternatives may have already changed private
                     // locals. Carry those widened facts into later alternatives.
-                    if !self.bind_code_pattern(pattern, fields, path, private, depth + 1) {
+                    if !self.bind_code_pattern(pattern, fields, addresses, path, private, depth + 1)
+                    {
                         return false;
                     }
                     let mut keys = vec![];
@@ -983,6 +1249,33 @@ impl<'a> Analysis<'a> {
                             keys.push(place.clone());
                         }
                     }
+                    let address_keys = self
+                        .private_addresses
+                        .keys()
+                        .filter(|key| !visible_addresses.contains(key))
+                        .copied()
+                        .collect::<Vec<_>>();
+                    let mut address_branch = BTreeMap::new();
+                    for key in address_keys {
+                        address_branch.insert(key, self.private_addresses.remove(&key).unwrap());
+                    }
+                    joined_addresses = Some(match joined_addresses {
+                        None => address_branch,
+                        Some(previous) => {
+                            let mut result = BTreeMap::new();
+                            for (binding, targets) in previous {
+                                if let Some(incoming) = address_branch.remove(&binding) {
+                                    let Some(targets) =
+                                        self.join_private_targets(targets, incoming)
+                                    else {
+                                        return false;
+                                    };
+                                    result.insert(binding, targets);
+                                }
+                            }
+                            result
+                        }
+                    });
                     let mut branch = keys
                         .into_iter()
                         .map(|key| {
@@ -1001,21 +1294,31 @@ impl<'a> Analysis<'a> {
                             .collect(),
                     });
                 }
+                self.private_addresses
+                    .extend(joined_addresses.unwrap_or_default());
                 self.callables.extend(joined.unwrap_or_default());
                 self.fuel > 0
             }
             n::Pattern::Then { first, value, next } => {
-                if !self.bind_code_pattern(first, fields, path, private, depth + 1)
+                if !self.bind_code_pattern(first, fields, addresses, path, private, depth + 1)
                     || (self.finite && !self.resource_scope && !self.copy_type(&value.ty))
                     || !self.expression(value, private, false, depth + 1)
                 {
                     return false;
                 }
                 let computed = self.take_code_fields();
-                self.bind_code_pattern(next, &computed, &mut vec![], private, depth + 1)
+                let computed_addresses = self.result_addresses.take();
+                self.bind_code_pattern(
+                    next,
+                    &computed,
+                    computed_addresses.as_deref(),
+                    &mut vec![],
+                    private,
+                    depth + 1,
+                )
             }
             n::Pattern::Guard { pattern, condition } => {
-                self.bind_code_pattern(pattern, fields, path, private, depth + 1)
+                self.bind_code_pattern(pattern, fields, addresses, path, private, depth + 1)
                     && self.copy_type(&condition.ty)
                     && self.expression(condition, private, false, depth + 1)
             }
@@ -1044,7 +1347,9 @@ impl<'a> Analysis<'a> {
             }
             *fuel -= 1;
             match pattern {
-                n::Pattern::Then { .. } | n::Pattern::Guard { .. } => false,
+                n::Pattern::Then { .. } | n::Pattern::Guard { .. } | n::Pattern::Observe { .. } => {
+                    false
+                }
                 n::Pattern::Binding { inner, .. } | n::Pattern::Remap { pattern: inner, .. } => {
                     structural(inner, fuel, depth + 1)
                 }
@@ -1175,6 +1480,8 @@ impl<'a> Analysis<'a> {
                     self.result_fields.clear();
                 }
                 *private = saved;
+                self.private_addresses
+                    .retain(|binding, _| private.contains(binding));
                 self.callables
                     .retain(|binding, _| visible_code.contains(&binding.binding));
                 valid
@@ -1184,6 +1491,11 @@ impl<'a> Analysis<'a> {
                     || !self.expression(value, private, returns, depth + 1)
                 {
                     return false;
+                }
+                if !self.finite {
+                    if let Some(places) = self.result_addresses.take() {
+                        self.private_addresses.insert(*binding, places);
+                    }
                 }
                 for (fields, code) in self.take_code_fields() {
                     self.callables.insert(
@@ -1203,17 +1515,33 @@ impl<'a> Analysis<'a> {
                 guard,
                 otherwise,
             } => {
-                if otherwise.is_some()
-                    || (self.finite && !self.resource_scope && !self.copy_type(&value.ty))
+                if (self.finite && !self.resource_scope && !self.copy_type(&value.ty))
                     || !self.expression(value, private, returns, depth + 1)
                 {
                     return false;
                 }
                 let fields = self.take_code_fields();
-                self.bind_code_pattern(pattern, &fields, &mut vec![], private, depth + 1)
-                    && guard.as_ref().is_none_or(|guard| {
-                        self.copy_type(&guard.ty)
-                            && self.expression(guard, private, returns, depth + 1)
+                let addresses = self.result_addresses.take();
+                let outer_private = private.clone();
+                let valid = self.bind_code_pattern(
+                    pattern,
+                    &fields,
+                    addresses.as_deref(),
+                    &mut vec![],
+                    private,
+                    depth + 1,
+                ) && guard.as_ref().is_none_or(|guard| {
+                    self.copy_type(&guard.ty) && self.expression(guard, private, returns, depth + 1)
+                });
+                valid
+                    && otherwise.as_ref().is_none_or(|otherwise| {
+                        is_never(&otherwise.ty)
+                            && self.check_pattern_failure(
+                                otherwise,
+                                &outer_private,
+                                returns,
+                                depth + 1,
+                            )
                     })
             }
             K::Local(binding) => {
@@ -1241,17 +1569,85 @@ impl<'a> Analysis<'a> {
             // Resource validation separately establishes each load's live,
             // initialized target. Never promote this evidence to runtime P4 or
             // cache a computed value across calls/storage versions.
+            K::ReadPointer(pointer) if !self.finite => {
+                if !self.expression(pointer, private, returns, depth + 1) {
+                    return false;
+                }
+                let Some(places) = self.result_addresses.take() else {
+                    return false;
+                };
+                let mut joined = None;
+                let mut targets = Some(Vec::new());
+                for place in places {
+                    if !self.expression(&place, private, returns, depth + 1) {
+                        return false;
+                    }
+                    // A private pointer slot can contain an external address.
+                    // Retain pointee evidence only when every possible slot
+                    // contributes established private targets; unknown is sticky.
+                    targets = match (targets, self.result_addresses.take()) {
+                        (Some(previous), Some(incoming)) => {
+                            self.join_private_targets(previous, incoming)
+                        }
+                        _ => None,
+                    };
+                    let fields = self.take_code_fields();
+                    joined = Some(match joined {
+                        None => fields,
+                        Some(previous) => self.join_code_fields(previous, fields),
+                    });
+                }
+                self.set_code_fields(joined.unwrap_or_default());
+                self.result_addresses = targets;
+                true
+            }
+            K::AddressOf(place) if !self.finite => {
+                self.private_owned_place(place, private)
+                    && self.expression(place, private, returns, depth + 1)
+            }
+            K::WritePointer {
+                pointer,
+                value: replacement,
+            } if !self.finite => {
+                if !self.expression(pointer, private, returns, depth + 1) {
+                    return false;
+                }
+                let Some(places) = self.result_addresses.take() else {
+                    return false;
+                };
+                // Data-only replacement cannot change callable identity or
+                // pointer reachability. Resource analysis checks Copy legality,
+                // cleanup responsibility and initialized storage separately.
+                matches!(
+                    crate::verification::memory::data_representation(
+                        Some(self.package),
+                        &replacement.ty,
+                        &mut self.fuel,
+                    ),
+                    Ok(true)
+                ) && places
+                    .iter()
+                    .all(|place| self.expression(place, private, returns, depth + 1))
+                    && self.expression(replacement, private, returns, depth + 1)
+            }
             K::ReadPointer(pointer) if self.finite => {
-                self.copy_type(&value.ty)
+                // In a checked resource scope the transfer report establishes
+                // Copy representation and target availability for nominal loads.
+                (self.copy_type(&value.ty) || self.resource_scope)
                     && matches!(&pointer.ty,Term::Pointer(inner) if **inner==value.ty)
                     && self.expression(pointer, private, returns, depth + 1)
             }
-            K::PointerField { pointer, .. } | K::PointerAnonymousField { pointer, .. }
-                if self.finite =>
-            {
-                matches!(value.ty, Term::Pointer(_))
-                    && matches!(pointer.ty, Term::Pointer(_))
-                    && self.expression(pointer, private, returns, depth + 1)
+            K::PointerField { pointer, .. } | K::PointerAnonymousField { pointer, .. } => {
+                if !matches!(value.ty, Term::Pointer(_))
+                    || !matches!(pointer.ty, Term::Pointer(_))
+                    || !self.expression(pointer, private, returns, depth + 1)
+                {
+                    return false;
+                }
+                let addresses = self.result_addresses.take();
+                self.result_addresses =
+                    addresses.and_then(|places| self.project_private_targets(value, places));
+                true
             }
             K::Literal(_) | K::Unit | K::AssociatedValue { .. } => self.copy_type(&value.ty),
             K::Assign { place, value } => {
@@ -1260,6 +1656,18 @@ impl<'a> Analysis<'a> {
                     || !self.expression(value, private, returns, depth + 1)
                 {
                     return false;
+                }
+                if place.fields.is_empty() {
+                    let incoming = self.result_addresses.take();
+                    if let (Some(previous), Some(incoming)) =
+                        (self.private_addresses.remove(&place.root), incoming)
+                    {
+                        let Some(joined) = self.join_private_targets(previous, incoming) else {
+                            return false;
+                        };
+                        self.private_addresses.insert(place.root, joined);
+                    }
+                    // Missing evidence is sticky across later alternatives.
                 }
                 // Widen rather than choosing the last syntactically visited
                 // branch. Unknown is sticky, including across loop backedges.
@@ -1330,7 +1738,7 @@ impl<'a> Analysis<'a> {
                 if self.finite || !self.loop_code_closure(body) {
                     return false;
                 }
-                self.expression(body, &mut private.clone(), returns, depth + 1)
+                self.loop_private_addresses(body, private, returns, depth + 1)
             }
             K::Break(_) | K::Continue(_) => !self.finite,
             K::Return(value) => {
@@ -1351,6 +1759,7 @@ impl<'a> Analysis<'a> {
                     return false;
                 }
                 let left = self.take_code_fields();
+                let left_addresses = self.result_addresses.take();
                 let Some(branch) = else_branch else {
                     return true;
                 };
@@ -1358,6 +1767,13 @@ impl<'a> Analysis<'a> {
                     return false;
                 }
                 let right = self.take_code_fields();
+                self.result_addresses =
+                    left_addresses
+                        .zip(self.result_addresses.take())
+                        .map(|(mut left, right)| {
+                            left.extend(right);
+                            left
+                        });
                 let joined = self.join_code_fields(left, right);
                 self.set_code_fields(joined);
                 true
@@ -1369,12 +1785,14 @@ impl<'a> Analysis<'a> {
                     return false;
                 }
                 let scrutinee = self.take_code_fields();
+                let scrutinee_addresses = self.result_addresses.take();
                 let visible = self
                     .callables
                     .keys()
                     .map(|place| place.binding)
                     .collect::<BTreeSet<_>>();
                 let mut codes = None;
+                let mut addresses = Some(Vec::new());
                 for arm in arms {
                     let absent =
                         self.code_pattern_absent(&arm.pattern, &scrutinee, &mut vec![], depth + 1);
@@ -1388,6 +1806,7 @@ impl<'a> Analysis<'a> {
                     if !self.bind_code_pattern(
                         &arm.pattern,
                         &scrutinee,
+                        scrutinee_addresses.as_deref(),
                         &mut vec![],
                         &mut arm_private,
                         depth + 1,
@@ -1399,13 +1818,22 @@ impl<'a> Analysis<'a> {
                         return false;
                     }
                     let result = self.take_code_fields();
+                    addresses = addresses.zip(self.result_addresses.take()).map(
+                        |(mut previous, incoming)| {
+                            previous.extend(incoming);
+                            previous
+                        },
+                    );
                     codes = Some(match codes {
                         None => result,
                         Some(previous) => self.join_code_fields(previous, result),
                     });
                     self.callables
                         .retain(|place, _| visible.contains(&place.binding));
+                    self.private_addresses
+                        .retain(|binding, _| private.contains(binding));
                 }
+                self.result_addresses = addresses.filter(|places| !places.is_empty());
                 self.set_code_fields(codes.unwrap_or_default());
                 true
             }
@@ -1431,6 +1859,28 @@ impl<'a> Analysis<'a> {
                 let mut inputs = BTreeMap::new();
                 // Snapshot identities at each argument's preparation point.
                 for arg in arguments {
+                    if self.finite {
+                        let Term::Function { parameters, .. } = callee.ty.callable_signature()
+                        else {
+                            return false;
+                        };
+                        let Some(parameter) = parameters.get(arg.parameter) else {
+                            return false;
+                        };
+                        if parameter.sort != Sort::Runtime
+                            && iir::staging::canonical_input_with_layouts(
+                                iir::staging::Layouts::new(
+                                    &self.package.normal_forms,
+                                    &self.package.newtypes,
+                                ),
+                                &arg.value,
+                                &mut self.fuel,
+                            )
+                            .is_err()
+                        {
+                            return false;
+                        }
+                    }
                     if (self.finite && !self.resource_scope && !self.copy_type(&arg.value.ty))
                         || !self.expression(&arg.value, private, returns, depth + 1)
                     {
@@ -1548,10 +1998,44 @@ impl<'a> Analysis<'a> {
                     || is_never(&inner.ty))
                     && self.expression(inner, private, returns, depth + 1)
             }
+            K::NewtypeConvert(inner) => {
+                let Ok(Some(conversion)) = nir::newtypes::conversion(
+                    &self.package.newtypes,
+                    &inner.ty,
+                    &value.ty,
+                    &[],
+                    &mut self.fuel,
+                ) else {
+                    return false;
+                };
+                // A direct conversion transfers its payload. It neither copies
+                // the nominal owner nor runs cleanup on the transferred value.
+                if !self.expression(inner, private, returns, depth + 1) {
+                    return false;
+                }
+                let mut fields = BTreeMap::new();
+                for (mut path, codes) in self.take_code_fields() {
+                    let Some(fuel) = self.fuel.checked_sub(path.len().saturating_add(1)) else {
+                        return false;
+                    };
+                    self.fuel = fuel;
+                    match conversion.direction() {
+                        nir::newtypes::Direction::Wrap => path.insert(0, 0),
+                        nir::newtypes::Direction::Unwrap => {
+                            if path.first() != Some(&0) {
+                                return false;
+                            }
+                            path.remove(0);
+                        }
+                    }
+                    fields.insert(path, codes);
+                }
+                self.set_code_fields(fields);
+                true
+            }
             K::Not(inner)
             | K::FloatNegate(inner)
             | K::BitConvert(inner)
-            | K::NewtypeConvert(inner)
             | K::Snapshot(inner)
             | K::TakeBits(inner)
             | K::SymbolName(inner)
@@ -1578,12 +2062,14 @@ impl<'a> Analysis<'a> {
                     && self.expression(b, private, returns, depth + 1)
             }
             K::IntegerBinary { left, right, .. } => {
-                n::machine_integer_type(value).is_some()
+                (n::machine_integer_type(value).is_some()
+                    || (!self.finite && left.ty == p(P::Integer) && right.ty == p(P::Integer)))
                     && self.expression(left, private, returns, depth + 1)
                     && self.expression(right, private, returns, depth + 1)
             }
             K::IntegerNegate(inner) => {
-                n::machine_integer_type(value).is_some()
+                (n::machine_integer_type(value).is_some()
+                    || (!self.finite && inner.ty == p(P::Integer)))
                     && self.expression(inner, private, returns, depth + 1)
             }
             K::Tuple(fields) | K::AnonymousRecord { fields } => {
@@ -1600,61 +2086,141 @@ impl<'a> Analysis<'a> {
     /// Value transfer is not a state effect. Require the existing affine pass
     /// to account for every path before admitting non-Copy values: leftovers,
     /// replacement, failed preparation and partial construction may run Drop.
-    fn transfer_cleanup_is_pure(&mut self, function: &n::Function, inputs: &Inputs) -> bool {
-        use crate::verification::moves::{self, Delivery};
-        let callable_parameters = inputs
-            .keys()
-            .filter_map(|slot| {
-                let parameter = function.parameters.get(slot.parameter)?;
-                let mut definitions = copy_codes(
-                    self.callables.get(&CallablePlace {
-                        binding: *parameter,
-                        fields: slot.fields.clone(),
-                    })?,
-                    &mut self.fuel,
-                )?;
-                if definitions.is_empty() {
+    fn resource_callable_evidence(
+        &mut self,
+        mut codes: Vec<BehaviorCode>,
+        depth: usize,
+    ) -> Option<crate::verification::moves::CallableEvidence> {
+        use crate::verification::{PlaceId, moves::CallableEvidence, ownership::Place};
+        if depth >= 128 || codes.is_empty() || self.fuel == 0 {
+            return None;
+        }
+        self.fuel -= 1;
+        let closure = codes
+            .iter()
+            .position(|code| matches!(code.kind, K::Closure { .. }));
+        let code = codes.remove(closure.unwrap_or(0));
+        if !code.charge(&mut self.fuel) {
+            return None;
+        }
+        let mut captures = BTreeMap::new();
+        for (place, keys) in &code.captures {
+            // Empty evidence at a variant payload denotes an absent leaf,
+            // not an unknown callable. There is no code candidate to export;
+            // resource analysis still checks the actual variant and ownership.
+            if keys.is_empty() && place.fields.contains(&VARIANT_FIELD) {
+                continue;
+            }
+            let K::Closure {
+                captures: bindings, ..
+            } = &code.kind
+            else {
+                return None;
+            };
+            let binding = bindings
+                .iter()
+                .find(|binding| binding.binding == place.binding)?;
+            let ty = crate::verification::memory::owned_path_type(
+                Some(self.package),
+                &binding.ty,
+                &place.fields,
+                &mut self.fuel,
+            )
+            .ok()?;
+            let mut values = Vec::new();
+            for key in keys {
+                values.push(self.code_value(key, &ty, code.source)?);
+            }
+            let evidence = self.resource_callable_evidence(values, depth + 1)?;
+            captures.insert(
+                Place {
+                    root: PlaceId {
+                        owner: u64::from(place.binding.owner),
+                        local: place.binding.index,
+                    },
+                    fields: place.fields.clone(),
+                },
+                evidence,
+            );
+        }
+        let mut evidence = CallableEvidence {
+            definition: code.definition,
+            captures,
+            alternatives: vec![],
+            choices: vec![],
+            enum_captures: Default::default(),
+        };
+        for other in codes {
+            if closure.is_some() {
+                evidence
+                    .choices
+                    .push(self.resource_callable_evidence(vec![other], depth + 1)?);
+            } else {
+                if !other.charge(&mut self.fuel) {
                     return None;
                 }
-                // Resource evidence uses a closure representative for mixed sets.
-                let closure = definitions
-                    .iter()
-                    .position(|d| matches!(d.kind, K::Closure { .. }));
-                let definition = definitions.remove(closure.unwrap_or(0));
-                let (alternatives, choices) = if closure.is_some() {
-                    (
-                        vec![],
-                        definitions
-                            .into_iter()
-                            .map(|definition| moves::CallableEvidence {
-                                definition: definition.definition,
-                                alternatives: vec![],
-                                choices: vec![],
-                                captures: Default::default(),
-                                enum_captures: Default::default(),
-                            })
-                            .collect(),
-                    )
-                } else {
-                    (
-                        definitions
-                            .into_iter()
-                            .map(|code| code.definition)
-                            .collect(),
-                        vec![],
-                    )
-                };
-                Some(moves::CallableParameter {
-                    parameter: slot.parameter,
-                    definition: definition.definition,
+                evidence.alternatives.push(other.definition);
+            }
+        }
+        Some(evidence)
+    }
+
+    fn transfer_cleanup_is_pure(&mut self, function: &n::Function, inputs: &Inputs) -> bool {
+        use crate::verification::moves::{self, Delivery};
+        let mut callable_parameters = Vec::new();
+        for slot in inputs.keys() {
+            let Some(parameter) = function.parameters.get(slot.parameter) else {
+                return false;
+            };
+            let Some(definitions) = self
+                .callables
+                .get(&CallablePlace {
+                    binding: *parameter,
                     fields: slot.fields.clone(),
-                    alternatives,
-                    choices,
-                    captures: Default::default(),
-                    enum_captures: Default::default(),
                 })
-            })
-            .collect::<Vec<_>>();
+                .and_then(|codes| copy_codes(codes, &mut self.fuel))
+            else {
+                return false;
+            };
+            // Preserve the same absent-payload convention at input roots.
+            if definitions.is_empty() && slot.fields.contains(&VARIANT_FIELD) {
+                continue;
+            }
+            let Some(evidence) = self.resource_callable_evidence(definitions, 0) else {
+                return false;
+            };
+            callable_parameters.push(moves::CallableParameter {
+                parameter: slot.parameter,
+                fields: slot.fields.clone(),
+                definition: evidence.definition,
+                alternatives: evidence.alternatives,
+                choices: evidence.choices,
+                captures: evidence.captures,
+                enum_captures: evidence.enum_captures,
+            });
+        }
+        // P3 checks a body under valid runtime inputs. Give pointer parameters
+        // conditional pointee roots, including pointers wrapped by newtypes.
+        // This report only proves purity/cleanup; it is never published as an
+        // unconditional memory contract. Resource checking at each actual call
+        // still establishes the footprint and lifetime of the supplied targets.
+        let mut borrowed_parameters = Vec::new();
+        if self.finite {
+            let Term::Function { parameters, .. } = function.signature.callable_signature() else {
+                return false;
+            };
+            for (slot, parameter) in parameters.iter().enumerate() {
+                match crate::verification::memory::pointer_representation(
+                    Some(self.package),
+                    &parameter.ty,
+                    &mut self.fuel,
+                ) {
+                    Ok(Some((_, subject))) => borrowed_parameters.push((slot, subject)),
+                    Ok(None) => {}
+                    Err(_) => return false,
+                }
+            }
+        }
         let mut copy_types = HashSet::new();
         if self.protocols.drop.is_none() {
             let report = moves::analyze_in_package_with_inputs(
@@ -1669,7 +2235,7 @@ impl<'a> Analysis<'a> {
                 },
                 self.fuel,
                 None,
-                &[],
+                &borrowed_parameters,
                 &callable_parameters,
             );
             let Ok(report) = report else {
@@ -1679,35 +2245,12 @@ impl<'a> Analysis<'a> {
             return self.cleanup_report_is_pure(&report, &copy_types, None, 0);
         }
         let mut fuel = self.fuel;
-        let context = crate::ptc::Context::from_package(self.package);
-        let mut index = crate::implementation::Index::default();
+        let Some((context, index)) = self.resource_world_parts() else {
+            return false;
+        };
         let budget = crate::ptc::Budget {
             steps: fuel,
             ..Default::default()
-        };
-        for implementation in &self.package.implementations {
-            if implementation.interface.is_none() {
-                continue;
-            }
-            if index
-                .insert(
-                    crate::implementation::ImplementationHead {
-                        declaration: implementation.declaration,
-                        interface: implementation.interface,
-                        interface_arguments: implementation.interface_arguments.clone(),
-                        subject: implementation.subject.clone(),
-                        type_parameters: implementation.type_parameters.clone(),
-                        requirements: implementation.requirements.clone(),
-                    },
-                    budget,
-                )
-                .is_err()
-            {
-                return false;
-            }
-        }
-        let Ok(context) = context else {
-            return false;
         };
         let world = crate::capabilities::World {
             index: &index,
@@ -1743,7 +2286,7 @@ impl<'a> Analysis<'a> {
             },
             self.fuel,
             None,
-            &[],
+            &borrowed_parameters,
             &callable_parameters,
         );
         self.fuel = fuel;
@@ -1754,6 +2297,219 @@ impl<'a> Analysis<'a> {
         self.cleanup_report_is_pure(&report, &copy_types, Some(&world), 0)
     }
 
+    fn check_pattern_failure(
+        &mut self,
+        otherwise: &n::Expr,
+        private: &BTreeSet<n::LocalId>,
+        returns: bool,
+        depth: usize,
+    ) -> bool {
+        let mut failure_code = BTreeMap::new();
+        for (place, codes) in &self.callables {
+            if !private.contains(&place.binding) {
+                continue;
+            }
+            let Some(fuel) = self.fuel.checked_sub(place.fields.len() + 1) else {
+                return false;
+            };
+            self.fuel = fuel;
+            let Some(codes) = copy_codes(codes, &mut self.fuel) else {
+                return false;
+            };
+            failure_code.insert(place.clone(), codes);
+        }
+        if !self.charge_private_addresses() {
+            return false;
+        }
+        let failure_addresses = self
+            .private_addresses
+            .iter()
+            .filter(|(binding, _)| private.contains(binding))
+            .map(|(binding, targets)| (*binding, targets.clone()))
+            .collect();
+        let success_code = std::mem::replace(&mut self.callables, failure_code);
+        let success_addresses = std::mem::replace(&mut self.private_addresses, failure_addresses);
+        let valid = self.expression(otherwise, &mut private.clone(), returns, depth + 1);
+        self.callables = success_code;
+        self.private_addresses = success_addresses;
+        valid
+    }
+
+    fn copy_private_targets(&mut self, targets: &[n::Expr]) -> Option<Vec<n::Expr>> {
+        for target in targets {
+            nir::visit::expression(target, &mut self.fuel, |node, fuel| {
+                crate::verification::memory::bound_type(&node.ty, fuel)
+            })
+            .ok()?;
+        }
+        Some(targets.to_vec())
+    }
+
+    fn join_private_targets(
+        &mut self,
+        mut previous: Vec<n::Expr>,
+        incoming: Vec<n::Expr>,
+    ) -> Option<Vec<n::Expr>> {
+        for target in incoming {
+            let mut present = false;
+            for old in &previous {
+                for value in [old, &target] {
+                    nir::visit::expression(value, &mut self.fuel, |node, fuel| {
+                        crate::verification::memory::bound_type(&node.ty, fuel)
+                    })
+                    .ok()?;
+                }
+                if old == &target {
+                    present = true;
+                    break;
+                }
+            }
+            if !present {
+                previous.push(target);
+            }
+        }
+        Some(previous)
+    }
+
+    fn charge_private_addresses(&mut self) -> bool {
+        for targets in self.private_addresses.values() {
+            for target in targets {
+                if nir::visit::expression(target, &mut self.fuel, |node, fuel| {
+                    crate::verification::memory::bound_type(&node.ty, fuel)
+                })
+                .is_err()
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn loop_private_addresses(
+        &mut self,
+        body: &n::Expr,
+        private: &BTreeSet<n::LocalId>,
+        returns: bool,
+        depth: usize,
+    ) -> bool {
+        loop {
+            if !self.charge_private_addresses() || self.fuel == 0 {
+                return false;
+            }
+            self.fuel -= 1;
+            let previous = self.private_addresses.clone();
+            if !self.expression(body, &mut private.clone(), returns, depth + 1)
+                || !self.charge_private_addresses()
+            {
+                return false;
+            }
+            // Assignments only add targets or lose evidence. A further pass
+            // checks earlier reads against all origins supplied by backedges.
+            if previous == self.private_addresses {
+                return true;
+            }
+        }
+    }
+
+    // Extract only possible storage places. The caller checks address-computation
+    // effects separately; saved aliases never replay conditions or statements.
+    fn private_targets(
+        &mut self,
+        pointer: &n::Expr,
+        private: &BTreeSet<n::LocalId>,
+        depth: usize,
+    ) -> Option<Vec<n::Expr>> {
+        if depth >= 128 || self.fuel == 0 {
+            return None;
+        }
+        self.fuel -= 1;
+        let (_, subject) = crate::verification::memory::pointer_representation(
+            Some(self.package),
+            &pointer.ty,
+            &mut self.fuel,
+        )
+        .ok()??;
+        match &pointer.kind {
+            K::Local(binding) if private.contains(binding) => {
+                let places = self.private_addresses.get(binding)?;
+                for place in places {
+                    if place.ty != subject {
+                        return None;
+                    }
+                    nir::visit::expression(place, &mut self.fuel, |node, fuel| {
+                        crate::verification::memory::bound_type(&node.ty, fuel)
+                    })
+                    .ok()?;
+                }
+                Some(places.clone())
+            }
+            K::AddressOf(place) => {
+                if !self.private_owned_place(place, private) || place.ty != subject {
+                    return None;
+                }
+                nir::visit::expression(place, &mut self.fuel, |node, fuel| {
+                    crate::verification::memory::bound_type(&node.ty, fuel)
+                })
+                .ok()?;
+                Some(vec![(**place).clone()])
+            }
+            _ => None,
+        }
+    }
+    fn project_private_targets(
+        &mut self,
+        pointer: &n::Expr,
+        places: Vec<n::Expr>,
+    ) -> Option<Vec<n::Expr>> {
+        let Term::Pointer(subject) = &pointer.ty else {
+            return None;
+        };
+        places
+            .into_iter()
+            .map(|place| {
+                crate::verification::memory::bound_type(subject, &mut self.fuel).ok()?;
+                let kind = match &pointer.kind {
+                    K::PointerField {
+                        declaration, index, ..
+                    } => K::Field {
+                        value: Box::new(place),
+                        declaration: *declaration,
+                        index: *index,
+                    },
+                    K::PointerAnonymousField { name, index, .. } => {
+                        self.fuel = self.fuel.checked_sub(name.len())?;
+                        K::AnonymousField {
+                            value: Box::new(place),
+                            name: name.clone(),
+                            index: *index,
+                        }
+                    }
+                    _ => return None,
+                };
+                Some(n::Expr {
+                    ty: (**subject).clone(),
+                    source: pointer.source,
+                    kind,
+                })
+            })
+            .collect()
+    }
+    fn private_owned_place(&mut self, mut value: &n::Expr, private: &BTreeSet<n::LocalId>) -> bool {
+        loop {
+            if self.fuel == 0 {
+                return false;
+            }
+            self.fuel -= 1;
+            match &value.kind {
+                K::Local(binding) => return private.contains(binding),
+                K::Field { value: inner, .. } | K::AnonymousField { value: inner, .. } => {
+                    value = inner
+                }
+                _ => return false,
+            }
+        }
+    }
     fn stable_place_read(&mut self, mut value: &n::Expr) -> bool {
         loop {
             if self.fuel == 0 {
@@ -2238,6 +2994,30 @@ impl<'a> Analysis<'a> {
                 })?,
                 &mut self.fuel,
             ),
+            K::NewtypeConvert(inner) => {
+                let conversion = nir::newtypes::conversion(
+                    &self.package.newtypes,
+                    &inner.ty,
+                    &value.ty,
+                    &[],
+                    &mut self.fuel,
+                )
+                .ok()??;
+                match conversion.direction() {
+                    nir::newtypes::Direction::Wrap => {
+                        let (index, tail) = path.split_first()?;
+                        if *index != 0 {
+                            return None;
+                        }
+                        Some(self.loop_code_value_at(inner, tail, facts, depth + 1))
+                    }
+                    nir::newtypes::Direction::Unwrap => {
+                        let mut nested = vec![0];
+                        nested.extend_from_slice(path);
+                        Some(self.loop_code_value_at(inner, &nested, facts, depth + 1))
+                    }
+                }
+            }
             K::Record { fields, .. } | K::Tuple(fields) | K::AnonymousRecord { fields } => {
                 let (index, tail) = path.split_first()?;
                 Some(self.loop_code_value_at(fields.get(*index)?, tail, facts, depth + 1))
@@ -2444,14 +3224,20 @@ impl<'a> Analysis<'a> {
                 if promised && !self.finite {
                     return true;
                 }
-                let Ok(method) = crate::materialization::resolve_method_instance(
-                    self.package,
-                    callee,
-                    &mut self.fuel,
-                ) else {
+                let Ok(method) = self
+                    .method_callees
+                    .select(self.package, callee, &mut self.fuel)
+                else {
                     return false;
                 };
-                (method.body, method.arguments)
+                let K::FunctionInstance {
+                    declaration,
+                    arguments,
+                } = method.kind
+                else {
+                    return false;
+                };
+                (declaration, arguments)
             }
             _ => return false,
         };
@@ -3000,7 +3786,9 @@ impl<'a> Analysis<'a> {
             .copied()
             .chain(captures.iter().map(|capture| capture.binding))
             .collect();
+        let saved_addresses = std::mem::take(&mut self.private_addresses);
         let valid = self.expression(body, &mut private, true, depth + 1);
+        self.private_addresses = saved_addresses;
         self.callables = saved;
         valid
     }
@@ -3054,7 +3842,15 @@ impl<'a> Analysis<'a> {
         if self.active.contains(&key) {
             return !self.finite;
         }
-        if self.active.iter().any(|(active, _, _)| *active == id) {
+        // A recursive P4 call can supply a different known callback (for
+        // example a default closure). Check that distinct behavior obligation
+        // rather than treating declaration identity alone as a failed cycle.
+        // Only an exact key closes a coinductive backedge above. Type-growing
+        // recursion and all P3 backedges remain conservative rejections; new
+        // callback environments are still bounded by depth and shared fuel.
+        if self.active.iter().any(|(active, active_types, _)| {
+            *active == id && (self.finite || active_types != types)
+        }) {
             return false;
         }
         if let Some(valid) = self.proven.get(&key) {
@@ -3091,6 +3887,10 @@ impl<'a> Analysis<'a> {
         let Term::Function { parameters, result } = &function.signature else {
             return false;
         };
+        // A runtime callable may retain staged formal inputs after its
+        // instance is formed. Phase validation owns their availability; P3
+        // checks the actual input computations and this residual body. The
+        // formal sort alone is not evidence of divergence or instability.
         // Rejection after obtaining an owned result could execute its Drop.
         // Without a bound cleanup protocol retain the trivial-only rule;
         // otherwise the mandatory resource report below includes this result's
@@ -3103,10 +3903,7 @@ impl<'a> Analysis<'a> {
                 .iter()
                 .any(|predicate| !matches!(predicate.kind, K::Literal(n::Literal::Bool(true)))))
             || parameters.iter().any(|parameter| {
-                parameter.sort != Sort::Runtime
-                    || (self.finite
-                        && self.protocols.drop.is_none()
-                        && !self.copy_type(&parameter.ty))
+                self.finite && self.protocols.drop.is_none() && !self.copy_type(&parameter.ty)
             })
         {
             return false;
@@ -3138,6 +3935,7 @@ impl<'a> Analysis<'a> {
             }
         }
         let entry_callables = self.callables.clone();
+        let saved_addresses = std::mem::take(&mut self.private_addresses);
         self.active.insert(key.clone());
         let mut private = function.parameters.iter().copied().collect();
         let previous_scope = std::mem::replace(&mut self.resource_scope, false);
@@ -3148,8 +3946,8 @@ impl<'a> Analysis<'a> {
             .all(|value| {
                 self.copy_type(&value.ty) && self.expression(value, &mut private, false, depth + 1)
             });
-        // Only complete function bodies have a resource report here. Defaults
-        // themselves and untracked captures do not gain ownership permission.
+        // This function body has a complete resource report. Default expressions
+        // establish their own boundary; untracked captures gain no permission.
         let checked_resources = self.protocols.drop.is_some();
         self.resource_scope = checked_resources;
         let body = contracts && self.expression(&function.body, &mut private, true, depth + 1);
@@ -3160,8 +3958,78 @@ impl<'a> Analysis<'a> {
                 self.transfer_cleanup_is_pure(&function, inputs)
             });
         self.callables = saved_callables;
+        self.private_addresses = saved_addresses;
         self.active.remove(&key);
         self.proven.insert(key, valid);
         valid
+    }
+}
+
+#[cfg(test)]
+mod private_address_loop_tests {
+    use super::*;
+
+    #[test]
+    fn target_fixed_point_is_bounded_and_does_not_duplicate_candidates() {
+        let package = n::Package::default();
+        let a = n::LocalId { owner: 9, index: 0 };
+        let b = n::LocalId { owner: 9, index: 1 };
+        let p = n::LocalId { owner: 9, index: 2 };
+        let source = n::SourceRange { start: 0, end: 1 };
+        let place = |binding| n::Expr {
+            source,
+            ty: Term::Primitive(P::Bool),
+            kind: K::Local(binding),
+        };
+        let body = n::Expr {
+            source,
+            ty: Term::Primitive(P::Void),
+            kind: K::Assign {
+                place: n::Place {
+                    root: p,
+                    fields: vec![],
+                },
+                value: Box::new(n::Expr {
+                    source,
+                    ty: Term::Pointer(Box::new(Term::Primitive(P::Bool))),
+                    kind: K::AddressOf(Box::new(place(b))),
+                }),
+            },
+        };
+        let body = n::Expr {
+            source,
+            ty: Term::Primitive(P::Void),
+            kind: K::Block {
+                statements: vec![n::Expr {
+                    source,
+                    ty: Term::Primitive(P::Bool),
+                    kind: K::ReadPointer(Box::new(n::Expr {
+                        source,
+                        ty: Term::Pointer(Box::new(Term::Primitive(P::Bool))),
+                        kind: K::Local(p),
+                    })),
+                }],
+                result: Some(Box::new(body)),
+            },
+        };
+        let private = [a, b, p].into_iter().collect();
+        let mut succeeded = false;
+        for fuel in 0..256 {
+            let mut analysis = Analysis::new(&package, false);
+            analysis.fuel = fuel;
+            analysis.private_addresses.insert(p, vec![place(a)]);
+            if analysis.loop_private_addresses(&body, &private, true, 0) {
+                assert_eq!(analysis.private_addresses[&p], vec![place(a), place(b)]);
+                succeeded = true;
+                break;
+            }
+            // Retry from the entry state with a fresh budget; no failed
+            // attempt may leave a cached successful loop certificate.
+            analysis.fuel = 1_000;
+            analysis.private_addresses.insert(p, vec![place(a)]);
+            assert!(analysis.loop_private_addresses(&body, &private, true, 0));
+            assert_eq!(analysis.private_addresses[&p], vec![place(a), place(b)]);
+        }
+        assert!(succeeded);
     }
 }

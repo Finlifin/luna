@@ -44,6 +44,360 @@ fn dependency(requester: u32, alias: &str, provider: u32) -> DependencyEdge {
 }
 
 #[test]
+fn dynamic_alias_contracts_keep_provider_identity_and_recover_after_failure() {
+    use comptime_interpretor::{ErrorKind, Interpreter, Value};
+    use nir::{Primitive, Term};
+    let inputs = Inputs::new();
+    let app = inputs.package(1, "app", "use flags.Checked as Flag;use characters.Checked as Character;typealias Type=.Type'builtin;comptime fn FlagType(value:Type)->Type {Flag<value>}comptime fn CharacterType(value:Type)->Type {Character<value>}");
+    let flags = inputs.package(
+        2,
+        "flags",
+        "pub trait Allowed {}impl Allowed for bool {}pub typealias Checked<T:-Allowed> = T;",
+    );
+    let characters = inputs.package(3, "characters", "pub trait Allowed {}impl Allowed for .char'builtin {}pub typealias Checked<T:-Allowed> = T;");
+    let Artifact::Nir(program) = packages::compile(
+        &[app, flags, characters],
+        &[dependency(1, "flags", 2), dependency(1, "characters", 3)],
+        1,
+    )
+    .unwrap() else {
+        panic!("NIR")
+    };
+    assert_eq!(program.alias_contracts.len(), 2);
+    for contract in &program.alias_contracts {
+        assert!(matches!(contract.declaration.package, 1002 | 1003));
+        assert_eq!(contract.capabilities.len(), 1);
+        assert_eq!(
+            contract.capabilities[0].interface.package,
+            contract.declaration.package
+        );
+    }
+    let mut vm = Interpreter::for_comptime(&program, Default::default()).unwrap();
+    for (name, accepted, rejected) in [
+        ("FlagType", Primitive::Bool, Primitive::Char),
+        ("CharacterType", Primitive::Char, Primitive::Bool),
+    ] {
+        let id = program
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .declaration;
+        let valid = Value::Type(Term::Primitive(accepted));
+        assert_eq!(vm.invoke(id, vec![valid.clone()]).unwrap(), valid);
+        assert_eq!(
+            vm.invoke(id, vec![Value::Type(Term::Primitive(rejected))])
+                .unwrap_err()
+                .kind,
+            ErrorKind::TypeContractUnresolved
+        );
+        assert_eq!(vm.invoke(id, vec![valid.clone()]).unwrap(), valid);
+    }
+}
+
+#[test]
+fn imported_alias_guards_survive_required_invocation_snapshots() {
+    let inputs = Inputs::new();
+    let provider = inputs.package(2, "provider", "typealias Type=.Type'builtin;pub trait Allowed {}impl Allowed for bool {}pub pure comptime fn Head<T>->Type {T}pub typealias Checked<T:-Allowed> = Head<T>;pub comptime fn Build(value:Type)->Type {Checked<value>}");
+    let source = "use support.{Build,Head};typealias Selected=Build(bool);fn keep(value:Selected)->Head<bool> {value}";
+    let app = inputs.package(1, "app", source);
+    let packages = [app, provider];
+    let edges = [dependency(1, "support", 2)];
+    let Artifact::Nir(program) = packages::compile(&packages, &edges, 1).unwrap() else {
+        panic!("NIR")
+    };
+    let keep = program.functions.iter().find(|f| f.name == "keep").unwrap();
+    let nir::Term::Function { parameters, result } = &keep.signature else {
+        panic!("signature")
+    };
+    assert_eq!(parameters[0].ty, **result);
+    let nir::Term::NormalForm {
+        head, arguments, ..
+    } = &**result
+    else {
+        panic!("alias erased the normal-form head")
+    };
+    assert_eq!(head.package, 1002);
+    assert_eq!(arguments, &[nir::Term::Primitive(nir::Primitive::Bool)]);
+    std::fs::write(
+        &packages[0].entry,
+        source.replace("Build(bool)", "Build(.char'builtin)"),
+    )
+    .unwrap();
+    let failure = packages::compile(&packages, &edges, 1)
+        .err()
+        .expect("unchecked imported alias");
+    assert!(failure.contains("TypeContractUnresolved"), "{failure}");
+    std::fs::write(&packages[0].entry, source).unwrap();
+    assert!(packages::compile(&packages, &edges, 1).is_ok());
+}
+
+#[test]
+fn aliases_to_imported_containers_preserve_member_visibility() {
+    let inputs = Inputs::new();
+    let provider = inputs.package(2, "provider", "pub struct Holder where T {pub typealias Payload=T;typealias Hidden=T;}pub typealias Alias<T> = Holder<T>;pub struct Other where T {pub typealias Hidden=T;}");
+    let source =
+        "use support.Alias;typealias Flag=Alias<bool>;fn entry(value:Flag.Payload)->bool {value}";
+    let app = inputs.package(1, "app", source);
+    let packages = [app, provider];
+    let edges = [dependency(1, "support", 2)];
+    let Artifact::Nir(program) = packages::compile(&packages, &edges, 1).unwrap() else {
+        panic!("NIR")
+    };
+    let entry = program
+        .functions
+        .iter()
+        .find(|f| f.name == "entry")
+        .unwrap();
+    let nir::Term::Function { parameters, result } = &entry.signature else {
+        panic!("signature")
+    };
+    assert_eq!(parameters[0].ty, nir::Term::Primitive(nir::Primitive::Bool));
+    assert_eq!(**result, parameters[0].ty);
+    for member in ["Hidden", "Missing"] {
+        std::fs::write(&packages[0].entry, source.replace("Payload", member)).unwrap();
+        assert!(
+            packages::compile(&packages, &edges, 1).is_err(),
+            "alias exposed {member}"
+        );
+    }
+}
+
+#[test]
+fn completed_type_call_members_keep_provider_access_rules() {
+    let inputs = Inputs::new();
+    let provider = inputs.package(2, "provider", "pub struct Holder where T {pub typealias Payload=T;typealias Hidden=T;}pub comptime fn Select()->.Type'builtin {Holder<bool>}pub struct Other {pub typealias Hidden=bool;}");
+    let source = "use support.Select;fn entry(value:Select().Payload)->bool {value}";
+    let app = inputs.package(1, "app", source);
+    let packages = [app, provider];
+    let edges = [dependency(1, "support", 2)];
+    assert!(packages::compile(&packages, &edges, 1).is_ok());
+    for member in ["Hidden", "Missing"] {
+        std::fs::write(&packages[0].entry, source.replace("Payload", member)).unwrap();
+        assert!(
+            packages::compile(&packages, &edges, 1).is_err(),
+            "computed Type exposed {member}"
+        );
+    }
+}
+
+#[test]
+fn deferred_type_members_respect_import_precedence_and_ambiguity() {
+    let inputs = Inputs::new();
+    let source = "use support.Alias;fn entry(value:Alias<bool>.Payload)->bool {value}";
+    let app = inputs.package(1, "app", source);
+    let provider = inputs.package(2, "provider", "pub mod a {pub typealias Payload=bool;}pub mod b {pub typealias Payload=.char'builtin;}pub struct Holder where T {pub use a.*;}pub typealias Alias<T> = Holder<T>;");
+    let packages = [app, provider];
+    let edges = [dependency(1, "support", 2)];
+    let variants = [
+        ("pub use a.*;", true),
+        ("pub use a.*;pub use b.*;", false),
+        ("pub use a.Payload;pub use b.*;", true),
+        ("pub use a.*;private typealias Payload=bool;", false),
+        ("pub use a.*;pub const Payload=true;", false),
+    ];
+    for (members, valid) in variants {
+        std::fs::write(&packages[1].entry, format!("pub mod a {{pub typealias Payload=bool;}}pub mod b {{pub typealias Payload=.char'builtin;}}pub struct Holder where T {{{members}}}pub typealias Alias<T> = Holder<T>;")).unwrap();
+        let result = packages::compile(&packages, &edges, 1);
+        assert_eq!(result.is_ok(), valid, "{members}: {:?}", result.err());
+    }
+}
+
+#[test]
+fn container_aliases_do_not_expose_nonpublic_static_methods() {
+    let inputs = Inputs::new();
+    for visibility in ["pub ", ""] {
+        for (clause, calls) in [
+            (
+                "",
+                [
+                    "Alias<bool>.flag()",
+                    "let callback=Alias<bool>.flag;callback()",
+                ],
+            ),
+            (
+                "where U",
+                [
+                    "Alias<bool>.flag<bool>()",
+                    "let callback=Alias<bool>.flag<bool>;callback()",
+                ],
+            ),
+        ] {
+            for body in calls {
+                let provider = inputs.package(2, "provider", &format!("pub struct Holder where T {{{visibility}fn flag()->bool {clause} {{true}}}}pub struct Other {{pub fn flag()->bool {{false}}}}pub typealias Alias<T> = Holder<T>;"));
+                let app = inputs.package(
+                    1,
+                    "app",
+                    &format!("use support.Alias;fn entry()->bool {{{body}}}"),
+                );
+                let result = packages::compile(&[app, provider], &[dependency(1, "support", 2)], 1);
+                if visibility.is_empty() {
+                    let failure = result.err().expect("nonpublic method escaped");
+                    assert!(failure.contains("not accessible"), "{body}: {failure}");
+                } else {
+                    let Artifact::Nir(package) = result.unwrap() else {
+                        panic!("NIR")
+                    };
+                    assert_eq!(
+                        luna::execution::interpret_in_package(&package, 1001, "entry", 100_000)
+                            .unwrap(),
+                        comptime_interpretor::Value::Bool(true)
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn aliased_type_factories_preserve_method_access_and_returned_member_access() {
+    let inputs = Inputs::new();
+    for (factory_access, member_access, valid) in [
+        ("pub ", "pub ", true),
+        ("", "pub ", false),
+        ("pub ", "", false),
+    ] {
+        let provider = inputs.package(2, "provider", &format!("pub struct Result where T {{{member_access}typealias Payload=T;}}pub struct Factory where T {{{factory_access}comptime fn Make()->.Type'builtin {{Result<T>}}}}pub typealias Alias<T> = Factory<T>;"));
+        let app = inputs.package(
+            1,
+            "app",
+            "use support.Alias;fn entry(value:Alias<bool>.Make().Payload)->bool {value}",
+        );
+        let result = packages::compile(&[app, provider], &[dependency(1, "support", 2)], 1);
+        assert_eq!(
+            result.is_ok(),
+            valid,
+            "factory {factory_access:?}, member {member_access:?}: {:?}",
+            result.err()
+        );
+    }
+}
+
+#[test]
+fn instance_methods_preserve_cross_package_visibility() {
+    let inputs = Inputs::new();
+    for visibility in ["pub ", ""] {
+        for (receiver, clause, body) in [
+            ("self", "", "let value=Value {};value.flag()"),
+            ("self", "", "Value {}.flag()"),
+            ("self", "where U", "let value=Value {};value.flag<bool>()"),
+            (
+                "*self",
+                "",
+                "let value=Value {};let pointer=value.ref;pointer.flag()",
+            ),
+        ] {
+            let provider = inputs.package(
+                2,
+                "provider",
+                &format!(
+                    "pub struct Value {{{visibility}fn flag({receiver})->bool {clause} {{true}}}}"
+                ),
+            );
+            let app = inputs.package(
+                1,
+                "app",
+                &format!("use support.Value;fn entry()->bool {{{body}}}"),
+            );
+            let result = packages::compile(&[app, provider], &[dependency(1, "support", 2)], 1);
+            if visibility.is_empty() {
+                let failure = result.err().expect("nonpublic instance method escaped");
+                assert!(failure.contains("not accessible"), "{body}: {failure}");
+            } else {
+                let Artifact::Nir(package) = result.unwrap() else {
+                    panic!("NIR")
+                };
+                assert_eq!(
+                    luna::execution::interpret_in_package(&package, 1001, "entry", 100_000)
+                        .unwrap(),
+                    comptime_interpretor::Value::Bool(true)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn exported_quote_and_callback_keep_the_defining_modules_member_access() {
+    let inputs = Inputs::new();
+    let provider = inputs.package(2, "provider", "pub struct Value {private fn secret(self)->bool {true}}pub quote fn reveal(value:Value)->bool {value.secret()}pub fn callback()->fn(Value)->bool {Value.secret}");
+    let app = inputs.package(1, "app", "use support.{Value,reveal,callback};fn entry()->bool {let action=callback();reveal(Value {}) and action(Value {})}");
+    let packages = [app, provider];
+    let edges = [dependency(1, "support", 2)];
+    let Artifact::Nir(program) = packages::compile(&packages, &edges, 1).unwrap() else {
+        panic!("NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret_in_package(&program, 1001, "entry", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    std::fs::write(&packages[0].entry, "use support.Value;quote fn denied(value:Value)->bool {value.secret()}fn entry()->bool {denied(Value {})}").unwrap();
+    let failure = packages::compile(&packages, &edges, 1)
+        .err()
+        .expect("caller quote gained provider access");
+    assert!(failure.contains("not accessible"), "{failure}");
+}
+
+#[test]
+fn projected_constants_use_splice_without_bypassing_member_access() {
+    let inputs = Inputs::new();
+    for visibility in ["pub ", ""] {
+        let provider = inputs.package(2, "provider", &format!("typealias Type=.Type'builtin;pub trait Conversion {{assoc RuntimeTarget:Type;fn splice(comptime data:Self)->RuntimeTarget;}}impl Conversion for bool {{assoc RuntimeTarget:Type=bool;fn splice(comptime data:bool)->bool {{data}}}}pub struct Holder where T {{{visibility}const FLAG=true;}}pub typealias Alias<T> = Holder<T>;"));
+        let app = inputs.package(
+            1,
+            "app",
+            "use support.Alias;fn entry()->bool {Alias<bool>.FLAG}",
+        );
+        let result = packages::compile_with_splice(
+            &[app, provider],
+            &[dependency(1, "support", 2)],
+            1,
+            None,
+            "provider::Conversion",
+        );
+        if visibility.is_empty() {
+            assert!(
+                result.is_err(),
+                "Splice granted access to a nonpublic constant"
+            );
+        } else {
+            let Artifact::Nir(program) = result.unwrap() else {
+                panic!("NIR")
+            };
+            assert_eq!(
+                luna::execution::interpret_in_package(&program, 1001, "entry", 100_000).unwrap(),
+                comptime_interpretor::Value::Bool(true)
+            );
+        }
+    }
+}
+
+#[test]
+fn generic_member_constants_splice_the_selected_container_value() {
+    let inputs = Inputs::new();
+    let provider = inputs.package(2, "provider", "typealias Type=.Type'builtin;pub trait Conversion {assoc RuntimeTarget:Type;fn splice(comptime data:Self)->RuntimeTarget;}impl Conversion for bool {assoc RuntimeTarget:Type=bool;fn splice(comptime data:bool)->bool {data}}pub struct Holder where T {pub const FLAG=T==bool;}pub typealias Alias<T> = Holder<T>;");
+    let app = inputs.package(
+        1,
+        "app",
+        "use support.Alias;fn entry()->bool {Alias<bool>.FLAG and not Alias<.char'builtin>.FLAG}",
+    );
+    let Artifact::Nir(program) = packages::compile_with_splice(
+        &[app, provider],
+        &[dependency(1, "support", 2)],
+        1,
+        None,
+        "provider::Conversion",
+    )
+    .unwrap() else {
+        panic!("NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret_in_package(&program, 1001, "entry", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
 fn automatic_splice_uses_provider_identity_across_package_boundaries() {
     let input = Inputs::new();
     let app = input.package(7, "app",
@@ -1179,5 +1533,37 @@ fn dependency_errors_retain_provider_diagnostics_and_do_not_leak_to_retry() {
             packages::compile(&sources, &dependencies, 7).unwrap(),
             Artifact::Nir(_)
         ));
+    }
+}
+
+#[test]
+fn parameterized_member_projection_obeys_provider_visibility() {
+    for visibility in ["pub ", ""] {
+        let input = Inputs::new();
+        let app = input.package(
+            7,
+            "app",
+            "use support.Holder;fn run()->bool {true.as(Holder<bool>.Wrapped).as(bool)}",
+        );
+        let library = input.package(
+            9,
+            "library",
+            &format!("pub struct Holder where T {{{visibility}newtype Wrapped=T;}}"),
+        );
+        let result = packages::compile(&[app, library], &[dependency(7, "support", 9)], 7);
+        if visibility.is_empty() {
+            let failure = result
+                .err()
+                .expect("package-private member escaped through a generic type");
+            assert!(failure.contains("not accessible"), "{failure}");
+        } else {
+            let Artifact::Nir(package) = result.unwrap() else {
+                panic!("NIR")
+            };
+            assert_eq!(
+                luna::execution::interpret(&package, "run", 100_000).unwrap(),
+                comptime_interpretor::Value::Bool(true)
+            );
+        }
     }
 }

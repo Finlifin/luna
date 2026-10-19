@@ -47,12 +47,101 @@ impl Checker<'_, '_> {
             H::Closure(..) => true,
             H::Projection(base, name) => {
                 !self.is_type_head(base)
-                    || self.static_method(base, name.name.as_str(), callee.span)?.is_some()
+                    || self.static_method(base, name.name.as_str(), callee.span, callee.hir_id)?.is_some()
             },
             _ => false,
         };
         if !callable {
-            return Ok(None);
+            if self.is_type_head(callee) {
+                return Ok(None);
+            }
+            // A factory, conditional or constant can supply a callable just as
+            // a local can. Retain the checked callee through routing: probing
+            // its type must not elaborate or execute its producer twice.
+            // Type-valued constants are consumed as types, without a runtime
+            // Splice conversion. Function-valued constants still follow the
+            // ordinary invocation phase rules below.
+            if let H::ResolvedDef { def_id, .. } = callee.kind {
+                if let Some(owner) = self.package.definition_owner(def_id) {
+                    if matches!(
+                        self.package.item(owner).map(|item| &item.kind),
+                        Some(ItemKind::Const(..))
+                    ) {
+                        let value = self.constant_value(owner, callee.span)?;
+                        if let K::TypeValue(ty) = value.kind {
+                            return self.construct_typed(expr, ty, args, expected).map(Some);
+                        }
+                    }
+                }
+            }
+            let value = self.invocation_callee(callee)?;
+            let ty = self.structural_type(&value.ty, callee.span)?;
+            if ty == p(P::Type) {
+                let prepared = self.prepare_required_expression(
+                    callee,
+                    Some(&p(P::Type)),
+                    Some(value),
+                    Vec::new(),
+                    false,
+                )?;
+                let (comptime_interpretor::Value::Type(ty), _) =
+                    prepared.invoke(&mut self.required_steps, callee.span)?
+                else {
+                    return Err(error(callee.span, "construction requires a Type value"));
+                };
+                return self.construct_typed(expr, ty, args, expected).map(Some);
+            }
+            if args.iter().any(|arg| matches!(arg, Arg::Named(..))) {
+                return Err(error(
+                    expr.span,
+                    "attribute collection requires declaration-side protocol metadata",
+                ));
+            }
+            // A value never recovers names, defaults or collection protocols
+            // merely because constant folding exposed a named function.
+            let value = n::Expr {
+                source: value.source,
+                ty: value.ty.clone(),
+                kind: K::Block {
+                    statements: vec![],
+                    result: Some(Box::new(value)),
+                },
+            };
+            if let Some(flat) = arguments::literal_spread_arguments(args) {
+                return self
+                    .finish_call(expr, value, &flat, Vec::new(), expected, partial)
+                    .map(Some);
+            }
+            if value.ty.is_comptime_callable()
+                && self.protocols.splice.is_some()
+                && self.runtime_value_context()
+            {
+                let result = self.with_staged_input(true, |this| {
+                    this.spread_call_resolved(
+                        expr,
+                        callee,
+                        args,
+                        None,
+                        None,
+                        Some((value, Vec::new())),
+                        None,
+                    )
+                })?;
+                return self
+                    .deliver_comptime_result(expr, result, expected)
+                    .map(Some);
+            }
+            return self
+                .spread_call_resolved(
+                    expr,
+                    callee,
+                    args,
+                    expected,
+                    partial,
+                    Some((value, Vec::new())),
+                    None,
+                )
+                .map(Some);
         }
         if args.iter().any(|arg| matches!(arg, Arg::Named(..))) {
             return self
@@ -70,7 +159,22 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         partial: Option<&crate::calls::CallableContext>,
     ) -> Result<n::Expr, Error> {
-        let resolved = if let Some(method) = self.resolve_receiver(expr, callee)? {
+        // An open declaration is instantiated by the invocation path, after
+        // routing its runtime inputs. It cannot first become an ordinary
+        // function value just because the call uses explicit type clauses.
+        let direct_open = if let H::ResolvedDef { def_id, .. } = head.kind {
+            if let Some(owner) = self.package.definition_owner(def_id) {
+                self.ensure_signature(owner, callee.span)?;
+                self.open_functions.contains_key(&owner)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        let resolved = if direct_open {
+            None
+        } else if let Some(method) = self.resolve_receiver(expr, callee)? {
             Some(method)
         } else if let H::NFApplication(base, types) = callee.kind {
             // Retain the completed instance for both context propagation and
@@ -97,7 +201,7 @@ impl Checker<'_, '_> {
                     _ => return None,
                 };
                 self.package.owners().find_map(|(owner, _)| {
-                    (declaration(self.package, &self.package_identities, owner) == id)
+                    (matches_declaration(self.package, &self.package_identities, owner, id))
                         .then_some(owner)
                 })
             })
@@ -108,15 +212,28 @@ impl Checker<'_, '_> {
                 "attribute collection requires declaration-side protocol metadata",
             )
         })?;
+        if direct_open {
+            if let H::NFApplication(_, clauses) = callee.kind {
+                return self.with_explicit_open_clauses(owner, clauses, expr.span, |this| {
+                    this.collect_properties_resolved(
+                        expr, callee, args, expected, partial, None, owner, true,
+                    )
+                });
+            }
+        }
         let comptime = self.package.item(owner).is_some_and(|item|
             matches!(&item.kind, ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) if sig.modifiers.is_comptime));
         if comptime && self.protocols.splice.is_some() && self.runtime_value_context() {
             let value = self.with_staged_input(true, |this| {
-                this.collect_properties_resolved(expr, callee, args, None, None, resolved, owner)
+                this.collect_properties_resolved(
+                    expr, callee, args, None, None, resolved, owner, false,
+                )
             })?;
             return self.deliver_comptime_result(expr, value, expected);
         }
-        self.collect_properties_resolved(expr, callee, args, expected, partial, resolved, owner)
+        self.collect_properties_resolved(
+            expr, callee, args, expected, partial, resolved, owner, false,
+        )
     }
 
     fn collect_properties_resolved(
@@ -128,6 +245,7 @@ impl Checker<'_, '_> {
         partial: Option<&crate::calls::CallableContext>,
         resolved: Option<(n::Expr, Vec<n::Expr>)>,
         owner: OwnerId,
+        open_instantiated: bool,
     ) -> Result<n::Expr, Error> {
         let Some(ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
             self.package.item(owner).map(|item| &item.kind)
@@ -203,15 +321,16 @@ impl Checker<'_, '_> {
                 expected,
                 partial,
                 resolved.as_ref(),
-                |this, flat| {
+                |this, flat, diverges| {
                     this.collect_properties_resolved(
                         expr,
                         callee,
                         flat,
-                        expected,
-                        partial,
+                        expected.filter(|_| !diverges),
+                        partial.filter(|_| !diverges),
                         resolved.clone(),
                         owner,
+                        open_instantiated,
                     )
                 },
             );
@@ -219,6 +338,8 @@ impl Checker<'_, '_> {
         let receiver_count = resolved.as_ref().map_or(0, |(_, prefix)| prefix.len());
         let mut call = if let Some((method, prefix)) = resolved {
             self.finish_call(expr, method, &inputs, prefix, expected, partial)?
+        } else if open_instantiated {
+            self.instantiated_open_call(expr, owner, &inputs, expected)?
         } else {
             self.call(expr, callee, &inputs, expected, partial)?
         };
@@ -309,7 +430,7 @@ impl Checker<'_, '_> {
         })
     }
 
-    fn property_collector(
+    pub(super) fn property_collector(
         &mut self,
         owner: OwnerId,
         collectors: &[(hir::common::Ident, usize)],
@@ -322,6 +443,24 @@ impl Checker<'_, '_> {
             return Ok(*collector);
         }
         self.ensure_signature(owner, span)?;
+        if let Some(definition) = self.open_functions.get(&owner) {
+            // Open signatures need not have an entry in the ordinary signature
+            // table. Classify only known domains; deferred domains remain
+            // candidates rather than being evaluated ahead of their inputs.
+            let domains = definition.input_domains();
+            let candidates = collectors
+                .iter()
+                .map(|&(name, index)| {
+                    let ty = domains[index]
+                        .1
+                        .as_ref()
+                        .map(|ty| self.specialize_open_clause_type(owner, ty, span))
+                        .transpose()?;
+                    Ok((name, index, ty))
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            return self.select_property_collector(candidates, span);
+        }
         let signature = resolved
             .map(|value| value.ty.clone())
             .unwrap_or_else(|| self.signatures[&owner].clone());
@@ -360,7 +499,7 @@ impl Checker<'_, '_> {
         } else {
             None
         };
-        let mut eligible = Vec::new();
+        let mut candidates = Vec::new();
         for &(name, index) in collectors {
             let ty = if let Some(inferred) = &inferred {
                 inferred
@@ -369,6 +508,18 @@ impl Checker<'_, '_> {
             } else {
                 Some(parameters[index].ty.clone())
             };
+            candidates.push((name, index, ty));
+        }
+        self.select_property_collector(candidates, span)
+    }
+
+    fn select_property_collector(
+        &mut self,
+        candidates: Vec<(hir::common::Ident, usize, Option<Term>)>,
+        span: Span,
+    ) -> Result<(hir::common::Ident, usize), Error> {
+        let mut eligible = Vec::new();
+        for (name, index, ty) in candidates {
             let shape = ty
                 .as_ref()
                 .map(|ty| self.structural_type(ty, span))

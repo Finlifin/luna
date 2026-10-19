@@ -11,7 +11,7 @@ use rustc_span::Span;
 use symbol::{DefId, PathAnchor};
 
 use crate::common::{Arg, FnParam, PathSegment, TyParam, TyParamKind};
-use crate::expr::ClosureParam;
+use crate::expr::{ClosureParam, ObjectEntry};
 use crate::item::{EffectGroupDef, EffectModifiers, FnModifiers, UseKind, UsePath};
 use crate::pattern::BoundType;
 use crate::*;
@@ -168,11 +168,88 @@ impl Display for Package<'_> {
                 Owner(*owner)
             )?;
         }
+        f.write_str(") (member-projections")?;
+        let mut projections: Vec<_> = self.member_projections.iter().collect();
+        projections.sort_unstable_by_key(|(id, _)| (id.owner.def_id.raw(), id.local_id.raw()));
+        for (expression, definition) in projections {
+            write!(
+                f,
+                " (member (expression {}) (target {}))",
+                Id(*expression),
+                Definition(*definition)
+            )?;
+        }
+        for (label, table) in [
+            (
+                "deferred-member-projections",
+                &self.deferred_member_projections,
+            ),
+            ("member-access", &self.member_access),
+        ] {
+            write!(f, ") ({label}")?;
+            let mut deferred: Vec<_> = table.iter().collect();
+            deferred.sort_unstable_by_key(|(id, _)| (id.owner.def_id.raw(), id.local_id.raw()));
+            for (expression, candidates) in deferred {
+                write!(
+                    f,
+                    " (projection (expression {}) (candidates",
+                    Id(*expression)
+                )?;
+                let mut candidates = candidates.to_vec();
+                candidates.sort_unstable_by_key(|(container, member)| {
+                    (container.pkg, container.index, member.pkg, member.index)
+                });
+                for (container, member) in candidates {
+                    write!(
+                        f,
+                        " (member (container {}) (target {}))",
+                        Definition(container),
+                        Definition(member)
+                    )?;
+                }
+                f.write_str("))")?;
+            }
+        }
+        f.write_str(") (definition-attributes")?;
+        for attribute in &self.definition_attributes {
+            write!(f, " {attribute}")?;
+        }
         f.write_str(") (pending-semantics")?;
         for (span, feature) in &self.pending_semantics {
             write!(f, " (pending {} {})", Location(*span), Quoted(feature))?;
         }
         f.write_str("))")
+    }
+}
+
+impl Display for ObjectEntry<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Value(value) => form!(f, "object-value", "value" => value),
+            Self::Property(field) => form!(f, "object-property", "field" => field),
+        }
+    }
+}
+
+impl Display for AttributeTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Definition(owner) => Owner(*owner).fmt(f),
+            Self::Member(id) => Id(*id).fmt(f),
+        }
+    }
+}
+
+impl Display for DeferredDefinitionAttribute {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(key) = &self.configuration_key {
+            return form!(f, "deferred-configuration", "target" => self.target,
+                "lexical-owner" => Owner(self.lexical_owner), "key" => Quoted(key),
+                "expression" => Quoted(&self.expression), "span" => Location(self.span));
+        }
+        form!(f, "deferred-attribute", "target" => self.target,
+            "lexical-owner" => Owner(self.lexical_owner),
+            "expression" => Quoted(&self.expression), "span" => Location(self.span))
     }
 }
 
@@ -226,7 +303,7 @@ impl Display for EffectGroupDef<'_> {
 
 impl Display for FnModifiers {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        form!(f, "modifiers", "inline" => self.is_inline, "quote" => self.is_quote, "normal-form-head" => self.is_normal_form_head, "pure" => self.is_pure, "comptime" => self.is_comptime, "extern" => self.is_extern)
+        form!(f, "modifiers", "inline" => self.is_inline, "quote" => self.is_quote, "normal-form-head" => self.is_normal_form_head, "pure" => self.is_pure, "comptime" => self.is_comptime)
     }
 }
 
@@ -569,6 +646,7 @@ impl Display for ExprKind<'_> {
             }
             Self::Assumes(value) => form!(f, "assumes", "condition" => value),
             Self::Defer(value) => form!(f, "defer", "value" => value),
+            Self::InlineControl(value) => form!(f, "inline-control", "value" => value),
             Self::RefinedType { requirement, base } => {
                 form!(f, "refined-type", "requirement" => requirement, "base" => base)
             }
@@ -584,9 +662,7 @@ impl Display for ExprKind<'_> {
             }
             Self::Tuple(values) => form!(f, "tuple", "values" => List(values)),
             Self::List(values) => form!(f, "list", "values" => List(values)),
-            Self::Object(bases, fields) => {
-                form!(f, "object", "bases" => List(bases), "fields" => List(fields))
-            }
+            Self::Object(entries) => form!(f, "object", "entries" => List(entries)),
             Self::Ref(value) => form!(f, "ref", "value" => value),
             Self::Deref(value) => form!(f, "deref", "value" => value),
             Self::ErrorNew(value) => form!(f, "error-new", "value" => value),
@@ -655,6 +731,7 @@ impl Display for ExprKind<'_> {
             Self::Builtin(name) => form!(f, "builtin", "name" => Quoted(name)),
             Self::TakeOld(value) => form!(f, "take-old", "value" => value),
             Self::TakeTagName(value) => form!(f, "take-tag-name", "value" => value),
+            Self::TakeTupleEnumerate(value) => form!(f, "take-tuple-enumerate", "value" => value),
             Self::TakeBitVec(value) => form!(f, "take-bit-vec", "value" => value),
             Self::TypeOf(value) => form!(f, "type-of", "value" => value),
             Self::MultiDeref(value) => form!(f, "multi-deref", "value" => value),

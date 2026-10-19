@@ -250,7 +250,8 @@ impl<'w> World<'w> {
         if contract.type_parameters.len() != query.arguments.len() {
             return Err("trait proposition interface argument count mismatch".into());
         }
-        contract.validate_arguments_in_declarations(
+        contract.validate_arguments_for_subject(
+            &query.subject,
             &query.arguments,
             self.context.scope(),
             self.traits,
@@ -374,7 +375,7 @@ impl<'w> World<'w> {
                     && resolution.types.assessments.iter().all(
                         |(id, assessment)| match assessment {
                             TypeAssessment::Excluded(_)
-                            | TypeAssessment::SymbolMismatch { .. }
+                            | TypeAssessment::ValueIndexMismatch { .. }
                             | TypeAssessment::ForbiddenSubject(_) => true,
                             TypeAssessment::Applicable(_) => matches!(
                                 resolution.qualifications.get(id),

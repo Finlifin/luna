@@ -133,7 +133,10 @@ impl Package {
             }
             self.validate_type(&interface.subject, fuel)?;
             for method in &interface.methods {
-                self.validate_type(&method.signature, fuel)?;
+                self.validate_type(
+                    method.signature.ordinary().map_err(|e| e.to_string())?,
+                    fuel,
+                )?;
                 for argument in &method.type_arguments {
                     self.validate_type(argument, fuel)?;
                 }
@@ -292,12 +295,37 @@ impl Package {
                     return Err("IIR newtype conversion has no direct representation edge".into());
                 }
             }
-            K::TypeListValue(types) => {
+            K::TypeListValue(_) | K::TypeList(_) => {
+                let diverging = if let K::TypeList(fields) = &expr.kind {
+                    for field in fields {
+                        *fuel = fuel
+                            .checked_sub(1)
+                            .ok_or("IIR type-list budget exhausted")?;
+                        if !matches!(
+                            field.ty,
+                            Term::Primitive(nir::Primitive::Type | nir::Primitive::Never)
+                        ) {
+                            return Err("IIR type-list operand is not Type".into());
+                        }
+                    }
+                    fields
+                        .iter()
+                        .any(|field| field.ty == Term::Primitive(nir::Primitive::Never))
+                } else {
+                    false
+                };
+                if diverging {
+                    if expr.ty != Term::Primitive(nir::Primitive::Never) {
+                        return Err("IIR diverging type-list construction must be Never".into());
+                    }
+                    return Ok(());
+                }
                 let mut admitted = false;
                 for head in &self.normal_forms {
                     *fuel = fuel
                         .checked_sub(1)
                         .ok_or("IIR type-list metadata budget exhausted")?;
+                    admitted |= head.is_type_list_instance(&expr.ty);
                     for parameter in &head.parameters {
                         *fuel = fuel
                             .checked_sub(1)
@@ -311,10 +339,12 @@ impl Package {
                         "IIR type-list constant requires trusted meta.List<Type> metadata".into(),
                     );
                 }
-                for ty in types {
-                    self.validate_type(ty, fuel)?;
-                    if ty.sort() != nir::Sort::Type {
-                        return Err("IIR type-list element is not Type".into());
+                if let K::TypeListValue(types) = &expr.kind {
+                    for ty in types {
+                        self.validate_type(ty, fuel)?;
+                        if ty.sort() != nir::Sort::Type {
+                            return Err("IIR type-list element is not Type".into());
+                        }
                     }
                 }
             }
@@ -488,6 +518,8 @@ pub fn completed_dependencies(
                 ));
             }
             Term::Nominal { arguments, .. }
+            | Term::FunctionValue { arguments, .. }
+            | Term::ClosureSnapshot { arguments, .. }
             | Term::NormalForm { arguments, .. }
             | Term::Tuple(arguments)
             | Term::TypeListValue(arguments)

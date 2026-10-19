@@ -171,6 +171,55 @@ impl Builder<'_> {
     ) -> Result<n::Expr, String> {
         self.tick(depth)?;
         let kind = match value {
+            Value::Function(declaration) if ty.is_comptime_callable() => K::Function(declaration),
+            Value::Closure(closure)
+                if ty.is_comptime_callable()
+                    && closure.ty().is_comptime_callable()
+                    && closure.captured_values().len() == 0
+                    && closure.declaration_instance().is_some() =>
+            {
+                let (declaration, arguments) = closure.declaration_instance().unwrap();
+                for argument in arguments {
+                    nir::type_computations::charge_term(argument, &mut self.fuel)
+                        .map_err(|error| error.to_string())?;
+                    iir::completed_type(argument, &BTreeSet::new(), &mut self.fuel)?;
+                }
+                K::FunctionInstance {
+                    declaration,
+                    arguments: arguments.to_vec(),
+                }
+            }
+            Value::Newtype { ty: actual, value } => {
+                if actual != *ty {
+                    return Err("staged newtype identity mismatch".into());
+                }
+                let Term::Nominal {
+                    declaration,
+                    arguments,
+                } = ty
+                else {
+                    return Err("staged newtype requires a nominal type".into());
+                };
+                let definition = self
+                    .package
+                    .newtypes
+                    .iter()
+                    .find(|definition| definition.declaration == *declaration)
+                    .ok_or("staged newtype declaration is missing")?;
+                self.fuel = self
+                    .fuel
+                    .checked_sub(self.package.newtypes.len())
+                    .ok_or("staged newtype layout budget exhausted")?;
+                let representation = definition
+                    .representation_budgeted(arguments, &[], &mut self.fuel)
+                    .map_err(|error| error.to_string())?;
+                K::NewtypeConvert(Box::new(self.freeze_staged_value(
+                    *value,
+                    &representation,
+                    source,
+                    depth + 1,
+                )?))
+            }
             Value::Unit => K::Unit,
             Value::Bool(v) => K::Literal(n::Literal::Bool(v)),
             Value::Char(v) => K::Literal(n::Literal::Char(v)),
@@ -200,10 +249,11 @@ impl Builder<'_> {
             Value::TypeList(types) => {
                 if !nir::normal_forms::type_list_input_type(ty)
                     || !self.package.normal_forms.iter().any(|head| {
-                        head.parameters.iter().any(|parameter| {
-                            parameter.kind == nir::normal_forms::Kind::TypeList
-                                && parameter.ty == *ty
-                        })
+                        head.is_type_list_instance(ty)
+                            || head.parameters.iter().any(|parameter| {
+                                parameter.kind == nir::normal_forms::Kind::TypeList
+                                    && parameter.ty == *ty
+                            })
                     })
                 {
                     return Err("staged type-list result requires trusted meta.List<Type>".into());
@@ -270,6 +320,48 @@ impl Builder<'_> {
                         .collect::<Result<_, _>>()?,
                 )
             }
+            Value::Record {
+                declaration,
+                arguments,
+                fields,
+            } => {
+                let fields = self.freeze_staged_nominal_fields(
+                    declaration,
+                    &arguments,
+                    fields,
+                    None,
+                    ty,
+                    source,
+                    depth,
+                )?;
+                K::Record {
+                    declaration,
+                    fields,
+                }
+            }
+            Value::Variant {
+                declaration,
+                arguments,
+                index,
+                fields,
+            } => {
+                let variant = u32::try_from(index)
+                    .map_err(|_| "staged enum variant index exceeds representation")?;
+                let fields = self.freeze_staged_nominal_fields(
+                    declaration,
+                    &arguments,
+                    fields,
+                    Some(variant),
+                    ty,
+                    source,
+                    depth,
+                )?;
+                K::Variant {
+                    declaration,
+                    index,
+                    fields,
+                }
+            }
             _ => {
                 return Err(
                     "staged invocation result cannot yet be frozen as an instance input".into(),
@@ -281,5 +373,39 @@ impl Builder<'_> {
             ty: ty.clone(),
             source,
         })
+    }
+
+    fn freeze_staged_nominal_fields(
+        &mut self,
+        declaration: Id,
+        arguments: &[Term],
+        fields: Vec<Value>,
+        variant: Option<u32>,
+        ty: &Term,
+        source: n::SourceRange,
+        depth: usize,
+    ) -> Result<Vec<n::Expr>, String> {
+        nir::type_computations::charge_term(ty, &mut self.fuel)
+            .map_err(|error| error.to_string())?;
+        if !matches!(ty, Term::Nominal { declaration: expected, arguments: expected_arguments }
+            if *expected == declaration && expected_arguments == arguments)
+        {
+            return Err("staged nominal result identity mismatch".into());
+        }
+        let types = nir::normal_forms::nominal_value_fields_budgeted(
+            self.package,
+            ty,
+            variant,
+            &mut self.fuel,
+        )
+        .ok_or("staged nominal layout is invalid or exceeds the budget")?;
+        if fields.len() != types.len() {
+            return Err("staged nominal field count mismatch".into());
+        }
+        fields
+            .into_iter()
+            .zip(types)
+            .map(|(value, ty)| self.freeze_staged_value(value, &ty, source, depth + 1))
+            .collect()
     }
 }

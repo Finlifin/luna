@@ -132,11 +132,36 @@ fn lower(
                 ty: ty.clone(),
             },
             CleanupStep::SwitchVariant { place, branches } => {
-                let mut output = vec![];
-                for (index, branch) in branches.iter().enumerate() {
-                    if branch.index != index {
-                        return Err("noncanonical cleanup variant order".into());
+                if branches
+                    .windows(2)
+                    .any(|pair| pair[0].index >= pair[1].index)
+                {
+                    return Err("noncanonical cleanup variant order".into());
+                }
+                if branches
+                    .iter()
+                    .enumerate()
+                    .any(|(index, branch)| branch.index != index)
+                {
+                    let mut cases = vec![];
+                    for branch in branches {
+                        cases.push(iir::cleanup::VariantCase {
+                            guards: vec![(relative(place)?, branch.index)],
+                            steps: lower(
+                                &branch.steps,
+                                receiver,
+                                roots,
+                                receivers,
+                                fuel,
+                                depth + 1,
+                            )?,
+                        });
                     }
+                    output.push(iir::cleanup::Step::Select { cases });
+                    continue;
+                }
+                let mut output = vec![];
+                for branch in branches {
                     output.push(lower(
                         &branch.steps,
                         receiver,
@@ -173,6 +198,38 @@ impl fmt::Display for Executable {
 }
 /// Publish schedules for every reachable concrete function, including captured
 /// destructors. Unmapped responsibilities are rejected before execution.
+fn field_borrows(
+    package: &Package,
+    function: &nir::program::Function,
+    fuel: &mut usize,
+) -> Result<Vec<moves::BorrowedField>, String> {
+    let nir::Term::Function { parameters, .. } = function.signature.callable_signature() else {
+        return Err("field borrow analysis lacks a callable signature".into());
+    };
+    let mut fields = vec![];
+    for (parameter, input) in parameters.iter().enumerate() {
+        if input.sort == nir::Sort::Type && input.ty == nir::Term::Primitive(nir::Primitive::Type) {
+            continue;
+        }
+        // Closure code identity is supplied separately, but its owned
+        // environment still needs parameter-relative pointee premises.
+        for leaf in
+            elaboration::verification::memory::pointer_input_layout(Some(package), &input.ty, fuel)?
+        {
+            let path = leaf.input_fields;
+            let pointee = leaf.pointee;
+            if !path.is_empty() {
+                fields.push(moves::BorrowedField {
+                    parameter,
+                    fields: path,
+                    pointee,
+                });
+            }
+        }
+    }
+    Ok(fields)
+}
+
 pub fn prepare_source(
     package: &Package,
     world: &World<'_>,
@@ -191,6 +248,9 @@ pub fn prepare_source(
     let mut receivers: Vec<(iir::InstanceKey, nir::Term)> = vec![];
     let mut schedule = Schedule::default();
     let mut generated_layouts = std::collections::HashSet::new();
+    let mut cleanup_accesses: Vec<(iir::InstanceKey, Vec<nir::program::RuntimeCleanupAccess>)> =
+        vec![];
+
     loop {
         *fuel = fuel
             .checked_sub(1)
@@ -241,6 +301,47 @@ pub fn prepare_source(
                 view.enums.push(definition.clone());
             }
         }
+        for instance in &graph.functions {
+            nir::type_computations::charge_term(&instance.function.signature, fuel)
+                .map_err(|e| e.to_string())?;
+            for argument in &instance.key.arguments {
+                nir::type_computations::charge_term(argument, fuel).map_err(|e| e.to_string())?;
+            }
+            nir::visit::expressions(&instance.function, fuel, |expr, fuel| {
+                nir::type_computations::charge_term(&expr.ty, fuel).map_err(|e| e.to_string())
+            })?;
+        }
+        for (_, accesses) in &cleanup_accesses {
+            for access in accesses {
+                let cost = access.through.iter().fold(
+                    access
+                        .input_fields
+                        .len()
+                        .saturating_add(access.fields.len())
+                        .saturating_add(1),
+                    |cost, path| cost.saturating_add(path.len()).saturating_add(1),
+                );
+                *fuel = fuel
+                    .checked_sub(cost)
+                    .ok_or("cleanup footprint overlay budget exhausted")?;
+                nir::type_computations::charge_term(&access.ty, fuel).map_err(|e| e.to_string())?;
+            }
+        }
+        let mut cleanup_changed = false;
+        layouts.to_mut().runtime_instances = graph
+            .functions
+            .iter()
+            .map(|instance| nir::program::RuntimeInstance {
+                declaration: instance.key.declaration,
+                arguments: instance.key.arguments.clone(),
+                function: instance.function.clone(),
+                cleanup_accesses: cleanup_accesses
+                    .iter()
+                    .find(|(key, _)| key == &instance.key)
+                    .map(|(_, accesses)| accesses.clone())
+                    .unwrap_or_default(),
+            })
+            .collect();
         let package = layouts.as_ref();
         let previous = (roots.len(), types.len());
         for instance in &graph.functions {
@@ -280,6 +381,8 @@ pub fn prepare_source(
                 .ok_or("source cleanup function budget exhausted")?;
             let function = &instance.function;
             let mut borrows = vec![];
+            let mut fields = vec![];
+            let mut independent_report = None;
             if let Some((_, subject)) = receivers.iter().find(|(key, _)| key == &instance.key) {
                 borrows.push((0, subject.clone()));
             } else if instance.key != entry {
@@ -289,11 +392,32 @@ pub fn prepare_source(
                     return Err("cleanup function lacks a callable signature".into());
                 };
                 for (index, parameter) in parameters.iter().enumerate() {
-                    if let nir::Term::Pointer(subject) = &parameter.ty {
-                        borrows.push((index, (**subject).clone()));
+                    if let Some((_, subject)) =
+                        elaboration::verification::memory::pointer_representation(
+                            Some(package),
+                            &parameter.ty,
+                            fuel,
+                        )?
+                    {
+                        borrows.push((index, subject));
                     }
                 }
-                if !borrows.is_empty() {
+                fields = field_borrows(package, function, fuel)?;
+                if !fields.is_empty() {
+                    // Moving an aggregate need not borrow its pointees. Try an
+                    // unconditional plan before demanding field validity.
+                    let allowance = (*fuel / 2).min(4096);
+                    match crate::protocols::analyze_cleanup_with_borrows(
+                        package, world, items, function, allowance, budget, &borrows,
+                    ) {
+                        Ok(report) => {
+                            fields.clear();
+                            independent_report = Some(report);
+                        }
+                        Err(_) => *fuel -= allowance,
+                    }
+                }
+                if !borrows.is_empty() || !fields.is_empty() {
                     // Non-entry pointer calls are checked by the caller's memory
                     // analysis. Only supported, initialization-preserving body
                     // footprints justify these conditional parameter roots.
@@ -310,11 +434,25 @@ pub fn prepare_source(
                     }
                 }
             }
-            let report = crate::protocols::analyze_cleanup_with_borrows(
-                package, world, items, function, *fuel, budget, &borrows,
-            )
-            .map_err(|e| e.to_string())?;
-            if report.borrowed_parameters != borrows {
+            let report = if let Some(report) = independent_report {
+                report
+            } else {
+                crate::protocols::analyze_cleanup_with_field_context(
+                    package,
+                    world,
+                    items,
+                    function,
+                    *fuel,
+                    budget,
+                    &borrows,
+                    &[],
+                    &[],
+                    vec![],
+                    &fields,
+                )
+                .map_err(|e| e.to_string())?
+            };
+            if report.borrowed_parameters != borrows || report.borrowed_fields != fields {
                 return Err("cleanup report disagrees with borrowed entry premises".into());
             }
             let mut scopes =
@@ -327,6 +465,47 @@ pub fn prepare_source(
                 Vec<moves::EffectResultInput>,
             )> = vec![];
             while let Some((context, scope, report, observations)) = scopes.pop_front() {
+                let footprint_key = if context.is_empty() {
+                    Some(&instance.key)
+                } else if let Some(ContextKey::Function { callee, .. }) = context.last() {
+                    Some(callee)
+                } else {
+                    None
+                };
+                if let Some(footprint_key) = footprint_key.filter(|_| {
+                    !report.borrowed_parameters.is_empty() || !report.borrowed_fields.is_empty()
+                }) {
+                    let accesses = report.cleanup_memory_accesses(package, fuel)?;
+                    let position = if let Some(position) = cleanup_accesses
+                        .iter()
+                        .position(|(key, _)| key == footprint_key)
+                    {
+                        position
+                    } else {
+                        cleanup_accesses.push((footprint_key.clone(), vec![]));
+                        cleanup_accesses.len() - 1
+                    };
+                    for access in accesses {
+                        let access = nir::program::RuntimeCleanupAccess {
+                            parameter: access.target.parameter,
+                            input_fields: access.target.input_fields,
+                            through: access.target.through,
+                            fields: access.target.fields,
+                            ty: access.ty,
+                            write: access.write,
+                            read_value: access.read_value,
+                        };
+                        let effects = &mut cleanup_accesses[position].1;
+                        *fuel = fuel
+                            .checked_sub(effects.len() + 1)
+                            .ok_or("cleanup footprint publication budget exhausted")?;
+                        if !effects.contains(&access) {
+                            effects.push(access);
+                            cleanup_changed = true;
+                        }
+                    }
+                }
+
                 if let Some(ContextKey::Function { callee, .. }) = context.last() {
                     named_contexts.push((
                         context.clone(),
@@ -633,12 +812,43 @@ pub fn prepare_source(
                         child.signature.callable_signature()
                     {
                         for (slot, parameter) in parameters.iter().enumerate() {
-                            if let nir::Term::Pointer(subject) = &parameter.ty {
-                                borrows.push((slot, (**subject).clone()));
+                            if let Some((_, subject)) =
+                                elaboration::verification::memory::pointer_representation(
+                                    Some(package),
+                                    &parameter.ty,
+                                    fuel,
+                                )?
+                            {
+                                borrows.push((slot, subject));
                             }
                         }
                     }
-                    if !borrows.is_empty() {
+                    let mut fields = field_borrows(package, &child, fuel)?;
+                    let mut independent_invocation = None;
+                    if !fields.is_empty() {
+                        let effects = moves::copy_effect_inputs(&call.effects, fuel, call.source)
+                            .map_err(|e| e.to_string())?;
+                        let allowance = (*fuel / 2).min(4096);
+                        match crate::protocols::analyze_cleanup_with_effect_context(
+                            package,
+                            world,
+                            items,
+                            &child,
+                            allowance,
+                            budget,
+                            &borrows,
+                            &call.callables,
+                            &call.enums,
+                            effects,
+                        ) {
+                            Ok(report) => {
+                                fields.clear();
+                                independent_invocation = Some(report);
+                            }
+                            Err(_) => *fuel -= allowance,
+                        }
+                    }
+                    if !borrows.is_empty() || !fields.is_empty() {
                         let footprint = moves::infer_callable_memory(
                             package,
                             key.declaration,
@@ -654,21 +864,28 @@ pub fn prepare_source(
                             );
                         }
                     }
-                    let invocation = crate::protocols::analyze_cleanup_with_effect_context(
-                        package,
-                        world,
-                        items,
-                        &child,
-                        *fuel,
-                        budget,
-                        &borrows,
-                        &call.callables,
-                        &call.enums,
-                        moves::copy_effect_inputs(&call.effects, fuel, call.source)
-                            .map_err(|e| e.to_string())?,
-                    )
-                    .map_err(|e| e.to_string())?;
-                    if invocation.borrowed_parameters != borrows {
+                    let invocation = if let Some(report) = independent_invocation {
+                        report
+                    } else {
+                        crate::protocols::analyze_cleanup_with_field_context(
+                            package,
+                            world,
+                            items,
+                            &child,
+                            *fuel,
+                            budget,
+                            &borrows,
+                            &call.callables,
+                            &call.enums,
+                            moves::copy_effect_inputs(&call.effects, fuel, call.source)
+                                .map_err(|e| e.to_string())?,
+                            &fields,
+                        )
+                        .map_err(|e| e.to_string())?
+                    };
+                    if invocation.borrowed_parameters != borrows
+                        || invocation.borrowed_fields != fields
+                    {
                         return Err(
                             "contextual cleanup report disagrees with borrowed premises".into()
                         );
@@ -1067,6 +1284,12 @@ pub fn prepare_source(
                     pattern_orders,
                 });
             }
+        }
+        if cleanup_changed {
+            // Every caller must be rechecked against the grown transitive footprint.
+            // No schedule from a provisional body-only round is published.
+            schedule = Schedule::default();
+            continue;
         }
         if previous == (roots.len(), types.len()) {
             return Ok(Executable {

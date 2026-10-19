@@ -27,6 +27,8 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), &'static str> {
             }
             Term::AssociatedType { arguments, .. } => arguments.len().saturating_add(1),
             Term::Nominal { arguments, .. }
+            | Term::ClosureSnapshot { arguments, .. }
+            | Term::FunctionValue { arguments, .. }
             | Term::NormalForm { arguments, .. }
             | Term::Tuple(arguments)
             | Term::TypeListValue(arguments)
@@ -55,6 +57,8 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), &'static str> {
                 children.extend(arguments);
             }
             Term::Nominal { arguments, .. }
+            | Term::ClosureSnapshot { arguments, .. }
+            | Term::FunctionValue { arguments, .. }
             | Term::NormalForm { arguments, .. }
             | Term::Tuple(arguments)
             | Term::TypeListValue(arguments)

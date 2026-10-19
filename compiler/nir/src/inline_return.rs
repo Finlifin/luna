@@ -412,6 +412,7 @@ fn lower_inner(
         arguments,
     };
     let descriptor = n::Enum {
+        parameter_types: vec![],
         declaration: ids.packet,
         name: "<inline-return-packet>".into(),
         type_parameters,

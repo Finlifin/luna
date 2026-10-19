@@ -117,3 +117,182 @@ fn predicate_substitution_rebinds_read_addresses_and_field_pointers() {
     );
     assert!(nir::contracts::remap_predicate(&mut write, &bindings).is_err());
 }
+
+#[test]
+fn predicate_destructuring_rebinds_pure_patterns_and_rejects_writes() {
+    use nir::program::Pattern;
+    let input = LocalId { owner: 1, index: 0 };
+    let field = LocalId { owner: 1, index: 1 };
+    let mapped_input = LocalId { owner: 2, index: 0 };
+    let mapped_field = LocalId { owner: 2, index: 1 };
+    let binding = Pattern::Tuple(vec![Pattern::Binding {
+        binding: field,
+        inner: Box::new(Pattern::Wild),
+    }]);
+    let make = |pattern| {
+        expr(
+            boolean(),
+            K::Block {
+                statements: vec![expr(
+                    Term::Primitive(P::Void),
+                    K::LetPattern {
+                        pattern,
+                        value: Box::new(expr(Term::Tuple(vec![boolean()]), K::Local(input))),
+                        guard: None,
+                        otherwise: None,
+                    },
+                )],
+                result: Some(Box::new(expr(boolean(), K::Local(field)))),
+            },
+        )
+    };
+    let mut predicate = make(binding.clone());
+    assert!(checkable_predicate(&predicate));
+    let mapping = std::collections::BTreeMap::from([(input, mapped_input), (field, mapped_field)]);
+    nir::contracts::remap_predicate(&mut predicate, &mapping).unwrap();
+    let K::Block { statements, result } = &predicate.kind else {
+        panic!("block")
+    };
+    let K::LetPattern {
+        pattern: Pattern::Tuple(fields),
+        value,
+        ..
+    } = &statements[0].kind
+    else {
+        panic!("binding")
+    };
+    assert!(matches!(fields[0], Pattern::Binding { binding, .. } if binding == mapped_field));
+    assert!(matches!(value.kind, K::Local(id) if id == mapped_input));
+    assert!(matches!(result.as_ref().unwrap().kind, K::Local(id) if id == mapped_field));
+    assert!(checkable_predicate(&predicate));
+    for pattern in [
+        Pattern::Guard {
+            pattern: Box::new(binding.clone()),
+            condition: Box::new(expr(boolean(), K::Literal(Literal::Bool(true)))),
+        },
+        Pattern::Then {
+            first: Box::new(binding.clone()),
+            value: Box::new(expr(boolean(), K::Literal(Literal::Bool(true)))),
+            next: Box::new(Pattern::Wild),
+        },
+    ] {
+        let mut predicate = make(pattern);
+        assert!(checkable_predicate(&predicate));
+        nir::contracts::remap_predicate(&mut predicate, &mapping).unwrap();
+    }
+    let mut invalid = make(Pattern::Then {
+        first: Box::new(binding),
+        value: Box::new(expr(
+            Term::Primitive(P::Void),
+            K::WritePointer {
+                pointer: Box::new(pointer()),
+                value: Box::new(expr(boolean(), K::Literal(Literal::Bool(true)))),
+            },
+        )),
+        next: Box::new(Pattern::Wild),
+    });
+    assert!(!checkable_predicate(&invalid));
+    assert!(nir::contracts::remap_predicate(&mut invalid, &mapping).is_err());
+}
+
+#[test]
+fn predicate_match_rebinds_pattern_guards_and_rejects_guard_writes() {
+    use nir::program::{MatchArm, Pattern};
+    let input = LocalId { owner: 1, index: 0 };
+    let field = LocalId { owner: 1, index: 1 };
+    let mapped = LocalId { owner: 2, index: 1 };
+    let make = |condition| {
+        expr(
+            boolean(),
+            K::Match {
+                value: Box::new(expr(boolean(), K::Local(input))),
+                arms: vec![MatchArm {
+                    pattern: Pattern::Guard {
+                        pattern: Box::new(Pattern::Binding {
+                            binding: field,
+                            inner: Box::new(Pattern::Wild),
+                        }),
+                        condition: Box::new(condition),
+                    },
+                    guard: Some(expr(boolean(), K::Local(field))),
+                    body: expr(boolean(), K::Local(field)),
+                }],
+            },
+        )
+    };
+    let mut predicate = make(expr(boolean(), K::Local(field)));
+    assert!(checkable_predicate(&predicate));
+    let mapping = std::collections::BTreeMap::from([(field, mapped)]);
+    nir::contracts::remap_predicate(&mut predicate, &mapping).unwrap();
+    let K::Match { arms, .. } = &predicate.kind else {
+        panic!("match")
+    };
+    let Pattern::Guard { pattern, condition } = &arms[0].pattern else {
+        panic!("guard")
+    };
+    assert!(matches!(pattern.as_ref(),Pattern::Binding {binding,..} if *binding==mapped));
+    for expr in [
+        condition.as_ref(),
+        arms[0].guard.as_ref().unwrap(),
+        &arms[0].body,
+    ] {
+        assert!(matches!(expr.kind,K::Local(id) if id==mapped));
+    }
+    let mut invalid = make(expr(
+        boolean(),
+        K::Block {
+            statements: vec![expr(
+                Term::Primitive(P::Void),
+                K::WritePointer {
+                    pointer: Box::new(pointer()),
+                    value: Box::new(expr(boolean(), K::Literal(Literal::Bool(true)))),
+                },
+            )],
+            result: Some(Box::new(expr(boolean(), K::Literal(Literal::Bool(true))))),
+        },
+    ));
+    assert!(!checkable_predicate(&invalid));
+    assert!(nir::contracts::remap_predicate(&mut invalid, &mapping).is_err());
+}
+
+#[test]
+fn predicate_or_patterns_remap_candidate_and_exported_bindings_once() {
+    use nir::program::{MatchArm, Pattern};
+    let candidate = LocalId { owner: 1, index: 1 };
+    let exported = LocalId { owner: 1, index: 2 };
+    let target = LocalId { owner: 2, index: 1 };
+    let mut predicate = expr(
+        boolean(),
+        K::Match {
+            value: Box::new(expr(boolean(), K::Literal(Literal::Bool(true)))),
+            arms: vec![MatchArm {
+                pattern: Pattern::Or(vec![Pattern::Remap {
+                    pattern: Box::new(Pattern::Binding {
+                        binding: candidate,
+                        inner: Box::new(Pattern::Wild),
+                    }),
+                    bindings: vec![(candidate, exported)],
+                }]),
+                guard: Some(expr(boolean(), K::Local(exported))),
+                body: expr(boolean(), K::Local(exported)),
+            }],
+        },
+    );
+    assert!(checkable_predicate(&predicate));
+    let mapping = std::collections::BTreeMap::from([(candidate, exported), (exported, target)]);
+    nir::contracts::remap_predicate(&mut predicate, &mapping).unwrap();
+    let K::Match { arms, .. } = &predicate.kind else {
+        panic!("match")
+    };
+    let Pattern::Or(alternatives) = &arms[0].pattern else {
+        panic!("or")
+    };
+    let Pattern::Remap { pattern, bindings } = &alternatives[0] else {
+        panic!("remap")
+    };
+    assert_eq!(bindings, &vec![(exported, target)]);
+    assert!(matches!(pattern.as_ref(),Pattern::Binding {binding,..} if *binding==exported));
+    assert!(matches!(arms[0].body.kind,K::Local(binding) if binding==target));
+    assert!(matches!(arms[0].guard.as_ref().unwrap().kind,K::Local(binding) if binding==target));
+    assert!(checkable_predicate(&predicate));
+}

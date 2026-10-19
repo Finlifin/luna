@@ -123,7 +123,7 @@ pub fn select(
     {
         return Err("comptime key protocol method is duplicated or generic".into());
     }
-    let Term::ComptimeFunction(signature) = &member.signature else {
+    let Ok(Term::ComptimeFunction(signature)) = member.signature.ordinary() else {
         return Err("key protocol requires a comptime method".into());
     };
     let Term::Function { parameters, result } = signature.as_ref() else {
@@ -255,7 +255,7 @@ pub fn select(
         .signature
         .instantiate_types(&function.type_parameters, &arguments)
         .map_err(|e| e.to_string())?;
-    let Term::ComptimeFunction(expected) = &contract.signature else {
+    let Ok(Term::ComptimeFunction(expected)) = contract.signature.ordinary() else {
         unreachable!()
     };
     if function.phase != FunctionPhase::Comptime

@@ -161,15 +161,17 @@ impl Walker<'_> {
                 .take_while(|(p, _)| p.root == root)
             {
                 self.limits.step(path.fields.len().saturating_add(1))?;
-                let bound = state
-                    .facts
-                    .bound(*field_id, self.limits)?
-                    .copy(self.limits)?;
+                let bound = match state.facts.bound(*field_id, self.limits) {
+                    Ok(bound) => Some(bound.copy(self.limits)?),
+                    Err(Unknown::MissingBound(_)) => None,
+                    Err(e) => return Err(e.into()),
+                };
                 self.replace_field(
                     &mut result,
                     &path.fields,
                     Value {
-                        range: Some(bound),
+                        unbounded_integer: bound.is_none(),
+                        range: bound,
                         ..Value::default()
                     },
                     0,
@@ -199,29 +201,47 @@ impl Walker<'_> {
         self.limits
             .step(projection.path.fields.len().saturating_add(1))?;
         projection.path.fields.push(component);
-        if let Some(bound) = &result.range {
+        if result.range.is_some() || result.unbounded_integer {
             let id = match state.paths.get(&projection.path) {
                 Some(id) => *id,
                 None => {
                     let local = self.next_field;
                     self.next_field = local.checked_add(1).ok_or(Unknown::VersionExhausted)?;
-                    // Source local owners are u32; this namespace is disjoint.
-                    let id = state.facts.assign(
-                        PlaceId {
-                            owner: u64::MAX,
-                            local,
-                        },
-                        bound.copy(self.limits)?,
-                    )?;
+                    let place = PlaceId {
+                        owner: u64::MAX,
+                        local,
+                    };
+                    let id = match &result.range {
+                        Some(bound) => state.facts.assign(place, bound.copy(self.limits)?)?,
+                        None => state.facts.invalidate(place)?,
+                    };
                     state.paths.insert(projection.path.clone(), id);
                     id
                 }
             };
-            result.range = Some(state.facts.bound(id, self.limits)?.copy(self.limits)?);
+            result.range = match state.facts.bound(id, self.limits) {
+                Ok(bound) => Some(bound.copy(self.limits)?),
+                Err(Unknown::MissingBound(_)) => None,
+                Err(e) => return Err(e.into()),
+            };
             result.scalar = Some(Scalar::Local(id));
         }
         result.projection = Some(projection);
         Ok(())
+    }
+    fn fixed_pointer_observation(&mut self, mut expr: &Expr) -> Result<bool, Reason> {
+        for _ in 0..128 {
+            self.limits.step(1)?;
+            expr = match &expr.kind {
+                K::Local(_) => return Ok(true),
+                K::Field { value, .. } | K::AnonymousField { value, .. } => value,
+                K::PointerField { pointer, .. }
+                | K::PointerAnonymousField { pointer, .. }
+                | K::ReadPointer(pointer) => pointer,
+                _ => return Ok(false),
+            };
+        }
+        Err(Reason::DepthLimit)
     }
     /// Register pure local/field reads before short-circuit forks so conditions
     /// on either operand name the same scalar identity in both alternatives.
@@ -240,6 +260,15 @@ impl Walker<'_> {
             return Ok(());
         }
         match &expr.kind {
+            K::ReadPointer(pointer) if self.fixed_pointer_observation(pointer)? => {
+                // Establish an unconstrained memory observation identity before
+                // short-circuit forks. Only fixed load chains reach this branch;
+                // no pointer factories run and no read permission is granted.
+                // Real writes still invalidate observations.
+                // Otherwise a RHS-only ghost disappears at the join while the
+                // resulting boolean condition still refers to it.
+                self.child(expr, state, depth + 1)?;
+            }
             K::AnonymousField { .. } | K::Field { .. } => {
                 let mut base = expr;
                 let mut count = depth;

@@ -2,7 +2,7 @@ use super::*;
 use std::collections::HashSet;
 
 impl Checker<'_, '_> {
-    pub(super) fn interface_expr_for(
+    pub(in crate::program) fn interface_expr_for(
         &mut self,
         expr: &Expr<'_>,
         subject: &Term,
@@ -163,7 +163,7 @@ impl Checker<'_, '_> {
                 .collect(),
         )
     }
-    pub(super) fn inherited_member_source(
+    pub(in crate::program) fn inherited_member_source(
         &self,
         subject: &Term,
         root: &n::InterfaceInstance,
@@ -171,12 +171,7 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<Option<n::InterfaceInstance>, Error> {
         let mut pending = vec![root.clone()];
-        let scope = self.call_inference_scope();
-        let frames = if scope.is_empty() {
-            vec![]
-        } else {
-            vec![scope.iter().map(|parameter| parameter.sort).collect()]
-        };
+        let frames = self.call_input_frames();
         let mut seen = HashSet::new();
         let mut sources = Vec::new();
         let mut fuel = Budget::default().steps;
@@ -252,7 +247,7 @@ impl Checker<'_, '_> {
                     .collect(),
             })
     }
-    pub(super) fn symbolic_interface_evidence(
+    pub(in crate::program) fn symbolic_interface_evidence(
         &self,
         subject: &Term,
         target: &n::InterfaceInstance,
@@ -276,6 +271,14 @@ impl Checker<'_, '_> {
             world
                 .given_in_context(&requirement, Budget::default())
                 .is_some()
+        } else if self
+            .call_inference_domains()
+            .iter()
+            .any(|(_, domain)| domain.is_none())
+        {
+            world
+                .given_in_input_scope(&requirement, Budget::default(), &self.call_input_frames())
+                .is_some()
         } else {
             world
                 .given_in_scope(
@@ -293,12 +296,7 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<Option<n::InterfaceInstance>, Error> {
         let mut sources = Vec::new();
-        let scope = self.call_inference_scope();
-        let frames = if scope.is_empty() {
-            vec![]
-        } else {
-            vec![scope.iter().map(|parameter| parameter.sort).collect()]
-        };
+        let frames = self.call_input_frames();
         for capability in crate::capabilities::capability_sources_in_scope(
             &self.checked_traits,
             &self.capability_assumptions(),

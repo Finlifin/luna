@@ -8,6 +8,7 @@ pub mod types;
 pub use types::*;
 
 pub mod enum_encoding;
+mod nominal_parameters;
 pub mod program;
 mod trait_parameters;
 
@@ -33,3 +34,11 @@ pub mod deferred_signatures;
 pub mod inline_return;
 
 pub mod newtypes;
+
+pub mod type_aliases;
+
+pub mod code_interfaces;
+
+pub use nominal_parameters::{
+    binders as declaration_parameters, validate_completed as validate_declaration_arguments,
+};

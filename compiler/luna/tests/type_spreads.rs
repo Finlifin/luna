@@ -7,6 +7,36 @@ use execution_support::{calls, compile, compile_with_protocols, id};
 const TYPE: &str = "typealias Type=.Type'builtin;";
 
 #[test]
+fn bound_meta_list_values_do_not_depend_on_tuple_declarations() {
+    let prefix = format!("{TYPE}pure comptime fn List<T>->Type {{T}}");
+    let baseline = compile(&prefix);
+    let protocols = elaboration::program::Protocols {
+        meta_list: Some(baseline.normal_forms[0].declaration),
+        ..Default::default()
+    };
+    let package = compile_with_protocols(
+        &format!("{prefix}comptime fn pass(values:List<Type>)->List<Type> {{values}}"),
+        &protocols,
+    )
+    .unwrap();
+    assert_eq!(package.normal_forms.len(), 1);
+    assert_eq!(
+        package.normal_forms[0].role,
+        nir::normal_forms::Role::TypeList
+    );
+    assert!(package.to_string().contains("(role type-list)"));
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    for types in [vec![], vec![nir::Term::Primitive(nir::Primitive::Bool)]] {
+        let value = Value::TypeList(types);
+        assert_eq!(
+            vm.invoke(id(&package, "pass"), vec![value.clone()])
+                .unwrap(),
+            value
+        );
+    }
+}
+
+#[test]
 fn nominal_and_alias_arguments_expand_literal_and_computed_packets() {
     let package=compile(&format!("{TYPE}
         struct Pair where A,B {{first:A,second:B}}
@@ -966,10 +996,20 @@ fn partial_packet_context_keeps_fixed_fields_beside_dependent_values() {
 
 #[test]
 fn partial_packet_context_does_not_prove_the_unknown_dependency() {
-    let package = compile(&format!(
+    let prefix = format!(
         "{TYPE}typealias Byte=.u8'builtin;
-        pure comptime fn Tagged<T,value:T,number:Byte>->Type {{T}}
-        comptime fn Run()->Type {{Tagged<...do {{(Byte,true,7)}}>}}"
+        pure comptime fn Tagged<T,value:T,number:Byte>->Type {{T}}"
+    );
+    let failure = compile_with_protocols(
+        &format!("{prefix} comptime fn Bad()->Type {{Tagged<...do {{(Byte,true,7)}}>}}"),
+        &Default::default(),
+    )
+    .err()
+    .expect("known conflicting dependency must be rejected");
+    assert!(failure.contains("type mismatch"), "{failure}");
+    let package = compile(&format!(
+        "{prefix} comptime fn Selected()->Type {{Byte}}
+        comptime fn Run()->Type {{Tagged<...do {{(Selected(),true,7)}}>}}"
     ));
     assert!(luna::invocation::invoke(&package, "Run", 100_000).is_err());
 }
@@ -1019,33 +1059,63 @@ fn packet_context_inference_does_not_replay_branch_conditions() {
 }
 
 #[test]
-fn multiple_unknown_packet_widths_do_not_invent_a_partition() {
+fn variadic_return_signatures_determine_packet_partition() {
     let prefix = format!(
         "{TYPE}typealias Byte=.u8'builtin;
         pure comptime fn Pair<first:Byte,second:Byte>->Type {{bool}}
         comptime fn packet(...items:T)->T where T {{items}}"
     );
-    assert!(
-        compile_with_protocols(
-            &format!("{prefix}comptime fn Run()->Type {{Pair<...packet(7),...packet(8)>}}"),
-            &Default::default()
-        )
-        .is_err()
-    );
-    let package = compile(&format!(
-        "{prefix}comptime fn Run()->Type {{let a:Byte=7;let b:Byte=8;Pair<...packet(a),...packet(b)>}}"
-    ));
-    assert_eq!(
-        luna::invocation::invoke(&package, "Run", 100_000).unwrap(),
-        Value::Type(nir::Term::NormalForm {
-            head: id(&package, "Pair"),
-            sort: nir::Sort::Type,
-            arguments: vec![
-                nir::Term::Integer(comptime_runtime::Integer::from_u128(7)),
-                nir::Term::Integer(comptime_runtime::Integer::from_u128(8))
-            ],
-        })
-    );
+    for body in [
+        "Pair<...packet(7),...packet(8)>",
+        "let a:Byte=7;let b:Byte=8;Pair<...packet(a),...packet(b)>",
+    ] {
+        let package = compile(&format!("{prefix}comptime fn Run()->Type {{{body}}}"));
+        assert_eq!(
+            luna::invocation::invoke(&package, "Run", 100_000).unwrap(),
+            Value::Type(nir::Term::NormalForm {
+                head: id(&package, "Pair"),
+                sort: nir::Sort::Type,
+                arguments: vec![
+                    nir::Term::Integer(comptime_runtime::Integer::from_u128(7)),
+                    nir::Term::Integer(comptime_runtime::Integer::from_u128(8))
+                ],
+            })
+        );
+    }
+}
+
+#[test]
+fn required_packet_layout_preserves_context_execution_and_obligations() {
+    for requirement in [
+        "T == (Byte,bool)",
+        "(Byte,bool) == T",
+        "T == (Byte,bool) and (Byte,bool) == T",
+    ] {
+        let source = format!(
+            "{TYPE}typealias Byte=.u8'builtin;
+            comptime fn packet()->T where T, requires {requirement} {{(7,true)}}
+            comptime fn take(a:Byte,b:bool,c:Byte,d:bool)->bool {{a == 7 and b and c == 7 and d}}
+            comptime fn Run()->bool {{take(...packet(),...packet())}}"
+        );
+        let package = compile(&source);
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        assert_eq!(
+            vm.invoke(id(&package, "Run"), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            calls(&package, &vm),
+            vec!["Run", "packet", "packet", "take"]
+        );
+
+        let invalid = source.replace(
+            &format!("requires {requirement}"),
+            &format!("requires ({requirement}) and false"),
+        );
+        assert!(compile_with_protocols(&invalid, &Default::default()).is_err());
+        let invalid = source.replace("c:Byte", "c:bool");
+        assert!(compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
 }
 
 #[test]
@@ -1069,6 +1139,30 @@ fn type_only_spreads_contextualize_result_inferred_factories() {
     assert_eq!(
         luna::invocation::invoke(&package, "Run", 100_000).unwrap(),
         result
+    );
+}
+
+#[test]
+fn explicit_packet_type_hints_do_not_repeat_producers() {
+    let source = format!(
+        "{TYPE}typealias Byte=.u8'builtin;
+        comptime fn first()->(Byte,bool) {{(7,true)}}
+        comptime fn second()->(Byte,bool) {{(9,false)}}
+        comptime fn packet(value:T)->T where T {{value}}
+        comptime fn take(a:Byte,b:bool,c:Byte,d:bool)->bool {{a == 7 and b and c == 9 and not d}}
+        comptime fn Run()->bool {{take(
+            ...packet<(Byte,bool)>(do {{let pair=first();pair}}),
+            ...packet<(Byte,bool)>(do {{let pair=second();pair}}))}}"
+    );
+    let package = compile(&source);
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(&package, "Run"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        calls(&package, &vm),
+        vec!["Run", "first", "packet", "second", "packet", "take"]
     );
 }
 
@@ -1153,4 +1247,920 @@ fn type_packet_result_context_does_not_override_producer_requirements() {
     );
     let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
     assert!(error.contains("requirement"), "{error}");
+}
+
+#[test]
+fn projected_type_factories_expand_packets_once_and_reuse_dynamic_defaults() {
+    let package = compile(&format!(
+        "{TYPE}
+        struct Holder where T {{pub newtype Wrapped<U,.V:Type=U> = U;}}
+        comptime fn packet(T:Type)->(Type,) {{(T,)}}
+        comptime fn Build(T:Type)->Type {{Holder<bool>.Wrapped<...packet(T)>}}
+        comptime fn Run()->Type {{Build(.u8'builtin)}}"
+    ));
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let result = vm.invoke(id(&package, "Run"), vec![]).unwrap();
+    assert_eq!(calls(&package, &vm), vec!["Run", "Build", "packet"]);
+    assert_eq!(
+        result,
+        Value::Type(nir::Term::Nominal {
+            declaration: package.newtypes[0].declaration,
+            arguments: vec![
+                nir::Term::Primitive(nir::Primitive::U8),
+                nir::Term::Primitive(nir::Primitive::U8),
+                nir::Term::Primitive(nir::Primitive::Bool)
+            ],
+        })
+    );
+    assert_eq!(
+        luna::invocation::invoke(&package, "Run", 100_000).unwrap(),
+        result
+    );
+}
+
+#[test]
+fn dynamic_projection_base_and_member_packets_keep_separate_input_order() {
+    let package = compile(&format!(
+        "{TYPE}
+        struct Holder where T {{pub newtype Wrapped<U> = U;}}
+        comptime fn outer(T:Type)->(Type,) {{(T,)}}
+        comptime fn member()->(Type,) {{(bool,)}}
+        comptime fn Build(T:Type)->Type {{Holder<...outer(T)>.Wrapped<...member()>}}
+        comptime fn Run()->Type {{Build(.u8'builtin)}}"
+    ));
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let result = vm.invoke(id(&package, "Run"), vec![]).unwrap();
+    assert_eq!(
+        calls(&package, &vm),
+        vec!["Run", "Build", "outer", "member"]
+    );
+    assert_eq!(
+        result,
+        Value::Type(nir::Term::Nominal {
+            declaration: package.newtypes[0].declaration,
+            arguments: vec![
+                nir::Term::Primitive(nir::Primitive::Bool),
+                nir::Term::Primitive(nir::Primitive::U8)
+            ],
+        })
+    );
+}
+
+#[test]
+fn type_preserving_packet_layout_does_not_execute_or_repeat_calls() {
+    let package = compile(
+        "typealias Byte=.u8'builtin;
+        comptime fn first()->Byte {1}
+        comptime fn second()->Byte {2}
+        comptime fn identity(value:T)->T where T {value}
+        comptime fn combine(left:Byte,right:Byte)->bool {left == 1 and right == 2}
+        comptime fn Run()->bool {
+            combine(...identity((first(),)),...identity((second(),)))
+        }",
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(&package, "Run"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        calls(&package, &vm),
+        vec!["Run", "first", "identity", "second", "identity", "combine"]
+    );
+}
+
+#[test]
+fn collected_packet_width_counts_source_arguments_not_tuple_fields() {
+    for (arguments, expected_calls) in [
+        (
+            "...pack(.items=((255,true),)),...pack(.items=(true,))",
+            vec!["Run", "pack", "pack", "combine"],
+        ),
+        (
+            "...pack((255,true)),...pack(true)",
+            vec!["Run", "pack", "pack", "combine"],
+        ),
+        (
+            "...pack(),...pack((255,true)),...pack(...(true,)),...pack(...())",
+            vec!["Run", "pack", "pack", "pack", "pack", "combine"],
+        ),
+    ] {
+        let package = compile(&format!("typealias Byte=.u8'builtin;
+            comptime fn pack(...items:T)->T where T {{items}}
+            comptime fn combine(pair:(Byte,bool),flag:bool)->bool {{let (number,enabled)=pair;number == 255 and enabled and flag}}
+            comptime fn Run()->bool {{combine({arguments})}}"));
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        assert_eq!(
+            vm.invoke(id(&package, "Run"), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(calls(&package, &vm), expected_calls);
+    }
+}
+
+#[test]
+fn complete_packet_layout_hints_do_not_accept_invalid_named_routing() {
+    let prefix = "typealias Byte=.u8'builtin;
+        comptime fn pack(...items:T)->T where T {items}
+        comptime fn combine(left:Byte,right:Byte)->bool {left == 7 and right == 8}";
+    for first in [
+        "pack(.unknown=(7,))",
+        "pack(.items=(7,),.items=(7,))",
+        "pack(.items=(7,),7)",
+    ] {
+        let result = compile_with_protocols(
+            &format!(
+                "{prefix}comptime fn Run()->bool {{combine(...{first},...pack(.items=(8,)))}}"
+            ),
+            &Default::default(),
+        );
+        assert!(result.is_err(), "{first}");
+    }
+}
+
+#[test]
+fn explicit_named_packets_preserve_optional_and_implicit_input_shapes() {
+    for parameter in ["implicit value:T", ".value:T=fallback<T>()"] {
+        let source = format!("typealias Byte=.u8'builtin;
+            comptime fn fallback()->T where T {{fallback<T>()}}
+            comptime fn supply({parameter})->T where T {{value}}
+            comptime fn combine(number:Byte,flag:bool)->bool {{number == 255 and flag}}
+            comptime fn Run()->bool {{combine(...supply(.value=(255,)),...supply(.value=(true,)))}}");
+        let package = compile(&source);
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        assert_eq!(
+            vm.invoke(id(&package, "Run"), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            calls(&package, &vm),
+            vec!["Run", "supply", "supply", "combine"]
+        );
+        for invalid in [
+            source.replace(".value=(255,)", ".missing=(255,)"),
+            source.replace(parameter, "value:T"),
+        ] {
+            assert!(compile_with_protocols(&invalid, &Default::default()).is_err());
+        }
+    }
+}
+
+#[test]
+fn preserved_packet_shape_routes_among_other_function_inputs() {
+    for (parameters, first, second) in [
+        (
+            "flag:bool,value:T",
+            "forward(first(),(255,))",
+            "forward(second(),(true,))",
+        ),
+        (
+            "flag:bool,implicit value:T",
+            "forward(.value=(255,),first())",
+            "forward(second(),.value=(true,))",
+        ),
+        (
+            "flag:bool,.value:T=fallback<T>()",
+            "forward(first(),.value=(255,))",
+            "forward(.value=(true,),second())",
+        ),
+    ] {
+        let package = compile(&format!(
+            "typealias Byte=.u8'builtin;
+            comptime fn first()->bool {{true}}
+            comptime fn second()->bool {{false}}
+            comptime fn fallback()->T where T {{fallback<T>()}}
+            comptime fn forward({parameters})->T where T {{value}}
+            comptime fn combine(number:Byte,flag:bool)->bool {{number == 255 and flag}}
+            comptime fn Run()->bool {{combine(...{first},...{second})}}"
+        ));
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        assert_eq!(
+            vm.invoke(id(&package, "Run"), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            calls(&package, &vm),
+            vec!["Run", "first", "forward", "second", "forward", "combine"]
+        );
+    }
+}
+
+#[test]
+fn preserved_collection_width_excludes_fixed_prefix_and_suffix() {
+    for (left, right) in [
+        ("packet(first(),255,last())", "packet(first(),true,last())"),
+        (
+            "packet(.items=(255,),first(),last())",
+            "packet(first(),last(),.items=(true,))",
+        ),
+        (
+            "packet(...(first(),255),last())",
+            "packet(first(),...(true,last()))",
+        ),
+    ] {
+        for empty_prefix in [false, true] {
+            let empty = if empty_prefix {
+                "...packet(first(),last()),"
+            } else {
+                ""
+            };
+            let package = compile(&format!(
+                "typealias Byte=.u8'builtin;
+                comptime fn first()->bool {{true}}
+                comptime fn last()->bool {{false}}
+                comptime fn packet(prefix:bool,...items:T,suffix:bool)->T where T {{items}}
+                comptime fn combine(number:Byte,flag:bool)->bool {{number == 255 and flag}}
+                comptime fn Run()->bool {{combine({empty}...{left},...{right})}}"
+            ));
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            assert_eq!(
+                vm.invoke(id(&package, "Run"), vec![]).unwrap(),
+                Value::Bool(true)
+            );
+            let mut expected = vec!["Run"];
+            if empty_prefix {
+                expected.extend(["first", "last", "packet"]);
+            }
+            expected.extend([
+                "first", "last", "packet", "first", "last", "packet", "combine",
+            ]);
+            assert_eq!(calls(&package, &vm), expected);
+        }
+    }
+}
+
+#[test]
+fn named_type_list_supply_accepts_literal_prefix_packets_in_source_order() {
+    for (arguments, calls) in [
+        (
+            ".Es=tail(), ...(First(), value())",
+            vec!["Build", "tail", "First", "value"],
+        ),
+        (
+            "...(First(), value()), .Es=tail()",
+            vec!["Build", "First", "value", "tail"],
+        ),
+        (
+            "...(), First(), .Es=tail(), ...(value(),)",
+            vec!["Build", "First", "tail", "value"],
+        ),
+    ] {
+        let source = format!(
+            "{TYPE}
+            pure comptime fn List<T>->Type {{T}}
+            pure comptime fn Product<T,value:T,...Es:List<Type>>->Type {{T}}
+            comptime fn First()->Type {{bool}}
+            comptime fn value()->bool {{true}}
+            comptime fn tail()->List<Type> {{[bool]}}
+            comptime fn Build()->Type {{Product<{arguments}>}}
+            typealias Fixed=Product<...(.u8'builtin,9),.Es=[bool]>;"
+        );
+        let package = execution_support::compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                meta_list: Some("input::List"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut vm = comptime_interpretor::Interpreter::new(
+            &package,
+            comptime_interpretor::Budget::default(),
+        )
+        .unwrap();
+        let result = vm
+            .invoke(execution_support::id(&package, "Build"), vec![])
+            .unwrap();
+        let Value::Type(nir::Term::NormalForm { arguments, .. }) = result else {
+            panic!("expected retained head")
+        };
+        assert_eq!(
+            arguments,
+            vec![
+                nir::Term::Primitive(nir::Primitive::Bool),
+                nir::Term::Bool(true),
+                nir::Term::TypeListValue(vec![nir::Term::Primitive(nir::Primitive::Bool)])
+            ]
+        );
+        assert_eq!(execution_support::calls(&package, &vm), calls);
+    }
+}
+
+#[test]
+fn named_type_list_prefix_packets_preserve_exits_and_reject_conflicting_supply() {
+    let compile = |arguments: &str| {
+        execution_support::compile_with_source_bindings(
+            &format!(
+                "{TYPE} pure comptime fn List<T>->Type {{T}}
+                pure comptime fn Product<T,value:T,...Es:List<Type>>->Type {{T}}
+                comptime fn First()->Type {{bool}}
+                comptime fn value()->bool {{true}}
+                comptime fn tail()->List<Type> {{[bool]}}
+                comptime fn Build()->Type {{Product<{arguments}>}}"
+            ),
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                meta_list: Some("input::List"),
+                ..Default::default()
+            },
+        )
+    };
+    let package = compile(".Es=do {tail();return bool;}, ...(First(),value())").unwrap();
+    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(&package, "Build"), vec![]).unwrap(),
+        Value::Type(nir::Term::Primitive(nir::Primitive::Bool))
+    );
+    assert_eq!(calls(&package, &vm), vec!["Build", "tail"]);
+    for (args, message) in [
+        (
+            "...(bool,true,bool),.Es=tail()",
+            "combine a complete type-list",
+        ),
+        ("...(bool,),.Es=tail()", "argument count mismatch"),
+        (
+            "...(bool,true),.Es=tail(),.Es=tail()",
+            "duplicate type-list",
+        ),
+        ("...(bool,true),.other=tail()", "unknown named normal-form"),
+    ] {
+        let failure = compile(args).unwrap_err();
+        assert!(failure.contains(message), "{args}: {failure}");
+    }
+}
+
+#[test]
+fn computed_prefix_packets_share_the_named_type_list_input_plan() {
+    for bound_tuple in [false, true] {
+        for (arguments, expected_calls) in [
+            (".Es=tail(), ...packet()", vec!["Build", "tail", "packet"]),
+            ("...packet(), .Es=tail()", vec!["Build", "packet", "tail"]),
+            (
+                "...empty(), .Es=tail(), ...packet()",
+                vec!["Build", "empty", "tail", "packet"],
+            ),
+        ] {
+            let source = format!(
+                "{TYPE}
+                pure comptime fn List<T>->Type {{T}}
+                pure comptime fn Tuple<...Es:List<Type>>->Type {{bool}}
+                pure comptime fn Product<T,value:T,...Es:List<Type>>->Type {{T}}
+                comptime fn packet()->(Type,bool) {{(bool,true)}}
+                comptime fn empty(...items:T)->T where T {{items}}
+                comptime fn tail()->List<Type> {{[bool]}}
+                comptime fn Build()->Type {{Product<{arguments}>}}
+                typealias Fixed=Product<...packet(),.Es=[bool]>;"
+            );
+            let package = execution_support::compile_with_source_bindings(
+                &source,
+                &Default::default(),
+                luna::protocols::type_constructors::Selectors {
+                    meta_list: Some("input::List"),
+                    tuple: bound_tuple.then_some("input::Tuple"),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+            let Value::Type(nir::Term::NormalForm { arguments, .. }) =
+                vm.invoke(id(&package, "Build"), vec![]).unwrap()
+            else {
+                panic!("expected retained head")
+            };
+            assert_eq!(
+                arguments,
+                vec![
+                    nir::Term::Primitive(nir::Primitive::Bool),
+                    nir::Term::Bool(true),
+                    nir::Term::TypeListValue(vec![nir::Term::Primitive(nir::Primitive::Bool)])
+                ]
+            );
+            assert_eq!(calls(&package, &vm), expected_calls);
+        }
+    }
+}
+
+#[test]
+fn computed_prefix_packets_keep_exit_order_and_dependent_checks() {
+    let compile = |arguments: &str, packet: &str| {
+        execution_support::compile_with_source_bindings(
+            &format!(
+                "{TYPE} pure comptime fn List<T>->Type {{T}}
+            pure comptime fn Product<T,value:T,...Es:List<Type>>->Type {{T}}
+            comptime fn packet()->(Type,bool) {{{packet}}}
+            comptime fn tail()->List<Type> {{[bool]}}
+            comptime fn Build()->Type {{Product<{arguments}>}}"
+            ),
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                meta_list: Some("input::List"),
+                ..Default::default()
+            },
+        )
+    };
+    let package = compile(".Es=do {tail();return bool;},...packet()", "(bool,true)").unwrap();
+    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(&package, "Build"), vec![]).unwrap(),
+        Value::Type(nir::Term::Primitive(nir::Primitive::Bool))
+    );
+    assert_eq!(calls(&package, &vm), vec!["Build", "tail"]);
+    let package = compile("...packet(),.Es=tail()", "(.u8'builtin,true)").unwrap();
+    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    assert!(vm.invoke(id(&package, "Build"), vec![]).is_err());
+    assert_eq!(calls(&package, &vm), vec!["Build", "packet"]);
+    for (arguments, diagnostic) in [
+        ("...packet(),bool,.Es=tail()", "argument count mismatch"),
+        (
+            "...packet(),.Es=tail(),.Es=tail()",
+            "duplicate normal-form argument",
+        ),
+        (
+            "...packet(),.unknown=tail()",
+            "unknown named normal-form argument",
+        ),
+    ] {
+        let failure = compile(arguments, "(bool,true)").unwrap_err();
+        assert!(failure.contains(diagnostic), "{failure}");
+    }
+}
+
+#[test]
+fn named_type_list_packets_compose_with_dependent_defaults() {
+    let source = format!(
+        "{TYPE}
+        pure comptime fn List<T>->Type {{T}}
+        pure comptime fn Product<T,value:T,.copy:T=value,...Es:List<Type>>->Type {{T}}
+        comptime fn packet()->(Type,bool) {{(bool,true)}}
+        comptime fn tail()->List<Type> {{[bool]}}
+        comptime fn replacement()->bool {{false}}
+        comptime fn Default()->Type {{Product<...packet(),.Es=tail()>}}
+        comptime fn Empty()->Type {{Product<...packet()>}}
+        comptime fn Explicit()->Type {{Product<.copy=replacement(),.Es=tail(),...packet()>}}"
+    );
+    let package = execution_support::compile_with_source_bindings(
+        &source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            meta_list: Some("input::List"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for (entry, copy, elements, expected_calls) in [
+        (
+            "Default",
+            true,
+            vec![nir::Term::Primitive(nir::Primitive::Bool)],
+            vec!["Default", "packet", "tail"],
+        ),
+        (
+            "Explicit",
+            false,
+            vec![nir::Term::Primitive(nir::Primitive::Bool)],
+            vec!["Explicit", "replacement", "tail", "packet"],
+        ),
+        ("Empty", true, vec![], vec!["Empty", "packet"]),
+    ] {
+        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        let Value::Type(nir::Term::NormalForm { arguments, .. }) =
+            vm.invoke(id(&package, entry), vec![]).unwrap()
+        else {
+            panic!("expected retained head")
+        };
+        assert_eq!(
+            arguments,
+            vec![
+                nir::Term::Primitive(nir::Primitive::Bool),
+                nir::Term::Bool(true),
+                nir::Term::Bool(copy),
+                nir::Term::TypeListValue(elements)
+            ]
+        );
+        assert_eq!(calls(&package, &vm), expected_calls);
+    }
+}
+
+#[test]
+fn named_type_list_packets_retain_generic_type_alias_parameters() {
+    let source = format!(
+        "{TYPE}
+        pure comptime fn List<T>->Type {{T}}
+        pure comptime fn Product<A,B,.C:Type=B,...Es:List<Type>>->Type {{A}}
+        comptime fn packet()->(Type,Type) where T {{(T,bool)}}
+        typealias Alias<T> = Product<...packet<T>(),.Es=[T]>;
+        fn keep(value:Alias<T>)->Product<T,bool,.C=bool,.Es=[T]> where T {{value}}
+        comptime fn Result()->Type {{Alias<.u8'builtin>}}"
+    );
+    let package = execution_support::compile_with_source_bindings(
+        &source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            meta_list: Some("input::List"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let Value::Type(nir::Term::NormalForm { arguments, .. }) =
+        luna::invocation::invoke(&package, "Result", 100_000).unwrap()
+    else {
+        panic!("expected retained head")
+    };
+    assert_eq!(
+        arguments,
+        vec![
+            nir::Term::Primitive(nir::Primitive::U8),
+            nir::Term::Primitive(nir::Primitive::Bool),
+            nir::Term::Primitive(nir::Primitive::Bool),
+            nir::Term::TypeListValue(vec![nir::Term::Primitive(nir::Primitive::U8)])
+        ]
+    );
+}
+
+#[test]
+fn defaulted_normal_heads_collect_type_items_in_source_order() {
+    for (arguments, expected_calls) in [
+        (
+            "bool,true,First(),.copy=replacement(),Second()",
+            vec!["Build", "First", "replacement", "Second"],
+        ),
+        (
+            "bool,true,.copy=replacement(),First(),Second()",
+            vec!["Build", "replacement", "First", "Second"],
+        ),
+        (
+            "bool,true,First(),Second()",
+            vec!["Build", "First", "Second"],
+        ),
+    ] {
+        let source = format!(
+            "{TYPE} pure comptime fn List<T>->Type {{T}}
+            pure comptime fn Product<T,value:T,.copy:T=value,...Es:List<Type>>->Type {{T}}
+            comptime fn First()->Type {{bool}}
+            comptime fn Second()->Type {{.u8'builtin}}
+            comptime fn replacement()->bool {{true}}
+            comptime fn Build()->Type {{Product<{arguments}>}}
+            typealias Alias=Product<bool,true,bool,.u8'builtin>;"
+        );
+        let package = execution_support::compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                meta_list: Some("input::List"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        let Value::Type(nir::Term::NormalForm { arguments, .. }) =
+            vm.invoke(id(&package, "Build"), vec![]).unwrap()
+        else {
+            panic!("expected retained head")
+        };
+        assert_eq!(
+            arguments.last(),
+            Some(&nir::Term::TypeListValue(vec![
+                nir::Term::Primitive(nir::Primitive::Bool),
+                nir::Term::Primitive(nir::Primitive::U8)
+            ]))
+        );
+        assert_eq!(calls(&package, &vm), expected_calls);
+    }
+}
+
+#[test]
+fn defaulted_type_collection_preserves_early_exit_and_rejects_mixed_supply() {
+    let compile = |arguments: &str| {
+        execution_support::compile_with_source_bindings(
+            &format!(
+                "{TYPE} pure comptime fn List<T>->Type {{T}}
+            pure comptime fn Tuple<...Es:List<Type>>->Type {{bool}}
+            pure comptime fn Product<T,value:T,.copy:T=value,...Es:List<Type>>->Type {{T}}
+            comptime fn First()->Type {{bool}}
+            comptime fn Second()->Type {{.u8'builtin}}
+            comptime fn replacement()->bool {{true}}
+            comptime fn Build()->Type {{Product<{arguments}>}}"
+            ),
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                meta_list: Some("input::List"),
+                tuple: Some("input::Tuple"),
+                ..Default::default()
+            },
+        )
+    };
+    let package =
+        compile("bool,true,First(),do {return bool;},.copy=replacement(),Second()").unwrap();
+    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(&package, "Build"), vec![]).unwrap(),
+        Value::Type(nir::Term::Primitive(nir::Primitive::Bool))
+    );
+    assert_eq!(calls(&package, &vm), vec!["Build", "First"]);
+    let package = compile("bool,true,First(),.copy=replacement(),Second()").unwrap();
+    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    assert!(matches!(
+        vm.invoke(id(&package, "Build"), vec![]).unwrap(),
+        Value::Type(nir::Term::NormalForm { .. })
+    ));
+    assert_eq!(
+        calls(&package, &vm),
+        vec!["Build", "First", "replacement", "Second"]
+    );
+    for args in ["bool,true,bool,.Es=[bool]", "bool,true,.Es=[bool],bool"] {
+        let failure = compile(args).unwrap_err();
+        assert!(
+            failure.contains("combine a complete type-list"),
+            "{failure}"
+        );
+    }
+    assert!(compile("bool,true,true").is_err());
+}
+
+#[test]
+fn defaulted_type_collectors_spread_lists_once_in_source_order() {
+    for (arguments, expected_calls) in [
+        (
+            "bool,true,...items(),.copy=replacement(),bool,...empty()",
+            vec!["Build", "items", "replacement", "empty"],
+        ),
+        (
+            "...packet(),...items(),.copy=replacement(),bool,...empty()",
+            vec!["Build", "packet", "items", "replacement", "empty"],
+        ),
+    ] {
+        let source = format!(
+            "{TYPE} pure comptime fn List<T>->Type {{T}}
+            pure comptime fn Tuple<...Es:List<Type>>->Type {{bool}}
+            pure comptime fn Product<T,value:T,.copy:T=value,...Es:List<Type>>->Type {{T}}
+            comptime fn packet()->(Type,bool) {{(bool,true)}}
+            comptime fn items()->List<Type> {{[bool,.u8'builtin]}}
+            comptime fn empty()->List<Type> {{[]}}
+            comptime fn replacement()->bool {{false}}
+            comptime fn Build()->Type {{Product<{arguments}>}}
+            typealias Alias<T> = Product<bool,true,...[T],bool>;
+            fn keep(value:Alias<T>)->Product<bool,true,.Es=[T,bool]> where T {{value}}"
+        );
+        let package = execution_support::compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                meta_list: Some("input::List"),
+                tuple: Some("input::Tuple"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        let Value::Type(nir::Term::NormalForm { arguments, .. }) =
+            vm.invoke(id(&package, "Build"), vec![]).unwrap()
+        else {
+            panic!("expected retained head")
+        };
+        assert_eq!(arguments[2], nir::Term::Bool(false));
+        assert_eq!(
+            arguments[3],
+            nir::Term::TypeListValue(vec![
+                nir::Term::Primitive(nir::Primitive::Bool),
+                nir::Term::Primitive(nir::Primitive::U8),
+                nir::Term::Primitive(nir::Primitive::Bool)
+            ])
+        );
+        assert_eq!(calls(&package, &vm), expected_calls);
+    }
+}
+
+#[test]
+fn defaulted_list_spreads_preserve_exit_and_validate_element_domains() {
+    let compile = |arguments: &str| {
+        execution_support::compile_with_source_bindings(
+            &format!(
+                "{TYPE} pure comptime fn List<T>->Type {{T}}
+            pure comptime fn Product<T,value:T,.copy:T=value,...Es:List<Type>>->Type {{T}}
+            comptime fn items()->List<Type> {{[bool]}}
+            comptime fn replacement()->bool {{false}}
+            comptime fn Build()->Type {{Product<{arguments}>}}"
+            ),
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                meta_list: Some("input::List"),
+                ..Default::default()
+            },
+        )
+    };
+    let package =
+        compile("bool,true,...do {items();return bool;},.copy=replacement(),bool").unwrap();
+    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(&package, "Build"), vec![]).unwrap(),
+        Value::Type(nir::Term::Primitive(nir::Primitive::Bool))
+    );
+    assert_eq!(calls(&package, &vm), vec!["Build", "items"]);
+    for args in [
+        "bool,true,...[true]",
+        "bool,true,...(bool,bool)",
+        "bool,true,...items(),.Es=[]",
+        "bool,true,.Es=[],...items()",
+    ] {
+        assert!(compile(args).is_err(), "{args}");
+    }
+}
+
+#[test]
+fn required_prefix_heads_collect_after_computed_packets() {
+    let source = format!(
+        "{TYPE} pure comptime fn List<T>->Type {{T}}
+        pure comptime fn Tuple<...Es:List<Type>>->Type {{bool}}
+        pure comptime fn Product<T,value:T,...Es:List<Type>>->Type {{T}}
+        comptime fn packet()->(Type,bool) {{(bool,true)}}
+        comptime fn items()->List<Type> {{[.u8'builtin]}}
+        comptime fn Build()->Type {{Product<...packet(),...items(),bool>}}
+        comptime fn Empty()->Type {{Product<...packet()>}}
+        typealias Alias=Product<...packet(),...items(),bool>;
+        fn keep(value:Alias)->Product<bool,true,.u8'builtin,bool> {{value}}"
+    );
+    let package = execution_support::compile_with_source_bindings(
+        &source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            meta_list: Some("input::List"),
+            tuple: Some("input::Tuple"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for (entry, elements, expected_calls) in [
+        (
+            "Build",
+            vec![
+                nir::Term::Primitive(nir::Primitive::U8),
+                nir::Term::Primitive(nir::Primitive::Bool),
+            ],
+            vec!["Build", "packet", "items"],
+        ),
+        ("Empty", vec![], vec!["Empty", "packet"]),
+    ] {
+        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        let Value::Type(nir::Term::NormalForm { arguments, .. }) =
+            vm.invoke(id(&package, entry), vec![]).unwrap()
+        else {
+            panic!("expected retained head")
+        };
+        assert_eq!(
+            arguments,
+            vec![
+                nir::Term::Primitive(nir::Primitive::Bool),
+                nir::Term::Bool(true),
+                nir::Term::TypeListValue(elements)
+            ]
+        );
+        assert_eq!(calls(&package, &vm), expected_calls);
+    }
+}
+
+#[test]
+fn prefix_literal_expansion_does_not_reinterpret_tail_tuples_as_type_lists() {
+    let compile = |args: &str| {
+        execution_support::compile_with_source_bindings(
+            &format!(
+                "{TYPE} pure comptime fn List<T>->Type {{T}}
+            pure comptime fn Product<T,value:T,...Es:List<Type>>->Type {{T}}
+            comptime fn items()->List<Type> {{[bool]}}
+            comptime fn Build()->Type {{Product<{args}>}}"
+            ),
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                meta_list: Some("input::List"),
+                ..Default::default()
+            },
+        )
+    };
+    let package = compile("...(.u8'builtin,9),...items()").unwrap();
+    let Value::Type(nir::Term::NormalForm { arguments, .. }) =
+        luna::invocation::invoke(&package, "Build", 100_000).unwrap()
+    else {
+        panic!("expected retained head")
+    };
+    assert_eq!(arguments[0], nir::Term::Primitive(nir::Primitive::U8));
+    assert_eq!(
+        arguments[1],
+        nir::Term::Integer(comptime_runtime::Integer::from_u128(9))
+    );
+    for args in ["...(bool,true),...(bool,bool)", "...(bool,true),...()"] {
+        assert!(compile(args).is_err(), "{args}");
+    }
+}
+
+#[test]
+fn collected_type_list_contracts_reject_known_violations_during_elaboration() {
+    for tail in ["bool,.u8'builtin", "...[bool,.u8'builtin]"] {
+        let source = format!(
+            "{TYPE} pure comptime fn List<T>->Type {{T}}
+            pure comptime fn Probe<...Es:List<Type>>->Type {{bool}}
+            pure comptime fn Checked<T,.U:Type=T,...Es:List<Type>>->Type
+                where requires Probe<...Es> == Probe<bool,bool> {{T}}
+            comptime fn Build()->Type {{Checked<bool,{tail}>}}"
+        );
+        let failure = execution_support::compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                meta_list: Some("input::List"),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(failure.contains("requirement"), "{failure}");
+    }
+}
+
+#[test]
+fn collected_type_list_contracts_check_deferred_inputs_and_recover() {
+    let source = format!(
+        "{TYPE} pure comptime fn List<T>->Type {{T}}
+        pure comptime fn Probe<...Es:List<Type>>->Type {{bool}}
+        pure comptime fn Checked<T,.U:Type=T,...Es:List<Type>>->Type
+            where requires Probe<...Es> == Probe<bool,bool> {{T}}
+        comptime fn items(flag:bool)->List<Type> {{[bool,if flag {{bool}} else {{.u8'builtin}}]}}
+        comptime fn Build(flag:bool)->Type {{Checked<bool,...items(flag)>}}"
+    );
+    let package = execution_support::compile_with_source_bindings(
+        &source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            meta_list: Some("input::List"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert!(
+        vm.invoke(id(&package, "Build"), vec![Value::Bool(false)])
+            .is_err()
+    );
+    let Value::Type(nir::Term::NormalForm {
+        head, arguments, ..
+    }) = vm
+        .invoke(id(&package, "Build"), vec![Value::Bool(true)])
+        .unwrap()
+    else {
+        panic!("expected retained head")
+    };
+    assert_eq!(head, id(&package, "Checked"));
+    assert_eq!(
+        arguments,
+        vec![
+            nir::Term::Primitive(nir::Primitive::Bool),
+            nir::Term::Primitive(nir::Primitive::Bool),
+            nir::Term::TypeListValue(vec![
+                nir::Term::Primitive(nir::Primitive::Bool),
+                nir::Term::Primitive(nir::Primitive::Bool)
+            ])
+        ]
+    );
+    assert_eq!(
+        calls(&package, &vm),
+        vec!["Build", "items", "Build", "items"]
+    );
+}
+
+#[test]
+fn fixed_packet_type_evidence_reaches_defaults_and_requirements() {
+    let prefix = format!(
+        "{TYPE} typealias Char='x''type; pure comptime fn Checked<T,value:T,.U:Type=T>->Type where requires U == bool {{T}}"
+    );
+    for packet in ["do {(Char,'x')}", "if true {(Char,'x')} else {(Char,'y')}"] {
+        let result = compile_with_protocols(
+            &format!("{prefix} comptime fn Bad()->Type {{Checked<...{packet}>}}"),
+            &Default::default(),
+        );
+        let failure = result
+            .err()
+            .expect("known default Type violates requirement");
+        assert!(failure.contains("requirement"), "{failure}");
+    }
+    let package = compile(&format!(
+        "{prefix}
+        comptime fn Good()->Type {{Checked<...do {{(bool,true)}}>}}
+        comptime fn Override()->Type {{Checked<...do {{(Char,'x')}},.U=bool>}}"
+    ));
+    for (entry, first, value) in [
+        ("Good", nir::Primitive::Bool, nir::Term::Bool(true)),
+        ("Override", nir::Primitive::Char, nir::Term::Char('x')),
+    ] {
+        let Value::Type(nir::Term::NormalForm { arguments, .. }) =
+            luna::invocation::invoke(&package, entry, 100_000).unwrap()
+        else {
+            panic!("expected retained head")
+        };
+        assert_eq!(
+            arguments,
+            vec![
+                nir::Term::Primitive(first),
+                value,
+                nir::Term::Primitive(nir::Primitive::Bool)
+            ]
+        );
+    }
 }

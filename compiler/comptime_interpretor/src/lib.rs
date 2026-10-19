@@ -14,7 +14,7 @@ mod invocation_contracts;
 mod memory;
 mod normal_inputs;
 mod selected_types;
-pub use memory::{PointerValue, Storage};
+pub use memory::{OwnedGraphCheckpoint, PointerValue, Storage};
 
 use nir::program::InterfaceInstance;
 use nir::program::{Expr, ExprKind as K, Literal, LocalId, Package, SourceRange};
@@ -30,6 +30,14 @@ enum PreparedNormalInput {
     Value(Value),
     TypeTuple(Option<DeclarationId>),
 }
+/// Invocation-only input transport. Live graphs retain their storage identity;
+/// normal terms are reconstructed in the invocation's checked environment.
+/// This transport is neither a type identity nor a serializable IR node.
+pub enum InvocationValue {
+    Normal(Term),
+    Live(Value),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Pointer(PointerValue),
@@ -39,6 +47,11 @@ pub enum Value {
     Type(Term),
     /// Opaque declaration Type input, admitted only by a comptime scope.
     TypeParameter(DeclarationId),
+    /// Invocation-scoped opaque data, never a completed runtime value.
+    AbstractValue {
+        declaration: DeclarationId,
+        ty: Term,
+    },
     /// Immutable meta.List<Type>; distinct from a tuple of Type values.
     /// Abstract elements require the same scope as individual Type descriptions.
     TypeList(Vec<Term>),
@@ -102,6 +115,75 @@ impl fmt::Display for TraitMethodIdentity {
     }
 }
 impl Value {
+    /// Inspect the owned invocation graph without copying storage or executing
+    /// callbacks. Shared closures and storage are visited once. Weak pointers
+    /// are leaves: inspecting a value does not dereference borrowed memory.
+    pub fn visit_owned_graph(
+        &self,
+        fuel: &mut u64,
+        visitor: &mut impl FnMut(&Value, &mut u64) -> Result<(), ErrorKind>,
+    ) -> Result<(), ErrorKind> {
+        fn visit(
+            value: &Value,
+            fuel: &mut u64,
+            depth: usize,
+            closures: &mut BTreeSet<usize>,
+            storage: &mut BTreeSet<usize>,
+            visitor: &mut impl FnMut(&Value, &mut u64) -> Result<(), ErrorKind>,
+        ) -> Result<(), ErrorKind> {
+            *fuel = fuel.checked_sub(1).ok_or(ErrorKind::StepsExhausted)?;
+            if depth >= 128 {
+                return Err(ErrorKind::DepthExhausted);
+            }
+            match value {
+                Value::Closure(closure) if !closures.insert(Arc::as_ptr(closure) as usize) => {
+                    return Ok(());
+                }
+                Value::Storage(cell) if !storage.insert(Arc::as_ptr(&cell.0) as usize) => {
+                    return Ok(());
+                }
+                _ => {}
+            }
+            visitor(value, fuel)?;
+            match value {
+                Value::Storage(cell) => {
+                    let payload = cell.0.try_lock().map_err(|_| ErrorKind::InvalidPointer)?;
+                    visit(&payload, fuel, depth + 1, closures, storage, visitor)?;
+                }
+                Value::Closure(closure) => {
+                    for child in closure.environment.values() {
+                        visit(child, fuel, depth + 1, closures, storage, visitor)?;
+                    }
+                }
+                Value::Tuple(fields)
+                | Value::Record { fields, .. }
+                | Value::Variant { fields, .. } => {
+                    for child in fields {
+                        visit(child, fuel, depth + 1, closures, storage, visitor)?;
+                    }
+                }
+                Value::AnonymousRecord(fields) => {
+                    for (_, child) in fields {
+                        visit(child, fuel, depth + 1, closures, storage, visitor)?;
+                    }
+                }
+                Value::Newtype { value, .. } => {
+                    visit(value, fuel, depth + 1, closures, storage, visitor)?
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+        visit(
+            self,
+            fuel,
+            0,
+            &mut BTreeSet::new(),
+            &mut BTreeSet::new(),
+            visitor,
+        )
+    }
+
     /// Bound copying of immutable data supplied by the host before cloning it.
     /// This checks representation only; nominal formation and argument types
     /// still belong to the invocation checker. It does not freeze storage.
@@ -117,7 +199,7 @@ impl Value {
             }
             work = work.checked_add(1)?;
             let extra = match value {
-                Self::Type(ty) | Self::Newtype { ty, .. } => {
+                Self::Type(ty) | Self::Newtype { ty, .. } | Self::AbstractValue { ty, .. } => {
                     scoped_type_value_work(ty, &BTreeMap::new(), parameters)?
                 }
                 Self::TypeList(types) => {
@@ -201,11 +283,43 @@ impl Value {
     ) -> Result<Term, ErrorKind> {
         self.into_scoped_normal_term(budget, &BTreeSet::new())
     }
-    // Internal substitution representation. Public immutable export stays closed.
-    fn into_scoped_normal_term(
+    /// Freeze an invocation input, retaining named comptime callable identities
+    /// inside immutable aggregates. Captured environments remain live values;
+    /// this path never serializes their storage or execution state.
+    pub fn into_scoped_invocation_term(
         self,
         budget: &mut comptime_runtime::Budget,
         parameters: &BTreeSet<DeclarationId>,
+    ) -> Result<Term, ErrorKind> {
+        self.into_scoped_term(budget, parameters, &BTreeMap::new(), true)
+    }
+    /// Freeze a substitution value within an explicitly supplied Type scope.
+    /// Immutable export must use `into_normal_term`, which remains closed.
+    pub fn into_scoped_normal_term(
+        self,
+        budget: &mut comptime_runtime::Budget,
+        parameters: &BTreeSet<DeclarationId>,
+    ) -> Result<Term, ErrorKind> {
+        self.into_scoped_term(budget, parameters, &BTreeMap::new(), false)
+    }
+
+    /// Reify a residual substitution under explicit declaration-domain authority.
+    /// This is not a completed constant or cache-key export.
+    pub fn into_abstract_invocation_term(
+        self,
+        budget: &mut comptime_runtime::Budget,
+        type_parameters: &BTreeSet<DeclarationId>,
+        value_parameters: &BTreeMap<DeclarationId, Term>,
+    ) -> Result<Term, ErrorKind> {
+        self.into_scoped_term(budget, type_parameters, value_parameters, true)
+    }
+
+    fn into_scoped_term(
+        self,
+        budget: &mut comptime_runtime::Budget,
+        parameters: &BTreeSet<DeclarationId>,
+        value_parameters: &BTreeMap<DeclarationId, Term>,
+        invocation: bool,
     ) -> Result<Term, ErrorKind> {
         fn charge(budget: &mut comptime_runtime::Budget, work: usize) -> Result<(), ErrorKind> {
             budget.consume(work).map_err(|_| ErrorKind::StepsExhausted)
@@ -226,12 +340,68 @@ impl Value {
             depth: usize,
             budget: &mut comptime_runtime::Budget,
             parameters: &BTreeSet<DeclarationId>,
+            value_parameters: &BTreeMap<DeclarationId, Term>,
+            invocation: bool,
         ) -> Result<Term, ErrorKind> {
             if depth > 128 {
                 return Err(ErrorKind::DepthExhausted);
             }
+            let instance = match value {
+                Value::Function(declaration) => Some((*declaration, &[][..])),
+                Value::Closure(closure)
+                    if closure.environment.is_empty()
+                        && closure.capture_order.is_empty()
+                        && closure.ty.is_comptime_callable() =>
+                {
+                    closure.declaration_instance()
+                }
+                _ => None,
+            };
+            if invocation {
+                if let Some((declaration, arguments)) = instance {
+                    budget.consume(1).map_err(|_| ErrorKind::StepsExhausted)?;
+                    for argument in arguments {
+                        nir::type_computations::charge_term(argument, &mut budget.steps)
+                            .map_err(|_| ErrorKind::StepsExhausted)?;
+                        argument.check_scope(&[]).map_err(|_| ErrorKind::Type)?;
+                        // A well-scoped value argument may still contain an
+                        // unresolved rigid/hole or pending list operation.
+                        // Frozen invocation identities must contain completed
+                        // arguments, regardless of their semantic sort.
+                        let work = scoped_term_value_work_with_layouts(
+                            argument,
+                            &BTreeMap::new(),
+                            parameters,
+                            |_, _, _| None,
+                        )
+                        .ok_or(ErrorKind::Type)?;
+                        budget
+                            .consume(work)
+                            .map_err(|_| ErrorKind::StepsExhausted)?;
+                    }
+                    return Ok(Term::FunctionValue {
+                        declaration,
+                        arguments: arguments.to_vec(),
+                    });
+                }
+            }
             charge(budget, 1)?;
             Ok(match value {
+                Value::AbstractValue { declaration, ty } => {
+                    if parameters.contains(declaration)
+                        || *ty == Term::Primitive(Primitive::Type)
+                        || value_parameters.get(declaration) != Some(ty)
+                    {
+                        return Err(ErrorKind::AbstractValueUnresolved);
+                    }
+                    let work = scoped_type_value_work(ty, &BTreeMap::new(), parameters)
+                        .ok_or(ErrorKind::Type)?;
+                    charge(budget, work)?;
+                    Term::Rigid {
+                        declaration: *declaration,
+                        sort: nir::Sort::ComptimeValue,
+                    }
+                }
                 Value::TypeParameter(declaration) if parameters.contains(declaration) => {
                     Term::Rigid {
                         declaration: *declaration,
@@ -308,7 +478,14 @@ impl Value {
                     Term::NominalValue {
                         ty: Box::new(ty.clone()),
                         variant: None,
-                        fields: vec![visit(value, depth + 1, budget, parameters)?],
+                        fields: vec![visit(
+                            value,
+                            depth + 1,
+                            budget,
+                            parameters,
+                            value_parameters,
+                            invocation,
+                        )?],
                     }
                 }
                 Value::Record {
@@ -343,7 +520,16 @@ impl Value {
                         },
                         fields: fields
                             .iter()
-                            .map(|field| visit(field, depth + 1, budget, parameters))
+                            .map(|field| {
+                                visit(
+                                    field,
+                                    depth + 1,
+                                    budget,
+                                    parameters,
+                                    value_parameters,
+                                    invocation,
+                                )
+                            })
                             .collect::<Result<_, _>>()?,
                     }
                 }
@@ -357,7 +543,17 @@ impl Value {
                                 if !names.insert(name.clone()) {
                                     return Err(ErrorKind::Type);
                                 }
-                                Ok((name.clone(), visit(value, depth + 1, budget, parameters)?))
+                                Ok((
+                                    name.clone(),
+                                    visit(
+                                        value,
+                                        depth + 1,
+                                        budget,
+                                        parameters,
+                                        value_parameters,
+                                        invocation,
+                                    )?,
+                                ))
                             })
                             .collect::<Result<_, _>>()?,
                     )
@@ -365,13 +561,22 @@ impl Value {
                 Value::Tuple(values) => Term::TupleValue(
                     values
                         .iter()
-                        .map(|value| visit(value, depth + 1, budget, parameters))
+                        .map(|value| {
+                            visit(
+                                value,
+                                depth + 1,
+                                budget,
+                                parameters,
+                                value_parameters,
+                                invocation,
+                            )
+                        })
                         .collect::<Result<_, _>>()?,
                 ),
                 _ => return Err(ErrorKind::Unsupported),
             })
         }
-        let result = visit(&self, 0, budget, parameters);
+        let result = visit(&self, 0, budget, parameters, value_parameters, invocation);
         // Even rejected host data must be released without recursively dropping
         // a potentially unbounded aggregate tail. Cleanup is not fuel-limited.
         let mut pending = vec![self];
@@ -440,6 +645,10 @@ impl Closure {
     pub fn body(&self) -> &Arc<Expr> {
         &self.body
     }
+    /// The checked callable type, including capture domains and phase.
+    pub fn ty(&self) -> &Term {
+        &self.ty
+    }
     /// Capture slots in semantic field order, independent of caller locals.
     /// Slots may be Storage cells: constant materializers must snapshot their
     /// current values rather than persist these interpreter handles.
@@ -477,6 +686,7 @@ pub enum ErrorKind {
     ProgramContractRejected,
     TypeContractRejected,
     TypeContractUnresolved,
+    AbstractValueUnresolved,
     StepsExhausted,
     RepresentationSizeLimit,
     DepthExhausted,
@@ -503,6 +713,9 @@ pub struct Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "interpretation {:?}", self.kind)?;
+        if self.kind == ErrorKind::StepsExhausted {
+            f.write_str(" (step budget exhausted)")?;
+        }
         if let Some(source) = self.source {
             write!(f, " at {source}")?;
         }
@@ -570,6 +783,11 @@ pub enum ContractOutcome {
     Unknown,
 }
 
+enum PointerCopyPermission<'a> {
+    Checked(&'a dyn Fn(&Term) -> bool),
+    Budgeted(&'a dyn Fn(&Term, &mut u64) -> bool),
+}
+
 pub struct Interpreter<'a> {
     effect_declarations: BTreeMap<DeclarationId, &'a nir::effects::Declaration>,
     effect_state: effects::State,
@@ -585,8 +803,10 @@ pub struct Interpreter<'a> {
     cleanup_context: Vec<iir::cleanup::ContextKey>,
     comptime_only: bool,
     abstract_type_parameters: BTreeSet<DeclarationId>,
+    abstract_value_parameters: BTreeMap<DeclarationId, Term>,
     type_solver: Option<&'a dyn Fn(&nir::program::TypePredicate) -> ContractOutcome>,
-    trait_parameter_sorts: BTreeMap<DeclarationId, nir::Sort>,
+    pointer_copy: Option<PointerCopyPermission<'a>>,
+    declaration_parameter_sorts: BTreeMap<DeclarationId, nir::Sort>,
     method_parameters: HashMap<(DeclarationId, DeclarationId), Vec<LocalId>>,
     method_contracts: HashMap<
         (DeclarationId, DeclarationId),
@@ -605,6 +825,7 @@ pub struct Interpreter<'a> {
     normal_forms: BTreeMap<DeclarationId, &'a nir::normal_forms::Head>,
     structs: BTreeMap<DeclarationId, &'a nir::program::Struct>,
     newtypes: BTreeMap<DeclarationId, &'a nir::newtypes::Newtype>,
+    alias_contracts: BTreeMap<DeclarationId, &'a nir::type_aliases::Contract>,
     enums: BTreeMap<DeclarationId, &'a nir::program::Enum>,
     budget: Budget,
     depth: usize,
@@ -617,7 +838,7 @@ impl<'a> Interpreter<'a> {
             .map(|id| nir::DeclarationParameter {
                 declaration: *id,
                 sort: self
-                    .trait_parameter_sorts
+                    .declaration_parameter_sorts
                     .get(id)
                     .copied()
                     .unwrap_or(nir::Sort::Type),
@@ -709,12 +930,12 @@ impl<'a> Interpreter<'a> {
             let mut members = BTreeSet::new();
             for member in &interface.methods {
                 if !matches!(
-                    member.signature,
-                    Term::Function { .. } | Term::ComptimeFunction(_)
+                    member.signature.ordinary(),
+                    Ok(Term::Function { .. } | Term::ComptimeFunction(_))
                 ) {
                     return Err(invalid());
                 }
-                let Term::Function { parameters, .. } = member.signature.callable_signature()
+                let Ok(Term::Function { parameters, .. }) = member.signature.callable_signature()
                 else {
                     return Err(invalid());
                 };
@@ -753,15 +974,15 @@ impl<'a> Interpreter<'a> {
             .collect();
         let mut premise_fuel = budget.steps;
         let mut trait_parameter_fuel = usize::try_from(budget.steps).unwrap_or(usize::MAX);
-        let trait_parameter_sorts = package
-            .trait_parameter_sorts(&mut trait_parameter_fuel)
+        let declaration_parameter_sorts = package
+            .declaration_parameter_sorts(&mut trait_parameter_fuel)
             .map_err(|_| invalid())?;
         let input_binders = |parameters: &[DeclarationId]| {
             parameters
                 .iter()
                 .map(|id| nir::DeclarationParameter {
                     declaration: *id,
-                    sort: trait_parameter_sorts
+                    sort: declaration_parameter_sorts
                         .get(id)
                         .copied()
                         .unwrap_or(nir::Sort::Type),
@@ -855,7 +1076,13 @@ impl<'a> Interpreter<'a> {
             }
             if concrete {
                 contract
-                    .validate_arguments(&interface.arguments, &[], &mut trait_parameter_fuel)
+                    .validate_arguments_for_subject(
+                        &implementation.subject,
+                        &interface.arguments,
+                        &[],
+                        &package.traits,
+                        &mut trait_parameter_fuel,
+                    )
                     .map_err(|_| invalid())?;
             }
             if concrete
@@ -952,15 +1179,28 @@ impl<'a> Interpreter<'a> {
                 .iter()
                 .find(|i| i.declaration == instance.implementation)
                 .ok_or_else(invalid)?;
+            nir::validate_declaration_arguments(
+                &implementation.type_parameters,
+                &implementation.parameter_types,
+                &instance.arguments,
+                &mut trait_parameter_fuel,
+            )
+            .map_err(|_| invalid())?;
             if implementation
                 .interface_instance()
                 .ok_or_else(invalid)?
-                .instantiate_types(&implementation.type_parameters, &instance.arguments)
+                .instantiate_parameters(
+                    &input_binders(&implementation.type_parameters),
+                    &instance.arguments,
+                )
                 .map_err(|_| invalid())?
                 != instance.interface_instance()
                 || implementation
                     .subject
-                    .instantiate_types(&implementation.type_parameters, &instance.arguments)
+                    .instantiate_parameters(
+                        &input_binders(&implementation.type_parameters),
+                        &instance.arguments,
+                    )
                     .map_err(|_| invalid())?
                     != instance.subject
             {
@@ -978,7 +1218,12 @@ impl<'a> Interpreter<'a> {
                     .collect();
                 let member_type = member_contract
                     .ty
-                    .instantiate_types(&contract.parameters_with_self(), &member_inputs)
+                    .instantiate_parameters(
+                        &contract
+                            .binders_with_self(&mut trait_parameter_fuel)
+                            .map_err(|_| invalid())?,
+                        &member_inputs,
+                    )
                     .map_err(|_| invalid())?;
                 if !selected_types::same(&value.ty, &member_type, &associated_values) {
                     return Err(invalid());
@@ -997,7 +1242,10 @@ impl<'a> Interpreter<'a> {
                     .map_err(|_| invalid())?;
                 if originals.next().is_some()
                     || original
-                        .instantiate_types(&implementation.type_parameters, &instance.arguments)
+                        .instantiate_parameters(
+                            &input_binders(&implementation.type_parameters),
+                            &instance.arguments,
+                        )
                         .map_err(|_| invalid())?
                         != *value
                 {
@@ -1087,7 +1335,11 @@ impl<'a> Interpreter<'a> {
                             .collect::<Vec<_>>(),
                     )
                     .map_err(|_| invalid())?;
-                if !selected_types::same(&ty, &required, &associated_values) {
+                if !selected_types::same(
+                    &ty,
+                    required.ordinary().map_err(|_| invalid())?,
+                    &associated_values,
+                ) {
                     return Err(invalid());
                 }
                 let key = (
@@ -1118,7 +1370,10 @@ impl<'a> Interpreter<'a> {
                 .ok_or_else(invalid)?;
             for capability in &implementation.capabilities {
                 let capability = capability
-                    .instantiate_types(&implementation.type_parameters, &instance.arguments)
+                    .instantiate_parameters(
+                        &input_binders(&implementation.type_parameters),
+                        &instance.arguments,
+                    )
                     .map_err(|_| invalid())?;
                 if !worlds
                     .contains_key(&(capability.interface_instance(), capability.subject.clone()))
@@ -1217,9 +1472,11 @@ impl<'a> Interpreter<'a> {
             cleanup_context: vec![],
             comptime_only: false,
             abstract_type_parameters: BTreeSet::new(),
+            abstract_value_parameters: BTreeMap::new(),
             type_solver: None,
+            pointer_copy: None,
             method_parameters,
-            trait_parameter_sorts,
+            declaration_parameter_sorts,
             method_contracts,
             implemented_interfaces: worlds,
             assumed_interfaces,
@@ -1234,6 +1491,11 @@ impl<'a> Interpreter<'a> {
                 .map(|head| (head.declaration, head))
                 .collect(),
             structs,
+            alias_contracts: package
+                .alias_contracts
+                .iter()
+                .map(|contract| (contract.declaration, contract))
+                .collect(),
             newtypes: package
                 .newtypes
                 .iter()
@@ -1282,19 +1544,111 @@ impl<'a> Interpreter<'a> {
         self
     }
 
+    /// Host-checked Copy delivery, including representation and Drop legality.
+    /// Raw interpreters retain intrinsic-only pointer reads and replacement.
+    pub fn with_pointer_copy_permission(mut self, permission: &'a dyn Fn(&Term) -> bool) -> Self {
+        self.pointer_copy = Some(PointerCopyPermission::Checked(permission));
+        self
+    }
+
+    /// Acquire resource evidence using this invocation's remaining execution
+    /// fuel. Proof work is charged before the transfer or its continuation.
+    pub fn with_budgeted_pointer_copy_permission(
+        mut self,
+        permission: &'a dyn Fn(&Term, &mut u64) -> bool,
+    ) -> Self {
+        self.pointer_copy = Some(PointerCopyPermission::Budgeted(permission));
+        self
+    }
+
+    fn permits_pointer_copy(&mut self, ty: &Term) -> bool {
+        if nir::program::intrinsic_pointer_value(ty) {
+            return true;
+        }
+        match &self.pointer_copy {
+            Some(PointerCopyPermission::Checked(permission)) => permission(ty),
+            Some(PointerCopyPermission::Budgeted(permission)) => {
+                let mut remaining = self.budget.steps;
+                let allowed = permission(ty, &mut remaining);
+                self.budget.steps = self.budget.steps.min(remaining);
+                allowed
+            }
+            None => false,
+        }
+    }
+
     /// Permit opaque Type inputs belonging to this normalization scope. This
     /// does not grant layout, pattern discrimination or normal-value export.
     pub fn with_abstract_type_parameters(
         mut self,
         parameters: &[DeclarationId],
     ) -> Result<Self, Error> {
+        self.authorize_abstract_type_parameters(parameters)?;
+        Ok(self)
+    }
+
+    /// Extend scope atomically while keeping failed preparation costs visible.
+    pub fn authorize_abstract_type_parameters(
+        &mut self,
+        parameters: &[DeclarationId],
+    ) -> Result<(), Error> {
         if !self.comptime_only {
             return Err(self.failure(ErrorKind::PhaseMismatch, None));
         }
         self.integer_operation(None, |budget| budget.consume(parameters.len()))?;
+        if parameters
+            .iter()
+            .any(|id| self.abstract_value_parameters.contains_key(id))
+        {
+            return Err(self.failure(ErrorKind::Type, None));
+        }
         self.abstract_type_parameters
             .extend(parameters.iter().copied());
+        Ok(())
+    }
+
+    /// Grant explicit declaration-domain evidence for opaque comptime data.
+    /// These values may be transported but cannot authorize a branch decision
+    /// or a completed snapshot. No authority is inferred from an input value.
+    pub fn with_abstract_value_parameters(
+        mut self,
+        parameters: &[(DeclarationId, Term)],
+    ) -> Result<Self, Error> {
+        self.authorize_abstract_value_parameters(parameters)?;
         Ok(self)
+    }
+
+    /// Validate the entire batch before publishing any new value authority.
+    /// Errors retain consumed fuel but leave the previous scope unchanged.
+    pub fn authorize_abstract_value_parameters(
+        &mut self,
+        parameters: &[(DeclarationId, Term)],
+    ) -> Result<(), Error> {
+        if !self.comptime_only {
+            return Err(self.failure(ErrorKind::PhaseMismatch, None));
+        }
+        self.integer_operation(None, |budget| budget.consume(parameters.len()))?;
+        let mut additions = BTreeMap::new();
+        for (declaration, ty) in parameters {
+            let work = self
+                .type_description_work(ty)
+                .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
+            self.integer_operation(None, |budget| budget.consume(work))?;
+            if self.abstract_type_parameters.contains(declaration)
+                || *ty == Term::Primitive(Primitive::Type)
+                || self
+                    .abstract_value_parameters
+                    .get(declaration)
+                    .is_some_and(|old| old != ty)
+                || additions.get(declaration).is_some_and(|old| *old != ty)
+            {
+                return Err(self.failure(ErrorKind::Type, None));
+            }
+            additions.insert(*declaration, ty);
+        }
+        self.abstract_value_parameters
+            .extend(additions.into_iter().map(|(id, ty)| (id, ty.clone())));
+        Ok(())
     }
     fn type_description_work(&self, ty: &Term) -> Option<usize> {
         scoped_type_value_work_with_layouts(
@@ -1330,6 +1684,7 @@ impl<'a> Interpreter<'a> {
                         instantiate_value_fields(
                             &[],
                             &[],
+                            &[],
                             definition.variants.get(index as usize)?.fields.iter(),
                             fuel,
                         )
@@ -1338,11 +1693,13 @@ impl<'a> Interpreter<'a> {
                         instantiate_value_fields(
                             &[],
                             &[],
+                            &[],
                             std::iter::once(&definition.representation),
                             fuel,
                         )
                     }
                     (iir::NominalDefinition::Struct(definition), None) => instantiate_value_fields(
+                        &[],
                         &[],
                         &[],
                         definition.fields.iter().map(|(_, ty)| ty),
@@ -1357,6 +1714,7 @@ impl<'a> Interpreter<'a> {
             let definition = self.enums.get(declaration)?;
             instantiate_value_fields(
                 &definition.type_parameters,
+                &definition.parameter_types,
                 arguments,
                 definition.variants.get(index as usize)?.fields.iter(),
                 fuel,
@@ -1371,6 +1729,7 @@ impl<'a> Interpreter<'a> {
             let definition = self.structs.get(declaration)?;
             instantiate_value_fields(
                 &definition.type_parameters,
+                &definition.parameter_types,
                 arguments,
                 definition.fields.iter().map(|(_, ty)| ty),
                 fuel,
@@ -1483,6 +1842,16 @@ impl<'a> Interpreter<'a> {
         self.invoke_value(value, arguments)
     }
 
+    fn concrete_value(value: Value, source: SourceRange) -> Result<Value, Error> {
+        if matches!(value, Value::AbstractValue { .. }) {
+            Err(Error {
+                kind: ErrorKind::AbstractValueUnresolved,
+                source: Some(source),
+            })
+        } else {
+            Ok(value)
+        }
+    }
     fn failure(&self, kind: ErrorKind, source: Option<SourceRange>) -> Error {
         Error { kind, source }
     }
@@ -1597,8 +1966,9 @@ impl<'a> Interpreter<'a> {
                         .get(id)
                         .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
                     if !definition.type_parameters.is_empty()
-                        || !definition.requirements.is_empty()
-                        || !definition.capabilities.is_empty()
+                        || (!self.comptime_only
+                            && (!definition.requirements.is_empty()
+                                || !definition.capabilities.is_empty()))
                     {
                         return Err(self.failure(ErrorKind::Type, None));
                     }
@@ -1616,7 +1986,10 @@ impl<'a> Interpreter<'a> {
                     };
                     (
                         closure.parameters.as_slice(),
-                        closure.environment.clone(),
+                        self.clone_invocation_environment(
+                            &closure.environment,
+                            closure.body.source,
+                        )?,
                         closure.body.as_ref(),
                         signature,
                     )
@@ -1862,8 +2235,8 @@ impl<'a> Interpreter<'a> {
             parameters.iter().zip(arguments).zip(types).enumerate()
         {
             let representation = match &argument {
-                Value::Storage(storage) => storage.read().map_err(|e| self.failure(e, None))?,
-                value => value.clone(),
+                Value::Storage(storage) => self.read_owned_value(storage)?,
+                value => self.checkpoint_representation(value, source)?,
             };
             let expected = match &type_scope {
                 Some(scope) => scope.rebind(&parameter.ty),
@@ -1937,6 +2310,16 @@ impl<'a> Interpreter<'a> {
         self.has_type_at(value, ty, 0)
     }
     fn has_type_at(&self, value: &Value, ty: &Term, depth: usize) -> bool {
+        if let Value::AbstractValue {
+            declaration,
+            ty: domain,
+        } = value
+        {
+            return self.comptime_only
+                && domain == ty
+                && self.abstract_value_parameters.get(declaration) == Some(domain);
+        }
+
         if depth >= 128 {
             return false;
         }
@@ -1965,7 +2348,11 @@ impl<'a> Interpreter<'a> {
                     });
             }
             return self.newtypes.get(declaration).is_some_and(|d| {
-                self.capabilities_hold(&d.capabilities, &d.type_parameters, arguments)
+                d.validate_completed_arguments(arguments, &mut 100_000)
+                    .is_ok()
+                    && d.parameter_binders().is_ok_and(|parameters| {
+                        self.capabilities_hold_parameters(&d.capabilities, &parameters, arguments)
+                    })
                     && d.representation_budgeted(arguments, &[], &mut 100_000)
                         .is_ok_and(|representation| {
                             self.has_type_at(value, &representation, depth + 1)
@@ -2055,15 +2442,21 @@ impl<'a> Interpreter<'a> {
                         .enums
                         .get(declaration)
                         .filter(|definition| {
-                            self.capabilities_hold(
-                                &definition.capabilities,
-                                &definition.type_parameters,
-                                arguments,
-                            )
+                            definition
+                                .validate_completed_arguments(arguments, &mut 100_000)
+                                .is_ok()
+                                && definition.parameter_binders().is_ok_and(|parameters| {
+                                    self.capabilities_hold_parameters(
+                                        &definition.capabilities,
+                                        &parameters,
+                                        arguments,
+                                    )
+                                })
                         })
                         .and_then(|definition| {
                             nir::normal_forms::instantiate_value_fields(
                                 &definition.type_parameters,
+                                &definition.parameter_types,
                                 arguments,
                                 definition.variants.get(*index)?.fields.iter(),
                                 &mut 100_000,
@@ -2164,11 +2557,21 @@ impl<'a> Interpreter<'a> {
                 },
             ) if declaration == expected && actual_arguments == arguments => {
                 self.structs.get(declaration).is_some_and(|s| {
-                    if !self.capabilities_hold(&s.capabilities, &s.type_parameters, arguments) {
+                    if s.validate_completed_arguments(arguments, &mut 100_000)
+                        .is_err()
+                        || !s.parameter_binders().is_ok_and(|parameters| {
+                            self.capabilities_hold_parameters(
+                                &s.capabilities,
+                                &parameters,
+                                arguments,
+                            )
+                        })
+                    {
                         return false;
                     }
                     nir::normal_forms::instantiate_value_fields(
                         &s.type_parameters,
+                        &s.parameter_types,
                         arguments,
                         s.fields.iter().map(|(_, ty)| ty),
                         &mut 100_000,
@@ -2185,8 +2588,8 @@ impl<'a> Interpreter<'a> {
             (Value::Function(id), ty @ (Term::Function { .. } | Term::ComptimeFunction(_))) => {
                 self.functions.get(id).is_some_and(|f| {
                     f.type_parameters.is_empty()
-                        && f.requirements.is_empty()
-                        && f.capabilities.is_empty()
+                        && (self.comptime_only
+                            || (f.requirements.is_empty() && f.capabilities.is_empty()))
                         && (f.phase == nir::program::FunctionPhase::Comptime)
                             == matches!(ty, Term::ComptimeFunction(_))
                         && selected_types::same(
@@ -2236,11 +2639,13 @@ impl<'a> Interpreter<'a> {
                                     .signature
                                     .instantiate_parameters(parameters, &arguments)
                                     .is_ok_and(|signature| {
-                                        selected_types::same(
-                                            &signature,
-                                            ty,
-                                            &self.associated_values,
-                                        )
+                                        signature.ordinary().is_ok_and(|signature| {
+                                            selected_types::same(
+                                                signature,
+                                                ty,
+                                                &self.associated_values,
+                                            )
+                                        })
                                     })
                         })
             }
@@ -2250,24 +2655,46 @@ impl<'a> Interpreter<'a> {
             _ => false,
         }
     }
+    fn clone_invocation_environment(
+        &mut self,
+        environment: &Environment,
+        source: SourceRange,
+    ) -> Result<Environment, Error> {
+        self.charge_preparation(environment.len())?;
+        environment
+            .iter()
+            .map(|(id, value)| {
+                self.checkpoint_representation(value, source)
+                    .map(|value| (*id, value))
+            })
+            .collect()
+    }
+
     fn local_value(
-        &self,
+        &mut self,
         environment: &Environment,
         id: LocalId,
         source: Option<SourceRange>,
     ) -> Result<Value, Error> {
+        let location = source.unwrap_or(SourceRange { start: 0, end: 0 });
         match environment
             .get(&id)
             .ok_or_else(|| self.failure(ErrorKind::MissingBinding, source))?
         {
-            Value::Storage(storage) => storage.read().map_err(|kind| self.failure(kind, source)),
-            value => Ok(value.clone()),
+            Value::Storage(storage) => {
+                // Read the representation, retaining shared nested identities.
+                // Ownership is checked by the actual access/transfer operation;
+                // a projection may legally read one field of a partial owner.
+                let value = storage
+                    .0
+                    .try_lock()
+                    .map_err(|_| self.failure(ErrorKind::InvalidPointer, source))?;
+                self.checkpoint_representation(&value, location)
+            }
+            value => self.checkpoint_representation(value, location),
         }
     }
     fn eval_pointer(&mut self, expr: &Expr, environment: &mut Environment) -> Result<Flow, Error> {
-        if self.comptime_only {
-            return Err(self.failure(ErrorKind::Unsupported, Some(expr.source)));
-        }
         if nir::program::pointer_operation_error(expr).is_some() {
             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
         }
@@ -2308,10 +2735,10 @@ impl<'a> Interpreter<'a> {
                     unreachable!()
                 };
                 let pointer = storage.pointer(place.ty.clone(), fields);
-                let target = pointer
-                    .read()
+                let valid = pointer
+                    .inspect(|target| self.has_type(target, &place.ty))
                     .map_err(|kind| self.failure(kind, Some(expr.source)))?;
-                if !self.has_type(&target, &place.ty) {
+                if !valid {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 }
                 Value::Pointer(pointer)
@@ -2354,12 +2781,12 @@ impl<'a> Interpreter<'a> {
                 let Value::Pointer(pointer) = value!(self.eval(pointer, environment)) else {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 };
-                if pointer.pointee != expr.ty || !nir::program::intrinsic_pointer_value(&expr.ty) {
+                if pointer.pointee != expr.ty || !self.permits_pointer_copy(&expr.ty) {
                     return Err(self.failure(ErrorKind::Unsupported, Some(expr.source)));
                 }
                 let value = pointer
-                    .read()
-                    .map_err(|kind| self.failure(kind, Some(expr.source)))?;
+                    .inspect(|value| self.copy_representation(value, expr.source, 0))
+                    .map_err(|kind| self.failure(kind, Some(expr.source)))??;
                 if !self.has_type(&value, &expr.ty) {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 }
@@ -2370,7 +2797,7 @@ impl<'a> Interpreter<'a> {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 };
                 let value = value!(self.eval(value, environment));
-                if !nir::program::intrinsic_pointer_value(&pointer.pointee) {
+                if !self.permits_pointer_copy(&pointer.pointee) {
                     return Err(self.failure(ErrorKind::Unsupported, Some(expr.source)));
                 }
                 if !self.has_type(&value, &pointer.pointee) {
@@ -2608,6 +3035,7 @@ impl<'a> Interpreter<'a> {
                 self.eval_environment_type(expr, environment)
             }
             K::NominalType { .. } => self.eval_nominal_type(expr, environment),
+            K::CheckTypeAlias { .. } => self.eval_type_alias_guard(expr, environment),
             K::ScalarEqual(..)
             | K::ScalarLessEqual(..)
             | K::ScalarLess(..)
@@ -2616,6 +3044,7 @@ impl<'a> Interpreter<'a> {
             K::TypeEqual(..) => self.eval_type_equal(expr, environment),
             K::TypeListIndex(..) => self.eval_type_list_index(expr, environment),
             K::TupleType(..) => self.eval_tuple_type(expr, environment),
+            K::TypeList(..) => self.eval_type_list(expr, environment),
             K::BitVecType(..) => self.eval_bit_vec_type(expr, environment),
             K::Literal(..) => self.eval_literal(expr, environment),
             K::Variant { .. } => self.eval_variant(expr, environment),
@@ -3251,7 +3680,11 @@ impl<'a> Interpreter<'a> {
                 else_input,
                 ..
             } => {
-                let Value::Bool(condition) = value!(self.eval(condition, environment)) else {
+                let Value::Bool(condition) = Self::concrete_value(
+                    value!(self.eval(condition, environment)),
+                    condition.source,
+                )?
+                else {
                     return Err(self.failure(ErrorKind::Type, Some(condition.source)));
                 };
                 self.eval_normal_argument(
@@ -3579,6 +4012,53 @@ impl<'a> Interpreter<'a> {
     }
 
     #[inline(never)]
+    fn eval_type_alias_guard(
+        &mut self,
+        expr: &Expr,
+        environment: &mut Environment,
+    ) -> Result<Flow, Error> {
+        let K::CheckTypeAlias {
+            declaration,
+            arguments,
+        } = &expr.kind
+        else {
+            unreachable!()
+        };
+        let contract = self
+            .alias_contracts
+            .get(declaration)
+            .copied()
+            .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?;
+        if expr.ty != Term::Primitive(Primitive::Void)
+            || arguments.len() != contract.parameters.len()
+            || arguments
+                .iter()
+                .any(|argument| argument.ty != Term::Primitive(Primitive::Type))
+        {
+            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+        }
+        self.integer_operation(Some(expr.source), |budget| {
+            budget.consume(arguments.len().saturating_add(1))
+        })?;
+        let mut types = Vec::with_capacity(arguments.len());
+        for argument in arguments {
+            let value = value!(self.eval(argument, environment));
+            types.push(self.type_description_term(value, argument.source)?);
+        }
+        for requirement in &contract.requirements {
+            self.tick(Some(expr.source))?;
+            let predicate = requirement
+                .instantiate_types(&contract.parameters, &types)
+                .map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?;
+            self.check_type_contract(&predicate, expr.source)?;
+        }
+        if !self.capabilities_hold(&contract.capabilities, &contract.parameters, &types) {
+            return Err(self.failure(ErrorKind::TypeContractUnresolved, Some(expr.source)));
+        }
+        Ok(Flow::Value(Value::Unit))
+    }
+
+    #[inline(never)]
     fn eval_nominal_type(
         &mut self,
         expr: &Expr,
@@ -3593,14 +4073,28 @@ impl<'a> Interpreter<'a> {
         };
         let (parameters, requirements, capabilities) =
             if let Some(def) = self.structs.get(declaration).copied() {
-                (&def.type_parameters, &def.requirements, &def.capabilities)
+                (
+                    def.parameter_binders(),
+                    &def.requirements,
+                    &def.capabilities,
+                )
             } else if let Some(def) = self.enums.get(declaration).copied() {
-                (&def.type_parameters, &def.requirements, &def.capabilities)
+                (
+                    def.parameter_binders(),
+                    &def.requirements,
+                    &def.capabilities,
+                )
             } else if let Some(def) = self.newtypes.get(declaration).copied() {
-                (&def.type_parameters, &def.requirements, &def.capabilities)
+                (
+                    def.parameter_binders(),
+                    &def.requirements,
+                    &def.capabilities,
+                )
             } else {
                 return Err(self.failure(ErrorKind::Type, Some(expr.source)));
             };
+        let parameters =
+            parameters.map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?;
         let expected = if arguments
             .iter()
             .any(|field| field.ty == Term::Primitive(Primitive::Never))
@@ -3609,15 +4103,7 @@ impl<'a> Interpreter<'a> {
         } else {
             Primitive::Type
         };
-        if arguments.len() != parameters.len()
-            || expr.ty != Term::Primitive(expected)
-            || arguments.iter().any(|field| {
-                !matches!(
-                    field.ty,
-                    Term::Primitive(Primitive::Type | Primitive::Never)
-                )
-            })
-        {
+        if arguments.len() != parameters.len() || expr.ty != Term::Primitive(expected) {
             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
         }
         self.integer_operation(Some(expr.source), |budget| {
@@ -3626,17 +4112,37 @@ impl<'a> Interpreter<'a> {
         let mut types = Vec::with_capacity(arguments.len());
         for argument in arguments {
             let value = value!(self.eval(argument, environment));
-            let ty = self.type_description_term(value, argument.source)?;
+            let ty = self.normal_input_term(value, argument.source)?;
             types.push(ty);
         }
+        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let mut remaining = before;
+        let valid = if let Some(def) = self.structs.get(declaration) {
+            def.validate_completed_arguments(&types, &mut remaining)
+        } else if let Some(def) = self.enums.get(declaration) {
+            def.validate_completed_arguments(&types, &mut remaining)
+        } else {
+            self.newtypes[declaration].validate_completed_arguments(&types, &mut remaining)
+        };
+        self.budget.steps -= (before - remaining) as u64;
+        valid.map_err(|_| {
+            self.failure(
+                if remaining == 0 {
+                    ErrorKind::StepsExhausted
+                } else {
+                    ErrorKind::Type
+                },
+                Some(expr.source),
+            )
+        })?;
         for requirement in requirements {
             self.tick(Some(expr.source))?;
             let predicate = requirement
-                .instantiate_types(parameters, &types)
+                .instantiate_parameters(&parameters, &types)
                 .map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?;
             self.check_type_contract(&predicate, expr.source)?;
         }
-        if !self.capabilities_hold(capabilities, parameters, &types) {
+        if !self.capabilities_hold_parameters(capabilities, &parameters, &types) {
             return Err(self.failure(ErrorKind::TypeContractUnresolved, Some(expr.source)));
         }
         Ok(Flow::Value(Value::Type(Term::Nominal {
@@ -3686,6 +4192,9 @@ impl<'a> Interpreter<'a> {
         let b = value!(self.eval(right, environment));
         if !self.has_type(&a, &left.ty) || !self.has_type(&b, &right.ty) {
             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+        }
+        if matches!(a, Value::AbstractValue { .. }) || matches!(b, Value::AbstractValue { .. }) {
+            return Err(self.failure(ErrorKind::AbstractValueUnresolved, Some(expr.source)));
         }
         let compare = |ordering| match op {
             Comparison::Equal => matches!(ordering, Some(Equal)),
@@ -3821,6 +4330,48 @@ impl<'a> Interpreter<'a> {
             }
         }
         Err(self.failure(ErrorKind::TypeContractUnresolved, Some(expr.source)))
+    }
+
+    #[inline(never)]
+    fn eval_type_list(
+        &mut self,
+        expr: &Expr,
+        environment: &mut Environment,
+    ) -> Result<Flow, Error> {
+        let K::TypeList(fields) = &expr.kind else {
+            unreachable!()
+        };
+        if fields.len() > 100_000 {
+            return Err(self.failure(ErrorKind::RepresentationSizeLimit, Some(expr.source)));
+        }
+        let diverging = fields
+            .iter()
+            .any(|field| field.ty == Term::Primitive(Primitive::Never));
+        if (diverging && expr.ty != Term::Primitive(Primitive::Never))
+            || (!diverging && !self.is_type_list_input(&expr.ty))
+            || fields.iter().any(|field| {
+                !matches!(
+                    field.ty,
+                    Term::Primitive(Primitive::Type | Primitive::Never)
+                )
+            })
+        {
+            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+        }
+        self.integer_operation(Some(expr.source), |budget| {
+            budget.consume(fields.len().saturating_add(1))
+        })?;
+        let mut types = Vec::with_capacity(fields.len());
+        for field in fields {
+            let value = value!(self.eval(field, environment));
+            types.push(self.type_description_term(value, field.source)?);
+        }
+        if diverging {
+            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+        }
+        let value = Value::TypeList(types);
+        self.validate_immutable_input(&value, &expr.ty)?;
+        Ok(Flow::Value(value))
     }
 
     #[inline(never)]
@@ -4534,6 +5085,11 @@ impl<'a> Interpreter<'a> {
         let flow = if let Some(guard) = guard {
             match self.eval(guard, environment)? {
                 flow @ Flow::Value(Value::Bool(_)) => flow,
+                Flow::Value(Value::AbstractValue { .. }) => {
+                    return Err(
+                        self.failure(ErrorKind::AbstractValueUnresolved, Some(guard.source))
+                    );
+                }
                 Flow::Value(_) => return Err(self.failure(ErrorKind::Type, Some(guard.source))),
                 flow => flow,
             }
@@ -4594,39 +5150,68 @@ impl<'a> Interpreter<'a> {
 
     #[inline(never)]
     fn eval_block(&mut self, expr: &Expr, environment: &mut Environment) -> Result<Flow, Error> {
-        match &expr.kind {
-            K::Block { statements, result } | K::CallPreparation { statements, result } => {
-                let existing: BTreeSet<_> = environment.keys().copied().collect();
-                let flow = (|| {
-                    for statement in statements {
-                        value!(self.eval(statement, environment));
-                    }
-                    if let Some(result) = result {
-                        self.eval(result, environment)
-                    } else {
-                        Ok(Flow::Value(Value::Unit))
-                    }
-                })();
-                let flow = match flow {
-                    Ok(Flow::Value(value)) => {
-                        if matches!(expr.kind, K::CallPreparation { .. }) {
-                            self.cleanup_site(
-                                expr.source,
-                                iir::cleanup::Boundary::ScopeEnd,
-                                environment,
-                            )?;
-                        } else {
-                            self.cleanup_block(expr.source, environment)?;
-                        }
-                        Ok(Flow::Value(value))
-                    }
-                    other => other,
+        let mut frames = Vec::new();
+        let mut current = expr;
+        let mut flow = 'evaluate: loop {
+            // Charge the saved scope as well as each expression. Deep generated
+            // wrappers use heap continuations, not unbounded uncharged storage.
+            let Some(remaining) = self.budget.steps.checked_sub(environment.len() as u64) else {
+                let failure = Err(self.failure(ErrorKind::StepsExhausted, Some(current.source)));
+                break if frames.is_empty() {
+                    failure
+                } else {
+                    self.finish_evaluation(current, environment, failure)
                 };
-                environment.retain(|id, _| existing.contains(id));
-                return flow;
+            };
+            self.budget.steps = remaining;
+            frames.push((
+                current,
+                environment.keys().copied().collect::<BTreeSet<_>>(),
+            ));
+            let (K::Block { statements, result } | K::CallPreparation { statements, result }) =
+                &current.kind
+            else {
+                unreachable!("expression dispatcher selected an incompatible evaluator")
+            };
+            for statement in statements {
+                match self.eval(statement, environment) {
+                    Ok(Flow::Value(_)) => {}
+                    other => break 'evaluate other,
+                }
             }
-            _ => unreachable!("expression dispatcher selected an incompatible evaluator"),
+            let Some(tail) = result.as_deref() else {
+                break Ok(Flow::Value(Value::Unit));
+            };
+            if matches!(tail.kind, K::Block { .. } | K::CallPreparation { .. }) {
+                if let Err(failure) = self.tick(Some(tail.source)) {
+                    break Err(failure);
+                }
+                current = tail;
+            } else {
+                break self.eval(tail, environment);
+            }
+        };
+        while let Some((frame, existing)) = frames.pop() {
+            let cleanup = if matches!(&flow, Ok(Flow::Value(_))) {
+                if matches!(frame.kind, K::CallPreparation { .. }) {
+                    self.cleanup_site(frame.source, iir::cleanup::Boundary::ScopeEnd, environment)
+                } else {
+                    self.cleanup_block(frame.source, environment)
+                }
+            } else {
+                Ok(())
+            };
+            match cleanup {
+                Ok(()) => environment.retain(|id, _| existing.contains(id)),
+                Err(failure) => flow = Err(failure),
+            }
+            // The outer eval owns the root's delivery hook. Every tail block
+            // still receives the same hook after its lexical cleanup.
+            if !frames.is_empty() {
+                flow = self.finish_evaluation(frame, environment, flow);
+            }
         }
+        flow
     }
 
     #[inline(never)]
@@ -4836,9 +5421,6 @@ impl<'a> Interpreter<'a> {
         expr: &Expr,
         environment: &mut Environment,
     ) -> Result<Flow, Error> {
-        if self.comptime_only {
-            return Err(self.failure(ErrorKind::Unsupported, Some(expr.source)));
-        }
         let K::BitWritePointer {
             pointer,
             selections,
@@ -4872,10 +5454,9 @@ impl<'a> Interpreter<'a> {
         if rhs.width() != end - start || expr.ty != Term::Primitive(Primitive::Void) {
             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
         }
-        let old = target
-            .read()
-            .map_err(|kind| self.failure(kind, Some(expr.source)))?;
-        let changed = self.replaced_bit_value(expr.source, storage_type, &old, start, &rhs)?;
+        let changed = target
+            .inspect(|old| self.replaced_bit_value(expr.source, storage_type, old, start, &rhs))
+            .map_err(|kind| self.failure(kind, Some(expr.source)))??;
         target
             .write(changed, |old| self.has_type(old, storage_type))
             .map_err(|kind| self.failure(kind, Some(expr.source)))?;
@@ -5099,7 +5680,9 @@ impl<'a> Interpreter<'a> {
         {
             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
         }
-        let Value::Bool(passed) = value!(self.eval(condition, environment)) else {
+        let Value::Bool(passed) =
+            Self::concrete_value(value!(self.eval(condition, environment)), expr.source)?
+        else {
             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
         };
         self.events.push(Event::CheckPredicate {
@@ -5170,6 +5753,11 @@ impl<'a> Interpreter<'a> {
                             Value::Unit
                         }
                     }
+                    Value::AbstractValue { .. } => {
+                        return Err(
+                            self.failure(ErrorKind::AbstractValueUnresolved, Some(expr.source))
+                        );
+                    }
                     _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
                 }
             }
@@ -5186,11 +5774,14 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Flow, Error> {
         let result = match &expr.kind {
             K::BitWindow { value, start, end } => {
-                let Value::BitVec(bits) = value!(self.eval(value, environment)) else {
+                let Value::BitVec(bits) =
+                    Self::concrete_value(value!(self.eval(value, environment)), expr.source)?
+                else {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 };
-                let lower = value!(self.eval(start, environment));
-                let upper = value!(self.eval(end, environment));
+                let lower =
+                    Self::concrete_value(value!(self.eval(start, environment)), expr.source)?;
+                let upper = Self::concrete_value(value!(self.eval(end, environment)), expr.source)?;
                 if !self.has_type(&lower, &start.ty)
                     || !self.has_type(&upper, &end.ty)
                     || value.ty != Term::Primitive(Primitive::BitVec(bits.width()))
@@ -5220,10 +5811,13 @@ impl<'a> Interpreter<'a> {
                 )
             }
             K::BitIndex(value, index) => {
-                let Value::BitVec(bits) = value!(self.eval(value, environment)) else {
+                let Value::BitVec(bits) =
+                    Self::concrete_value(value!(self.eval(value, environment)), expr.source)?
+                else {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 };
-                let position = value!(self.eval(index, environment));
+                let position =
+                    Self::concrete_value(value!(self.eval(index, environment)), expr.source)?;
                 if !self.has_type(&position, &index.ty)
                     || value.ty != Term::Primitive(Primitive::BitVec(bits.width()))
                     || expr.ty != Term::Primitive(Primitive::BitVec(1))
@@ -5244,7 +5838,9 @@ impl<'a> Interpreter<'a> {
                 })?)
             }
             K::BitSlice { value, start, end } => {
-                let Value::BitVec(bits) = value!(self.eval(value, environment)) else {
+                let Value::BitVec(bits) =
+                    Self::concrete_value(value!(self.eval(value, environment)), expr.source)?
+                else {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 };
                 let result =
@@ -5267,10 +5863,14 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Flow, Error> {
         let result = match &expr.kind {
             K::BitEqual(a, b) => {
-                let Value::BitVec(a) = value!(self.eval(a, environment)) else {
+                let Value::BitVec(a) =
+                    Self::concrete_value(value!(self.eval(a, environment)), expr.source)?
+                else {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 };
-                let Value::BitVec(b) = value!(self.eval(b, environment)) else {
+                let Value::BitVec(b) =
+                    Self::concrete_value(value!(self.eval(b, environment)), expr.source)?
+                else {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 };
                 if a.width() != b.width() || expr.ty != Term::Primitive(Primitive::Bool) {
@@ -5306,7 +5906,8 @@ impl<'a> Interpreter<'a> {
                 {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 }
-                let result = value!(self.eval(value, environment));
+                let result =
+                    Self::concrete_value(value!(self.eval(value, environment)), expr.source)?;
                 if !self.has_type(&result, &value.ty) {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 }
@@ -5338,8 +5939,8 @@ impl<'a> Interpreter<'a> {
                 {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 }
-                let a = value!(self.eval(left, environment));
-                let b = value!(self.eval(right, environment));
+                let a = Self::concrete_value(value!(self.eval(left, environment)), expr.source)?;
+                let b = Self::concrete_value(value!(self.eval(right, environment)), expr.source)?;
                 if !self.has_type(&a, &left.ty) || !self.has_type(&b, &right.ty) {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 }
@@ -5411,12 +6012,18 @@ impl<'a> Interpreter<'a> {
             }
             _ => Err(MError::RepresentationMismatch),
         };
-        let left = convert(value!(self.eval(left, environment)))
-            .map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?;
+        let left = convert(Self::concrete_value(
+            value!(self.eval(left, environment)),
+            expr.source,
+        )?)
+        .map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?;
         let right = if let Some(right) = right {
             Some(
-                convert(value!(self.eval(right, environment)))
-                    .map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?,
+                convert(Self::concrete_value(
+                    value!(self.eval(right, environment)),
+                    expr.source,
+                )?)
+                .map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?,
             )
         } else {
             None
@@ -5479,7 +6086,9 @@ impl<'a> Interpreter<'a> {
                 {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 }
-                let Value::Integer(value) = value!(self.eval(value, environment)) else {
+                let Value::Integer(value) =
+                    Self::concrete_value(value!(self.eval(value, environment)), expr.source)?
+                else {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 };
                 Value::Integer(
@@ -5525,10 +6134,14 @@ impl<'a> Interpreter<'a> {
                 {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 }
-                let Value::Integer(left) = value!(self.eval(left, environment)) else {
+                let Value::Integer(left) =
+                    Self::concrete_value(value!(self.eval(left, environment)), expr.source)?
+                else {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 };
-                let Value::Integer(right) = value!(self.eval(right, environment)) else {
+                let Value::Integer(right) =
+                    Self::concrete_value(value!(self.eval(right, environment)), expr.source)?
+                else {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 };
                 let value = self.integer_operation(Some(expr.source), |budget| {
@@ -5553,7 +6166,9 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Flow, Error> {
         let result = match &expr.kind {
             K::BitConvert(value) => {
-                let Value::BitVec(bits) = value!(self.eval(value, environment)) else {
+                let Value::BitVec(bits) =
+                    Self::concrete_value(value!(self.eval(value, environment)), expr.source)?
+                else {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 };
                 match expr.ty {
@@ -5609,10 +6224,14 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Flow, Error> {
         let result = match &expr.kind {
             K::BitConcat(a, b) => {
-                let Value::BitVec(a) = value!(self.eval(a, environment)) else {
+                let Value::BitVec(a) =
+                    Self::concrete_value(value!(self.eval(a, environment)), expr.source)?
+                else {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 };
-                let Value::BitVec(b) = value!(self.eval(b, environment)) else {
+                let Value::BitVec(b) =
+                    Self::concrete_value(value!(self.eval(b, environment)), expr.source)?
+                else {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 };
                 let result = self.bit_operation(expr.source, |budget| a.concat(&b, budget))?;
@@ -5634,7 +6253,8 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Flow, Error> {
         let result = match &expr.kind {
             K::TakeBits(operand) => {
-                let value = value!(self.eval(operand, environment));
+                let value =
+                    Self::concrete_value(value!(self.eval(operand, environment)), expr.source)?;
                 let Term::Primitive(Primitive::BitVec(width)) = expr.ty else {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 };
@@ -5751,16 +6371,18 @@ impl<'a> Interpreter<'a> {
     #[inline(never)]
     fn eval_not(&mut self, expr: &Expr, environment: &mut Environment) -> Result<Flow, Error> {
         let result = match &expr.kind {
-            K::Not(operand) => match value!(self.eval(operand, environment)) {
-                Value::Bool(value) => Value::Bool(!value),
-                Value::BitVec(value) => {
-                    if expr.ty != Term::Primitive(Primitive::BitVec(value.width())) {
-                        return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+            K::Not(operand) => {
+                match Self::concrete_value(value!(self.eval(operand, environment)), expr.source)? {
+                    Value::Bool(value) => Value::Bool(!value),
+                    Value::BitVec(value) => {
+                        if expr.ty != Term::Primitive(Primitive::BitVec(value.width())) {
+                            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                        }
+                        Value::BitVec(self.bit_operation(expr.source, |budget| value.not(budget))?)
                     }
-                    Value::BitVec(self.bit_operation(expr.source, |budget| value.not(budget))?)
+                    _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
                 }
-                _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
-            },
+            }
             _ => unreachable!("expression dispatcher selected an incompatible evaluator"),
         };
         Ok(Flow::Value(result))
@@ -5770,11 +6392,13 @@ impl<'a> Interpreter<'a> {
     fn eval_and(&mut self, expr: &Expr, environment: &mut Environment) -> Result<Flow, Error> {
         let result = match &expr.kind {
             K::And(a, b) | K::Or(a, b) => {
-                let left = value!(self.eval(a, environment));
+                let left = Self::concrete_value(value!(self.eval(a, environment)), expr.source)?;
                 match left {
                     Value::BitVec(left) => {
                         // BitVec operations are eager, unlike boolean short circuiting.
-                        let Value::BitVec(right) = value!(self.eval(b, environment)) else {
+                        let Value::BitVec(right) =
+                            Self::concrete_value(value!(self.eval(b, environment)), expr.source)?
+                        else {
                             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                         };
                         if expr.ty != Term::Primitive(Primitive::BitVec(left.width())) {
@@ -5795,7 +6419,7 @@ impl<'a> Interpreter<'a> {
                             Value::Bool(left)
                         } else {
                             let right = value!(self.eval(b, environment));
-                            if !matches!(right, Value::Bool(_)) {
+                            if !self.has_type(&right, &Term::Primitive(Primitive::Bool)) {
                                 return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                             }
                             right
@@ -6069,6 +6693,9 @@ impl fmt::Display for Value {
             Self::Storage(_) => f.write_str("(internal-storage)"),
             Self::Type(ty) => write!(f, "(type-value {ty})"),
             Self::TypeParameter(id) => write!(f, "(abstract-type-input {id})"),
+            Self::AbstractValue { declaration, ty } => {
+                write!(f, "(abstract-value-input {declaration} (domain {ty}))")
+            }
             Self::Integer(value) => value.fmt(f),
             Self::BitVec(value) => value.fmt(f),
             Self::Float(value) => write!(f, "(comptime-float {value})"),
@@ -6215,6 +6842,20 @@ impl Interpreter<'_> {
         undo: &mut PatternJournal,
     ) -> Result<Flow, Error> {
         use nir::program::Pattern;
+        if matches!(input, Value::AbstractValue { .. })
+            && !matches!(
+                pattern,
+                Pattern::Wild
+                    | Pattern::Binding { .. }
+                    | Pattern::Guard { .. }
+                    | Pattern::Then { .. }
+                    | Pattern::Remap { .. }
+                    | Pattern::Or(..)
+                    | Pattern::Observe { .. }
+            )
+        {
+            return Err(self.failure(ErrorKind::AbstractValueUnresolved, None));
+        }
         let abstract_input = matches!(input, Value::TypeParameter(_))
             || matches!(input, Value::Type(Term::Rigid { .. }));
         if abstract_input
@@ -6234,6 +6875,17 @@ impl Interpreter<'_> {
             Pattern::Wild => true,
             Pattern::Unit => matches!(input, Value::Unit),
             Pattern::Literal(..) => return self.match_literal(pattern, input, environment, undo),
+            Pattern::Observe { binding, inner } => {
+                if environment.contains_key(binding) {
+                    return Err(self.failure(ErrorKind::InvalidCallPlan, None));
+                }
+                // This alias is not part of the rollback/export journal. Only
+                // user bindings produced by the inner pattern can escape.
+                environment.insert(*binding, input.clone());
+                let result = self.match_pattern_node(inner, input, environment, undo);
+                environment.remove(binding);
+                return result;
+            }
             Pattern::Then { .. } => return self.match_then(pattern, input, environment, undo),
             Pattern::Guard { .. } => return self.match_guard(pattern, input, environment, undo),
             Pattern::Binding { .. } => {
@@ -6398,7 +7050,10 @@ impl Interpreter<'_> {
                 ) {
                     false
                 } else {
-                    match value!(self.eval(condition, environment)) {
+                    match Self::concrete_value(
+                        value!(self.eval(condition, environment)),
+                        condition.source,
+                    )? {
                         Value::Bool(value) => value,
                         _ => return Err(self.failure(ErrorKind::Type, Some(condition.source))),
                     }
@@ -6615,6 +7270,72 @@ impl Interpreter<'_> {
         Ok(Flow::Value(Value::Bool(true)))
     }
 
+    /// Invoke with an already evaluated value graph. Check every advertised
+    /// domain before executing code, without reconstructing closure storage.
+    pub fn invoke_with_typed_values(
+        &mut self,
+        function: DeclarationId,
+        arguments: Vec<(Term, Value)>,
+    ) -> Result<Value, Error> {
+        self.invoke_with_prepared_arguments(
+            function,
+            arguments
+                .into_iter()
+                .map(|(ty, value)| (ty, InvocationValue::Live(value)))
+                .collect(),
+        )
+    }
+
+    /// Mix completed graph inputs with frozen inputs. Validate every live
+    /// domain before running a normal-input factory or the target body.
+    pub fn invoke_with_prepared_arguments(
+        &mut self,
+        function: DeclarationId,
+        arguments: Vec<(Term, InvocationValue)>,
+    ) -> Result<Value, Error> {
+        for (ty, value) in &arguments {
+            if let InvocationValue::Live(value) = value {
+                let mut fuel = usize::try_from(self.remaining_steps()).unwrap_or(usize::MAX);
+                let before = fuel;
+                let bounded = nir::type_computations::charge_term(ty, &mut fuel);
+                self.charge_preparation(before - fuel)?;
+                bounded.map_err(|_| self.failure(ErrorKind::StepsExhausted, None))?;
+                ty.check_scope(&[])
+                    .map_err(|_| self.failure(ErrorKind::Type, None))?;
+                if ty.sort() != nir::Sort::Type {
+                    return Err(self.failure(ErrorKind::Type, None));
+                }
+                if let Value::Storage(storage) = value {
+                    // Prepared calls may retain owned roots between invocations.
+                    // Validate the payload without copying the cell or turning a
+                    // borrowed pointer into an owner. Check responsibility while
+                    // borrowing, before any argument factory or body executes.
+                    let mut fuel = self.remaining_steps();
+                    let checked = (|| {
+                        let contents = storage.contents_for_copy(&mut fuel, 128)?;
+                        if self.has_type(contents.value(), ty) {
+                            Ok(())
+                        } else {
+                            Err(ErrorKind::Type)
+                        }
+                    })();
+                    self.budget.steps = fuel;
+                    checked.map_err(|kind| self.failure(kind, None))?;
+                } else if !self.has_type(value, ty) {
+                    return Err(self.failure(ErrorKind::Type, None));
+                }
+            }
+        }
+        let values = arguments
+            .into_iter()
+            .map(|(ty, value)| match value {
+                InvocationValue::Live(value) => Ok(value),
+                InvocationValue::Normal(term) => self.normal_pattern_value(&term, &ty),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.invoke(function, values)
+    }
+
     /// Invoke with typed, canonical normal-form inputs. Reuse the checked
     /// conversion used by normal-form patterns. Abstract Type descriptions need
     /// explicit scope authorization; they never become concrete runtime inputs.
@@ -6633,9 +7354,10 @@ impl Interpreter<'_> {
     fn is_type_list_input(&self, ty: &Term) -> bool {
         nir::normal_forms::type_list_input_type(ty)
             && self.normal_forms.values().any(|head| {
-                head.parameters.iter().any(|parameter| {
-                    parameter.kind == nir::normal_forms::Kind::TypeList && parameter.ty == *ty
-                })
+                head.is_type_list_instance(ty)
+                    || head.parameters.iter().any(|parameter| {
+                        parameter.kind == nir::normal_forms::Kind::TypeList && parameter.ty == *ty
+                    })
             })
     }
 
@@ -6663,6 +7385,19 @@ impl Interpreter<'_> {
             return Err(self.failure(ErrorKind::DepthExhausted, None));
         }
         self.tick(None)?;
+        if let Term::Rigid {
+            declaration,
+            sort: nir::Sort::ComptimeValue,
+        } = term
+        {
+            if self.comptime_only && self.abstract_value_parameters.get(declaration) == Some(ty) {
+                return Ok(Value::AbstractValue {
+                    declaration: *declaration,
+                    ty: ty.clone(),
+                });
+            }
+            return Err(self.failure(ErrorKind::Type, None));
+        }
         let work = if *ty == Term::Primitive(Primitive::Type) {
             self.type_description_work(term)
                 .ok_or_else(|| self.failure(ErrorKind::Type, None))?
@@ -6701,6 +7436,96 @@ impl Interpreter<'_> {
                 (Term::Char(value), _) => Value::Char(*value),
                 (Term::String(value), _) => Value::String(value.clone()),
                 (Term::Symbol(value), _) => Value::Symbol(value.clone()),
+                (Term::ClosureSnapshot { factory, arguments }, ty) if ty.is_comptime_callable() => {
+                    let function = self
+                        .functions
+                        .get(factory)
+                        .copied()
+                        .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
+                    if function.phase != nir::program::FunctionPhase::Comptime {
+                        return Err(self.failure(ErrorKind::Type, None));
+                    }
+                    for argument in arguments {
+                        let work = self
+                            .type_description_work(argument)
+                            .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
+                        self.integer_operation(None, |budget| budget.consume(work))?;
+                    }
+                    let signature = function
+                        .signature
+                        .instantiate_parameters(
+                            &self.input_binders(&function.type_parameters),
+                            arguments,
+                        )
+                        .map_err(|_| self.failure(ErrorKind::Type, None))?;
+                    if !matches!(signature.callable_signature(), Term::Function { parameters, result }
+                        if parameters.is_empty() && result.as_ref() == ty)
+                    {
+                        return Err(self.failure(ErrorKind::Type, None));
+                    }
+                    let expression = Expr {
+                        source: function.body.source,
+                        ty: signature.with_comptime_phase(true),
+                        kind: K::FunctionInstance {
+                            declaration: *factory,
+                            arguments: arguments.clone(),
+                        },
+                    };
+                    let Flow::Value(callable) = self.eval(&expression, &mut Environment::new())?
+                    else {
+                        return Err(
+                            self.failure(ErrorKind::InvalidControlFlow, Some(expression.source))
+                        );
+                    };
+                    self.invoke_value(callable, vec![])?
+                }
+                (
+                    Term::FunctionValue {
+                        declaration,
+                        arguments,
+                    },
+                    ty,
+                ) if ty.is_comptime_callable() => {
+                    let function = self
+                        .functions
+                        .get(declaration)
+                        .copied()
+                        .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
+                    if function.phase != nir::program::FunctionPhase::Comptime {
+                        return Err(self.failure(ErrorKind::Type, None));
+                    }
+                    for argument in arguments {
+                        let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+                        let before = fuel;
+                        let checked = nir::type_computations::charge_term(argument, &mut fuel);
+                        self.budget.steps -= (before - fuel) as u64;
+                        checked.map_err(|_| self.failure(ErrorKind::StepsExhausted, None))?;
+                        argument
+                            .check_scope(&[])
+                            .map_err(|_| self.failure(ErrorKind::Type, None))?;
+                        if argument.sort() == nir::Sort::Type {
+                            let work = self
+                                .type_description_work(argument)
+                                .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
+                            self.integer_operation(None, |budget| budget.consume(work))?;
+                        }
+                    }
+                    let expression = Expr {
+                        source: function.body.source,
+                        ty: ty.clone(),
+                        kind: K::FunctionInstance {
+                            declaration: *declaration,
+                            arguments: arguments.clone(),
+                        },
+                    };
+                    match self.eval(&expression, &mut Environment::new())? {
+                        Flow::Value(value) => value,
+                        _ => {
+                            return Err(self
+                                .failure(ErrorKind::InvalidControlFlow, Some(expression.source)));
+                        }
+                    }
+                }
                 (Term::Integer(value), Term::Primitive(Primitive::Integer)) => {
                     Value::Integer(value.clone())
                 }
@@ -6992,6 +7817,24 @@ fn scoped_type_value_work_with_layouts(
     if ty.sort() != nir::Sort::Type {
         return None;
     }
+    scoped_term_value_work_with_layouts(ty, heads, parameters, nominal_fields)
+}
+
+// Instance identities contain completed value arguments as well as types.
+// Use the same bounded structural validation without imposing a Type root.
+fn instance_argument_work(
+    argument: &Term,
+    heads: &BTreeMap<DeclarationId, &nir::normal_forms::Head>,
+) -> Option<usize> {
+    scoped_term_value_work_with_layouts(argument, heads, &BTreeSet::new(), |_, _, _| None)
+}
+
+fn scoped_term_value_work_with_layouts(
+    ty: &Term,
+    heads: &BTreeMap<DeclarationId, &nir::normal_forms::Head>,
+    parameters: &BTreeSet<DeclarationId>,
+    nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
+) -> Option<usize> {
     let mut pending = vec![(ty, 0usize)];
     let mut work = 0usize;
     while let Some((ty, depth)) = pending.pop() {
@@ -7029,6 +7872,12 @@ fn scoped_type_value_work_with_layouts(
             | Term::TypeListValue(items)
             | Term::TypeListConcat(items)
             | Term::TupleValue(items)
+            | Term::ClosureSnapshot {
+                arguments: items, ..
+            }
+            | Term::FunctionValue {
+                arguments: items, ..
+            }
             | Term::Nominal {
                 arguments: items, ..
             }
@@ -7099,6 +7948,12 @@ fn scoped_type_value_work_with_layouts(
             | Term::TypeListValue(items)
             | Term::TypeListConcat(items)
             | Term::TupleValue(items)
+            | Term::ClosureSnapshot {
+                arguments: items, ..
+            }
+            | Term::FunctionValue {
+                arguments: items, ..
+            }
             | Term::Nominal {
                 arguments: items, ..
             }
@@ -7137,6 +7992,26 @@ fn scoped_type_value_work_with_layouts(
 #[cfg(test)]
 mod computation_type_tests {
     use super::*;
+
+    #[test]
+    fn instance_argument_budget_accepts_completed_values_but_rejects_open_terms() {
+        let heads = BTreeMap::new();
+        let value = Term::Bool(true);
+        assert!(type_value_work(&value, &heads).is_none());
+        assert_eq!(instance_argument_work(&value, &heads), Some(1));
+        assert!(instance_argument_work(&Term::Primitive(Primitive::Bool), &heads).is_some());
+        let open = Term::Rigid {
+            declaration: DeclarationId {
+                package: 0,
+                local: 1,
+            },
+            sort: nir::Sort::ComptimeValue,
+        };
+        assert!(instance_argument_work(&open, &heads).is_none());
+        assert!(instance_argument_work(&Term::TupleValue(vec![value, open]), &heads).is_none());
+        let oversized = Term::TupleValue(vec![Term::Bool(false); 100_000]);
+        assert!(instance_argument_work(&oversized, &heads).is_none());
+    }
 
     #[test]
     fn enum_name_rejects_forged_domains_before_evaluation() {
@@ -7323,6 +8198,196 @@ mod normal_input_data_tests {
     use super::*;
 
     #[test]
+    fn freezing_named_callables_does_not_erase_captures_or_specialization() {
+        let declaration = DeclarationId {
+            package: 2,
+            local: 3,
+        };
+        let signature = Term::Function {
+            parameters: vec![],
+            result: Box::new(Term::Primitive(Primitive::Type)),
+        }
+        .with_comptime_phase(true);
+        let closure = Closure {
+            definition_source: None,
+            origin: Some(declaration),
+            instance_arguments: Some(vec![]),
+            parameters: vec![],
+            environment: Environment::new(),
+            capture_order: vec![],
+            body: Arc::new(Expr {
+                source: SourceRange { start: 0, end: 1 },
+                ty: Term::Primitive(Primitive::Type),
+                kind: K::Unit,
+            }),
+            ty: signature,
+        };
+        let freeze = |value: Value| {
+            value.into_scoped_invocation_term(
+                &mut comptime_runtime::Budget::default(),
+                &BTreeSet::new(),
+            )
+        };
+        assert_eq!(
+            freeze(Value::Function(declaration)).unwrap(),
+            Term::FunctionValue {
+                declaration,
+                arguments: vec![]
+            }
+        );
+        assert_eq!(
+            freeze(Value::Closure(Arc::new(closure.clone()))).unwrap(),
+            Term::FunctionValue {
+                declaration,
+                arguments: vec![]
+            }
+        );
+        let mut captured = closure.clone();
+        let binding = LocalId { owner: 1, index: 0 };
+        captured.environment.insert(binding, Value::Bool(true));
+        captured.capture_order.push(binding);
+        let mut specialized = closure.clone();
+        specialized.instance_arguments = Some(vec![Term::Primitive(Primitive::Bool)]);
+        for argument in [
+            Term::Bool(true),
+            Term::TupleValue(vec![Term::Bool(false), Term::Primitive(Primitive::Bool)]),
+            Term::TypeListValue(vec![Term::Primitive(Primitive::Bool)]),
+        ] {
+            let mut instance = closure.clone();
+            instance.instance_arguments = Some(vec![argument.clone()]);
+            assert_eq!(
+                freeze(Value::Closure(Arc::new(instance))).unwrap(),
+                Term::FunctionValue {
+                    declaration,
+                    arguments: vec![argument]
+                }
+            );
+        }
+        for argument in [
+            Term::Rigid {
+                declaration,
+                sort: nir::Sort::ComptimeValue,
+            },
+            Term::TupleValue(vec![Term::Rigid {
+                declaration,
+                sort: nir::Sort::ComptimeValue,
+            }]),
+            Term::TypeListConcat(vec![Term::TypeListValue(vec![])]),
+        ] {
+            let mut instance = closure.clone();
+            instance.instance_arguments = Some(vec![argument]);
+            assert_eq!(
+                Value::Closure(Arc::new(instance)).into_scoped_invocation_term(
+                    &mut comptime_runtime::Budget::default(),
+                    &BTreeSet::from([declaration]),
+                ),
+                Err(ErrorKind::Type)
+            );
+        }
+        let mut scoped = closure.clone();
+        let parameter = Term::Rigid {
+            declaration,
+            sort: nir::Sort::Type,
+        };
+        scoped.instance_arguments = Some(vec![parameter.clone()]);
+        assert_eq!(
+            freeze(Value::Closure(Arc::new(scoped.clone()))),
+            Err(ErrorKind::Type)
+        );
+        assert_eq!(
+            Value::Closure(Arc::new(scoped))
+                .into_scoped_invocation_term(
+                    &mut comptime_runtime::Budget::default(),
+                    &BTreeSet::from([declaration]),
+                )
+                .unwrap(),
+            Term::FunctionValue {
+                declaration,
+                arguments: vec![parameter]
+            }
+        );
+        let mut anonymous = closure.clone();
+        anonymous.origin = None;
+        let mut runtime = closure;
+        runtime.ty = runtime.ty.callable_signature().clone();
+        assert_eq!(
+            freeze(Value::Closure(Arc::new(specialized))).unwrap(),
+            Term::FunctionValue {
+                declaration,
+                arguments: vec![Term::Primitive(Primitive::Bool)]
+            }
+        );
+        for unsupported in [captured, anonymous, runtime] {
+            assert_eq!(
+                freeze(Value::Tuple(vec![Value::Closure(Arc::new(
+                    unsupported.clone()
+                ))]))
+                .unwrap_err(),
+                ErrorKind::Unsupported
+            );
+            assert_eq!(
+                freeze(Value::Closure(Arc::new(unsupported))).unwrap_err(),
+                ErrorKind::Unsupported
+            );
+        }
+    }
+
+    #[test]
+    fn invocation_aggregates_retain_named_callables_without_exporting_them_as_data() {
+        let declaration = DeclarationId {
+            package: 2,
+            local: 3,
+        };
+        let value = Value::Tuple(vec![Value::AnonymousRecord(vec![(
+            "callback".into(),
+            Value::Function(declaration),
+        )])]);
+        let expected = Term::TupleValue(vec![Term::RecordValue(vec![(
+            "callback".into(),
+            Term::FunctionValue {
+                declaration,
+                arguments: vec![],
+            },
+        )])]);
+        assert_eq!(
+            value
+                .clone()
+                .into_normal_term(&mut comptime_runtime::Budget::default()),
+            Err(ErrorKind::Unsupported)
+        );
+        assert_eq!(
+            value.clone().into_scoped_invocation_term(
+                &mut comptime_runtime::Budget {
+                    steps: 1,
+                    max_limbs: 4096
+                },
+                &BTreeSet::new()
+            ),
+            Err(ErrorKind::StepsExhausted)
+        );
+        assert_eq!(
+            value
+                .into_scoped_invocation_term(
+                    &mut comptime_runtime::Budget::default(),
+                    &BTreeSet::new()
+                )
+                .unwrap(),
+            expected
+        );
+        let mut deep = Value::Function(declaration);
+        for _ in 0..130 {
+            deep = Value::Tuple(vec![deep]);
+        }
+        assert_eq!(
+            deep.into_scoped_invocation_term(
+                &mut comptime_runtime::Budget::default(),
+                &BTreeSet::new()
+            ),
+            Err(ErrorKind::DepthExhausted)
+        );
+    }
+
+    #[test]
     fn aggregate_snapshot_classification_is_bounded_and_excludes_executable_members() {
         let package = Package::default();
         let source = SourceRange { start: 1, end: 2 };
@@ -7368,4 +8433,387 @@ mod normal_input_data_tests {
     }
 }
 
+#[cfg(test)]
+mod block_continuation_tests {
+    use super::*;
+
+    #[test]
+    fn deep_block_scopes_preserve_transfers_and_errors() {
+        let source = SourceRange { start: 3, end: 7 };
+        let binding = LocalId { owner: 1, index: 0 };
+        let target = LocalId { owner: 2, index: 0 };
+        for mode in 0..4 {
+            let mut body = Expr {
+                ty: Term::Primitive(Primitive::Never),
+                source,
+                kind: match mode {
+                    0 => K::Return(None),
+                    1 => K::Break(target),
+                    2 => K::Continue(target),
+                    _ => K::SymbolName(Box::new(Expr {
+                        ty: Term::Primitive(Primitive::Bool),
+                        source,
+                        kind: K::Literal(Literal::Bool(true)),
+                    })),
+                },
+            };
+            for index in 1..=200 {
+                let statement = Expr {
+                    ty: Term::Primitive(Primitive::Void),
+                    source,
+                    kind: K::Let {
+                        binding: LocalId { owner: 1, index },
+                        value: Box::new(Expr {
+                            ty: Term::Primitive(Primitive::Bool),
+                            source,
+                            kind: K::Literal(Literal::Bool(true)),
+                        }),
+                    },
+                };
+                body = Expr {
+                    ty: Term::Primitive(Primitive::Never),
+                    source,
+                    kind: if index % 2 == 0 {
+                        K::Block {
+                            statements: vec![statement],
+                            result: Some(Box::new(body)),
+                        }
+                    } else {
+                        K::CallPreparation {
+                            statements: vec![statement],
+                            result: Some(Box::new(body)),
+                        }
+                    },
+                };
+            }
+            let package = Package::default();
+            let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+            let mut environment = Environment::new();
+            environment.insert(binding, Value::Bool(false));
+            let result = vm.eval(&body, &mut environment);
+            match mode {
+                0 => assert!(matches!(result.unwrap(), Flow::Return(Value::Unit))),
+                1 => assert!(matches!(result.unwrap(), Flow::Break(id) if id == target)),
+                2 => assert!(matches!(result.unwrap(), Flow::Continue(id) if id == target)),
+                _ => assert_eq!(result.unwrap_err().kind, ErrorKind::Type),
+            }
+            assert_eq!(environment.len(), 1);
+            assert_eq!(environment.get(&binding), Some(&Value::Bool(false)));
+            assert_eq!(vm.depth, 0);
+        }
+    }
+
+    #[test]
+    fn deep_block_scopes_unwind_on_success_and_fuel_failure() {
+        let boolean = Term::Primitive(Primitive::Bool);
+        let source = SourceRange { start: 1, end: 2 };
+        let literal = || Expr {
+            ty: boolean.clone(),
+            source,
+            kind: K::Literal(Literal::Bool(true)),
+        };
+        let mut body = literal();
+        for index in 1..=200 {
+            let statement = Expr {
+                ty: Term::Primitive(Primitive::Void),
+                source,
+                kind: K::Let {
+                    binding: LocalId { owner: 1, index },
+                    value: Box::new(literal()),
+                },
+            };
+            body = Expr {
+                ty: boolean.clone(),
+                source,
+                kind: if index % 2 == 0 {
+                    K::Block {
+                        statements: vec![statement],
+                        result: Some(Box::new(body)),
+                    }
+                } else {
+                    K::CallPreparation {
+                        statements: vec![statement],
+                        result: Some(Box::new(body)),
+                    }
+                },
+            };
+        }
+        let package = Package::default();
+        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        let binding = LocalId { owner: 1, index: 0 };
+        let mut environment = Environment::new();
+        environment.insert(binding, Value::Bool(false));
+        assert!(matches!(
+            vm.eval(&body, &mut environment).unwrap(),
+            Flow::Value(Value::Bool(true))
+        ));
+        assert_eq!(environment.len(), 1);
+        assert_eq!(environment.get(&binding), Some(&Value::Bool(false)));
+        assert_eq!(vm.depth, 0);
+        vm.budget.steps = 64;
+        assert_eq!(
+            vm.eval(&body, &mut environment).unwrap_err().kind,
+            ErrorKind::StepsExhausted
+        );
+        assert_eq!(environment.len(), 1);
+        assert_eq!(vm.depth, 0);
+        vm.budget.steps = 100_000;
+        assert!(matches!(
+            vm.eval(&body, &mut environment).unwrap(),
+            Flow::Value(Value::Bool(true))
+        ));
+        assert_eq!(environment.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod pointer_copy_budget_tests {
+    use super::*;
+    #[test]
+    fn pointer_write_proof_uses_live_fuel_before_mutation_and_can_retry() {
+        let ty = Term::Tuple(vec![Term::Primitive(Primitive::Bool)]);
+        let storage = Storage::new(Value::Tuple(vec![Value::Bool(false)]));
+        let binding = LocalId { owner: 1, index: 0 };
+        let source = SourceRange { start: 1, end: 2 };
+        let expr = Expr {
+            ty: Term::Primitive(Primitive::Void),
+            source,
+            kind: K::WritePointer {
+                pointer: Box::new(Expr {
+                    ty: Term::Pointer(Box::new(ty.clone())),
+                    source,
+                    kind: K::Local(binding),
+                }),
+                value: Box::new(Expr {
+                    ty: ty.clone(),
+                    source,
+                    kind: K::Tuple(vec![Expr {
+                        ty: Term::Primitive(Primitive::Bool),
+                        source,
+                        kind: K::Literal(Literal::Bool(true)),
+                    }]),
+                }),
+            },
+        };
+        let mut environment = Environment::new();
+        environment.insert(binding, Value::Pointer(storage.pointer(ty, vec![])));
+        let observed = std::cell::Cell::new(0);
+        let permission = |_: &Term, remaining: &mut u64| {
+            observed.set(*remaining);
+            let allowed = *remaining >= 20;
+            *remaining = remaining.saturating_sub(20);
+            allowed
+        };
+        let package = Package::default();
+        let mut vm = Interpreter::new(
+            &package,
+            Budget {
+                steps: 10,
+                depth: 128,
+            },
+        )
+        .unwrap()
+        .with_budgeted_pointer_copy_permission(&permission);
+        assert_eq!(
+            vm.eval(&expr, &mut environment).unwrap_err().kind,
+            ErrorKind::Unsupported
+        );
+        assert!(
+            observed.get() < 10,
+            "operand evaluation must precede proof acquisition"
+        );
+        assert_eq!(vm.remaining_steps(), 0);
+        assert_eq!(
+            storage.read().unwrap(),
+            Value::Tuple(vec![Value::Bool(false)])
+        );
+        assert_eq!(vm.depth, 0);
+        vm.budget.steps = 40;
+        assert!(matches!(
+            vm.eval(&expr, &mut environment).unwrap(),
+            Flow::Value(Value::Unit)
+        ));
+        assert_eq!(vm.remaining_steps(), observed.get() - 20);
+        assert_eq!(
+            storage.read().unwrap(),
+            Value::Tuple(vec![Value::Bool(true)])
+        );
+    }
+
+    #[test]
+    fn pointer_reads_charge_copy_work_and_recover_without_mutation() {
+        let ty = Term::Tuple(vec![Term::Primitive(Primitive::Bool); 64]);
+        let original = Value::Tuple(vec![Value::Bool(true); 64]);
+        let storage = Storage::new(original.clone());
+        let binding = LocalId { owner: 1, index: 0 };
+        let source = SourceRange { start: 1, end: 2 };
+        let expr = Expr {
+            ty: ty.clone(),
+            source,
+            kind: K::ReadPointer(Box::new(Expr {
+                ty: Term::Pointer(Box::new(ty.clone())),
+                source,
+                kind: K::Local(binding),
+            })),
+        };
+        let mut environment = Environment::new();
+        environment.insert(binding, Value::Pointer(storage.pointer(ty, vec![])));
+        let package = Package::default();
+        // Resource permission is explicit; it does not waive copying limits.
+        let mut vm = Interpreter::new(
+            &package,
+            Budget {
+                steps: 8,
+                depth: 128,
+            },
+        )
+        .unwrap()
+        .with_pointer_copy_permission(&|_| true);
+        assert_eq!(
+            vm.eval(&expr, &mut environment).unwrap_err().kind,
+            ErrorKind::StepsExhausted
+        );
+        assert_eq!(storage.read().unwrap(), original);
+        assert_eq!(vm.depth, 0);
+        vm.budget.steps = 1000;
+        assert!(
+            matches!(vm.eval(&expr,&mut environment).unwrap(),Flow::Value(value) if value==original)
+        );
+        assert_eq!(storage.read().unwrap(), original);
+        assert!(vm.remaining_steps() < 1000 - 64);
+    }
+}
+
 mod newtypes;
+
+#[cfg(test)]
+mod live_graph_tests {
+    use super::*;
+
+    #[test]
+    fn owned_graph_visits_shared_storage_and_cycles_once_without_cloning() {
+        let storage = Storage::new(Value::Unit);
+        let nested = Storage::new(Value::Tuple(vec![
+            Value::Storage(storage.clone()),
+            Value::Function(DeclarationId {
+                package: 3,
+                local: 7,
+            }),
+        ]));
+        *storage.0.lock().unwrap() = Value::Tuple(vec![
+            Value::Storage(nested.clone()),
+            Value::Storage(nested.clone()),
+        ]);
+        let root = Value::Storage(storage.clone());
+        let mut cells = 0;
+        let mut functions = Vec::new();
+        let result = root.visit_owned_graph(&mut 100, &mut |value, _| {
+            match value {
+                Value::Storage(_) => cells += 1,
+                Value::Function(id) => functions.push(*id),
+                _ => {}
+            }
+            Ok(())
+        });
+        // Break the test-created ownership cycle even if an assertion fails.
+        *storage.0.lock().unwrap() = Value::Unit;
+        result.unwrap();
+        assert_eq!(cells, 2);
+        assert_eq!(
+            functions,
+            vec![DeclarationId {
+                package: 3,
+                local: 7
+            }]
+        );
+    }
+
+    #[test]
+    fn owned_graph_budget_and_locked_storage_fail_without_waiting() {
+        let storage = Storage::new(Value::Bool(true));
+        let root = Value::Storage(storage.clone());
+        let mut seen = 0;
+        assert_eq!(
+            root.visit_owned_graph(&mut 0, &mut |_, _| {
+                seen += 1;
+                Ok(())
+            }),
+            Err(ErrorKind::StepsExhausted)
+        );
+        assert_eq!(seen, 0);
+        let lock = storage.0.lock().unwrap();
+        assert_eq!(
+            root.visit_owned_graph(&mut 10, &mut |_, _| Ok(())),
+            Err(ErrorKind::InvalidPointer)
+        );
+        drop(lock);
+        root.visit_owned_graph(&mut 10, &mut |value, _| {
+            if matches!(value, Value::Bool(true)) {
+                seen += 1;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(seen, 1);
+        let mut deep = Value::Unit;
+        for _ in 0..130 {
+            deep = Value::Tuple(vec![deep]);
+        }
+        assert_eq!(
+            deep.visit_owned_graph(&mut 1000, &mut |_, _| Ok(())),
+            Err(ErrorKind::DepthExhausted)
+        );
+    }
+}
+
+#[cfg(test)]
+mod invocation_environment_tests {
+    use super::*;
+    #[test]
+    fn failed_capture_preparation_restores_frame_and_can_resume_with_fresh_budget() {
+        let package = Package::default();
+        let source = SourceRange { start: 1, end: 2 };
+        let binding = LocalId { owner: 1, index: 0 };
+        let closure = Value::Closure(Arc::new(Closure {
+            definition_source: None,
+            origin: None,
+            instance_arguments: None,
+            parameters: vec![],
+            capture_order: vec![binding],
+            environment: Environment::from([(binding, Value::Tuple(vec![Value::Bool(false); 64]))]),
+            body: Arc::new(Expr {
+                ty: Term::Primitive(Primitive::Bool),
+                source,
+                kind: K::Literal(Literal::Bool(true)),
+            }),
+            ty: Term::Function {
+                parameters: vec![],
+                result: Box::new(Term::Primitive(Primitive::Bool)),
+            },
+        }));
+        let mut vm = Interpreter::new(
+            &package,
+            Budget {
+                steps: 8,
+                depth: 128,
+            },
+        )
+        .unwrap();
+        vm.effect_state.invocation = 7;
+        vm.effect_state.resume = Some(9);
+        assert_eq!(
+            vm.invoke_value(closure.clone(), vec![]).unwrap_err().kind,
+            ErrorKind::StepsExhausted
+        );
+        assert_eq!(vm.depth, 0);
+        assert_eq!(vm.effect_state.invocation, 7);
+        assert_eq!(vm.effect_state.resume, Some(9));
+        assert!(vm.cleanup_frame.is_none());
+        assert!(vm.prepared_frames.is_empty());
+        vm.budget.steps = 10_000;
+        assert_eq!(vm.invoke_value(closure, vec![]).unwrap(), Value::Bool(true));
+        assert_eq!(vm.depth, 0);
+        assert_eq!(vm.effect_state.invocation, 7);
+        assert_eq!(vm.effect_state.resume, Some(9));
+    }
+}

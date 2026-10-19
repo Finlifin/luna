@@ -138,12 +138,16 @@ fn trait_package() -> Package {
             by_reference_receiver: false,
             declaration: id(5),
             name: "make".into(),
-            signature: package.runtime_function_identities[0].signature.clone(),
+            signature: package.runtime_function_identities[0]
+                .signature
+                .clone()
+                .into(),
             requirements: vec![],
             default: None,
         }],
     });
     package.implementations.push(nir::program::Implementation {
+        parameter_types: vec![],
         associated: vec![],
         interface_arguments: vec![],
         capabilities: vec![],
@@ -216,4 +220,54 @@ fn body_free_trait_method_cannot_execute_or_erase_a_precondition() {
         vm.invoke(id(1), vec![]).unwrap_err().kind,
         ErrorKind::InvalidCallPlan
     );
+}
+
+#[test]
+fn generator_method_contract_cannot_enter_ordinary_interpreter_dispatch() {
+    let mut package = package();
+    Interpreter::new(&package, Budget::default()).unwrap();
+    package.traits.push(nir::program::Trait {
+        parameter_types: vec![],
+        associated: vec![],
+        requirements: vec![],
+        capabilities: vec![],
+        type_parameters: vec![],
+        declaration: id(40),
+        parents: vec![],
+        self_parameter: id(40),
+        name: "Generator".into(),
+        methods: vec![nir::program::MethodContract {
+            is_quote: false,
+            pure: false,
+            type_arguments: vec![],
+            type_parameters: vec![],
+            capabilities: vec![],
+            program: Default::default(),
+            parameter_bindings: vec![],
+            by_value_receiver: false,
+            by_reference_receiver: false,
+            declaration: id(41),
+            name: "build".into(),
+            signature: nir::code_interfaces::MethodSignature::Generator(
+                nir::code_interfaces::CodeFunctionSignature {
+                    clause_domains: vec![],
+                    inputs: vec![],
+                    output: nir::code_interfaces::ExpressionCodeInterface {
+                        infer_context: false,
+                        context: Default::default(),
+                        ports: Default::default(),
+                        defaults: Default::default(),
+                        result: Term::Primitive(Primitive::Bool),
+                    },
+                },
+            ),
+            requirements: vec![],
+            default: None,
+        }],
+    });
+    assert!(
+        matches!(Interpreter::new(&package,Budget::default()),Err(error) if error.kind == ErrorKind::InvalidCallPlan)
+    );
+    package.traits.clear();
+    Interpreter::new(&package, Budget::default()).unwrap();
 }

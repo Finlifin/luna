@@ -59,6 +59,7 @@ impl Key {
                 | Term::Unit
                 | Term::Bool(_)
                 | Term::Integer(_)
+                | Term::Float(_)
                 | Term::BitVec(_)
                 | Term::Float32(_)
                 | Term::Float64(_)
@@ -196,6 +197,11 @@ impl Key {
                     .collect::<Result<_, _>>()?,
             ))
         }
+        // Charge the complete payload before any key clones it, including
+        // scalar values nested under an opaque normal-form head. Structural
+        // search work below has a separate cost in this same budget.
+        nir::type_computations::charge_term_with_depth(ty, fuel, max_depth)
+            .map_err(|_| Error::BudgetExhausted)?;
         build(ty, fuel, 0, max_depth.min(128))
     }
     pub fn precision(&self) -> usize {
@@ -254,8 +260,41 @@ impl Key {
                         | Term::Value { .. },
                     ),
                 ) => {}
-                (Self::Leaf(a), Self::Leaf(b)) if a == b => {}
-                (Self::Node(a, aa), Self::Node(b, ba)) if a == b && aa.len() == ba.len() => {
+                (Self::Leaf(a), Self::Leaf(b)) => {
+                    // Every candidate comparison reads its own payload. Paying
+                    // for the query key once does not bound a whole bucket scan.
+                    nir::type_computations::charge_term(a, fuel)
+                        .map_err(|_| Error::BudgetExhausted)?;
+                    nir::type_computations::charge_term(b, fuel)
+                        .map_err(|_| Error::BudgetExhausted)?;
+                    if matches!((a, b), (Term::RecordValue(_), Term::RecordValue(_)))
+                        && a.is_structural_index_value()
+                        && b.is_structural_index_value()
+                    {
+                        if a.index_type_relations(b).is_none() {
+                            return Ok(false);
+                        }
+                        continue;
+                    }
+                    if a != b {
+                        return Ok(false);
+                    }
+                }
+                (Self::Node(a, aa), Self::Node(b, ba)) => {
+                    for head in [a, b] {
+                        let work = match head {
+                            Head::Record(names) => names
+                                .iter()
+                                .try_fold(names.len(), |size, name| size.checked_add(name.len()))
+                                .ok_or(Error::BudgetExhausted)?,
+                            Head::Function(sorts) => sorts.len(),
+                            _ => 0,
+                        };
+                        *fuel = fuel.checked_sub(work).ok_or(Error::BudgetExhausted)?;
+                    }
+                    if a != b || aa.len() != ba.len() {
+                        return Ok(false);
+                    }
                     if aa.len() > *fuel {
                         return Err(Error::BudgetExhausted);
                     }
@@ -281,6 +320,8 @@ impl Key {
 
 #[derive(Clone, Debug)]
 pub struct ImplementationHead {
+    /// Ordered declaration domains; empty denotes all Type parameters.
+    pub parameter_types: Vec<Term>,
     pub type_parameters: Vec<DeclarationId>,
     pub requirements: Vec<nir::program::TypePredicate>,
     pub declaration: DeclarationId,
@@ -288,6 +329,11 @@ pub struct ImplementationHead {
     pub interface: Option<DeclarationId>,
     pub interface_arguments: Vec<Term>,
     pub subject: Term,
+}
+impl ImplementationHead {
+    pub fn parameter_binders(&self) -> Result<Vec<nir::DeclarationParameter>, nir::TypeError> {
+        nir::declaration_parameters(&self.type_parameters, &self.parameter_types)
+    }
 }
 #[derive(Clone, Debug)]
 struct Entry {
@@ -534,6 +580,10 @@ impl fmt::Display for Index {
             f.write_str(") (type-parameters")?;
             for parameter in &entry.head.type_parameters {
                 write!(f, " {parameter}")?;
+            }
+            f.write_str(") (parameter-types")?;
+            for domain in &entry.head.parameter_types {
+                write!(f, " {domain}")?;
             }
             f.write_str(") (requires")?;
             for requirement in &entry.head.requirements {

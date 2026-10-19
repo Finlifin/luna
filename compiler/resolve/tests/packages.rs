@@ -15,6 +15,90 @@ fn edge(requester: u32, alias: &str, provider: u32) -> DependencyEdge {
         provider,
     }
 }
+
+#[test]
+fn deferred_member_cache_shares_results_without_leaking_package_access() {
+    let map = SourceMap::new(FilePathMapping::empty());
+    let diagnostics = diagnostic::DiagnosticContext::new(&map);
+    let mut app = package(&map, "app", "fn entry() {}");
+    let mut lib = package(
+        &map,
+        "library",
+        "pub struct Holder {pub typealias Public=bool;typealias Hidden=bool;}",
+    );
+    let result = build_package_set(
+        &map,
+        &diagnostics,
+        &mut [(7, &mut app), (9, &mut lib)],
+        &[edge(7, "library", 9)],
+    )
+    .unwrap();
+    assert!(result.tree.errors.is_empty());
+    let mut resolver = resolve::resolver::Resolver::new(&result.tree);
+    let public = Symbol::intern("Public");
+    let hidden = Symbol::intern("Hidden");
+    let app_scope = result.package_scopes[&7];
+    let lib_scope = result.package_scopes[&9];
+    let visible = resolver.accessible_type_members(public, app_scope);
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].0.pkg, 9);
+    for _ in 0..128 {
+        assert!(std::sync::Arc::ptr_eq(
+            &visible,
+            &resolver.accessible_type_members(public, app_scope)
+        ));
+    }
+    // Both fill orders must preserve the requester's access, including a cached
+    // empty result followed by a successful lookup in the defining package.
+    for (first, second) in [(app_scope, lib_scope), (lib_scope, app_scope)] {
+        let mut resolver = resolve::resolver::Resolver::new(&result.tree);
+        let a = resolver.accessible_type_members(hidden, first);
+        let b = resolver.accessible_type_members(hidden, second);
+        assert_eq!(a.len(), usize::from(first == lib_scope));
+        assert_eq!(b.len(), usize::from(second == lib_scope));
+        assert!(std::sync::Arc::ptr_eq(
+            &a,
+            &resolver.accessible_type_members(hidden, first)
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            &b,
+            &resolver.accessible_type_members(hidden, second)
+        ));
+    }
+    assert_eq!(visible.len(), 1, "later lookups changed a shared snapshot");
+}
+
+#[test]
+fn deferred_member_cache_keeps_private_module_permissions_separate() {
+    let map = SourceMap::new(FilePathMapping::empty());
+    let diagnostics = diagnostic::DiagnosticContext::new(&map);
+    let mut lib = package(
+        &map,
+        "library",
+        "pub mod inside {pub struct Holder {private typealias Hidden=bool;}}pub mod outside {}",
+    );
+    let result = build_package_set(&map, &diagnostics, &mut [(9, &mut lib)], &[]).unwrap();
+    assert!(result.tree.errors.is_empty(), "{:?}", result.tree.errors);
+    let module = |name| {
+        result
+            .tree
+            .scope_tree
+            .iter()
+            .find(|scope| scope.name == Some(Symbol::intern(name)))
+            .unwrap()
+            .id
+    };
+    let inside = module("inside");
+    let outside = module("outside");
+    let name = Symbol::intern("Hidden");
+    for scopes in [[inside, outside], [outside, inside]] {
+        let mut resolver = resolve::resolver::Resolver::new(&result.tree);
+        for scope in scopes.into_iter().chain(scopes) {
+            let candidates = resolver.accessible_type_members(name, scope);
+            assert_eq!(candidates.len(), usize::from(scope == inside));
+        }
+    }
+}
 #[test]
 fn explicit_dependency_aliases_preserve_provider_identity_and_file_namespaces() {
     let map = SourceMap::new(FilePathMapping::empty());

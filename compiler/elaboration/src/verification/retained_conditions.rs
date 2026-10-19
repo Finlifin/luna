@@ -38,6 +38,20 @@ impl Condition {
                 }
                 true
             }
+            (
+                Self::PolynomialCompare {
+                    left: a,
+                    relation: ar,
+                    right: b,
+                },
+                Self::PolynomialCompare {
+                    left: c,
+                    relation: br,
+                    right: d,
+                },
+            ) if ar == br && matches!(ar, Comparison::Equal | Comparison::NotEqual) => {
+                (a == c && b == d) || (a == d && b == c)
+            }
             _ => self == other,
         })
     }
@@ -107,8 +121,34 @@ impl Facts {
             // Charge tree and coefficient comparison work before structural equality.
             let known = known.copy_bounded(limits, 0)?;
             let query = condition.copy_bounded(limits, 0)?;
+            if !known.is_current(self, limits, 0)? {
+                continue;
+            }
             if known.equivalent(&query, limits, 0)? {
                 return Ok(Some(*truth));
+            }
+            if let (
+                Condition::Compare {
+                    value: a,
+                    relation: ar,
+                    constant: ac,
+                },
+                Condition::Compare {
+                    value: b,
+                    relation: br,
+                    constant: bc,
+                },
+            ) = (&known, &query)
+            {
+                if a == b {
+                    let ar = if *truth { *ar } else { ar.negated() };
+                    if comparison_entails(ar, ac, *br, bc, limits)? {
+                        return Ok(Some(true));
+                    }
+                    if comparison_entails(ar, ac, br.negated(), bc, limits)? {
+                        return Ok(Some(false));
+                    }
+                }
             }
         }
         Ok(None)
@@ -119,10 +159,28 @@ impl Facts {
         truth: bool,
         limits: &mut Limits,
     ) -> Result<(), Unknown> {
-        if matches!(
-            condition,
-            Condition::Bool(_) | Condition::Compare { .. } | Condition::PolynomialCompare { .. }
-        ) {
+        if !self.reachable {
+            return Ok(());
+        }
+        if let Condition::Compare { value, .. } = condition {
+            match self.bound(*value, limits) {
+                Ok(_) => return Ok(()),
+                Err(Unknown::MissingBound(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        if let Condition::PolynomialCompare { left, right, .. } = condition {
+            match (
+                left.interval_enclosure(self, limits),
+                right.interval_enclosure(self, limits),
+            ) {
+                (Ok(_), Ok(_)) => return Ok(()),
+                (Err(Unknown::MissingBound(_)), Ok(_) | Err(Unknown::MissingBound(_)))
+                | (Ok(_), Err(Unknown::MissingBound(_))) => {}
+                (Err(e), _) | (_, Err(e)) => return Err(e),
+            }
+        }
+        if matches!(condition, Condition::Bool(_)) {
             return Ok(());
         }
         if !self.reachable || self.known_condition(condition, limits)?.is_some() {
@@ -156,10 +214,30 @@ impl Facts {
         other: &Self,
         limits: &mut Limits,
     ) -> Result<Vec<(Condition, bool)>, Unknown> {
-        let mut result = Vec::new();
-        for (condition, truth) in self.copy_conditions(limits)? {
-            if other.known_condition(&condition, limits)? == Some(truth) {
-                result.push((condition, truth));
+        let mut result: Vec<(Condition, bool)> = Vec::new();
+        // Implication is directional: the weaker common fact may be stored
+        // only on the right branch. Consider both sets of candidates.
+        for (condition, truth) in self
+            .copy_conditions(limits)?
+            .into_iter()
+            .chain(other.copy_conditions(limits)?)
+        {
+            if self.known_condition(&condition, limits)? == Some(truth)
+                && other.known_condition(&condition, limits)? == Some(truth)
+            {
+                let mut duplicate = false;
+                for (saved, value) in &result {
+                    if *value == truth && saved.equivalent(&condition, limits, 0)? {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                if !duplicate {
+                    if result.len() >= limits.max_terms {
+                        return Err(Unknown::TermLimit);
+                    }
+                    result.push((condition, truth));
+                }
             }
         }
         Ok(result)
@@ -188,7 +266,10 @@ impl Condition {
                 }) else {
                     return Ok(None);
                 };
-                target.bound(id, limits)?;
+                limits.step(1)?;
+                if target.value(id.place) != Some(id) {
+                    return Err(Unknown::StaleValue(id));
+                }
                 Ok(Some(id))
             };
         let polynomial =
@@ -262,5 +343,150 @@ impl Condition {
                 }
             }
         }))
+    }
+}
+
+/// Inclusion between integer half-lines, singleton values and excluded points.
+/// Strict bounds are normalized in mathematical Integer, never machine arithmetic.
+fn comparison_entails(
+    premise: Comparison,
+    a: &Integer,
+    conclusion: Comparison,
+    b: &Integer,
+    limits: &mut Limits,
+) -> Result<bool, Unknown> {
+    let (lower, upper, excluded) = comparison_bounds(premise, a, limits)?;
+    let (required_lower, required_upper, required_excluded) =
+        comparison_bounds(conclusion, b, limits)?;
+    if let Some(required) = required_lower {
+        let Some(lower) = &lower else {
+            return Ok(false);
+        };
+        if limits.compare(lower, &required)?.is_lt() {
+            return Ok(false);
+        }
+    }
+    if let Some(required) = required_upper {
+        let Some(upper) = &upper else {
+            return Ok(false);
+        };
+        if limits.compare(upper, &required)?.is_gt() {
+            return Ok(false);
+        }
+    }
+    if let Some(required) = required_excluded {
+        if let Some(excluded) = excluded {
+            if limits.compare(&excluded, &required)?.is_eq() {
+                return Ok(true);
+            }
+        }
+        if let Some(lower) = lower {
+            if limits.compare(&lower, &required)?.is_gt() {
+                return Ok(true);
+            }
+        }
+        if let Some(upper) = upper {
+            if limits.compare(&upper, &required)?.is_lt() {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn comparison_bounds(
+    relation: Comparison,
+    value: &Integer,
+    limits: &mut Limits,
+) -> Result<(Option<Integer>, Option<Integer>, Option<Integer>), Unknown> {
+    let value = limits.integer(value)?;
+    Ok(match relation {
+        Comparison::Equal => (Some(limits.integer(&value)?), Some(value), None),
+        Comparison::NotEqual => (None, None, Some(value)),
+        Comparison::GreaterEqual => (Some(value), None, None),
+        Comparison::LessEqual => (None, Some(value), None),
+        Comparison::Greater => (
+            Some(value.add(&Integer::from_u128(1), &mut limits.arithmetic)?),
+            None,
+            None,
+        ),
+        Comparison::Less => (
+            None,
+            Some(value.subtract(&Integer::from_u128(1), &mut limits.arithmetic)?),
+            None,
+        ),
+    })
+}
+
+impl Facts {
+    /// Combine one-sided premises only after both finite endpoints are known.
+    /// Keeping the same version makes all retained evidence refer to this value.
+    pub(super) fn bound_from_retained_comparisons(
+        &mut self,
+        id: ValueId,
+        limits: &mut Limits,
+    ) -> Result<(), Unknown> {
+        let mut lower: Option<Integer> = None;
+        let mut upper: Option<Integer> = None;
+        let mut excluded = Vec::new();
+        for (condition, truth) in &self.conditions {
+            limits.step(1)?;
+            let Condition::Compare {
+                value,
+                relation,
+                constant,
+            } = condition
+            else {
+                continue;
+            };
+            if *value != id {
+                continue;
+            }
+            let relation = if *truth {
+                *relation
+            } else {
+                relation.negated()
+            };
+            let (lo, hi, hole) = comparison_bounds(relation, constant, limits)?;
+            if let Some(lo) = lo {
+                if match &lower {
+                    Some(old) => limits.compare(&lo, old)?.is_gt(),
+                    None => true,
+                } {
+                    lower = Some(lo);
+                }
+            }
+            if let Some(hi) = hi {
+                if match &upper {
+                    Some(old) => limits.compare(&hi, old)?.is_lt(),
+                    None => true,
+                } {
+                    upper = Some(hi);
+                }
+            }
+            if let Some(hole) = hole {
+                excluded.push(hole);
+            }
+        }
+        let (Some(lower), Some(upper)) = (lower, upper) else {
+            return Ok(());
+        };
+        let order = limits.compare(&lower, &upper)?;
+        if order.is_gt() {
+            self.reachable = false;
+            return Ok(());
+        }
+        if order.is_eq() {
+            for hole in excluded {
+                if limits.compare(&lower, &hole)?.is_eq() {
+                    self.reachable = false;
+                    return Ok(());
+                }
+            }
+        }
+        let bound = Interval::new(lower, upper, limits)?;
+        self.current.insert(id.place, (id.version, Some(bound)));
+        Ok(())
     }
 }

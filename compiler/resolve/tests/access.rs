@@ -71,3 +71,37 @@ fn entry_union_is_order_independent_for_the_same_identity() {
         assert_eq!(merged.kind, origin.kind);
     }
 }
+
+#[test]
+fn private_adt_members_and_import_entries_use_the_lexical_module() {
+    let mut tree = tree();
+    let adt = ScopeId::new(7);
+    tree.add_scope(Scope::new(
+        adt,
+        ScopeKind::AdtBody,
+        Some(ScopeId::new(2)),
+        None,
+        DefId::new(0, 100),
+        false,
+    ));
+    let member = Binding {
+        kind: BindingKind::Definition(DefId::new(0, 101), adt),
+        vis: Visibility::Private,
+        entry: None,
+    };
+    let entry = declaration(Visibility::Public).imported(adt, Visibility::Private);
+    for binding in [member, entry] {
+        for scope in [2, 3, 7] {
+            assert!(
+                binding.accessible(&tree, ScopeId::new(scope)),
+                "scope {scope}"
+            );
+        }
+        for scope in [1, 4, 5, 6] {
+            assert!(
+                !binding.accessible(&tree, ScopeId::new(scope)),
+                "scope {scope}"
+            );
+        }
+    }
+}

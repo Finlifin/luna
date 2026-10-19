@@ -469,9 +469,13 @@ impl Checker<'_, '_> {
             .owners()
             .find_map(|(owner, info)| {
                 (matches!(info.node.expect_item().kind, ItemKind::Effect(..))
-                    && declaration(self.package, &self.package_identities, owner)
-                        == operation.declaration)
-                    .then_some(owner)
+                    && matches_declaration(
+                        self.package,
+                        &self.package_identities,
+                        owner,
+                        operation.declaration,
+                    ))
+                .then_some(owner)
             })
             .ok_or_else(|| error(span, "missing effect operation metadata"))?;
         // Validate the copy before constructing the owned formation descriptor.

@@ -341,3 +341,37 @@ fn registered_list_heads_admit_reduced_inputs_and_reject_pending_concatenation()
     );
     assert_eq!(completed, tuple_type(vec![ty(P::Bool), ty(P::U8)]));
 }
+
+#[test]
+fn explicit_list_role_does_not_require_a_variadic_consumer() {
+    let mut package = package();
+    package.normal_forms.truncate(1);
+    package.normal_forms[0].role = nir::normal_forms::Role::TypeList;
+    let function = &mut package.functions[0];
+    let Term::Function { result, .. } = &mut function.signature else {
+        unreachable!()
+    };
+    *result = Box::new(list_type());
+    function.body = Expr {
+        ty: list_type(),
+        source: function.body.source,
+        kind: K::Local(function.parameters[0]),
+    };
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    for types in [vec![], vec![ty(P::Bool), ty(P::U8)]] {
+        let value = Value::TypeList(types);
+        assert_eq!(vm.invoke(id(3), vec![value.clone()]).unwrap(), value);
+    }
+    let mut unbound = package.clone();
+    unbound.normal_forms[0].role = nir::normal_forms::Role::Opaque;
+    let mut vm = Interpreter::for_comptime(&unbound, Budget::default()).unwrap();
+    assert!(vm.invoke(id(3), vec![Value::TypeList(vec![])]).is_err());
+
+    let mut invalid = package.clone();
+    invalid.normal_forms[0].parameters.clear();
+    assert!(Interpreter::for_comptime(&invalid, Budget::default()).is_err());
+    let mut impostor = package.clone();
+    impostor.normal_forms[0].declaration = id(99);
+    let mut vm = Interpreter::for_comptime(&impostor, Budget::default()).unwrap();
+    assert!(vm.invoke(id(3), vec![Value::TypeList(vec![])]).is_err());
+}

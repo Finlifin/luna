@@ -535,7 +535,10 @@ fn deferred_refinements_validate_the_proposition_language_before_waiting() {
         Formula::kind(Term::Bool(true), TypeKind::Boolean),
         Formula::Trait(TraitQuery {
             interface: subject,
-            arguments: vec![Term::Bool(true)],
+            arguments: vec![Term::Runtime(nir::RuntimeId {
+                instance: 1,
+                local: 0,
+            })],
             subject: Term::Primitive(Primitive::Bool),
         }),
     ] {
@@ -1231,4 +1234,51 @@ fn gradual_observation_honors_depth_limits_even_without_an_equality_query() {
             .unwrap(),
         gradual::Freeze::Ready(_)
     ));
+}
+
+#[test]
+fn deferred_trait_refinements_accept_comptime_indices_without_proving_them() {
+    use elaboration::ptc::TraitQuery;
+    use gradual::{Refinement, RefinementCheck as R};
+    let subject = DeclarationId {
+        package: 3,
+        local: 4,
+    };
+    let mut inference = InferenceContext::default();
+    let unknown = inference.fresh(Sort::Type);
+    let context = Context::default();
+    let refinement = Refinement {
+        subject,
+        requirement: Formula::Trait(TraitQuery {
+            interface: DeclarationId {
+                package: 3,
+                local: 5,
+            },
+            arguments: vec![Term::Bool(true)],
+            subject: Term::Rigid {
+                declaration: subject,
+                sort: Sort::Type,
+            },
+        }),
+    };
+    assert!(matches!(
+        refinement
+            .check(&D::Any, &inference, &context, &mut Budget::default())
+            .unwrap(),
+        R::NeedsInstantiation
+    ));
+    assert!(matches!(
+        refinement
+            .check(
+                &D::Known(I::Meta(unknown)),
+                &inference,
+                &context,
+                &mut Budget::default()
+            )
+            .unwrap(),
+        R::Waiting(_)
+    ));
+    assert!(
+        matches!(refinement.check(&boolean(), &inference, &context, &mut Budget::default()).unwrap(), R::Checked(outcome) if !matches!(outcome, Outcome::Entailed(_)))
+    );
 }

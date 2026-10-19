@@ -168,12 +168,6 @@ impl Scheme {
         discharge_effects: bool,
         scope: &[nir::Parameter],
     ) -> Result<CallCandidate, Error> {
-        let Term::Function { parameters, result } = &self.signature else {
-            return Err(Error::InvalidSignature);
-        };
-        if parameters.len() != actual.len() {
-            return Err(Error::ArgumentCount);
-        }
         Term::Function {
             parameters: scope.to_vec(),
             result: Box::new(Term::Primitive(nir::Primitive::Void)),
@@ -184,10 +178,92 @@ impl Scheme {
         } else {
             vec![scope.iter().map(|p| p.sort).collect()]
         };
+        self.infer_in_caller(
+            actual,
+            expected,
+            partial,
+            budget,
+            discharge_effects,
+            caller_frames,
+            Engine::with_call_scope(context.fork(), scope.to_vec()),
+        )
+    }
+
+    /// Infer under a caller telescope whose runtime domains may still be open.
+    /// Missing domains are not types and never become inference substitutions.
+    pub fn infer_sparse_scoped_types(
+        &self,
+        actual: &[Option<Term>],
+        expected: Option<&Term>,
+        context: &crate::ptc::Context,
+        budget: Budget,
+        scope: &[(Sort, Option<Term>)],
+    ) -> Result<CallCandidate, Error> {
+        self.infer_sparse_scoped_types_mode(actual, expected, None, context, budget, false, scope)
+    }
+
+    pub(crate) fn infer_sparse_scoped_types_mode(
+        &self,
+        actual: &[Option<Term>],
+        expected: Option<&Term>,
+        partial: Option<&CallableContext>,
+        context: &crate::ptc::Context,
+        budget: Budget,
+        discharge_effects: bool,
+        scope: &[(Sort, Option<Term>)],
+    ) -> Result<CallCandidate, Error> {
+        if let Some(parameters) = scope
+            .iter()
+            .map(|(sort, domain)| domain.clone().map(|ty| nir::Parameter { sort: *sort, ty }))
+            .collect::<Option<Vec<_>>>()
+        {
+            return self.infer_scoped_types_mode(
+                actual,
+                expected,
+                partial,
+                context,
+                budget,
+                discharge_effects,
+                &parameters,
+            );
+        }
+        let caller_frames = if scope.is_empty() {
+            vec![]
+        } else {
+            vec![scope.iter().map(|entry| entry.0).collect()]
+        };
+        let root = Engine::with_sparse_call_scope(context.fork(), scope.to_vec())
+            .map_err(Error::Obligations)?;
+        self.infer_in_caller(
+            actual,
+            expected,
+            partial,
+            budget,
+            discharge_effects,
+            caller_frames,
+            root,
+        )
+    }
+
+    fn infer_in_caller(
+        &self,
+        actual: &[Option<Term>],
+        expected: Option<&Term>,
+        partial: Option<&CallableContext>,
+        budget: Budget,
+        discharge_effects: bool,
+        caller_frames: Vec<Vec<Sort>>,
+        mut root: Engine,
+    ) -> Result<CallCandidate, Error> {
+        let Term::Function { parameters, result } = &self.signature else {
+            return Err(Error::InvalidSignature);
+        };
+        if parameters.len() != actual.len() {
+            return Err(Error::ArgumentCount);
+        }
         let mut frames = caller_frames.clone();
         frames.push(vec![Sort::Type; self.type_parameters]);
         self.signature.check_scope(&frames)?;
-        let mut root = Engine::with_call_scope(context.fork(), scope.to_vec());
         let types: Vec<_> = (0..self.type_parameters)
             .map(|_| I::Meta(root.fresh(Sort::Type)))
             .collect();
@@ -410,6 +486,27 @@ impl CallCandidate {
         context: &InputContext,
         budget: Budget,
     ) -> Result<(), Error> {
+        let Some(target) = self.contextual_result.clone() else {
+            return Ok(());
+        };
+        self.constrain_component_context(target, context, budget)
+    }
+
+    pub(crate) fn constrain_parameter_context(
+        &mut self,
+        index: usize,
+        context: &InputContext,
+        budget: Budget,
+    ) -> Result<(), Error> {
+        self.constrain_component_context(self.parameter_term(index)?, context, budget)
+    }
+
+    fn constrain_component_context(
+        &mut self,
+        target: I,
+        context: &InputContext,
+        budget: Budget,
+    ) -> Result<(), Error> {
         fn leaf(
             ty: Option<&Term>,
             engine: &mut Engine,
@@ -546,10 +643,6 @@ impl CallCandidate {
         if matches!(context, InputContext::Unknown) {
             return Ok(());
         }
-        let Some(contextual_result) = &self.contextual_result else {
-            // Preserve the existing deferral for unresolved computation inputs.
-            return Ok(());
-        };
         let mut trial = self.engine.trial();
         let mut components = Vec::new();
         let mut fuel = budget.steps;
@@ -557,7 +650,7 @@ impl CallCandidate {
         let (mut engine, _) = trial
             .match_many(
                 &[(
-                    contextual_result.clone(),
+                    target,
                     I::Instantiate {
                         template,
                         arguments: components,
@@ -739,6 +832,11 @@ impl CallCandidate {
     /// still wait. `finish` is the only instance export and checks all of them.
     pub fn parameter_type(&self, index: usize) -> Result<Option<Term>, Error> {
         self.inspect_component(self.parameter_term(index)?)
+    }
+    /// A description may inspect a settled result without exporting a call
+    /// instance. Unresolved binders remain private to this candidate.
+    pub(crate) fn result_type(&self) -> Result<Option<Term>, Error> {
+        self.inspect_component(self.result.clone())
     }
     pub fn parameter_input_context(&self, index: usize) -> Result<InputContext, Error> {
         self.input_context(self.parameter_term(index)?, &mut 100_000, 0)

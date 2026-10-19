@@ -13,7 +13,12 @@ impl Parser<'_> {
             }
             // consume '^'
             p.eat_tokens(1);
-            let expr = p.try_expr()?;
+            let expression_start = p.next_token_span().lo();
+            // A following named input belongs to the attributed element,
+            // not to the attribute's postfix projection chain.
+            let mut option = super::expressions::ExprOption::default();
+            option.stop_at_named_parameter = true;
+            let expr = p.try_expr_with_option(option)?;
             if expr == 0 {
                 return Err(ParseError::invalid_syntax(
                     "Expected attribute expression after `^`".to_string(),
@@ -21,6 +26,11 @@ impl Parser<'_> {
                     p.current_span(),
                 ));
             }
+            // Postfix parsing may assign the root a suffix-only span. An
+            // attribute must retain the entire expression for deferred name
+            // resolution, including its callee/path prefix.
+            p.ast.spans[expr as usize] =
+                rustc_span::Span::new(expression_start, p.current_span().hi());
             Ok(expr)
         })
     }
@@ -299,6 +309,7 @@ impl Parser<'_> {
         self.scoped_with_expected_prefix(&[TokenKind::Dot, TokenKind::Id], |p| {
             p.eat_tokens(1);
             let id = p.try_id()?;
+            let value_start = p.next_token_span().lo();
             let value = p.try_expr()?;
             if value == 0 {
                 return Err(ParseError::invalid_syntax(
@@ -307,6 +318,7 @@ impl Parser<'_> {
                     p.next_token_span(),
                 ));
             }
+            p.ast.spans[value as usize] = rustc_span::Span::new(value_start, p.current_span().hi());
             Ok(NodeBuilder::new(NodeKind::Configuration, p.current_span())
                 .add_single_child(id)
                 .add_single_child(value)

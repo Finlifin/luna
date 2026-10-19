@@ -9,6 +9,17 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 pub(crate) fn compile(source: &str) -> Package {
     compile_with_protocols(source, &Default::default()).unwrap()
 }
+/// Instantiate checked source and execute its concrete IIR entry.
+pub(crate) fn run_iir(
+    source: &str,
+    entry: &str,
+    inputs: Vec<comptime_interpretor::Value>,
+) -> comptime_interpretor::Value {
+    let package = compile(source);
+    let graph = luna::instantiation::instantiate(&package, entry, 100_000).unwrap();
+    let mut vm = Interpreter::from_iir(&graph, Default::default()).unwrap();
+    vm.invoke_instance(&graph.roots[0], inputs).unwrap()
+}
 pub(crate) fn compile_with_protocols(
     source: &str,
     protocols: &elaboration::program::Protocols,

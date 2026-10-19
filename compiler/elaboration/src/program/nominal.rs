@@ -31,6 +31,163 @@ pub(super) fn enum_leaves<'h>(
 }
 
 impl Checker<'_, '_> {
+    // Source clause arity excludes this lexical environment. Keep the same
+    // suffix in declaration telescopes and every nominal value constructor.
+    pub(super) fn nominal_captures(
+        &self,
+        owner: OwnerId,
+        _span: Span,
+    ) -> Result<Vec<DeclarationId>, Error> {
+        if !matches!(
+            self.package.item(owner).map(|item| &item.kind),
+            Some(ItemKind::Newtype(..))
+        ) {
+            return Ok(Vec::new());
+        }
+        let Some(parent) = self.self_containers.get(&owner) else {
+            return Ok(Vec::new());
+        };
+        let mut captures = Vec::new();
+        if matches!(
+            self.package.item(*parent).map(|item| &item.kind),
+            Some(ItemKind::Trait(_))
+        ) {
+            captures.push(declaration(self.package, &self.package_identities, *parent));
+        }
+        for parameter in &self.type_parameters[parent] {
+            if !captures.contains(parameter) {
+                captures.push(*parameter);
+            }
+        }
+        Ok(captures)
+    }
+
+    pub(super) fn nominal_parameter_types(
+        &mut self,
+        owner: OwnerId,
+        span: Span,
+    ) -> Result<Vec<Term>, Error> {
+        if let Some(parent) = self.self_containers.get(&owner).copied() {
+            self.trait_domains(parent)?;
+        }
+        let mut domains = self.trait_domains(owner)?;
+        if domains.is_empty() {
+            domains.resize(self.type_parameters[&owner].len(), p(P::Type));
+        }
+        domains.extend(
+            self.nominal_captures(owner, span)?
+                .into_iter()
+                .map(|id| self.trait_input_domain(id).unwrap_or_else(|| p(P::Type))),
+        );
+        Ok(domains)
+    }
+
+    pub(super) fn nominal_capture_expressions(
+        &mut self,
+        owner: OwnerId,
+        span: Span,
+    ) -> Result<Vec<n::Expr>, Error> {
+        self.nominal_captures(owner, span)?
+            .into_iter()
+            .map(|parameter| {
+                let domain = self
+                    .trait_input_domain(parameter)
+                    .unwrap_or_else(|| p(P::Type));
+                if domain != p(P::Type) {
+                    let ty = self.substituted_trait_domain(&domain, span)?;
+                    if let Some(binding) = self
+                        .alias_value_bindings
+                        .get(&parameter)
+                        .copied()
+                        .or_else(|| {
+                            self.normal_default_bindings
+                                .get(&parameter)
+                                .map(|(id, _)| *id)
+                        })
+                    {
+                        return Ok(n::Expr {
+                            source: source(span),
+                            ty,
+                            kind: K::Local(binding),
+                        });
+                    }
+                    let value = self
+                        .alias_substitution
+                        .get(&parameter)
+                        .cloned()
+                        .ok_or_else(|| {
+                            error(
+                                span,
+                                "captured value input is not yet available in this definition",
+                            )
+                        })?;
+                    let id = self.spread_binding(span)?;
+                    let value = self.copy_alias_type(&value, span)?;
+                    let root = n::Expr {
+                        source: source(span),
+                        ty: ty.clone(),
+                        kind: K::Local(id),
+                    };
+                    let site = Expr {
+                        hir_id: hir::HirId::new(
+                            hir::OwnerId::INVALID,
+                            hir::ItemLocalId::new(id.index),
+                        ),
+                        span,
+                        kind: H::Unit,
+                    };
+                    let (value, ty) =
+                        self.required_normal_input(&site, root, vec![(id, ty, value)])?;
+                    return self.materialize_generator_data(value, ty, span);
+                }
+                let kind = if let Some(binding) = self.alias_value_bindings.get(&parameter) {
+                    K::Local(*binding)
+                } else {
+                    let ty = if let Some(value) = self.alias_substitution.get(&parameter).cloned() {
+                        self.copy_alias_type(&value, span)?
+                    } else {
+                        Term::Rigid {
+                            declaration: parameter,
+                            sort: Sort::Type,
+                        }
+                    };
+                    K::TypeValue(ty)
+                };
+                Ok(n::Expr {
+                    source: source(span),
+                    ty: p(P::Type),
+                    kind,
+                })
+            })
+            .collect()
+    }
+
+    pub(super) fn nominal_capture_arguments(
+        &mut self,
+        owner: OwnerId,
+        span: Span,
+    ) -> Result<Vec<Term>, Error> {
+        self.nominal_captures(owner, span)?
+            .into_iter()
+            .map(|parameter| {
+                if self.alias_value_bindings.contains_key(&parameter) {
+                    return Err(error(
+                        span,
+                        "captured input is not yet available in this definition",
+                    ));
+                }
+                if let Some(value) = self.alias_substitution.get(&parameter).cloned() {
+                    self.copy_alias_type(&value, span)
+                } else {
+                    Ok(Term::Rigid {
+                        declaration: parameter,
+                        sort: self.input_binders(&[parameter])[0].sort,
+                    })
+                }
+            })
+            .collect()
+    }
+
     pub(super) fn ensure_nominal_type(&mut self, ty: &Term, span: Span) -> Result<(), Error> {
         let Term::Nominal {
             declaration: id, ..
@@ -42,7 +199,8 @@ impl Checker<'_, '_> {
             .package
             .owners()
             .find_map(|(owner, _)| {
-                (declaration(self.package, &self.package_identities, owner) == *id).then_some(owner)
+                (matches_declaration(self.package, &self.package_identities, owner, *id))
+                    .then_some(owner)
             })
             .ok_or_else(|| error(span, "nominal declaration is missing"))?;
         self.ensure_nominal(owner, span)
@@ -64,6 +222,10 @@ impl Checker<'_, '_> {
         let saved_owner = self.signature_owner.replace(owner);
         let saved_context = self.context.clone();
         let saved_locals = std::mem::take(&mut self.locals);
+        // Layouts describe the declaration telescope, never the first caller's
+        // concrete environment. Instantiation happens at each nominal use.
+        let saved_substitution = std::mem::take(&mut self.alias_substitution);
+        let saved_bindings = std::mem::take(&mut self.alias_value_bindings);
         self.context = self.binder_context(owner);
         let result = (|| {
             let item = self.package.item(owner).unwrap();
@@ -79,24 +241,31 @@ impl Checker<'_, '_> {
                     {
                         if let Some(target_owner) =
                             self.package.owners().find_map(|(owner, info)| {
-                                (declaration(self.package, &self.package_identities, owner)
-                                    == *target
-                                    && matches!(
-                                        info.node.expect_item().kind,
-                                        ItemKind::Newtype(..)
-                                    ))
+                                (matches_declaration(
+                                    self.package,
+                                    &self.package_identities,
+                                    owner,
+                                    *target,
+                                ) && matches!(info.node.expect_item().kind, ItemKind::Newtype(..)))
                                 .then_some(owner)
                             })
                         {
                             self.ensure_nominal(target_owner, value.span)?;
                         }
                     }
+                    let mut type_parameters = self.type_parameters[&owner].clone();
+                    let captures = self.nominal_captures(owner, span)?;
+                    let capture_count = captures.len();
+                    type_parameters.extend(captures);
+                    let parameter_types = self.nominal_parameter_types(owner, span)?;
                     self.newtypes.insert(
                         id,
                         nir::newtypes::Newtype {
+                            capture_count,
+                            parameter_types,
                             declaration: id,
                             name: item.ident.name.to_string(),
-                            type_parameters: self.type_parameters[&owner].clone(),
+                            type_parameters,
                             requirements: self
                                 .requirements
                                 .get(&owner)
@@ -202,6 +371,11 @@ impl Checker<'_, '_> {
                     self.enums.insert(
                         declaration(self.package, &self.package_identities, owner),
                         n::Enum {
+                            parameter_types: self
+                                .trait_parameter_types
+                                .get(&owner)
+                                .cloned()
+                                .unwrap_or_default(),
                             capabilities: self
                                 .capabilities
                                 .get(&owner)
@@ -237,6 +411,11 @@ impl Checker<'_, '_> {
                     self.structs.insert(
                         declaration(self.package, &self.package_identities, owner),
                         n::Struct {
+                            parameter_types: self
+                                .trait_parameter_types
+                                .get(&owner)
+                                .cloned()
+                                .unwrap_or_default(),
                             capabilities: self
                                 .capabilities
                                 .get(&owner)
@@ -261,6 +440,8 @@ impl Checker<'_, '_> {
         self.signature_owner = saved_owner;
         self.context = saved_context;
         self.locals = saved_locals;
+        self.alias_substitution = saved_substitution;
+        self.alias_value_bindings = saved_bindings;
         self.active_nominals.remove(&owner);
         result
     }

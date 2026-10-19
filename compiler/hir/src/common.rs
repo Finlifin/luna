@@ -215,6 +215,7 @@ pub const TPARAM_QUOTE: u32 = 1 << 2;
 pub const TPARAM_ERROR: u32 = 1 << 3;
 pub const TPARAM_LAMBDA: u32 = 1 << 4;
 pub const TPARAM_ASSOC: u32 = 1 << 5;
+pub const TPARAM_CATCH: u32 = 1 << 6;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TyParam<'hir> {
@@ -242,6 +243,9 @@ impl TyParam<'_> {
     }
     pub fn is_assoc(&self) -> bool {
         self.flags & TPARAM_ASSOC != 0
+    }
+    pub fn is_catch(&self) -> bool {
+        self.flags & TPARAM_CATCH != 0
     }
 }
 

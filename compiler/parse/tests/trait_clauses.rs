@@ -33,7 +33,7 @@ fn declaration_sugar_and_explicit_requires_keep_distinct_ast_forms() {
     ] {
         let (ast, root) = declaration(source).unwrap();
         let clauses = ast
-            .get_multi_child_slice(ast.get_children(root)[4])
+            .get_multi_child_slice(ast.get_children(root)[3])
             .unwrap();
         assert_eq!(
             clauses

@@ -202,7 +202,7 @@ fn empty_and_invalid_packages_are_single_complete_expressions() {
     let mut package = Package::new();
     assert_eq!(
         package.to_string(),
-        "(hir-package\n  (root (owner-id 4294967295))\n  (owners)\n  (bodies) (definitions) (pending-semantics))"
+        "(hir-package\n  (root (owner-id 4294967295))\n  (owners)\n  (bodies) (definitions) (member-projections) (deferred-member-projections) (member-access) (definition-attributes) (pending-semantics))"
     );
     let item = Item {
         owner_id: owner(0),
@@ -614,7 +614,10 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
         (ExprKind::Tuple(std::slice::from_ref(&a)), "tuple", vec![]),
         (ExprKind::List(std::slice::from_ref(&a)), "list", vec![]),
         (
-            ExprKind::Object(std::slice::from_ref(&a), &fields),
+            ExprKind::Object(vec![
+                hir::expr::ObjectEntry::Value(&a),
+                hir::expr::ObjectEntry::Property(fields[0].clone()),
+            ]),
             "object",
             vec![],
         ),
@@ -727,8 +730,13 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
             vec![("value", &a_tree)],
         ),
         (ExprKind::Invalid, "invalid", vec![]),
+        (
+            ExprKind::TakeTupleEnumerate(&a),
+            "take-tuple-enumerate",
+            vec![("value", &a_tree)],
+        ),
     ];
-    assert_eq!(cases.len(), 81);
+    assert_eq!(cases.len(), 82);
     for (kind, tag, children) in cases {
         let tree = parsed(&kind);
         assert_eq!(tree.tag(), tag);
@@ -786,8 +794,10 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
                 assert_eq!(tree.field("values").list(), std::slice::from_ref(&a_tree))
             }
             "object" => {
-                assert_eq!(tree.field("bases").list(), std::slice::from_ref(&a_tree));
-                assert_eq!(tree.field("fields").list()[0].field("value"), &b_tree);
+                let entries = tree.field("entries").list();
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0].field("value"), &a_tree);
+                assert_eq!(entries[1].field("field").field("value"), &b_tree);
             }
             "tactic-parameter" => tree.field("index").atom(3),
             "post-lambda-body" => assert_id(tree.field("body"), 7, 20),
@@ -1005,7 +1015,6 @@ fn function_signatures_preserve_parameters_flags_clauses_return_binding_and_body
             is_normal_form_head: false,
             is_pure: true,
             is_comptime: true,
-            is_extern: true,
         },
         clause_params: &clauses,
         clause_constraints: &constraints,
@@ -1045,7 +1054,7 @@ fn function_signatures_preserve_parameters_flags_clauses_return_binding_and_body
     signature.field("return-bind").list()[1]
         .field("name")
         .text("result");
-    for flag in ["inline", "pure", "comptime", "extern"] {
+    for flag in ["inline", "pure", "comptime"] {
         signature.field("modifiers").field(flag).atom(true);
     }
     let types = [
@@ -1420,7 +1429,7 @@ fn absent_optional_payloads_and_operator_spelling_are_explicit() {
     let signature = parsed(&sig);
     assert_eq!(signature.field("return-type").tag(), "none");
     assert_eq!(signature.field("return-bind").tag(), "none");
-    for flag in ["inline", "pure", "comptime", "extern"] {
+    for flag in ["inline", "pure", "comptime"] {
         signature.field("modifiers").field(flag).atom(false);
     }
     for (op, spelling) in [
@@ -1482,4 +1491,60 @@ fn collected_properties_dump_preserves_nested_fields_and_escaping() {
     field.field("name").field("name").text(label);
     assert_eq!(field.field("value"), &parsed(&value));
     println!("PROPERTY_HIR_DUMP={outer}\nPROPERTY_HIR_END");
+}
+
+#[test]
+fn selected_member_projections_dump_stable_expression_and_definition_ids() {
+    let mut first = Package::new();
+    let mut second = Package::new();
+    let entries = [
+        (
+            HirId::new(owner(2), ItemLocalId::new(5)),
+            DefId { pkg: 3, index: 9 },
+        ),
+        (
+            HirId::new(owner(1), ItemLocalId::new(7)),
+            DefId { pkg: 4, index: 2 },
+        ),
+    ];
+    for (expr, target) in entries {
+        first.member_projections.insert(expr, target);
+    }
+    for (expr, target) in entries.into_iter().rev() {
+        second.member_projections.insert(expr, target);
+    }
+    assert_eq!(first.to_string(), second.to_string());
+    let tree = Sexp::parse(&first.to_string());
+    assert!(first.to_string().contains("(member-projections (member (expression (hir-id (owner 1) (local 7))) (target (def-id (package 4) (index 2))))"));
+    assert_eq!(tree.tag(), "hir-package");
+}
+
+#[test]
+fn deferred_member_candidates_dump_in_stable_container_order() {
+    let mut first = Package::new();
+    let mut second = Package::new();
+    let expr = HirId::new(owner(2), ItemLocalId::new(3));
+    let candidates = vec![
+        (DefId { pkg: 2, index: 9 }, DefId { pkg: 2, index: 10 }),
+        (DefId { pkg: 1, index: 4 }, DefId { pkg: 1, index: 5 }),
+    ];
+    first
+        .deferred_member_projections
+        .insert(expr, candidates.clone().into());
+    second
+        .deferred_member_projections
+        .insert(expr, candidates.into_iter().rev().collect());
+    first
+        .member_access
+        .insert(expr, first.deferred_member_projections[&expr].clone());
+    second
+        .member_access
+        .insert(expr, second.deferred_member_projections[&expr].clone());
+    let dump = first.to_string();
+    assert_eq!(dump, second.to_string());
+    assert_eq!(Sexp::parse(&dump).tag(), "hir-package");
+    assert!(dump.contains("(member-access (projection"));
+    assert!(dump.contains(
+        "(container (def-id (package 1) (index 4))) (target (def-id (package 1) (index 5)))"
+    ));
 }

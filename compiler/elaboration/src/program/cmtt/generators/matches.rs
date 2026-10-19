@@ -8,6 +8,33 @@ struct Arm {
 }
 
 impl Checker<'_, '_> {
+    fn generator_arm_pattern(
+        &mut self,
+        arm: &hir::pattern::PatternArm<'_>,
+        value: &n::Expr,
+    ) -> Result<n::Pattern, Error> {
+        // Guards observe current cells at execution time, including writes
+        // performed by earlier failed candidates. Preserve only Type evidence.
+        self.required_steps = self
+            .required_steps
+            .checked_sub(self.generator_data.len() as u64)
+            .ok_or_else(|| error(arm.span, "generator guard environment budget exhausted"))?;
+        let mut saved = BTreeMap::new();
+        for (id, data) in &mut self.generator_data {
+            if self.immutable.contains(id)
+                && data.as_ref().is_some_and(|value| {
+                    matches!(value.kind, K::TypeValue(_) | K::TypeListValue(_))
+                })
+            {
+                continue;
+            }
+            saved.insert(*id, data.take());
+        }
+        let result = self.match_arm_pattern(arm, value);
+        self.generator_data.extend(saved);
+        result
+    }
+
     pub(in crate::program::cmtt) fn generator_code_match(
         &mut self,
         site: &Expr<'_>,
@@ -22,17 +49,7 @@ impl Checker<'_, '_> {
         let mut result: Option<Arc<ExpressionCode>> = None;
         for code in codes {
             if let Some(first) = &result {
-                self.require_expression(&code.result, &first.result, site.span)?;
-                if code.context != first.context || code.ports != first.ports {
-                    let expected = Interface {
-                        infer_context: false,
-                        context: first.context.clone(),
-                        ports: first.ports.clone(),
-                        defaults: first.defaults.clone(),
-                        result: first.result.clone(),
-                    };
-                    self.ascribe_code(code, Some(&expected), site.span)?;
-                }
+                self.require_code_branch(first, code, site.span)?;
             } else {
                 result = Some(code);
             }
@@ -48,20 +65,49 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         mut body: impl FnMut(&mut Self, usize, &Expr<'_>) -> Result<T, Error>,
     ) -> Result<Vec<T>, Error> {
+        self.generator_scope(site.span, |this| {
+            this.generator_match_inner(site, subject, arms, expected, &mut body)
+        })
+    }
+
+    fn generator_match_inner<T>(
+        &mut self,
+        site: &Expr<'_>,
+        subject: &Expr<'_>,
+        arms: &[hir::pattern::PatternArm<'_>],
+        expected: Option<&Term>,
+        body: &mut impl FnMut(&mut Self, usize, &Expr<'_>) -> Result<T, Error>,
+    ) -> Result<Vec<T>, Error> {
         let value = if self.checking_code_generator {
             let value = self.expr(subject, expected)?;
             self.validate_generator_data(&value, subject.span)?;
             value
         } else {
-            let (value, ty) = self.required_typed_expression(subject, expected)?;
-            self.materialize_generator_data(value, ty, subject.span)?
+            let (value, ty) = self.generator_data_expression(subject, expected)?;
+            if self.generator_value_needs_live_storage(&value, subject.span)? {
+                let id = self.spread_binding(subject.span)?;
+                self.locals.insert(id, ty.clone());
+                let marker = n::Expr {
+                    ty,
+                    source: source(subject.span),
+                    kind: K::Local(id),
+                };
+                self.generator_data.insert(id, Some(marker.clone()));
+                self.generator_cells.insert(
+                    id,
+                    (marker.clone(), comptime_interpretor::Storage::new(value)),
+                );
+                marker
+            } else {
+                self.materialize_generator_data(value, ty, subject.span)?
+            }
         };
         let mut checked = Vec::new();
         let mut results = Vec::new();
         for (index, arm) in arms.iter().enumerate() {
             let (prepared, code) = self.generator_scope(arm.span, |this| {
                 this.immutable.extend(pattern_binding_ids(&arm.pat));
-                let pattern = this.match_arm_pattern(arm, &value)?;
+                let pattern = this.generator_arm_pattern(arm, &value)?;
                 let bindings = pattern_bindings(&arm.pat)?
                     .into_values()
                     .map(|id| {
@@ -170,6 +216,7 @@ impl Checker<'_, '_> {
         self.enums.insert(
             declaration,
             n::Enum {
+                parameter_types: vec![],
                 declaration,
                 name: "<generator-match-packet>".into(),
                 type_parameters: vec![],
@@ -221,7 +268,8 @@ impl Checker<'_, '_> {
                     arms: cases,
                 },
             };
-            self.required_normal_input(subject, root, vec![])
+            self.generator_data_frame_with(subject, |_| Ok(root))?
+                .ok_or_else(|| error(subject.span, "generator match requires completed data"))
         })();
         self.code_packet_nominals.remove(&declaration);
         self.enums.remove(&declaration);
@@ -251,11 +299,25 @@ impl Checker<'_, '_> {
         let selected = self.generator_scope(arms[index].span, |this| {
             // Re-establish type facts, not matching effects: elaborating a
             // guard builds IR here but never invokes it a second time.
-            let pattern = this.match_arm_pattern(&arms[index], &value)?;
+            let pattern = this.generator_arm_pattern(&arms[index], &value)?;
             for ((id, ty), value) in exports[index].iter().zip(fields) {
-                let value = this.materialize_generator_data(value, ty.clone(), arms[index].span)?;
+                let snapshot =
+                    if this.generator_value_needs_live_storage(&value, arms[index].span)? {
+                        let snapshot = n::Expr {
+                            ty: ty.clone(),
+                            source: source(arms[index].span),
+                            kind: K::Local(*id),
+                        };
+                        this.generator_cells.insert(
+                            *id,
+                            (snapshot.clone(), comptime_interpretor::Storage::new(value)),
+                        );
+                        snapshot
+                    } else {
+                        this.materialize_generator_data(value, ty.clone(), arms[index].span)?
+                    };
                 this.locals.insert(*id, ty.clone());
-                this.generator_data.insert(*id, Some(value));
+                this.generator_data.insert(*id, Some(snapshot));
                 this.immutable.insert(*id);
             }
             this.under_matched_pattern_type_facts(&pattern, &value, arms[index].span, |this| {

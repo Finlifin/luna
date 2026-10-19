@@ -3,15 +3,33 @@
 use super::*;
 
 impl Checker<'_, '_> {
+    pub(super) fn with_callee_delivery<R>(
+        &mut self,
+        parent: hir::HirId,
+        delivery: Option<hir::HirId>,
+        check: impl FnOnce(&mut Self) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        let saved = self.comptime_callee_result;
+        if saved == Some(parent) {
+            self.comptime_callee_result = delivery;
+        }
+        let result = check(self);
+        self.comptime_callee_result = saved;
+        result
+    }
+
     pub(super) fn deliver_comptime_result(
         &mut self,
         expr: &Expr<'_>,
         value: n::Expr,
         expected: Option<&Term>,
     ) -> Result<n::Expr, Error> {
-        // An immediately invoked comptime callable never enters runtime data
-        // flow. Keep its producer expression inside the next staged invocation.
-        if self.comptime_callee_result == Some(expr.hir_id) && value.ty.is_comptime_callable() {
+        // A comptime callable or constructor Type used as the next callee
+        // never enters runtime data flow. Keep the checked producer for that
+        // invocation or construction instead of requesting a Splice conversion.
+        if self.comptime_callee_result == Some(expr.hir_id)
+            && (value.ty.is_comptime_callable() || value.ty == p(P::Type))
+        {
             return Ok(value);
         }
         self.splice_value(expr, value, expected)

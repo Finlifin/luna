@@ -59,6 +59,7 @@ fn call(local: u32) -> Expr {
 
 fn record(requirements: Vec<nir::program::TypePredicate>) -> nir::program::Struct {
     nir::program::Struct {
+        parameter_types: vec![],
         declaration: id(20),
         name: "Box".into(),
         type_parameters: vec![id(9)],
@@ -195,6 +196,180 @@ fn specialization_preserves_the_template_and_bounded_construction_recovers() {
         Value::Type(Term::Nominal {
             declaration: id(20),
             arguments: vec![p(P::Char)]
+        })
+    );
+}
+
+#[test]
+fn transparent_alias_guards_check_before_body_and_do_not_produce_nominal_values() {
+    for allowed in [true, false] {
+        let guard = expr(
+            p(P::Void),
+            K::CheckTypeAlias {
+                declaration: id(20),
+                arguments: vec![call(2)],
+            },
+        );
+        let package = Package {
+            alias_contracts: vec![nir::type_aliases::Contract {
+                declaration: id(20),
+                parameters: vec![id(9)],
+                requirements: vec![nir::program::TypePredicate::Bool(allowed)],
+                capabilities: vec![],
+            }],
+            functions: vec![
+                function(
+                    1,
+                    expr(
+                        p(P::Type),
+                        K::Block {
+                            statements: vec![guard],
+                            result: Some(Box::new(call(3))),
+                        },
+                    ),
+                ),
+                function(2, value(p(P::Bool))),
+                function(3, value(p(P::Char))),
+            ],
+            ..Default::default()
+        };
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let result = vm.invoke(id(1), vec![]);
+        if allowed {
+            assert_eq!(result.unwrap(), Value::Type(p(P::Char)));
+        } else {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::TypeContractRejected);
+        }
+        let calls: Vec<_> = vm
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                Event::EnterFunction(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            if allowed {
+                vec![id(1), id(2), id(3)]
+            } else {
+                vec![id(1), id(2)]
+            }
+        );
+    }
+}
+
+#[test]
+fn alias_guards_reject_runtime_placement_and_malformed_inputs() {
+    let contract = nir::type_aliases::Contract {
+        declaration: id(20),
+        parameters: vec![id(9)],
+        requirements: vec![],
+        capabilities: vec![],
+    };
+    let guard = expr(
+        p(P::Void),
+        K::CheckTypeAlias {
+            declaration: id(20),
+            arguments: vec![value(p(P::Bool))],
+        },
+    );
+    let mut package = Package {
+        alias_contracts: vec![contract],
+        functions: vec![function(
+            1,
+            expr(
+                p(P::Type),
+                K::Block {
+                    statements: vec![guard],
+                    result: Some(Box::new(value(p(P::Bool)))),
+                },
+            ),
+        )],
+        ..Default::default()
+    };
+    assert!(nir::phases::validate(&package).is_ok());
+    package.functions[0].phase = FunctionPhase::Runtime;
+    assert!(nir::phases::validate(&package).is_err());
+    package.functions[0].phase = FunctionPhase::Comptime;
+    let K::Block { statements, .. } = &mut package.functions[0].body.kind else {
+        unreachable!()
+    };
+    let K::CheckTypeAlias { arguments, .. } = &mut statements[0].kind else {
+        unreachable!()
+    };
+    arguments.clear();
+    assert!(nir::phases::validate(&package).is_err());
+    package.alias_contracts.clear();
+    assert!(nir::phases::validate(&package).is_err());
+}
+
+#[test]
+fn nominal_constructor_checks_value_domains_before_export_and_recovers() {
+    let mut descriptor = record(vec![]);
+    descriptor.parameter_types = vec![p(P::U8)];
+    descriptor.fields.clear();
+    let integer = |n: u128| {
+        expr(
+            p(P::Integer),
+            K::Literal(nir::program::Literal::Integer(n.to_string())),
+        )
+    };
+    let package = Package {
+        structs: vec![descriptor],
+        functions: vec![
+            function(0, nominal(integer(256))),
+            function(1, nominal(integer(255))),
+        ],
+        ..Default::default()
+    };
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert_eq!(vm.invoke(id(0), vec![]).unwrap_err().kind, ErrorKind::Type);
+    assert_eq!(
+        vm.invoke(id(1), vec![]).unwrap(),
+        Value::Type(Term::Nominal {
+            declaration: id(20),
+            arguments: vec![Term::Integer(comptime_runtime::Integer::from_u128(255))]
+        })
+    );
+}
+
+#[test]
+fn nominal_constructor_value_indices_keep_contract_substitution_sorts() {
+    let mut descriptor = record(vec![nir::program::TypePredicate::Equal(
+        Term::Nominal {
+            declaration: id(20),
+            arguments: vec![Term::Rigid {
+                declaration: id(9),
+                sort: Sort::ComptimeValue,
+            }],
+        },
+        Term::Nominal {
+            declaration: id(20),
+            arguments: vec![Term::Bool(true)],
+        },
+    )]);
+    descriptor.parameter_types = vec![p(P::Bool)];
+    descriptor.fields.clear();
+    let argument = |flag| expr(p(P::Bool), K::Literal(nir::program::Literal::Bool(flag)));
+    let package = Package {
+        structs: vec![descriptor],
+        functions: vec![
+            function(0, nominal(argument(false))),
+            function(1, nominal(argument(true))),
+        ],
+        ..Default::default()
+    };
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(0), vec![]).unwrap_err().kind,
+        ErrorKind::TypeContractUnresolved
+    );
+    assert_eq!(
+        vm.invoke(id(1), vec![]).unwrap(),
+        Value::Type(Term::Nominal {
+            declaration: id(20),
+            arguments: vec![Term::Bool(true)]
         })
     );
 }

@@ -169,6 +169,7 @@ fn nominal_callback_storage_preserves_ordinary_input_frames() {
         local: 51,
     };
     let definition = nir::program::Struct {
+        parameter_types: vec![],
         declaration: nominal,
         name: "Box".into(),
         type_parameters: vec![parameter],
@@ -254,6 +255,7 @@ fn recursive_runtime_callback_storage_terminates_across_function_frames() {
         result: Box::new(node.clone()),
     };
     let definition = nir::program::Struct {
+        parameter_types: vec![],
         declaration: nominal,
         name: "Node".into(),
         type_parameters: vec![],
@@ -433,4 +435,143 @@ fn retained_quote_templates_do_not_hide_invalid_runtime_storage() {
         ..Default::default()
     };
     assert!(nir::phases::validate(&package).is_err());
+}
+
+#[test]
+fn nested_preparation_stages_the_whole_producer_but_not_runtime_siblings() {
+    use nir::program::Pattern;
+    let compute = function(1, Phase::Comptime, &[]);
+    let runtime = function(2, Phase::Runtime, &[]);
+    let target = function(3, Phase::Runtime, &[Sort::ComptimeValue, Sort::Runtime]);
+    let mut root = function(4, Phase::Runtime, &[]);
+    let id = |index| LocalId { owner: 4, index };
+    let tuple = |values: Vec<Expr>| Expr {
+        ty: Term::Tuple(values.iter().map(|v| v.ty.clone()).collect()),
+        kind: K::Tuple(values),
+        source: SourceRange { start: 1, end: 2 },
+    };
+    let packet = tuple(vec![
+        call(&compute, vec![]),
+        tuple(vec![
+            flag(K::Literal(Literal::Bool(false))),
+            flag(K::Literal(Literal::Bool(true))),
+        ]),
+    ]);
+    let unpack = Expr {
+        source: packet.source,
+        ty: Term::Primitive(Primitive::Void),
+        kind: K::LetPattern {
+            pattern: Pattern::Tuple(vec![
+                Pattern::Binding {
+                    binding: id(1),
+                    inner: Box::new(Pattern::Wild),
+                },
+                Pattern::Tuple(vec![
+                    Pattern::Wild,
+                    Pattern::Binding {
+                        binding: id(2),
+                        inner: Box::new(Pattern::Wild),
+                    },
+                ]),
+            ]),
+            value: Box::new(packet),
+            guard: None,
+            otherwise: None,
+        },
+    };
+    root.body = flag(K::CallPreparation {
+        statements: vec![
+            unpack,
+            Expr {
+                source: runtime.body.source,
+                ty: Term::Primitive(Primitive::Void),
+                kind: K::Let {
+                    binding: id(3),
+                    value: Box::new(call(&runtime, vec![])),
+                },
+            },
+        ],
+        result: Some(Box::new(call(
+            &target,
+            vec![(0, flag(K::Local(id(1)))), (1, flag(K::Local(id(2))))],
+        ))),
+    });
+    let mut package = Package {
+        functions: vec![compute, runtime.clone(), target, root],
+        ..Default::default()
+    };
+    nir::phases::validate(&package).unwrap();
+    let K::CallPreparation { statements, .. } = &mut package.functions[3].body.kind else {
+        unreachable!()
+    };
+    let K::LetPattern { value, .. } = &mut statements[0].kind else {
+        unreachable!()
+    };
+    let K::Tuple(fields) = &mut value.kind else {
+        unreachable!()
+    };
+    let K::Tuple(inner) = &mut fields[1].kind else {
+        unreachable!()
+    };
+    inner[0] = call(&runtime, vec![]);
+    assert!(
+        nir::phases::validate(&package)
+            .unwrap_err()
+            .message
+            .contains("runtime function is unavailable")
+    );
+}
+
+#[test]
+fn diverging_preparation_checks_patterns_without_requiring_tuple_layouts() {
+    use nir::program::Pattern;
+    let target = function(1, Phase::Runtime, &[]);
+    let mut root = function(2, Phase::Runtime, &[]);
+    let binding = LocalId { owner: 2, index: 1 };
+    let bind = Pattern::Binding {
+        binding,
+        inner: Box::new(Pattern::Wild),
+    };
+    root.body = Expr {
+        ty: Term::Primitive(Primitive::Never),
+        source: root.body.source,
+        kind: K::CallPreparation {
+            statements: vec![Expr {
+                ty: Term::Primitive(Primitive::Never),
+                source: root.body.source,
+                kind: K::LetPattern {
+                    pattern: Pattern::Tuple(vec![
+                        Pattern::Tuple(vec![bind.clone()]),
+                        Pattern::Wild,
+                    ]),
+                    value: Box::new(Expr {
+                        ty: Term::Primitive(Primitive::Never),
+                        source: root.body.source,
+                        kind: K::Return(Some(Box::new(flag(K::Literal(Literal::Bool(true)))))),
+                    }),
+                    guard: None,
+                    otherwise: None,
+                },
+            }],
+            result: Some(Box::new(call(&target, vec![]))),
+        },
+    };
+    let mut package = Package {
+        functions: vec![target, root],
+        ..Default::default()
+    };
+    nir::phases::validate(&package).unwrap();
+    let K::CallPreparation { statements, .. } = &mut package.functions[1].body.kind else {
+        unreachable!()
+    };
+    let K::LetPattern { pattern, .. } = &mut statements[0].kind else {
+        unreachable!()
+    };
+    *pattern = Pattern::Tuple(vec![bind.clone(), Pattern::Tuple(vec![bind])]);
+    assert!(
+        nir::phases::validate(&package)
+            .unwrap_err()
+            .message
+            .contains("distinct")
+    );
 }

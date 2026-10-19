@@ -53,9 +53,37 @@ impl Facts {
         truth: bool,
         limits: &mut Limits,
     ) -> Result<(), Unknown> {
-        // Validate every input before normalization can cancel stale identities.
-        left.interval_enclosure(self, limits)?;
-        right.interval_enclosure(self, limits)?;
+        // Validate all identities before deciding whether finite enclosure is
+        // available; cancellation must never hide a stale input.
+        if !self.relation_is_current(left, limits)? || !self.relation_is_current(right, limits)? {
+            return Err(Unknown::InsufficientBounds);
+        }
+        let unbounded = match (
+            left.interval_enclosure(self, limits),
+            right.interval_enclosure(self, limits),
+        ) {
+            (Ok(_), Ok(_)) => false,
+            (Err(Unknown::MissingBound(_)), Ok(_) | Err(Unknown::MissingBound(_)))
+            | (Ok(_), Err(Unknown::MissingBound(_))) => true,
+            (Err(e), _) | (_, Err(e)) => return Err(e),
+        };
+        if unbounded {
+            let condition = Condition::PolynomialCompare {
+                left: left.copy(limits)?,
+                relation,
+                right: right.copy(limits)?,
+            };
+            match condition.truth_by_enclosure(self, limits, 0) {
+                Ok(Some(actual)) => {
+                    self.reachable &= actual == truth;
+                    return Ok(());
+                }
+                Ok(None) | Err(Unknown::MissingBound(_)) => {}
+                Err(e) => return Err(e),
+            }
+            return self.remember_condition(&condition, truth, limits);
+        }
+
         let relation = if truth { relation } else { relation.negated() };
         let difference = left.subtract(right, limits)?;
         let negated = Polynomial::default().subtract(&difference, limits)?;

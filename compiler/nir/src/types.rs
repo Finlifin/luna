@@ -237,6 +237,18 @@ pub enum Term {
     /// Immutable UTF-8 contents, compared by value rather than allocation identity.
     String(Arc<str>),
     Symbol(Arc<str>),
+    /// Identity of a comptime function declaration and its explicit instance inputs.
+    /// This is a value, not its callable type or an unfolded normal-form head.
+    FunctionValue {
+        declaration: DeclarationId,
+        arguments: Vec<Term>,
+    },
+    /// Checked reconstruction of a closure whose captured data cannot be mutated
+    /// or addressed by its body. The factory owns the complete constant graph.
+    ClosureSnapshot {
+        factory: DeclarationId,
+        arguments: Vec<Term>,
+    },
     /// Canonical exact builtin integer; no machine-width truncation or store identity.
     Integer(comptime_runtime::Integer),
     Float(comptime_runtime::decimal::DecimalValue),
@@ -276,7 +288,9 @@ impl Term {
                     pending.push(*subject);
                     pending.extend(arguments);
                 }
-                Self::NormalForm { arguments, .. }
+                Self::ClosureSnapshot { arguments, .. }
+                | Self::FunctionValue { arguments, .. }
+                | Self::NormalForm { arguments, .. }
                 | Self::Nominal { arguments, .. }
                 | Self::Tuple(arguments)
                 | Self::TupleValue(arguments)
@@ -532,7 +546,9 @@ impl Term {
             | Self::Float64(_)
             | Self::Char(_)
             | Self::String(_)
+            | Self::ClosureSnapshot { .. }
             | Self::Symbol(_)
+            | Self::FunctionValue { .. }
             | Self::Float(_)
             | Self::Integer(_)
             | Self::Value { .. } => Sort::ComptimeValue,
@@ -872,6 +888,17 @@ impl Term {
                 declaration: *declaration,
                 arguments: many(arguments, leaf)?,
             },
+            Self::ClosureSnapshot { factory, arguments } => Self::ClosureSnapshot {
+                factory: *factory,
+                arguments: many(arguments, leaf)?,
+            },
+            Self::FunctionValue {
+                declaration,
+                arguments,
+            } => Self::FunctionValue {
+                declaration: *declaration,
+                arguments: many(arguments, leaf)?,
+            },
             Self::NormalForm {
                 head,
                 sort,
@@ -974,6 +1001,7 @@ impl<E: std::error::Error + 'static> std::error::Error for CallError<E> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TypeError {
+    ContextualCodeNotCallable,
     WrongSort { expected: Sort, actual: Sort },
     MissingArgument(usize),
     ArgumentCount { expected: usize, actual: usize },
@@ -995,6 +1023,7 @@ pub enum TypeError {
 impl fmt::Display for TypeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ContextualCodeNotCallable => f.write_str("contextual code signature requires code-method elaboration, not ordinary callable erasure"),
             Self::InvalidTypeListComponent => {
                 f.write_str("type-list concatenation requires list operands")
             }
@@ -1270,6 +1299,8 @@ fn collect_runtime_dependencies(term: &Term, result: &mut BTreeSet<RuntimeId>) {
             result.insert(*id);
         }
         Term::Nominal { arguments, .. }
+        | Term::ClosureSnapshot { arguments, .. }
+        | Term::FunctionValue { arguments, .. }
         | Term::NormalForm { arguments, .. }
         | Term::Tuple(arguments)
         | Term::TypeListValue(arguments)
@@ -1514,7 +1545,15 @@ fn validate(
                 validate(argument, holes, frames, allow_free, core)?;
             }
         }
-        Term::Nominal { arguments, .. } | Term::NormalForm { arguments, .. } => {
+        Term::ClosureSnapshot { arguments, .. } => {
+            for argument in arguments {
+                require_sort(argument, Sort::Type)?;
+                validate(argument, holes, frames, allow_free, core)?;
+            }
+        }
+        Term::Nominal { arguments, .. }
+        | Term::FunctionValue { arguments, .. }
+        | Term::NormalForm { arguments, .. } => {
             for argument in arguments {
                 validate(argument, holes, frames, allow_free, core)?;
             }
@@ -1723,6 +1762,23 @@ impl fmt::Display for Term {
             Self::Integer(value) => write!(f, "{value}"),
             Self::Float(value) => write!(f, "(comptime-float {value})"),
             Self::Char(value) => write!(f, "(char {})", *value as u32),
+            Self::ClosureSnapshot { factory, arguments } => {
+                write!(f, "(closure-snapshot (factory {factory}) (arguments")?;
+                for argument in arguments {
+                    write!(f, " {argument}")?;
+                }
+                f.write_str("))")
+            }
+            Self::FunctionValue {
+                declaration,
+                arguments,
+            } => {
+                write!(f, "(function-value {declaration} (arguments")?;
+                for argument in arguments {
+                    write!(f, " {argument}")?;
+                }
+                f.write_str("))")
+            }
             Self::String(value) | Self::Symbol(value) => {
                 f.write_str(if matches!(self, Self::Symbol(_)) {
                     "(symbol "

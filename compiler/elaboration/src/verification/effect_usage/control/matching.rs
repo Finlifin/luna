@@ -69,9 +69,9 @@ fn pure(pattern: &Pattern, fuel: &mut usize, depth: usize) -> Result<bool, Strin
     }
     match pattern {
         Pattern::Then { .. } | Pattern::Guard { .. } => Ok(false),
-        Pattern::Binding { inner, .. } | Pattern::Remap { pattern: inner, .. } => {
-            pure(inner, fuel, depth + 1)
-        }
+        Pattern::Observe { inner, .. }
+        | Pattern::Binding { inner, .. }
+        | Pattern::Remap { pattern: inner, .. } => pure(inner, fuel, depth + 1),
         Pattern::Tuple(fields)
         | Pattern::TypeTuple(fields)
         | Pattern::Or(fields)
@@ -198,9 +198,9 @@ impl Analyzer<'_, '_, '_, '_> {
             return Probe::choice(known, n, fuel);
         }
         match pattern {
-            Pattern::Binding { inner, .. } | Pattern::Remap { pattern: inner, .. } => {
-                self.probe(inner, input, n, fuel, depth + 1)
-            }
+            Pattern::Observe { inner, .. }
+            | Pattern::Binding { inner, .. }
+            | Pattern::Remap { pattern: inner, .. } => self.probe(inner, input, n, fuel, depth + 1),
             Pattern::Guard { pattern, condition } => {
                 let probe = self.probe(pattern, input, n, fuel, depth + 1)?;
                 self.guard_probe(probe, condition, n, fuel, depth + 1)

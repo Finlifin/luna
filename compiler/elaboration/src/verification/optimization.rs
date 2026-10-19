@@ -205,12 +205,16 @@ fn visit(
             }
             visit(signature, limits, depth, action)?;
         }
-        K::NominalType {
+        K::CheckTypeAlias {
+            arguments: fields, ..
+        }
+        | K::NominalType {
             arguments: fields, ..
         }
         | K::FunctionType {
             parameters: fields, ..
         }
+        | K::TypeList(fields)
         | K::TupleType(fields)
         | K::Tuple(fields)
         | K::AnonymousRecord { fields }
@@ -397,9 +401,9 @@ fn visit_pattern(
             visit_pattern(pattern, limits, depth, action)?;
             visit(condition, limits, depth, action)?;
         }
-        Pattern::Remap { pattern, .. } | Pattern::Binding { inner: pattern, .. } => {
-            visit_pattern(pattern, limits, depth, action)?
-        }
+        Pattern::Observe { inner: pattern, .. }
+        | Pattern::Remap { pattern, .. }
+        | Pattern::Binding { inner: pattern, .. } => visit_pattern(pattern, limits, depth, action)?,
         Pattern::Record { fields, .. }
         | Pattern::AnonymousRecord { fields, .. }
         | Pattern::Variant { fields, .. }

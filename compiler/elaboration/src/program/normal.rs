@@ -1,5 +1,7 @@
 //! Opaque head inputs: a stable value or a declaration-side symbolic input.
 use super::*;
+pub(super) mod known_patterns;
+mod known_scalars;
 
 /// Expand syntax before assigning dependent contexts. Evaluating a literal
 /// tuple first would default its numeric fields independently of preceding
@@ -29,6 +31,7 @@ pub(super) fn literal_spreads<'h>(inputs: &[Arg<'h>]) -> Option<Vec<Arg<'h>>> {
 enum RoutedNormalInput<'a, 'h> {
     Source(&'a Expr<'h>),
     Prepared(n::Expr),
+    Collected(Vec<n::NormalFormArgument>),
 }
 
 impl Checker<'_, '_> {
@@ -40,7 +43,7 @@ impl Checker<'_, '_> {
             .package
             .owners()
             .find_map(|(owner, _)| {
-                (declaration(self.package, &self.package_identities, owner) == head)
+                (matches_declaration(self.package, &self.package_identities, owner, head))
                     .then_some(owner)
             })
             .ok_or_else(|| error(span, "bound Tuple head is not in this source package"))?;
@@ -73,7 +76,7 @@ impl Checker<'_, '_> {
             .package
             .owners()
             .find_map(|(owner, _)| {
-                (declaration(self.package, &self.package_identities, owner) == head)
+                (matches_declaration(self.package, &self.package_identities, owner, head))
                     .then_some(owner)
             })
             .unwrap();
@@ -96,7 +99,7 @@ impl Checker<'_, '_> {
             .package
             .owners()
             .find_map(|(owner, _)| {
-                (declaration(self.package, &self.package_identities, owner) == head)
+                (matches_declaration(self.package, &self.package_identities, owner, head))
                     .then_some(owner)
             })
             .ok_or_else(|| error(span, "bound Tuple head is not in this source package"))?;
@@ -121,6 +124,7 @@ impl Checker<'_, '_> {
                     sort: Sort::ComptimeValue,
                 })],
                 deferred,
+                environment: BTreeMap::new(),
             },
             span,
         )?;
@@ -135,6 +139,14 @@ impl Checker<'_, '_> {
     }
 
     fn known_collected_type_list(&mut self, items: &[n::NormalFormArgument]) -> Option<Term> {
+        self.known_collected_type_list_in(items, &BTreeMap::new())
+    }
+
+    fn known_collected_type_list_in(
+        &mut self,
+        items: &[n::NormalFormArgument],
+        bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
+    ) -> Option<Term> {
         let mut budget = comptime_runtime::Budget {
             steps: self.required_steps as usize,
             max_limbs: 4096,
@@ -145,13 +157,13 @@ impl Checker<'_, '_> {
         for item in items {
             match item {
                 n::NormalFormArgument::Value(value) => {
-                    match self.known_normal_input(value, 0, &mut budget) {
+                    match self.known_normal_input_in(value, 0, &mut budget, bindings) {
                         Some(ty) => elements.push(ty),
                         None => known = false,
                     }
                 }
                 n::NormalFormArgument::TypeListSpread(value) => {
-                    match self.known_normal_input(value, 0, &mut budget) {
+                    match self.known_normal_input_in(value, 0, &mut budget, bindings) {
                         Some(Term::TypeListValue(types)) => elements.extend(types),
                         _ => known = false,
                     }
@@ -178,6 +190,83 @@ impl Checker<'_, '_> {
                 matches!(parameter.kind, hir::clause::ClauseParamKind::Varadic(..))
             })
     }
+    pub(super) fn normal_type_inputs_need_plan(&self, owner: OwnerId, inputs: &[Arg<'_>]) -> bool {
+        if !self.normal_type_list_tail(owner) {
+            return false;
+        }
+        if inputs.iter().any(|input| matches!(input, Arg::Named(..)))
+            && inputs.iter().any(|input| {
+                matches!(input, Arg::Expand(value)
+                if !matches!(value.kind, H::Tuple(_) | H::Unit))
+            })
+        {
+            return true;
+        }
+        let mut remaining = self.normal_fixed_prefix_count(owner);
+        for input in inputs {
+            match input {
+                Arg::Positional(_) => remaining = remaining.saturating_sub(1),
+                Arg::Expand(_) if remaining > 0 => return true,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn normal_fixed_prefix_count(&self, owner: OwnerId) -> usize {
+        self.type_clause_params(owner)
+            .iter()
+            .filter(|clause| {
+                !matches!(
+                    clause.kind,
+                    hir::clause::ClauseParamKind::Optional(..)
+                        | hir::clause::ClauseParamKind::Varadic(..)
+                )
+            })
+            .count()
+    }
+
+    pub(super) fn normal_prefix_literal_spreads<'h>(
+        &self,
+        owner: OwnerId,
+        inputs: &[Arg<'h>],
+    ) -> Option<Vec<Arg<'h>>> {
+        let whole_collector = self.type_clause_params(owner).last().is_some_and(|clause| {
+            inputs
+                .iter()
+                .any(|input| matches!(input, Arg::Named(name, _) if name.name == clause.name.name))
+        });
+        let mut remaining = self.normal_fixed_prefix_count(owner);
+        let mut expanded = Vec::new();
+        let mut changed = false;
+        for input in inputs {
+            match input {
+                Arg::Expand(value) if remaining > 0 => match value.kind {
+                    H::Tuple(fields) if fields.len() <= remaining || whole_collector => {
+                        remaining = remaining.saturating_sub(fields.len());
+                        expanded.extend(fields.iter().map(Arg::Positional));
+                        changed = true;
+                    }
+                    H::Unit => {
+                        changed = true;
+                    }
+                    _ => {
+                        // A computed packet can determine the remaining prefix
+                        // later. Do not flatten subsequent tail list inputs.
+                        remaining = 0;
+                        expanded.push(input.clone());
+                    }
+                },
+                Arg::Positional(_) => {
+                    remaining = remaining.saturating_sub(1);
+                    expanded.push(input.clone());
+                }
+                _ => expanded.push(input.clone()),
+            }
+        }
+        changed.then_some(expanded)
+    }
+
     pub(super) fn normal_type_list_route<'hir>(
         &self,
         owner: OwnerId,
@@ -186,6 +275,16 @@ impl Checker<'_, '_> {
     ) -> Result<(Vec<Arg<'hir>>, Vec<usize>), Error> {
         let clauses = self.type_clause_params(owner);
         let count = clauses.len();
+        // A named whole collector leaves positional inputs exclusively for
+        // the fixed prefix. Expand literal packets before assigning dependent
+        // contexts, without confusing a trailing List<Type> spread with a tuple.
+        if self.normal_type_list_tail(owner)
+            && inputs.iter().any(|input| matches!(input, Arg::Named(..)))
+        {
+            if let Some(expanded) = literal_spreads(inputs) {
+                return self.normal_type_list_route(owner, &expanded, span);
+            }
+        }
         if self.normal_type_list_tail(owner)
             && inputs.len() == count
             && inputs[..count - 1]
@@ -289,6 +388,17 @@ impl Checker<'_, '_> {
         value: comptime_interpretor::Value,
         span: Span,
     ) -> Result<Term, Error> {
+        self.optional_normal_term(value, span)?
+            .ok_or_else(|| error(span, "normal-form input freezing failed: Unsupported"))
+    }
+
+    // Delivery-only values need no symbolic identity. Resource, scope and
+    // representation failures still propagate; only absent representation is optional.
+    pub(super) fn optional_normal_term(
+        &mut self,
+        value: comptime_interpretor::Value,
+        span: Span,
+    ) -> Result<Option<Term>, Error> {
         use comptime_interpretor::Value;
         let term = match value {
             Value::Type(ty) if ty.sort() == Sort::Type => ty,
@@ -297,18 +407,53 @@ impl Checker<'_, '_> {
             }
             Value::TypeList(types) => Term::TypeListValue(types),
             value => {
+                let parameters: BTreeSet<DeclarationId> = self
+                    .signature_owner
+                    .and_then(|owner| self.type_parameters.get(&owner))
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .collect();
+                self.required_steps = self
+                    .required_steps
+                    .checked_sub(parameters.len() as u64)
+                    .ok_or_else(|| {
+                        error(span, "abstract value reification scope budget exhausted")
+                    })?;
+                let mut value_parameters = BTreeMap::new();
+                for id in &parameters {
+                    if let Some(domain) = self
+                        .trait_input_domain(*id)
+                        .filter(|domain| *domain != p(P::Type))
+                    {
+                        value_parameters.insert(*id, self.substituted_trait_domain(&domain, span)?);
+                    }
+                }
+                let parameters = parameters
+                    .into_iter()
+                    .filter(|id| !value_parameters.contains_key(id))
+                    .collect();
+                // Domain substitution consumes preparation fuel before the
+                // exporter receives its remaining allowance.
                 let steps = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
                 let mut budget = comptime_runtime::Budget {
                     steps,
                     max_limbs: 4096,
                 };
-                let term = value.into_normal_term(&mut budget);
+                let term = value.into_abstract_invocation_term(
+                    &mut budget,
+                    &parameters,
+                    &value_parameters,
+                );
                 self.required_steps -= (steps - budget.steps) as u64;
-                return term.map_err(|failure| {
-                    error(
+                return term.map(Some).or_else(|failure| {
+                    if matches!(failure, comptime_interpretor::ErrorKind::Unsupported) {
+                        return Ok(None);
+                    }
+                    Err(error(
                         span,
                         format!("normal-form input freezing failed: {failure:?}"),
-                    )
+                    ))
                 });
             }
         };
@@ -327,7 +472,7 @@ impl Checker<'_, '_> {
         }
         term.check_scope(&self.call_input_frames())
             .map_err(|e| error(span, e.to_string()))?;
-        Ok(term)
+        Ok(Some(term))
     }
 
     fn normal_value_argument_at(
@@ -398,6 +543,7 @@ impl Checker<'_, '_> {
                 .trait_input_domain(declaration)
                 .filter(|ty| *ty != p(P::Type))
             {
+                let actual = self.substituted_trait_domain(&actual, value.span)?;
                 self.require(&actual, ty, value.span)?;
                 return Ok(self
                     .alias_substitution
@@ -411,11 +557,15 @@ impl Checker<'_, '_> {
             let actual = self
                 .normal_parameters
                 .values()
+                .chain(self.normal_input_prefixes.values())
                 .flatten()
                 .find(|(d, _, _)| *d == declaration)
                 .map(|(_, _, t)| t)
-                .ok_or_else(|| {
-                    error(
+                .ok_or_else(|| Error {
+                    needs_capability: self
+                        .signature_owner
+                        .is_some_and(|owner| self.active_signatures.contains(&owner)),
+                    ..error(
                         value.span,
                         "normal-form value argument is not an available declaration input",
                     )
@@ -469,11 +619,29 @@ impl Checker<'_, '_> {
                     == self.protocols.tuple
                 {
                     nir::normal_forms::Role::Tuple
+                } else if Some(declaration(self.package, &self.package_identities, *owner))
+                    == self.protocols.meta_list
+                {
+                    nir::normal_forms::Role::TypeList
                 } else {
                     nir::normal_forms::Role::Opaque
                 },
                 declaration: declaration(self.package, &self.package_identities, *owner),
-                requirements: self.requirements.get(owner).cloned().unwrap_or_default(),
+                requirements: self
+                    .requirements
+                    .get(owner)
+                    .into_iter()
+                    .flatten()
+                    .cloned()
+                    .chain(
+                        self.capabilities
+                            .get(owner)
+                            .into_iter()
+                            .flatten()
+                            .cloned()
+                            .map(n::TypePredicate::Trait),
+                    )
+                    .collect(),
                 parameters: parameters
                     .iter()
                     .map(|(declaration, binding, ty)| nir::normal_forms::Parameter {
@@ -502,6 +670,12 @@ impl Checker<'_, '_> {
     ) -> Result<n::Expr, Error> {
         self.ensure_signature(owner, expr.span)?;
         self.ensure_contract(owner, expr.span)?;
+        if self.normal_type_inputs_need_plan(owner, inputs) {
+            if let Some(expanded) = self.normal_prefix_literal_spreads(owner, inputs) {
+                return self.normal_type_expression(expr, owner, &expanded, expected);
+            }
+            return self.defaulted_normal_expression(owner, inputs, expr.span, expected);
+        }
         if !self.normal_type_list_tail(owner) {
             if let Some(inputs) = literal_spreads(inputs) {
                 return self.normal_type_expression(expr, owner, &inputs, expected);
@@ -667,19 +841,12 @@ impl Checker<'_, '_> {
                     .collect::<Result<_, _>>()?,
             })
         };
-        if !pending_parameters.is_empty()
-            && self.capabilities.get(&owner).is_some_and(|c| !c.is_empty())
-        {
-            return Err(error(
-                expr.span,
-                "normal-form capability checks await concrete Type inputs; residual trait scheduling is not yet implemented",
-            ));
-        }
         self.check_formation_application(
             owner,
             FormationInputs {
                 terms: formation_arguments,
                 deferred: pending_inputs,
+                environment: BTreeMap::new(),
             },
             expr.span,
         )?;
@@ -716,7 +883,7 @@ impl Checker<'_, '_> {
         self.known_normal_input_in(expr, depth, budget, &BTreeMap::new())
     }
 
-    fn known_normal_input_in(
+    pub(in crate::program) fn known_normal_input_in(
         &self,
         expr: &n::Expr,
         depth: usize,
@@ -738,6 +905,29 @@ impl Checker<'_, '_> {
                 }
                 Some(Term::TypeListValue(values))
             }
+            K::TypeListIndex(values, index) => {
+                if !self.is_type_list_type(&values.ty) {
+                    return None;
+                }
+                let Term::TypeListValue(mut values) =
+                    self.known_normal_input_in(values, depth + 1, budget, bindings)?
+                else {
+                    return None;
+                };
+                let Term::Integer(index) =
+                    self.known_normal_input_in(index, depth + 1, budget, bindings)?
+                else {
+                    return None;
+                };
+                budget
+                    .consume(index.bit_len().div_ceil(32).saturating_add(1))
+                    .ok()?;
+                let index = usize::try_from(index.to_u128().ok()?).ok()?;
+                if index >= values.len() || values[index].sort() != Sort::Type {
+                    return None;
+                }
+                Some(values.swap_remove(index))
+            }
             K::NormalFormType {
                 head,
                 arguments,
@@ -745,8 +935,9 @@ impl Checker<'_, '_> {
             } => {
                 let arguments = if let Some(plan) = plan {
                     // This inspects immutable construction only. Calls,
-                    // assignments, contextual conversions and control flow
-                    // still require invocation through the original plan.
+                    // assignments and contextual conversions still require
+                    // invocation through the original plan. Known branches
+                    // below supply context without removing that plan.
                     budget
                         .consume(arguments.len().saturating_add(bindings.len()))
                         .ok()?;
@@ -787,6 +978,98 @@ impl Checker<'_, '_> {
                     arguments,
                 })
             }
+            K::PointerType(value) => {
+                let inner = self.known_normal_input_in(value, depth + 1, budget, bindings)?;
+                (inner.sort() == Sort::Type).then(|| Term::Pointer(Box::new(inner)))
+            }
+            K::BitVecType(value) => {
+                let Term::Integer(width) =
+                    self.known_normal_input_in(value, depth + 1, budget, bindings)?
+                else {
+                    return None;
+                };
+                budget
+                    .consume(width.bit_len().div_ceil(32).saturating_add(1))
+                    .ok()?;
+                let width = usize::try_from(width.to_u128().ok()?).ok()?;
+                Some(p(P::BitVec(width)))
+            }
+            K::FunctionType {
+                comptime,
+                parameters,
+            } => {
+                budget.consume(parameters.len().saturating_add(1)).ok()?;
+                let mut types = Vec::with_capacity(parameters.len());
+                for parameter in parameters {
+                    let ty = self.known_normal_input_in(parameter, depth + 1, budget, bindings)?;
+                    if ty.sort() != Sort::Type {
+                        return None;
+                    }
+                    types.push(Parameter {
+                        sort: Sort::Runtime,
+                        ty,
+                    });
+                }
+                Some(
+                    Term::Function {
+                        parameters: types,
+                        result: Box::new(p(P::Void)),
+                    }
+                    .with_comptime_phase(*comptime),
+                )
+            }
+            K::FunctionResultType { signature, result } => {
+                let signature =
+                    self.known_normal_input_in(signature, depth + 1, budget, bindings)?;
+                if !matches!(signature.callable_signature(), Term::Function { .. }) {
+                    return None;
+                }
+                let result = self.known_normal_input_in(result, depth + 1, budget, bindings)?;
+                if result.sort() != Sort::Type {
+                    return None;
+                }
+                signature.with_callable_result(result)
+            }
+            K::ClosureType {
+                environment,
+                signature,
+            } => {
+                budget.consume(environment.len().saturating_add(1)).ok()?;
+                let mut types = Vec::with_capacity(environment.len());
+                for field in environment {
+                    let ty = self.known_normal_input_in(field, depth + 1, budget, bindings)?;
+                    if ty.sort() != Sort::Type {
+                        return None;
+                    }
+                    types.push(ty);
+                }
+                let signature =
+                    self.known_normal_input_in(signature, depth + 1, budget, bindings)?;
+                if signature.sort() != Sort::Type {
+                    return None;
+                }
+                if types.is_empty() {
+                    Some(signature)
+                } else {
+                    if !matches!(signature, Term::Function { .. } | Term::ComptimeFunction(_)) {
+                        return None;
+                    }
+                    Some(Term::Closure {
+                        environment: types,
+                        signature: Box::new(signature),
+                    })
+                }
+            }
+            K::TypeList(values) if self.is_type_list_type(&expr.ty) => {
+                let values = values
+                    .iter()
+                    .map(|value| self.known_normal_input_in(value, depth + 1, budget, bindings))
+                    .collect::<Option<Vec<_>>>()?;
+                values
+                    .iter()
+                    .all(|value| value.sort() == Sort::Type)
+                    .then_some(Term::TypeListValue(values))
+            }
             K::TupleType(values) => Some(Term::Tuple(
                 values
                     .iter()
@@ -817,6 +1100,81 @@ impl Checker<'_, '_> {
                         .collect::<Option<Vec<_>>>()?,
                 ))
             }
+            K::Record {
+                declaration,
+                fields,
+            }
+            | K::Variant {
+                declaration,
+                fields,
+                ..
+            } => {
+                let Term::Nominal {
+                    declaration: actual,
+                    ..
+                } = &expr.ty
+                else {
+                    return None;
+                };
+                if declaration != actual {
+                    return None;
+                }
+                if fields.len() > budget.steps {
+                    return None;
+                }
+                let variant = match &expr.kind {
+                    K::Variant { index, .. } => Some(u32::try_from(*index).ok()?),
+                    _ => None,
+                };
+                Some(Term::NominalValue {
+                    ty: Box::new(clone_known_term(&expr.ty, budget)?),
+                    variant,
+                    fields: fields
+                        .iter()
+                        .map(|field| self.known_normal_input_in(field, depth + 1, budget, bindings))
+                        .collect::<Option<Vec<_>>>()?,
+                })
+            }
+            K::Field {
+                value,
+                declaration,
+                index,
+            } => {
+                let Term::NominalValue {
+                    ty,
+                    variant: None,
+                    mut fields,
+                } = self.known_normal_input_in(value, depth + 1, budget, bindings)?
+                else {
+                    return None;
+                };
+                let Term::Nominal {
+                    declaration: actual,
+                    ..
+                } = ty.as_ref()
+                else {
+                    return None;
+                };
+                if actual != declaration || *index >= fields.len() {
+                    return None;
+                }
+                Some(fields.swap_remove(*index))
+            }
+            K::AnonymousField { value, name, index } => {
+                let Term::RecordValue(mut fields) =
+                    self.known_normal_input_in(value, depth + 1, budget, bindings)?
+                else {
+                    return None;
+                };
+                let (actual, _) = fields.get(*index)?;
+                budget
+                    .consume(actual.len().saturating_add(name.len()))
+                    .ok()?;
+                if actual != name {
+                    return None;
+                }
+                Some(fields.swap_remove(*index).1)
+            }
             K::Tuple(values) => Some(Term::TupleValue(
                 values
                     .iter()
@@ -826,6 +1184,9 @@ impl Checker<'_, '_> {
             K::Unit => Some(Term::Unit),
             K::Literal(n::Literal::Bool(value)) => Some(Term::Bool(*value)),
             K::Literal(n::Literal::Char(value)) => Some(Term::Char(*value)),
+            K::Literal(n::Literal::Float(spelling)) => Some(Term::Float(
+                comptime_runtime::decimal::DecimalValue::parse_literal(spelling, budget).ok()?,
+            )),
             K::Literal(n::Literal::Float32(bits)) => Some(Term::Float32(*bits)),
             K::Literal(n::Literal::Float64(bits)) => Some(Term::Float64(*bits)),
             K::Literal(n::Literal::BitVec { width, words }) => Some(Term::BitVec(
@@ -856,9 +1217,17 @@ impl Checker<'_, '_> {
             K::Literal(n::Literal::UnsignedInteger(value)) => {
                 Some(Term::Integer(comptime_runtime::Integer::from_u128(*value)))
             }
-            K::Literal(n::Literal::Integer(value)) => Some(Term::Integer(
-                comptime_runtime::Integer::parse_literal(value, budget).ok()?,
-            )),
+            K::Literal(n::Literal::Integer(value)) => {
+                let (digits, negative) = value
+                    .strip_prefix('-')
+                    .map_or((value.as_str(), false), |digits| (digits, true));
+                let value = comptime_runtime::Integer::parse_literal(digits, budget).ok()?;
+                Some(Term::Integer(if negative {
+                    value.negate(budget).ok()?
+                } else {
+                    value
+                }))
+            }
             K::Not(value) => {
                 match self.known_normal_input_in(value, depth + 1, budget, bindings)? {
                     Term::Bool(value) => Some(Term::Bool(!value)),
@@ -868,8 +1237,16 @@ impl Checker<'_, '_> {
             }
             K::And(left, right) | K::Or(left, right) => {
                 let left = self.known_normal_input_in(left, depth + 1, budget, bindings)?;
-                let right = self.known_normal_input_in(right, depth + 1, budget, bindings)?;
                 let conjunction = matches!(expr.kind, K::And(..));
+                // Boolean operators short-circuit; bit-vector operators do not.
+                // In particular an unreachable call must not erase a known
+                // boolean context or consume its invocation budget here.
+                if let Term::Bool(value) = &left {
+                    if *value != conjunction {
+                        return Some(Term::Bool(*value));
+                    }
+                }
+                let right = self.known_normal_input_in(right, depth + 1, budget, bindings)?;
                 match (left, right) {
                     (Term::Bool(a), Term::Bool(b)) => {
                         Some(Term::Bool(if conjunction { a && b } else { a || b }))
@@ -953,6 +1330,55 @@ impl Checker<'_, '_> {
                 };
                 Some(Term::BitVec(value.widen(width, budget).ok()?))
             }
+            K::TypeEqual(left, right) => {
+                let left = self.known_normal_input_in(left, depth + 1, budget, bindings)?;
+                let right = self.known_normal_input_in(right, depth + 1, budget, bindings)?;
+                known_type_equality(&self.context, &left, &right, budget).map(Term::Bool)
+            }
+            K::ScalarEqual(left, right)
+            | K::ScalarLess(left, right)
+            | K::ScalarLessEqual(left, right)
+            | K::ScalarGreater(left, right)
+            | K::ScalarGreaterEqual(left, right) => {
+                let left = self.known_normal_input_in(left, depth + 1, budget, bindings)?;
+                let right = self.known_normal_input_in(right, depth + 1, budget, bindings)?;
+                let op = match expr.kind {
+                    K::ScalarEqual(..) => n::IntegerOp::Equal,
+                    K::ScalarLess(..) => n::IntegerOp::Less,
+                    K::ScalarLessEqual(..) => n::IntegerOp::LessEqual,
+                    K::ScalarGreater(..) => n::IntegerOp::Greater,
+                    K::ScalarGreaterEqual(..) => n::IntegerOp::GreaterEqual,
+                    _ => unreachable!(),
+                };
+                known_scalars::compare(&left, &right, op, budget).map(Term::Bool)
+            }
+            K::FloatNegate(value) => Some(
+                match self.known_normal_input_in(value, depth + 1, budget, bindings)? {
+                    Term::Float(value) => Term::Float(value.negate(budget).ok()?),
+                    Term::Float32(bits) => Term::Float32(bits ^ (1 << 31)),
+                    Term::Float64(bits) => Term::Float64(bits ^ (1 << 63)),
+                    _ => return None,
+                },
+            ),
+            K::FloatBinary { op, left, right } => {
+                let left = self.known_normal_input_in(left, depth + 1, budget, bindings)?;
+                let right = self.known_normal_input_in(right, depth + 1, budget, bindings)?;
+                Some(match (left, right) {
+                    (Term::Float(left), Term::Float(right)) => Term::Float(match op {
+                        n::FloatOp::Add => left.add(&right, budget).ok()?,
+                        n::FloatOp::Subtract => left.subtract(&right, budget).ok()?,
+                        n::FloatOp::Multiply => left.multiply(&right, budget).ok()?,
+                        n::FloatOp::Divide => return None,
+                    }),
+                    (Term::Float32(left), Term::Float32(right)) => {
+                        Term::Float32(op.evaluate_f32(left, right))
+                    }
+                    (Term::Float64(left), Term::Float64(right)) => {
+                        Term::Float64(op.evaluate_f64(left, right))
+                    }
+                    _ => return None,
+                })
+            }
             K::IntegerNegate(value) => {
                 let Term::Integer(value) =
                     self.known_normal_input_in(value, depth + 1, budget, bindings)?
@@ -974,6 +1400,58 @@ impl Checker<'_, '_> {
                 };
                 op.evaluate(&left, &right, budget).ok()
             }
+            K::Match { value, arms } => {
+                let value = self.known_normal_input_in(value, depth + 1, budget, bindings)?;
+                for arm in arms {
+                    budget.consume(bindings.len().saturating_add(1)).ok()?;
+                    let mut scoped = bindings.clone();
+                    if !self.known_normal_pattern(
+                        &arm.pattern,
+                        &value,
+                        depth + 1,
+                        budget,
+                        &mut scoped,
+                    )? {
+                        continue;
+                    }
+                    if let Some(guard) = &arm.guard {
+                        let Term::Bool(accepted) =
+                            self.known_normal_input_in(guard, depth + 1, budget, &scoped)?
+                        else {
+                            return None;
+                        };
+                        if !accepted {
+                            continue;
+                        }
+                    }
+                    return self.known_normal_input_in(&arm.body, depth + 1, budget, &scoped);
+                }
+                None
+            }
+            K::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                // Inspect only a known condition and its selected branch. The
+                // original expression remains in the input plan for execution;
+                // this never evaluates calls or guesses the result of effects.
+                let Term::Bool(condition) =
+                    self.known_normal_input_in(condition, depth + 1, budget, bindings)?
+                else {
+                    return None;
+                };
+                if condition {
+                    self.known_normal_input_in(then_branch, depth + 1, budget, bindings)
+                } else {
+                    match else_branch {
+                        Some(branch) => {
+                            self.known_normal_input_in(branch, depth + 1, budget, bindings)
+                        }
+                        None => Some(Term::Unit),
+                    }
+                }
+            }
             K::Block { statements, result } | K::CallPreparation { statements, result } => {
                 // Only immutable local construction is inspected. Calls,
                 // assignments and control transfer retain invocation-time work.
@@ -983,11 +1461,42 @@ impl Checker<'_, '_> {
                 budget.consume(bindings.len()).ok()?;
                 let mut scoped = bindings.clone();
                 for statement in statements {
-                    let K::Let { binding, value } = &statement.kind else {
-                        return None;
-                    };
-                    let value = self.known_normal_input_in(value, depth + 1, budget, &scoped)?;
-                    scoped.insert(*binding, std::sync::Arc::new(value));
+                    budget.consume(1).ok()?;
+                    match &statement.kind {
+                        K::Let { binding, value } => {
+                            let value =
+                                self.known_normal_input_in(value, depth + 1, budget, &scoped)?;
+                            scoped.insert(*binding, std::sync::Arc::new(value));
+                        }
+                        K::LetPattern {
+                            pattern,
+                            value,
+                            guard,
+                            ..
+                        } => {
+                            let value =
+                                self.known_normal_input_in(value, depth + 1, budget, &scoped)?;
+                            // Any failure leaves the whole block unknown. In
+                            // particular a let-else transfer is not fallthrough.
+                            if !self.known_normal_pattern(
+                                pattern,
+                                &value,
+                                depth + 1,
+                                budget,
+                                &mut scoped,
+                            )? {
+                                return None;
+                            }
+                            if let Some(guard) = guard {
+                                if self.known_normal_input_in(guard, depth + 1, budget, &scoped)?
+                                    != Term::Bool(true)
+                                {
+                                    return None;
+                                }
+                            }
+                        }
+                        _ => return None,
+                    }
                 }
                 match result {
                     Some(result) => self.known_normal_input_in(result, depth + 1, budget, &scoped),
@@ -1240,6 +1749,48 @@ fn collect_known_normal_argument(
     Some(Term::TypeListValue(collected))
 }
 
+/// A type relation needs a proof in either direction. A failed equality query
+/// is not a disequality fact, and an opaque head is never reduced to its body.
+fn known_type_equality(
+    context: &crate::ptc::Context,
+    left: &Term,
+    right: &Term,
+    budget: &mut comptime_runtime::Budget,
+) -> Option<bool> {
+    use crate::ptc::{Formula, Outcome};
+    if left.sort() != Sort::Type || right.sort() != Sort::Type {
+        return None;
+    }
+    let equality = Formula::equal(
+        clone_known_term(left, budget)?,
+        clone_known_term(right, budget)?,
+    );
+    let inequality = Formula::equal(
+        clone_known_term(left, budget)?,
+        clone_known_term(right, budget)?,
+    )
+    .negate();
+    let mut proof_budget = crate::ptc::Budget {
+        steps: budget.steps,
+        max_depth: 128,
+    };
+    let result = if matches!(
+        context.prove_metered(equality, &mut proof_budget),
+        Outcome::Entailed(_)
+    ) {
+        Some(true)
+    } else if matches!(
+        context.prove_metered(inequality, &mut proof_budget),
+        Outcome::Entailed(_)
+    ) {
+        Some(false)
+    } else {
+        None
+    };
+    budget.steps = proof_budget.steps;
+    result
+}
+
 pub(super) fn clone_known_term(term: &Term, budget: &mut comptime_runtime::Budget) -> Option<Term> {
     let mut pending = vec![(term, 0usize)];
     while let Some((term, depth)) = pending.pop() {
@@ -1324,6 +1875,16 @@ pub(super) fn clone_known_term(term: &Term, budget: &mut comptime_runtime::Budge
             Term::Integer(value) => {
                 budget.consume(value.bit_len().div_ceil(32)).ok()?;
             }
+            Term::Float(value) => {
+                budget
+                    .consume(
+                        value
+                            .digits()
+                            .len()
+                            .saturating_add(value.exponent().bit_len().div_ceil(32)),
+                    )
+                    .ok()?;
+            }
             Term::BitVec(value) => {
                 budget.consume(value.words().len()).ok()?;
             }
@@ -1339,8 +1900,10 @@ pub(super) fn clone_known_term(term: &Term, budget: &mut comptime_runtime::Budge
 #[cfg(test)]
 mod tests {
     use super::clone_known_term;
+    use super::known_type_equality;
     use comptime_runtime::Budget;
     use nir::Term;
+    use nir::{Primitive, Sort};
 
     #[test]
     fn known_type_list_collection_preserves_order_and_stops_at_unknowns() {
@@ -1419,6 +1982,76 @@ mod tests {
     }
 
     #[test]
+    fn known_type_equality_requires_proofs_and_keeps_heads_opaque() {
+        let head = nir::DeclarationId {
+            package: 0,
+            local: 900,
+        };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let character = Term::Primitive(Primitive::Char);
+        let opaque = Term::NormalForm {
+            head,
+            sort: Sort::Type,
+            arguments: vec![boolean.clone()],
+        };
+        let mut context = crate::ptc::Context::default();
+        context.admit_congruence(head);
+        assert_eq!(
+            known_type_equality(&context, &boolean, &boolean, &mut Budget::default()),
+            Some(true)
+        );
+        assert_eq!(
+            known_type_equality(&context, &boolean, &character, &mut Budget::default()),
+            Some(false)
+        );
+        assert_eq!(
+            known_type_equality(&context, &opaque, &boolean, &mut Budget::default()),
+            None
+        );
+        assert_eq!(
+            known_type_equality(&context, &opaque, &opaque, &mut Budget::default()),
+            Some(true)
+        );
+        let mut empty = Budget {
+            steps: 0,
+            max_limbs: 4096,
+        };
+        assert_eq!(
+            known_type_equality(&context, &boolean, &boolean, &mut empty),
+            None
+        );
+        assert_eq!(
+            known_type_equality(&context, &boolean, &boolean, &mut Budget::default()),
+            Some(true)
+        );
+        assert_eq!(
+            known_type_equality(
+                &context,
+                &Term::Bool(true),
+                &Term::Bool(true),
+                &mut Budget::default()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn copied_exact_decimal_charges_payload_before_cloning() {
+        let value = comptime_runtime::decimal::DecimalValue::parse_literal(
+            "12345678901234567890.123456789e123456789012345678901234567890",
+            &mut Budget::default(),
+        )
+        .unwrap();
+        let term = Term::Float(value);
+        let mut insufficient = Budget {
+            steps: 2,
+            max_limbs: 4096,
+        };
+        assert!(clone_known_term(&term, &mut insufficient).is_none());
+        assert_eq!(clone_known_term(&term, &mut Budget::default()), Some(term));
+    }
+
+    #[test]
     fn copied_identity_structure_consumes_work_before_expanding() {
         let term = Term::TupleValue(vec![Term::String("λ".into()), Term::Unit]);
         let mut short = Budget {
@@ -1476,6 +2109,57 @@ impl Checker<'_, '_> {
         result
     }
 
+    fn prepare_normal_collection_input(
+        &mut self,
+        value: n::Expr,
+        before: usize,
+        preparations: &mut Vec<n::NormalFormPreparation>,
+        known_bindings: &mut BTreeMap<n::LocalId, std::sync::Arc<Term>>,
+        span: Span,
+    ) -> Result<n::Expr, Error> {
+        let binding = self.spread_binding(span)?;
+        let mut budget = comptime_runtime::Budget {
+            steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
+            max_limbs: 4096,
+        };
+        let budget_before = budget.steps;
+        let known = self.known_normal_input_in(&value, 0, &mut budget, known_bindings);
+        self.required_steps -= (budget_before - budget.steps) as u64;
+        if let Some(known) = known {
+            known_bindings.insert(binding, std::sync::Arc::new(known));
+        }
+
+        let ty = value.ty.clone();
+        self.locals.insert(binding, ty.clone());
+        let location = value.source;
+        let tuple_ty = self.tuple_value_type(vec![ty.clone()], span)?;
+        preparations.push(n::NormalFormPreparation {
+            before,
+            expression: n::Expr {
+                source: location,
+                ty: p(P::Void),
+                kind: K::LetPattern {
+                    pattern: n::Pattern::Tuple(vec![n::Pattern::Binding {
+                        binding,
+                        inner: Box::new(n::Pattern::Wild),
+                    }]),
+                    value: Box::new(n::Expr {
+                        source: location,
+                        ty: tuple_ty,
+                        kind: K::Tuple(vec![value]),
+                    }),
+                    guard: None,
+                    otherwise: None,
+                },
+            },
+        });
+        Ok(n::Expr {
+            source: location,
+            ty,
+            kind: K::Local(binding),
+        })
+    }
+
     /// Prepare explicit inputs in source order, then omitted inputs in their
     /// declaration telescope. All reuse goes through fresh local bindings.
     fn defaulted_normal_expression(
@@ -1494,7 +2178,10 @@ impl Checker<'_, '_> {
         let saved_context = self.context.clone();
         let saved_owner = self.signature_owner;
         let saved_mode = self.in_required_comptime;
-        let caller_scope = self.call_inference_scope();
+        let caller_scope = self.call_inference_domains();
+        let caller_owner = self.default_input_owner.or(self.signature_owner);
+        let saved_input_owner = self.default_input_owner;
+        self.default_input_owner = caller_owner;
         let saved_input_scope = self.default_input_scope.replace(caller_scope);
         let result = (|| {
             // Layout hints establish only positions. Actual packet checking
@@ -1504,12 +2191,49 @@ impl Checker<'_, '_> {
                 .iter()
                 .zip(&clauses)
                 .filter(|(_, clause)| {
-                    !matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..))
+                    !matches!(
+                        clause.kind,
+                        hir::clause::ClauseParamKind::Optional(..)
+                            | hir::clause::ClauseParamKind::Varadic(..)
+                    )
                 })
                 .map(|((_, _, ty), _)| ty.clone())
                 .collect::<Vec<_>>();
+            let collector = self.normal_type_list_tail(owner).then(|| clauses.len() - 1);
+            let whole_collector = collector.is_some_and(|slot| {
+                inputs.iter().any(|input|
+                matches!(input, Arg::Named(name, _) if name.name == clauses[slot].name.name))
+            });
+            let mut layout_inputs = inputs.to_vec();
+            let mut list_spreads = BTreeSet::new();
+            let mut remaining = Some(positional_types.len());
+            let mut layout_fuel = 10_000;
+            if let Some(slot) = collector.filter(|_| !whole_collector) {
+                for (index, input) in inputs.iter().enumerate() {
+                    match input {
+                        Arg::Positional(value) if remaining == Some(0) => {
+                            layout_inputs[index] = Arg::Named(clauses[slot].name, value);
+                        }
+                        Arg::Expand(value) if remaining == Some(0) => {
+                            layout_inputs[index] = Arg::Named(clauses[slot].name, value);
+                            list_spreads.insert(index);
+                        }
+                        Arg::Positional(_) => remaining = remaining.map(|n| n.saturating_sub(1)),
+                        Arg::Expand(value) => {
+                            remaining =
+                                match (remaining, self.spread_width(value, &mut layout_fuel, 0)?) {
+                                    (Some(left), Some(width)) if width <= left => {
+                                        Some(left - width)
+                                    }
+                                    _ => None,
+                                };
+                        }
+                        _ => {}
+                    }
+                }
+            }
             let packet_contexts = if inputs.iter().any(|input| matches!(input, Arg::Expand(_))) {
-                self.spread_packet_layout(inputs, &positional_types, span)?
+                self.spread_packet_layout(&layout_inputs, &positional_types, span)?
             } else {
                 vec![None; inputs.len()]
             };
@@ -1517,8 +2241,24 @@ impl Checker<'_, '_> {
             let mut preparations = Vec::new();
             let mut order = Vec::new();
             let mut positional = 0;
+            let mut collected = Vec::new();
+            let mut prepared_bindings = BTreeMap::new();
             for (input_index, input) in inputs.iter().enumerate() {
                 if let Arg::Expand(packet) = input {
+                    if list_spreads.contains(&input_index) {
+                        let slot = collector.expect("list spread has a collector");
+                        let value = self.expr(packet, Some(&parameters[slot].2))?;
+                        let value = self.prepare_normal_collection_input(
+                            value,
+                            order.len(),
+                            &mut preparations,
+                            &mut prepared_bindings,
+                            span,
+                        )?;
+                        collected.push(n::NormalFormArgument::TypeListSpread(value));
+                        continue;
+                    }
+
                     let context = if let Some(fields) = &packet_contexts[input_index] {
                         use crate::calls::InputContext as C;
                         let dependent =
@@ -1556,6 +2296,20 @@ impl Checker<'_, '_> {
                             "normal-form spread requires a tuple value",
                         ));
                     };
+                    let mut budget = comptime_runtime::Budget {
+                        steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
+                        max_limbs: 4096,
+                    };
+                    let budget_before = budget.steps;
+                    let observed =
+                        self.known_normal_input_in(&value, 0, &mut budget, &prepared_bindings);
+                    self.required_steps -= (budget_before - budget.steps) as u64;
+                    let mut observed_fields = match observed {
+                        Some(Term::TupleValue(values)) if values.len() == fields.len() => {
+                            Some(values.into_iter())
+                        }
+                        _ => None,
+                    };
                     let before = order.len();
                     let mut pattern = Vec::new();
                     for ty in fields {
@@ -1563,6 +2317,7 @@ impl Checker<'_, '_> {
                             && matches!(
                                 clauses[positional].kind,
                                 hir::clause::ClauseParamKind::Optional(..)
+                                    | hir::clause::ClauseParamKind::Varadic(..)
                             )
                         {
                             positional += 1;
@@ -1570,6 +2325,9 @@ impl Checker<'_, '_> {
                         let slot = positional;
                         positional += 1;
                         let binding = self.spread_binding(packet.span)?;
+                        if let Some(known) = observed_fields.as_mut().and_then(Iterator::next) {
+                            prepared_bindings.insert(binding, std::sync::Arc::new(known));
+                        }
                         self.locals.insert(binding, ty.clone());
                         pattern.push(n::Pattern::Binding {
                             binding,
@@ -1616,6 +2374,24 @@ impl Checker<'_, '_> {
                         {
                             positional += 1;
                         }
+                        if collector == Some(positional) {
+                            if whole_collector {
+                                return Err(error(
+                                    span,
+                                    "cannot combine a complete type-list argument with collected inputs",
+                                ));
+                            }
+                            let value = self.expr(value, Some(&p(P::Type)))?;
+                            let value = self.prepare_normal_collection_input(
+                                value,
+                                order.len(),
+                                &mut preparations,
+                                &mut prepared_bindings,
+                                span,
+                            )?;
+                            collected.push(n::NormalFormArgument::Value(value));
+                            continue;
+                        }
                         let slot = positional;
                         positional += 1;
                         (slot, *value)
@@ -1628,6 +2404,7 @@ impl Checker<'_, '_> {
                                     && matches!(
                                         clause.kind,
                                         hir::clause::ClauseParamKind::Optional(..)
+                                            | hir::clause::ClauseParamKind::Varadic(..)
                                     )
                             })
                             .ok_or_else(|| error(span, "unknown named normal-form argument"))?,
@@ -1648,6 +2425,11 @@ impl Checker<'_, '_> {
                 }
                 order.push(slot);
             }
+            if !collected.is_empty() {
+                let slot = collector.expect("collected inputs have a collector");
+                routed[slot] = Some(RoutedNormalInput::Collected(collected));
+                order.push(slot);
+            }
             let mut values = vec![None; parameters.len()];
             let mut known: Vec<Option<Term>> = vec![None; parameters.len()];
             let bindings = (0..parameters.len())
@@ -1661,10 +2443,40 @@ impl Checker<'_, '_> {
                 if values[slot].is_some() {
                     continue;
                 }
+                if routed[slot].is_none()
+                    && matches!(
+                        clauses[slot].kind,
+                        hir::clause::ClauseParamKind::Varadic(..)
+                    )
+                {
+                    // An unsupplied collector has zero elements, not a missing
+                    // required input. Keep it in the normal-form telescope.
+                    let ty = self.instantiate_input_types(
+                        &parameters[slot].2,
+                        &known_parameters,
+                        &known_types,
+                        span,
+                    )?;
+                    if !self.is_type_list_type(&ty) {
+                        return Err(error(
+                            span,
+                            "normal-form variadic collector requires meta.List<Type>",
+                        ));
+                    }
+                    known[slot] = Some(Term::TypeListValue(Vec::new()));
+                    self.locals.insert(bindings[slot], ty.clone());
+                    values[slot] = Some(n::NormalFormArgument::Value(n::Expr {
+                        source: source(span),
+                        ty,
+                        kind: K::TypeListValue(Vec::new()),
+                    }));
+                    evaluation_order.push(slot);
+                    continue;
+                }
                 let explicit = routed[slot].as_ref();
                 let input = match explicit {
                     Some(RoutedNormalInput::Source(input)) => Some(*input),
-                    Some(RoutedNormalInput::Prepared(_)) => None,
+                    Some(RoutedNormalInput::Prepared(_) | RoutedNormalInput::Collected(_)) => None,
                     None => {
                         // Defaults can see only preceding declarations, regardless
                         // of which later named inputs have already been evaluated.
@@ -1729,7 +2541,12 @@ impl Checker<'_, '_> {
                 let dependent = self.type_parameters[&owner]
                     .iter()
                     .any(|id| ty.mentions_rigid(*id));
-                let checked = if let Some(RoutedNormalInput::Prepared(value)) = explicit {
+                let checked = if let Some(RoutedNormalInput::Collected(items)) = explicit {
+                    Ok(n::NormalFormArgument::TypeList {
+                        source: source(span),
+                        items: items.clone(),
+                    })
+                } else if let Some(RoutedNormalInput::Prepared(value)) = explicit {
                     if !dependent {
                         self.require_expression(&value.ty, &ty, span)?;
                     }
@@ -1744,10 +2561,26 @@ impl Checker<'_, '_> {
                     self.active_type_defaults.remove(&(owner, slot));
                 }
                 let value = checked?;
-                let mut budget = comptime_runtime::Budget::default();
-                known[slot] = value
-                    .expression()
-                    .and_then(|value| self.known_normal_input(value, 0, &mut budget));
+                let mut budget = comptime_runtime::Budget {
+                    steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
+                    max_limbs: 4096,
+                };
+                let budget_before = budget.steps;
+                known[slot] = match &value {
+                    n::NormalFormArgument::TypeList { items, .. } => {
+                        self.known_collected_type_list_in(items, &prepared_bindings)
+                    }
+                    _ => value.expression().and_then(|value| {
+                        self.known_normal_input_in(value, 0, &mut budget, &prepared_bindings)
+                    }),
+                };
+                self.required_steps -= (budget_before - budget.steps) as u64;
+                if let Some(known) = &known[slot] {
+                    prepared_bindings.insert(
+                        bindings[slot],
+                        std::sync::Arc::new(self.copy_alias_type(known, span)?),
+                    );
+                }
                 if parameters[slot].2 == p(P::Type) {
                     if let Some(ty) = &known[slot] {
                         known_parameters.push(parameters[slot].0);
@@ -1782,7 +2615,15 @@ impl Checker<'_, '_> {
                     })
                 })
                 .collect();
-            self.check_formation_application(owner, FormationInputs { terms, deferred }, span)?;
+            self.check_formation_application(
+                owner,
+                FormationInputs {
+                    terms,
+                    deferred,
+                    environment: BTreeMap::new(),
+                },
+                span,
+            )?;
             let arguments: Vec<_> = values.into_iter().map(Option::unwrap).collect();
             let ty = if arguments.iter().any(n::NormalFormArgument::is_diverging) {
                 p(P::Never)
@@ -1814,6 +2655,7 @@ impl Checker<'_, '_> {
         self.signature_owner = saved_owner;
         self.in_required_comptime = saved_mode;
         self.default_input_scope = saved_input_scope;
+        self.default_input_owner = saved_input_owner;
         result
     }
 }

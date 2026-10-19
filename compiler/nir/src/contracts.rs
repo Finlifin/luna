@@ -97,6 +97,7 @@ impl MethodContract {
     ) -> Result<Function, TypeError> {
         let signature = self
             .signature
+            .ordinary()?
             .instantiate_parameters(parameters, arguments)?;
         let program = self.program.instantiate_parameters(parameters, arguments)?;
         Ok(Function {
@@ -169,6 +170,15 @@ pub fn remap_predicate(
                 }
                 pending.push(value);
             }
+            K::LetPattern {
+                pattern,
+                value,
+                guard: None,
+                otherwise: None,
+            } => {
+                remap_predicate_pattern(pattern, bindings, &mut pending, &mut remaining)?;
+                pending.push(value);
+            }
             K::Literal(_) | K::Unit => {}
             K::ReadPointer(v)
             | K::AddressOf(v)
@@ -212,6 +222,19 @@ pub fn remap_predicate(
                 pending.push(end);
             }
             K::Tuple(fields) => pending.extend(fields),
+            K::Match { value, arms } => {
+                pending.push(value);
+                for arm in arms {
+                    remap_predicate_pattern(
+                        &mut arm.pattern,
+                        bindings,
+                        &mut pending,
+                        &mut remaining,
+                    )?;
+                    pending.extend(arm.guard.as_mut());
+                    pending.push(&mut arm.body);
+                }
+            }
             K::If {
                 condition,
                 then_branch,
@@ -226,6 +249,70 @@ pub fn remap_predicate(
                 pending.extend(result.as_deref_mut());
             }
             _ => return Err("invalid expression in program contract substitution"),
+        }
+    }
+    Ok(())
+}
+
+fn remap_predicate_pattern<'a>(
+    pattern: &'a mut crate::program::Pattern,
+    bindings: &BTreeMap<LocalId, LocalId>,
+    pending: &mut Vec<&'a mut Expr>,
+    remaining: &mut usize,
+) -> Result<(), &'static str> {
+    let mut patterns = vec![pattern];
+    while let Some(pattern) = patterns.pop() {
+        if *remaining == 0 {
+            return Err("program contract substitution budget exhausted");
+        }
+        *remaining -= 1;
+        use crate::program::Pattern;
+        match pattern {
+            Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => {}
+            Pattern::Then { first, value, next } => {
+                patterns.push(first);
+                patterns.push(next);
+                pending.push(value);
+            }
+            Pattern::Remap {
+                pattern,
+                bindings: aliases,
+            } => {
+                if aliases.len() > *remaining {
+                    return Err("program contract substitution budget exhausted");
+                }
+                *remaining -= aliases.len();
+                for (from, to) in aliases {
+                    if let Some(mapped) = bindings.get(from) {
+                        *from = *mapped;
+                    }
+                    if let Some(mapped) = bindings.get(to) {
+                        *to = *mapped;
+                    }
+                }
+                patterns.push(pattern);
+            }
+            Pattern::Guard { pattern, condition } => {
+                patterns.push(pattern);
+                pending.push(condition);
+            }
+            Pattern::Observe { binding, inner } | Pattern::Binding { binding, inner } => {
+                if let Some(to) = bindings.get(binding) {
+                    *binding = *to;
+                }
+                patterns.push(inner);
+            }
+            Pattern::Tuple(fields)
+            | Pattern::Record { fields, .. }
+            | Pattern::AnonymousRecord { fields, .. }
+            | Pattern::Or(fields)
+            | Pattern::Variant { fields, .. } => {
+                if fields.len() > *remaining {
+                    return Err("program contract substitution budget exhausted");
+                }
+                patterns.extend(fields);
+            }
+            _ => return Err("invalid pattern in program contract substitution"),
         }
     }
     Ok(())

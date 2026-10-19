@@ -239,3 +239,46 @@ fn pattern_remaps_publish_common_outputs_without_leaking_arm_locals() {
     });
     assert_eq!(result(&value), vec![id(1), id(2)]);
 }
+
+#[test]
+fn observation_aliases_bind_only_inside_the_pattern_and_visit_computations() {
+    let pattern = P::Observe {
+        binding: id(2),
+        inner: Box::new(P::Then {
+            first: Box::new(P::Wild),
+            value: Box::new(local(2)),
+            next: Box::new(P::Binding {
+                binding: id(3),
+                inner: Box::new(P::Wild),
+            }),
+        }),
+    };
+    let body = expr(K::Match {
+        value: Box::new(local(1)),
+        arms: vec![MatchArm {
+            pattern: pattern.clone(),
+            guard: None,
+            body: expr(K::And(Box::new(local(2)), Box::new(local(3)))),
+        }],
+    });
+    assert_eq!(result(&body), vec![id(1), id(2)]);
+    assert_eq!(
+        pattern.to_string(),
+        "(observe-pattern (subject (local 1 2)) (inner (and-is (first (wild)) (value (expr (type (primitive bool)) (source 1 2) (local 1 2))) (next (binding (local 1 3) (wild))))))"
+    );
+    let mut references = vec![];
+    nir::visit::expression(&body, &mut 1000, |expr, _| {
+        if let K::Local(binding) = expr.kind {
+            references.push(binding);
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        references
+            .iter()
+            .filter(|binding| **binding == id(2))
+            .count(),
+        2
+    );
+}

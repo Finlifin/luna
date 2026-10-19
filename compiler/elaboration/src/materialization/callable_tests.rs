@@ -58,19 +58,42 @@ fn conditional_call_resolution_preserves_uncompleted_inputs_and_scopes() {
                 *then_branch = Box::new(expr(
                     K::Block {
                         statements: vec![expr(K::Unit, Term::Primitive(Primitive::Void))],
-                        result: Some(then_branch.clone()),
+                        result: Some(Box::new(expr(K::Local(binding), signature.clone()))),
                     },
                     signature.clone(),
                 ));
             }
         }
         let original = candidate.clone();
-        Builder::resolve_conditional_callable(&mut candidate, &mut 1000).unwrap();
+        Builder::resolve_conditional_callable(
+            &mut candidate,
+            false,
+            &mut 100,
+            &mut Vec::new(),
+            &mut 1000,
+        )
+        .unwrap();
         assert_eq!(candidate, original, "boundary {boundary}");
     }
-    assert!(Builder::resolve_conditional_callable(&mut base.clone(), &mut 0).is_err());
+    assert!(
+        Builder::resolve_conditional_callable(
+            &mut base.clone(),
+            false,
+            &mut 100,
+            &mut Vec::new(),
+            &mut 0
+        )
+        .is_err()
+    );
     let mut completed = base;
-    Builder::resolve_conditional_callable(&mut completed, &mut 1000).unwrap();
+    Builder::resolve_conditional_callable(
+        &mut completed,
+        false,
+        &mut 100,
+        &mut Vec::new(),
+        &mut 1000,
+    )
+    .unwrap();
     assert!(matches!(completed.kind, K::If { .. }));
 }
 
@@ -193,7 +216,7 @@ fn callable_resolution_preserves_observable_bindings_and_statement_order() {
             value.ty,
         );
         let before = candidate.clone();
-        Builder::resolve_immediate_callable(&mut candidate, &mut 1000).unwrap();
+        Builder::resolve_immediate_callable(&mut candidate, false, &mut 1000).unwrap();
         assert_eq!(candidate, before);
     }
     let mut candidate = base;
@@ -202,17 +225,17 @@ fn callable_resolution_preserves_observable_bindings_and_statement_order() {
     };
     statements.push(expr(K::Unit, Term::Primitive(Primitive::Void)));
     let before = candidate.clone();
-    Builder::resolve_immediate_callable(&mut candidate, &mut 1000).unwrap();
+    Builder::resolve_immediate_callable(&mut candidate, false, &mut 1000).unwrap();
     assert_eq!(candidate, before);
 }
 
 #[test]
 fn callable_resolution_is_metered_and_keeps_arguments() {
     let (base, _, _) = fixture();
-    assert!(Builder::resolve_immediate_callable(&mut base.clone(), &mut 0).is_err());
+    assert!(Builder::resolve_immediate_callable(&mut base.clone(), false, &mut 0).is_err());
     let mut candidate = base.clone();
     let mut fuel = 100;
-    Builder::resolve_immediate_callable(&mut candidate, &mut fuel).unwrap();
+    Builder::resolve_immediate_callable(&mut candidate, false, &mut fuel).unwrap();
     assert!(fuel < 100);
     let K::Block {
         statements,
@@ -250,4 +273,266 @@ fn callable_resolution_is_metered_and_keeps_arguments() {
         unreachable!()
     };
     assert_eq!(arguments, original);
+}
+
+#[test]
+fn runtime_alias_resolution_is_opt_in_and_preserves_argument_observations() {
+    let (mut base, binding, old_signature) = fixture();
+    let signature = Term::Function {
+        parameters: vec![Parameter {
+            sort: Sort::Runtime,
+            ty: Term::Primitive(Primitive::Bool),
+        }],
+        result: Box::new(Term::Primitive(Primitive::Bool)),
+    };
+    base.rewrite_types(&mut |ty| {
+        Ok::<_, String>(if *ty == old_signature {
+            signature.clone()
+        } else {
+            ty.clone()
+        })
+    })
+    .unwrap();
+    let K::Block {
+        result: Some(result),
+        ..
+    } = &mut base.kind
+    else {
+        unreachable!()
+    };
+    let K::Call { arguments, .. } = &mut result.kind else {
+        unreachable!()
+    };
+    arguments[0].value = expr(
+        K::Literal(n::Literal::Bool(true)),
+        Term::Primitive(Primitive::Bool),
+    );
+    let mut candidate = base.clone();
+    Builder::resolve_immediate_callable(&mut candidate, false, &mut 1000).unwrap();
+    assert_eq!(candidate, base);
+    Builder::resolve_immediate_callable(&mut candidate, true, &mut 1000).unwrap();
+    let K::Block { statements, .. } = &candidate.kind else {
+        unreachable!()
+    };
+    assert!(statements.is_empty());
+    let K::Block {
+        result: Some(result),
+        ..
+    } = &mut base.kind
+    else {
+        unreachable!()
+    };
+    let K::Call { arguments, .. } = &mut result.kind else {
+        unreachable!()
+    };
+    arguments[0].value = expr(
+        K::Block {
+            statements: vec![expr(K::Local(binding), signature)],
+            result: Some(Box::new(arguments[0].value.clone())),
+        },
+        Term::Primitive(Primitive::Bool),
+    );
+    let original = base.clone();
+    Builder::resolve_immediate_callable(&mut base, true, &mut 1000).unwrap();
+    assert_eq!(base, original);
+}
+
+#[test]
+fn conditional_copy_failure_restores_expression_and_expansion_metadata() {
+    let (base, _, _) = fixture();
+    let K::Block {
+        result: Some(result),
+        ..
+    } = base.kind
+    else {
+        unreachable!()
+    };
+    let mut candidate = *result;
+    let K::Call {
+        callee, arguments, ..
+    } = &mut candidate.kind
+    else {
+        unreachable!()
+    };
+    let Term::Function { parameters, .. } = &mut callee.ty else {
+        unreachable!()
+    };
+    parameters.push(Parameter {
+        sort: Sort::Runtime,
+        ty: Term::Primitive(Primitive::Bool),
+    });
+    let signature = callee.ty.clone();
+    let target = Box::new(expr(
+        K::Function(Id {
+            package: 0,
+            local: 1,
+        }),
+        signature.clone(),
+    ));
+    *callee = Box::new(expr(
+        K::If {
+            condition: Box::new(expr(
+                K::Literal(n::Literal::Bool(true)),
+                Term::Primitive(Primitive::Bool),
+            )),
+            then_branch: target.clone(),
+            else_branch: Some(target),
+        },
+        signature,
+    ));
+    let local = n::LocalId { owner: 2, index: 3 };
+    arguments.push(n::CallArgument {
+        parameter: 1,
+        is_default: false,
+        value: expr(
+            K::Block {
+                statements: vec![expr(
+                    K::Let {
+                        binding: local,
+                        value: Box::new(expr(
+                            K::Literal(n::Literal::Bool(true)),
+                            Term::Primitive(Primitive::Bool),
+                        )),
+                    },
+                    Term::Primitive(Primitive::Void),
+                )],
+                result: Some(Box::new(expr(
+                    K::Local(local),
+                    Term::Primitive(Primitive::Bool),
+                ))),
+            },
+            Term::Primitive(Primitive::Bool),
+        ),
+    });
+    for matched in [false, true] {
+        let mut candidate = candidate.clone();
+        if matched {
+            let K::Call { callee, .. } = &mut candidate.kind else {
+                unreachable!()
+            };
+            let K::If {
+                condition,
+                then_branch,
+                else_branch: Some(other),
+            } = std::mem::replace(&mut callee.kind, K::Unit)
+            else {
+                unreachable!()
+            };
+            callee.kind = K::Match {
+                value: condition,
+                arms: vec![
+                    n::MatchArm {
+                        pattern: P::Literal(n::Literal::Bool(true)),
+                        guard: None,
+                        body: *then_branch,
+                    },
+                    n::MatchArm {
+                        pattern: P::Wild,
+                        guard: None,
+                        body: *other,
+                    },
+                ],
+            };
+        }
+        let original = candidate.clone();
+        let mut sources = Vec::new();
+        let initial_next = u32::MAX - u32::from(matched);
+        let mut next = initial_next;
+        let failure = Builder::resolve_conditional_callable(
+            &mut candidate,
+            false,
+            &mut next,
+            &mut sources,
+            &mut 10_000,
+        )
+        .unwrap_err();
+        assert!(failure.contains("identity space exhausted"), "{failure}");
+        assert_eq!(candidate, original);
+        assert_eq!(next, initial_next);
+        assert!(sources.is_empty());
+        next = 100;
+        Builder::resolve_conditional_callable(
+            &mut candidate,
+            false,
+            &mut next,
+            &mut sources,
+            &mut 10_000,
+        )
+        .unwrap();
+        assert!(next > 100);
+        assert!(!sources.is_empty());
+        assert!(matches!(candidate.kind, K::If { .. } | K::Block { .. }));
+    }
+}
+
+#[test]
+fn runtime_conditional_calls_only_expand_in_the_opted_in_context() {
+    let (base, _, _) = fixture();
+    let K::Block {
+        result: Some(result),
+        ..
+    } = base.kind
+    else {
+        unreachable!()
+    };
+    let mut candidate = *result;
+    let K::Call {
+        callee, arguments, ..
+    } = &mut candidate.kind
+    else {
+        unreachable!()
+    };
+    let signature = Term::Function {
+        parameters: vec![Parameter {
+            sort: Sort::Runtime,
+            ty: Term::Primitive(Primitive::Bool),
+        }],
+        result: Box::new(Term::Primitive(Primitive::Bool)),
+    };
+    let target = Box::new(expr(
+        K::Function(Id {
+            package: 0,
+            local: 1,
+        }),
+        signature.clone(),
+    ));
+    *callee = Box::new(expr(
+        K::If {
+            condition: Box::new(expr(
+                K::Literal(n::Literal::Bool(true)),
+                Term::Primitive(Primitive::Bool),
+            )),
+            then_branch: target.clone(),
+            else_branch: Some(target),
+        },
+        signature,
+    ));
+    arguments[0].value = expr(
+        K::Literal(n::Literal::Bool(true)),
+        Term::Primitive(Primitive::Bool),
+    );
+    let original = candidate.clone();
+    let mut sources = Vec::new();
+    let mut next = 100;
+    Builder::resolve_conditional_callable(
+        &mut candidate,
+        false,
+        &mut next,
+        &mut sources,
+        &mut 10_000,
+    )
+    .unwrap();
+    assert_eq!(candidate, original);
+    assert!(sources.is_empty());
+    assert_eq!(next, 100);
+    Builder::resolve_conditional_callable(
+        &mut candidate,
+        true,
+        &mut next,
+        &mut sources,
+        &mut 10_000,
+    )
+    .unwrap();
+    assert!(matches!(candidate.kind, K::If { .. }));
+    assert!(!sources.is_empty());
 }

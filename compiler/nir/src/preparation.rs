@@ -1,5 +1,5 @@
 //! Preparation dependencies shared by phase validation and materialization.
-use crate::program::{Expr, ExprKind as K, LocalId};
+use crate::program::{Expr, ExprKind as K, LocalId, Pattern};
 use crate::{Sort, Term};
 use std::collections::{BTreeMap, BTreeSet};
 fn charge(fuel: &mut usize, count: usize) -> Result<(), String> {
@@ -33,6 +33,16 @@ pub fn references(expr: &Expr, fuel: &mut usize) -> Result<BTreeSet<LocalId>, St
 }
 
 pub fn inputs(
+    expr: &Expr,
+    fuel: &mut usize,
+) -> Result<Option<(BTreeSet<usize>, Vec<(usize, LocalId, Term)>)>, String> {
+    inputs_with_layouts(&[], expr, fuel)
+}
+
+/// Select tuple producers using validated Tuple-role descriptors, preserving
+/// the normal-form type of their values rather than rewriting it structurally.
+pub fn inputs_with_layouts(
+    heads: &[crate::normal_forms::Head],
     expr: &Expr,
     fuel: &mut usize,
 ) -> Result<Option<(BTreeSet<usize>, Vec<(usize, LocalId, Term)>)>, String> {
@@ -72,26 +82,15 @@ pub fn inputs(
         match &statement.kind {
             K::Let { binding, value } => fields.push((*binding, value.ty.clone())),
             K::LetPattern {
-                pattern: crate::program::Pattern::Tuple(patterns),
+                pattern: pattern @ (Pattern::Tuple(_) | Pattern::Binding { .. } | Pattern::Wild),
                 value,
                 guard: None,
                 otherwise: None,
             } => {
-                let Term::Tuple(types) = &value.ty else {
+                let Some(selected) = pattern_bindings(heads, pattern, &value.ty, fuel)? else {
                     continue;
                 };
-                if patterns.len() != types.len() {
-                    return Err("preparation tuple arity mismatch".into());
-                }
-                for (pattern, ty) in patterns.iter().zip(types) {
-                    let crate::program::Pattern::Binding { binding, inner } = pattern else {
-                        return Err("unsupported preparation binding".into());
-                    };
-                    if !matches!(inner.as_ref(), crate::program::Pattern::Wild) {
-                        return Err("unsupported preparation subpattern".into());
-                    }
-                    fields.push((*binding, ty.clone()));
-                }
+                fields = selected;
             }
             _ => continue,
         }
@@ -136,4 +135,50 @@ pub fn inputs(
     }
     bindings.retain(|(index, binding, _)| indices.contains(index) && exported.contains(binding));
     Ok(Some((indices, bindings)))
+}
+
+// Only irrefutable binding structure participates in dependency selection.
+// Tuple roles expose field types without changing the producer's Type identity.
+pub(crate) fn pattern_bindings(
+    heads: &[crate::normal_forms::Head],
+    pattern: &Pattern,
+    ty: &Term,
+    fuel: &mut usize,
+) -> Result<Option<Vec<(LocalId, Term)>>, String> {
+    let mut pending = vec![(pattern, ty)];
+    let mut bindings = Vec::new();
+    while let Some((pattern, ty)) = pending.pop() {
+        charge(fuel, 1)?;
+        match pattern {
+            Pattern::Wild => {}
+            Pattern::Binding { binding, inner } => {
+                bindings.push((*binding, ty.clone()));
+                pending.push((inner, ty));
+            }
+            Pattern::Tuple(patterns) => {
+                if *ty == Term::Primitive(crate::Primitive::Never) {
+                    // The producer exits before unpacking. No tuple layout is
+                    // required, but still visit the binding structure so phase
+                    // validation can reject duplicates and unsupported patterns.
+                    pending.extend(patterns.iter().rev().map(|pattern| (pattern, ty)));
+                    continue;
+                }
+                let types = if let Term::Tuple(types) = ty {
+                    types.as_slice()
+                } else {
+                    charge(fuel, heads.len())?;
+                    let Some(types) = heads.iter().find_map(|head| head.tuple_elements(ty)) else {
+                        return Ok(None);
+                    };
+                    types
+                };
+                if patterns.len() != types.len() {
+                    return Err("preparation tuple arity mismatch".into());
+                }
+                pending.extend(patterns.iter().zip(types).rev());
+            }
+            _ => return Err("unsupported preparation subpattern".into()),
+        }
+    }
+    Ok(Some(bindings))
 }

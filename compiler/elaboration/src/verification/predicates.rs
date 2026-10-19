@@ -62,7 +62,12 @@ impl Facts {
                 Err(Unknown::InsufficientBounds)
             };
         }
-        if let Some(actual) = condition.truth_by_enclosure(self, limits, 0)? {
+        let enclosed = match condition.truth_by_enclosure(self, limits, 0) {
+            Ok(value) => value,
+            Err(Unknown::MissingBound(_)) if condition.is_current(self, limits, 0)? => None,
+            Err(e) => return Err(e),
+        };
+        if let Some(actual) = enclosed {
             return if actual == truth {
                 Ok(())
             } else {
@@ -168,8 +173,18 @@ impl Condition {
                 right,
             } => {
                 // Check versions before normalization can cancel an old value.
-                left.interval_enclosure(facts, limits)?;
-                right.interval_enclosure(facts, limits)?;
+                // Identity validity and a finite interval are different facts:
+                // x + 1 > x is decidable even for an unbounded current x.
+                for polynomial in [left, right] {
+                    for factors in polynomial.terms.keys() {
+                        limits.step(factors.len().saturating_add(1))?;
+                        for value in factors {
+                            if facts.value(value.place) != Some(*value) {
+                                return Err(Unknown::StaleValue(*value));
+                            }
+                        }
+                    }
+                }
                 (left.subtract(right, limits)?, *relation)
             }
         };

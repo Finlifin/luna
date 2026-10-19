@@ -1337,3 +1337,117 @@ fn candidate_type_equations_are_transactional_and_do_not_invert_opaque_heads() {
         .unwrap();
     assert!(candidate.finish().is_err());
 }
+
+#[test]
+fn sparse_caller_inference_retains_slots_and_lexical_assumptions() {
+    use elaboration::ptc::{Context, Formula};
+    let scope = vec![
+        (Sort::Runtime, None),
+        (Sort::Type, Some(primitive(P::Type))),
+    ];
+    let local = Term::Bound {
+        depth: 0,
+        index: 1,
+        sort: Sort::Type,
+    };
+    let identity = scheme(vec![generic(0)], generic(0), 1);
+    let candidate = identity
+        .infer_sparse_scoped_types(
+            &[Some(local.clone())],
+            Some(&local),
+            &Context::default(),
+            Budget::default(),
+            &scope,
+        )
+        .unwrap();
+    assert!(
+        candidate
+            .engine()
+            .to_string()
+            .contains("(parameter runtime (unknown-domain))")
+    );
+    let instance = candidate.finish().unwrap();
+    assert_eq!(instance.type_arguments, vec![local.clone()]);
+    instance
+        .signature
+        .check_scope(&[vec![Sort::Runtime, Sort::Type]])
+        .unwrap();
+
+    let mut context = Context::with_scope(vec![vec![Sort::Runtime, Sort::Type]]);
+    context.assume(Formula::equal(local.clone(), primitive(P::Bool)));
+    identity
+        .infer_sparse_scoped_types(
+            &[Some(local.clone())],
+            Some(&primitive(P::Bool)),
+            &context,
+            Budget::default(),
+            &scope,
+        )
+        .unwrap()
+        .finish()
+        .unwrap();
+    let wrong_scope = Context::with_scope(vec![vec![Sort::Type]]);
+    assert!(
+        identity
+            .infer_sparse_scoped_types(
+                &[Some(local.clone())],
+                None,
+                &wrong_scope,
+                Budget::default(),
+                &scope
+            )
+            .is_err()
+    );
+    // An invalid closed assumption must not become valid merely by adding slots.
+    let mut invalid = Context::default();
+    invalid.assume(Formula::equal(local.clone(), primitive(P::Bool)));
+    assert!(
+        identity
+            .infer_sparse_scoped_types(&[Some(local)], None, &invalid, Budget::default(), &scope)
+            .is_err()
+    );
+    assert!(
+        identity
+            .infer_sparse_scoped_types(
+                &[Some(primitive(P::Bool))],
+                None,
+                &Context::default(),
+                Budget::default(),
+                &[(Sort::Type, None)]
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn sparse_caller_inference_preserves_closed_assumptions() {
+    use elaboration::ptc::{Context, Formula};
+    let left = Term::Rigid {
+        declaration: DeclarationId {
+            package: 7,
+            local: 1,
+        },
+        sort: Sort::Type,
+    };
+    let right = Term::Rigid {
+        declaration: DeclarationId {
+            package: 7,
+            local: 2,
+        },
+        sort: Sort::Type,
+    };
+    let mut context = Context::default();
+    context.assume(Formula::equal(left.clone(), right.clone()));
+    let identity = scheme(vec![generic(0)], generic(0), 1);
+    identity
+        .infer_sparse_scoped_types(
+            &[Some(left)],
+            Some(&right),
+            &context,
+            Budget::default(),
+            &[(Sort::Runtime, None)],
+        )
+        .unwrap()
+        .finish()
+        .unwrap();
+}

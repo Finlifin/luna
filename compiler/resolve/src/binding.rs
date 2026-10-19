@@ -65,7 +65,14 @@ impl Binding {
         ) -> bool {
             match vis {
                 Visibility::Public => true,
-                Visibility::Private => tree.ancestors(requester).any(|s| s.id == owner),
+                Visibility::Private => {
+                    // Definitions and import entries may live in an ADT or
+                    // function scope. Privacy belongs to their lexical module,
+                    // not to those implementation scopes.
+                    let module = tree.ancestors(owner).find(|scope| scope.is_module());
+                    module
+                        .is_some_and(|module| tree.ancestors(requester).any(|s| s.id == module.id))
+                }
                 Visibility::Package => {
                     let package = |scope| {
                         tree.ancestors(scope)

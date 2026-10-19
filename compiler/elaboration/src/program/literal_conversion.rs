@@ -64,11 +64,11 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<Option<Term>, Error> {
         use crate::implementation::Selection;
-        let scope = self.call_inference_scope();
+        let scope = self.call_inference_domains();
         let frames = if scope.is_empty() {
             vec![]
         } else {
-            vec![scope.iter().map(|p| p.sort).collect()]
+            vec![scope.iter().map(|p| p.0).collect()]
         };
         let suffix = Term::Symbol(suffix.into());
         let mut choices = Vec::new();
@@ -183,7 +183,7 @@ impl Checker<'_, '_> {
                 signature,
             };
             let mut candidate = scheme
-                .infer_scoped_types(
+                .infer_sparse_scoped_types(
                     &[Some(subject.clone())],
                     None,
                     &self.context,

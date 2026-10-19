@@ -5,7 +5,8 @@ mod execution_support;
 use execution_support::{calls, compile, compile_with_protocols, id};
 
 fn run(source: &str, expected: Value, order: &[&str]) {
-    let package = compile(source);
+    let package = compile_with_protocols(source, &Default::default())
+        .unwrap_or_else(|error| panic!("{source}: {error}"));
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(vm.invoke(id(&package, "run"), vec![]).unwrap(), expected);
     assert_eq!(calls(&package, &vm), order);
@@ -119,18 +120,16 @@ fn method_receivers_precede_mixed_inputs() {
 
 #[test]
 fn malformed_mixed_inputs_reject_instead_of_changing_routes() {
-    for inputs in [
-        "flag:true,...(true,false,true)",
-        "flag:true,...false",
-        "flag:true,...(true,false),flag:false",
+    for (inputs, diagnostic) in [
+        (
+            "flag:true,...(true,false,true)",
+            "variadic collection argument count mismatch",
+        ),
+        ("flag:true,...false", "type mismatch"),
+        ("flag:true,...(true,false),flag:false", "more than once"),
     ] {
         let error = compile_with_protocols(&format!("fn take(...items:(bool,bool),...properties:T)->T where T {{properties}} fn run() {{take {{{inputs}}};}}"), &Default::default()).unwrap_err();
-        assert!(
-            error.contains("positional")
-                || error.contains("type mismatch")
-                || error.contains("more than once"),
-            "{error}"
-        );
+        assert!(error.contains(diagnostic), "{inputs}: {error}");
     }
 }
 
@@ -232,5 +231,566 @@ fn mixed_calls_preserve_the_bound_tuple_normal_form() {
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
+    );
+}
+
+#[test]
+fn computed_callees_accept_braced_inputs_and_run_before_producers() {
+    for (callee, prefix) in [
+        ("factory()", vec!["run", "factory"]),
+        ("do {factory()}", vec!["run", "factory"]),
+        (
+            "(if flag() {factory()} else {target})",
+            vec!["run", "flag", "factory"],
+        ),
+    ] {
+        for (inputs, producers) in [
+            ("first(),second()", vec!["first", "second"]),
+            ("...(first(),second())", vec!["first", "second"]),
+            ("...packet()", vec!["packet", "first", "second"]),
+        ] {
+            let mut order = prefix.clone();
+            order.extend(producers);
+            order.push("target");
+            run(
+                &format!(
+                    "fn target(a:bool,b:bool)->bool {{a and not b}} const ACTION=target;
+                fn factory()->fn(bool,bool)->bool {{target}} fn flag()->bool {{true}}
+                fn first()->bool {{true}} fn second()->bool {{false}}
+                fn packet()->(bool,bool) {{(first(),second())}}
+                fn run()->bool {{{callee} {{{inputs}}}}}"
+                ),
+                Value::Bool(true),
+                &order,
+            );
+        }
+    }
+}
+
+#[test]
+fn computed_type_callees_still_construct_structs() {
+    for callee in [
+        "Choose()",
+        "do {Choose()}",
+        "(if true {Box} else {Box})",
+        "ALIAS",
+    ] {
+        run(
+            &format!(
+                "typealias Type=.Type'builtin;struct Box {{value:bool}} comptime fn Choose()->Type {{Box}} const ALIAS=Box;
+            fn mark()->bool {{true}} fn run()->bool {{let b={callee} {{value:mark()}};b.value}}"
+            ),
+            Value::Bool(true),
+            &["run", "mark"],
+        );
+    }
+}
+
+#[test]
+fn computed_callees_do_not_recover_declaration_parameter_names() {
+    for callee in ["factory()", "do {factory()}"] {
+        for inputs in ["value:true"] {
+            let error = compile_with_protocols(
+                &format!(
+                    "fn target(value:bool)->bool {{value}}
+                const ACTION=target; fn factory()->fn(bool)->bool {{target}}
+                fn run()->bool {{{callee} {{{inputs}}}}}"
+                ),
+                &Default::default(),
+            )
+            .unwrap_err();
+            assert!(
+                error.contains("metadata") || error.contains("named"),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn computed_callees_preserve_captures_and_input_exit_order() {
+    run(
+        "fn first()->bool {true} fn run()->bool {(do {let captured=true;|value:bool| captured and value}) {...do {(first(),)}}}",
+        Value::Bool(true),
+        &["run", "first"],
+    );
+    for input in ["do {return true;false}", "...do {return true;(false,)}"] {
+        run(
+            &format!(
+                "fn target(value:bool)->bool {{false}} fn factory()->fn(bool)->bool {{target}}
+            fn run()->bool {{factory() {{{input}}}}}"
+            ),
+            Value::Bool(true),
+            &["run", "factory"],
+        );
+    }
+    run(
+        "fn target(value:bool)->bool {value} fn mark()->bool {false}
+        fn leave()->bool {true} fn run()->bool {(do {if leave() {return true;} target}) {...do {(mark(),)}}}",
+        Value::Bool(true),
+        &["run", "leave"],
+    );
+}
+
+#[test]
+fn braced_stored_comptime_calls_preserve_phase_and_type_checks() {
+    let source = "comptime fn target(a:bool,b:bool)->bool {a and not b}
+        const ACTION=target;const ANSWER=ACTION {...(true,false)};
+        fn select(comptime value:bool)->bool {inline if value {true} else {false}}
+        fn run()->bool {select(ANSWER)}";
+    run(source, Value::Bool(true), &["run", "select"]);
+    let error = compile_with_protocols(
+        &source.replace("...(true,false)", "...(true,7)"),
+        &Default::default(),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("type mismatch") || error.contains("integer"),
+        "{error}"
+    );
+    let error = compile_with_protocols(
+        "fn target(value:bool)->bool {value} const ACTION=target;
+        fn run()->bool {ACTION {true}}",
+        &Default::default(),
+    )
+    .unwrap_err();
+    assert!(error.contains("Splice"), "{error}");
+}
+
+#[test]
+fn computed_constructor_types_do_not_require_runtime_splice() {
+    let source = "typealias Type=.Type'builtin;
+        trait Splice {assoc RuntimeTarget:Type;fn splice(comptime data:Self)->RuntimeTarget;}
+        struct Box {value:bool} comptime fn Choose()->Type {Box}
+        fn run()->bool {let b=Choose() {value:true};b.value}";
+    let package =
+        execution_support::compile_with_bindings(source, &Default::default(), Some("Splice"))
+            .unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn selected_comptime_callees_deliver_only_the_invocation_result_to_runtime() {
+    let prefix = include_str!("../../../development/examples/splice-comptime-calls.fl");
+    for (callee, expected) in [
+        ("(if true {make()} else {other()})", true),
+        ("(if false {make()} else {other()})", false),
+        ("(do {inline if true {make()} else {other()}})", true),
+        ("(do {inline if false {make()} else {other()}})", false),
+        (
+            "(do {inline when {false => make(),else => other()}})",
+            false,
+        ),
+        (
+            "(do {inline if true is do {true => make(),false => other()}})",
+            true,
+        ),
+        ("(when {true => make(),else => other()})", true),
+        ("(when {false => make(),else => other()})", false),
+        ("(true match {true => make(),false => other()})", true),
+        ("(false match {true => make(),false => other()})", false),
+        ("(do {if true {do {make()}} else {other()}})", true),
+    ] {
+        for input in ["(false)", "{false}", "{...do {(false,)}}"] {
+            let source = format!(
+                "{prefix} comptime fn make()->comptime fn(bool)->bool {{invert}}
+                comptime fn other()->comptime fn(bool)->bool {{identity}} fn entry()->(bool,bool) {{{callee}{input}}}"
+            );
+            let package = execution_support::compile_with_bindings(
+                &source,
+                &Default::default(),
+                Some("Splice"),
+            )
+            .unwrap_or_else(|error| panic!("{callee}{input}: {error}"));
+            let graph = luna::instantiation::instantiate(&package, "entry", 100_000).unwrap();
+            let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
+            assert_eq!(
+                vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+                Value::Tuple(vec![Value::Bool(expected), Value::Bool(!expected)])
+            );
+            let events = calls(&package, &vm);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|name| name.as_str() == "splice")
+                    .count(),
+                1
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|name| ["make", "other", "invert", "identity"].contains(&name.as_str())),
+                "{events:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn callee_delivery_context_does_not_stage_conditions_or_discarded_values() {
+    let prefix = include_str!("../../../development/examples/splice-comptime-calls.fl");
+    for callee in [
+        "(if flag {make()} else {make()})",
+        "(when {flag => make(),else => make()})",
+        "(flag match {true => make(),false => make()})",
+        "(if true {make();make()} else {make()})",
+    ] {
+        let source = format!(
+            "{prefix} comptime fn make()->comptime fn(bool)->bool {{invert}}
+            fn entry(flag:bool)->(bool,bool) {{{callee}(false)}}"
+        );
+        let error =
+            execution_support::compile_with_bindings(&source, &Default::default(), Some("Splice"))
+                .unwrap_err();
+        assert!(!error.contains("parsing failed"), "{error}");
+        if callee.contains("make();") {
+            // The discarded result still requests Splice, for which this
+            // function type deliberately has no implementation.
+            assert!(error.contains("no-applicable-candidate"), "{error}");
+        } else {
+            assert!(
+                error.contains("comptime") || error.contains("runtime"),
+                "{callee}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn selected_comptime_callees_keep_open_inputs_and_closure_environments() {
+    let prefix = include_str!("../../../development/examples/splice-comptime-calls.fl");
+    for callee in [
+        "(if flag {make(true)} else {make(false)})",
+        "(do {inline if flag {make(true)} else {make(false)}})",
+        "(when {flag=>make(true),else=>make(false)})",
+        "(do {inline when {flag=>make(true),else=>make(false)}})",
+        "(flag match {true=>make(true),false=>make(false)})",
+        "(do {inline if flag is do {true=>make(true),false=>make(false)}})",
+    ] {
+        for invocation in ["()", "{}"] {
+            let source = format!(
+                "{prefix}
+            typealias Callback=%{{flag:bool}} comptime fn()->bool;
+            comptime fn make(flag:bool)->Callback {{|| flag}}
+            fn choose(comptime flag:bool)->(bool,bool) {{{callee}{invocation}}}
+            fn entry()->((bool,bool),(bool,bool)) {{(choose(true),choose(false))}}"
+            );
+            let package = execution_support::compile_with_bindings(
+                &source,
+                &Default::default(),
+                Some("Splice"),
+            )
+            .unwrap_or_else(|error| panic!("{callee}: {error}"));
+            assert_eq!(
+                luna::execution::interpret(&package, "entry", 100_000).unwrap(),
+                Value::Tuple(vec![
+                    Value::Tuple(vec![Value::Bool(true), Value::Bool(false)]),
+                    Value::Tuple(vec![Value::Bool(false), Value::Bool(true)])
+                ]),
+                "{callee}"
+            );
+        }
+    }
+}
+
+#[test]
+fn inline_callee_selection_checks_unselected_branches_and_runtime_dependencies() {
+    let prefix = include_str!("../../../development/examples/splice-comptime-calls.fl");
+    for (parameter, callee) in [
+        ("flag:bool", "(do {inline if flag {make()} else {make()}})"),
+        (
+            "flag:bool",
+            "(do {inline when {flag=>make(),else=>make()}})",
+        ),
+        (
+            "flag:bool",
+            "(do {inline if flag is do {true=>make(),false=>make()}})",
+        ),
+        (
+            "comptime flag:bool",
+            "(do {inline if flag {make()} else {invert(7)}})",
+        ),
+    ] {
+        let source = format!("{prefix} comptime fn make()->comptime fn(bool)->bool {{invert}}
+            fn entry({parameter})->(bool,bool) {{{callee}(false)}} fn run_entry()->(bool,bool) {{entry(true)}}");
+        let error =
+            execution_support::compile_with_bindings(&source, &Default::default(), Some("Splice"))
+                .unwrap_err();
+        assert!(!error.contains("parsing failed"), "{error}");
+        assert!(
+            error.contains("runtime")
+                || error.contains("comptime")
+                || error.contains("type mismatch")
+                || error.contains("integer"),
+            "{callee}: {error}"
+        );
+    }
+}
+
+#[test]
+fn open_runtime_callee_factories_preserve_explicit_implicit_inputs() {
+    for selection in [
+        "inline if flag {first(bias)} else {second(bias)}",
+        "inline when {flag=>first(bias),else=>second(bias)}",
+        "inline if flag is do {true=>first(bias),false=>second(bias)}",
+    ] {
+        for invocation in ["(input())", "{...do {(input(),)}}"] {
+            run(&format!("typealias Callback=%{{bias:bool}} fn(bool)->bool;
+                fn first(bias:bool)->Callback {{|value:bool| bias and value}}
+                fn second(bias:bool)->Callback {{|value:bool| bias or value}}
+                fn input()->bool {{false}} fn supply()->bool {{true}}
+                fn choose(comptime flag:bool,implicit bias:bool)->bool {{(do {{{selection}}}){invocation}}}
+                fn run()->bool {{let a=choose(true,.bias=supply());let b=choose(false,.bias=supply());not a and b}}"),
+                Value::Bool(true), &["run","supply","choose","first","input","supply","choose","second","input"]);
+        }
+    }
+}
+
+#[test]
+fn open_callee_factories_forward_unknown_staged_and_implicit_inputs() {
+    for selection in [
+        "factory(flag,.bias=bias)",
+        "inline if flag {factory(flag,.bias=bias)} else {factory(flag,.bias=bias)}",
+        "inline when {flag=>factory(flag,.bias=bias),else=>factory(flag,.bias=bias)}",
+    ] {
+        run(&format!("typealias Callback=%{{bias:bool}} fn(bool)->bool;
+            fn factory(comptime mode:bool,implicit bias:bool)->Callback {{inline if mode {{|value:bool| bias and value}} else {{|value:bool| bias or value}}}}
+            fn input()->bool {{false}} fn supply()->bool {{true}}
+            fn choose(comptime flag:bool,implicit bias:bool)->bool {{(do {{{selection}}})(input())}}
+            fn run()->bool {{let a=choose(true,.bias=supply());let b=choose(false,.bias=supply());not a and b}}"),
+            Value::Bool(true), &["run","supply","choose","factory","input","supply","choose","factory","input"]);
+    }
+}
+
+#[test]
+fn described_open_callee_factories_still_check_stage_and_implicit_supply() {
+    for (parameter, factory_call, diagnostic) in [
+        ("flag:bool", "factory(flag,.bias=bias)", "runtime"),
+        ("comptime flag:bool", "factory(flag)", "implicit"),
+        ("comptime flag:bool", "factory(flag,.bias=7)", "integer"),
+    ] {
+        let source = format!("typealias Callback=%{{bias:bool}} fn(bool)->bool;
+            fn factory(comptime mode:bool,implicit bias:bool)->Callback {{inline if mode {{|value:bool| bias and value}} else {{|value:bool| bias or value}}}}
+            fn choose({parameter},bias:bool)->bool {{(do {{{factory_call}}})(false)}}");
+        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(!error.contains("parsing failed"), "{error}");
+        assert!(
+            error.contains(diagnostic) || error.contains("type mismatch"),
+            "{factory_call}: {error}"
+        );
+    }
+}
+
+#[test]
+fn generic_open_factories_accept_computed_packets_without_staging_the_producer() {
+    for factory_call in [
+        "factory(flag,...packet())",
+        "factory<bool>(flag,...packet())",
+        "factory<bool>(...(flag,),...packet())",
+    ] {
+        run(&format!("typealias Callback<T> = %{{value:T}} fn()->T;
+            fn factory(comptime mode:bool,value:T)->Callback<T> where T {{inline if mode {{|| value}} else {{|| value}}}}
+            fn packet()->(bool,) {{(true,)}}
+            fn choose(comptime flag:bool)->bool {{(do {{{factory_call}}})()}}
+            fn run()->bool {{choose(true)}}"), Value::Bool(true), &["run","choose","packet","factory"]);
+    }
+}
+
+#[test]
+fn explicit_open_factory_packet_types_remain_scoped_to_each_invocation() {
+    for (parameter, binding) in [("value:T", ""), ("...items:(T,)", "let (value,)=items;")] {
+        run(&format!("typealias Callback<T> = %{{value:T}} fn()->T;
+            fn factory(comptime mode:bool,{parameter})->Callback<T> where T {{{binding} inline if mode {{|| value}} else {{|| value}}}}
+            fn packet(value:T)->(T,) where T {{(value,)}}
+            fn choose(comptime flag:bool,value:T)->T where T {{(do {{factory<T>(flag,...packet(value))}})()}}
+            fn run()->bool {{let a=choose<bool>(true,true);let b=choose<.char'builtin>(false,'x');let c=choose<bool>(false,false);a and b=='x' and not c}}"),
+            Value::Bool(true), &["run","choose","packet","factory","choose","packet","factory","choose","packet","factory"]);
+    }
+}
+
+#[test]
+fn explicit_open_factory_packets_reject_conflicting_types_and_stage_inputs() {
+    for (parameter, input, diagnostic) in [
+        (
+            "comptime flag:bool",
+            "factory<.char'builtin>(flag,...packet())",
+            "type",
+        ),
+        ("flag:bool", "factory<bool>(flag,...packet())", "runtime"),
+    ] {
+        let source = format!("typealias Callback<T> = %{{value:T}} fn()->T;
+            fn factory(comptime mode:bool,value:T)->Callback<T> where T {{inline if mode {{|| value}} else {{|| value}}}}
+            fn packet()->(bool,) {{(true,)}}
+            fn choose({parameter})->bool {{(do {{{input}}})()}}");
+        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(!error.contains("parsing failed"), "{error}");
+        assert!(error.contains(diagnostic), "{input}: {error}");
+    }
+}
+
+#[test]
+fn open_callee_factories_keep_effect_handling_before_callback_inputs() {
+    let source = "^attrs.effects.direct_passing effect setting()->bool;
+        fn positive(value:bool)->bool {value} fn negative(value:bool)->bool {not value}
+        typealias Action=fn(bool)->bool; fn factory(comptime flag:bool)->#setting Action {let observed=setting()#;inline if flag {positive} else {negative}}
+        fn handler()->bool {true} fn input()->bool {true}
+        fn choose(comptime flag:bool)->bool {(do {factory(flag)# {setting()=>handler(),}})(input())}
+        fn run()->bool {choose(true) and not choose(false)}";
+    run(
+        source,
+        Value::Bool(true),
+        &[
+            "run", "choose", "handler", "factory", "input", "positive", "choose", "handler",
+            "factory", "input", "negative",
+        ],
+    );
+    for modifier in ["", "inline "] {
+        run(
+            &source.replace("^attrs.effects.direct_passing ", modifier),
+            Value::Bool(true),
+            &[
+                "run", "choose", "factory", "handler", "input", "positive", "choose", "factory",
+                "handler", "input", "negative",
+            ],
+        );
+    }
+}
+
+#[test]
+fn open_effectful_calls_deliver_plain_values_inside_the_declared_row() {
+    run("effect read()->bool;
+        fn leaf(comptime flag:bool)->#read bool {inline if flag {read()#} else {false}}
+        fn forward(comptime flag:bool)->#read bool {let value=leaf(flag);if value {true} else {false}}
+        fn handler()->bool {true} fn run()->bool {forward(true)# {read()=>handler(),}}",
+        Value::Bool(true), &["run","forward","leaf","handler"]);
+}
+
+#[test]
+fn open_effect_rows_do_not_authorize_other_requests_or_staged_selectors() {
+    for body in [
+        "inline if flag {write()#} else {true}",
+        "inline if (read()#) {true} else {false}",
+    ] {
+        let source = format!(
+            "effect read()->bool;effect write()->bool;
+            fn leaf(comptime flag:bool)->#read bool {{{body}}}"
+        );
+        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(!error.contains("parsing failed"), "{error}");
+        assert!(
+            error.contains("effect") || error.contains("comptime"),
+            "{body}: {error}"
+        );
+    }
+    let error=compile_with_protocols("effect read()->bool;
+        fn leaf(comptime flag:bool,.value:bool=read()#)->#read bool {inline if flag {value} else {false}}",
+        &Default::default()).unwrap_err();
+    assert!(error.contains("effect"), "{error}");
+}
+
+#[test]
+fn generic_open_effect_calls_infer_payloads_inside_a_known_row() {
+    for call in [
+        "leaf(flag,true)",
+        "leaf<bool>(flag,true)",
+        "leaf(flag,...do {(true,)})",
+    ] {
+        run(&format!("effect obtain()->T where T;
+            fn leaf(comptime flag:bool,value:T)->#obtain<T> T where T {{inline if flag {{obtain<T>()#}} else {{value}}}}
+            fn forward(comptime flag:bool)->#obtain<bool> bool {{{call}}}
+            fn handler()->bool {{true}} fn run()->bool {{forward(true)# {{obtain<bool>()=>handler(),}}}}"),
+            Value::Bool(true), &["run","forward","leaf","handler"]);
+    }
+}
+
+#[test]
+fn open_effect_context_can_supply_the_only_generic_payload_evidence() {
+    for (declaration, call) in [
+        (
+            "fn leaf(comptime flag:bool)->#obtain<T> T where T {inline if flag {obtain<T>()#} else {obtain<T>()#}}",
+            "leaf(flag)",
+        ),
+        ("fn leaf()->#obtain<T> T where T {obtain<T>()#}", "leaf()"),
+    ] {
+        run(&format!("effect obtain()->T where T;{declaration}
+            fn forward(comptime flag:bool)->#obtain<bool> bool {{inline if flag {{{call}}} else {{{call}}}}}
+            fn handler()->bool {{true}} fn run()->bool {{forward(true)# {{obtain<bool>()=>handler(),}}}}"),
+            Value::Bool(true), &["run","forward","leaf","handler"]);
+    }
+}
+
+#[test]
+fn generic_open_effect_inference_retains_operation_identity_and_type_arguments() {
+    for row in ["obtain<.char'builtin>", "other<bool>", "[]"] {
+        for call in [
+            "leaf(flag,true)",
+            "leaf(flag,...do {(true,)})",
+            "leaf<bool>(flag,true)",
+        ] {
+            let source=format!("effect obtain()->T where T;effect other()->T where T;
+                fn leaf(comptime flag:bool,value:T)->#obtain<T> bool where T {{let ignored=obtain<T>()#;inline if flag {{true}} else {{false}}}}
+                fn forward(comptime flag:bool)->#{row} bool {{{call}}}");
+            let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+            assert!(!error.contains("parsing failed"), "{error}");
+            assert!(
+                error.contains("effect")
+                    || error.contains("Row")
+                    || error.contains("Operation")
+                    || (row == "[]" && error.contains("generic call inference failed")),
+                "{row}/{call}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn generic_open_calls_do_not_erase_explicit_computation_targets() {
+    for target in ["other<bool>", "obtain<.char'builtin>"] {
+        let source=format!("effect obtain()->T where T;effect other()->T where T;
+            fn leaf(comptime flag:bool,value:T)->#obtain<T> T where T {{inline if flag {{obtain<T>()#}} else {{value}}}}
+            fn forward(comptime flag:bool)->#obtain<bool> bool {{let pending:#{target} bool=leaf(flag,true);true}}");
+        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(!error.contains("parsing failed"), "{error}");
+        assert!(
+            error.contains("inference") || error.contains("type mismatch"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn open_effect_results_keep_contracts_across_returns_and_handler_completion() {
+    let source = "effect poll()->bool;
+        fn keep(comptime mode:bool,flag:bool)->result:#poll bool where ensures result==flag'old {
+            poll()#;inline if mode {return flag;} else {flag}
+        }
+        fn forward(comptime mode:bool)->result:bool where ensures result {
+            keep(mode,true)# {poll()=>handler(),}
+        }
+        fn handler()->bool {false} fn run()->bool {forward(true) and forward(false)}";
+    run(
+        source,
+        Value::Bool(true),
+        &[
+            "run", "forward", "keep", "handler", "forward", "keep", "handler",
+        ],
+    );
+    let early_exit = source.replace("poll()=>handler(),", "poll()=>{return false;},");
+    let error = compile_with_protocols(&early_exit, &Default::default()).unwrap_err();
+    assert!(
+        error.contains("postcondition") || error.contains("ensures"),
+        "{error}"
+    );
+    let error = compile_with_protocols(
+        &source.replace("ensures result==flag'old", "ensures result!=flag'old"),
+        &Default::default(),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("postcondition") || error.contains("ensures"),
+        "{error}"
     );
 }

@@ -9,11 +9,77 @@ pub struct Newtype {
     pub declaration: DeclarationId,
     pub name: String,
     pub type_parameters: Vec<DeclarationId>,
+    /// Empty retains the all-Type telescope used by existing declarations.
+    pub parameter_types: Vec<Term>,
+    /// Lexical captures occupy the identity suffix but precede own parameters semantically.
+    pub capture_count: usize,
     pub requirements: Vec<TypePredicate>,
     pub capabilities: Vec<TraitRequirement>,
     pub representation: Term,
 }
 impl Newtype {
+    pub fn parameter_binders(&self) -> Result<Vec<crate::DeclarationParameter>, TypeError> {
+        if self.capture_count > self.type_parameters.len() {
+            return Err(TypeError::ArgumentCount {
+                expected: self.type_parameters.len(),
+                actual: self.capture_count,
+            });
+        }
+        crate::nominal_parameters::binders(&self.type_parameters, &self.parameter_types)
+    }
+
+    pub fn validate_completed_arguments(
+        &self,
+        arguments: &[Term],
+        fuel: &mut usize,
+    ) -> Result<(), String> {
+        let own = self
+            .type_parameters
+            .len()
+            .checked_sub(self.capture_count)
+            .ok_or("invalid newtype capture count")?;
+        if self.capture_count == 0 {
+            return crate::nominal_parameters::validate_completed(
+                &self.type_parameters,
+                &self.parameter_types,
+                arguments,
+                fuel,
+            );
+        }
+        if arguments.len() != self.type_parameters.len()
+            || (!self.parameter_types.is_empty() && self.parameter_types.len() != arguments.len())
+        {
+            return Err("newtype argument/domain count mismatch".into());
+        }
+        *fuel = fuel
+            .checked_sub(arguments.len())
+            .ok_or("newtype capture ordering budget exhausted")?;
+        for domain in &self.parameter_types {
+            crate::type_computations::charge_term(domain, fuel).map_err(|e| e.to_string())?;
+        }
+        for argument in arguments {
+            crate::type_computations::charge_term(argument, fuel).map_err(|e| e.to_string())?;
+        }
+        let order = (own..arguments.len()).chain(0..own).collect::<Vec<_>>();
+        let parameters = order
+            .iter()
+            .map(|&i| self.type_parameters[i])
+            .collect::<Vec<_>>();
+        let domains = if self.parameter_types.is_empty() {
+            vec![]
+        } else {
+            order
+                .iter()
+                .map(|&i| self.parameter_types[i].clone())
+                .collect()
+        };
+        let arguments = order
+            .iter()
+            .map(|&i| arguments[i].clone())
+            .collect::<Vec<_>>();
+        crate::nominal_parameters::validate_completed(&parameters, &domains, &arguments, fuel)
+    }
+
     pub fn instantiate_representation(&self, arguments: &[Term]) -> Result<Term, TypeError> {
         self.instantiate_representation_in_scope(arguments, &[])
     }
@@ -29,8 +95,11 @@ impl Newtype {
                 actual,
             });
         }
-        self.representation
-            .instantiate_types_in_scope(&self.type_parameters, arguments, frames)
+        self.representation.instantiate_parameters_in_scope(
+            &self.parameter_binders()?,
+            arguments,
+            frames,
+        )
     }
 }
 impl fmt::Display for Newtype {
@@ -40,6 +109,10 @@ impl fmt::Display for Newtype {
         f.write_str(") (type-parameters")?;
         for parameter in &self.type_parameters {
             write!(f, " {parameter}")?;
+        }
+        write!(f, ") (captures {}) (parameter-types", self.capture_count)?;
+        for domain in &self.parameter_types {
+            write!(f, " {domain}")?;
         }
         f.write_str(") (capabilities")?;
         for capability in &self.capabilities {
@@ -73,17 +146,92 @@ pub fn validate(package: &crate::program::Package) -> Result<(), &'static str> {
         if !identities.insert(definition.declaration) {
             return Err("duplicate nominal newtype identity");
         }
-        let arguments = definition
-            .type_parameters
+        let binders = definition
+            .parameter_binders()
+            .map_err(|_| "invalid newtype parameter domains")?;
+        let mut parameters = std::collections::BTreeMap::new();
+        let own = binders.len() - definition.capture_count;
+        for index in (own..binders.len()).chain(0..own) {
+            let parameter = &binders[index];
+            if let Some(domain) = definition.parameter_types.get(index) {
+                validate_contract_capture(domain, &parameters, &mut fuel)?;
+            }
+            parameters.insert(parameter.declaration, parameter.sort);
+        }
+        let arguments = binders
             .iter()
-            .map(|&declaration| Term::Rigid {
-                declaration,
-                sort: Sort::Type,
+            .map(|parameter| Term::Rigid {
+                declaration: parameter.declaration,
+                sort: parameter.sort,
             })
             .collect::<Vec<_>>();
         definition
             .representation_budgeted(&arguments, &[], &mut fuel)
             .map_err(|_| "invalid or excessively large newtype representation or telescope")?;
+        validate_contract_capture(&definition.representation, &parameters, &mut fuel).map_err(
+            |reason| {
+                if reason == "newtype contract has an undeclared captured parameter" {
+                    "newtype representation has an undeclared captured parameter"
+                } else {
+                    reason
+                }
+            },
+        )?;
+        // Formation premises are part of the same closed declaration as its
+        // representation. Even a constant representation may capture types
+        // solely through a capability or requirement.
+        for capability in &definition.capabilities {
+            validate_contract_capture(&capability.subject, &parameters, &mut fuel)?;
+            for argument in &capability.interface_arguments {
+                validate_contract_capture(argument, &parameters, &mut fuel)?;
+            }
+        }
+        spend(&mut fuel, definition.requirements.len())
+            .map_err(|_| "newtype metadata validation budget exhausted")?;
+        let mut predicates: Vec<_> = definition.requirements.iter().collect();
+        while let Some(predicate) = predicates.pop() {
+            match predicate {
+                TypePredicate::Bool(_) => {}
+                TypePredicate::Equal(left, right) => {
+                    validate_contract_capture(left, &parameters, &mut fuel)?;
+                    validate_contract_capture(right, &parameters, &mut fuel)?;
+                }
+                TypePredicate::Trait(capability) => {
+                    validate_contract_capture(&capability.subject, &parameters, &mut fuel)?;
+                    for argument in &capability.interface_arguments {
+                        validate_contract_capture(argument, &parameters, &mut fuel)?;
+                    }
+                }
+                TypePredicate::Not(inner) => {
+                    spend(&mut fuel, 1)
+                        .map_err(|_| "newtype metadata validation budget exhausted")?;
+                    predicates.push(inner);
+                }
+                TypePredicate::And(parts) | TypePredicate::Or(parts) => {
+                    spend(&mut fuel, parts.len())
+                        .map_err(|_| "newtype metadata validation budget exhausted")?;
+                    predicates.extend(parts);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_contract_capture(
+    term: &Term,
+    parameters: &std::collections::BTreeMap<DeclarationId, Sort>,
+    fuel: &mut usize,
+) -> Result<(), &'static str> {
+    charge(term, fuel).map_err(|_| "newtype metadata validation budget exhausted")?;
+    let free = term
+        .rigid_parameters()
+        .map_err(|_| "invalid newtype contract parameters")?;
+    if free
+        .into_iter()
+        .any(|(parameter, sort)| parameters.get(&parameter) != Some(&sort))
+    {
+        return Err("newtype contract has an undeclared captured parameter");
     }
     Ok(())
 }
@@ -188,6 +336,9 @@ impl Newtype {
         spend(fuel, frames.len())?;
         for frame in frames {
             spend(fuel, frame.len())?;
+        }
+        for domain in &self.parameter_types {
+            charge(domain, fuel)?;
         }
         let before = *fuel;
         charge(&self.representation, fuel)?;

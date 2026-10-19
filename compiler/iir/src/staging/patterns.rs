@@ -52,12 +52,13 @@ pub(super) fn bindings(
     Ok(true)
 }
 
-fn copy_locals(
-    heads: &[nir::normal_forms::Head],
+fn copy_locals<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     locals: &BTreeMap<LocalId, Expr>,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<BTreeMap<LocalId, Expr>, String> {
+    let heads = heads.into();
     for value in locals.values() {
         constant(heads, value, fuel, depth)?;
     }
@@ -65,14 +66,15 @@ fn copy_locals(
 }
 
 #[inline(never)]
-fn matches(
-    heads: &[nir::normal_forms::Head],
+fn matches<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     pattern: &Pattern,
     value: &Expr,
     locals: &mut BTreeMap<LocalId, Expr>,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<bool, String> {
+    let heads = heads.into();
     charge(fuel, 1)?;
     if depth >= 128 {
         return Err("staged pattern depth exceeded".into());
@@ -269,12 +271,13 @@ fn matches(
     Ok(true)
 }
 
-pub(super) fn fold(
-    heads: &[nir::normal_forms::Head],
+pub(super) fn fold<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     expr: &Expr,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<Expr, String> {
+    let heads = heads.into();
     if depth >= 128 {
         return Err("staged match depth exceeded".into());
     }

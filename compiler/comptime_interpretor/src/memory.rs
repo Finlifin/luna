@@ -340,6 +340,10 @@ impl fmt::Display for PointerValue {
     }
 }
 impl PointerValue {
+    /// Borrow a live target without cloning its payload or granting write access.
+    pub(crate) fn inspect<T>(&self, inspect: impl FnOnce(&Value) -> T) -> Result<T, ErrorKind> {
+        self.with_target(|value| Ok(inspect(value)))
+    }
     fn with_target<T>(
         &self,
         operation: impl FnOnce(&mut Value) -> Result<T, ErrorKind>,
@@ -576,9 +580,333 @@ impl PointerValue {
     }
 }
 
+/// Invocation-local rollback of owned cells. This is not a language constant,
+/// a deep copy, or a rollback of external effects. Dropping it commits changes;
+/// restoration is explicit and retains every original cell identity.
+pub struct OwnedGraphCheckpoint {
+    entries: Vec<(Storage, Value, Responsibility)>,
+}
+impl fmt::Display for OwnedGraphCheckpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(owned-graph-checkpoint (cells {}))", self.entries.len())
+    }
+}
+impl OwnedGraphCheckpoint {
+    /// Acquire every cell before writing any of them. A conflicting borrow
+    /// rejects restoration without partially restoring the graph. The fixed
+    /// restoration work was prepaid when creating this checkpoint.
+    pub fn restore(self) -> Result<(), ErrorKind> {
+        let (owners, contents): (Vec<_>, Vec<_>) = self
+            .entries
+            .into_iter()
+            .map(|(owner, value, responsibility)| (owner, (value, responsibility)))
+            .unzip();
+        let mut guards = Vec::with_capacity(owners.len());
+        for owner in &owners {
+            let responsibility = owner.1.try_lock().map_err(|_| ErrorKind::InvalidPointer)?;
+            let value = owner.0.try_lock().map_err(|_| ErrorKind::InvalidPointer)?;
+            guards.push((value, responsibility));
+        }
+        for ((value, responsibility), (saved_value, saved_responsibility)) in
+            guards.iter_mut().zip(contents)
+        {
+            **value = saved_value;
+            **responsibility = saved_responsibility;
+        }
+        Ok(())
+    }
+}
+
+impl super::Interpreter<'_> {
+    /// Read an invocation-local representation without duplicating nested
+    /// storage or closure identities. This is not a language-level Copy or an
+    /// exportable constant; callers must preserve the owners' lifetimes.
+    pub fn read_owned_value(&mut self, storage: &Storage) -> Result<Value, super::Error> {
+        let contents = storage
+            .contents_for_copy(&mut self.budget.steps, self.budget.depth)
+            .map_err(|kind| self.failure(kind, None))?;
+        self.checkpoint_representation(
+            contents.value(),
+            nir::program::SourceRange { start: 0, end: 0 },
+        )
+    }
+
+    /// Copy a live owner's current value under the invocation budget. Pointer
+    /// targets remain borrowed; copying does not retain or snapshot their owners.
+    pub fn copy_owned_value(&mut self, storage: &Storage) -> Result<Value, super::Error> {
+        let contents = storage
+            .contents_for_copy(&mut self.budget.steps, self.budget.depth)
+            .map_err(|kind| self.failure(kind, None))?;
+        self.copy_representation(
+            contents.value(),
+            nir::program::SourceRange { start: 0, end: 0 },
+            0,
+        )
+    }
+
+    /// Capture cells reachable through ownership edges. Weak pointers remain
+    /// leaves: callers must explicitly supply their owners among the roots.
+    /// Scope and storage are local to this invocation, never serialized to IR.
+    pub fn checkpoint_owned_graph(
+        &mut self,
+        roots: &[Value],
+    ) -> Result<OwnedGraphCheckpoint, super::Error> {
+        let mut cells = BTreeMap::new();
+        for root in roots {
+            root.visit_owned_graph(&mut self.budget.steps, &mut |value, _| {
+                if let Value::Storage(storage) = value {
+                    cells
+                        .entry(Arc::as_ptr(&storage.0) as usize)
+                        .or_insert_with(|| storage.clone());
+                }
+                Ok(())
+            })
+            .map_err(|kind| self.failure(kind, None))?;
+        }
+        let mut entries = Vec::new();
+        for storage in cells.into_values() {
+            // Reserve restoration work before storing each snapshot. Even an
+            // exhausted invocation can subsequently restore its owned state.
+            self.charge_preparation(2)?;
+            let responsibility = storage
+                .1
+                .try_lock()
+                .map_err(|_| self.failure(ErrorKind::InvalidPointer, None))?;
+            let mut pending = vec![(&*responsibility, 0usize)];
+            while let Some((node, depth)) = pending.pop() {
+                self.tick(None)?;
+                if depth >= 128 {
+                    return Err(self.failure(ErrorKind::DepthExhausted, None));
+                }
+                self.charge_preparation(node.children.len())?;
+                pending.extend(node.children.values().map(|child| (child, depth + 1)));
+            }
+            let value = storage
+                .0
+                .try_lock()
+                .map_err(|_| self.failure(ErrorKind::InvalidPointer, None))?;
+            let saved = self.checkpoint_representation(
+                &value,
+                nir::program::SourceRange { start: 0, end: 0 },
+            )?;
+            entries.push((storage.clone(), saved, responsibility.clone()));
+        }
+        Ok(OwnedGraphCheckpoint { entries })
+    }
+}
+
 #[cfg(test)]
 mod record_storage_tests {
     use super::*;
+    #[test]
+    fn local_reads_meter_raw_and_owned_aggregates_without_cloning_cell_identity() {
+        let package = nir::program::Package::default();
+        let id = nir::program::LocalId { owner: 0, index: 0 };
+        let location = Some(nir::program::SourceRange { start: 7, end: 12 });
+        for owned in [false, true] {
+            let child = Storage::new(Value::Bool(false));
+            let value = Value::Tuple(vec![Value::Storage(child.clone()), Value::Bool(true)]);
+            let value = if owned {
+                Value::Storage(Storage::new(value))
+            } else {
+                value
+            };
+            let environment = BTreeMap::from([(id, value)]);
+            let mut vm =
+                super::super::Interpreter::for_comptime(&package, Default::default()).unwrap();
+            vm.budget.steps = 1;
+            assert_eq!(
+                vm.local_value(&environment, id, location).unwrap_err().kind,
+                ErrorKind::StepsExhausted
+            );
+            vm.budget.steps = 100;
+            let Value::Tuple(fields) = vm.local_value(&environment, id, location).unwrap() else {
+                panic!()
+            };
+            assert_eq!(fields[0], Value::Storage(child.clone()));
+            child
+                .pointer(boolean(), vec![])
+                .write(Value::Bool(true), |_| true)
+                .unwrap();
+            let Value::Storage(alias) = &fields[0] else {
+                panic!()
+            };
+            assert_eq!(alias.read().unwrap(), Value::Bool(true));
+        }
+    }
+
+    #[test]
+    fn owned_value_reads_preserve_shared_cells_and_bound_work() {
+        let package = nir::program::Package::default();
+        let mut vm = super::super::Interpreter::for_comptime(&package, Default::default()).unwrap();
+        let child = Storage::new(Value::Bool(false));
+        let owner = Storage::new(Value::Tuple(vec![
+            Value::Storage(child.clone()),
+            Value::Storage(child.clone()),
+        ]));
+        let Value::Tuple(values) = vm.read_owned_value(&owner).unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            values,
+            vec![Value::Storage(child.clone()), Value::Storage(child.clone())]
+        );
+        child
+            .pointer(boolean(), vec![])
+            .write(Value::Bool(true), |_| true)
+            .unwrap();
+        let Value::Storage(read_child) = &values[0] else {
+            panic!()
+        };
+        assert_eq!(read_child.read().unwrap(), Value::Bool(true));
+        let guard = owner.0.lock().unwrap();
+        assert_eq!(
+            vm.read_owned_value(&owner).unwrap_err().kind,
+            ErrorKind::InvalidPointer
+        );
+        drop(guard);
+        vm.budget.steps = 2;
+        assert_eq!(
+            vm.read_owned_value(&owner).unwrap_err().kind,
+            ErrorKind::StepsExhausted
+        );
+        assert_eq!(child.read().unwrap(), Value::Bool(true));
+        vm.budget.steps = 100;
+        owner
+            .pointer(Term::Tuple(vec![boolean(), boolean()]), vec![])
+            .transfer()
+            .unwrap();
+        assert_eq!(
+            vm.read_owned_value(&owner).unwrap_err().kind,
+            ErrorKind::InvalidPointer
+        );
+    }
+
+    #[test]
+    fn owned_value_copy_preserves_borrows_and_checks_budget_and_responsibility() {
+        let package = nir::program::Package::default();
+        let mut vm = super::super::Interpreter::for_comptime(&package, Default::default()).unwrap();
+        let target = Storage::new(Value::Bool(false));
+        let pointer = target.pointer(boolean(), vec![]);
+        let owner = Storage::new(Value::Tuple(vec![
+            Value::Bool(false),
+            Value::Pointer(pointer.clone()),
+        ]));
+        let Value::Tuple(saved) = vm.copy_owned_value(&owner).unwrap() else {
+            panic!()
+        };
+        *owner.0.lock().unwrap() = Value::Bool(true);
+        pointer.write(Value::Bool(true), |_| true).unwrap();
+        assert_eq!(saved[0], Value::Bool(false));
+        let Value::Pointer(saved_pointer) = &saved[1] else {
+            panic!()
+        };
+        assert_eq!(saved_pointer.read().unwrap(), Value::Bool(true));
+        drop(target);
+        assert_eq!(saved_pointer.read(), Err(ErrorKind::ExpiredPointer));
+
+        vm.budget.steps = 0;
+        assert_eq!(
+            vm.copy_owned_value(&owner).unwrap_err().kind,
+            ErrorKind::StepsExhausted
+        );
+        assert_eq!(owner.read().unwrap(), Value::Bool(true));
+        vm.budget.steps = 100;
+        owner.pointer(boolean(), vec![]).transfer().unwrap();
+        assert_eq!(
+            vm.copy_owned_value(&owner).unwrap_err().kind,
+            ErrorKind::InvalidPointer
+        );
+    }
+
+    #[test]
+    fn owned_graph_checkpoint_restores_aliases_payload_and_responsibility() {
+        let package = nir::program::Package::default();
+        let mut vm = super::super::Interpreter::for_comptime(&package, Default::default()).unwrap();
+        let child = Storage::new(Value::Bool(false));
+        let owner = Storage::new(Value::Tuple(vec![
+            Value::Storage(child.clone()),
+            Value::Storage(child.clone()),
+        ]));
+        let pointer = child.pointer(boolean(), vec![]);
+        let ownership = owner.pointer(Term::Tuple(vec![boolean(), boolean()]), vec![]);
+        let checkpoint = vm
+            .checkpoint_owned_graph(&[Value::Storage(owner.clone()), Value::Storage(child.clone())])
+            .unwrap();
+        assert_eq!(checkpoint.to_string(), "(owned-graph-checkpoint (cells 2))");
+        pointer.write(Value::Bool(true), |_| true).unwrap();
+        ownership.transfer().unwrap();
+        assert!(!ownership.is_constructed().unwrap());
+        // Recovery does not need fresh fuel after a failed invocation.
+        vm.budget.steps = 0;
+        checkpoint.restore().unwrap();
+        assert!(ownership.is_constructed().unwrap());
+        assert_eq!(pointer.read().unwrap(), Value::Bool(false));
+        let Value::Tuple(fields) = owner.read().unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            fields,
+            vec![Value::Storage(child.clone()), Value::Storage(child)]
+        );
+    }
+
+    #[test]
+    fn owned_graph_checkpoint_does_not_follow_borrowed_owners_or_partially_restore() {
+        let package = nir::program::Package::default();
+        let mut vm = super::super::Interpreter::for_comptime(&package, Default::default()).unwrap();
+        let foreign = Storage::new(Value::Bool(false));
+        let pointer = foreign.pointer(boolean(), vec![]);
+        let checkpoint = vm
+            .checkpoint_owned_graph(&[Value::Pointer(pointer.clone())])
+            .unwrap();
+        assert_eq!(checkpoint.to_string(), "(owned-graph-checkpoint (cells 0))");
+        pointer.write(Value::Bool(true), |_| true).unwrap();
+        checkpoint.restore().unwrap();
+        assert_eq!(foreign.read().unwrap(), Value::Bool(true));
+
+        let a = Storage::new(Value::Bool(false));
+        let b = Storage::new(Value::Bool(false));
+        let checkpoint = vm
+            .checkpoint_owned_graph(&[Value::Storage(a.clone()), Value::Storage(b.clone())])
+            .unwrap();
+        a.pointer(boolean(), vec![])
+            .write(Value::Bool(true), |_| true)
+            .unwrap();
+        b.pointer(boolean(), vec![])
+            .write(Value::Bool(true), |_| true)
+            .unwrap();
+        let last = checkpoint.entries.last().unwrap().0.clone();
+        let guard = last.0.lock().unwrap();
+        assert_eq!(checkpoint.restore(), Err(ErrorKind::InvalidPointer));
+        drop(guard);
+        assert_eq!(a.read().unwrap(), Value::Bool(true));
+        assert_eq!(b.read().unwrap(), Value::Bool(true));
+    }
+
+    #[test]
+    fn failed_checkpoint_budget_does_not_mutate_owned_data() {
+        let package = nir::program::Package::default();
+        let mut vm = super::super::Interpreter::for_comptime(
+            &package,
+            super::super::Budget {
+                steps: 3,
+                depth: 128,
+            },
+        )
+        .unwrap();
+        let owner = Storage::new(Value::Tuple(vec![Value::Bool(false); 32]));
+        let before = owner.read().unwrap();
+        assert!(matches!(
+            vm.checkpoint_owned_graph(&[Value::Storage(owner.clone())]),
+            Err(super::super::Error {
+                kind: ErrorKind::StepsExhausted,
+                ..
+            })
+        ));
+        assert_eq!(owner.read().unwrap(), before);
+    }
+
     fn boolean() -> Term {
         Term::Primitive(nir::Primitive::Bool)
     }

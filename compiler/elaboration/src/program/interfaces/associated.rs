@@ -198,7 +198,12 @@ impl Checker<'_, '_> {
             .find(|i| i.declaration == selected)
             .unwrap();
         let mut value = value
-            .instantiate_types(&implementation.type_parameters, &evidence.type_arguments)
+            .instantiate_parameters(
+                &implementation
+                    .parameter_binders()
+                    .map_err(|e| error(span, e.to_string()))?,
+                &evidence.type_arguments,
+            )
             .map_err(|e| error(span, e.to_string()))?;
         value.source = source(span);
         Ok(Some(value))
@@ -208,7 +213,8 @@ impl Checker<'_, '_> {
 impl Checker<'_, '_> {
     pub(in crate::program) fn associated_owner(&self, member: DeclarationId) -> Option<OwnerId> {
         self.package.owners().find_map(|(owner, _)| {
-            (declaration(self.package, &self.package_identities, owner) == member).then_some(owner)
+            (matches_declaration(self.package, &self.package_identities, owner, member))
+                .then_some(owner)
         })
     }
 

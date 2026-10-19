@@ -29,7 +29,7 @@ pub fn protocol(traits: &[Trait], id: DeclarationId) -> Result<&MethodContract, 
     let [method] = methods.as_slice() else {
         return Err("LiteralInto requires one literal_into method".into());
     };
-    let Term::Function { parameters, result } = method.signature.callable_signature() else {
+    let Ok(Term::Function { parameters, result }) = method.signature.callable_signature() else {
         return Err("literal_into must be callable".into());
     };
     let expected = Parameter {

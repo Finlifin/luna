@@ -401,11 +401,11 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<Option<Term>, Error> {
         use crate::ptc::{Budget, Formula, Outcome};
-        let scope = self.call_inference_scope();
+        let scope = self.call_inference_domains();
         let frames = if scope.is_empty() {
             vec![]
         } else {
-            vec![scope.iter().map(|p| p.sort).collect()]
+            vec![scope.iter().map(|p| p.0).collect()]
         };
         let mut choices = Vec::new();
         for capability in crate::capabilities::capability_sources_in_scope(
@@ -510,7 +510,7 @@ impl Checker<'_, '_> {
             // Fresh candidate inference cannot leak substitutions into another
             // implementation. An unresolved alternative prevents guessing.
             let candidate = scheme
-                .infer_scoped_types(
+                .infer_sparse_scoped_types(
                     &[Some(subject.clone())],
                     None,
                     &self.context,

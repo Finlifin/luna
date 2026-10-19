@@ -80,7 +80,7 @@ impl Package {
                 if !members.insert((method.declaration, &method.type_arguments)) {
                     return Err("duplicate IIR interface member".into());
                 }
-                let Term::Function { parameters, .. } = method.signature.callable_signature()
+                let Ok(Term::Function { parameters, .. }) = method.signature.callable_signature()
                 else {
                     return Err("IIR interface member is not callable".into());
                 };

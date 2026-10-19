@@ -19,6 +19,9 @@ pub(crate) struct Interval {
 enum Value {
     Subject,
     Constant(Integer),
+    // The truth region when this immutable local was initialized. Subsequent
+    // reads intersect it with their own branch domain, not the whole domain.
+    Predicate(Vec<Interval>),
 }
 #[derive(Clone)]
 struct State {
@@ -84,11 +87,14 @@ fn value(expr: &Expr, state: &State, steps: &mut usize, depth: usize) -> Result<
     if depth > 128 {
         return Err(());
     }
+    if expr.ty == nir::Term::Primitive(Primitive::Bool) {
+        return Ok(condition(expr, state, steps, depth + 1)?.map(Value::Predicate));
+    }
     match &expr.kind {
         K::Literal(v) => Ok(literal(v, steps)?.map(Value::Constant)),
         K::Local(id) => {
-            if let Some(Value::Constant(v)) = state.bindings.get(id) {
-                spend(steps, integer_work(v))?;
+            if let Some(v) = state.bindings.get(id) {
+                charge_value(v, steps)?;
             }
             Ok(state.bindings.get(id).cloned())
         }
@@ -150,15 +156,25 @@ fn copy_state(state: &State, steps: &mut usize) -> Result<State, ()> {
         )?;
     }
     for binding in state.bindings.values() {
-        spend(
-            steps,
-            match binding {
-                Value::Subject => 1,
-                Value::Constant(v) => integer_work(v),
-            },
-        )?;
+        charge_value(binding, steps)?;
     }
     Ok(state.clone())
+}
+fn charge_value(value: &Value, steps: &mut usize) -> Result<(), ()> {
+    match value {
+        Value::Subject => spend(steps, 1),
+        Value::Constant(v) => spend(steps, integer_work(v)),
+        Value::Predicate(ranges) => {
+            spend(steps, 1)?;
+            for range in ranges {
+                spend(
+                    steps,
+                    edge_work(&range.start).saturating_add(edge_work(&range.end)),
+                )?;
+            }
+            Ok(())
+        }
+    }
 }
 // Every recursive result is relative to the current input region. This is
 // essential when a nested negation appears in only one conditional branch.
@@ -187,6 +203,13 @@ fn condition_inner(
         return Err(());
     }
     let (left, right, op) = match &expr.kind {
+        K::Local(id) => {
+            let Some(value @ Value::Predicate(ranges)) = state.bindings.get(id) else {
+                return Ok(None);
+            };
+            charge_value(value, steps)?;
+            return Ok(Some(ranges.clone()));
+        }
         K::ScalarLessEqual(left, right) => (left, right, IntegerOp::LessEqual),
         K::ScalarLess(left, right) => (left, right, IntegerOp::Less),
         K::ScalarGreater(left, right) => (left, right, IntegerOp::Greater),
@@ -194,9 +217,9 @@ fn condition_inner(
         K::ScalarEqual(left, right) => (left, right, IntegerOp::Equal),
         K::IntegerBinary { op, left, right } if op.is_comparison() => (left, right, *op),
         K::Match { value: input, arms } => {
-            if !matches!(value(input, state, steps, depth + 1)?, Some(Value::Subject)) {
+            let Some(subject) = value(input, state, steps, depth + 1)? else {
                 return Ok(None);
-            }
+            };
             let mut remaining = copy_state(state, steps)?;
             let mut truth = Vec::new();
             for arm in arms {
@@ -207,8 +230,9 @@ fn condition_inner(
                     return Ok(None);
                 }
                 let mut complete = true;
-                let states = pattern(
+                let states = pattern_subject(
                     &arm.pattern,
+                    &subject,
                     copy_state(&remaining, steps)?,
                     steps,
                     depth + 1,
@@ -304,6 +328,19 @@ fn condition_inner(
     let left = value(left, state, steps, depth + 1)?;
     let right = value(right, state, steps, depth + 1)?;
     let (point, op) = match (left, right) {
+        (Some(Value::Predicate(a)), Some(Value::Predicate(b)))
+            if matches!(op, IntegerOp::Equal | IntegerOp::NotEqual) =>
+        {
+            let mut equal = intersect(&a, &b, steps)?;
+            let both_false = intersect(&complement(&a, steps)?, &complement(&b, steps)?, steps)?;
+            spend(steps, both_false.len())?;
+            equal.extend(both_false);
+            return Ok(Some(if op == IntegerOp::NotEqual {
+                complement(&equal, steps)?
+            } else {
+                equal
+            }));
+        }
         (Some(Value::Subject), Some(Value::Constant(v))) => (v, op),
         (Some(Value::Constant(v)), Some(Value::Subject)) => (
             v,
@@ -372,6 +409,16 @@ fn condition_inner(
 
 fn pattern(
     pat: &Pattern,
+    state: State,
+    steps: &mut usize,
+    depth: usize,
+    complete: &mut bool,
+) -> Result<Vec<State>, ()> {
+    pattern_subject(pat, &Value::Subject, state, steps, depth, complete)
+}
+fn pattern_subject(
+    pat: &Pattern,
+    subject: &Value,
     mut state: State,
     steps: &mut usize,
     depth: usize,
@@ -384,10 +431,11 @@ fn pattern(
     match pat {
         Pattern::Wild => Ok(vec![state]),
         Pattern::Binding { binding, inner } => {
-            let mut states = pattern(inner, state, steps, depth + 1, complete)?;
+            let mut states = pattern_subject(inner, subject, state, steps, depth + 1, complete)?;
             for state in &mut states {
                 spend(steps, 1)?;
-                state.bindings.insert(*binding, Value::Subject);
+                charge_value(subject, steps)?;
+                state.bindings.insert(*binding, subject.clone());
             }
             Ok(states)
         }
@@ -395,20 +443,14 @@ fn pattern(
             pattern: inner,
             bindings,
         } => {
-            let mut states = pattern(inner, state, steps, depth + 1, complete)?;
+            let mut states = pattern_subject(inner, subject, state, steps, depth + 1, complete)?;
             for state in &mut states {
                 let mut values = Vec::new();
                 let mut targets = std::collections::BTreeSet::new();
                 for (from, to) in bindings {
                     spend(steps, 1)?;
                     if let Some(v) = state.bindings.get(from) {
-                        spend(
-                            steps,
-                            match v {
-                                Value::Subject => 1,
-                                Value::Constant(v) => integer_work(v),
-                            },
-                        )?;
+                        charge_value(v, steps)?;
                         values.push((*to, v.clone()));
                         targets.insert(*to);
                     } else {
@@ -436,7 +478,8 @@ fn pattern(
                 }
                 let next = copy_state(&remaining, steps)?;
                 let mut exact = true;
-                let states = pattern(alternative, next, steps, depth + 1, &mut exact)?;
+                let states =
+                    pattern_subject(alternative, subject, next, steps, depth + 1, &mut exact)?;
                 if exact {
                     let mut matched = Vec::new();
                     for state in &states {
@@ -461,11 +504,28 @@ fn pattern(
             }
             Ok(out)
         }
-        Pattern::Literal(v) => {
+        Pattern::Literal(Literal::Bool(selected)) => {
+            let Value::Predicate(truth) = subject else {
+                *complete = false;
+                return Ok(vec![]);
+            };
+            let ranges = if *selected {
+                intersect(&state.ranges, truth, steps)?
+            } else {
+                intersect(&state.ranges, &complement(truth, steps)?, steps)?
+            };
+            state.ranges = ranges;
+            Ok(vec![state])
+        }
+        Pattern::Literal(v) if !matches!(subject, Value::Predicate(_)) => {
             let Some(v) = literal(v, steps)? else {
                 *complete = false;
                 return Ok(vec![]);
             };
+            if let Value::Constant(actual) = subject {
+                spend(steps, integer_work(actual).saturating_add(integer_work(&v)))?;
+                return Ok(if actual == &v { vec![state] } else { vec![] });
+            }
             let end = successor(&v, steps)?;
             state.ranges = intersect(
                 &state.ranges,
@@ -477,12 +537,36 @@ fn pattern(
             )?;
             Ok(vec![state])
         }
+        Pattern::Then {
+            first,
+            value: computed,
+            next,
+        } => {
+            let mut out = Vec::new();
+            for state in pattern_subject(first, subject, state, steps, depth + 1, complete)? {
+                let Some(observed) = value(computed, &state, steps, depth + 1)? else {
+                    // Unknown computation must not turn into wildcard coverage;
+                    // an enclosing ordered alternative cannot safely retry it.
+                    *complete = false;
+                    continue;
+                };
+                out.extend(pattern_subject(
+                    next,
+                    &observed,
+                    state,
+                    steps,
+                    depth + 1,
+                    complete,
+                )?);
+            }
+            Ok(out)
+        }
         Pattern::Guard {
             pattern: inner,
             condition: expr,
         } => {
             let mut out = Vec::new();
-            for mut state in pattern(inner, state, steps, depth + 1, complete)? {
+            for mut state in pattern_subject(inner, subject, state, steps, depth + 1, complete)? {
                 let Some(ranges) = condition(expr, &state, steps, depth + 1)? else {
                     *complete = false;
                     continue;
@@ -499,10 +583,22 @@ fn pattern(
     }
 }
 pub(crate) fn extract(pat: &Pattern, steps: &mut usize) -> Result<Vec<Interval>, ()> {
-    // Ordinary positive evidence may omit unknown regions. Only callers taking
-    // a complement need the exactness flag used by match conditions above.
+    extract_with_completeness(pat, steps, false)
+}
+
+// Projection callers preserve Unknown for unsupported executable conditions,
+// instead of claiming a definite uncovered region from missing evidence.
+pub(crate) fn extract_exact(pat: &Pattern, steps: &mut usize) -> Result<Vec<Interval>, ()> {
+    extract_with_completeness(pat, steps, true)
+}
+
+fn extract_with_completeness(
+    pat: &Pattern,
+    steps: &mut usize,
+    require_complete: bool,
+) -> Result<Vec<Interval>, ()> {
     let mut complete = true;
-    Ok(pattern(
+    let states = pattern(
         pat,
         State {
             ranges: whole(),
@@ -511,10 +607,11 @@ pub(crate) fn extract(pat: &Pattern, steps: &mut usize) -> Result<Vec<Interval>,
         steps,
         0,
         &mut complete,
-    )?
-    .into_iter()
-    .flat_map(|state| state.ranges)
-    .collect())
+    )?;
+    if require_complete && !complete {
+        return Err(());
+    }
+    Ok(states.into_iter().flat_map(|state| state.ranges).collect())
 }
 
 pub(crate) fn domain(primitive: Primitive) -> Option<Vec<Interval>> {
@@ -965,5 +1062,103 @@ mod tests {
             ),
             Coverage::Exhaustive
         );
+    }
+}
+
+#[cfg(test)]
+mod sequential_tests {
+    use super::*;
+    use nir::{Term, program::SourceRange};
+
+    fn expr(ty: Primitive, kind: K) -> Expr {
+        Expr {
+            ty: Term::Primitive(ty),
+            source: SourceRange { start: 0, end: 0 },
+            kind,
+        }
+    }
+    fn bound(id: LocalId) -> Pattern {
+        Pattern::Binding {
+            binding: id,
+            inner: Box::new(Pattern::Wild),
+        }
+    }
+    fn less(id: LocalId, n: i128) -> Expr {
+        expr(
+            Primitive::Bool,
+            K::IntegerBinary {
+                op: IntegerOp::Less,
+                left: Box::new(expr(Primitive::Integer, K::Local(id))),
+                right: Box::new(expr(
+                    Primitive::Integer,
+                    K::Literal(Literal::SignedInteger(n)),
+                )),
+            },
+        )
+    }
+    fn selected(ranges: &[Interval], n: i128) -> bool {
+        let point = Edge::Finite(Integer::from_i128(n));
+        ranges
+            .iter()
+            .any(|range| range.start <= point && point < range.end)
+    }
+    #[test]
+    fn computed_predicates_intersect_with_first_pattern_region() {
+        let input = LocalId { owner: 1, index: 0 };
+        let result = LocalId { owner: 1, index: 1 };
+        for low in -3..=3 {
+            for high in -3..=3 {
+                let pat = Pattern::Guard {
+                    pattern: Box::new(Pattern::Then {
+                        first: Box::new(Pattern::Guard {
+                            pattern: Box::new(bound(input)),
+                            condition: Box::new(expr(
+                                Primitive::Bool,
+                                K::Not(Box::new(less(input, low))),
+                            )),
+                        }),
+                        value: Box::new(less(input, high)),
+                        next: Box::new(bound(result)),
+                    }),
+                    condition: Box::new(expr(Primitive::Bool, K::Local(result))),
+                };
+                let ranges = extract_exact(&pat, &mut 100_000).unwrap();
+                for n in -5..=5 {
+                    assert_eq!(
+                        selected(&ranges, n),
+                        low <= n && n < high,
+                        "low={low}, high={high}, n={n}"
+                    );
+                }
+                assert!(extract_exact(&pat, &mut 1).is_err());
+            }
+        }
+    }
+    #[test]
+    fn ordered_alternatives_do_not_retry_after_exporting_computed_bindings() {
+        let input = LocalId { owner: 1, index: 0 };
+        let result = LocalId { owner: 1, index: 1 };
+        let alternative = |value| Pattern::Then {
+            first: Box::new(bound(input)),
+            value: Box::new(value),
+            next: Box::new(bound(result)),
+        };
+        let pat = Pattern::Guard {
+            pattern: Box::new(Pattern::Or(vec![
+                alternative(less(input, 0)),
+                alternative(expr(Primitive::Bool, K::Literal(Literal::Bool(true)))),
+            ])),
+            condition: Box::new(expr(Primitive::Bool, K::Local(result))),
+        };
+        let ranges = extract_exact(&pat, &mut 100_000).unwrap();
+        for n in -3..=3 {
+            assert_eq!(selected(&ranges, n), n < 0);
+        }
+        let unknown = Pattern::Or(vec![
+            alternative(expr(Primitive::Bool, K::Unit)),
+            Pattern::Wild,
+        ]);
+        assert!(extract_exact(&unknown, &mut 100_000).is_err());
+        assert!(extract(&unknown, &mut 100_000).unwrap().is_empty());
     }
 }

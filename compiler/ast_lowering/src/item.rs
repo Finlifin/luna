@@ -75,13 +75,16 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 continue;
             }
 
+            if self.lower_definition_configuration(elem) {
+                continue;
+            }
             let owner = self.lower_top_level_node(elem);
             item_ids.push(owner);
         }
 
         // Build the root module item.
         self.current_owner = root_owner_id;
-        self.reset_hir_id_counter();
+        self.ensure_owner_counter();
 
         let mod_def = ModDef { items: item_ids };
         let module_name = self
@@ -214,7 +217,25 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 self.package
                     .pending_semantics
                     .push((span, "definition attribute or modifier".into()));
-                self.lower_top_level_node(children[1])
+                let lexical_owner = self.current_owner;
+                let target = self.lower_top_level_node(children[1]);
+                // Recurse first: closer attributes apply first. Keep the
+                // original expression and lexical owner for later evaluation;
+                // lowering the target must not move lookup into its body.
+                if kind == NodeKind::Attribute {
+                    let expression = self.source_text(children[0]);
+                    let expression_span = self.ast.get_span(children[0]).unwrap_or(span);
+                    self.package
+                        .definition_attributes
+                        .push(hir::DeferredDefinitionAttribute {
+                            target: hir::AttributeTarget::Definition(target),
+                            lexical_owner,
+                            expression,
+                            configuration_key: None,
+                            span: expression_span,
+                        });
+                }
+                target
             }
 
             NodeKind::ConstDef => self.lower_const_def(node),
@@ -347,8 +368,8 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         self.lower_top_level_node(node)
     }
 
-    /// Lower `Function`: a, N, b, c, N, d
-    ///   (id, params, return_type, handles_effect, clauses, body)
+    /// Lower `Function`: a, N, b, N, c
+    ///   (id, params, return_type, clauses, body)
     fn lower_function(&mut self, node: NodeIndex, modifiers: FnModifiers) -> OwnerId {
         self.lower_callable(node, modifiers, None)
     }
@@ -370,14 +391,14 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             kind,
             NodeKind::Function | NodeKind::AlgebraicEffect
         ));
-        let clauses_multi = children[if effect.is_some() { 3 } else { 4 }];
-        let body_node = children[if effect.is_some() { 4 } else { 5 }];
+        let clauses_multi = children[3];
+        let body_node = children[4];
 
         // Allocate owner
         let owner_id = self.package.alloc_owner_id();
         let prev_owner = self.current_owner;
         self.current_owner = owner_id;
-        self.reset_hir_id_counter();
+        self.ensure_owner_counter();
 
         // Identifier
         let ident = self.node_to_ident(id_node);
@@ -550,7 +571,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let owner_id = self.package.alloc_owner_id();
         let prev_owner = self.current_owner;
         self.current_owner = owner_id;
-        self.reset_hir_id_counter();
+        self.ensure_owner_counter();
 
         let ident = self.node_to_ident(id_node);
         let previous_scope = self.file_scope;
@@ -658,7 +679,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let owner_id = self.package.alloc_owner_id();
         let prev_owner = self.current_owner;
         self.current_owner = owner_id;
-        self.reset_hir_id_counter();
+        self.ensure_owner_counter();
 
         let ident = self.node_to_ident(id_node);
         let previous_scope = self.file_scope;
@@ -731,6 +752,52 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         }
     }
 
+    fn is_wrapped_namespace_member(&self, mut node: NodeIndex) -> bool {
+        loop {
+            match self.ast.get_node_kind(node) {
+                Some(NodeKind::UseStatement | NodeKind::ModuleDef) => return true,
+                Some(NodeKind::Pub | NodeKind::Private) => {
+                    let Some(inner) = self.ast.get_children(node).first() else {
+                        return false;
+                    };
+                    node = *inner;
+                }
+                Some(NodeKind::Attribute | NodeKind::AttributeSetTrue) => {
+                    let Some(inner) = self.ast.get_children(node).get(1) else {
+                        return false;
+                    };
+                    node = *inner;
+                }
+                _ => return false,
+            }
+        }
+    }
+
+    /// Preserve configuration without inventing a field or child definition.
+    fn lower_definition_configuration(&mut self, node: NodeIndex) -> bool {
+        if self.ast.get_node_kind(node) != Some(NodeKind::Configuration) {
+            return false;
+        }
+        let children = self.ast.get_children(node);
+        let span = self.ast.get_span(node).unwrap_or_default();
+        let value_span = self.ast.get_span(children[1]).unwrap_or(span);
+        let key = self.node_to_ident(children[0]).name.as_str().to_owned();
+        let expression = self.source_text(children[1]);
+        self.package
+            .definition_attributes
+            .push(hir::DeferredDefinitionAttribute {
+                target: hir::AttributeTarget::Definition(self.current_owner),
+                lexical_owner: self.current_owner,
+                expression,
+                configuration_key: Some(key),
+                span: value_span,
+            });
+        self.package
+            .pending_semantics
+            .push((span, "definition configuration".into()));
+        true
+    }
+
     /// Lower the body of a struct definition.
     fn lower_struct_body(&mut self, body_node: NodeIndex) -> (Vec<FieldDef<'hir>>, Vec<OwnerId>) {
         let mut fields = Vec::new();
@@ -754,8 +821,13 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             }
             let kind = self.ast.get_node_kind(elem);
             match kind {
-                _ if self.is_wrapped_callable_member(elem) => {
+                _ if self.is_wrapped_callable_member(elem)
+                    || self.is_wrapped_namespace_member(elem) =>
+                {
                     nested_items.push(self.lower_top_level_node(elem));
+                }
+                Some(NodeKind::Configuration) => {
+                    self.lower_definition_configuration(elem);
                 }
                 Some(NodeKind::StructField) => {
                     if let Some(field) = self.lower_struct_field(elem) {
@@ -774,6 +846,23 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 ) => {
                     let owner = self.lower_top_level_node(elem);
                     nested_items.push(owner);
+                }
+                Some(NodeKind::Private)
+                    if self.ast.get_children(elem).first().is_some_and(|inner| {
+                        matches!(
+                            self.ast.get_node_kind(*inner),
+                            Some(
+                                NodeKind::TypealiasDef
+                                    | NodeKind::NewtypeDef
+                                    | NodeKind::Function
+                                    | NodeKind::NormalFormHeadDef
+                                    | NodeKind::ConstDef
+                                    | NodeKind::ConstDecl
+                            )
+                        )
+                    }) =>
+                {
+                    nested_items.push(self.lower_top_level_node(elem));
                 }
                 Some(NodeKind::Pub)
                     if self.ast.get_children(elem).first().is_some_and(|inner| {
@@ -799,17 +888,38 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                         self.ast.get_span(elem).unwrap_or_default(),
                         "struct member attribute".into(),
                     ));
-                    let ch = self.ast.get_children(elem);
-                    if ch.len() >= 2 {
-                        let inner = ch[1];
-                        if self.ast.get_node_kind(inner) == Some(NodeKind::StructField) {
-                            if let Some(field) = self.lower_struct_field(inner) {
-                                fields.push(field);
-                            }
-                        } else {
-                            let owner = self.lower_top_level_node(inner);
-                            nested_items.push(owner);
+                    let mut cursor = elem;
+                    let mut attributes = Vec::new();
+                    while let Some((
+                        kind @ (NodeKind::Attribute | NodeKind::AttributeSetTrue),
+                        _,
+                        parts,
+                    )) = self.ast.get_node(cursor)
+                    {
+                        if kind == NodeKind::Attribute {
+                            attributes.push(parts[0]);
                         }
+                        cursor = parts[1];
+                    }
+                    if self.ast.get_node_kind(cursor) == Some(NodeKind::StructField) {
+                        if let Some(field) = self.lower_struct_field(cursor) {
+                            for expression in attributes.into_iter().rev() {
+                                let text = self.source_text(expression);
+                                self.package.definition_attributes.push(
+                                    hir::DeferredDefinitionAttribute {
+                                        target: hir::AttributeTarget::Member(field.hir_id),
+                                        lexical_owner: self.current_owner,
+                                        expression: text,
+                                        configuration_key: None,
+                                        span: self.ast.get_span(expression).unwrap_or(field.span),
+                                    },
+                                );
+                            }
+                            fields.push(field);
+                        }
+                    } else {
+                        // Preserve the complete prefix chain on nested definitions too.
+                        nested_items.push(self.lower_top_level_node(elem));
                     }
                 }
                 _ => {
@@ -826,6 +936,14 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
     /// Lower a single struct field: `id : type (= default)?`
     fn lower_struct_field(&mut self, node: NodeIndex) -> Option<FieldDef<'hir>> {
+        let (target, attributes) = self.peel_member_attributes(node);
+        if target != node {
+            self.package.pending_semantics.push((
+                self.ast.get_span(node).unwrap_or_default(),
+                "struct field attribute".into(),
+            ));
+        }
+        let node = target;
         let Some((NodeKind::StructField, span, children)) = self.ast.get_node(node) else {
             unreachable!(
                 "not a valid struct field node or no such node index {:?}",
@@ -854,13 +972,25 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             None
         };
 
-        Some(FieldDef {
+        let field = FieldDef {
             hir_id: self.next_hir_id(),
             ident,
             ty,
             default,
             span,
-        })
+        };
+        for expression in attributes.into_iter().rev() {
+            self.package
+                .definition_attributes
+                .push(hir::DeferredDefinitionAttribute {
+                    target: hir::AttributeTarget::Member(field.hir_id),
+                    lexical_owner: self.current_owner,
+                    expression: self.source_text(expression),
+                    configuration_key: None,
+                    span: self.ast.get_span(expression).unwrap_or(span),
+                });
+        }
+        Some(field)
     }
 
     /// Lower `EnumDef`: a, N, b  (id, clauses, body)
@@ -876,7 +1006,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let owner_id = self.package.alloc_owner_id();
         let prev_owner = self.current_owner;
         self.current_owner = owner_id;
-        self.reset_hir_id_counter();
+        self.ensure_owner_counter();
 
         let ident = self.node_to_ident(id_node);
         let previous_scope = self.file_scope;
@@ -941,7 +1071,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let owner_id = self.package.alloc_owner_id();
         let prev_owner = self.current_owner;
         self.current_owner = owner_id;
-        self.reset_hir_id_counter();
+        self.ensure_owner_counter();
 
         let ident = self.node_to_ident(id_node);
         let previous_scope = self.file_scope;
@@ -1015,7 +1145,9 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             }
             let kind = self.ast.get_node_kind(elem);
             match kind {
-                _ if self.is_wrapped_callable_member(elem) => {
+                _ if self.is_wrapped_callable_member(elem)
+                    || self.is_wrapped_namespace_member(elem) =>
+                {
                     nested_items.push(self.lower_top_level_node(elem));
                 }
                 Some(NodeKind::Configuration) => {
@@ -1060,6 +1192,23 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     let owner = self.lower_top_level_node(elem);
                     nested_items.push(owner);
                 }
+                Some(NodeKind::Private)
+                    if self.ast.get_children(elem).first().is_some_and(|inner| {
+                        matches!(
+                            self.ast.get_node_kind(*inner),
+                            Some(
+                                NodeKind::TypealiasDef
+                                    | NodeKind::NewtypeDef
+                                    | NodeKind::Function
+                                    | NodeKind::NormalFormHeadDef
+                                    | NodeKind::ConstDef
+                                    | NodeKind::ConstDecl
+                            )
+                        )
+                    }) =>
+                {
+                    nested_items.push(self.lower_top_level_node(elem));
+                }
                 Some(NodeKind::Pub)
                     if self.ast.get_children(elem).first().is_some_and(|inner| {
                         matches!(
@@ -1076,6 +1225,26 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 {
                     nested_items.push(self.lower_top_level_node(elem));
                 }
+                Some(NodeKind::Attribute | NodeKind::AttributeSetTrue) => {
+                    let (target, _) = self.peel_member_attributes(elem);
+                    if matches!(
+                        self.ast.get_node_kind(target),
+                        Some(
+                            NodeKind::Id
+                                | NodeKind::PatternEnumVariant
+                                | NodeKind::ExprEnumVariant
+                                | NodeKind::TupleEnumVariant
+                                | NodeKind::StructEnumVariant
+                                | NodeKind::SubEnumEnumVariant
+                        )
+                    ) {
+                        if let Some(variant) = self.lower_enum_variant(elem) {
+                            variants.push(variant);
+                        }
+                    } else {
+                        nested_items.push(self.lower_top_level_node(elem));
+                    }
+                }
                 _ => {
                     self.package.pending_semantics.push((
                         self.ast.get_span(elem).unwrap_or_default(),
@@ -1088,12 +1257,33 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         (variants, nested_items, configurations)
     }
 
+    fn peel_member_attributes(&self, mut node: NodeIndex) -> (NodeIndex, Vec<NodeIndex>) {
+        let mut attributes = Vec::new();
+        while let Some((kind @ (NodeKind::Attribute | NodeKind::AttributeSetTrue), _, parts)) =
+            self.ast.get_node(node)
+        {
+            if kind == NodeKind::Attribute {
+                attributes.push(parts[0]);
+            }
+            node = parts[1];
+        }
+        (node, attributes)
+    }
+
     fn lower_enum_variant(&mut self, node: NodeIndex) -> Option<Variant<'hir>> {
+        let (target, attributes) = self.peel_member_attributes(node);
+        if target != node {
+            self.package.pending_semantics.push((
+                self.ast.get_span(node).unwrap_or_default(),
+                "enum variant attribute".into(),
+            ));
+        }
+        let node = target;
         let Some((kind, span, children)) = self.ast.get_node(node) else {
             unreachable!("invalid enum variant node: no such node index {:?}", node);
         };
 
-        match kind {
+        let variant = match kind {
             NodeKind::Id => Some(Variant {
                 hir_id: self.next_hir_id(),
                 ident: self.node_to_ident(node),
@@ -1176,7 +1366,21 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     .push((span, "enum group member attribute or declaration".into()));
                 None
             }
+        };
+        if let Some(variant) = &variant {
+            for expression in attributes.into_iter().rev() {
+                self.package
+                    .definition_attributes
+                    .push(hir::DeferredDefinitionAttribute {
+                        target: hir::AttributeTarget::Member(variant.hir_id),
+                        lexical_owner: self.current_owner,
+                        expression: self.source_text(expression),
+                        configuration_key: None,
+                        span: self.ast.get_span(expression).unwrap_or(span),
+                    });
+            }
         }
+        variant
     }
 
     /// Lower `TraitDef`: a, b, N, c  (id, super_trait, clauses, body)
@@ -1196,7 +1400,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let owner_id = self.package.alloc_owner_id();
         let prev_owner = self.current_owner;
         self.current_owner = owner_id;
-        self.reset_hir_id_counter();
+        self.ensure_owner_counter();
 
         let ident = self.node_to_ident(id_node);
         let previous_scope = self.file_scope;
@@ -1269,6 +1473,9 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             }
             let kind = self.ast.get_node_kind(elem);
             match kind {
+                _ if self.is_wrapped_namespace_member(elem) => {
+                    items.push(self.lower_top_level_node(elem));
+                }
                 Some(
                     NodeKind::Function
                     | NodeKind::NormalFormHeadDef
@@ -1276,7 +1483,16 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     | NodeKind::TypealiasDef
                     | NodeKind::NewtypeDef
                     | NodeKind::ConstDef
-                    | NodeKind::ConstDecl,
+                    | NodeKind::ConstDecl
+                    | NodeKind::StructDef
+                    | NodeKind::EnumDef
+                    | NodeKind::TraitDef
+                    | NodeKind::ModuleDef
+                    | NodeKind::ImplDef
+                    | NodeKind::ImplTraitDef
+                    | NodeKind::AlgebraicEffect
+                    | NodeKind::EffectEnumDef
+                    | NodeKind::UseStatement,
                 ) => {
                     let owner = self.lower_top_level_node(elem);
                     items.push(owner);
@@ -1293,7 +1509,12 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     ));
                     items.push(self.lower_top_level_node(elem));
                 }
-                _ => {}
+                _ => {
+                    self.package.pending_semantics.push((
+                        self.ast.get_span(elem).unwrap_or_default(),
+                        "unsupported trait/implementation body entry".into(),
+                    ));
+                }
             }
         }
         items
@@ -1324,7 +1545,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let owner_id = self.package.alloc_owner_id();
         let prev_owner = self.current_owner;
         self.current_owner = owner_id;
-        self.reset_hir_id_counter();
+        self.ensure_owner_counter();
 
         let ident = Ident::new(Symbol::intern("<impl>"), span);
 
@@ -1386,7 +1607,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let owner_id = self.package.alloc_owner_id();
         let prev_owner = self.current_owner;
         self.current_owner = owner_id;
-        self.reset_hir_id_counter();
+        self.ensure_owner_counter();
 
         let ident = Ident::new(Symbol::intern("<impl>"), span);
 
@@ -1443,7 +1664,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let previous_owner = self.current_owner;
         let previous_scope = self.file_scope;
         self.current_owner = owner_id;
-        self.reset_hir_id_counter();
+        self.ensure_owner_counter();
         let ident = self.node_to_ident(children[0]);
         if let Ok(binding) = self.resolve(ident) {
             if let resolve::BindingKind::Definition(definition, _) = binding.kind {
@@ -1522,7 +1743,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let owner_id = self.package.alloc_owner_id();
         let prev_owner = self.current_owner;
         self.current_owner = owner_id;
-        self.reset_hir_id_counter();
+        self.ensure_owner_counter();
 
         let ident = self.node_to_ident(id_node);
         let previous_scope = self.file_scope;
@@ -1582,7 +1803,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let owner_id = self.package.alloc_owner_id();
         let prev_owner = self.current_owner;
         self.current_owner = owner_id;
-        self.reset_hir_id_counter();
+        self.ensure_owner_counter();
 
         let ident = self.node_to_ident(id_node);
         if let Ok(binding) = self.resolve(ident) {
@@ -1618,7 +1839,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
         let mut item_ids = Vec::new();
         for &elem in &elem_nodes {
-            if elem != 0 {
+            if elem != 0 && !self.lower_definition_configuration(elem) {
                 let owner = self.lower_top_level_node(elem);
                 item_ids.push(owner);
             }
@@ -1646,6 +1867,14 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
     }
 
     fn lower_fn_param(&mut self, node: NodeIndex) -> Option<FnParam<'hir>> {
+        let (target, attributes) = self.peel_member_attributes(node);
+        if target != node {
+            self.package.pending_semantics.push((
+                self.ast.get_span(node).unwrap_or_default(),
+                "function parameter attribute".into(),
+            ));
+        }
+        let node = target;
         let Some((kind, span, children)) = self.ast.get_node(node) else {
             unreachable!(
                 "invalid function parameter node: no such node index {:?}",
@@ -1653,7 +1882,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             );
         };
 
-        match kind {
+        let parameter = match kind {
             NodeKind::TypeBoundParam => {
                 // id : type
                 let ident = self.node_to_ident(children[0]);
@@ -1771,10 +2000,10 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 param.ty.flags |= TPARAM_ERROR;
                 param
             }),
-            NodeKind::CatchParam => {
-                // No dedicated TPARAM flag yet; lower the inner param unchanged.
-                self.lower_fn_param(children[0])
-            }
+            NodeKind::CatchParam => self.lower_fn_param(children[0]).map(|mut param| {
+                param.ty.flags |= hir::common::TPARAM_CATCH;
+                param
+            }),
             NodeKind::QuoteParam => self.lower_fn_param(children[0]).map(|mut param| {
                 param.ty.flags |= TPARAM_QUOTE;
                 param
@@ -1801,7 +2030,21 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 self.emit_invalid_parameter(&format!("{:?}", kind), span);
                 None
             }
+        };
+        if let Some(parameter) = &parameter {
+            for expression in attributes.into_iter().rev() {
+                self.package
+                    .definition_attributes
+                    .push(hir::DeferredDefinitionAttribute {
+                        target: hir::AttributeTarget::Member(parameter.hir_id),
+                        lexical_owner: self.current_owner,
+                        expression: self.source_text(expression),
+                        configuration_key: None,
+                        span: self.ast.get_span(expression).unwrap_or(span),
+                    });
+            }
         }
+        parameter
     }
 
     fn lower_const_def(&mut self, node: NodeIndex) -> OwnerId {
@@ -1818,7 +2061,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let owner_id = self.package.alloc_owner_id();
         let prev_owner = self.current_owner;
         self.current_owner = owner_id;
-        self.reset_hir_id_counter();
+        self.ensure_owner_counter();
 
         let ident = self.node_to_ident(id_node);
         if let Ok(binding) = self.resolve(ident) {
@@ -1864,7 +2107,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let owner_id = self.package.alloc_owner_id();
         let prev_owner = self.current_owner;
         self.current_owner = owner_id;
-        self.reset_hir_id_counter();
+        self.ensure_owner_counter();
 
         let item = Item {
             owner_id,

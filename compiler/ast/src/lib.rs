@@ -231,8 +231,8 @@ pub enum NodeKind {
     LiftType,                  // a (lift expr)
     ForallType,                // a, N (body_expr, params)
     ForType,                   // a, N (body_expr, params)
-    // fn_type -> pure? comptime? inline? (unsafe|spec|verified)? (extern "ABI")? fn(parameter_type*)
-    // Children: flags_u32, abi_node, N (modifier_flags, abi_str_node, parameter_types)
+    // fn_type -> pure? comptime? inline? (unsafe|spec|verified)? fn(parameter_type*)
+    // Children: flags_u32, N (modifier_flags, parameter_types)
     // flags_u32 is a raw u32 bitmask stored in the children slot (not a real node index).
     FnType,
 
@@ -378,9 +378,9 @@ pub enum NodeKind {
     TypeBindPattern,                  // a
 
     // items
-    // pure? comptime? inline? (unsafe|spec|verified|atomic)? (extern "ABI")?
-    //   fn id? ( params ) (-> return_type)? (handles eff)? clauses? (block | = expr)
-    Function, // a, N, b, c, N, d
+    // pure? comptime? inline? (unsafe|spec|verified|atomic)?
+    //   fn id? ( params ) (-> return_type)? clauses? (block | = expr)
+    Function, // a, N, b, N, c
     // pure comptime fn id<params> (-> return_type)? clauses? (block | = expr)
     NormalFormHeadDef, // a, N, b, N, c
     // async? inline? effect id (params) (-> return_type)? clauses?;
@@ -567,7 +567,6 @@ pub const FN_MOD_INLINE: u32 = 1 << 2;
 pub const FN_MOD_UNSAFE: u32 = 1 << 3;
 pub const FN_MOD_SPEC: u32 = 1 << 4;
 pub const FN_MOD_VERIFIED: u32 = 1 << 5;
-pub const FN_MOD_EXTERN: u32 = 1 << 6;
 pub const FN_MOD_ATOMIC: u32 = 1 << 7; // only for function definitions, not fn_type
 
 pub fn fn_mod_flags_to_string(flags: u32) -> String {
@@ -589,9 +588,6 @@ pub fn fn_mod_flags_to_string(flags: u32) -> String {
     }
     if flags & FN_MOD_VERIFIED != 0 {
         parts.push("verified");
-    }
-    if flags & FN_MOD_EXTERN != 0 {
-        parts.push("extern");
     }
     if flags & FN_MOD_ATOMIC != 0 {
         parts.push("atomic");
@@ -621,7 +617,7 @@ pub enum NodeType {
     TripleWithMultiChildren,
 
     // Complex patterns for specific node types
-    // Function definitions: a, N, b, c, N, d (id, params, return_type, handles_effect, clauses, body)
+    // Function definitions: a, N, b, N, c (id, params, return_type, clauses, body)
     FunctionDefChildren,
     // Normal form / Case definitions: a, N, b, N, c (id, params, return_type, clauses, body)
     NormalFormHeadDefChildren,
@@ -639,7 +635,7 @@ pub enum NodeType {
     TypeAliasChildren,
     // Assoc decl: a, N, b, c, N (id, params, type, default, clauses)
     AssocDeclChildren,
-    // FnType: flags_u32, abi_node, N (modifier_flags, abi_str_node, parameter_types)
+    // FnType: flags_u32, N (modifier_flags, parameter_types)
     // flags_u32 is NOT a node index but a raw bitmask.
     FnTypeChildren,
 }
@@ -840,7 +836,7 @@ impl NodeKind {
             Lambda | AtomicBlock | WhileMatch => NodeType::DoubleWithMultiChildren,
 
             // Complex children patterns
-            Function => NodeType::FunctionDefChildren, // a, N, b, c, N, d
+            Function => NodeType::FunctionDefChildren, // a, N, b, N, c
             NormalFormHeadDef | CaseDef => NodeType::NormalFormHeadDefChildren, // a, N, b, N, c
             AlgebraicEffect => NodeType::AlgebraicEffectChildren, // a, N, b, N, c
             StructDef | EnumDef | EffectEnumDef | UnionDef | ImplDef | ExtendDef => {
@@ -852,7 +848,7 @@ impl NodeKind {
             DeriveDef => NodeType::DoubleWithMultiChildren, // a, b, N
             TypealiasDef | NewtypeDef => NodeType::TypeAliasChildren, // a, N, b
             AssocDecl => NodeType::AssocDeclChildren,  // a, N, b, c, N
-            FnType => NodeType::FnTypeChildren,        // flags_u32, abi_node, N
+            FnType => NodeType::FnTypeChildren,        // flags_u32, N
             ProjectionMultiPath | QuoteExpr | SpliceExpr | ContextualExprType => {
                 NodeType::SingleWithMultiChildren
             } // a, N
@@ -1035,14 +1031,13 @@ impl Ast {
 
                 // Complex children patterns
                 NodeType::FunctionDefChildren => {
-                    // a, N, b, c, N, d (id, params, return_type, handles_effect, clauses, body)
+                    // a, N, b, N, c (id, params, return_type, clauses, body)
                     let children = self.get_children(node_index);
                     let id = children[0];
                     let params_node = children[1];
                     let return_type = children[2];
-                    let handles_effect = children[3];
-                    let clauses_node = children[4];
-                    let body = children[5];
+                    let clauses_node = children[3];
+                    let body = children[4];
 
                     let params = self.get_multi_child_slice(params_node).unwrap();
                     let params_str = params
@@ -1058,12 +1053,11 @@ impl Ast {
                         .join(" ");
 
                     format!(
-                        "({} {} [{}] {} {} [{}] {})",
+                        "({} {} [{}] {} [{}] {})",
                         kind,
                         self.dump_to_s_expression(id, source_map),
                         params_str,
                         self.dump_to_s_expression(return_type, source_map),
-                        self.dump_to_s_expression(handles_effect, source_map),
                         clauses_str,
                         self.dump_to_s_expression(body, source_map)
                     )
@@ -1232,11 +1226,10 @@ impl Ast {
                 }
 
                 NodeType::FnTypeChildren => {
-                    // flags_u32, abi_node, N (modifier_flags, abi_str_node, parameter_types)
+                    // flags_u32, N (modifier_flags, parameter_types)
                     let children = self.get_children(node_index);
                     let flags = children[0]; // raw u32 bitmask, NOT a node index
-                    let abi_node = children[1];
-                    let params_node = children[2];
+                    let params_node = children[1];
 
                     let mods_str = fn_mod_flags_to_string(flags);
                     let params = self.get_multi_child_slice(params_node).unwrap();
@@ -1246,10 +1239,7 @@ impl Ast {
                         .collect::<Vec<_>>()
                         .join(" ");
 
-                    if abi_node != 0 {
-                        let abi = self.dump_to_s_expression(abi_node, source_map);
-                        format!("(FnType [{}] {} [{}])", mods_str, abi, params_str)
-                    } else if !mods_str.is_empty() {
+                    if !mods_str.is_empty() {
                         format!("(FnType [{}] [{}])", mods_str, params_str)
                     } else {
                         format!("(FnType [{}])", params_str)

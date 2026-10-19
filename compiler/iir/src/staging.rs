@@ -12,7 +12,102 @@ use nir::{Primitive, Sort, Term};
 use std::collections::BTreeSet;
 mod patterns;
 mod preparation;
-pub use preparation::preparation;
+pub use preparation::{preparation, preparation_with_layouts};
+
+/// Borrowed, checked layout metadata. Type identity remains nominal; this view
+/// authorizes reconstruction only and never participates in type equality.
+#[derive(Clone, Copy)]
+pub struct Layouts<'a> {
+    heads: &'a [nir::normal_forms::Head],
+    newtypes: &'a [nir::newtypes::Newtype],
+    newtype_index:
+        Option<&'a std::collections::BTreeMap<nir::DeclarationId, nir::newtypes::Newtype>>,
+}
+impl<'a> Layouts<'a> {
+    pub fn new(
+        heads: &'a [nir::normal_forms::Head],
+        newtypes: &'a [nir::newtypes::Newtype],
+    ) -> Self {
+        Self {
+            heads,
+            newtypes,
+            newtype_index: None,
+        }
+    }
+    pub fn from_index(
+        heads: &'a [nir::normal_forms::Head],
+        newtypes: &'a std::collections::BTreeMap<nir::DeclarationId, nir::newtypes::Newtype>,
+    ) -> Self {
+        Self {
+            heads,
+            newtypes: &[],
+            newtype_index: Some(newtypes),
+        }
+    }
+    fn representation(self, ty: &Term, fuel: &mut usize) -> Result<Option<Term>, String> {
+        let Term::Nominal {
+            declaration,
+            arguments,
+        } = ty
+        else {
+            return Ok(None);
+        };
+        if let Some(index) = self.newtype_index {
+            charge(fuel, 1)?;
+            return index
+                .get(declaration)
+                .map(|definition| {
+                    definition
+                        .representation_budgeted(arguments, &[], fuel)
+                        .map_err(|error| error.to_string())
+                })
+                .transpose();
+        }
+        for definition in self.newtypes {
+            charge(fuel, 1)?;
+            if definition.declaration == *declaration {
+                return definition
+                    .representation_budgeted(arguments, &[], fuel)
+                    .map(Some)
+                    .map_err(|error| error.to_string());
+            }
+        }
+        Ok(None)
+    }
+}
+impl<'a> From<&'a [nir::normal_forms::Head]> for Layouts<'a> {
+    fn from(heads: &'a [nir::normal_forms::Head]) -> Self {
+        Self::new(heads, &[])
+    }
+}
+impl<'a, const N: usize> From<&'a [nir::normal_forms::Head; N]> for Layouts<'a> {
+    fn from(heads: &'a [nir::normal_forms::Head; N]) -> Self {
+        Self::new(heads, &[])
+    }
+}
+impl<'a> From<&'a Vec<nir::normal_forms::Head>> for Layouts<'a> {
+    fn from(heads: &'a Vec<nir::normal_forms::Head>) -> Self {
+        Self::new(heads, &[])
+    }
+}
+impl<'a> From<&'a nir::program::Package> for Layouts<'a> {
+    fn from(package: &'a nir::program::Package) -> Self {
+        Self::new(&package.normal_forms, &package.newtypes)
+    }
+}
+impl<'a> IntoIterator for Layouts<'a> {
+    type Item = &'a nir::normal_forms::Head;
+    type IntoIter = std::slice::Iter<'a, nir::normal_forms::Head>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.heads.iter()
+    }
+}
+impl std::ops::Deref for Layouts<'_> {
+    type Target = [nir::normal_forms::Head];
+    fn deref(&self) -> &Self::Target {
+        self.heads
+    }
+}
 
 /// Remove supplied staged inputs from the callable signature and local input
 /// list. Closed constants are restored as local bindings in each independently
@@ -21,22 +116,24 @@ pub use preparation::preparation;
 /// This preserves addressability,
 /// closure capture and parameter mutation semantics without re-evaluating the
 /// original comptime expression. Remaining default indices are renumbered.
-pub fn bind_inputs_with_layouts(
-    heads: &[nir::normal_forms::Head],
+pub fn bind_inputs_with_layouts<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     template: &Function,
     inputs: &[Option<Expr>],
     fuel: &mut usize,
 ) -> Result<Function, String> {
+    let heads = heads.into();
     bind_inputs_with_type_view(heads, template, inputs, fuel, |ty, _| Ok(ty.clone()))
 }
 
-fn bind_inputs_with_type_view(
-    heads: &[nir::normal_forms::Head],
+fn bind_inputs_with_type_view<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     template: &Function,
     inputs: &[Option<Expr>],
     fuel: &mut usize,
     mut type_view: impl FnMut(&Term, &mut usize) -> Result<Term, String>,
 ) -> Result<Function, String> {
+    let heads = heads.into();
     let Term::Function { parameters, .. } = template.signature.callable_signature() else {
         return Err("staged input template is not a function".into());
     };
@@ -231,20 +328,22 @@ fn rebind_requirement(
 // flow analysis can establish a finer fact, conservatively reject those cases.
 /// Resolve closed immutable local producers before specializing calls in an
 /// ordinary function that has no erased input frame of its own.
-pub fn forward_closed_locals_with_layouts(
-    heads: &[nir::normal_forms::Head],
+pub fn forward_closed_locals_with_layouts<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     function: &mut Function,
     fuel: &mut usize,
 ) -> Result<(), String> {
+    let heads = heads.into();
     substitute_forwarded_inputs(heads, function, &[], fuel)
 }
 
-fn substitute_forwarded_inputs(
-    heads: &[nir::normal_forms::Head],
+fn substitute_forwarded_inputs<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     function: &mut Function,
     bindings: &[(LocalId, Expr)],
     fuel: &mut usize,
 ) -> Result<(), String> {
+    let heads = heads.into();
     let mut unavailable = BTreeSet::new();
     for root in std::iter::once(&function.body)
         .chain(&function.preconditions)
@@ -292,13 +391,14 @@ fn substitute_forwarded_inputs(
 // inputs, including total Boolean/structural compositions. Never invoke a
 // producer or cross a separate callable/default environment. Writes/escapes
 // still invalidate every subsequent substitution.
-fn collect_forwarded_locals(
-    heads: &[nir::normal_forms::Head],
+fn collect_forwarded_locals<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     root: &Expr,
     values: &mut std::collections::BTreeMap<LocalId, Expr>,
     unavailable: &BTreeSet<LocalId>,
     fuel: &mut usize,
 ) -> Result<(), String> {
+    let heads = heads.into();
     let mut pending = Vec::new();
     crate::visit::expression_pruned(root, fuel, |expr, _| {
         if matches!(expr.kind, K::Closure { .. } | K::Call { .. }) {
@@ -371,7 +471,8 @@ fn collect_forwarded_locals(
                         charge(fuel, 1)?;
                         match pattern {
                             nir::program::Pattern::Wild => {}
-                            nir::program::Pattern::Binding { inner, .. } => patterns.push(inner),
+                            nir::program::Pattern::Observe { inner, .. }
+                            | nir::program::Pattern::Binding { inner, .. } => patterns.push(inner),
                             nir::program::Pattern::Tuple(fields)
                             | nir::program::Pattern::AnonymousRecord { fields, .. }
                             | nir::program::Pattern::Record { fields, .. } => {
@@ -604,12 +705,13 @@ fn boolean_pattern_at(
 }
 
 #[inline(never)]
-fn fold_boolean_match(
-    heads: &[nir::normal_forms::Head],
+fn fold_boolean_match<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     expr: &Expr,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<Expr, String> {
+    let heads = heads.into();
     if depth >= 128 {
         return Err("staged expression depth exceeded".into());
     }
@@ -685,12 +787,13 @@ fn supported_float_operation(expr: &Expr) -> bool {
 }
 
 #[inline(never)]
-fn fold_float_operation(
-    heads: &[nir::normal_forms::Head],
+fn fold_float_operation<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     expr: &Expr,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<Expr, String> {
+    let heads = heads.into();
     if depth >= 128 {
         return Err("staged expression depth exceeded".into());
     }
@@ -817,12 +920,13 @@ fn total_bit_representation(expr: &Expr) -> bool {
 }
 
 #[inline(never)]
-fn fold_bit_representation(
-    heads: &[nir::normal_forms::Head],
+fn fold_bit_representation<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     expr: &Expr,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<Expr, String> {
+    let heads = heads.into();
     if depth >= 128 {
         return Err("staged expression depth exceeded".into());
     }
@@ -922,12 +1026,13 @@ fn fold_bit_representation(
 }
 
 #[inline(never)]
-fn folded_bits(
-    heads: &[nir::normal_forms::Head],
+fn folded_bits<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     expr: &Expr,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<comptime_runtime::bitvec::BitVec, String> {
+    let heads = heads.into();
     let value = fold_input(heads, expr, fuel, depth)?;
     match constant(heads, &value, fuel, depth)? {
         Term::BitVec(bits) => Ok(bits),
@@ -936,12 +1041,13 @@ fn folded_bits(
 }
 
 #[inline(never)]
-fn fold_bitvec_operation(
-    heads: &[nir::normal_forms::Head],
+fn fold_bitvec_operation<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     expr: &Expr,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<Expr, String> {
+    let heads = heads.into();
     if depth >= 128 {
         return Err("staged expression depth exceeded".into());
     }
@@ -1045,8 +1151,8 @@ fn forwarding_writes(
 
 // Callee-frame references in defaults must survive substitution of caller
 // inputs, including recursive calls whose LocalIds share the same owner.
-fn substitute_forwarded_expression(
-    heads: &[nir::normal_forms::Head],
+fn substitute_forwarded_expression<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     expression: &mut Expr,
     values: &std::collections::BTreeMap<LocalId, &Expr>,
     unavailable: &BTreeSet<LocalId>,
@@ -1055,6 +1161,7 @@ fn substitute_forwarded_expression(
     fuel: &mut usize,
     depth: usize,
 ) -> Result<(), String> {
+    let heads = heads.into();
     if depth >= 128 {
         return Err("staged forwarding depth exceeded".into());
     }
@@ -1220,13 +1327,14 @@ fn substitute_forwarded_expression(
 /// runtime arguments, still in their original evaluation order.
 /// `template` has already received its declaration arguments; these arguments
 /// remain the prefix of the resulting instance identity.
-pub fn bind_call_with_layouts(
-    heads: &[nir::normal_forms::Head],
+pub fn bind_call_with_layouts<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     template: &Function,
     declaration_arguments: &[Term],
     call: &Expr,
     fuel: &mut usize,
 ) -> Result<(crate::FunctionInstance, Expr), String> {
+    let heads = heads.into();
     bind_call_with_layouts_and_evaluator(
         heads,
         template,
@@ -1240,14 +1348,15 @@ pub fn bind_call_with_layouts(
 /// Prepare staged inputs once in source/default order. The host evaluator runs
 /// only after preceding staged results have been substituted into a default's
 /// callee frame. It must return completed immutable data of the checked type.
-pub fn bind_call_with_layouts_and_evaluator(
-    heads: &[nir::normal_forms::Head],
+pub fn bind_call_with_layouts_and_evaluator<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     template: &Function,
     declaration_arguments: &[Term],
     call: &Expr,
     fuel: &mut usize,
     mut evaluate: impl FnMut(&Expr, &mut usize) -> Result<Expr, String>,
 ) -> Result<(crate::FunctionInstance, Expr), String> {
+    let heads = heads.into();
     bind_call_with_layouts_and_type_views(
         heads,
         template,
@@ -1262,8 +1371,8 @@ pub fn bind_call_with_layouts_and_evaluator(
 
 /// Resolve substituted input domains using the same world as staged evaluation.
 /// The view normalizes types; it cannot bypass value/type consistency checks.
-pub fn bind_call_with_layouts_and_type_views<C>(
-    heads: &[nir::normal_forms::Head],
+pub fn bind_call_with_layouts_and_type_views<'layout, C>(
+    heads: impl Into<Layouts<'layout>>,
     template: &Function,
     declaration_arguments: &[Term],
     call: &Expr,
@@ -1272,6 +1381,7 @@ pub fn bind_call_with_layouts_and_type_views<C>(
     mut evaluate: impl FnMut(&mut C, &Expr, &mut usize) -> Result<Expr, String>,
     mut type_view: impl FnMut(&mut C, &Term, &mut usize) -> Result<Term, String>,
 ) -> Result<(crate::FunctionInstance, Expr), String> {
+    let heads = heads.into();
     charge(fuel, 1)?;
     let K::Call {
         callee,
@@ -1510,12 +1620,13 @@ fn charge(fuel: &mut usize, work: usize) -> Result<(), String> {
     Ok(())
 }
 
-fn wrap(
-    heads: &[nir::normal_forms::Head],
+fn wrap<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     expression: &mut Expr,
     bindings: &[(LocalId, Expr)],
     fuel: &mut usize,
 ) -> Result<(), String> {
+    let heads = heads.into();
     if bindings.is_empty() {
         return Ok(());
     }
@@ -1606,11 +1717,12 @@ fn wrap(
 // Only effect-free residual structure is folded here. General comptime calls
 // still belong to required invocation, not to runtime graph materialization.
 /// Complete the supported effect-free staged input fragment without invoking user code.
-pub fn fold_value_with_layouts(
-    heads: &[nir::normal_forms::Head],
+pub fn fold_value_with_layouts<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     expr: &Expr,
     fuel: &mut usize,
 ) -> Result<Expr, String> {
+    let heads = heads.into();
     fold_input(heads, expr, fuel, 0)
 }
 
@@ -1668,12 +1780,13 @@ fn staged_record_field<'a>(
 }
 
 #[inline(never)]
-fn fold_record_field(
-    heads: &[nir::normal_forms::Head],
+fn fold_record_field<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     expr: &Expr,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<Expr, String> {
+    let heads = heads.into();
     // Flatten projection chains before folding their producer. Recursing once
     // per field would exhaust the host stack before the semantic depth limit.
     let mut root = expr;
@@ -1698,12 +1811,13 @@ fn fold_record_field(
 }
 
 #[inline(never)]
-fn fold_integer_comparison(
-    heads: &[nir::normal_forms::Head],
+fn fold_integer_comparison<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     expr: &Expr,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<Expr, String> {
+    let heads = heads.into();
     let K::IntegerBinary { op, left, right } = &expr.kind else {
         unreachable!()
     };
@@ -1739,12 +1853,13 @@ fn fold_integer_comparison(
 }
 
 #[inline(never)]
-fn fold_aggregate_input(
-    heads: &[nir::normal_forms::Head],
+fn fold_aggregate_input<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     expr: &Expr,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<Expr, String> {
+    let heads = heads.into();
     if depth >= 128 {
         return Err("staged expression depth exceeded".into());
     }
@@ -1785,14 +1900,15 @@ fn fold_aggregate_input(
 }
 
 #[inline(never)]
-fn fold_scalar_comparison(
-    heads: &[nir::normal_forms::Head],
+fn fold_scalar_comparison<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     expr: &Expr,
     left: &Expr,
     right: &Expr,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<Expr, String> {
+    let heads = heads.into();
     if left.ty != right.ty {
         return Err("staged comparison operand types differ".into());
     }
@@ -1842,12 +1958,147 @@ fn fold_scalar_comparison(
     })
 }
 
-fn fold_input(
-    heads: &[nir::normal_forms::Head],
+#[inline(never)]
+fn fold_type_list<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     expr: &Expr,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<Expr, String> {
+    let heads = heads.into();
+    if let K::TypeList(fields) = &expr.kind {
+        if depth >= 128 {
+            return Err("staged type-list depth exceeded".into());
+        }
+        charge(fuel, fields.len().saturating_add(1))?;
+        let mut types = Vec::with_capacity(fields.len());
+        for field in fields {
+            if field.ty != Term::Primitive(Primitive::Type) {
+                return Err("staged type-list operand is not Type".into());
+            }
+            let value = fold_input(heads, field, fuel, depth + 1)?;
+            types.push(constant(heads, &value, fuel, depth + 1)?);
+        }
+        let value = Expr {
+            source: expr.source,
+            ty: expr.ty.clone(),
+            kind: K::TypeListValue(types),
+        };
+        constant(heads, &value, fuel, depth + 1)?;
+        return Ok(value);
+    }
+    unreachable!()
+}
+
+#[inline(never)]
+fn fold_type_list_index<'layout>(
+    heads: impl Into<Layouts<'layout>>,
+    expr: &Expr,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Expr, String> {
+    let heads = heads.into();
+    if depth >= 128 {
+        return Err("staged type-list index depth exceeded".into());
+    }
+    charge(fuel, 1)?;
+    let K::TypeListIndex(values, index) = &expr.kind else {
+        unreachable!()
+    };
+    if expr.ty != Term::Primitive(Primitive::Type)
+        || index.ty != Term::Primitive(Primitive::Integer)
+    {
+        return Err("invalid staged type-list index types".into());
+    }
+    let values = fold_input(heads, values, fuel, depth + 1)?;
+    let Term::TypeListValue(mut elements) = constant(heads, &values, fuel, depth + 1)? else {
+        return Err("staged type-list index requires completed list data".into());
+    };
+    let index = fold_input(heads, index, fuel, depth + 1)?;
+    let Term::Integer(index) = constant(heads, &index, fuel, depth + 1)? else {
+        return Err("staged type-list index requires an Integer".into());
+    };
+    let position = index
+        .to_u128()
+        .ok()
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|position| *position < elements.len())
+        .ok_or("staged type-list index is out of bounds")?;
+    Ok(Expr {
+        source: expr.source,
+        ty: expr.ty.clone(),
+        kind: K::TypeValue(elements.swap_remove(position)),
+    })
+}
+
+#[inline(never)]
+fn fold_newtype_conversion(
+    heads: Layouts<'_>,
+    expr: &Expr,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Expr, String> {
+    let K::NewtypeConvert(value) = &expr.kind else {
+        unreachable!()
+    };
+    if depth >= 128 {
+        return Err("staged newtype depth exceeded".into());
+    }
+    charge(fuel, 1)?;
+    let value = fold_input(heads, value, fuel, depth + 1)?;
+    if heads.representation(&expr.ty, fuel)?.as_ref() == Some(&value.ty) {
+        let result = Expr {
+            kind: K::NewtypeConvert(Box::new(value)),
+            ty: expr.ty.clone(),
+            source: expr.source,
+        };
+        constant(heads, &result, fuel, depth)?;
+        return Ok(result);
+    }
+    if heads.representation(&value.ty, fuel)?.as_ref() == Some(&expr.ty) {
+        if let K::NewtypeConvert(mut inner) = value.kind {
+            if inner.ty != expr.ty {
+                return Err("staged newtype representation type mismatch".into());
+            }
+            inner.source = expr.source;
+            return Ok(*inner);
+        }
+    }
+    Err("staged newtype conversion requires a checked representation".into())
+}
+
+fn fold_input<'layout>(
+    heads: impl Into<Layouts<'layout>>,
+    expr: &Expr,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Expr, String> {
+    let heads = heads.into();
+    match &expr.kind {
+        K::ScalarEqual(left, right)
+        | K::ScalarLess(left, right)
+        | K::ScalarLessEqual(left, right)
+        | K::ScalarGreater(left, right)
+        | K::ScalarGreaterEqual(left, right)
+            if expr.ty == Term::Primitive(Primitive::Bool) =>
+        {
+            if depth >= 128 {
+                return Err("staged expression depth exceeded".into());
+            }
+            charge(fuel, 1)?;
+            return fold_scalar_comparison(heads, expr, left, right, fuel, depth);
+        }
+        _ => {}
+    }
+    if matches!(expr.kind, K::NewtypeConvert(_)) {
+        return fold_newtype_conversion(heads, expr, fuel, depth);
+    }
+    if matches!(expr.kind, K::TypeList(_)) {
+        return fold_type_list(heads, expr, fuel, depth);
+    }
+    if matches!(expr.kind, K::TypeListIndex(..)) {
+        return fold_type_list_index(heads, expr, fuel, depth);
+    }
     if let K::Match { value, arms } = &expr.kind {
         let mut boolean = value.ty == Term::Primitive(Primitive::Bool);
         if boolean {
@@ -1894,12 +2145,13 @@ fn fold_input(
 }
 
 #[inline(never)]
-fn folded_boolean(
-    heads: &[nir::normal_forms::Head],
+fn folded_boolean<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     expr: &Expr,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<bool, String> {
+    let heads = heads.into();
     let value = fold_input(heads, expr, fuel, depth)?;
     if value.ty != Term::Primitive(Primitive::Bool) {
         return Err("staged condition is not boolean".into());
@@ -1911,12 +2163,13 @@ fn folded_boolean(
 }
 
 #[inline(never)]
-fn fold_boolean_control(
-    heads: &[nir::normal_forms::Head],
+fn fold_boolean_control<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     expr: &Expr,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<Expr, String> {
+    let heads = heads.into();
     if depth >= 128 {
         return Err("staged expression depth exceeded".into());
     }
@@ -1967,12 +2220,13 @@ fn fold_boolean_control(
     Ok(result)
 }
 
-fn fold_general_input(
-    heads: &[nir::normal_forms::Head],
+fn fold_general_input<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     expr: &Expr,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<Expr, String> {
+    let heads = heads.into();
     if depth >= 128 {
         return Err("staged expression depth exceeded".into());
     }
@@ -2012,17 +2266,6 @@ fn fold_general_input(
         }
         K::IntegerNegate(_) | K::IntegerBinary { .. } => {
             Some(fold_machine_input(heads, expr, fuel, depth)?)
-        }
-        K::ScalarEqual(left, right)
-        | K::ScalarLess(left, right)
-        | K::ScalarLessEqual(left, right)
-        | K::ScalarGreater(left, right)
-        | K::ScalarGreaterEqual(left, right)
-            if expr.ty == Term::Primitive(Primitive::Bool) =>
-        {
-            Some(fold_scalar_comparison(
-                heads, expr, left, right, fuel, depth,
-            )?)
         }
         K::Block { statements, result } => {
             let mut locals = std::collections::BTreeMap::new();
@@ -2074,14 +2317,15 @@ fn fold_general_input(
 
 // Structural, irrefutable patterns require no protocol invocation. Binding uses
 // the already evaluated producer; destructuring never repeats that computation.
-fn bind_staged_pattern(
-    heads: &[nir::normal_forms::Head],
+fn bind_staged_pattern<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     pattern: &nir::program::Pattern,
     value: &Expr,
     locals: &mut std::collections::BTreeMap<LocalId, Expr>,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<(), String> {
+    let heads = heads.into();
     use nir::program::Pattern;
     if depth >= 128 {
         return Err("staged pattern depth exceeded".into());
@@ -2166,24 +2410,26 @@ fn bind_staged_pattern(
 // Only immutable canonical data enters this local environment. Substitution is
 // simultaneous and scoped to a single block; nested blocks receive outer values
 // through their checked references before creating their own environment.
-fn fold_local_input(
-    heads: &[nir::normal_forms::Head],
+fn fold_local_input<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     expr: &Expr,
     locals: &std::collections::BTreeMap<LocalId, Expr>,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<Expr, String> {
+    let heads = heads.into();
     let prepared = prepare_local_input(heads, expr, locals, fuel, depth)?;
     fold_input(heads, &prepared, fuel, depth)
 }
 
-fn prepare_local_input(
-    heads: &[nir::normal_forms::Head],
+fn prepare_local_input<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     expr: &Expr,
     locals: &std::collections::BTreeMap<LocalId, Expr>,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<Expr, String> {
+    let heads = heads.into();
     crate::visit::expression(expr, fuel, |_, _| Ok(()))?;
     let mut prepared = expr.clone();
     prepare_local_input_in_place(heads, &mut prepared, locals, fuel, depth)?;
@@ -2191,22 +2437,24 @@ fn prepare_local_input(
 }
 
 /// Substitute completed inputs while preserving closure-owned capture bindings.
-pub fn prepare_input_with_layouts(
-    heads: &[nir::normal_forms::Head],
+pub fn prepare_input_with_layouts<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     expr: &Expr,
     locals: &std::collections::BTreeMap<LocalId, Expr>,
     fuel: &mut usize,
 ) -> Result<Expr, String> {
+    let heads = heads.into();
     prepare_local_input(heads, expr, locals, fuel, 0)
 }
 
-fn prepare_local_input_in_place(
-    heads: &[nir::normal_forms::Head],
+fn prepare_local_input_in_place<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     prepared: &mut Expr,
     locals: &std::collections::BTreeMap<LocalId, Expr>,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<(), String> {
+    let heads = heads.into();
     if depth >= 128 {
         return Err("staged capture scope depth exceeded".into());
     }
@@ -2269,8 +2517,8 @@ fn prepare_local_input_in_place(
 // A closure's locals belong to a new invocation frame. Only closed producers
 // are discovered here; enclosing values are not seeds for local evaluation.
 #[inline(never)]
-fn substitute_closure_locals(
-    heads: &[nir::normal_forms::Head],
+fn substitute_closure_locals<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     body: &mut Expr,
     enclosing: &std::collections::BTreeMap<LocalId, &Expr>,
     unavailable: &BTreeSet<LocalId>,
@@ -2279,6 +2527,7 @@ fn substitute_closure_locals(
     fuel: &mut usize,
     depth: usize,
 ) -> Result<(), String> {
+    let heads = heads.into();
     if depth >= 128 {
         return Err("staged forwarding depth exceeded".into());
     }
@@ -2308,12 +2557,13 @@ fn substitute_closure_locals(
     )
 }
 
-fn fold_machine_input(
-    heads: &[nir::normal_forms::Head],
+fn fold_machine_input<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     expr: &Expr,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<Expr, String> {
+    let heads = heads.into();
     use comptime_runtime::machine::MachineInteger;
     use nir::program::IntegerOp as Op;
     let Term::Primitive(primitive) = expr.ty else {
@@ -2382,13 +2632,14 @@ fn fold_machine_input(
 }
 
 #[inline(never)]
-fn nominal_constant(
-    heads: &[nir::normal_forms::Head],
+fn nominal_constant<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     expr: &Expr,
     fields: &[Expr],
     fuel: &mut usize,
     depth: usize,
 ) -> Result<Term, String> {
+    let heads = heads.into();
     charge(fuel, fields.len())?;
     nir::type_computations::charge_term(&expr.ty, fuel).map_err(|error| error.to_string())?;
     Ok(Term::NominalValue {
@@ -2407,23 +2658,74 @@ fn nominal_constant(
     })
 }
 
-// This deliberately accepts only canonical immutable data, never a call,
+/// Check that a staged input is already canonical, without invoking code or
+/// resolving locals. Uses the same representation contract as staged binding.
+pub fn canonical_input_with_layouts(
+    layouts: Layouts<'_>,
+    expr: &Expr,
+    fuel: &mut usize,
+) -> Result<(), String> {
+    constant(layouts, expr, fuel, 0).map(|_| ())
+}
+
+// This accepts canonical immutable data and named comptime callable identities, never a call,
 // local reference, pointer or expression whose evaluation could repeat effects.
-fn constant(
-    heads: &[nir::normal_forms::Head],
+fn constant<'layout>(
+    heads: impl Into<Layouts<'layout>>,
     expr: &Expr,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<Term, String> {
+    let heads = heads.into();
     if depth >= 128 {
         return Err("staged constant depth exceeded".into());
     }
     charge(fuel, 1)?;
     Ok(match (&expr.kind, &expr.ty) {
+        (K::Function(declaration), ty) if ty.is_comptime_callable() => {
+            crate::completed_type(ty, &BTreeSet::new(), fuel)?;
+            Term::FunctionValue {
+                declaration: *declaration,
+                arguments: vec![],
+            }
+        }
+        (
+            K::FunctionInstance {
+                declaration,
+                arguments,
+            },
+            ty,
+        ) if ty.is_comptime_callable() => {
+            crate::completed_type(ty, &BTreeSet::new(), fuel)?;
+            for argument in arguments {
+                nir::type_computations::charge_term(argument, fuel)
+                    .map_err(|error| error.to_string())?;
+                crate::completed_type(argument, &BTreeSet::new(), fuel)?;
+            }
+            Term::FunctionValue {
+                declaration: *declaration,
+                arguments: arguments.clone(),
+            }
+        }
+        (K::NewtypeConvert(value), ty) => {
+            let representation = heads
+                .representation(ty, fuel)?
+                .ok_or("staged newtype constant requires its declaration layout")?;
+            if value.ty != representation {
+                return Err("staged newtype constant representation mismatch".into());
+            }
+            nir::type_computations::charge_term(ty, fuel).map_err(|error| error.to_string())?;
+            Term::NominalValue {
+                ty: Box::new(ty.clone()),
+                variant: None,
+                fields: vec![constant(heads, value, fuel, depth + 1)?],
+            }
+        }
         (K::TypeListValue(types), ty) => {
             let mut admitted = false;
             for head in heads {
                 charge(fuel, 1)?;
+                admitted |= head.is_type_list_instance(ty);
                 for parameter in &head.parameters {
                     charge(fuel, 1)?;
                     admitted |=
@@ -4743,6 +5045,116 @@ mod tests {
                 0
             )
             .is_ok()
+        );
+    }
+}
+
+#[cfg(test)]
+mod newtype_staging_tests {
+    use super::*;
+    #[test]
+    fn deeply_nested_newtype_values_fail_at_the_logical_depth_limit() {
+        let source = nir::program::SourceRange { start: 0, end: 1 };
+        let mut value = Expr {
+            kind: K::Literal(Literal::Bool(true)),
+            ty: Term::Primitive(Primitive::Bool),
+            source,
+        };
+        let mut definitions = Vec::new();
+        for local in 0..160 {
+            let declaration = nir::DeclarationId { package: 7, local };
+            definitions.push(nir::newtypes::Newtype {
+                capture_count: 0,
+                parameter_types: vec![],
+                declaration,
+                name: format!("Wrapper{local}"),
+                type_parameters: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                representation: value.ty.clone(),
+            });
+            value = Expr {
+                kind: K::NewtypeConvert(Box::new(value)),
+                ty: Term::Nominal {
+                    declaration,
+                    arguments: vec![],
+                },
+                source,
+            };
+        }
+        assert!(
+            fold_value_with_layouts(Layouts::new(&[], &definitions), &value, &mut 1_000_000)
+                .unwrap_err()
+                .contains("depth")
+        );
+    }
+
+    #[test]
+    fn newtype_staging_requires_layout_and_preserves_wrapping_direction() {
+        let declaration = nir::DeclarationId {
+            package: 3,
+            local: 1,
+        };
+        let definition = nir::newtypes::Newtype {
+            capture_count: 0,
+            parameter_types: vec![],
+            declaration,
+            name: "Flag".into(),
+            type_parameters: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            representation: Term::Primitive(Primitive::Bool),
+        };
+        let definitions = [definition];
+        let layouts = Layouts::new(&[], &definitions);
+        let source = nir::program::SourceRange { start: 0, end: 1 };
+        let ty = Term::Nominal {
+            declaration,
+            arguments: vec![],
+        };
+        let boolean = Expr {
+            kind: K::Literal(Literal::Bool(true)),
+            ty: Term::Primitive(Primitive::Bool),
+            source,
+        };
+        let wrapped = Expr {
+            kind: K::NewtypeConvert(Box::new(boolean.clone())),
+            ty: ty.clone(),
+            source,
+        };
+        assert!(fold_value(&wrapped, &mut 100).is_err());
+        assert_eq!(
+            constant(layouts, &wrapped, &mut 100, 0).unwrap(),
+            Term::NominalValue {
+                ty: Box::new(ty.clone()),
+                variant: None,
+                fields: vec![Term::Bool(true)]
+            }
+        );
+        let peeled = Expr {
+            kind: K::NewtypeConvert(Box::new(wrapped.clone())),
+            ty: boolean.ty.clone(),
+            source,
+        };
+        assert_eq!(
+            fold_value_with_layouts(layouts, &peeled, &mut 100).unwrap(),
+            boolean
+        );
+        assert!(constant(layouts, &peeled, &mut 100, 0).is_err());
+        let wrong = Expr {
+            kind: K::NewtypeConvert(Box::new(Expr {
+                kind: K::Unit,
+                ty: Term::Primitive(Primitive::Void),
+                source,
+            })),
+            ty,
+            source,
+        };
+        assert!(fold_value_with_layouts(layouts, &wrong, &mut 100).is_err());
+        assert!(fold_value_with_layouts(layouts, &wrapped, &mut 0).is_err());
+        assert_eq!(
+            fold_value_with_layouts(layouts, &wrapped, &mut 100).unwrap(),
+            wrapped
         );
     }
 }

@@ -237,7 +237,8 @@ impl<'a> Infer<'a> {
             Pattern::Then { first, value, next } => {
                 self.bind_data_pattern(first, ty, depth + 1)?;
                 let computed_ty = self.ty(&value.ty)?;
-                if !Self::guard_value_type(&computed_ty) {
+                if !matches!(computed_ty, Term::Pointer(_)) && !Self::guard_value_type(&computed_ty)
+                {
                     return Err(
                         "computed memory pattern needs independent result provenance".into(),
                     );
@@ -246,7 +247,17 @@ impl<'a> Infer<'a> {
                 // it normally to retain call/read footprints; resource analysis
                 // separately checks candidate observation and rollback safety.
                 self.walk(value, depth + 1)?;
-                if matches!(computed_ty, Term::Function { .. }) {
+                if matches!(computed_ty, Term::Pointer(_)) {
+                    let targets = self.optional_target(value, depth + 1)?;
+                    self.bind_match_subject(next, &targets, true, &computed_ty, true, depth + 1)?;
+                    self.bind_owned_callees(
+                        next,
+                        &computed_ty,
+                        &BTreeMap::new(),
+                        &BTreeMap::new(),
+                        depth + 1,
+                    )
+                } else if matches!(computed_ty, Term::Function { .. }) {
                     let named = self.value_callees(value)?;
                     let code = self.local_fields_for(value)?;
                     self.bind_owned_callees(next, &computed_ty, &named, &code, depth + 1)
@@ -336,6 +347,7 @@ impl<'a> Infer<'a> {
             }
             Pattern::Remap { pattern, bindings } => {
                 self.bind_data_pattern(pattern, ty, depth + 1)?;
+                let environment = self.save_environment()?;
                 for (from, to) in bindings {
                     let ty = self
                         .locals
@@ -343,6 +355,12 @@ impl<'a> Infer<'a> {
                         .ok_or("handler memory pattern remap is missing")?;
                     bound_type(ty, self.fuel)?;
                     self.locals.insert(*to, ty.clone());
+                    if let Some(targets) = environment.pointers.get(from) {
+                        if let Some(targets) = targets {
+                            self.target_work(targets)?;
+                        }
+                        self.set_pointer(*to, targets.clone())?;
+                    }
                 }
                 Ok(())
             }
@@ -352,12 +370,22 @@ impl<'a> Infer<'a> {
                 self.bind_data_pattern(inner, ty, depth + 1)
             }
             Pattern::Or(patterns) => {
+                let base = self.save_environment()?;
+                let mut joined = None;
                 for pattern in patterns {
+                    self.environment = self.clone_environment(&base)?;
                     self.bind_data_pattern(pattern, ty, depth + 1)?;
+                    let next = self.save_environment()?;
+                    joined = Some(if let Some(previous) = joined {
+                        self.join_environment(previous, next)?
+                    } else {
+                        next
+                    });
                 }
+                self.environment = joined.unwrap_or(base);
                 Ok(())
             }
-            _ => self.bind_match_subject(pattern, &None, false, ty, depth + 1),
+            _ => self.bind_match_subject(pattern, &None, false, ty, false, depth + 1),
         }
     }
     fn walk_handler(
@@ -462,7 +490,7 @@ impl<'a> Infer<'a> {
             }
             row.push(operation);
         }
-        validate_borrowed_capture_storage(expr, &pointer_captures, self.fuel)?;
+        validate_borrowed_capture_storage(false, self.package, expr, &pointer_captures, self.fuel)?;
         row.extend(outer_row);
         let Term::Computation { effects, result } = self.ty(&computation.ty)? else {
             return Err("handler memory subject must be a computation".into());

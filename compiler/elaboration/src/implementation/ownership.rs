@@ -120,7 +120,9 @@ fn local_identity(
             | Term::Closure { .. } => {
                 return Err(Error::Ownership(OwnershipError::OpenBeforeLocalIdentity));
             }
-            Term::Primitive(_)
+            Term::ClosureSnapshot { .. }
+            | Term::Primitive(_)
+            | Term::FunctionValue { .. }
             | Term::Unit
             | Term::Bool(_)
             | Term::Float(_)

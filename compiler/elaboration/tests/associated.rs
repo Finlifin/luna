@@ -64,6 +64,7 @@ fn contract() -> Trait {
 }
 fn implementation(subject: Term, result: Term) -> Implementation {
     Implementation {
+        parameter_types: vec![],
         declaration: id(4),
         subject,
         interface: Some(id(1)),
@@ -105,6 +106,7 @@ fn with_world<R>(
         index
             .insert(
                 ImplementationHead {
+                    parameter_types: i.parameter_types.clone(),
                     declaration: i.declaration,
                     interface: i.interface,
                     interface_arguments: i.interface_arguments.clone(),

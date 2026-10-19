@@ -205,7 +205,8 @@ fn method_contract_summary_preserves_and_instantiates_local_binders() {
         signature: Term::Function {
             parameters: vec![],
             result: Box::new(rigid),
-        },
+        }
+        .into(),
         requirements: vec![],
         default: None,
     };

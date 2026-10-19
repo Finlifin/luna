@@ -27,6 +27,124 @@ pub(super) fn equivalent<'a>(
     true
 }
 
+/// Compare contextual method signatures without treating code as ordinary data.
+/// Context correspondence is structural, like code ascription; fixed lexical
+/// dependencies and default connections remain separate from type equalities.
+pub(super) fn equivalent_code(
+    context: &Context,
+    expected: &nir::code_interfaces::CodeFunctionSignature,
+    actual: &nir::code_interfaces::CodeFunctionSignature,
+    budget: Budget,
+) -> bool {
+    use nir::code_interfaces::{CodeInput, ExpressionCodeInterface};
+    use nir::program::LocalId;
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut fuel = budget.steps;
+    if expected.charge(&mut fuel).is_err()
+        || actual.charge(&mut fuel).is_err()
+        || expected.inputs.len() != actual.inputs.len()
+        || expected.clause_domains.len() != actual.clause_domains.len()
+    {
+        return false;
+    }
+    let mut mapping = BTreeMap::new();
+    let mut reverse = BTreeMap::new();
+    fn connect(
+        mapping: &mut BTreeMap<LocalId, LocalId>,
+        reverse: &mut BTreeMap<LocalId, LocalId>,
+        from: LocalId,
+        to: LocalId,
+    ) -> bool {
+        if mapping.get(&from).is_some_and(|previous| *previous != to)
+            || reverse.get(&to).is_some_and(|previous| *previous != from)
+        {
+            return false;
+        }
+        mapping.insert(from, to);
+        reverse.insert(to, from);
+        true
+    }
+    let mut pairs = expected
+        .clause_domains
+        .iter()
+        .zip(&actual.clause_domains)
+        .collect::<Vec<_>>();
+    let mut interfaces: Vec<(&ExpressionCodeInterface, &ExpressionCodeInterface)> = Vec::new();
+    for ((left_id, left), (right_id, right)) in expected.inputs.iter().zip(&actual.inputs) {
+        if mapping.contains_key(left_id)
+            || reverse.contains_key(right_id)
+            || !connect(&mut mapping, &mut reverse, *left_id, *right_id)
+        {
+            return false;
+        }
+        match (left, right) {
+            (CodeInput::Data(left), CodeInput::Data(right)) => pairs.push((left, right)),
+            (CodeInput::Code(left), CodeInput::Code(right)) => interfaces.push((left, right)),
+            _ => return false,
+        }
+    }
+    interfaces.push((&expected.output, &actual.output));
+    for (left, right) in &interfaces {
+        if left.infer_context
+            || right.infer_context
+            || left.context.len() != right.context.len()
+            || left.ports.len() != right.ports.len()
+            || left.defaults.len() != right.defaults.len()
+        {
+            return false;
+        }
+        let left_ports: BTreeSet<_> = left.ports.values().copied().collect();
+        let right_ports: BTreeSet<_> = right.ports.values().copied().collect();
+        if left_ports.len() != left.ports.len()
+            || right_ports.len() != right.ports.len()
+            || !left_ports.iter().all(|id| left.context.contains_key(id))
+            || !right_ports.iter().all(|id| right.context.contains_key(id))
+        {
+            return false;
+        }
+        for ((from, left_ty), (to, right_ty)) in left.context.iter().zip(&right.context) {
+            let exposed = left_ports.contains(from);
+            if exposed != right_ports.contains(to)
+                || (!exposed && from != to)
+                || !connect(&mut mapping, &mut reverse, *from, *to)
+            {
+                return false;
+            }
+            pairs.push((left_ty, right_ty));
+        }
+        pairs.push((&left.result, &right.result));
+    }
+    for (left, right) in interfaces {
+        for (port, target) in &left.defaults {
+            if !left.context.contains_key(port) {
+                return false;
+            }
+            let Some(to) = mapping.get(port) else {
+                return false;
+            };
+            if right.defaults.get(to) != Some(mapping.get(target).unwrap_or(target)) {
+                return false;
+            }
+        }
+    }
+    // PTC receives type propositions only. Malformed value-shaped payloads
+    // must not become candidate type equalities, even when identical.
+    if pairs
+        .iter()
+        .any(|(left, right)| left.sort() != Sort::Type || right.sort() != Sort::Type)
+    {
+        return false;
+    }
+    equivalent(
+        context,
+        pairs,
+        Budget {
+            steps: fuel,
+            ..budget
+        },
+    )
+}
+
 fn charge(fuel: &mut usize) -> Option<()> {
     *fuel = fuel.checked_sub(1)?;
     Some(())
@@ -155,6 +273,261 @@ mod tests {
             }],
             result: Box::new(result),
         }
+    }
+    fn code_signature(owner: u32, ty: Term) -> nir::code_interfaces::CodeFunctionSignature {
+        use nir::code_interfaces::{CodeFunctionSignature, CodeInput, ExpressionCodeInterface};
+        use nir::program::LocalId;
+        use std::collections::BTreeMap;
+        let id = |index| LocalId { owner, index };
+        let input = ExpressionCodeInterface {
+            infer_context: false,
+            context: BTreeMap::from([(id(2), ty.clone())]),
+            ports: BTreeMap::from([(format!("port_{owner}"), id(2))]),
+            defaults: BTreeMap::new(),
+            result: ty.clone(),
+        };
+        let output = ExpressionCodeInterface {
+            infer_context: false,
+            context: BTreeMap::from([(id(3), ty.clone())]),
+            ports: BTreeMap::from([(format!("result_{owner}"), id(3))]),
+            defaults: BTreeMap::from([(id(3), id(2))]),
+            result: ty.clone(),
+        };
+        CodeFunctionSignature {
+            clause_domains: vec![],
+            inputs: vec![
+                (id(0), CodeInput::Data(ty)),
+                (id(1), CodeInput::Code(input)),
+            ],
+            output,
+        }
+    }
+    fn boolean() -> Term {
+        Term::Primitive(nir::Primitive::Bool)
+    }
+    #[test]
+    fn contextual_signatures_preserve_connections_under_binding_renaming() {
+        let expected = code_signature(1, boolean());
+        let actual = code_signature(2, boolean());
+        let context = Context::with_scope(vec![]);
+        assert!(equivalent_code(
+            &context,
+            &expected,
+            &actual,
+            Budget::default()
+        ));
+        let mut changed = actual.clone();
+        *changed.output.defaults.values_mut().next().unwrap() =
+            nir::program::LocalId { owner: 2, index: 0 };
+        assert!(!equivalent_code(
+            &context,
+            &expected,
+            &changed,
+            Budget::default()
+        ));
+        changed.output.defaults.clear();
+        assert!(!equivalent_code(
+            &context,
+            &expected,
+            &changed,
+            Budget::default()
+        ));
+        assert!(equivalent_code(
+            &context,
+            &expected,
+            &actual,
+            Budget::default()
+        ));
+    }
+    #[test]
+    fn contextual_signatures_reject_category_and_interface_shape_mismatches() {
+        use nir::code_interfaces::CodeInput;
+        let expected = code_signature(1, boolean());
+        let actual = code_signature(2, boolean());
+        let context = Context::with_scope(vec![]);
+        let mut cases = Vec::new();
+        let mut changed = actual.clone();
+        changed.inputs[1].1 = CodeInput::Data(boolean());
+        cases.push(changed);
+        let mut changed = actual.clone();
+        changed.inputs.pop();
+        cases.push(changed);
+        let mut changed = actual.clone();
+        changed.output.infer_context = true;
+        cases.push(changed);
+        let mut changed = actual.clone();
+        changed.inputs[1].0 = changed.inputs[0].0;
+        cases.push(changed);
+        let mut changed = actual.clone();
+        changed.output.ports.insert(
+            "missing".into(),
+            nir::program::LocalId {
+                owner: 2,
+                index: 99,
+            },
+        );
+        cases.push(changed);
+        let mut changed = actual.clone();
+        changed
+            .output
+            .ports
+            .insert("alias".into(), nir::program::LocalId { owner: 2, index: 3 });
+        cases.push(changed);
+        for changed in cases {
+            assert!(
+                !equivalent_code(&context, &expected, &changed, Budget::default()),
+                "{changed}"
+            );
+        }
+    }
+    #[test]
+    fn contextual_signatures_do_not_abstract_fixed_dependencies() {
+        let mut expected = code_signature(1, boolean());
+        expected.output.ports.clear();
+        expected.output.defaults.clear();
+        let actual = expected.clone();
+        let context = Context::with_scope(vec![]);
+        assert!(equivalent_code(
+            &context,
+            &expected,
+            &actual,
+            Budget::default()
+        ));
+        let mut exposed = actual.clone();
+        exposed.output.ports.insert(
+            "new_port".into(),
+            nir::program::LocalId { owner: 1, index: 3 },
+        );
+        assert!(!equivalent_code(
+            &context,
+            &expected,
+            &exposed,
+            Budget::default()
+        ));
+        let mut renamed = code_signature(2, boolean());
+        renamed.output.ports.clear();
+        renamed.output.defaults.clear();
+        assert!(!equivalent_code(
+            &context,
+            &expected,
+            &renamed,
+            Budget::default()
+        ));
+    }
+    #[test]
+    fn contextual_signatures_preserve_shared_context_binding_identity() {
+        use nir::code_interfaces::CodeInput;
+        let mut expected = code_signature(1, boolean());
+        let CodeInput::Code(input) = &expected.inputs[1].1 else {
+            unreachable!()
+        };
+        expected.output = input.clone();
+        let actual = code_signature(2, boolean());
+        let context = Context::with_scope(vec![]);
+        assert!(!equivalent_code(
+            &context,
+            &expected,
+            &actual,
+            Budget::default()
+        ));
+        let mut aligned = actual;
+        let CodeInput::Code(input) = &aligned.inputs[1].1 else {
+            unreachable!()
+        };
+        aligned.output = input.clone();
+        assert!(equivalent_code(
+            &context,
+            &expected,
+            &aligned,
+            Budget::default()
+        ));
+    }
+    #[test]
+    fn contextual_signatures_use_type_premises_without_unfolding_heads() {
+        let a = nir::DeclarationId {
+            package: 1,
+            local: 10,
+        };
+        let b = nir::DeclarationId {
+            package: 1,
+            local: 11,
+        };
+        let left = Term::Rigid {
+            declaration: a,
+            sort: Sort::Type,
+        };
+        let right = Term::Rigid {
+            declaration: b,
+            sort: Sort::Type,
+        };
+        let expected = code_signature(1, left.clone());
+        let actual = code_signature(2, right.clone());
+        let mut context = Context::with_scope(vec![]);
+        assert!(!equivalent_code(
+            &context,
+            &expected,
+            &actual,
+            Budget::default()
+        ));
+        context.assume(Formula::equal(left.clone(), right));
+        assert!(equivalent_code(
+            &context,
+            &expected,
+            &actual,
+            Budget::default()
+        ));
+        let mut headed = actual.clone();
+        headed.output.result = Term::NormalForm {
+            head: nir::DeclarationId {
+                package: 1,
+                local: 12,
+            },
+            sort: Sort::Type,
+            arguments: vec![left],
+        };
+        assert!(!equivalent_code(
+            &context,
+            &expected,
+            &headed,
+            Budget::default()
+        ));
+    }
+    #[test]
+    fn contextual_signature_budget_failure_does_not_affect_later_comparison() {
+        let expected = code_signature(1, boolean());
+        let actual = code_signature(2, boolean());
+        let context = Context::with_scope(vec![]);
+        assert!(!equivalent_code(
+            &context,
+            &expected,
+            &actual,
+            Budget {
+                steps: 0,
+                ..Budget::default()
+            }
+        ));
+        assert!(equivalent_code(
+            &context,
+            &expected,
+            &actual,
+            Budget::default()
+        ));
+        let mut value_shaped = actual.clone();
+        value_shaped.output.result = Term::Bool(true);
+        assert!(!equivalent_code(
+            &context,
+            &value_shaped,
+            &value_shaped,
+            Budget::default()
+        ));
+        let mut invalid = actual.clone();
+        invalid.output.result = bound(0, 0);
+        assert!(!equivalent_code(
+            &context,
+            &invalid,
+            &invalid,
+            Budget::default()
+        ));
     }
     #[test]
     fn nested_signature_equalities_lift_only_outer_bindings() {

@@ -3,7 +3,7 @@
 //! Calls run only in the committed inference context. A failed call is terminal:
 //! retrying inference must not replay its comptime effects.
 use crate::{InferenceContext, InferenceError, InferenceTerm, MetaId};
-use comptime_interpretor::{Budget, Interpreter, Value};
+use comptime_interpretor::{Budget, Interpreter, InvocationValue, Value};
 use nir::program::{FunctionPhase, Package};
 use nir::{DeclarationId, Primitive, Sort, Term};
 use std::{
@@ -17,6 +17,19 @@ pub struct Input {
     pub value: InferenceTerm,
 }
 
+/// An already evaluated invocation-local value. Its graph may contain mutable
+/// captures; it is never frozen into a Term or persisted in a residual call.
+pub struct LiveInput {
+    pub ty: InferenceTerm,
+    pub value: Value,
+}
+
+/// Completed inputs with a mixture of frozen data and live value graphs.
+pub struct PreparedInput {
+    pub ty: InferenceTerm,
+    pub value: InvocationValue,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
     ForeignContext,
@@ -24,6 +37,7 @@ pub enum Error {
     InvalidAnnotation(usize),
     SpeculativeContext,
     UnknownComputation,
+    ConsumedInputs,
     InvalidTarget,
     Arity,
     Inference(InferenceError),
@@ -135,9 +149,37 @@ impl fmt::Display for AnnotationState<'_> {
         }
     }
 }
+enum PendingInputs {
+    Symbolic(Vec<Input>),
+    Prepared {
+        domains: Vec<InferenceTerm>,
+        values: Option<Vec<InvocationValue>>,
+    },
+}
+impl PendingInputs {
+    fn dependencies(&self, context: &InferenceContext) -> Result<BTreeSet<MetaId>, InferenceError> {
+        self.dependencies_metered(context, &mut 100_000)
+    }
+    fn dependencies_metered(
+        &self,
+        context: &InferenceContext,
+        fuel: &mut usize,
+    ) -> Result<BTreeSet<MetaId>, InferenceError> {
+        match self {
+            Self::Symbolic(inputs) => dependencies_metered(context, inputs, fuel),
+            Self::Prepared { domains, .. } => {
+                let mut result = BTreeSet::new();
+                for domain in domains {
+                    result.extend(context.unresolved_metered(domain, fuel)?);
+                }
+                Ok(result)
+            }
+        }
+    }
+}
 struct Pending {
     target: DeclarationId,
-    inputs: Vec<Input>,
+    inputs: PendingInputs,
     state: State,
 }
 
@@ -242,23 +284,52 @@ impl<'a> Session<'a> {
     pub fn new_in_scope(
         package: &'a Package,
         context: &InferenceContext,
-        budget: Budget,
+        mut budget: Budget,
         assumptions: &[nir::program::TraitRequirement],
         parameters: &[DeclarationId],
         solver: Option<
             &'a dyn Fn(&nir::program::TypePredicate) -> comptime_interpretor::ContractOutcome,
         >,
     ) -> Result<Self, Error> {
+        Self::new_in_scope_with_pointer_copy(
+            package,
+            context,
+            &mut budget,
+            assumptions,
+            parameters,
+            &[],
+            solver,
+            None,
+        )
+    }
+    pub(crate) fn new_in_scope_with_pointer_copy(
+        package: &'a Package,
+        context: &InferenceContext,
+        budget: &mut Budget,
+        assumptions: &[nir::program::TraitRequirement],
+        parameters: &[DeclarationId],
+        value_parameters: &[(DeclarationId, Term)],
+        solver: Option<
+            &'a dyn Fn(&nir::program::TypePredicate) -> comptime_interpretor::ContractOutcome,
+        >,
+        pointer_copy: Option<&'a dyn Fn(&Term, &mut u64) -> bool>,
+    ) -> Result<Self, Error> {
         if context.parent.is_some() {
             return Err(Error::SpeculativeContext);
         }
         let mut interpreter =
-            Interpreter::for_comptime_with_assumptions(package, assumptions, budget)
-                .map_err(Error::Invocation)?
-                .with_abstract_type_parameters(parameters)
+            Interpreter::for_comptime_with_assumptions(package, assumptions, *budget)
                 .map_err(Error::Invocation)?;
+        let scope = interpreter
+            .authorize_abstract_type_parameters(parameters)
+            .and_then(|()| interpreter.authorize_abstract_value_parameters(value_parameters));
+        budget.steps = interpreter.remaining_steps();
+        scope.map_err(Error::Invocation)?;
         if let Some(solver) = solver {
             interpreter = interpreter.with_type_solver(solver);
+        }
+        if let Some(permission) = pointer_copy {
+            interpreter = interpreter.with_budgeted_pointer_copy_permission(permission);
         }
         Ok(Self {
             identity: crate::unique(),
@@ -293,6 +364,56 @@ impl<'a> Session<'a> {
             output,
             Pending {
                 target,
+                inputs: PendingInputs::Symbolic(inputs),
+                state: State::Waiting(waiting),
+            },
+        );
+        Ok(output)
+    }
+    /// Queue completed values without copying their capture environments. Only
+    /// the domains may wait on inference. The values are consumed at most once,
+    /// including when invocation or result publication fails.
+    pub fn enqueue_live(
+        &mut self,
+        context: &mut InferenceContext,
+        target: DeclarationId,
+        inputs: Vec<LiveInput>,
+    ) -> Result<MetaId, Error> {
+        self.enqueue_prepared(
+            context,
+            target,
+            inputs
+                .into_iter()
+                .map(|input| PreparedInput {
+                    ty: input.ty,
+                    value: InvocationValue::Live(input.value),
+                })
+                .collect(),
+        )
+    }
+
+    pub fn enqueue_prepared(
+        &mut self,
+        context: &mut InferenceContext,
+        target: DeclarationId,
+        inputs: Vec<PreparedInput>,
+    ) -> Result<MetaId, Error> {
+        self.check_context(context)?;
+        self.check_target(target, inputs.len())?;
+        let (domains, values) = inputs
+            .into_iter()
+            .map(|input| (input.ty, input.value))
+            .unzip();
+        let inputs = PendingInputs::Prepared {
+            domains,
+            values: Some(values),
+        };
+        let waiting = inputs.dependencies(context)?;
+        let output = context.fresh(Sort::Type);
+        self.pending.insert(
+            output,
+            Pending {
+                target,
                 inputs,
                 state: State::Waiting(waiting),
             },
@@ -305,6 +426,10 @@ impl<'a> Session<'a> {
         target: DeclarationId,
         inputs: &[Input],
     ) -> Result<BTreeSet<MetaId>, Error> {
+        self.check_target(target, inputs.len())?;
+        Ok(dependencies(context, inputs)?)
+    }
+    fn check_target(&self, target: DeclarationId, input_count: usize) -> Result<(), Error> {
         let function = self
             .package
             .functions
@@ -320,10 +445,10 @@ impl<'a> Session<'a> {
         {
             return Err(Error::InvalidTarget);
         }
-        if parameters.len() != inputs.len() {
+        if parameters.len() != input_count {
             return Err(Error::Arity);
         }
-        Ok(dependencies(context, inputs)?)
+        Ok(())
     }
     pub fn state(&self, output: MetaId) -> Option<&State> {
         self.pending.get(&output).map(|p| &p.state)
@@ -850,7 +975,7 @@ impl<'a> Session<'a> {
                 return Err(Error::DependencyCycle(id));
             }
             work.push((id, true));
-            for dependency in dependencies(context, &pending.inputs)? {
+            for dependency in pending.inputs.dependencies(context)? {
                 work.push((dependency, false));
             }
         }
@@ -915,13 +1040,16 @@ impl<'a> Session<'a> {
                 self.resume(context, id)?;
                 return self.resume(context, output);
             }
-            let inputs = dependencies_metered(context, &pending.inputs, fuel).map_err(|error| {
-                if error == InferenceError::Budget {
-                    Error::SchedulingBudget
-                } else {
-                    Error::Inference(error)
-                }
-            })?;
+            let inputs = pending
+                .inputs
+                .dependencies_metered(context, fuel)
+                .map_err(|error| {
+                    if error == InferenceError::Budget {
+                        Error::SchedulingBudget
+                    } else {
+                        Error::Inference(error)
+                    }
+                })?;
             *fuel = fuel
                 .checked_sub(inputs.len())
                 .ok_or(Error::SchedulingBudget)?;
@@ -937,7 +1065,7 @@ impl<'a> Session<'a> {
             if failed_dependency {
                 // Continue publishing failure along the demanded path, but do
                 // not run independent siblings after the demand has failed.
-                let inputs = dependencies(context, &self.pending[&id].inputs)?;
+                let inputs = self.pending[&id].inputs.dependencies(context)?;
                 if inputs.is_disjoint(&self.failed) {
                     continue;
                 }
@@ -995,7 +1123,7 @@ impl<'a> Session<'a> {
             if variable.value.is_some() {
                 return Err(Error::Inference(InferenceError::AlreadyAssigned(output)));
             }
-            let waiting = dependencies(context, &pending.inputs)?;
+            let waiting = pending.inputs.dependencies(context)?;
             if let Some(dependency) = waiting.intersection(&self.failed).next() {
                 return Err(Error::DependencyFailed(*dependency));
             }
@@ -1005,24 +1133,42 @@ impl<'a> Session<'a> {
             let mut fuel =
                 usize::try_from(self.interpreter.remaining_steps()).unwrap_or(usize::MAX);
             let before = fuel;
-            let arguments = pending
-                .inputs
-                .iter()
-                .map(|input| {
-                    Ok((
-                        context.freeze_metered(&input.ty, &mut fuel)?,
-                        context.freeze_metered(&input.value, &mut fuel)?,
-                    ))
-                })
-                .collect::<Result<Vec<_>, InferenceError>>();
-            self.interpreter
-                .charge_preparation(before - fuel)
-                .map_err(Error::Invocation)?;
-            let arguments = arguments?;
-            let value = self
-                .interpreter
-                .invoke_with_normal_arguments(pending.target, arguments)
-                .map_err(Error::Invocation)?;
+            let value = match &mut pending.inputs {
+                PendingInputs::Symbolic(inputs) => {
+                    let arguments = inputs
+                        .iter()
+                        .map(|input| {
+                            Ok((
+                                context.freeze_metered(&input.ty, &mut fuel)?,
+                                context.freeze_metered(&input.value, &mut fuel)?,
+                            ))
+                        })
+                        .collect::<Result<Vec<_>, InferenceError>>();
+                    self.interpreter
+                        .charge_preparation(before - fuel)
+                        .map_err(Error::Invocation)?;
+                    self.interpreter
+                        .invoke_with_normal_arguments(pending.target, arguments?)
+                        .map_err(Error::Invocation)?
+                }
+                PendingInputs::Prepared { domains, values } => {
+                    let domains = domains
+                        .iter()
+                        .map(|ty| context.freeze_metered(ty, &mut fuel))
+                        .collect::<Result<Vec<_>, _>>();
+                    self.interpreter
+                        .charge_preparation(before - fuel)
+                        .map_err(Error::Invocation)?;
+                    let domains = domains?;
+                    let values = values.take().ok_or(Error::ConsumedInputs)?;
+                    self.interpreter
+                        .invoke_with_prepared_arguments(
+                            pending.target,
+                            domains.into_iter().zip(values).collect(),
+                        )
+                        .map_err(Error::Invocation)?
+                }
+            };
             let ty = match value {
                 Value::Type(ty) => ty,
                 Value::TypeParameter(declaration) => Term::Rigid {
@@ -1079,8 +1225,18 @@ impl fmt::Display for Session<'_> {
                 " (computation (output {output}) (target {}) (inputs",
                 pending.target
             )?;
-            for input in &pending.inputs {
-                write!(f, " (input (type {}) (value {}))", input.ty, input.value)?;
+            match &pending.inputs {
+                PendingInputs::Symbolic(inputs) => {
+                    for input in inputs {
+                        write!(f, " (input (type {}) (value {}))", input.ty, input.value)?;
+                    }
+                }
+                PendingInputs::Prepared { domains, values } => {
+                    for ty in domains {
+                        write!(f, " (prepared-input (type {ty}))")?;
+                    }
+                    write!(f, " (consumed {})", values.is_none())?;
+                }
             }
             write!(f, ") {})", pending.state)?;
         }

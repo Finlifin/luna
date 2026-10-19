@@ -83,8 +83,7 @@ impl Parser<'_> {
                 | TokenKind::KwQuote
                 | TokenKind::Spec
                 | TokenKind::Verified
-                | TokenKind::Atomic
-                | TokenKind::Extern => p.try_keyword_modified_definition(),
+                | TokenKind::Atomic => p.try_keyword_modified_definition(),
 
                 // verification statements
                 TokenKind::Axiom => p.try_unary(
@@ -136,7 +135,7 @@ impl Parser<'_> {
     }
 
     /// inline statement_expr
-    fn try_inline_statement(&mut self) -> ParseResult {
+    pub(super) fn try_inline_statement(&mut self) -> ParseResult {
         self.scoped_with_expected_prefix(TokenKind::Inline.as_ref(), |p| {
             p.eat_tokens(1); // consume 'inline'
             let inner = p.try_statement_or_definition()?;
@@ -183,26 +182,26 @@ impl Parser<'_> {
                 }
             }
 
-            let mut init: u32 = 0;
-            if p.eat_token(TokenKind::Eq) {
-                init = p.try_expr()?;
-                if init == 0 {
-                    return Err(ParseError::invalid_syntax(
-                        "Expected an initializer expression after '='".to_string(),
-                        p.peek_next_token().kind,
-                        p.next_token_span(),
-                    ));
-                }
+            if !p.eat_token(TokenKind::Eq) {
+                return Err(ParseError::invalid_syntax(
+                    format!(
+                        "{} declaration requires an initializer after '='",
+                        if mutable { "var" } else { "let" }
+                    ),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+            let init = p.try_expr()?;
+            if init == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected an initializer expression after '='".to_string(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
             }
 
             let otherwise = if p.eat_token(TokenKind::Else) {
-                if init == 0 {
-                    return Err(ParseError::invalid_syntax(
-                        "let else requires an initializer".into(),
-                        p.peek_next_token().kind,
-                        p.next_token_span(),
-                    ));
-                }
                 let block = p.try_block()?;
                 if block == 0 {
                     return Err(ParseError::invalid_syntax(
@@ -560,7 +559,7 @@ impl Parser<'_> {
             }
 
             let arms = p.try_multi_with_bracket(
-                &[Rule::semicolon("case arm", |p| p.try_case_arm())],
+                &[Rule::comma("case arm", |p| p.try_case_arm())],
                 (TokenKind::LBrace, TokenKind::RBrace),
             )?;
 
@@ -928,7 +927,6 @@ impl Parser<'_> {
                 TokenKind::Spec => "__flurry_kw_spec",
                 TokenKind::Verified => "__flurry_kw_verified",
                 TokenKind::Atomic => "__flurry_kw_atomic",
-                TokenKind::Extern => "__flurry_kw_extern",
                 TokenKind::Async => "__flurry_kw_async",
                 _ => return Ok(0),
             };
@@ -1089,6 +1087,7 @@ impl Parser<'_> {
     pub fn try_file_scope(&mut self) -> ParseResult {
         self.scoped(|p| {
             let nodes = p.try_multi(&[
+                Rule::comma("configuration", |p| p.try_configuration()),
                 Rule::comma("property", |p| p.try_property()),
                 Rule::semicolon("statement or definition", |p| {
                     p.try_statement_or_definition()

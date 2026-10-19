@@ -1063,7 +1063,12 @@ fn same_congruent_head(a: &Term, b: &Term, context: &Context) -> bool {
     {
         return a == b && af.len() == bf.len();
     }
-    if let (Term::RecordValue(a), Term::RecordValue(b)) = (a, b) {
+    // Equal field types lift through the same named product layout. This is
+    // forward congruence only: no permutation or inverse field equation is
+    // introduced, and value records remain distinct from record Types.
+    if let (Term::Record(a), Term::Record(b)) | (Term::RecordValue(a), Term::RecordValue(b)) =
+        (a, b)
+    {
         return a.len() == b.len() && a.iter().zip(b).all(|((a, _), (b, _))| a == b);
     }
     if let (Term::TypeListValue(a), Term::TypeListValue(b))
@@ -1272,6 +1277,25 @@ impl Search<'_> {
                             if !matches!(ha, Head::Nominal(..))
                                 || matches!(ha, Head::Nominal(head, _) if self.context.is_nominal_constructor(head))
                             {
+                                // Closed scalar indices are part of a nominal
+                                // type's identity, not program-state predicates.
+                                if let (
+                                    Term::Nominal {
+                                        arguments: left, ..
+                                    },
+                                    Term::Nominal {
+                                        arguments: right, ..
+                                    },
+                                ) = (ta, tb)
+                                {
+                                    if left.iter().zip(right).any(|(left, right)| {
+                                        left.scalar_index_domain().is_some()
+                                            && right.scalar_index_domain().is_some()
+                                            && left != right
+                                    }) {
+                                        return Ok(None);
+                                    }
+                                }
                                 for (&ca, &cb) in
                                     self.terms.children[a].iter().zip(&self.terms.children[b])
                                 {
@@ -1791,6 +1815,38 @@ impl fmt::Display for Proof {
 #[cfg(test)]
 mod tuple_classification_tests {
     use super::*;
+
+    #[test]
+    fn completed_nominal_value_indices_require_constructor_authority() {
+        let head = DeclarationId {
+            package: 82,
+            local: 90,
+        };
+        let indexed = |value| Term::Nominal {
+            declaration: head,
+            arguments: vec![Term::Bool(value)],
+        };
+        let goal = Formula::equal(indexed(true), indexed(false)).negate();
+        let unknown = Context::default();
+        assert!(!matches!(
+            unknown.prove(goal.clone(), Budget::default()),
+            Outcome::Entailed(_)
+        ));
+        let mut registered = Context::default();
+        registered.admit_nominal_constructor(head);
+        let Outcome::Entailed(proof) = registered.prove(goal, Budget::default()) else {
+            panic!("completed distinct indices must separate admitted nominal types")
+        };
+        registered.verify_proof(&proof, Budget::default()).unwrap();
+        assert!(unknown.verify_proof(&proof, Budget::default()).is_err());
+        assert!(matches!(
+            registered.prove(
+                Formula::equal(indexed(true), indexed(true)),
+                Budget::default()
+            ),
+            Outcome::Entailed(_)
+        ));
+    }
 
     #[test]
     fn tuple_classification_counterexamples_retain_their_authority() {

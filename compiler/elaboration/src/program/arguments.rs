@@ -9,11 +9,75 @@ pub(super) struct RoutedArgument<'h> {
     lambda: bool,
 }
 
-impl RoutedArgument<'_> {
+impl<'h> RoutedArgument<'h> {
+    /// A literal whole packet has no producer around its fields. Prepare those
+    /// fields in the ordinary collection loop without constructing a second
+    /// tuple layer. Callers must first establish that this is a variadic slot.
+    pub(super) fn expand_literal_packet(&mut self, remaining: &mut u64) -> Result<(), Error> {
+        if self.collected || self.lambda || self.values.len() != 1 {
+            return Ok(());
+        }
+        let H::Tuple(fields) = self.values[0].kind else {
+            return Ok(());
+        };
+        *remaining = remaining.checked_sub(fields.len() as u64).ok_or_else(|| {
+            error(
+                self.values[0].span,
+                "literal packet preparation budget exhausted",
+            )
+        })?;
+        let position = self.positions[0];
+        self.values = fields.to_vec();
+        self.positions = vec![position; fields.len()];
+        self.collected = true;
+        Ok(())
+    }
+
     pub(super) fn is_collected(&self) -> bool {
         self.collected
     }
-    pub(super) fn source_inputs(&self) -> impl Iterator<Item = (usize, &Expr<'_>)> {
+    pub(super) fn property_fields(&self) -> Option<&[hir::expr::FieldExpr<'h>]> {
+        if self.collected {
+            return None;
+        }
+        match self.values.first()?.kind {
+            H::CollectedProperties(fields) => Some(fields),
+            _ => None,
+        }
+    }
+    pub(super) fn has_collection_fields(&self) -> bool {
+        self.collected || self.property_fields().is_some()
+    }
+    pub(super) fn retained_collection_context(
+        &self,
+        checker: &Checker<'_, '_>,
+        values: &[Option<n::Expr>],
+    ) -> crate::calls::InputContext {
+        use crate::calls::InputContext as C;
+        let fields = values
+            .iter()
+            .map(|value| {
+                value
+                    .as_ref()
+                    .filter(|value| !is_never(&value.ty))
+                    .map_or(C::Unknown, |value| C::Known(value.ty.clone()))
+            })
+            .collect::<Vec<_>>();
+        match self.property_fields() {
+            Some(properties) => C::Record(
+                properties
+                    .iter()
+                    .zip(fields)
+                    .map(|(property, field)| (property.ident.name.to_string(), field))
+                    .collect(),
+            ),
+            None => match checker.protocols.tuple {
+                Some(head) => C::NormalTuple { head, fields },
+                None => C::Tuple(fields),
+            },
+        }
+    }
+    pub(super) fn source_inputs(&self) -> impl Iterator<Item = (usize, &Expr<'h>)> {
         self.positions.iter().copied().zip(&self.values)
     }
     pub(super) fn single_position(&self) -> Option<usize> {
@@ -35,6 +99,36 @@ impl RoutedArgument<'_> {
         } else {
             self.values[0].clone()
         }
+    }
+
+    pub(super) fn local_collection_context(
+        &self,
+        checker: &Checker<'_, '_>,
+    ) -> Option<crate::calls::InputContext> {
+        use crate::calls::InputContext as C;
+        if !self.collected {
+            return None;
+        }
+        let fields = self
+            .source_inputs()
+            .map(|(_, input)| {
+                let ty = match input.kind {
+                    H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => {
+                        checker.locals.get(&local(id))
+                    }
+                    _ => None,
+                };
+                ty.filter(|ty| !is_never(ty))
+                    .map_or(C::Unknown, |ty| C::Known(ty.clone()))
+            })
+            .collect::<Vec<_>>();
+        if fields.iter().all(|field| matches!(field, C::Unknown)) {
+            return None;
+        }
+        Some(match checker.protocols.tuple {
+            Some(head) => C::NormalTuple { head, fields },
+            None => C::Tuple(fields),
+        })
     }
 
     pub fn require_collection_type(
@@ -285,6 +379,152 @@ pub(super) fn route_arguments<'h>(
 }
 
 impl Checker<'_, '_> {
+    pub(super) fn attempt_collection_fields(
+        &mut self,
+        call: &Expr<'_>,
+        route: &RoutedArgument<'_>,
+        context: &crate::calls::InputContext,
+        values: &mut Vec<Option<n::Expr>>,
+        staged: bool,
+        allow_defaults: bool,
+    ) -> Result<(Option<n::Expr>, bool), Error> {
+        use crate::calls::InputContext as C;
+        let properties = route.property_fields();
+        let inputs = match properties {
+            Some(properties) => properties
+                .iter()
+                .map(|property| property.expr)
+                .collect::<Vec<_>>(),
+            None => route.source_inputs().map(|(_, input)| input).collect(),
+        };
+        let count = inputs.len();
+        let record_context = |fields: Vec<(String, C)>| -> Result<Vec<C>, Error> {
+            let Some(properties) = properties else {
+                return Err(error(
+                    call.span,
+                    "default variadic collection requires a tuple type",
+                ));
+            };
+            if fields.len() != properties.len()
+                || fields
+                    .iter()
+                    .zip(properties)
+                    .any(|((name, _), property)| name != property.ident.name.as_str())
+            {
+                return Err(error(
+                    call.span,
+                    "property argument fields do not match the expected record shape",
+                ));
+            }
+            Ok(fields.into_iter().map(|(_, context)| context).collect())
+        };
+        let fields = match context {
+            C::Known(ty) => match self.structural_type(ty, call.span)? {
+                Term::Record(fields) if properties.is_some() => record_context(
+                    fields
+                        .into_iter()
+                        .map(|(name, ty)| (name, C::Known(ty)))
+                        .collect(),
+                )?,
+                Term::Tuple(fields) if properties.is_none() => {
+                    fields.into_iter().map(C::Known).collect()
+                }
+                _ => {
+                    return Err(error(
+                        call.span,
+                        "collection domain does not match its input protocol",
+                    ));
+                }
+            },
+            C::Record(fields) => record_context(fields.clone())?,
+            C::Tuple(fields) | C::NormalTuple { fields, .. } if properties.is_none() => {
+                fields.clone()
+            }
+            C::Unknown => vec![C::Unknown; count],
+            _ => {
+                return Err(error(
+                    call.span,
+                    "collection domain does not match its input protocol",
+                ));
+            }
+        };
+        if fields.len() != count {
+            return Err(error(
+                call.span,
+                "variadic collection argument count mismatch",
+            ));
+        }
+        values.resize_with(count, || None);
+        let mut progress = false;
+        for (input, (value, context)) in inputs.into_iter().zip(values.iter_mut().zip(&fields)) {
+            if value.is_some() {
+                continue;
+            }
+            let expected = match context {
+                C::Known(ty) => Some(ty),
+                _ => None,
+            };
+            *value = self.with_staged_input(staged, |this| {
+                this.argument_attempt_with_input(
+                    input,
+                    expected,
+                    None,
+                    allow_defaults,
+                    Some(context),
+                )
+            })?;
+            if value.is_some() {
+                progress = true;
+                // Recompute the candidate before contextualizing or defaulting
+                // another element; a peer can determine its domain.
+                break;
+            }
+        }
+        if values.iter().any(Option::is_none) {
+            return Ok((None, progress));
+        }
+        let values = values
+            .iter()
+            .map(|value| value.as_ref().unwrap().clone())
+            .collect::<Vec<_>>();
+        let (ty, kind) = if let Some(properties) = properties {
+            let types = properties
+                .iter()
+                .zip(values.iter().zip(&fields))
+                .map(|(property, (value, context))| {
+                    let ty = if is_never(&value.ty) {
+                        match context {
+                            C::Known(ty) => ty.clone(),
+                            _ => value.ty.clone(),
+                        }
+                    } else {
+                        value.ty.clone()
+                    };
+                    (property.ident.name.to_string(), ty)
+                })
+                .collect();
+            (Term::Record(types), K::AnonymousRecord { fields: values })
+        } else {
+            let ty = if values.iter().any(|value| is_never(&value.ty)) {
+                p(P::Never)
+            } else {
+                self.tuple_value_type(
+                    values.iter().map(|value| value.ty.clone()).collect(),
+                    call.span,
+                )?
+            };
+            (ty, K::Tuple(values))
+        };
+        Ok((
+            Some(n::Expr {
+                ty,
+                source: source(call.span),
+                kind,
+            }),
+            true,
+        ))
+    }
+
     pub(super) fn stage_collected_call(
         &mut self,
         mut call: n::Expr,
@@ -292,7 +532,11 @@ impl Checker<'_, '_> {
         offset: usize,
         span: Span,
     ) -> Result<n::Expr, Error> {
-        if !routes.iter().any(|route| route.collected) {
+        let completed_defaults = matches!(&call.kind, K::Call { arguments, .. }
+            if arguments.iter().any(|argument| argument.parameter >= offset
+                && !argument.is_default
+                && !routes.iter().any(|route| offset + route.parameter == argument.parameter)));
+        if !routes.iter().any(|route| route.collected) && !completed_defaults {
             return Ok(call);
         }
         let K::Call {
@@ -386,4 +630,21 @@ impl Checker<'_, '_> {
             },
         })
     }
+}
+
+/// Flatten only syntax-level tuple packets. Element expressions retain their
+/// destination phase; computed packets need the checked preparation path.
+pub(super) fn literal_spread_arguments<'hir>(args: &[Arg<'hir>]) -> Option<Vec<Arg<'hir>>> {
+    let mut flat = Vec::new();
+    for arg in args {
+        match arg {
+            Arg::Expand(value) => match value.kind {
+                H::Tuple(items) => flat.extend(items.iter().map(Arg::Positional)),
+                H::Unit => {}
+                _ => return None,
+            },
+            other => flat.push(other.clone()),
+        }
+    }
+    Some(flat)
 }

@@ -214,6 +214,33 @@ impl Engine<'_> {
         }
         values.pop().ok_or(())
     }
+    // Universal coverage independent of the subject domain. The ordinary
+    // wildcard path stays iterative even for very long sequential patterns.
+    fn unconditional(&mut self, pat: &Pattern, depth: usize) -> Result<bool, ()> {
+        if self.wildcard(pat)? {
+            return Ok(true);
+        }
+        if depth > 256 {
+            return Err(());
+        }
+        self.spend(1)?;
+        match pat {
+            Pattern::Binding { inner, .. } | Pattern::Remap { pattern: inner, .. } => {
+                self.unconditional(inner, depth + 1)
+            }
+            Pattern::Then { first, value, next } => Ok(self.unconditional(first, depth + 1)?
+                && self.matrix(vec![&value.ty], vec![vec![next]], depth + 1)?),
+            Pattern::Or(alternatives) => {
+                for alternative in alternatives {
+                    if self.unconditional(alternative, depth + 1)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
+    }
     fn matrix<'a>(
         &mut self,
         types: Vec<&'a Term>,
@@ -230,7 +257,7 @@ impl Engine<'_> {
         for row in &rows {
             let mut all = true;
             for pat in row {
-                if !self.wildcard(pat)? {
+                if !self.unconditional(pat, depth)? {
                     all = false;
                     break;
                 }
@@ -245,7 +272,7 @@ impl Engine<'_> {
         if !rows.is_empty() {
             let mut all = true;
             for row in &rows {
-                if !self.wildcard(row[0])? {
+                if !self.unconditional(row[0], depth)? {
                     all = false;
                     break;
                 }
@@ -269,6 +296,15 @@ impl Engine<'_> {
             return self.bit_matrix(*width, &types[1..], rows, depth);
         }
         if let Term::Primitive(primitive) = types[0] {
+            if let Some(domain) = crate::machine_float_coverage::Domain::new(*primitive) {
+                return self.interval_matrix_with_float(
+                    &domain.ranges(),
+                    &types[1..],
+                    rows,
+                    depth,
+                    Some(domain),
+                );
+            }
             if let Some(domain) = crate::interval_coverage::domain(*primitive) {
                 return self.interval_matrix(&domain, &types[1..], rows, depth);
             }
@@ -335,7 +371,14 @@ impl Engine<'_> {
         for (head, fields) in branches {
             let mut specialized = Vec::new();
             for row in &rows {
-                self.specialize(row[0], head, fields.len(), &row[1..], &mut specialized)?;
+                self.specialize(
+                    row[0],
+                    head,
+                    fields.len(),
+                    &row[1..],
+                    &mut specialized,
+                    depth,
+                )?;
             }
             let mut next = fields;
             next.extend_from_slice(&types[1..]);
@@ -395,10 +438,23 @@ impl Engine<'_> {
         rows: Vec<Vec<&'a Pattern>>,
         depth: usize,
     ) -> Result<bool, ()> {
+        self.interval_matrix_with_float(domain, tail_types, rows, depth, None)
+    }
+    fn interval_matrix_with_float<'a>(
+        &mut self,
+        domain: &[crate::interval_coverage::Interval],
+        tail_types: &[&'a Term],
+        rows: Vec<Vec<&'a Pattern>>,
+        depth: usize,
+        float: Option<crate::machine_float_coverage::Domain>,
+    ) -> Result<bool, ()> {
         use crate::interval_coverage::{covers, cuts, extract};
         let mut intervals = Vec::new();
         for row in &rows {
-            intervals.push(extract(row[0], &mut self.steps)?);
+            intervals.push(match float {
+                Some(float) => float.extract(row[0], &mut self.steps)?,
+                None => extract(row[0], &mut self.steps)?,
+            });
         }
         let cuts = cuts(
             domain.iter().chain(intervals.iter().flatten()),
@@ -501,6 +557,7 @@ impl Engine<'_> {
         arity: usize,
         tail: &[&'a Pattern],
         out: &mut Vec<Vec<&'a Pattern>>,
+        depth: usize,
     ) -> Result<(), ()> {
         let mut pending = vec![pat];
         while let Some(pat) = pending.pop() {
@@ -510,8 +567,16 @@ impl Engine<'_> {
                     pending.push(inner);
                     continue;
                 }
-                Pattern::Then { first, next, .. } if self.wildcard(next)? => {
-                    pending.push(first);
+                Pattern::Then { first, value, next } => {
+                    // A computed suffix observes its own result domain, not
+                    // the original subject. Only universal coverage of that
+                    // domain allows us to retain the first pattern's coverage.
+                    // Reuse this engine's fuel and depth; do not execute value.
+                    if self.wildcard(next)?
+                        || self.matrix(vec![&value.ty], vec![vec![next]], depth + 1)?
+                    {
+                        pending.push(first);
+                    }
                     continue;
                 }
                 Pattern::Or(patterns) => {
@@ -633,6 +698,7 @@ mod tests {
             BTreeMap::from([(
                 id(),
                 Enum {
+                    parameter_types: vec![],
                     groups: vec![],
                     encoding: None,
                     symbol_encoding: None,
@@ -694,6 +760,7 @@ mod tests {
             let structs = BTreeMap::from([(
                 id(),
                 Struct {
+                    parameter_types: vec![],
                     capabilities: Vec::new(),
                     requirements: vec![],
                     type_parameters: vec![],
@@ -1309,6 +1376,101 @@ mod exact_float_tests {
                 &[&wrong_subject, &lit("0.0")],
                 100_000
             ),
+            Coverage::Missing
+        );
+    }
+}
+
+#[cfg(test)]
+mod computed_structure_tests {
+    use super::*;
+    use nir::program::{Expr, ExprKind, SourceRange};
+
+    fn computed(first: Pattern, ty: Term, next: Pattern) -> Pattern {
+        Pattern::Then {
+            first: Box::new(first),
+            value: Box::new(Expr {
+                source: SourceRange { start: 0, end: 0 },
+                ty,
+                // Coverage uses the result type, never evaluates this body.
+                kind: ExprKind::Unit,
+            }),
+            next: Box::new(next),
+        }
+    }
+
+    #[test]
+    fn computed_suffix_uses_its_result_domain_and_preserves_first_restriction() {
+        let bool_ty = Term::Primitive(Primitive::Bool);
+        let tuple_ty = Term::Tuple(vec![bool_ty.clone(), bool_ty.clone()]);
+        let total = computed(
+            Pattern::Wild,
+            tuple_ty.clone(),
+            Pattern::Tuple(vec![Pattern::Wild, Pattern::Wild]),
+        );
+        assert_eq!(
+            check(&BTreeMap::new(), &bool_ty, &[&total], 100_000),
+            Coverage::Exhaustive
+        );
+        for subject in [
+            Term::Primitive(Primitive::U32),
+            Term::Primitive(Primitive::Float),
+            Term::Primitive(Primitive::BitVec(8)),
+            tuple_ty.clone(),
+        ] {
+            assert_eq!(
+                check(&BTreeMap::new(), &subject, &[&total], 100_000),
+                Coverage::Exhaustive,
+                "{subject:?}"
+            );
+        }
+        let partial = computed(
+            Pattern::Literal(Literal::Bool(true)),
+            tuple_ty.clone(),
+            Pattern::Tuple(vec![Pattern::Wild, Pattern::Wild]),
+        );
+        assert_eq!(
+            check(&BTreeMap::new(), &bool_ty, &[&partial], 100_000),
+            Coverage::Missing
+        );
+        let refutable = computed(
+            Pattern::Wild,
+            tuple_ty,
+            Pattern::Tuple(vec![Pattern::Literal(Literal::Bool(true)), Pattern::Wild]),
+        );
+        assert_eq!(
+            check(&BTreeMap::new(), &bool_ty, &[&refutable], 100_000),
+            Coverage::Missing
+        );
+        assert_eq!(
+            check(&BTreeMap::new(), &bool_ty, &[&total], 2),
+            Coverage::Unknown
+        );
+    }
+
+    #[test]
+    fn computed_suffix_can_cover_all_variants_without_erasing_guards() {
+        let bool_ty = Term::Primitive(Primitive::Bool);
+        let all = Pattern::Or(vec![
+            Pattern::Literal(Literal::Bool(true)),
+            Pattern::Literal(Literal::Bool(false)),
+        ]);
+        let total = computed(Pattern::Wild, bool_ty.clone(), all);
+        assert_eq!(
+            check(&BTreeMap::new(), &bool_ty, &[&total], 100_000),
+            Coverage::Exhaustive
+        );
+        let guard = Pattern::Guard {
+            pattern: Box::new(Pattern::Wild),
+            condition: Box::new(Expr {
+                source: SourceRange { start: 0, end: 0 },
+                ty: bool_ty.clone(),
+                kind: ExprKind::Literal(Literal::Bool(false)),
+            }),
+        };
+        let guarded = computed(Pattern::Wild, bool_ty.clone(), guard);
+        assert_eq!(
+            check(&BTreeMap::new(), &bool_ty, &[&guarded], 100_000),
             Coverage::Missing
         );
     }

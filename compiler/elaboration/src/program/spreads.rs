@@ -5,11 +5,12 @@ mod inputs;
 mod layout;
 
 pub(super) struct PendingPacket {
+    origin: (hir::HirId, Span),
     bindings: Vec<n::LocalId>,
     value: n::Expr,
     staged: bool,
     tuple: bool,
-    frozen: Option<(n::Expr, Term)>,
+    frozen: Option<(n::Expr, comptime_interpretor::Value)>,
 }
 
 impl Checker<'_, '_> {
@@ -25,7 +26,7 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         partial: Option<&crate::calls::CallableContext>,
         resolved: Option<&(n::Expr, Vec<n::Expr>)>,
-        build: impl FnOnce(&mut Self, &[Arg<'_>]) -> Result<n::Expr, Error>,
+        build: impl FnOnce(&mut Self, &[Arg<'_>], bool) -> Result<n::Expr, Error>,
     ) -> Result<n::Expr, Error> {
         // Literal tuples must reach destination checking before numeric
         // defaulting or staged-input interpretation.
@@ -45,7 +46,7 @@ impl Checker<'_, '_> {
                     other => flat.push(other.clone()),
                 }
             }
-            return build(self, &flat);
+            return build(self, &flat, false);
         }
         let mut checked = inputs::PreparedInputs::new();
         let context = self.spread_context(
@@ -57,11 +58,14 @@ impl Checker<'_, '_> {
             expr.span,
             &mut checked,
         )?;
-        let (contexts, stages) = if let Some(context) = context {
+        let (contexts, partial_contexts, stages) = if let Some(context) = context {
             let types = context.iter().map(|(ty, _)| ty.clone()).collect::<Vec<_>>();
             let stages = context.iter().map(|(_, stage)| *stage).collect::<Vec<_>>();
+            let (contexts, partial_contexts) =
+                self.spread_partial_packet_contexts(collected, &types, expr.span)?;
             (
-                self.spread_packet_contexts(collected, &types, expr.span)?,
+                contexts,
+                partial_contexts,
                 self.spread_packet_layout(collected, &stages, expr.span)?
                     .into_iter()
                     .map(|fields| {
@@ -70,15 +74,21 @@ impl Checker<'_, '_> {
                     .collect::<Vec<_>>(),
             )
         } else {
-            (vec![None; collected.len()], vec![false; collected.len()])
+            (
+                vec![None; collected.len()],
+                vec![None; collected.len()],
+                vec![false; collected.len()],
+            )
         };
         let mut source_contexts = Vec::new();
+        let mut source_partial_contexts = Vec::new();
         let mut source_stages = Vec::new();
         let mut collected_index = 0;
         let mut record_seen = false;
         for arg in args {
             if matches!(arg, Arg::Named(..)) {
                 source_contexts.push(None);
+                source_partial_contexts.push(None);
                 source_stages.push(false);
                 if !record_seen {
                     collected_index += 1;
@@ -86,6 +96,7 @@ impl Checker<'_, '_> {
                 }
             } else {
                 source_contexts.push(contexts[collected_index].clone());
+                source_partial_contexts.push(partial_contexts[collected_index].clone());
                 source_stages.push(stages[collected_index]);
                 collected_index += 1;
             }
@@ -157,7 +168,7 @@ impl Checker<'_, '_> {
             args,
             &source_contexts,
             &source_stages,
-            None,
+            Some(&source_partial_contexts),
             source_checked,
             BTreeMap::new(),
             1,
@@ -165,11 +176,11 @@ impl Checker<'_, '_> {
         )
     }
 
-    pub(super) fn spread_input_symbol(
+    pub(super) fn prepare_spread_input(
         &mut self,
         binding: n::LocalId,
         source: &Expr<'_>,
-    ) -> Result<Option<Term>, Error> {
+    ) -> Result<Option<(n::LocalId, usize)>, Error> {
         let Some((key, index)) = self.pending_spread_inputs.iter().find_map(|(key, packet)| {
             packet
                 .bindings
@@ -188,13 +199,58 @@ impl Checker<'_, '_> {
         }
         if packet.frozen.is_none() {
             let value = packet.value.clone();
-            let frozen = self.freeze_dependency_input(source, value, vec![])?;
-            self.pending_spread_inputs.get_mut(&key).unwrap().frozen = Some(frozen);
+            // The synthetic field uses the enclosing call's identity. Required
+            // evaluation must track the packet producer instead, or evaluating
+            // a constant call would falsely appear to recurse into itself.
+            let mut origin = source.clone();
+            origin.hir_id = packet.origin.0;
+            origin.span = packet.origin.1;
+            let (completed, ty) = self.required_normal_input(&origin, value, vec![])?;
+            let frozen = self.materialize_local_constant(completed.clone(), ty, origin.span)?;
+            self.pending_spread_inputs.get_mut(&key).unwrap().frozen = Some((frozen, completed));
         }
+        Ok(Some((key, index)))
+    }
+
+    pub(super) fn completed_packet_key(&self, binding: n::LocalId) -> Option<n::LocalId> {
+        self.pending_spread_inputs.iter().find_map(|(key, packet)| {
+            (packet.frozen.is_some() && packet.bindings.contains(&binding)).then_some(*key)
+        })
+    }
+
+    pub(super) fn completed_packet_graph(
+        &self,
+        key: n::LocalId,
+    ) -> (comptime_interpretor::Value, Term) {
+        let (expression, value) = self.pending_spread_inputs[&key]
+            .frozen
+            .as_ref()
+            .expect("completed packet");
+        (value.clone(), expression.ty.clone())
+    }
+
+    pub(super) fn set_completed_packet_expression(&mut self, key: n::LocalId, expression: n::Expr) {
+        self.pending_spread_inputs
+            .get_mut(&key)
+            .unwrap()
+            .frozen
+            .as_mut()
+            .expect("completed packet")
+            .0 = expression;
+    }
+
+    pub(super) fn spread_input_value(
+        &mut self,
+        binding: n::LocalId,
+        source: &Expr<'_>,
+    ) -> Result<Option<comptime_interpretor::Value>, Error> {
+        let Some((key, index)) = self.prepare_spread_input(binding, source)? else {
+            return Ok(None);
+        };
         let packet = &self.pending_spread_inputs[&key];
-        let (_, symbol) = packet.frozen.as_ref().unwrap();
-        if packet.tuple {
-            let Term::TupleValue(fields) = symbol else {
+        let (_, completed) = packet.frozen.as_ref().unwrap();
+        let selected = if packet.tuple {
+            let comptime_interpretor::Value::Tuple(fields) = completed else {
                 return Err(error(
                     source.span,
                     "dependent spread did not produce a tuple",
@@ -203,11 +259,32 @@ impl Checker<'_, '_> {
             fields
                 .get(index)
                 .cloned()
-                .map(Some)
-                .ok_or_else(|| error(source.span, "dependent spread field is missing"))
+                .ok_or_else(|| error(source.span, "dependent spread field is missing"))?
         } else {
-            Ok(Some(symbol.clone()))
+            completed.clone()
+        };
+        Ok(Some(selected))
+    }
+    pub(super) fn spread_input_symbol(
+        &mut self,
+        binding: n::LocalId,
+        ty: &Term,
+        source: &Expr<'_>,
+    ) -> Result<Option<Term>, Error> {
+        let Some(selected) = self.spread_input_value(binding, source)? else {
+            return Ok(None);
+        };
+        // Delivery remains attached to the original packet. Only the selected
+        // dependency obtains a symbol; a closure's checked snapshot factory is
+        // used by annotation computations, not to split the delivery graph.
+        if matches!(&selected, comptime_interpretor::Value::Closure(closure)
+            if closure.declaration_instance().is_none())
+        {
+            return self
+                .freeze_completed_dependency(selected, ty.clone(), source.span)
+                .map(|(_, symbol)| Some(symbol));
         }
+        self.required_normal_term(selected, source.span).map(Some)
     }
     pub(super) fn spread_binding(&mut self, span: Span) -> Result<n::LocalId, Error> {
         let index = self.next_temporary_binding;
@@ -231,22 +308,7 @@ impl Checker<'_, '_> {
         // Literal packets already expose their element expressions. Route them
         // directly so each destination supplies both type and stage context;
         // a speculative runtime temporary would erase that distinction.
-        if args
-            .iter()
-            .all(|arg| !matches!(arg, Arg::Expand(value) if !matches!(value.kind,H::Tuple(_))))
-        {
-            let mut flat = Vec::new();
-            for arg in args {
-                match arg {
-                    Arg::Expand(value) => {
-                        let H::Tuple(items) = value.kind else {
-                            unreachable!()
-                        };
-                        flat.extend(items.iter().map(Arg::Positional));
-                    }
-                    other => flat.push(other.clone()),
-                }
-            }
+        if let Some(flat) = arguments::literal_spread_arguments(args) {
             return self
                 .call(expr, callee, &flat, expected, partial)
                 .map_err(|mut failure| {
@@ -259,6 +321,32 @@ impl Checker<'_, '_> {
                     }
                     failure
                 });
+        }
+        if let H::NFApplication(head, clauses) = callee.kind {
+            if let H::ResolvedDef { def_id, .. } = head.kind {
+                if let Some(owner) = self.package.definition_owner(def_id) {
+                    self.ensure_signature(owner, expr.span)?;
+                    if self.open_functions.contains_key(&owner) {
+                        self.require_non_trait_body_reference(owner, callee.span)?;
+                        return self.with_explicit_open_clauses(
+                            owner,
+                            clauses,
+                            expr.span,
+                            |this| {
+                                this.spread_call_resolved(
+                                    expr,
+                                    callee,
+                                    args,
+                                    expected,
+                                    partial,
+                                    None,
+                                    Some(owner),
+                                )
+                            },
+                        );
+                    }
+                }
+            }
         }
         let resolved = if let Some(method) = self.resolve_receiver(expr, callee)? {
             Some(method)
@@ -281,14 +369,14 @@ impl Checker<'_, '_> {
             && self.runtime_value_context()
         {
             let value = self.with_staged_input(true, |this| {
-                this.spread_call_resolved(expr, callee, args, None, None, resolved)
+                this.spread_call_resolved(expr, callee, args, None, None, resolved, None)
             })?;
             return self.deliver_comptime_result(expr, value, expected);
         }
-        self.spread_call_resolved(expr, callee, args, expected, partial, resolved)
+        self.spread_call_resolved(expr, callee, args, expected, partial, resolved, None)
     }
 
-    fn spread_call_resolved(
+    pub(super) fn spread_call_resolved(
         &mut self,
         expr: &Expr<'_>,
         callee: &Expr<'_>,
@@ -296,6 +384,7 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         partial: Option<&crate::calls::CallableContext>,
         resolved: Option<(n::Expr, Vec<n::Expr>)>,
+        open_instance: Option<OwnerId>,
     ) -> Result<n::Expr, Error> {
         let mut checked = inputs::PreparedInputs::new();
         let context = self.spread_context(
@@ -307,14 +396,14 @@ impl Checker<'_, '_> {
             expr.span,
             &mut checked,
         )?;
-        let packet_contexts = if let Some(types) = &context {
-            self.spread_packet_contexts(
+        let (packet_contexts, partial_contexts) = if let Some(types) = &context {
+            self.spread_partial_packet_contexts(
                 args,
                 &types.iter().map(|(ty, _)| ty.clone()).collect::<Vec<_>>(),
                 expr.span,
             )?
         } else {
-            vec![None; args.len()]
+            (vec![None; args.len()], vec![None; args.len()])
         };
         let packet_stages = if let Some(types) = &context {
             let markers = types.iter().map(|(_, staged)| *staged).collect::<Vec<_>>();
@@ -330,13 +419,17 @@ impl Checker<'_, '_> {
             args,
             &packet_contexts,
             &packet_stages,
-            None,
+            Some(&partial_contexts),
             checked,
             BTreeMap::new(),
             0,
-            |this, inputs| {
+            |this, inputs, diverges| {
+                let expected = expected.filter(|_| !diverges);
+                let partial = partial.filter(|_| !diverges);
                 if let Some((callee, prefix)) = resolved {
                     this.finish_call(expr, callee, inputs, prefix, expected, partial)
+                } else if let Some(owner) = open_instance {
+                    this.instantiated_open_call(expr, owner, inputs, expected)
                 } else {
                     this.call(expr, callee, inputs, expected, partial)
                 }
@@ -349,7 +442,7 @@ impl Checker<'_, '_> {
         expr: &Expr<'_>,
         args: &[Arg<'_>],
         packet_contexts: &[Option<Term>],
-        build: impl FnOnce(&mut Self, &[Arg<'_>]) -> Result<n::Expr, Error>,
+        build: impl FnOnce(&mut Self, &[Arg<'_>], bool) -> Result<n::Expr, Error>,
     ) -> Result<n::Expr, Error> {
         self.prepare_spreads_checked(
             expr,
@@ -382,7 +475,7 @@ impl Checker<'_, '_> {
             checked,
             packets,
             0,
-            build,
+            |this, inputs, _| build(this, inputs),
         )
     }
 
@@ -393,11 +486,81 @@ impl Checker<'_, '_> {
         packet_contexts: &[Option<Term>],
         packet_stages: &[bool],
         input_contexts: Option<&[Option<crate::calls::InputContext>]>,
+        checked: inputs::PreparedInputs,
+        packets: BTreeMap<usize, n::Expr>,
+        trailing: usize,
+        build: impl FnOnce(&mut Self, &[Arg<'_>], bool) -> Result<n::Expr, Error>,
+    ) -> Result<n::Expr, Error> {
+        let anchor = n::SourceRange {
+            start: expr.span.lo().0,
+            end: expr.span.lo().0,
+        };
+        self.with_prepared_spreads(
+            expr,
+            args,
+            packet_contexts,
+            packet_stages,
+            input_contexts,
+            checked,
+            packets,
+            |this, inputs, mut spreads, flat_count| {
+                let saved = this.preparing_spread.replace(source(expr.span));
+                // The enclosing expression cannot produce the callee's result
+                // when any packet producer exits. Keep checking every input,
+                // but let the caller discard only its result expectation.
+                let diverges = spreads.iter().any(|(_, statement)| is_never(&statement.ty));
+                let call = build(this, inputs, diverges);
+                this.preparing_spread = saved;
+                let call = call?;
+                for (_, statement) in &mut spreads {
+                    let (key, value) = match &mut statement.kind {
+                        K::Let { binding, value } => (*binding, value),
+                        K::LetPattern {
+                            pattern: n::Pattern::Tuple(fields),
+                            value,
+                            ..
+                        } => {
+                            let Some(n::Pattern::Binding { binding, .. }) = fields.first() else {
+                                continue;
+                            };
+                            (*binding, value)
+                        }
+                        _ => continue,
+                    };
+                    if let Some((frozen, _)) = this
+                        .pending_spread_inputs
+                        .get(&key)
+                        .and_then(|packet| packet.frozen.as_ref())
+                    {
+                        **value = frozen.clone();
+                    }
+                }
+                if spreads.is_empty() {
+                    return Ok(call);
+                }
+                let prepared = this.insert_spread_preparation(
+                    call, spreads, flat_count, trailing, anchor, expr.span,
+                )?;
+                this.freeze_staged_preparation(prepared, expr)
+            },
+        )
+    }
+
+    /// Share checked packet layout and temporary bindings with a scoped
+    /// consumer. Executable callers publish a preparation plan; definition
+    /// description can consume the same typed inputs without instantiating a
+    /// callee. Temporary locals and pending packets are restored on all exits.
+    pub(super) fn with_prepared_spreads<R>(
+        &mut self,
+        expr: &Expr<'_>,
+        args: &[Arg<'_>],
+        packet_contexts: &[Option<Term>],
+        packet_stages: &[bool],
+        input_contexts: Option<&[Option<crate::calls::InputContext>]>,
         mut checked: inputs::PreparedInputs,
         mut packets: BTreeMap<usize, n::Expr>,
-        trailing: usize,
-        build: impl FnOnce(&mut Self, &[Arg<'_>]) -> Result<n::Expr, Error>,
-    ) -> Result<n::Expr, Error> {
+        build: impl FnOnce(&mut Self, &[Arg<'_>], Vec<(usize, n::Expr)>, usize) -> Result<R, Error>,
+    ) -> Result<R, Error> {
         let anchor = n::SourceRange {
             start: expr.span.lo().0,
             end: expr.span.lo().0,
@@ -425,6 +588,7 @@ impl Checker<'_, '_> {
                         // The callee's dependent telescope is not a tuple
                         // binder. Infer this packet's own type, then check its
                         // fields after the Type inputs have been obtained.
+                        let origin = (value.hir_id, value.span);
                         let packet_context = match &packet_contexts[argument_index] {
                             Some(ty) if ty.check_scope(&[]).is_err() => None,
                             context => context.clone(),
@@ -491,6 +655,7 @@ impl Checker<'_, '_> {
                             self.pending_spread_inputs.insert(
                                 key,
                                 PendingPacket {
+                                    origin,
                                     bindings: packet_bindings,
                                     value: value.clone(),
                                     staged: packet_stages[argument_index],
@@ -546,6 +711,7 @@ impl Checker<'_, '_> {
                     self.pending_spread_inputs.insert(
                         binding,
                         PendingPacket {
+                            origin: (input.hir_id, input.span),
                             bindings: vec![binding],
                             value: value.clone(),
                             staged: true,
@@ -597,45 +763,7 @@ impl Checker<'_, '_> {
                     }
                 })
                 .collect();
-            let saved = self.preparing_spread.replace(source(expr.span));
-            let call = build(self, &inputs);
-            self.preparing_spread = saved;
-            let call = call?;
-            for (_, statement) in &mut spreads {
-                let (key, value) = match &mut statement.kind {
-                    K::Let { binding, value } => (*binding, value),
-                    K::LetPattern {
-                        pattern: n::Pattern::Tuple(fields),
-                        value,
-                        ..
-                    } => {
-                        let Some(n::Pattern::Binding { binding, .. }) = fields.first() else {
-                            continue;
-                        };
-                        (*binding, value)
-                    }
-                    _ => continue,
-                };
-                if let Some((frozen, _)) = self
-                    .pending_spread_inputs
-                    .get(&key)
-                    .and_then(|packet| packet.frozen.as_ref())
-                {
-                    **value = frozen.clone();
-                }
-            }
-            if spreads.is_empty() {
-                return Ok(call);
-            }
-            let prepared = self.insert_spread_preparation(
-                call,
-                spreads,
-                flat.len(),
-                trailing,
-                anchor,
-                expr.span,
-            )?;
-            self.freeze_staged_preparation(prepared, expr)
+            build(self, &inputs, spreads, flat.len())
         })();
         for binding in introduced {
             self.locals.remove(&binding);
@@ -655,7 +783,7 @@ impl Checker<'_, '_> {
         resolved: Option<&(n::Expr, Vec<n::Expr>)>,
         span: Span,
         checked: &mut inputs::PreparedInputs,
-    ) -> Result<Option<Vec<(Term, bool)>>, Error> {
+    ) -> Result<Option<Vec<(Option<Term>, bool)>>, Error> {
         if let Some((callee, prefix)) = resolved {
             let shape = self.structural_type(&callee.ty, span)?;
             let shape = if self.incomplete_method_instance(callee) {
@@ -744,7 +872,7 @@ impl Checker<'_, '_> {
                 declarations,
                 &parameters[offset..]
                     .iter()
-                    .map(|p| p.sort != Sort::Runtime)
+                    .map(|p| callee.ty.is_comptime_callable() || p.sort != Sort::Runtime)
                     .collect::<Vec<_>>(),
                 args,
                 span,
@@ -769,11 +897,57 @@ impl Checker<'_, '_> {
         }
         let declarations = declaration.params;
         self.ensure_signature(owner, span)?;
-        // Open annotations have no complete callable Type yet. A packet that
-        // provides its own tuple type can still be prepared and routed; its
-        // elements are checked by the eventual concrete open-call signature.
-        if self.open_functions.contains_key(&owner) {
-            return Ok(None);
+        // An open result does not erase known input domains. Preserve those
+        // contexts for packet literals, but do not execute deferred annotations
+        // here: they may need inputs that have not yet been prepared.
+        if let Some(definition) = self.open_functions.get(&owner) {
+            let domains = definition.input_domains();
+            let mut types = domains
+                .iter()
+                .map(|(_, ty)| {
+                    let Some(ty) = ty else { return Ok(None) };
+                    let ty = self.specialize_open_clause_type(owner, ty, span)?;
+                    let free = ty
+                        .rigid_parameters()
+                        .map_err(|cause| error(span, cause.to_string()))?;
+                    // Unsolved clause parameters are inference inputs, not an
+                    // expected type to impose on numeric packet expressions.
+                    if self.type_parameters[&owner]
+                        .iter()
+                        .any(|id| free.contains_key(id))
+                        || !ty
+                            .substitution_parameters()
+                            .map_err(|cause| error(span, cause.to_string()))?
+                            .is_empty()
+                    {
+                        return Ok(None);
+                    }
+                    Ok(Some(ty))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if !self.type_parameters[&owner].is_empty()
+                && types.iter().any(Option::is_none)
+                && let Some(candidate) =
+                    self.open_spread_candidate(owner, expected, args, checked, span)?
+            {
+                for (slot, ty) in types.iter_mut().enumerate() {
+                    if ty.is_none() {
+                        *ty = candidate
+                            .parameter_type(slot)
+                            .map_err(|cause| call_inference_error(span, cause))?;
+                    }
+                }
+            }
+            return self.spread_parameter_context(
+                types,
+                Some(declarations),
+                &domains
+                    .iter()
+                    .map(|(sort, _)| declaration.modifiers.is_comptime || *sort != Sort::Runtime)
+                    .collect::<Vec<_>>(),
+                args,
+                span,
+            );
         }
         let signature = self.signatures[&owner].clone();
         let type_parameters = self.type_parameters[&owner].clone();
@@ -826,23 +1000,24 @@ impl Checker<'_, '_> {
             Some(declarations),
             &declarations
                 .iter()
-                .map(|p| p.ty.is_comptime())
+                .map(|p| declaration.modifiers.is_comptime || p.ty.is_comptime())
                 .collect::<Vec<_>>(),
             args,
             span,
         )
     }
 
-    fn spread_parameter_context(
-        &self,
+    pub(super) fn spread_parameter_context(
+        &mut self,
         types: Vec<Option<Term>>,
         declarations: Option<&[hir::common::FnParam<'_>]>,
         stages: &[bool],
         args: &[Arg<'_>],
         span: Span,
-    ) -> Result<Option<Vec<(Term, bool)>>, Error> {
+    ) -> Result<Option<Vec<(Option<Term>, bool)>>, Error> {
         let post_target = arguments::post_lambda_target(args, declarations, types.len(), span)?;
         let mut inputs = Vec::new();
+        let mut unresolved = None;
         for (index, ty) in types.into_iter().enumerate() {
             let declaration = declarations.map(|parameters| &parameters[index]);
             if post_target == Some(index) {
@@ -860,17 +1035,53 @@ impl Checker<'_, '_> {
                     .any(|arg| matches!(arg, Arg::Named(name, _) if name.name == parameter.name.name))) {
                 continue;
             }
-            let Some(ty) = ty else { return Ok(None) };
             if declaration
                 .is_some_and(|parameter| matches!(parameter.ty.kind, TyParamKind::Varadic(..)))
             {
-                let Term::Tuple(fields) = self.structural_type(&ty, span)? else {
-                    return Ok(None);
-                };
-                inputs.extend(fields.into_iter().map(|ty| (ty, stages[index])));
+                let structure = ty
+                    .as_ref()
+                    .map(|ty| self.structural_type(ty, span))
+                    .transpose()?;
+                if let Some(Term::Tuple(fields)) = structure {
+                    inputs.extend(fields.into_iter().map(|ty| (Some(ty), stages[index])));
+                } else {
+                    // One unresolved collection has a unique remainder after
+                    // all anchors. Width evidence routes operands only; the
+                    // final call still has to infer and check its tuple type.
+                    if unresolved.replace((inputs.len(), stages[index])).is_some() {
+                        return Ok(None);
+                    }
+                }
             } else {
                 inputs.push((ty, stages[index]));
             }
+        }
+        if let Some((position, stage)) = unresolved {
+            let mut fuel = 10_000usize;
+            let mut width = 0usize;
+            for argument in args {
+                let count = match argument {
+                    Arg::Positional(_) => 1,
+                    Arg::Expand(value) => {
+                        let Some(width) = self.spread_width(value, &mut fuel, 0)? else {
+                            return Ok(None);
+                        };
+                        width
+                    }
+                    _ => 0,
+                };
+                fuel = fuel
+                    .checked_sub(count)
+                    .ok_or_else(|| error(span, "spread input routing budget exhausted"))?;
+                width += count;
+            }
+            let Some(width) = width.checked_sub(inputs.len()) else {
+                return Ok(None);
+            };
+            inputs.splice(
+                position..position,
+                std::iter::repeat_n((None, stage), width),
+            );
         }
         Ok(Some(inputs))
     }
@@ -886,6 +1097,24 @@ impl Checker<'_, '_> {
     ) -> Result<n::Expr, Error> {
         let source = call.source;
         let ty = call.ty.clone();
+        // Completed live arguments may share a materialization scope around
+        // the call. Insert packet producers into the enclosed call plan.
+        if let K::Block {
+            statements,
+            result: Some(result),
+        } = call.kind
+        {
+            let result = self
+                .insert_spread_preparation(*result, spreads, flat_count, trailing, anchor, span)?;
+            return Ok(n::Expr {
+                source,
+                ty: result.ty.clone(),
+                kind: K::Block {
+                    statements,
+                    result: Some(Box::new(result)),
+                },
+            });
+        }
         let (mut call, mut statements, prepared) = match call.kind {
             K::CallPreparation {
                 statements,

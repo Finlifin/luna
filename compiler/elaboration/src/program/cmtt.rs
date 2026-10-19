@@ -20,37 +20,7 @@ pub(super) struct ExpressionCode {
     defaults: BTreeMap<n::LocalId, n::LocalId>,
 }
 
-#[derive(Clone)]
-struct Interface {
-    /// Call-site expected result without rebinding a quote's lexical inputs.
-    infer_context: bool,
-    context: BTreeMap<n::LocalId, Term>,
-    ports: BTreeMap<String, n::LocalId>,
-    defaults: BTreeMap<n::LocalId, n::LocalId>,
-    result: Term,
-}
-
-impl fmt::Display for Interface {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "(code-interface (infer-context {}) (context",
-            self.infer_context
-        )?;
-        for (binding, ty) in &self.context {
-            write!(f, " (binding {binding} {ty})")?;
-        }
-        f.write_str(") (ports")?;
-        for (name, binding) in &self.ports {
-            write!(f, " (port {name:?} {binding})")?;
-        }
-        f.write_str(") (defaults")?;
-        for (port, actual) in &self.defaults {
-            write!(f, " (connect {port} {actual})")?;
-        }
-        write!(f, ") (result {}))", self.result)
-    }
-}
+use nir::code_interfaces::ExpressionCodeInterface as Interface;
 
 impl fmt::Display for ExpressionCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -149,14 +119,34 @@ impl Checker<'_, '_> {
                 "quoted code requires an unconditional immutable comptime binding",
             ));
         }
-        let hir::PatternKind::Binding(hir::common::BindingMode::ByValue, _, None) =
-            decl.pattern.kind
-        else {
-            return Err(error(
-                decl.span,
-                "comptime code destructuring is not yet implemented",
-            ));
-        };
+        // Code witnesses remain elaboration values. Wildcards discard a
+        // completed witness; `as` chains bind aliases of that same witness,
+        // without inventing a runtime representation or inspecting its body.
+        let mut pattern = &decl.pattern;
+        let mut bindings = Vec::new();
+        loop {
+            self.required_steps = self
+                .required_steps
+                .checked_sub(1)
+                .ok_or_else(|| error(pattern.span, "code binding pattern budget exhausted"))?;
+            match &pattern.kind {
+                hir::PatternKind::Wild => break,
+                hir::PatternKind::Binding(hir::common::BindingMode::ByValue, _, child) => {
+                    bindings.push(local(pattern.hir_id));
+                    if let Some(child) = child {
+                        pattern = child;
+                    } else {
+                        break;
+                    }
+                }
+                _ => {
+                    return Err(error(
+                        pattern.span,
+                        "code binding supports names, wildcards and whole-value aliases; code destructuring is not yet implemented",
+                    ));
+                }
+            }
+        }
         let initializer = decl
             .init
             .ok_or_else(|| error(decl.span, "comptime code requires an initializer"))?;
@@ -175,11 +165,12 @@ impl Checker<'_, '_> {
         if let Some(expected) = expected {
             self.require(&p(P::Void), expected, decl.span)?;
         }
-        let id = local(decl.pattern.hir_id);
-        if !decl.mutable {
-            self.immutable.insert(id);
+        for id in bindings {
+            if !decl.mutable {
+                self.immutable.insert(id);
+            }
+            self.code_values.insert(id, value.clone());
         }
-        self.code_values.insert(id, value);
         Ok(n::Expr {
             ty: p(P::Void),
             source: source(decl.span),
@@ -278,6 +269,37 @@ impl Checker<'_, '_> {
             H::Match(subject, arms) => {
                 self.generator_code_match(value, subject, arms, interface, depth + 1)
             }
+            H::InlineControl(inner)
+                if matches!(inner.kind, H::If(..) | H::When(..) | H::Match(..)) =>
+            {
+                // Construction decisions already run at comptime; definition
+                // checking must still validate the unselected branches.
+                self.code_value(inner, interface, depth + 1)
+            }
+            H::When(arms) => {
+                if !arms.iter().any(|arm| arm.cond.is_none()) {
+                    return Err(error(value.span, "code-valued when requires an else arm"));
+                }
+                let mut first: Option<Arc<ExpressionCode>> = None;
+                for arm in *arms {
+                    let selected = self.generator_when_condition(arm.cond)?;
+                    if self.checking_code_generator {
+                        let code = self.generator_scope(arm.span, |this| {
+                            this.code_value(arm.body, interface, depth + 1)
+                        })?;
+                        if let Some(previous) = &first {
+                            self.require_code_branch(previous, code, arm.span)?;
+                        } else {
+                            first = Some(code);
+                        }
+                    } else if selected == Some(true) {
+                        return self.generator_scope(arm.span, |this| {
+                            this.code_value(arm.body, interface, depth + 1)
+                        });
+                    }
+                }
+                first.ok_or_else(|| error(value.span, "code-valued when selected no arm"))
+            }
             H::Return(Some(value)) => self.code_value(value, interface, depth + 1),
             H::If(condition, yes, Some(no)) => {
                 if self.checking_code_generator {
@@ -285,11 +307,11 @@ impl Checker<'_, '_> {
                     self.validate_generator_data(&checked, condition.span)?;
                     let yes = self.code_block(yes, interface, depth + 1)?;
                     let no = self.code_value(no, interface, depth + 1)?;
-                    self.require_expression(&yes.result, &no.result, value.span)?;
+                    self.require_code_branch(&yes, no, value.span)?;
                     Ok(yes)
                 } else {
                     let (condition, _) =
-                        self.required_typed_expression(condition, Some(&p(P::Bool)))?;
+                        self.generator_data_expression(condition, Some(&p(P::Bool)))?;
                     match condition {
                         comptime_interpretor::Value::Bool(true) => {
                             self.code_block(yes, interface, depth + 1)
@@ -638,7 +660,15 @@ impl n::Rewriter for Renamer<'_> {
     }
     fn expression(&mut self, expression: &mut n::Expr) -> Result<bool, Error> {
         let original = expression.source;
-        let generated = if let Some(generated) = self.locations.get(&(original.start, original.end))
+        // Staged binding can wrap a body in another block with the same
+        // diagnostic range. Each lexical scope still needs a distinct runtime
+        // cleanup boundary, even when both trace back to the same source.
+        let independent_scope =
+            matches!(expression.kind, K::Block { .. } | K::CallPreparation { .. });
+        let generated = if let Some(generated) = self
+            .locations
+            .get(&(original.start, original.end))
+            .filter(|_| !independent_scope)
         {
             *generated
         } else {
@@ -650,7 +680,8 @@ impl n::Rewriter for Renamer<'_> {
             });
             let generated = n::SourceRange::generated(index);
             self.locations
-                .insert((original.start, original.end), generated);
+                .entry((original.start, original.end))
+                .or_insert(generated);
             generated
         };
         expression.source = generated;
@@ -733,7 +764,9 @@ impl n::Rewriter for Renamer<'_> {
     }
     fn pattern(&mut self, pattern: &mut n::Pattern) -> Result<(), Error> {
         match pattern {
-            n::Pattern::Binding { binding, .. } => self.rename(binding)?,
+            n::Pattern::Observe { binding, .. } | n::Pattern::Binding { binding, .. } => {
+                self.rename(binding)?
+            }
             n::Pattern::Remap { bindings, .. } => {
                 for (from, to) in bindings {
                     self.rename(from)?;

@@ -61,7 +61,7 @@ impl Interpreter<'_> {
     }
     fn effect_operation_work(&self, operation: &Operation) -> Option<usize> {
         operation.arguments.iter().try_fold(1usize, |sum, ty| {
-            sum.checked_add(type_value_work(ty, &self.normal_forms)?)
+            sum.checked_add(instance_argument_work(ty, &self.normal_forms)?)
         })
     }
 
@@ -80,7 +80,7 @@ impl Interpreter<'_> {
         {
             work = work.checked_add(1)?;
             for argument in &key.arguments {
-                work = work.checked_add(type_value_work(argument, &self.normal_forms)?)?;
+                work = work.checked_add(instance_argument_work(argument, &self.normal_forms)?)?;
             }
         }
         Some(work)
@@ -168,7 +168,8 @@ impl Interpreter<'_> {
                 for value in environment.values_mut() {
                     self.tick(Some(expr.source))?;
                     if !matches!(value, Value::Storage(_)) {
-                        *value = Value::Storage(Storage::new(value.clone()));
+                        let owned = std::mem::replace(value, Value::Unit);
+                        *value = Value::Storage(Storage::new(owned));
                     }
                 }
                 let mut installed = Vec::new();
@@ -737,7 +738,7 @@ impl Interpreter<'_> {
                 arguments, fields, ..
             } => {
                 for ty in arguments {
-                    let work = type_value_work(ty, &self.normal_forms).ok_or_else(|| {
+                    let work = instance_argument_work(ty, &self.normal_forms).ok_or_else(|| {
                         self.failure(ErrorKind::RepresentationSizeLimit, Some(source))
                     })?;
                     self.effect_charge(work, Some(source))?;
@@ -764,7 +765,7 @@ impl Interpreter<'_> {
             }
             Value::RuntimeFunction { arguments, .. } => {
                 for ty in arguments {
-                    let work = type_value_work(ty, &self.normal_forms).ok_or_else(|| {
+                    let work = instance_argument_work(ty, &self.normal_forms).ok_or_else(|| {
                         self.failure(ErrorKind::RepresentationSizeLimit, Some(source))
                     })?;
                     self.effect_charge(work, Some(source))?;

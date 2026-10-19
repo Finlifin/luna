@@ -218,7 +218,12 @@ impl World<'_> {
             charge_projection_copy(argument, &mut fuel)?;
         }
         let value = value
-            .instantiate_types(&implementation.type_parameters, &evidence.type_arguments)
+            .instantiate_parameters(
+                &implementation
+                    .parameter_binders()
+                    .map_err(|e| e.to_string())?,
+                &evidence.type_arguments,
+            )
             .map_err(|e| e.to_string())?;
         charge_projection_copy(&value, &mut fuel)?;
         value.check_scope(&[]).map_err(|e| e.to_string())?;
@@ -369,15 +374,22 @@ impl World<'_> {
             completed: std::collections::HashMap::new(),
             shared,
             steps: Vec::new(),
-            frames: Vec::new(),
+            frames: if preserve_given {
+                self.context.scope().to_vec()
+            } else {
+                Vec::new()
+            },
         };
         normalizer.charge_copy(ty)?;
-        ty.check_scope(&[]).map_err(|e| e.to_string())?;
+        ty.check_scope(&normalizer.frames)
+            .map_err(|e| e.to_string())?;
         if ty.sort() != nir::Sort::Type {
             return Err("associated normalization requires a Type".into());
         }
         let value = normalizer.normalize(ty, 0)?;
-        value.check_scope(&[]).map_err(|e| e.to_string())?;
+        value
+            .check_scope(&normalizer.frames)
+            .map_err(|e| e.to_string())?;
         Ok((
             AssociatedTypeNormalization {
                 value,
@@ -1068,6 +1080,7 @@ mod shared_cache_tests {
             }],
         }];
         let implementations = vec![Implementation {
+            parameter_types: vec![],
             declaration: id(3),
             subject: Term::Primitive(Primitive::Bool),
             interface: Some(id(1)),
@@ -1089,6 +1102,7 @@ mod shared_cache_tests {
         index
             .insert(
                 crate::implementation::ImplementationHead {
+                    parameter_types: vec![],
                     declaration: id(3),
                     subject: Term::Primitive(Primitive::Bool),
                     interface: Some(id(1)),
@@ -1346,7 +1360,12 @@ impl World<'_> {
 
         charge_completed_value(value, &mut fuel)?;
         let mut value = value
-            .instantiate_types(&implementation.type_parameters, &evidence.type_arguments)
+            .instantiate_parameters(
+                &implementation
+                    .parameter_binders()
+                    .map_err(|e| e.to_string())?,
+                &evidence.type_arguments,
+            )
             .map_err(|e| e.to_string())?;
         // Compare completed type views without unfolding opaque normal-form heads.
         let mut cache = std::collections::HashMap::new();

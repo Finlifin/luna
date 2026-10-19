@@ -73,6 +73,7 @@ impl Protocol {
             index
                 .insert(
                     ImplementationHead {
+                        parameter_types: i.parameter_types.clone(),
                         declaration: i.declaration,
                         interface: i.interface,
                         interface_arguments: i.interface_arguments.clone(),

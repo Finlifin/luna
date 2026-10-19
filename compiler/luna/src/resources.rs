@@ -187,6 +187,7 @@ impl ProtocolContext {
             index
                 .insert(
                     ImplementationHead {
+                        parameter_types: implementation.parameter_types.clone(),
                         declaration: implementation.declaration,
                         interface: implementation.interface,
                         interface_arguments: implementation.interface_arguments.clone(),

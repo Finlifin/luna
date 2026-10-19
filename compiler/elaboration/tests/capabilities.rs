@@ -28,6 +28,7 @@ fn implementation(
     capabilities: Vec<TraitRequirement>,
 ) -> Implementation {
     Implementation {
+        parameter_types: vec![],
         associated: vec![],
         interface_arguments: vec![],
         declaration: id(n),
@@ -45,6 +46,7 @@ fn index(implementations: &[Implementation]) -> Index {
         index
             .insert(
                 ImplementationHead {
+                    parameter_types: i.parameter_types.clone(),
                     declaration: i.declaration,
                     interface: i.interface,
                     interface_arguments: i.interface_arguments.clone(),
@@ -1301,6 +1303,7 @@ fn matched_candidate_requirements_are_proved_only_in_the_selected_world() {
         requirement(101, var()),
     )))];
     let head = ImplementationHead {
+        parameter_types: candidate.parameter_types.clone(),
         declaration: candidate.declaration,
         interface: candidate.interface,
         interface_arguments: vec![],
@@ -1495,6 +1498,7 @@ fn conditional_inherent_evidence_preserves_member_subject_and_both_indexes() {
     candidate.interface = None;
     candidate.requirements = vec![Q::Not(Box::new(Q::Trait(requirement(100, var()))))];
     let head = InherentHead {
+        parameter_types: candidate.parameter_types.clone(),
         declaration: candidate.declaration,
         subject: candidate.subject.clone(),
         type_parameters: candidate.type_parameters.clone(),

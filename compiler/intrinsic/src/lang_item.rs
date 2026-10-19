@@ -1,7 +1,7 @@
 //! Language items – well-known types and traits that the compiler must
 //! know about in order to lower certain constructs.
 //!
-//! For example, the `for`-loop desugars into calls to `Iterator`, and the
+//! For example, `for` uses the `Iter` and `IntoIterator` protocols, and the
 //! `?` operator needs to know about the `Optional` type. Language items
 //! connect these abstract compiler concepts to concrete user-visible
 //! definitions.
@@ -57,7 +57,8 @@ pub enum LangItem {
     Eq,
     Ord,
     Hash,
-    Iterator,
+    Iter,
+    IntoIterator,
     Into,
     From,
     Splice,
@@ -103,7 +104,8 @@ impl LangItem {
             LangItem::Eq => "Eq",
             LangItem::Ord => "Ord",
             LangItem::Hash => "Hash",
-            LangItem::Iterator => "Iterator",
+            LangItem::Iter => "Iter",
+            LangItem::IntoIterator => "IntoIterator",
             LangItem::Into => "Into",
             LangItem::From => "From",
             LangItem::Splice => "Splice",
@@ -164,7 +166,8 @@ impl LangItems {
                     | LangItem::Eq
                     | LangItem::Ord
                     | LangItem::Hash
-                    | LangItem::Iterator
+                    | LangItem::Iter
+                    | LangItem::IntoIterator
                     | LangItem::Into
                     | LangItem::From
                     | LangItem::Splice

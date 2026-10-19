@@ -217,6 +217,14 @@ fn pattern_scan(
     }
     charge(fuel, 1)?;
     match pattern {
+        P::Observe { binding, inner } => {
+            let inserted = scope.insert(*binding);
+            pattern_scan(inner, scope, free, fuel, depth + 1)?;
+            if inserted {
+                scope.remove(binding);
+            }
+        }
+
         P::Binding { binding, inner } => {
             pattern_scan(inner, scope, free, fuel, depth + 1)?;
             scope.insert(*binding);

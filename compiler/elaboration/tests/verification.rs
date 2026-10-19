@@ -1690,3 +1690,293 @@ fn retained_boolean_matching_is_associative_bounded_and_operator_sensitive() {
         .prove_condition(&both(both(bit(c), bit(a)), bit(b)), false, &mut limits)
         .unwrap();
 }
+
+#[test]
+fn unbounded_integer_comparisons_agree_with_integer_order() {
+    use elaboration::verification::{Comparison as C, Condition};
+    fn accepts(c: C, x: i128, y: i128) -> bool {
+        match c {
+            C::Equal => x == y,
+            C::NotEqual => x != y,
+            C::Less => x < y,
+            C::LessEqual => x <= y,
+            C::Greater => x > y,
+            C::GreaterEqual => x >= y,
+        }
+    }
+    let relations = [
+        C::Equal,
+        C::NotEqual,
+        C::Less,
+        C::LessEqual,
+        C::Greater,
+        C::GreaterEqual,
+    ];
+    for a in -2..=2 {
+        for b in -2..=2 {
+            for premise in relations {
+                for query in relations {
+                    let mut limits = Limits::default();
+                    let mut facts = Facts::default();
+                    let id = facts
+                        .invalidate(PlaceId {
+                            owner: 77,
+                            local: 0,
+                        })
+                        .unwrap();
+                    let condition = |relation, c| Condition::Compare {
+                        value: id,
+                        relation,
+                        constant: Integer::from_i128(c),
+                    };
+                    facts
+                        .assume(&condition(premise, a), true, &mut limits)
+                        .unwrap();
+                    // All transition points lie inside this witness set; its endpoints
+                    // also represent the two unbounded tails for these comparisons.
+                    let expected =
+                        (-4..=4).all(|x| !accepts(premise, x, a) || accepts(query, x, b));
+                    assert_eq!(
+                        facts
+                            .prove_condition(&condition(query, b), true, &mut limits)
+                            .is_ok(),
+                        expected,
+                        "premise {premise:?} {a}, query {query:?} {b}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn unbounded_integer_proof_replay_rejects_assignment_and_unrelated_lineage() {
+    use elaboration::verification::{Comparison as C, Condition};
+    let mut limits = Limits::default();
+    let mut facts = Facts::default();
+    let place = PlaceId {
+        owner: 78,
+        local: 0,
+    };
+    let id = facts.invalidate(place).unwrap();
+    let condition = |c| Condition::Compare {
+        value: id,
+        relation: C::Greater,
+        constant: Integer::from_i128(c),
+    };
+    facts.assume(&condition(10), true, &mut limits).unwrap();
+    let proof = facts
+        .prove_condition(&condition(0), true, &mut limits)
+        .unwrap();
+    proof.replay(&facts, &mut limits).unwrap();
+    proof
+        .replay(&facts.fork(&mut limits).unwrap(), &mut limits)
+        .unwrap();
+    assert!(proof.replay(&Facts::default(), &mut limits).is_err());
+    facts.invalidate(place).unwrap();
+    assert!(proof.replay(&facts, &mut limits).is_err());
+    assert!(
+        facts
+            .prove_condition(&condition(0), true, &mut limits)
+            .is_err()
+    );
+}
+
+#[test]
+fn unbounded_integer_join_does_not_assume_both_alternatives() {
+    use elaboration::verification::{Comparison as C, Condition};
+    let mut limits = Limits::default();
+    let mut root = Facts::default();
+    let id = root
+        .invalidate(PlaceId {
+            owner: 79,
+            local: 0,
+        })
+        .unwrap();
+    let condition = |c| Condition::Compare {
+        value: id,
+        relation: C::Greater,
+        constant: Integer::from_i128(c),
+    };
+    let mut left = root.fork(&mut limits).unwrap();
+    let mut right = root.fork(&mut limits).unwrap();
+    left.assume(&condition(0), true, &mut limits).unwrap();
+    right.assume(&condition(10), true, &mut limits).unwrap();
+    let merged = left.join(&right, &mut limits).unwrap();
+    merged
+        .prove_condition(&condition(0), true, &mut limits)
+        .unwrap();
+    assert!(
+        merged
+            .prove_condition(&condition(10), true, &mut limits)
+            .is_err()
+    );
+    let reversed = right.join(&left, &mut limits).unwrap();
+    reversed
+        .prove_condition(&condition(0), true, &mut limits)
+        .unwrap();
+    assert!(
+        reversed
+            .prove_condition(&condition(10), true, &mut limits)
+            .is_err()
+    );
+    let merged = left.join(&root, &mut limits).unwrap();
+    assert!(
+        merged
+            .prove_condition(&condition(0), true, &mut limits)
+            .is_err()
+    );
+}
+
+#[test]
+fn unbounded_integer_two_sided_premises_enable_polynomial_enclosures() {
+    use elaboration::verification::{Comparison as C, Condition};
+    let mut limits = Limits::default();
+    let mut facts = Facts::default();
+    let id = facts
+        .invalidate(PlaceId {
+            owner: 80,
+            local: 0,
+        })
+        .unwrap();
+    let condition = |relation, c| Condition::Compare {
+        value: id,
+        relation,
+        constant: Integer::from_i128(c),
+    };
+    facts
+        .assume(&condition(C::Greater, 10), true, &mut limits)
+        .unwrap();
+    assert!(facts.bound(id, &mut limits).is_err());
+    facts
+        .assume(&condition(C::Less, 20), true, &mut limits)
+        .unwrap();
+    assert_eq!(facts.bound(id, &mut limits).unwrap(), &interval(11, 19));
+    let x = Polynomial::variable(id, &mut limits).unwrap();
+    let square = x.multiply(&x, &mut limits).unwrap();
+    assert!(matches!(
+        square.prove_within(&interval(121, 361), &facts, &mut limits),
+        Outcome::Proven(_)
+    ));
+}
+
+#[test]
+fn unbounded_integer_excluded_singleton_is_unreachable() {
+    use elaboration::verification::{Comparison as C, Condition};
+    let mut limits = Limits::default();
+    let mut facts = Facts::default();
+    let id = facts
+        .invalidate(PlaceId {
+            owner: 81,
+            local: 0,
+        })
+        .unwrap();
+    for (relation, c) in [(C::NotEqual, 1), (C::Greater, 0), (C::Less, 2)] {
+        facts
+            .assume(
+                &Condition::Compare {
+                    value: id,
+                    relation,
+                    constant: Integer::from_i128(c),
+                },
+                true,
+                &mut limits,
+            )
+            .unwrap();
+    }
+    assert!(!facts.is_reachable());
+}
+
+#[test]
+fn unbounded_symbolic_equality_keeps_versions_without_inventing_bounds() {
+    use elaboration::verification::{Comparison as C, Condition};
+    let mut limits = Limits::default();
+    let mut facts = Facts::default();
+    let x = facts
+        .invalidate(PlaceId {
+            owner: 82,
+            local: 0,
+        })
+        .unwrap();
+    let y = facts
+        .invalidate(PlaceId {
+            owner: 82,
+            local: 1,
+        })
+        .unwrap();
+    let equal = Condition::PolynomialCompare {
+        left: Polynomial::variable(x, &mut limits).unwrap(),
+        relation: C::Equal,
+        right: Polynomial::variable(y, &mut limits).unwrap(),
+    };
+    assert!(facts.prove_condition(&equal, true, &mut limits).is_err());
+    facts.assume(&equal, true, &mut limits).unwrap();
+    let reversed = Condition::PolynomialCompare {
+        left: Polynomial::variable(y, &mut limits).unwrap(),
+        relation: C::Equal,
+        right: Polynomial::variable(x, &mut limits).unwrap(),
+    };
+    let proof = facts.prove_condition(&reversed, true, &mut limits).unwrap();
+    proof.replay(&facts, &mut limits).unwrap();
+    assert!(matches!(
+        facts.bound(x, &mut limits),
+        Err(Unknown::MissingBound(_))
+    ));
+    facts.invalidate(y.place).unwrap();
+    assert!(proof.replay(&facts, &mut limits).is_err());
+    assert!(facts.assume(&equal, true, &mut limits).is_err());
+}
+
+#[test]
+fn unbounded_polynomial_cancellation_proves_order_but_keeps_version_dependencies() {
+    use elaboration::verification::{Comparison as C, Condition};
+    let mut limits = Limits::default();
+    let mut facts = Facts::default();
+    let id = facts
+        .invalidate(PlaceId {
+            owner: 83,
+            local: 0,
+        })
+        .unwrap();
+    let x = Polynomial::variable(id, &mut limits).unwrap();
+    let square = x.multiply(&x, &mut limits).unwrap();
+    let cubic = square.multiply(&x, &mut limits).unwrap();
+    let one = constant(1, &mut limits);
+    let greater = Condition::PolynomialCompare {
+        left: cubic.add(&one, &mut limits).unwrap(),
+        relation: C::Greater,
+        right: cubic,
+    };
+    let proof = facts.prove_condition(&greater, true, &mut limits).unwrap();
+    proof.replay(&facts, &mut limits).unwrap();
+    assert!(matches!(
+        facts.bound(id, &mut limits),
+        Err(Unknown::MissingBound(_))
+    ));
+    facts.invalidate(id.place).unwrap();
+    assert!(proof.replay(&facts, &mut limits).is_err());
+    assert!(facts.prove_condition(&greater, true, &mut limits).is_err());
+}
+
+#[test]
+fn unbounded_polynomial_cancellation_detects_impossible_premises() {
+    use elaboration::verification::{Comparison as C, Condition};
+    for relation in [C::Less, C::Greater, C::NotEqual] {
+        let mut limits = Limits::default();
+        let mut facts = Facts::default();
+        let id = facts
+            .invalidate(PlaceId {
+                owner: 84,
+                local: 0,
+            })
+            .unwrap();
+        let x = Polynomial::variable(id, &mut limits).unwrap();
+        let condition = Condition::PolynomialCompare {
+            left: x.clone(),
+            relation,
+            right: x,
+        };
+        facts.assume(&condition, true, &mut limits).unwrap();
+        assert!(!facts.is_reachable());
+    }
+}

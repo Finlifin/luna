@@ -717,3 +717,173 @@ fn exact_float_alternatives_export_common_bindings_to_coverage_guards() {
         assert!(error.contains("non-exhaustive match"), "{error}");
     }
 }
+
+#[test]
+fn exact_float_guard_boolean_locals_and_conditionals_keep_decimal_precision() {
+    let package=compile(
+        "typealias Float=.Float'builtin;
+        comptime fn split(value:Float)->bool {value match {
+            _ as x if do {let low=x < 1.0000000000000000000000000000001;let alias=low;alias == true}=>true,
+            _ as x if do {let low=x < 1.0000000000000000000000000000001;low == false}=>false,
+        }}
+        comptime fn all(value:Float)->bool {value match {
+            _ as x if do {let low=x < 0.0;if low {low == true} else {not low}}=>true,
+        }}
+        comptime fn run()->(bool,bool,bool,bool) {
+            (split(1.0000000000000000000000000000000),split(1.0000000000000000000000000000001),all(-0.0),all(-1.0))
+        }"
+    );
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100000).unwrap(),
+        Value::Tuple(
+            [true, false, true, true]
+                .into_iter()
+                .map(Value::Bool)
+                .collect()
+        )
+    );
+    for guard in [
+        "do {let low=x < 0.0;low}",
+        "if x < 0.0 {let low=x < 0.0;not low} else {false}",
+        "do {let result=decide(x);result == result}",
+    ] {
+        let source = format!(
+            "typealias Float=.Float'builtin;comptime fn decide(x:Float)->bool {{true}} comptime fn bad(value:Float)->bool {{value match {{_ as x if {guard}=>true}}}}"
+        );
+        assert!(
+            compile_with_protocols(&source, &Default::default()).is_err(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn exact_float_nested_match_guards_preserve_first_matching_arm() {
+    let package=compile(
+        "typealias Float=.Float'builtin;
+        comptime fn split(value:Float)->bool {value match {
+            _ as x if (x < 1.0000000000000000000000000000001) match {true=>true,false=>false}=>true,
+            _ as x if (x < 1.0000000000000000000000000000001) match {true=>false,false=>true}=>false,
+        }}
+        comptime fn all(value:Float)->bool {value match {
+            _ as x if (x < 0.0) match {true as flag if not flag=>false,flag=>flag == (x < 0.0)}=>true,
+        }}
+        comptime fn numeric(value:Float)->bool {value match {
+            _ as x if x match {..0.0=>true,0.0=>true,_=>true}=>true,
+        }}
+        comptime fn run()->(bool,bool,bool,bool,bool) {
+            (split(1.0000000000000000000000000000000),split(1.0000000000000000000000000000001),all(-1.0),all(1.0),numeric(-0.0))
+        }"
+    );
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100000).unwrap(),
+        Value::Tuple(
+            [true, false, true, true, true]
+                .into_iter()
+                .map(Value::Bool)
+                .collect()
+        )
+    );
+    for guard in [
+        "x match {_=>false,_=>true}",
+        "(x < 0.0) match {true=>true,false=>false}",
+    ] {
+        let source = format!(
+            "typealias Float=.Float'builtin;comptime fn bad(value:Float)->bool {{value match {{_ as x if {guard}=>true}}}}"
+        );
+        assert!(
+            compile_with_protocols(&source, &Default::default()).is_err(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn exact_float_guards_skip_unreachable_opaque_conditions() {
+    for guard in [
+        "(true or decide(x)) match {_=>true}",
+        "(false and decide(x)) match {_=>true}",
+        "do {let unused=true or decide(x);true}",
+        "do {let unused=false and decide(x);not unused}",
+        "do {let unused=if x < 0.0 {true} else {x >= 0.0 or decide(x)};true}",
+        "x < 0.0 or (x >= 0.0 or decide(x))",
+        "if x < 0.0 {true} else {x >= 0.0 or decide(x)}",
+        "x match {..0.0=>true,0.0..=>true,_=>decide(x)}",
+        "not (x < 0.0 and (x >= 0.0 and decide(x)))",
+    ] {
+        let package = compile(&format!(
+            "typealias Float=.Float'builtin;
+            comptime fn decide(x:Float)->bool {{false}}
+            comptime fn all(value:Float)->bool {{value match {{_ as x if {guard}=>true}}}}
+            comptime fn run()->(bool,bool,bool) {{(all(-1.0),all(0.0),all(1.0))}}"
+        ));
+        assert_eq!(
+            luna::invocation::invoke(&package, "run", 100000).unwrap(),
+            Value::Tuple(vec![Value::Bool(true); 3])
+        );
+    }
+    for guard in [
+        "(false or decide(x)) match {_=>true}",
+        "not ((false or decide(x)) match {_=>false})",
+        "(x < 0.0 or decide(x)) match {_=>true}",
+        "do {let unused=(false or decide(x)) match {_=>true};true}",
+        "do {let unused=false or decide(x);true}",
+        "not do {let unused=false or decide(x);false}",
+        "do {let unused=if x < 0.0 {true} else {decide(x)};true}",
+        "do {let first=x >= 0.0 or decide(x);let second=true;second}",
+        "x < 0.0 or decide(x)",
+        "if x < 0.0 {true} else {decide(x)}",
+        "x match {..0.0=>true,_=>decide(x)}",
+        "not (x < 0.0 and decide(x))",
+        "decide(x) or (x < 0.0 or x >= 0.0)",
+    ] {
+        let source = format!(
+            "typealias Float=.Float'builtin;comptime fn decide(x:Float)->bool {{true}} comptime fn bad(value:Float)->bool {{value match {{_ as x if {guard}=>true}}}}"
+        );
+        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(error.contains("exhaustive"), "{source}: {error}");
+    }
+}
+
+#[test]
+fn exact_float_or_patterns_export_selected_computed_booleans() {
+    let source = "typealias Float=.Float'builtin;
+        comptime fn classify(input:Float)->bool {
+            input match {
+                (((value if value < 0.0) and false is selected) or
+                 ((value if value >= 0.0) and true is selected))
+                    if selected == (value >= 0.0) => selected,
+            }
+        }
+        comptime fn run()->(bool,bool,bool) {(classify(-1.0),classify(0.0),classify(1.0))}";
+    let package = compile(source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Tuple(vec![
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Bool(true)
+        ])
+    );
+    let nested = source.replace(
+        "((value if value >= 0.0) and true is selected)",
+        "(((value if value == 0.0) and true is selected) or ((value if value > 0.0) and false is selected))",
+    ).replace("selected == (value >= 0.0)", "selected == (value == 0.0)");
+    let package = compile(&nested);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Tuple(vec![
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Bool(false)
+        ])
+    );
+    // The first candidate now matches every input. Its false result must not
+    // be replaced by the later candidate's true result after guard failure.
+    let shadowed = source.replace("value if value < 0.0", "value");
+    let error = compile_with_protocols(&shadowed, &Default::default()).unwrap_err();
+    assert!(error.contains("exhaustive"), "{error}");
+    let wrong = source.replace("and true is selected", "and false is selected");
+    let error = compile_with_protocols(&wrong, &Default::default()).unwrap_err();
+    assert!(error.contains("exhaustive"), "{error}");
+}

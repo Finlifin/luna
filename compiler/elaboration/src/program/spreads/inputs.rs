@@ -16,14 +16,14 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<crate::calls::CallCandidate, Error> {
         let mut candidate = scheme
-            .infer_scoped_types_mode(
+            .infer_sparse_scoped_types_mode(
                 actual,
                 expected,
                 partial,
                 &self.context,
                 crate::ptc::Budget::default(),
                 false,
-                &self.call_inference_scope(),
+                &self.call_inference_domains(),
             )
             .map_err(|cause| call_inference_error(span, cause))?;
         if let Some(context) = structural {
@@ -162,6 +162,36 @@ impl Checker<'_, '_> {
     pub(in crate::program) fn infer_spread_inputs(
         &mut self,
         scheme: &crate::calls::Scheme,
+        actual: Vec<Option<Term>>,
+        args: &[Arg<'_>],
+        declarations: Option<&[hir::common::FnParam<'_>]>,
+        offset: usize,
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+        structural: Option<&crate::calls::InputContext>,
+        settled_widths: Option<&BTreeMap<usize, usize>>,
+        span: Span,
+        checked: &mut PreparedInputs,
+    ) -> Result<crate::calls::CallCandidate, Error> {
+        self.infer_spread_inputs_with_staging(
+            scheme,
+            actual,
+            args,
+            declarations,
+            offset,
+            expected,
+            partial,
+            structural,
+            settled_widths,
+            span,
+            checked,
+            false,
+        )
+    }
+
+    pub(in crate::program) fn infer_spread_inputs_with_staging(
+        &mut self,
+        scheme: &crate::calls::Scheme,
         mut actual: Vec<Option<Term>>,
         args: &[Arg<'_>],
         declarations: Option<&[hir::common::FnParam<'_>]>,
@@ -172,6 +202,7 @@ impl Checker<'_, '_> {
         settled_widths: Option<&BTreeMap<usize, usize>>,
         span: Span,
         checked: &mut PreparedInputs,
+        defer_staged: bool,
     ) -> Result<crate::calls::CallCandidate, Error> {
         let mut flat = Vec::new();
         let mut post_positions = std::collections::BTreeSet::new();
@@ -247,12 +278,105 @@ impl Checker<'_, '_> {
             .collect();
         let (routes, _) = route_arguments(&routed, declarations, actual.len() - offset, span)?;
         loop {
-            let candidate =
+            let mut candidate =
                 self.spread_candidate(scheme, &actual, expected, partial, structural, span)?;
+            // Retained collection elements provide partial tuple evidence.
+            // Unknown packet fields stay candidate-local inference variables.
+            for route in routes.iter().filter(|route| route.is_collected()) {
+                let fields = route
+                    .source_inputs()
+                    .map(|(position, _)| {
+                        checked
+                            .get(&position)
+                            .filter(|(_, value)| !is_never(&value.ty))
+                            .map_or(crate::calls::InputContext::Unknown, |(_, value)| {
+                                crate::calls::InputContext::Known(value.ty.clone())
+                            })
+                    })
+                    .collect();
+                let context = match self.protocols.tuple {
+                    Some(head) => crate::calls::InputContext::NormalTuple { head, fields },
+                    None => crate::calls::InputContext::Tuple(fields),
+                };
+                candidate
+                    .constrain_parameter_context(
+                        route.parameter + offset,
+                        &context,
+                        crate::ptc::Budget::default(),
+                    )
+                    .map_err(|e| call_inference_error(span, e))?;
+            }
+            // Collection evidence may settle an associated type's subject
+            // after the initial candidate was formed. Normalize those views
+            // before passing domains to callback and literal checking.
+            if routes.iter().any(|route| route.is_collected()) {
+                candidate
+                    .refine_type_views(
+                        |ty, budget| {
+                            self.callable_input_view_budgeted(ty, budget, span)
+                                .map_err(|e| e.message)
+                        },
+                        crate::ptc::Budget::default(),
+                    )
+                    .map_err(|e| call_inference_error(span, e))?;
+            }
             let mut progress = false;
             for route in &routes {
-                let Some(position) = route.single_position() else {
+                if route.is_collected() {
+                    let parameter = route.parameter + offset;
+                    let staged = matches!(scheme.signature.callable_signature(), Term::Function { parameters, .. } if parameters[parameter].sort != Sort::Runtime);
+                    if defer_staged && staged {
+                        continue;
+                    }
+                    let context = candidate
+                        .parameter_input_context(parameter)
+                        .map_err(|e| call_inference_error(span, e))?;
+                    let fields = match context {
+                        crate::calls::InputContext::Known(ty) => {
+                            route.require_collection_type(self, &ty, span)?;
+                            let Term::Tuple(fields) = self.structural_type(&ty, span)? else {
+                                unreachable!()
+                            };
+                            fields
+                                .into_iter()
+                                .map(crate::calls::InputContext::Known)
+                                .collect::<Vec<_>>()
+                        }
+                        crate::calls::InputContext::Tuple(fields)
+                        | crate::calls::InputContext::NormalTuple { fields, .. } => fields,
+                        _ => continue,
+                    };
+                    if fields.len() != route.source_inputs().count() {
+                        return Err(error(span, "variadic collection argument count mismatch"));
+                    }
+                    for ((position, input), field) in route.source_inputs().zip(&fields) {
+                        if !flat[position].2 || checked.contains_key(&position) {
+                            continue;
+                        }
+                        fuel = fuel.checked_sub(1).ok_or_else(|| {
+                            error(span, "spread input inference budget exhausted")
+                        })?;
+                        let expected = match field {
+                            crate::calls::InputContext::Known(ty) => Some(ty),
+                            _ => None,
+                        };
+                        if let Some(value) = self.with_staged_input(staged, |this| {
+                            this.argument_attempt_with_input(
+                                input,
+                                expected,
+                                None,
+                                false,
+                                Some(field),
+                            )
+                        })? {
+                            checked.insert(position, (input.hir_id, value));
+                            progress = true;
+                        }
+                    }
                     continue;
+                }
+                let Some(position) = route.single_position() else {
+                    unreachable!()
                 };
                 let (_, input, available) = &flat[position];
                 if !available || checked.contains_key(&position) {
@@ -262,6 +386,12 @@ impl Checker<'_, '_> {
                     .checked_sub(1)
                     .ok_or_else(|| error(span, "spread input inference budget exhausted"))?;
                 let parameter = route.parameter + offset;
+                if defer_staged
+                    && matches!(scheme.signature.callable_signature(),
+                    Term::Function { parameters, .. } if parameters[parameter].sort != Sort::Runtime)
+                {
+                    continue;
+                }
                 let context = candidate
                     .parameter_type(parameter)
                     .map_err(|e| call_inference_error(span, e))?;

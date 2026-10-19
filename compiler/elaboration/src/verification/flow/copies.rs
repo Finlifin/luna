@@ -152,7 +152,8 @@ impl Walker<'_> {
         }
         let scalar = match value.scalar {
             Some(Scalar::Local(id))
-                if value.range.is_some() && state.facts.value(id.place) == Some(id) =>
+                if (value.range.is_some() || value.unbounded_integer)
+                    && state.facts.value(id.place) == Some(id) =>
             {
                 Some(id)
             }
@@ -177,10 +178,10 @@ impl Walker<'_> {
         }
         let expression = match &value.polynomial {
             Some(p) if p.terms.keys().any(|f| !f.is_empty()) => {
-                match p.interval_enclosure(&state.facts, self.limits) {
-                    Ok(_) => Some(self.freeze_expression(p, state)?),
-                    Err(Unknown::StaleValue(_) | Unknown::MissingBound(_)) => None,
-                    Err(e) => return Err(e.into()),
+                if state.facts.relation_is_current(p, self.limits)? {
+                    Some(self.freeze_expression(p, state)?)
+                } else {
+                    None
                 }
             }
             _ => None,
@@ -249,6 +250,21 @@ impl Walker<'_> {
                 id,
             );
             Some(id)
+        } else if copy.scalar.is_some() || copy.expression.is_some() {
+            let local = self.next_field;
+            self.next_field = local.checked_add(1).ok_or(Unknown::VersionExhausted)?;
+            let id = state.facts.invalidate(PlaceId {
+                owner: u64::MAX,
+                local,
+            })?;
+            state.paths.insert(
+                FieldPath {
+                    root,
+                    fields: prefix.to_vec(),
+                },
+                id,
+            );
+            Some(id)
         } else {
             None
         };
@@ -260,14 +276,15 @@ impl Walker<'_> {
             self.limits.step(fields.len().saturating_add(1))?;
             let local = self.next_field;
             self.next_field = local.checked_add(1).ok_or(Unknown::VersionExhausted)?;
-            let bound = copy.source.bound(*old, self.limits)?.copy(self.limits)?;
-            let id = state.facts.assign(
-                PlaceId {
-                    owner: u64::MAX,
-                    local,
-                },
-                bound,
-            )?;
+            let destination = PlaceId {
+                owner: u64::MAX,
+                local,
+            };
+            let id = match copy.source.bound(*old, self.limits) {
+                Ok(bound) => state.facts.assign(destination, bound.copy(self.limits)?)?,
+                Err(Unknown::MissingBound(_)) => state.facts.invalidate(destination)?,
+                Err(e) => return Err(e.into()),
+            };
             let mut destination_fields = prefix.to_vec();
             destination_fields.extend(fields);
             state.paths.insert(
@@ -369,6 +386,10 @@ impl Walker<'_> {
                     }
                 }
             }
+            // Repeated inputs have several equal destinations. Transport this
+            // copy's own conditions to its destination rather than letting the
+            // last sibling win; unbounded equalities have no interval to spread.
+            mapping.extend(copy.mapping.iter().map(|(old, new)| (*old, *new)));
             let same_lineage = std::sync::Arc::ptr_eq(&copy.source.versions, &state.facts.versions);
             let mut selected: BTreeSet<_> = mapping.keys().copied().collect();
             if same_lineage {
@@ -456,6 +477,13 @@ fn project_expression_bounds(
     if !expression.terms.keys().any(|factors| factors.len() > 1) {
         return Ok(());
     }
+    // Exact expression evidence does not require an interval. This optional
+    // interval-row projection does: retain the equality below when unavailable.
+    match expression.interval_enclosure(facts, limits) {
+        Ok(_) => {}
+        Err(Unknown::MissingBound(_)) => return Ok(()),
+        Err(e) => return Err(e),
+    }
     let variable = Polynomial::variable(destination, limits)?;
     for row in facts.copy_relations(limits)? {
         let nonlinear = row.terms.keys().filter(|factors| factors.len() > 1).count();
@@ -529,6 +557,36 @@ fn exact_equal_values(
             equal.push((a, b));
         }
     }
+    for (condition, truth) in facts.copy_conditions(limits)? {
+        let Condition::PolynomialCompare {
+            left,
+            relation,
+            right,
+        } = condition
+        else {
+            continue;
+        };
+        if !matches!((relation, truth), (C::Equal, true) | (C::NotEqual, false)) {
+            continue;
+        }
+        let row = left.subtract(&right, limits)?;
+        if row.terms.len() != 2 {
+            continue;
+        }
+        let mut terms = row.terms.iter();
+        let (a, ac) = terms.next().unwrap();
+        let (b, bc) = terms.next().unwrap();
+        if a.len() != 1 || b.len() != 1 {
+            continue;
+        }
+        let negative = bc.negate(&mut limits.arithmetic).map_err(Unknown::from)?;
+        if !ac.is_zero() && limits.compare(ac, &negative)?.is_eq() {
+            if equal.len() >= limits.max_terms {
+                return Err(Unknown::TermLimit);
+            }
+            equal.push((a[0], b[0]));
+        }
+    }
     Ok(equal)
 }
 fn rename(
@@ -548,7 +606,9 @@ fn rename(
                 None if allow_current && target.value(id.place) == Some(*id) => *id,
                 _ => return Ok(None),
             };
-            target.bound(id, limits)?;
+            if target.value(id.place) != Some(id) {
+                return Err(Unknown::StaleValue(id));
+            }
             renamed.push(id);
         }
         renamed.sort_unstable();
@@ -562,6 +622,28 @@ fn add_equality(
     b: Polynomial,
     limits: &mut Limits,
 ) -> Result<(), Unknown> {
+    // Unbounded values still have exact copy identity. Preserve that equality
+    // as a symbolic condition until interval-based arithmetic becomes available.
+    let bounded = match (
+        a.interval_enclosure(facts, limits),
+        b.interval_enclosure(facts, limits),
+    ) {
+        (Ok(_), Ok(_)) => true,
+        (Err(Unknown::MissingBound(_)), Ok(_) | Err(Unknown::MissingBound(_)))
+        | (Ok(_), Err(Unknown::MissingBound(_))) => false,
+        (Err(e), _) | (_, Err(e)) => return Err(e),
+    };
+    if !bounded {
+        return facts.assume(
+            &Condition::PolynomialCompare {
+                left: a,
+                relation: C::Equal,
+                right: b,
+            },
+            true,
+            limits,
+        );
+    }
     add_row(facts, a.subtract(&b, limits)?, limits)?;
     add_row(facts, b.subtract(&a, limits)?, limits)
 }
@@ -622,7 +704,7 @@ impl Walker<'_> {
     /// binds its actual result to this root; component identities are then
     /// aligned by State::merge before intersecting relational guarantees.
     pub(super) fn result_root(&mut self, ty: &Term) -> Result<Option<PlaceId>, Reason> {
-        let integer = matches!(ty, Term::Primitive(p) if p.fixed_integer_layout().is_some() || *p == nir::Primitive::Bool);
+        let integer = matches!(ty, Term::Primitive(p) if p.fixed_integer_layout().is_some() || matches!(p, nir::Primitive::Bool | nir::Primitive::Integer));
         if !integer
             && !matches!(ty, Term::Tuple(_) | Term::Record(_) | Term::Nominal { .. })
             && self.tuple_field_types(ty)?.is_none()
@@ -675,7 +757,11 @@ impl Walker<'_> {
         }
         Ok(())
     }
-    fn expand_owned_shape(&mut self, value: &mut Value, depth: usize) -> Result<(), Reason> {
+    pub(super) fn expand_owned_shape(
+        &mut self,
+        value: &mut Value,
+        depth: usize,
+    ) -> Result<(), Reason> {
         self.limits.step(1)?;
         if depth >= 128 {
             return Err(Reason::DepthLimit);

@@ -181,11 +181,11 @@ impl Interpreter<'_> {
         }
         self.tick(None)?;
         self.cleanup_path_work(base)?;
-        let initial = storage
+        let valid = storage
             .owned_pointer(program.ty.clone(), base)
-            .and_then(|p| p.read())
+            .and_then(|pointer| pointer.inspect(|value| self.has_type(value, &program.ty)))
             .map_err(|e| self.failure(e, None))?;
-        if !self.has_type(&initial, &program.ty) {
+        if !valid {
             return Err(self.failure(ErrorKind::Type, None));
         }
         for (path, tag) in &program.guards {
@@ -195,7 +195,9 @@ impl Interpreter<'_> {
             let pointer = storage
                 .owned_pointer(Term::Primitive(Primitive::Void), &path)
                 .map_err(|e| self.failure(e, None))?;
-            if !matches!(pointer.read().map_err(|e|self.failure(e,None))?,Value::Variant {index,..} if index==*tag)
+            if !pointer
+                .inspect(|value| matches!(value, Value::Variant {index,..} if index == tag))
+                .map_err(|e| self.failure(e, None))?
             {
                 return Err(self.failure(ErrorKind::InvalidCallPlan, None));
             }
@@ -230,13 +232,16 @@ impl Interpreter<'_> {
                             self.tick(None)?;
                             let path: Vec<_> = base.iter().chain(fields).copied().collect();
                             self.cleanup_path_work(&path)?;
-                            let value = storage
+                            let index = storage
                                 .owned_pointer(Term::Primitive(Primitive::Void), &path)
-                                .and_then(|pointer| pointer.read())
-                                .map_err(|e| self.failure(e, None))?;
-                            let Value::Variant { index, .. } = value else {
-                                return Err(self.failure(ErrorKind::InvalidCallPlan, None));
-                            };
+                                .and_then(|pointer| {
+                                    pointer.inspect(|value| match value {
+                                        Value::Variant { index, .. } => Some(*index),
+                                        _ => None,
+                                    })
+                                })
+                                .map_err(|e| self.failure(e, None))?
+                                .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, None))?;
                             if index != *tag {
                                 matches = false;
                                 break;
@@ -286,11 +291,13 @@ impl Interpreter<'_> {
                     let pointer = storage
                         .owned_pointer(Term::Primitive(Primitive::Void), &path)
                         .map_err(|e| self.failure(e, None))?;
-                    let Value::Variant { index, .. } =
-                        pointer.read().map_err(|e| self.failure(e, None))?
-                    else {
-                        return Err(self.failure(ErrorKind::Type, None));
-                    };
+                    let index = pointer
+                        .inspect(|value| match value {
+                            Value::Variant { index, .. } => Some(*index),
+                            _ => None,
+                        })
+                        .map_err(|e| self.failure(e, None))?
+                        .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
                     let branch = branches
                         .get(index)
                         .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, None))?;
@@ -390,22 +397,57 @@ impl<'a> Interpreter<'a> {
             .ok_or_else(|| self.failure(ErrorKind::RepresentationSizeLimit, Some(source)))?;
         self.copy_work(work, source)
     }
-    fn copy_type_arguments(
+    fn copy_invocation_type_work(
+        &mut self,
+        ty: &Term,
+        source: SourceRange,
+        invocation: bool,
+    ) -> Result<(), Error> {
+        if !invocation {
+            return self.copy_type_work(ty, source);
+        }
+        let work = self
+            .type_description_work(ty)
+            .ok_or_else(|| self.failure(ErrorKind::RepresentationSizeLimit, Some(source)))?;
+        self.copy_work(work, source)
+    }
+
+    fn copy_instance_arguments(
         &mut self,
         arguments: &[Term],
         source: SourceRange,
     ) -> Result<Vec<Term>, Error> {
         self.copy_work(arguments.len(), source)?;
         for argument in arguments {
-            self.copy_type_work(argument, source)?;
+            let work = instance_argument_work(argument, &self.normal_forms)
+                .ok_or_else(|| self.failure(ErrorKind::RepresentationSizeLimit, Some(source)))?;
+            self.copy_work(work, source)?;
         }
         Ok(arguments.to_vec())
     }
-    fn copy_representation(
+    pub(super) fn copy_representation(
         &mut self,
         value: &Value,
         source: SourceRange,
         depth: usize,
+    ) -> Result<Value, Error> {
+        self.clone_representation(value, source, depth, false)
+    }
+
+    pub(super) fn checkpoint_representation(
+        &mut self,
+        value: &Value,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        self.clone_representation(value, source, 0, true)
+    }
+
+    fn clone_representation(
+        &mut self,
+        value: &Value,
+        source: SourceRange,
+        depth: usize,
+        preserve_identity: bool,
     ) -> Result<Value, Error> {
         self.tick(Some(source))?;
         if depth >= 128
@@ -417,6 +459,7 @@ impl<'a> Interpreter<'a> {
             return Err(self.failure(ErrorKind::DepthExhausted, Some(source)));
         }
         Ok(match value {
+            Value::Storage(_) | Value::Closure(_) if preserve_identity => value.clone(),
             Value::Storage(storage) => {
                 let limit = self
                     .budget
@@ -425,10 +468,11 @@ impl<'a> Interpreter<'a> {
                 let contents = storage
                     .contents_for_copy(&mut self.budget.steps, limit)
                     .map_err(|kind| self.failure(kind, Some(source)))?;
-                Value::Storage(Storage::new(self.copy_representation(
+                Value::Storage(Storage::new(self.clone_representation(
                     contents.value(),
                     source,
                     depth + 1,
+                    preserve_identity,
                 )?))
             }
             Value::Closure(closure) => {
@@ -439,13 +483,13 @@ impl<'a> Interpreter<'a> {
                 let arguments = closure
                     .instance_arguments
                     .as_ref()
-                    .map(|arguments| self.copy_type_arguments(arguments, source))
+                    .map(|arguments| self.copy_instance_arguments(arguments, source))
                     .transpose()?;
                 let mut environment = Environment::new();
                 for (binding, value) in &closure.environment {
                     environment.insert(
                         *binding,
-                        self.copy_representation(value, source, depth + 1)?,
+                        self.clone_representation(value, source, depth + 1, preserve_identity)?,
                     );
                 }
                 Value::Closure(std::sync::Arc::new(Closure {
@@ -464,7 +508,9 @@ impl<'a> Interpreter<'a> {
                 Value::Tuple(
                     values
                         .iter()
-                        .map(|value| self.copy_representation(value, source, depth + 1))
+                        .map(|value| {
+                            self.clone_representation(value, source, depth + 1, preserve_identity)
+                        })
                         .collect::<Result<_, _>>()?,
                 )
             }
@@ -477,7 +523,12 @@ impl<'a> Interpreter<'a> {
                             self.copy_work(name.len(), source)?;
                             Ok((
                                 name.clone(),
-                                self.copy_representation(value, source, depth + 1)?,
+                                self.clone_representation(
+                                    value,
+                                    source,
+                                    depth + 1,
+                                    preserve_identity,
+                                )?,
                             ))
                         })
                         .collect::<Result<_, Error>>()?,
@@ -487,7 +538,12 @@ impl<'a> Interpreter<'a> {
                 self.copy_type_work(ty, source)?;
                 Value::Newtype {
                     ty: ty.clone(),
-                    value: Box::new(self.copy_representation(value, source, depth + 1)?),
+                    value: Box::new(self.clone_representation(
+                        value,
+                        source,
+                        depth + 1,
+                        preserve_identity,
+                    )?),
                 }
             }
             Value::Record {
@@ -496,13 +552,15 @@ impl<'a> Interpreter<'a> {
                 fields,
             } => {
                 self.copy_work(fields.len(), source)?;
-                let arguments = self.copy_type_arguments(arguments, source)?;
+                let arguments = self.copy_instance_arguments(arguments, source)?;
                 Value::Record {
                     declaration: *declaration,
                     arguments,
                     fields: fields
                         .iter()
-                        .map(|value| self.copy_representation(value, source, depth + 1))
+                        .map(|value| {
+                            self.clone_representation(value, source, depth + 1, preserve_identity)
+                        })
                         .collect::<Result<_, _>>()?,
                 }
             }
@@ -513,14 +571,16 @@ impl<'a> Interpreter<'a> {
                 fields,
             } => {
                 self.copy_work(fields.len(), source)?;
-                let arguments = self.copy_type_arguments(arguments, source)?;
+                let arguments = self.copy_instance_arguments(arguments, source)?;
                 Value::Variant {
                     declaration: *declaration,
                     arguments,
                     index: *index,
                     fields: fields
                         .iter()
-                        .map(|value| self.copy_representation(value, source, depth + 1))
+                        .map(|value| {
+                            self.clone_representation(value, source, depth + 1, preserve_identity)
+                        })
                         .collect::<Result<_, _>>()?,
                 }
             }
@@ -534,24 +594,30 @@ impl<'a> Interpreter<'a> {
                 )?;
                 value.clone()
             }
-            Value::Type(ty) => {
-                self.copy_type_work(ty, source)?;
+            Value::Type(ty) | Value::AbstractValue { ty, .. } => {
+                self.copy_invocation_type_work(ty, source, preserve_identity)?;
                 value.clone()
             }
-            Value::TypeList(types) => Value::TypeList(self.copy_type_arguments(types, source)?),
+            Value::TypeList(types) => {
+                self.copy_work(types.len(), source)?;
+                for ty in types {
+                    self.copy_invocation_type_work(ty, source, preserve_identity)?;
+                }
+                Value::TypeList(types.clone())
+            }
             Value::RuntimeFunction {
                 declaration,
                 arguments,
             } => Value::RuntimeFunction {
                 declaration: *declaration,
-                arguments: self.copy_type_arguments(arguments, source)?,
+                arguments: self.copy_instance_arguments(arguments, source)?,
             },
             Value::RuntimeTraitMethod(method) => {
                 self.copy_type_work(&method.subject, source)?;
                 let interface_arguments =
-                    self.copy_type_arguments(&method.interface.arguments, source)?;
+                    self.copy_instance_arguments(&method.interface.arguments, source)?;
                 let method_arguments =
-                    self.copy_type_arguments(&method.method_arguments, source)?;
+                    self.copy_instance_arguments(&method.method_arguments, source)?;
                 Value::RuntimeTraitMethod(Box::new(TraitMethodIdentity {
                     interface: InterfaceInstance {
                         declaration: method.interface.declaration,
@@ -561,6 +627,11 @@ impl<'a> Interpreter<'a> {
                     member: method.member,
                     method_arguments,
                 }))
+            }
+            Value::Float(number) => {
+                self.copy_work(number.digits().len(), source)?;
+                self.copy_work(number.exponent().bit_len().div_ceil(32), source)?;
+                value.clone()
             }
             Value::Integer(integer) => {
                 self.copy_work(integer.bit_len().div_ceil(32), source)?;
@@ -1471,6 +1542,54 @@ mod tuple_context_tests {
 #[cfg(test)]
 mod representation_copy_tests {
     use super::*;
+    #[test]
+    fn copy_preserves_value_instance_arguments_without_relaxing_type_lists() {
+        let package = Package::default();
+        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        let source = SourceRange { start: 1, end: 2 };
+        let declaration = DeclarationId {
+            package: 0,
+            local: 1,
+        };
+        let arguments = vec![Term::Bool(true), Term::Primitive(Primitive::Bool)];
+        for value in [
+            Value::RuntimeFunction {
+                declaration,
+                arguments: arguments.clone(),
+            },
+            Value::Record {
+                declaration,
+                arguments: arguments.clone(),
+                fields: vec![Value::Bool(false)],
+            },
+            Value::Variant {
+                declaration,
+                arguments: arguments.clone(),
+                index: 0,
+                fields: vec![],
+            },
+        ] {
+            assert_eq!(vm.copy_representation(&value, source, 0).unwrap(), value);
+        }
+        let mut value = closure(vec![Value::Bool(true)]);
+        let Value::Closure(original) = &mut value else {
+            unreachable!()
+        };
+        Arc::make_mut(original).instance_arguments = Some(arguments.clone());
+        let Value::Closure(copied) = vm.copy_representation(&value, source, 0).unwrap() else {
+            panic!("closure")
+        };
+        assert_eq!(copied.instance_arguments, Some(arguments));
+        assert!(
+            vm.copy_representation(&Value::TypeList(vec![Term::Bool(true)]), source, 0)
+                .is_err()
+        );
+        assert!(
+            vm.copy_representation(&Value::Type(Term::Bool(true)), source, 0)
+                .is_err()
+        );
+    }
+
     fn closure(captures: Vec<Value>) -> Value {
         let ids = (0..captures.len())
             .map(|index| LocalId {
@@ -1496,6 +1615,53 @@ mod representation_copy_tests {
             },
         }))
     }
+    #[test]
+    fn authorized_pointer_read_detaches_owned_capture_storage() {
+        let source = SourceRange { start: 1, end: 2 };
+        let cell = Storage::new(Value::Bool(true));
+        let mut original = closure(vec![Value::Storage(cell.clone())]);
+        let Value::Closure(original_closure) = &mut original else {
+            unreachable!()
+        };
+        let ty = Term::Closure {
+            environment: vec![Term::Primitive(Primitive::Bool)],
+            signature: Box::new(original_closure.ty.clone()),
+        };
+        Arc::make_mut(original_closure).ty = ty.clone();
+        let storage = Storage::new(original);
+        let binding = LocalId {
+            owner: 99,
+            index: 0,
+        };
+        let mut environment = Environment::new();
+        environment.insert(binding, Value::Pointer(storage.pointer(ty.clone(), vec![])));
+        let package = Package::default();
+        let mut vm = Interpreter::new(&package, Budget::default())
+            .unwrap()
+            .with_pointer_copy_permission(&|_| true);
+        let expr = Expr {
+            ty: ty.clone(),
+            source,
+            kind: K::ReadPointer(Box::new(Expr {
+                ty: Term::Pointer(Box::new(ty)),
+                source,
+                kind: K::Local(binding),
+            })),
+        };
+        let Flow::Value(Value::Closure(copied)) = vm.eval(&expr, &mut environment).unwrap() else {
+            panic!("closure")
+        };
+        let Value::Storage(copied_cell) = copied.environment.values().next().unwrap() else {
+            panic!("capture storage")
+        };
+        copied_cell
+            .pointer(Term::Primitive(Primitive::Bool), vec![])
+            .write(Value::Bool(false), |v| matches!(v, Value::Bool(_)))
+            .unwrap();
+        assert_eq!(copied_cell.read().unwrap(), Value::Bool(false));
+        assert_eq!(cell.read().unwrap(), Value::Bool(true));
+    }
+
     #[test]
     fn representation_copy_detaches_nested_capture_cells_and_preserves_pointer_targets() {
         let package = Package::default();
@@ -1567,6 +1733,38 @@ mod representation_copy_tests {
 
 #[cfg(test)]
 mod copy_budget_tests {
+    #[test]
+    fn invocation_type_copy_uses_scope_without_granting_constant_export() {
+        use super::*;
+        let package = Package::default();
+        let source = SourceRange { start: 0, end: 1 };
+        let parameter = DeclarationId {
+            package: 77,
+            local: 1,
+        };
+        let ty = Term::Record(vec![(
+            "element".into(),
+            Term::Rigid {
+                declaration: parameter,
+                sort: nir::Sort::Type,
+            },
+        )]);
+        for value in [Value::Type(ty.clone()), Value::TypeList(vec![ty.clone()])] {
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            assert!(vm.checkpoint_representation(&value, source).is_err());
+            vm.authorize_abstract_type_parameters(&[parameter]).unwrap();
+            assert_eq!(vm.checkpoint_representation(&value, source).unwrap(), value);
+            assert!(vm.copy_representation(&value, source, 0).is_err());
+            vm.budget.steps = 1;
+            assert_eq!(
+                vm.checkpoint_representation(&value, source)
+                    .unwrap_err()
+                    .kind,
+                ErrorKind::StepsExhausted
+            );
+        }
+    }
+
     use super::*;
     #[test]
     fn representation_copy_charges_width_and_type_metadata_before_cloning() {

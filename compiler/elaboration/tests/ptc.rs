@@ -1006,6 +1006,51 @@ fn records_are_distinct_from_other_type_families_without_deciding_permutations()
 }
 
 #[test]
+fn record_type_congruence_uses_field_evidence_without_inventing_inverse_rules() {
+    let field = variable(910);
+    let record = |value| Term::Record(vec![("field".into(), value)]);
+    let left = record(record(field.clone()));
+    let right = record(record(ty(P::Bool)));
+    let goal = eq(left.clone(), right.clone());
+    assert!(!matches!(
+        Context::default().prove(goal.clone(), Budget::default()),
+        Outcome::Entailed(_)
+    ));
+    let mut context = Context::default();
+    context.assume(eq(field.clone(), ty(P::Bool)));
+    assert!(matches!(
+        context.prove(
+            goal.clone(),
+            Budget {
+                steps: 1,
+                max_depth: 64
+            }
+        ),
+        Outcome::Unknown { .. }
+    ));
+    let Outcome::Entailed(proof) = context.prove(goal, Budget::default()) else {
+        panic!("record congruence")
+    };
+    context.verify_proof(&proof, Budget::default()).unwrap();
+    assert!(
+        Context::default()
+            .verify_proof(&proof, Budget::default())
+            .is_err()
+    );
+    let changed_label = Term::Record(vec![("other".into(), record(ty(P::Bool)))]);
+    assert!(!matches!(
+        context.prove(eq(left.clone(), changed_label), Budget::default()),
+        Outcome::Entailed(_)
+    ));
+    let mut inverse = Context::default();
+    inverse.assume(eq(left, right));
+    assert!(!matches!(
+        inverse.prove(eq(field, ty(P::Bool)), Budget::default()),
+        Outcome::Entailed(_)
+    ));
+}
+
+#[test]
 fn record_structural_views_require_scoped_equality_evidence() {
     let subject = variable(901);
     let opaque = head(902, vec![]);

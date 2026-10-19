@@ -120,7 +120,8 @@ impl Solver<'_, '_> {
         if contract.type_parameters.len() != query.arguments.len() {
             return Err("conditional requirement interface argument count mismatch".into());
         }
-        contract.validate_arguments_in_declarations(
+        contract.validate_arguments_for_subject(
+            &query.subject,
             &query.arguments,
             &[],
             self.world.traits,

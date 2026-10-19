@@ -26,12 +26,15 @@ pub enum Role {
     #[default]
     Opaque,
     Tuple,
+    /// Compiler-bound immutable meta.List constructor; the head stays opaque.
+    TypeList,
 }
 impl fmt::Display for Role {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Opaque => "opaque",
             Self::Tuple => "tuple",
+            Self::TypeList => "type-list",
         })
     }
 }
@@ -172,8 +175,8 @@ pub fn supported_input_type_with_layouts(
 }
 
 /// Representation-shape guard for trusted Type-list metadata. This alone does
-/// not designate a language item: only the producer may attach Kind::TypeList
-/// after resolving the list declaration's trusted identity.
+/// not designate a language item: only the producer may attach Role::TypeList
+/// or a Kind::TypeList input contract after resolving its trusted identity.
 pub fn type_list_input_type(ty: &Term) -> bool {
     let arguments = match ty {
         Term::NormalForm {
@@ -206,6 +209,13 @@ pub fn validate(package: &Package) -> Result<(), &'static str> {
             && (head.parameters.len() != 1 || head.parameters[0].kind != Kind::TypeList)
         {
             return Err("Tuple head requires exactly one Type-list input");
+        }
+        if head.role == Role::TypeList
+            && (head.parameters.len() != 1 || head.parameters[0].kind != Kind::Type)
+        {
+            return Err(
+                "meta.List binding has an invalid constructor signature: expected exactly one Type input",
+            );
         }
         let function = functions.get(&head.declaration);
         if function.is_some_and(|f| f.phase != FunctionPhase::NormalForm || !f.pure) {
@@ -264,7 +274,18 @@ pub fn validate(package: &Package) -> Result<(), &'static str> {
         let Some(function) = function else {
             continue;
         };
-        if function.requirements != head.requirements {
+        // Formation must retain both ordinary predicates and trait capability
+        // obligations, including when the non-invocable body is omitted later.
+        let count = function
+            .requirements
+            .len()
+            .checked_add(function.capabilities.len())
+            .ok_or("normal-form contract count overflow")?;
+        if head.requirements.len() != count
+            || head.requirements[..function.requirements.len()] != function.requirements
+            || !head.requirements[function.requirements.len()..].iter().zip(&function.capabilities)
+                .all(|(predicate, capability)| matches!(predicate, TypePredicate::Trait(retained) if retained == capability))
+        {
             return Err("normal-form contracts disagree with the checked definition");
         }
         if function.type_parameters != types
@@ -320,6 +341,14 @@ impl fmt::Display for ApplicationError {
     }
 }
 impl Head {
+    pub fn is_type_list_instance(&self, ty: &Term) -> bool {
+        self.role == Role::TypeList
+            && matches!(self.parameters.as_slice(), [parameter]
+                if parameter.kind == Kind::Type && parameter.ty == Term::Primitive(Primitive::Type))
+            && matches!(ty, Term::NormalForm { head, sort: Sort::Type, arguments }
+                if *head == self.declaration && arguments.as_slice() == [Term::Primitive(Primitive::Type)])
+    }
+
     pub fn tuple_elements<'a>(&self, ty: &'a Term) -> Option<&'a [Term]> {
         let Term::NormalForm {
             head,
@@ -577,8 +606,12 @@ pub fn nominal_value_fields_budgeted(
         for definition in &package.enums {
             spend_layout(fuel, 1)?;
             if definition.declaration == *declaration {
+                definition
+                    .validate_completed_arguments(arguments, fuel)
+                    .ok()?;
                 return instantiate_value_fields(
                     &definition.type_parameters,
+                    &definition.parameter_types,
                     arguments,
                     definition.variants.get(index as usize)?.fields.iter(),
                     fuel,
@@ -599,8 +632,12 @@ pub fn nominal_value_fields_budgeted(
         for definition in &package.structs {
             spend_layout(fuel, 1)?;
             if definition.declaration == *declaration {
+                definition
+                    .validate_completed_arguments(arguments, fuel)
+                    .ok()?;
                 return instantiate_value_fields(
                     &definition.type_parameters,
+                    &definition.parameter_types,
                     arguments,
                     definition.fields.iter().map(|(_, ty)| ty),
                     fuel,
@@ -626,6 +663,7 @@ fn spend_layout(fuel: &mut usize, work: usize) -> Option<()> {
 /// An empty payload still validates the complete declaration argument frame.
 pub fn instantiate_value_fields<'a>(
     parameters: &[DeclarationId],
+    domains: &[Term],
     arguments: &[Term],
     fields: impl ExactSizeIterator<Item = &'a Term>,
     fuel: &mut usize,
@@ -637,20 +675,24 @@ pub fn instantiate_value_fields<'a>(
             .saturating_add(parameters.len())
             .saturating_add(arguments.len()),
     )?;
+    for domain in domains {
+        crate::type_computations::charge_term(domain, fuel).ok()?;
+    }
+    let parameters = crate::declaration_parameters(parameters, domains).ok()?;
     let before = *fuel;
     for argument in arguments {
         crate::type_computations::charge_term(argument, fuel).ok()?;
     }
     let input_work = before - *fuel;
     Term::Tuple(vec![])
-        .instantiate_types(parameters, arguments)
+        .instantiate_parameters(&parameters, arguments)
         .ok()?;
     let mut output = Vec::with_capacity(fields.len());
     for field in fields {
         let before = *fuel;
         crate::type_computations::charge_term(field, fuel).ok()?;
         spend_layout(fuel, (before - *fuel).saturating_mul(input_work))?;
-        output.push(field.instantiate_types(parameters, arguments).ok()?);
+        output.push(field.instantiate_parameters(&parameters, arguments).ok()?);
     }
     Some(output)
 }

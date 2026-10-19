@@ -55,6 +55,28 @@ fn nested_expression_child() {
             "zero ++ (".repeat(31),
             ")".repeat(31)
         ),
+        "open-not" => format!(
+            "fn nested(comptime flag:bool)->bool {{{}(do {{inline if flag {{true}} else {{false}}}}){}}}fn run()->bool {{nested(true)}}",
+            "not (".repeat(32),
+            ")".repeat(32)
+        ),
+        "open-arithmetic" => format!(
+            "typealias Byte=.u8'builtin;fn nested(comptime flag:bool)->Byte {{{}(do {{inline if flag {{0}} else {{1}}}}){}}}fn run()->bool {{nested(true)==0}}",
+            "0 + (".repeat(32),
+            ")".repeat(32)
+        ),
+        "open-compare" => {
+            let body = (0..32).fold(
+                "(do {inline if flag {true} else {false}})".to_owned(),
+                |body, _| format!("({body}) == true"),
+            );
+            format!("fn nested(comptime flag:bool)->bool {{{body}}}fn run()->bool {{nested(true)}}")
+        }
+        "open-concat" => format!(
+            "typealias Bit=.BitVec'builtin<1>;typealias Word=.BitVec'builtin<32>;fn nested(comptime flag:bool)->Word {{let zero:Bit=0;{}(do {{inline if flag {{zero}} else {{zero}}}}){}}}fn run()->bool {{nested(true)==0}}",
+            "zero ++ (".repeat(31),
+            ")".repeat(31)
+        ),
         _ => panic!("unknown case"),
     };
     let path = std::env::temp_dir().join(format!(
@@ -99,6 +121,10 @@ fn nested_scalar_operators_survive_frontend_and_execution() {
         "negative",
         "bits",
         "concat",
+        "open-not",
+        "open-arithmetic",
+        "open-compare",
+        "open-concat",
     ] {
         for stage in ["ast", "hir", "nir"] {
             let output = std::process::Command::new(std::env::current_exe().unwrap())

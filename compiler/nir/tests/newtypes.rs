@@ -6,6 +6,8 @@ fn id(local: u32) -> DeclarationId {
 }
 fn generic() -> Newtype {
     Newtype {
+        capture_count: 0,
+        parameter_types: vec![],
         declaration: id(1),
         name: "Id\"\\\n".into(),
         type_parameters: vec![id(2)],
@@ -16,6 +18,56 @@ fn generic() -> Newtype {
         requirements: vec![],
         capabilities: vec![],
     }
+}
+
+#[test]
+fn captured_environment_must_be_explicit_in_nominal_identity() {
+    let mut definition = generic();
+    definition.representation = Term::Tuple(vec![
+        Term::Rigid {
+            declaration: id(2),
+            sort: Sort::Type,
+        },
+        Term::Rigid {
+            declaration: id(3),
+            sort: Sort::Type,
+        },
+    ]);
+    let mut package = Package {
+        newtypes: vec![definition.clone()],
+        ..Default::default()
+    };
+    assert_eq!(
+        nir::newtypes::validate(&package),
+        Err("newtype representation has an undeclared captured parameter")
+    );
+    definition.type_parameters.push(id(3));
+    package.newtypes[0] = definition.clone();
+    assert!(nir::newtypes::validate(&package).is_ok());
+    let first = vec![
+        Term::Primitive(Primitive::Bool),
+        Term::Primitive(Primitive::Char),
+    ];
+    let second = vec![
+        Term::Primitive(Primitive::Bool),
+        Term::Primitive(Primitive::Bool),
+    ];
+    for arguments in [&first, &second] {
+        assert_eq!(
+            definition.instantiate_representation(arguments).unwrap(),
+            Term::Tuple(arguments.clone())
+        );
+    }
+    assert_ne!(
+        Term::Nominal {
+            declaration: definition.declaration,
+            arguments: first
+        },
+        Term::Nominal {
+            declaration: definition.declaration,
+            arguments: second
+        }
+    );
 }
 #[test]
 fn representation_substitution_preserves_nominal_and_opaque_heads() {
@@ -96,6 +148,7 @@ fn metadata_rejects_duplicate_identity_parameters_and_non_types() {
     assert!(nir::normal_forms::validate(&package).is_err());
     package.newtypes[0] = definition.clone();
     package.structs.push(nir::program::Struct {
+        parameter_types: vec![],
         declaration: definition.declaration,
         name: "collision".into(),
         type_parameters: vec![],
@@ -125,6 +178,8 @@ fn nominal(local: u32, arguments: Vec<Term>) -> Term {
 }
 fn wrapper(local: u32, representation: Term) -> Newtype {
     Newtype {
+        capture_count: 0,
+        parameter_types: vec![],
         declaration: id(local),
         name: format!("Wrapper{local}"),
         representation,
@@ -331,4 +386,271 @@ fn package_admission_bounds_newtype_representations_before_recursive_copying() {
     assert!(nir::normal_forms::validate(&package).is_err());
     package.newtypes[0].representation = Term::Primitive(Primitive::Bool);
     assert!(nir::normal_forms::validate(&package).is_ok());
+}
+
+#[test]
+fn captures_in_formation_premises_belong_to_the_nominal_telescope() {
+    use nir::program::{TraitRequirement, TypePredicate};
+    let parameter = Term::Rigid {
+        declaration: id(3),
+        sort: Sort::Type,
+    };
+    let capability = TraitRequirement {
+        subject: parameter.clone(),
+        interface: id(9),
+        interface_arguments: vec![],
+    };
+    for (requirements, capabilities) in [
+        (
+            vec![TypePredicate::Not(Box::new(TypePredicate::Or(vec![
+                TypePredicate::And(vec![TypePredicate::Equal(
+                    parameter.clone(),
+                    Term::Primitive(Primitive::Bool),
+                )]),
+            ])))],
+            vec![],
+        ),
+        (vec![TypePredicate::Trait(capability.clone())], vec![]),
+        (vec![], vec![capability.clone()]),
+        (
+            vec![],
+            vec![TraitRequirement {
+                subject: Term::Primitive(Primitive::Bool),
+                interface_arguments: vec![parameter.clone()],
+                ..capability.clone()
+            }],
+        ),
+    ] {
+        let mut definition = generic();
+        definition.requirements = requirements;
+        definition.capabilities = capabilities;
+        let mut package = Package {
+            newtypes: vec![definition],
+            ..Default::default()
+        };
+        assert_eq!(
+            nir::newtypes::validate(&package),
+            Err("newtype contract has an undeclared captured parameter")
+        );
+        package.newtypes[0].type_parameters.push(id(3));
+        assert!(nir::newtypes::validate(&package).is_ok());
+    }
+}
+
+#[test]
+fn newtype_contract_capture_validation_checks_sorts_and_budget() {
+    use nir::program::TypePredicate;
+    let mut definition = generic();
+    definition.requirements = vec![TypePredicate::Equal(
+        Term::Rigid {
+            declaration: id(2),
+            sort: Sort::ComptimeValue,
+        },
+        Term::Bool(true),
+    )];
+    let mut package = Package {
+        newtypes: vec![definition],
+        ..Default::default()
+    };
+    assert_eq!(
+        nir::newtypes::validate(&package),
+        Err("newtype contract has an undeclared captured parameter")
+    );
+    package.newtypes[0].requirements =
+        vec![TypePredicate::And(vec![TypePredicate::Bool(true); 100_001])];
+    assert_eq!(
+        nir::newtypes::validate(&package),
+        Err("newtype metadata validation budget exhausted")
+    );
+    package.newtypes[0].requirements = vec![TypePredicate::Bool(true)];
+    assert!(nir::newtypes::validate(&package).is_ok());
+}
+
+#[test]
+fn value_parameter_representation_preserves_sort_and_opaque_identity() {
+    let mut definition = generic();
+    definition.parameter_types = vec![Term::Primitive(nir::Primitive::Bool)];
+    definition.representation = Term::NormalForm {
+        sort: Sort::Type,
+        head: id(90),
+        arguments: vec![Term::Rigid {
+            declaration: id(2),
+            sort: Sort::ComptimeValue,
+        }],
+    };
+    let yes = definition
+        .instantiate_representation(&[Term::Bool(true)])
+        .unwrap();
+    let no = definition
+        .instantiate_representation(&[Term::Bool(false)])
+        .unwrap();
+    assert_ne!(yes, no);
+    assert_eq!(
+        yes,
+        Term::NormalForm {
+            sort: Sort::Type,
+            head: id(90),
+            arguments: vec![Term::Bool(true)]
+        }
+    );
+    assert!(
+        definition
+            .instantiate_representation(&[Term::Primitive(nir::Primitive::Bool)])
+            .is_err()
+    );
+    let package = nir::program::Package {
+        newtypes: vec![definition.clone()],
+        ..Default::default()
+    };
+    nir::newtypes::validate(&package).unwrap();
+    assert!(definition.to_string().contains("(parameter-types"));
+    let mut fuel = 0;
+    assert!(
+        definition
+            .representation_budgeted(&[Term::Bool(true)], &[], &mut fuel)
+            .is_err()
+    );
+    let mut fuel = 1000;
+    assert_eq!(
+        definition
+            .representation_budgeted(&[Term::Bool(true)], &[], &mut fuel)
+            .unwrap(),
+        yes
+    );
+}
+
+#[test]
+fn newtype_value_domains_form_an_ordered_telescope() {
+    let mut definition = generic();
+    definition.type_parameters.push(id(3));
+    definition.parameter_types = vec![
+        Term::Primitive(nir::Primitive::Type),
+        Term::Rigid {
+            declaration: id(2),
+            sort: Sort::Type,
+        },
+    ];
+    let parameters = definition.parameter_binders().unwrap();
+    assert_eq!(parameters[0].sort, Sort::Type);
+    assert_eq!(parameters[1].sort, Sort::ComptimeValue);
+    let mut package = nir::program::Package {
+        newtypes: vec![definition.clone()],
+        ..Default::default()
+    };
+    nir::newtypes::validate(&package).unwrap();
+    assert_eq!(
+        definition
+            .instantiate_representation(&[Term::Primitive(nir::Primitive::Bool), Term::Bool(true)])
+            .unwrap(),
+        Term::Primitive(nir::Primitive::Bool)
+    );
+    package.newtypes[0].parameter_types[0] = Term::Rigid {
+        declaration: id(3),
+        sort: Sort::Type,
+    };
+    assert!(nir::newtypes::validate(&package).is_err());
+    package.newtypes[0] = definition;
+    package.newtypes[0].parameter_types.pop();
+    assert!(nir::newtypes::validate(&package).is_err());
+}
+
+#[test]
+fn value_indexed_wrappers_convert_only_along_their_own_edge() {
+    let boolean = Term::Primitive(nir::Primitive::Bool);
+    let mut definition = generic();
+    definition.parameter_types = vec![boolean.clone()];
+    definition.representation = boolean.clone();
+    let yes = Term::Nominal {
+        declaration: definition.declaration,
+        arguments: vec![Term::Bool(true)],
+    };
+    let no = Term::Nominal {
+        declaration: definition.declaration,
+        arguments: vec![Term::Bool(false)],
+    };
+    assert!(
+        definition
+            .validate_completed_arguments(&[Term::Bool(true)], &mut 1000)
+            .is_ok()
+    );
+    assert!(
+        definition
+            .validate_completed_arguments(&[Term::Primitive(nir::Primitive::Bool)], &mut 1000)
+            .is_err()
+    );
+    assert!(
+        definition
+            .validate_completed_arguments(
+                &[Term::Integer(comptime_runtime::Integer::from_u128(1))],
+                &mut 1000
+            )
+            .is_err()
+    );
+    let definitions = [definition];
+    assert!(
+        nir::newtypes::conversion(&definitions, &boolean, &yes, &[], &mut 1000)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        nir::newtypes::conversion(&definitions, &yes, &boolean, &[], &mut 1000)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        nir::newtypes::conversion(&definitions, &yes, &no, &[], &mut 1000)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn captured_domains_precede_own_domains_without_reordering_identity() {
+    let mut definition = generic();
+    definition.type_parameters = vec![id(3), id(2)];
+    definition.capture_count = 1;
+    definition.parameter_types = vec![
+        Term::Rigid {
+            declaration: id(2),
+            sort: Sort::Type,
+        },
+        Term::Primitive(Primitive::Type),
+    ];
+    let mut package = Package {
+        newtypes: vec![definition.clone()],
+        ..Default::default()
+    };
+    nir::newtypes::validate(&package).unwrap();
+    let arguments = [Term::Bool(true), Term::Primitive(Primitive::Bool)];
+    definition
+        .validate_completed_arguments(&arguments, &mut 1000)
+        .unwrap();
+    assert_eq!(
+        definition.instantiate_representation(&arguments).unwrap(),
+        Term::Primitive(Primitive::Bool)
+    );
+    assert!(
+        definition
+            .validate_completed_arguments(&arguments, &mut 0)
+            .is_err()
+    );
+    assert!(
+        definition
+            .validate_completed_arguments(
+                &[Term::Bool(true), Term::Primitive(Primitive::Char)],
+                &mut 1000
+            )
+            .is_err()
+    );
+    assert!(definition.to_string().contains("(captures 1)"));
+    package.newtypes[0].capture_count = 0;
+    assert!(nir::newtypes::validate(&package).is_err());
+    package.newtypes[0].capture_count = 3;
+    assert!(package.newtypes[0].parameter_binders().is_err());
+    assert!(
+        package.newtypes[0]
+            .validate_completed_arguments(&arguments, &mut 1000)
+            .is_err()
+    );
+    assert!(nir::newtypes::validate(&package).is_err());
 }

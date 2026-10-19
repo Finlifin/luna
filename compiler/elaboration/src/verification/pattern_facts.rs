@@ -76,7 +76,7 @@ pub(super) fn pattern_observes(pattern: &Pattern, depth: usize) -> bool {
         return true;
     }
     match pattern {
-        Pattern::Then { .. } | Pattern::Guard { .. } => true,
+        Pattern::Observe { .. } | Pattern::Then { .. } | Pattern::Guard { .. } => true,
         Pattern::Binding { inner, .. } | Pattern::Remap { pattern: inner, .. } => {
             pattern_observes(inner, depth + 1)
         }

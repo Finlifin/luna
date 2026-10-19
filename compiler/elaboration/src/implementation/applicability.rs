@@ -80,8 +80,10 @@ impl ImplementationHead {
             .requirements
             .iter()
             .map(|requirement| {
-                requirement
-                    .instantiate_types(&self.type_parameters, &matched.evidence.type_arguments)
+                requirement.instantiate_parameters(
+                    &self.parameter_binders()?,
+                    &matched.evidence.type_arguments,
+                )
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| ProofError::Invalid)?;
@@ -89,6 +91,7 @@ impl ImplementationHead {
             return Err(ProofError::Invalid);
         }
         let head = ImplementationHead {
+            parameter_types: self.parameter_types.clone(),
             declaration: self.declaration,
             interface: self.interface,
             interface_arguments: self.interface_arguments.clone(),
@@ -113,9 +116,9 @@ pub enum TypeAssessment {
     Applicable(TypeEvidence),
     /// A refutation, not merely a countermodel to the positive requirement.
     Excluded(Proof),
-    /// Distinct fixed symbol indices cannot denote the same interface instance.
+    /// Distinct fixed scalar indices cannot denote the same interface instance.
     /// This is a checked identity mismatch, not a program-value PTC equation.
-    SymbolMismatch {
+    ValueIndexMismatch {
         position: usize,
         expected: Term,
         actual: Term,
@@ -128,7 +131,7 @@ impl TypeAssessment {
     pub fn applicability(&self) -> Applicability {
         match self {
             Self::Applicable(_) => Applicability::Applicable,
-            Self::Excluded(_) | Self::SymbolMismatch { .. } | Self::ForbiddenSubject(_) => {
+            Self::Excluded(_) | Self::ValueIndexMismatch { .. } | Self::ForbiddenSubject(_) => {
                 Applicability::Excluded
             }
             Self::Pending(_) | Self::Invalid(_) => Applicability::Pending,
@@ -159,6 +162,7 @@ pub(super) fn validate(
         .len()
         .saturating_add(head.interface_arguments.len())
         .saturating_add(head.requirements.len())
+        .saturating_add(head.parameter_types.len())
         .saturating_add(2)
         > fuel
     {
@@ -169,6 +173,7 @@ pub(super) fn validate(
         arguments
             .iter()
             .chain(&head.interface_arguments)
+            .chain(&head.parameter_types)
             .map(|t| (Work::Term(t), 0)),
     );
     pending.extend(head.requirements.iter().map(|p| (Work::Predicate(p), 0)));
@@ -367,7 +372,16 @@ impl ImplementationHead {
             .chain(std::iter::once(&self.subject))
             .chain(&self.interface_arguments)
         {
-            if term.sort() != Sort::Type && !matches!(term, Term::Symbol(_)) {
+            if term.sort() != Sort::Type
+                && !term.is_structural_index_value()
+                && !matches!(
+                    term,
+                    Term::Rigid {
+                        sort: Sort::ComptimeValue,
+                        ..
+                    } | Term::RecordValue(_)
+                )
+            {
                 return Err(TypeAssessment::Pending(
                     "non-Type interface argument matching is not implemented".into(),
                 ));
@@ -422,15 +436,17 @@ impl ImplementationHead {
                 "user implementation subject eligibility is unresolved".into(),
             ));
         }
+        let parameters = self
+            .parameter_binders()
+            .map_err(|e| TypeAssessment::Invalid(e.to_string()))?;
         let mut root = Engine::with_context(context.fork());
-        let types: Vec<_> = self
-            .type_parameters
+        let types: Vec<_> = parameters
             .iter()
-            .map(|_| I::Meta(root.fresh(Sort::Type)))
+            .map(|parameter| I::Meta(root.fresh(parameter.sort)))
             .collect();
         let instantiate = |term: &Term| -> Result<I, nir::TypeError> {
             Ok(I::Instantiate {
-                template: term.abstract_types(&self.type_parameters)?,
+                template: term.abstract_parameters(&parameters)?,
                 arguments: types.clone(),
             })
         };
@@ -449,9 +465,92 @@ impl ImplementationHead {
             .zip(interface_arguments)
             .enumerate()
         {
-            if let (Term::Symbol(expected), Term::Symbol(supplied)) = (template, actual) {
-                if expected != supplied {
-                    return Err(TypeAssessment::SymbolMismatch {
+            if template.sort() == Sort::ComptimeValue && actual.is_structural_index_value() {
+                // Value skeletons and binders are matched outside PTC. Only
+                // Type-valued leaves create type obligations; replay extracts
+                // those same leaves after the whole substitution is complete.
+                let mut pending = vec![(template, actual)];
+                let mut fuel = budget.steps;
+                while let Some((template, actual)) = pending.pop() {
+                    fuel = fuel.checked_sub(1).ok_or_else(|| {
+                        TypeAssessment::Pending("value index matching budget exhausted".into())
+                    })?;
+                    if template.sort() == Sort::Type && actual.sort() == Sort::Type {
+                        relations.push((
+                            instantiate(template)
+                                .map_err(|e| TypeAssessment::Invalid(e.to_string()))?,
+                            I::Stable(actual.clone()),
+                        ));
+                        continue;
+                    }
+                    if let Term::Rigid {
+                        declaration,
+                        sort: Sort::ComptimeValue,
+                    } = template
+                    {
+                        fuel = fuel.checked_sub(parameters.len()).ok_or_else(|| {
+                            TypeAssessment::Pending("value binder lookup budget exhausted".into())
+                        })?;
+                        if let Some(input) = parameters.iter().position(|p| {
+                            p.declaration == *declaration && p.sort == Sort::ComptimeValue
+                        }) {
+                            let bound = match root.freeze(&types[input]) {
+                                Ok(bound) => bound,
+                                Err(_) => {
+                                    let I::Meta(variable) = types[input] else {
+                                        unreachable!()
+                                    };
+                                    root.assign(variable, I::Stable(actual.clone())).map_err(
+                                        |reason| {
+                                            TypeAssessment::Pending(format!(
+                                                "value index inference: {reason:?}"
+                                            ))
+                                        },
+                                    )?;
+                                    actual.clone()
+                                }
+                            };
+                            let Some(type_relations) = bound.index_type_relations(actual) else {
+                                return Err(TypeAssessment::ValueIndexMismatch {
+                                    position,
+                                    expected: bound,
+                                    actual: actual.clone(),
+                                });
+                            };
+                            relations.extend(type_relations.into_iter().map(|(left, right)| {
+                                (I::Stable(left.clone()), I::Stable(right.clone()))
+                            }));
+                            continue;
+                        }
+                    }
+                    if let (Term::RecordValue(left), Term::RecordValue(right)) = (template, actual)
+                    {
+                        if left.len() == right.len()
+                            && left.iter().zip(right).all(|((a, _), (b, _))| a == b)
+                        {
+                            if left.len() > fuel.saturating_sub(pending.len()) {
+                                return Err(TypeAssessment::Pending(
+                                    "value index matching budget exhausted".into(),
+                                ));
+                            }
+                            pending.extend(
+                                left.iter().zip(right).rev().map(|((_, a), (_, b))| (a, b)),
+                            );
+                            continue;
+                        }
+                    }
+                    if template.scalar_index_domain().is_some() && template == actual {
+                        continue;
+                    }
+                    if template.sort() == Sort::ComptimeValue
+                        && template.scalar_index_domain().is_none()
+                        && !matches!(template, Term::RecordValue(_))
+                    {
+                        return Err(TypeAssessment::Pending(
+                            "value index identity is unresolved".into(),
+                        ));
+                    }
+                    return Err(TypeAssessment::ValueIndexMismatch {
                         position,
                         expected: template.clone(),
                         actual: actual.clone(),
@@ -527,10 +626,18 @@ impl ImplementationHead {
                 ));
             }
         };
+        let mut domain_fuel = budget.steps;
+        nir::validate_declaration_arguments(
+            &self.type_parameters,
+            &self.parameter_types,
+            &arguments,
+            &mut domain_fuel,
+        )
+        .map_err(TypeAssessment::Invalid)?;
         let requirements = match self
             .requirements
             .iter()
-            .map(|requirement| requirement.instantiate_types(&self.type_parameters, &arguments))
+            .map(|requirement| requirement.instantiate_parameters(&parameters, &arguments))
             .collect::<Result<Vec<_>, _>>()
         {
             Ok(requirements) => requirements,
@@ -721,13 +828,13 @@ impl fmt::Display for TypeAssessment {
         match self {
             Self::Applicable(evidence) => evidence.fmt(f),
             Self::Excluded(proof) => write!(f, "(excluded {proof})"),
-            Self::SymbolMismatch {
+            Self::ValueIndexMismatch {
                 position,
                 expected,
                 actual,
             } => write!(
                 f,
-                "(symbol-index-mismatch (position {position}) (expected {expected}) (actual {actual}))"
+                "(value-index-mismatch (position {position}) (expected {expected}) (actual {actual}))"
             ),
             Self::ForbiddenSubject(ty) => write!(f, "(forbidden-subject {ty})"),
             Self::Pending(reason) => write!(f, "(pending {reason:?})"),
@@ -813,8 +920,17 @@ impl ImplementationHead {
         {
             return Err(ProofError::Invalid);
         }
-        for arg in &evidence.type_arguments {
-            if arg.sort() != Sort::Type || arg.check_scope(&[]).is_err() {
+        let parameters = self.parameter_binders().map_err(|_| ProofError::Invalid)?;
+        let mut domain_fuel = remaining;
+        nir::validate_declaration_arguments(
+            &self.type_parameters,
+            &self.parameter_types,
+            &evidence.type_arguments,
+            &mut domain_fuel,
+        )
+        .map_err(|_| ProofError::Invalid)?;
+        for (parameter, arg) in parameters.iter().zip(&evidence.type_arguments) {
+            if arg.sort() != parameter.sort || arg.check_scope(&[]).is_err() {
                 return Err(ProofError::Invalid);
             }
         }
@@ -853,7 +969,7 @@ impl ImplementationHead {
             return Err(ProofError::Invalid);
         }
         let instantiate = |ty: &Term| {
-            ty.instantiate_types(&self.type_parameters, &evidence.type_arguments)
+            ty.instantiate_parameters(&parameters, &evidence.type_arguments)
                 .map_err(|_| ProofError::Invalid)
         };
         let instantiated = instantiate(&self.subject)?;
@@ -863,9 +979,12 @@ impl ImplementationHead {
         }
         for (template, actual) in self.interface_arguments.iter().zip(interface_arguments) {
             let template = instantiate(template)?;
-            if let (Term::Symbol(left), Term::Symbol(right)) = (&template, actual) {
-                if left != right {
-                    return Err(ProofError::Invalid);
+            if template.is_structural_index_value() && actual.is_structural_index_value() {
+                let type_relations = template
+                    .index_type_relations(actual)
+                    .ok_or(ProofError::Invalid)?;
+                for (left, right) in type_relations {
+                    expected.push(Formula::equal(left.clone(), right.clone()));
                 }
                 continue;
             }
@@ -887,7 +1006,7 @@ impl ImplementationHead {
         }
         for (requirement, proof) in self.requirements.iter().zip(&evidence.requirement_proofs) {
             let instantiated = requirement
-                .instantiate_types(&self.type_parameters, &evidence.type_arguments)
+                .instantiate_parameters(&parameters, &evidence.type_arguments)
                 .map_err(|_| ProofError::Invalid)?;
             if Formula::from_predicate(&instantiated) != proof.goal {
                 return Err(ProofError::Invalid);

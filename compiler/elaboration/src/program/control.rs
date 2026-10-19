@@ -1,6 +1,29 @@
 //! Conservative normal-completion checks for structured control flow.
 use super::*;
 
+/// Definition-side counterpart of `boolean`: inspect only literal Boolean
+/// trees, without interpreting staged inputs or invoking source computations.
+pub(super) fn source_boolean(expr: &Expr<'_>, fuel: &mut u64, depth: usize) -> Option<bool> {
+    *fuel = fuel.checked_sub(1)?;
+    if depth >= 64 {
+        return None;
+    }
+    match &expr.kind {
+        H::Lit(literal) => match literal.kind {
+            hir::common::LitKind::Bool(value) => Some(value),
+            _ => None,
+        },
+        H::Unary(UnOp::Not, value) => Some(!source_boolean(value, fuel, depth + 1)?),
+        H::Binary(BinOp::And, left, right) => {
+            Some(source_boolean(left, fuel, depth + 1)? && source_boolean(right, fuel, depth + 1)?)
+        }
+        H::Binary(BinOp::Or, left, right) => {
+            Some(source_boolean(left, fuel, depth + 1)? || source_boolean(right, fuel, depth + 1)?)
+        }
+        _ => None,
+    }
+}
+
 fn boolean_inner(expr: &n::Expr, depth: usize, fuel: &mut usize) -> Option<bool> {
     *fuel = fuel.checked_sub(1)?;
     if depth >= 64 {
@@ -37,7 +60,7 @@ pub(super) fn conditional_never(condition: &n::Expr, yes: &Term, no: &Term) -> b
 
 // Only inert patterns are classified. Executable guards/and-is patterns
 // remain on the full visitor path, including their control transfers.
-fn pattern_matches(
+pub(super) fn pattern_matches(
     pattern: &n::Pattern,
     value: &n::Expr,
     fuel: &mut usize,
@@ -190,6 +213,23 @@ pub(super) fn loop_may_complete(
     identity: n::LocalId,
     fuel: &mut usize,
 ) -> Result<bool, String> {
+    loop_may_transfer(body, identity, false, fuel)
+}
+
+pub(super) fn loop_may_continue(
+    body: &n::Expr,
+    identity: n::LocalId,
+    fuel: &mut usize,
+) -> Result<bool, String> {
+    loop_may_transfer(body, identity, true, fuel)
+}
+
+fn loop_may_transfer(
+    body: &n::Expr,
+    identity: n::LocalId,
+    continuing: bool,
+    fuel: &mut usize,
+) -> Result<bool, String> {
     let mut pending = vec![body];
     let mut found = false;
     while let Some(root) = pending.pop() {
@@ -201,8 +241,26 @@ pub(super) fn loop_may_complete(
                 return Ok(false);
             }
             match &expr.kind {
-                K::Break(target) if *target == identity => {
+                K::Break(target) | K::Continue(target)
+                    if *target == identity && matches!(expr.kind, K::Continue(_)) == continuing =>
+                {
                     found = true;
+                    return Ok(false);
+                }
+                K::Tuple(fields)
+                | K::TypeList(fields)
+                | K::Record { fields, .. }
+                | K::AnonymousRecord { fields }
+                | K::Variant { fields, .. } => {
+                    *fuel = fuel
+                        .checked_sub(fields.len())
+                        .ok_or("loop completion budget exhausted")?;
+                    for field in fields {
+                        pending.push(field);
+                        if is_never(&field.ty) {
+                            break;
+                        }
+                    }
                     return Ok(false);
                 }
                 K::Closure { captures, .. } => {
@@ -307,6 +365,18 @@ pub(super) fn loop_may_complete(
                         }
                         return Ok(false);
                     }
+                }
+                K::ScalarEqual(left, right)
+                | K::TypeEqual(left, right)
+                | K::BitEqual(left, right)
+                | K::BitConcat(left, right)
+                | K::IntegerBinary { left, right, .. }
+                | K::FloatBinary { left, right, .. } => {
+                    pending.push(left);
+                    if !is_never(&left.ty) {
+                        pending.push(right);
+                    }
+                    return Ok(false);
                 }
                 K::And(left, right) | K::Or(left, right) => {
                     pending.push(left);

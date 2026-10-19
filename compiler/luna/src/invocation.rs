@@ -35,7 +35,9 @@ fn invoke_selected(
     }];
     let preparation_budget = elaboration::ptc::Budget::default();
     let mut reachability_fuel = preparation_budget.steps;
-    let graph = if needs_input_staging(prepared.as_ref(), declaration, &mut reachability_fuel)? {
+    let graph = if needs_input_staging(prepared.as_ref(), declaration, &mut reachability_fuel)?
+        && needs_materialized_dispatch(prepared.as_ref(), declaration, &mut reachability_fuel)?
+    {
         Some(
             elaboration::materialization::instantiate(
                 prepared.as_ref(),
@@ -46,13 +48,13 @@ fn invoke_selected(
             .map_err(|error| format!("cannot prepare staged comptime invocation: {error}"))?,
         )
     } else {
-        let dispatch = elaboration::materialization::dispatch_instances_for_roots(
-            prepared.as_ref(),
-            &roots,
-            preparation_budget,
-        )
-        .map_err(|error| format!("cannot prepare invocation dispatch: {error}"))?;
-        prepared.to_mut().dispatch_instances = dispatch;
+        prepared.to_mut().dispatch_instances =
+            elaboration::materialization::dispatch_instances_for_invocation(
+                prepared.as_ref(),
+                &roots,
+                preparation_budget,
+            )
+            .map_err(|error| format!("cannot prepare invocation dispatch: {error}"))?;
         None
     };
     let package = prepared.as_ref();
@@ -67,6 +69,7 @@ fn invoke_selected(
         index
             .insert(
                 elaboration::implementation::ImplementationHead {
+                    parameter_types: implementation.parameter_types.clone(),
                     declaration: implementation.declaration,
                     interface: implementation.interface,
                     interface_arguments: implementation.interface_arguments.clone(),
@@ -312,6 +315,51 @@ pub(crate) fn needs_input_staging(
             Ok(())
         })?;
         if staged_call {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+// Type telescopes alone do not require IIR: the comptime interpreter binds
+// those inputs on each call. Method/associated-value selection still uses
+// materialized dispatch. Follow stored and higher-order function identities
+// too, including declarations whose Type telescope has not yet been bound.
+fn needs_materialized_dispatch(
+    package: &Package,
+    root: DeclarationId,
+    fuel: &mut usize,
+) -> Result<bool, String> {
+    use nir::program::ExprKind as K;
+    let mut pending = vec![root];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(id) = pending.pop() {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or("invocation reachability budget exhausted")?;
+        if !seen.insert(id) {
+            continue;
+        }
+        let Some(function) = package
+            .functions
+            .iter()
+            .find(|function| function.declaration == id)
+        else {
+            continue;
+        };
+        let mut dispatch = false;
+        iir::visit::expressions(function, fuel, |expr, _| {
+            match &expr.kind {
+                K::TraitMethod { .. } | K::AssociatedValue { .. } => dispatch = true,
+                K::Function(id)
+                | K::FunctionInstance {
+                    declaration: id, ..
+                } => pending.push(*id),
+                _ => {}
+            }
+            Ok(())
+        })?;
+        if dispatch {
             return Ok(true);
         }
     }

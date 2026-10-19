@@ -211,6 +211,8 @@ fn charge(term: &Term, fuel: &mut usize, depth: usize) -> Result<(), Error> {
         ),
         Term::BitVec(value) => bytes(fuel, value.words().len()),
         Term::Nominal { arguments, .. }
+        | Term::ClosureSnapshot { arguments, .. }
+        | Term::FunctionValue { arguments, .. }
         | Term::NormalForm { arguments, .. }
         | Term::Tuple(arguments)
         | Term::TypeListValue(arguments)

@@ -79,7 +79,9 @@ fn pattern_binds(
                 }
                 pending.push(pattern);
             }
-            Pattern::Guard { pattern, .. } => pending.push(pattern),
+            Pattern::Observe { inner: pattern, .. } | Pattern::Guard { pattern, .. } => {
+                pending.push(pattern)
+            }
             Pattern::Then { first, next, .. } => {
                 pending.push(first);
                 pending.push(next);
@@ -210,7 +212,9 @@ fn structural_bindings<'a>(
                     },
                 ));
             }
-            Pattern::Guard { pattern, .. } => pending.push(Work::Pattern(pattern, value, path)),
+            Pattern::Observe { inner: pattern, .. } | Pattern::Guard { pattern, .. } => {
+                pending.push(Work::Pattern(pattern, value, path))
+            }
             Pattern::Then {
                 first,
                 value: transformed,

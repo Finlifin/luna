@@ -119,7 +119,7 @@ pub fn protocol(
             subject: Box::new(subject),
         }),
     };
-    if method.signature.callable_signature() != &expected
+    if method.signature.callable_signature() != Ok(&expected)
         || !method.by_value_receiver
         || method.by_reference_receiver
         || method.parameter_bindings.len() != if operator.is_unary() { 1 } else { 2 }

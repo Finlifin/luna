@@ -232,6 +232,14 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                             span,
                         }
                     }
+                    "tuple_enumerate" => {
+                        let value = self.lower_expr(ctx, children[0]);
+                        Expr {
+                            hir_id: self.next_hir_id(),
+                            kind: ExprKind::TakeTupleEnumerate(self.arena.alloc_expr(value)),
+                            span,
+                        }
+                    }
                     "tag_name" => {
                         let value = self.lower_expr(ctx, children[0]);
                         Expr {
@@ -275,6 +283,49 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             }
             NodeKind::Projection => {
                 let base_expr = self.lower_expr(ctx, children[0]);
+                if let ExprKind::NFApplication(head, _) = &base_expr.kind {
+                    if let ExprKind::ResolvedDef { def_id, .. } = head.kind {
+                        if self
+                            .resolver
+                            .find_scope_for_def(def_id)
+                            .and_then(|id| self.resolver.scope_tree().get(id))
+                            .is_some_and(|scope| scope.kind == resolve::scope::ScopeKind::AdtBody)
+                        {
+                            let field = self.node_to_ident(children[1]);
+                            match self.resolver.resolve_member(
+                                def_id,
+                                field.name,
+                                self.file_scope,
+                                span,
+                            ) {
+                                Ok(resolve::Resolution {
+                                    kind: BindingKind::Definition(member, _),
+                                }) => {
+                                    let hir_id = self.next_hir_id();
+                                    self.package.member_projections.insert(hir_id, member);
+                                    return Expr {
+                                        hir_id,
+                                        span,
+                                        kind: ExprKind::Projection(
+                                            self.arena.alloc_expr(base_expr),
+                                            field,
+                                        ),
+                                    };
+                                }
+                                // Enum variants are resolved from the nominal descriptor.
+                                Err(resolve::ResolveError::UnresolvedIdentifier { .. }) => {}
+                                Err(error) => {
+                                    self.emit_resolve_error(error);
+                                    return self.make_invalid_expr(span);
+                                }
+                                Ok(_) => {
+                                    self.emit_malformed("static member is not a declaration", span);
+                                    return self.make_invalid_expr(span);
+                                }
+                            }
+                        }
+                    }
+                }
                 if let ExprKind::ResolvedDef { def_id, .. } = base_expr.kind {
                     if self
                         .resolver
@@ -307,7 +358,10 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                                 self.make_invalid_expr(span)
                             }
                             Err(error) => {
-                                if self
+                                if matches!(
+                                    &error,
+                                    resolve::ResolveError::UnresolvedIdentifier { .. }
+                                ) && self
                                     .resolver
                                     .find_scope_for_def(def_id)
                                     .and_then(|id| self.resolver.scope_tree().get(id))
@@ -334,8 +388,37 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 }
                 let base_ref = self.arena.alloc_expr(base_expr);
                 let field_ident = self.node_to_ident(children[1]);
+                let hir_id = self.next_hir_id();
+                let candidates = self
+                    .resolver
+                    .accessible_type_members(field_ident.name, self.file_scope);
+                self.package
+                    .member_access
+                    .insert(hir_id, std::sync::Arc::clone(&candidates));
+                let head = match base_ref.kind {
+                    ExprKind::NFApplication(head, _) => head,
+                    _ => base_ref,
+                };
+                if matches!(head.kind, ExprKind::ResolvedDef { def_id, .. }
+                    if self.resolver.find_scope_for_def(def_id)
+                        .and_then(|id| self.resolver.scope_tree().get(id))
+                        .is_some_and(|scope| scope.kind == resolve::scope::ScopeKind::TypeAlias))
+                    || self.package.member_projections.contains_key(&head.hir_id)
+                    || self
+                        .package
+                        .deferred_member_projections
+                        .contains_key(&head.hir_id)
+                    || matches!(
+                        base_ref.kind,
+                        ExprKind::Application(..) | ExprKind::ExtendedApplication(..)
+                    )
+                {
+                    self.package
+                        .deferred_member_projections
+                        .insert(hir_id, candidates);
+                }
                 Expr {
-                    hir_id: self.next_hir_id(),
+                    hir_id,
                     kind: ExprKind::Projection(base_ref, field_ident),
                     span,
                 }
@@ -523,6 +606,34 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             }
             NodeKind::IndexApplication => {
                 self.lower_index_expr(ctx, children[0], children[1], span)
+            }
+            NodeKind::Object => {
+                let nodes = self
+                    .ast
+                    .get_multi_child_slice(children[0])
+                    .unwrap_or(&[])
+                    .to_vec();
+                let mut entries = Vec::with_capacity(nodes.len());
+                for node in nodes {
+                    if self.ast.get_node_kind(node) == Some(NodeKind::Property) {
+                        let parts = self.ast.get_children(node);
+                        let ident = self.node_to_ident(parts[0]);
+                        let value = self.lower_expr(ctx, parts[1]);
+                        entries.push(hir::expr::ObjectEntry::Property(hir::expr::FieldExpr {
+                            ident,
+                            expr: self.arena.alloc_expr(value),
+                            span: self.ast.get_span(node).unwrap_or(span),
+                        }));
+                    } else {
+                        let value = self.lower_expr(ctx, node);
+                        entries.push(hir::expr::ObjectEntry::Value(self.arena.alloc_expr(value)));
+                    }
+                }
+                Expr {
+                    hir_id: self.next_hir_id(),
+                    span,
+                    kind: ExprKind::Object(entries),
+                }
             }
             NodeKind::Tuple => self.lower_tuple_expr(ctx, children[0], span),
             NodeKind::ListOf => self.lower_list_expr(ctx, children[0], span),
@@ -719,9 +830,27 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             }
             NodeKind::FnType => self.lower_fn_type_expr(node, span),
             NodeKind::Arrow => self.lower_arrow_type_expr(children[0], children[1], span),
-            // TODO: InlineStatement还没想好怎么处理呢
-            NodeKind::ExprStatement | NodeKind::InlineStatement => {
-                self.lower_expr(ctx, children[0])
+            NodeKind::ExprStatement => self.lower_expr(ctx, children[0]),
+            NodeKind::InlineStatement => {
+                let control = self.lower_expr(ctx, children[0]);
+                if !matches!(
+                    &control.kind,
+                    ExprKind::If(..)
+                        | ExprKind::When(..)
+                        | ExprKind::Match(..)
+                        | ExprKind::For { .. }
+                ) {
+                    self.emit_unsupported_node(
+                        "inline requires if, when, pattern matching or for control flow",
+                        span,
+                    );
+                    return self.make_invalid_expr(span);
+                }
+                Expr {
+                    hir_id: self.next_hir_id(),
+                    span,
+                    kind: ExprKind::InlineControl(self.arena.alloc_expr(control)),
+                }
             }
 
             // ── Desugaring: bool matches ─────────────────────────────────
@@ -2102,8 +2231,10 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     self.bind_arm_pattern_inner(node, &argument.pattern, seen);
                 }
             }
-            PatternKind::Tuple(fields) | PatternKind::AppTuple(_, fields) => {
-                let child = if matches!(pat.kind, PatternKind::Tuple(_)) {
+            PatternKind::Tuple(fields)
+            | PatternKind::List(fields, _)
+            | PatternKind::AppTuple(_, fields) => {
+                let child = if matches!(pat.kind, PatternKind::Tuple(_) | PatternKind::List(..)) {
                     0
                 } else {
                     1
@@ -2218,7 +2349,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
     }
 
     fn lower_fn_type_expr(&mut self, node: NodeIndex, span: Span) -> Expr<'hir> {
-        // FnType: flags_u32, abi_node, N  (modifier_flags, abi_str_node, parameter_types)
+        // FnType: flags_u32, N (modifier_flags, parameter_types)
         let Some((NodeKind::FnType, _, children)) = self.ast.get_node(node) else {
             unreachable!(
                 "not a function type node or invalid function type node: no such node index {:?}",
@@ -2227,13 +2358,12 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         };
 
         let _flags = children[0]; // raw u32 bitmask
-        let _abi_node = children[1];
-        if _flags & !ast::FN_MOD_COMPTIME != 0 || _abi_node != 0 {
+        if _flags & !ast::FN_MOD_COMPTIME != 0 {
             self.package
                 .pending_semantics
                 .push((span, "function type modifiers".into()));
         }
-        let params_multi = children[2];
+        let params_multi = children[1];
 
         let param_nodes = self.ast.get_multi_child_slice(params_multi).unwrap_or(&[]);
 

@@ -36,6 +36,7 @@ pub fn expressions_in_scope_with_observations<'a>(
         fuel,
         |expr, fuel| visit(expr, fuel).map(|_| true),
         false,
+        false,
     )
 }
 
@@ -58,7 +59,9 @@ pub fn into_pattern_observations(pattern: P, fuel: &mut usize) -> Result<Vec<Exp
                 roots.push(*condition);
                 pending.push(*pattern);
             }
-            P::Remap { pattern, .. } | P::Binding { inner: pattern, .. } => pending.push(*pattern),
+            P::Observe { inner: pattern, .. }
+            | P::Remap { pattern, .. }
+            | P::Binding { inner: pattern, .. } => pending.push(*pattern),
             P::Tuple(fields)
             | P::TypeTuple(fields)
             | P::Or(fields)
@@ -108,9 +111,9 @@ pub fn pattern_observations<'a>(pattern: &'a P, fuel: &mut usize) -> Result<Vec<
                 pending.push(Node::Expr(condition));
                 pending.push(Node::Pattern(pattern));
             }
-            P::Remap { pattern, .. } | P::Binding { inner: pattern, .. } => {
-                pending.push(Node::Pattern(pattern))
-            }
+            P::Observe { inner: pattern, .. }
+            | P::Remap { pattern, .. }
+            | P::Binding { inner: pattern, .. } => pending.push(Node::Pattern(pattern)),
             P::Tuple(fields)
             | P::TypeTuple(fields)
             | P::Or(fields)
@@ -130,6 +133,37 @@ pub fn pattern_observations<'a>(pattern: &'a P, fuel: &mut usize) -> Result<Vec<
     }
     Ok(roots)
 }
+/// Visit the evaluations in one expression's current runtime scope. Closure
+/// bodies, handler arms and call defaults have independent analysis contexts.
+pub fn expression_in_scope<'a>(
+    expression: &'a Expr,
+    fuel: &mut usize,
+    mut visit: impl FnMut(&'a Expr, &mut usize) -> Result<(), String>,
+) -> Result<(), String> {
+    walk_roots(
+        std::iter::once(expression),
+        fuel,
+        |expr, fuel| visit(expr, fuel).map(|_| true),
+        false,
+        false,
+    )
+}
+/// Visit accesses to the current closure environment. Handler arms, defaults,
+/// and capture initializers remain visible, but newly constructed closure bodies
+/// operate on their own owned capture cells and are not entered.
+pub fn expression_in_closure_environment<'a>(
+    expression: &'a Expr,
+    fuel: &mut usize,
+    mut visit: impl FnMut(&'a Expr, &mut usize) -> Result<(), String>,
+) -> Result<(), String> {
+    walk_roots(
+        std::iter::once(expression),
+        fuel,
+        |expr, fuel| visit(expr, fuel).map(|_| true),
+        true,
+        false,
+    )
+}
 /// Visit a complete expression tree, including nested closure bodies and defaults.
 pub fn expression<'a>(
     expression: &'a Expr,
@@ -141,6 +175,7 @@ pub fn expression<'a>(
         fuel,
         |expr, fuel| visit(expr, fuel).map(|_| true),
         true,
+        true,
     )
 }
 /// Returning false delegates this subtree to a scope-aware validator.
@@ -149,7 +184,7 @@ pub fn expression_pruned<'a>(
     fuel: &mut usize,
     visit: impl FnMut(&'a Expr, &mut usize) -> Result<bool, String>,
 ) -> Result<(), String> {
-    walk_roots(std::iter::once(expression), fuel, visit, true)
+    walk_roots(std::iter::once(expression), fuel, visit, true, true)
 }
 fn walk<'a>(
     function: &'a Function,
@@ -173,6 +208,7 @@ fn walk<'a>(
         fuel,
         |expr, fuel| visit(expr, fuel).map(|_| true),
         include_defaults,
+        include_defaults,
     )
 }
 fn walk_roots<'a>(
@@ -180,6 +216,7 @@ fn walk_roots<'a>(
     fuel: &mut usize,
     mut visit: impl FnMut(&'a Expr, &mut usize) -> Result<bool, String>,
     include_defaults: bool,
+    include_closure_bodies: bool,
 ) -> Result<(), String> {
     enum Node<'a> {
         Expr(&'a Expr),
@@ -202,9 +239,9 @@ fn walk_roots<'a>(
                     work.push(Node::Pattern(pattern));
                     work.push(Node::Expr(condition));
                 }
-                P::Remap { pattern, .. } | P::Binding { inner: pattern, .. } => {
-                    work.push(Node::Pattern(pattern))
-                }
+                P::Observe { inner: pattern, .. }
+                | P::Remap { pattern, .. }
+                | P::Binding { inner: pattern, .. } => work.push(Node::Pattern(pattern)),
                 P::AnonymousRecord { names, fields } => {
                     validate_record_pattern(names, fields.len(), fuel)?;
                     work.extend(fields.iter().map(Node::Pattern));
@@ -251,7 +288,7 @@ fn walk_roots<'a>(
                         work.extend(arguments.iter().map(Node::Expr))
                     }
                     K::Closure { captures, body, .. } => {
-                        if include_defaults {
+                        if include_closure_bodies {
                             work.push(Node::Expr(body));
                         }
                         work.extend(
@@ -292,12 +329,16 @@ fn walk_roots<'a>(
                     K::Variant { fields, .. }
                     | K::AnonymousRecord { fields }
                     | K::Record { fields, .. }
+                    | K::CheckTypeAlias {
+                        arguments: fields, ..
+                    }
                     | K::NominalType {
                         arguments: fields, ..
                     }
                     | K::FunctionType {
                         parameters: fields, ..
                     }
+                    | K::TypeList(fields)
                     | K::TupleType(fields)
                     | K::Tuple(fields) => work.extend(fields.iter().map(Node::Expr)),
                     K::BitAssign { value, .. }
@@ -530,9 +571,9 @@ pub fn expression_mut_pruned(
                     work.push(Node::Pattern(pattern));
                     work.push(Node::Expr(condition));
                 }
-                P::Remap { pattern, .. } | P::Binding { inner: pattern, .. } => {
-                    work.push(Node::Pattern(pattern))
-                }
+                P::Observe { inner: pattern, .. }
+                | P::Remap { pattern, .. }
+                | P::Binding { inner: pattern, .. } => work.push(Node::Pattern(pattern)),
                 P::AnonymousRecord { names, fields } => {
                     validate_record_pattern(names, fields.len(), fuel)?;
                     work.extend(fields.iter_mut().map(Node::Pattern));
@@ -605,12 +646,16 @@ pub fn expression_mut_pruned(
                     K::Variant { fields, .. }
                     | K::AnonymousRecord { fields }
                     | K::Record { fields, .. }
+                    | K::CheckTypeAlias {
+                        arguments: fields, ..
+                    }
                     | K::NominalType {
                         arguments: fields, ..
                     }
                     | K::FunctionType {
                         parameters: fields, ..
                     }
+                    | K::TypeList(fields)
                     | K::TupleType(fields)
                     | K::Tuple(fields) => work.extend(fields.iter_mut().map(Node::Expr)),
                     K::BitAssign { value, .. }

@@ -38,7 +38,7 @@ pub fn protocol(traits: &[Trait], id: DeclarationId) -> Result<&MethodContract, 
             },
         },
     ];
-    let Term::Function { parameters, .. } = method.signature.callable_signature() else {
+    let Ok(Term::Function { parameters, .. }) = method.signature.callable_signature() else {
         return Err("Index method must be callable".into());
     };
     if parameters != &expected

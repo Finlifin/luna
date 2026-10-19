@@ -47,10 +47,7 @@ impl Checker<'_, '_> {
                 collect(value, &mut atoms, 0)?;
             }
         }
-        let scope = self.call_inference_scope();
-        let mut context = self
-            .context
-            .theory_in_scope(vec![scope.iter().map(|p| p.sort).collect()]);
+        let mut context = self.context.theory_in_scope(self.call_input_frames());
         for atom in atoms {
             self.required_steps = self
                 .required_steps
@@ -58,8 +55,8 @@ impl Checker<'_, '_> {
                 .ok_or_else(|| error(span, "signature domain constraint budget exhausted"))?;
             if !signature_inputs_ready(&atom, 0, &|id| {
                 self.type_input_bindings.contains_key(&local(id))
-            })? || mentions_value_parameter(&atom, 0, &|id| {
-                self.type_input_bindings.contains_key(&local(id))
+            })? || mentions_value_parameter(&atom, 0, &|value| {
+                self.contract_parameter_is_type(value)
             })? {
                 continue;
             }
@@ -77,6 +74,19 @@ impl Checker<'_, '_> {
             Ok(p(P::Type))
         } else {
             Ok(ty)
+        }
+    }
+
+    fn contract_parameter_is_type(&self, value: &Expr<'_>) -> bool {
+        match value.kind {
+            H::ResolvedFnParam(_, id) => self.type_input_bindings.contains_key(&local(id)),
+            H::ResolvedClauseParam(_, id) => self
+                .trait_input_domain(DeclarationId {
+                    package: semantic_package(&self.package_identities, id.pkg),
+                    local: id.index,
+                })
+                .is_none_or(|domain| domain == p(P::Type)),
+            _ => false,
         }
     }
 
@@ -110,6 +120,9 @@ impl Checker<'_, '_> {
                 ItemKind::Impl(def) => def.clause_constraints,
                 ItemKind::Trait(def) => def.clause_constraints,
                 ItemKind::Associated(def) => def.clause_constraints,
+                // A lexical const has no declaration clauses; its initializer
+                // is checked separately by the required comptime evaluator.
+                ItemKind::Const(..) => &[],
                 _ => return Err(error(span, "declaration does not have a type contract")),
             };
             let mut requirements = if let Some(parent) = self.effect_parents.get(&owner).copied() {
@@ -123,8 +136,8 @@ impl Checker<'_, '_> {
             let mut pending_capabilities = Vec::new();
             for clause in clauses {
                 if let hir::clause::ClauseConstraintKind::Requires(value) = &clause.kind {
-                    if !mentions_value_parameter(value, 0, &|id| {
-                        self.type_input_bindings.contains_key(&local(id))
+                    if !mentions_value_parameter(value, 0, &|value| {
+                        self.contract_parameter_is_type(value)
                     })? {
                         signature_capability_atoms(value, &mut pending_capabilities, 0)?;
                     }
@@ -147,8 +160,8 @@ impl Checker<'_, '_> {
                         "program specification elaboration is not implemented",
                     ));
                 };
-                if mentions_value_parameter(value, 0, &|id| {
-                    self.type_input_bindings.contains_key(&local(id))
+                if mentions_value_parameter(value, 0, &|value| {
+                    self.contract_parameter_is_type(value)
                 })? {
                     if !matches!(&self.package.item(owner).unwrap().kind, ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) if !sig.modifiers.is_normal_form_head)
                     {
@@ -527,7 +540,19 @@ impl Checker<'_, '_> {
             .iter()
             .map(|ty| self.copy_alias_type(ty, span))
             .collect::<Result<Vec<_>, _>>()?;
-        let key = (owner, arguments.clone());
+        let captured: Vec<_> = self
+            .alias_substitution
+            .iter()
+            .map(|(id, value)| (*id, value.clone()))
+            .collect();
+        let environment = captured
+            .into_iter()
+            .map(|(id, value)| {
+                self.copy_alias_type(&value, span)
+                    .map(|value| (id, std::sync::Arc::new(value)))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let key = (owner, arguments.clone(), environment);
         if let Some(ty) = self.completed_aliases.get(&key).cloned() {
             return self.copy_alias_type(&ty, span);
         }
@@ -564,6 +589,83 @@ impl Checker<'_, '_> {
         })
     }
 
+    fn ensure_alias_formation_contract(
+        &mut self,
+        owner: OwnerId,
+        span: Span,
+    ) -> Result<Vec<DeclarationId>, Error> {
+        let declaration = declaration(self.package, &self.package_identities, owner);
+        if let Some(contract) = self.alias_contracts.get(&declaration) {
+            return Ok(contract.parameters.clone());
+        }
+        self.ensure_contract(owner, span)?;
+        let mut requirements = self.requirements[&owner].clone();
+        let mut capabilities = self.capabilities.get(&owner).cloned().unwrap_or_default();
+        let mut container = self.self_containers.get(&owner).copied();
+        let mut depth = 0;
+        while let Some(parent) = container {
+            depth += 1;
+            if depth > 64 {
+                return Err(error(
+                    span,
+                    "alias formation environment is excessively deep",
+                ));
+            }
+            self.ensure_contract(parent, span)?;
+            for premise in &self.requirements[&parent] {
+                if !requirements.contains(premise) {
+                    requirements.push(premise.clone());
+                }
+            }
+            for capability in self.capabilities.get(&parent).into_iter().flatten() {
+                if !capabilities.contains(capability) {
+                    capabilities.push(capability.clone());
+                }
+            }
+            container = self.self_containers.get(&parent).copied();
+        }
+        let mut parameters = self.type_parameters[&owner].clone();
+        if requirements.is_empty() && capabilities.is_empty() {
+            return Ok(parameters);
+        }
+        let mut captures = BTreeSet::new();
+        let predicates: Vec<_> = requirements
+            .iter()
+            .cloned()
+            .chain(capabilities.iter().cloned().map(n::TypePredicate::Trait))
+            .collect();
+        for predicate in predicates {
+            for term in requirement_terms(&predicate, span)? {
+                let term = self.copy_alias_type(term, span)?;
+                for (id, sort) in term
+                    .rigid_parameters()
+                    .map_err(|e| error(span, e.to_string()))?
+                {
+                    if sort != Sort::Type {
+                        return Err(error(
+                            span,
+                            "alias formation guard value captures are not implemented",
+                        ));
+                    }
+                    if !parameters.contains(&id) {
+                        captures.insert(id);
+                    }
+                }
+            }
+        }
+        parameters.extend(captures);
+        self.alias_contracts.insert(
+            declaration,
+            nir::type_aliases::Contract {
+                declaration,
+                parameters: parameters.clone(),
+                requirements,
+                capabilities,
+            },
+        );
+        Ok(parameters)
+    }
+
     pub(super) fn alias_value_expression(
         &mut self,
         owner: OwnerId,
@@ -587,21 +689,43 @@ impl Checker<'_, '_> {
                 }
             });
         }
-        // Alias bounds still require evidence here. This path cannot defer a
-        // contract without carrying its proof/check into the generated code.
-        self.check_type_application(owner, &terms, span)?;
         if arguments
             .iter()
             .all(|argument| matches!(argument.kind, K::TypeValue(_)))
         {
+            self.check_type_application(owner, &terms, span)?;
             return self.alias_expression(owner, value, &terms, span);
         }
+        let contract_parameters = self.ensure_alias_formation_contract(owner, span)?;
+        let mut deferred: BTreeSet<_> = parameters
+            .iter()
+            .zip(&arguments)
+            .filter(|(_, argument)| !matches!(argument.kind, K::TypeValue(_)))
+            .map(|(id, _)| *id)
+            .collect();
+        deferred.extend(
+            contract_parameters
+                .iter()
+                .filter(|id| self.alias_value_bindings.contains_key(id))
+                .copied(),
+        );
+        self.check_formation_application(
+            owner,
+            FormationInputs {
+                terms: terms.clone(),
+                deferred,
+                environment: BTreeMap::new(),
+            },
+            span,
+        )?;
         let diverges = arguments.iter().any(|argument| is_never(&argument.ty));
         let saved_bindings = self.alias_value_bindings.clone();
         let result = self.with_alias_arguments(owner, &parameters, &terms, span, |checker| {
             let mut statements = Vec::new();
+            let mut guard_arguments = Vec::new();
             for (argument, parameter) in arguments.into_iter().zip(&parameters) {
                 if matches!(argument.kind, K::TypeValue(_)) {
+                    guard_arguments.push(argument);
                     continue;
                 }
                 let index = checker.next_temporary_binding;
@@ -614,6 +738,11 @@ impl Checker<'_, '_> {
                 };
                 checker.alias_value_bindings.insert(*parameter, binding);
                 checker.locals.insert(binding, p(P::Type));
+                guard_arguments.push(n::Expr {
+                    source: argument.source,
+                    ty: p(P::Type),
+                    kind: K::Local(binding),
+                });
                 statements.push(n::Expr {
                     source: argument.source,
                     ty: if is_never(&argument.ty) {
@@ -624,6 +753,41 @@ impl Checker<'_, '_> {
                     kind: K::Let {
                         binding,
                         value: Box::new(argument),
+                    },
+                });
+            }
+            for parameter in &contract_parameters[parameters.len()..] {
+                let kind = if let Some(binding) = checker.alias_value_bindings.get(parameter) {
+                    K::Local(*binding)
+                } else if let Some(ty) = checker.alias_substitution.get(parameter).cloned() {
+                    K::TypeValue(checker.copy_alias_type(&ty, span)?)
+                } else {
+                    K::TypeValue(Term::Rigid {
+                        declaration: *parameter,
+                        sort: Sort::Type,
+                    })
+                };
+                guard_arguments.push(n::Expr {
+                    source: source(span),
+                    ty: p(P::Type),
+                    kind,
+                });
+            }
+            if checker.alias_contracts.contains_key(&declaration(
+                checker.package,
+                &checker.package_identities,
+                owner,
+            )) {
+                statements.push(n::Expr {
+                    source: source(span),
+                    ty: p(P::Void),
+                    kind: K::CheckTypeAlias {
+                        declaration: declaration(
+                            checker.package,
+                            &checker.package_identities,
+                            owner,
+                        ),
+                        arguments: guard_arguments,
                     },
                 });
             }
@@ -730,7 +894,7 @@ impl Checker<'_, '_> {
         root: n::Expr,
         inputs: Vec<(n::LocalId, Term, Term)>,
     ) -> Result<(Value, Term), Error> {
-        self.required_expression_with_inputs(source, None, Some(root), inputs)
+        self.required_live_input(source, root, inputs, Vec::new())
     }
 
     fn required_expression_with_inputs(
@@ -752,6 +916,92 @@ impl Checker<'_, '_> {
         inputs: Vec<(n::LocalId, Term, Term)>,
         defer_inputs: bool,
     ) -> Result<PreparedRequired, Error> {
+        self.prepare_required_expression_with_live_inputs(
+            expr,
+            expected,
+            checked,
+            inputs,
+            defer_inputs,
+            &[],
+        )
+    }
+
+    /// Complete an already checked source computation with invocation-local
+    /// graph inputs. Preparation captures domains and dependencies, never values.
+    pub(super) fn required_live_input(
+        &mut self,
+        source: &Expr<'_>,
+        root: n::Expr,
+        inputs: Vec<(n::LocalId, Term, Term)>,
+        live: Vec<(n::LocalId, Term, Value)>,
+    ) -> Result<(Value, Term), Error> {
+        let prepared = self.prepare_required_expression_with_live_inputs(
+            source,
+            None,
+            Some(root),
+            inputs,
+            false,
+            &live,
+        )?;
+        let selected: BTreeSet<_> = prepared
+            .inputs
+            .iter()
+            .map(|(binding, _, _)| *binding)
+            .collect();
+        prepared.invoke_with_live_inputs(
+            live.into_iter()
+                .filter(|(binding, _, _)| selected.contains(binding))
+                .map(|(binding, _, value)| (binding, value))
+                .collect(),
+            &mut self.required_steps,
+            source.span,
+        )
+    }
+
+    pub(super) fn required_expression_with_live_inputs(
+        &mut self,
+        source: &Expr<'_>,
+        expected: Option<&Term>,
+        live: Vec<(n::LocalId, Term, Value)>,
+    ) -> Result<(Value, Term), Error> {
+        let prepared = self.prepare_required_expression_with_live_inputs(
+            source,
+            expected,
+            None,
+            Vec::new(),
+            false,
+            &live,
+        )?;
+        let selected: BTreeSet<_> = prepared
+            .inputs
+            .iter()
+            .map(|(binding, _, _)| *binding)
+            .collect();
+        prepared.invoke_with_live_inputs(
+            live.into_iter()
+                .filter(|(binding, _, _)| selected.contains(binding))
+                .map(|(binding, _, value)| (binding, value))
+                .collect(),
+            &mut self.required_steps,
+            source.span,
+        )
+    }
+
+    pub(super) fn prepare_required_expression_with_live_inputs(
+        &mut self,
+        expr: &Expr<'_>,
+        expected: Option<&Term>,
+        checked: Option<n::Expr>,
+        inputs: Vec<(n::LocalId, Term, Term)>,
+        defer_inputs: bool,
+        live: &[(n::LocalId, Term, Value)],
+    ) -> Result<PreparedRequired, Error> {
+        let mut supplied: BTreeSet<_> = inputs.iter().map(|(binding, _, _)| *binding).collect();
+        for (binding, _, _) in live {
+            if !supplied.insert(*binding) {
+                return Err(error(expr.span, "duplicate required comptime input"));
+            }
+        }
         if self.active_required.len() >= 32 || !self.active_required.insert(local(expr.hir_id)) {
             return Err(error(
                 expr.span,
@@ -768,7 +1018,58 @@ impl Checker<'_, '_> {
         let saved_numeric = std::mem::replace(&mut self.numeric_defaults, true);
         let saved_pending = self.pending_type_uses.replace(Vec::new());
         let signature_start = self.signature_type_uses.len();
+        let saved_value_locals = self.locals.clone();
+        let saved_value_bindings = self.normal_default_bindings.clone();
         let result = (|| {
+            let mut inputs = inputs;
+            let mut abstract_value_parameters = Vec::new();
+            let visible = self
+                .signature_owner
+                .and_then(|owner| self.type_parameters.get(&owner))
+                .cloned()
+                .unwrap_or_default();
+            self.required_steps = self
+                .required_steps
+                .checked_sub(visible.len() as u64)
+                .ok_or_else(|| {
+                    error(
+                        expr.span,
+                        "abstract value scope preparation budget exhausted",
+                    )
+                })?;
+            for id in visible {
+                let Some(domain) = self
+                    .trait_input_domain(id)
+                    .filter(|domain| *domain != p(P::Type))
+                else {
+                    continue;
+                };
+                if self.normal_default_bindings.contains_key(&id) {
+                    continue;
+                }
+                let domain = self.substituted_trait_domain(&domain, expr.span)?;
+                let value = self
+                    .alias_substitution
+                    .get(&id)
+                    .map(|value| (**value).clone())
+                    .unwrap_or(Term::Rigid {
+                        declaration: id,
+                        sort: Sort::ComptimeValue,
+                    });
+                let binding = self.spread_binding(expr.span)?;
+                self.locals.insert(binding, domain.clone());
+                self.normal_default_bindings
+                    .insert(id, (binding, domain.clone()));
+                if value
+                    == (Term::Rigid {
+                        declaration: id,
+                        sort: Sort::ComptimeValue,
+                    })
+                {
+                    abstract_value_parameters.push((id, domain.clone()));
+                }
+                inputs.push((binding, domain, value));
+            }
             let mut root = checked
                 .map(Ok)
                 .unwrap_or_else(|| self.expr(expr, expected))
@@ -786,7 +1087,6 @@ impl Checker<'_, '_> {
                     .map_err(|e| error(expr.span, e.to_string()))?;
             }
             let result_type = root.ty.clone();
-            let mut inputs = inputs;
             for input in &self.specialization_inputs {
                 if !inputs.iter().any(|(id, _, _)| *id == input.0) {
                     inputs.push(input.clone());
@@ -832,7 +1132,7 @@ impl Checker<'_, '_> {
                         sort: *sort,
                     })
                     .collect::<Vec<_>>();
-                let owner = self.signature_owner.unwrap();
+                let owner = self.default_input_owner.or(self.signature_owner).unwrap();
                 let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
                 let before = fuel;
                 let free = nir::free_bindings::collect(&root, &mut fuel)
@@ -902,6 +1202,34 @@ impl Checker<'_, '_> {
             let mut associated = BTreeSet::new();
             let mut expanded_associated = BTreeSet::new();
             let mut queue = VecDeque::from_iter(references(&root, &mut members, &mut associated));
+            // A frozen callable input is an execution dependency even when the
+            // source computation refers to it through a local parameter.
+            let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+            let before = fuel;
+            let free = nir::free_bindings::collect(&root, &mut fuel);
+            self.required_steps -= (before - fuel) as u64;
+            let free = free.map_err(|message| error(expr.span, message))?;
+            queue.extend(frozen_references(
+                inputs
+                    .iter()
+                    .filter(|(binding, _, _)| free.contains(binding))
+                    .map(|(_, _, value)| value),
+                &mut self.required_steps,
+                expr.span,
+            )?);
+            for (binding, _, value) in live {
+                if !free.contains(binding) {
+                    continue;
+                }
+                let dependencies = live_references(
+                    value,
+                    &mut members,
+                    &mut associated,
+                    &mut self.required_steps,
+                    expr.span,
+                )?;
+                queue.extend(dependencies);
+            }
             let mut seen = BTreeSet::new();
             loop {
                 // Abstract associated values can carry runtime code identities.
@@ -990,11 +1318,36 @@ impl Checker<'_, '_> {
                         "required comptime dependency budget exhausted",
                     ));
                 }
+                if let Some(function) = self
+                    .generated_functions
+                    .iter()
+                    .find(|function| function.declaration == id)
+                    .cloned()
+                {
+                    if function.phase == n::FunctionPhase::Runtime {
+                        if !function.preconditions.is_empty() {
+                            return Err(error(
+                                expr.span,
+                                "function value would erase program preconditions; callable program contracts are not implemented",
+                            ));
+                        }
+                        runtime_function_identities.push(n::RuntimeFunctionIdentity {
+                            declaration: id,
+                            type_parameters: function.type_parameters,
+                            signature: function.signature,
+                        });
+                    } else {
+                        queue.extend(references(&function.body, &mut members, &mut associated));
+                        functions.push(function);
+                    }
+                    continue;
+                }
                 let owner = self
                     .package
                     .owners()
                     .find_map(|(o, _)| {
-                        (declaration(self.package, &self.package_identities, o) == id).then_some(o)
+                        (matches_declaration(self.package, &self.package_identities, o, id))
+                            .then_some(o)
                     })
                     .ok_or_else(|| {
                         error(
@@ -1042,7 +1395,31 @@ impl Checker<'_, '_> {
                     // Checking a contract operand uses only its binder facts.
                     // Its enclosing contract is still being formed and is not
                     // a prerequisite (nor an assumption available to itself).
-                    let premise_owner = if assume_requirements { scope } else { None };
+                    // Later staged binders may classify requires operands as
+                    // type propositions. Do not cache the enclosing contract
+                    // before those binders have entered its source telescope.
+                    let staged_pending = scope.is_some_and(|scope| {
+                        self.active_signatures.contains(&scope)
+                            && self
+                                .package
+                                .item(scope)
+                                .is_some_and(|item| match &item.kind {
+                                    ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) => {
+                                        let ready =
+                                            self.signature_domains.get(&scope).map_or(0, Vec::len);
+                                        sig.params
+                                            .iter()
+                                            .skip(ready)
+                                            .any(|parameter| parameter.ty.is_comptime())
+                                    }
+                                    _ => false,
+                                })
+                    });
+                    let premise_owner = if assume_requirements && !staged_pending {
+                        scope
+                    } else {
+                        None
+                    };
                     for dependency in [Some(owner), premise_owner].into_iter().flatten() {
                         if !matches!(
                             self.package.item(dependency).map(|i| &i.kind),
@@ -1072,7 +1449,7 @@ impl Checker<'_, '_> {
                     }
                     self.signature_owner = scope;
                     self.context = match scope {
-                        Some(o) if assume_requirements => self.definition_context(o),
+                        Some(o) if premise_owner == Some(o) => self.definition_context(o),
                         Some(o) => self.binder_context(o),
                         None => self.nominal_context(),
                     };
@@ -1115,7 +1492,7 @@ impl Checker<'_, '_> {
                     for (parameter, domain) in signature
                         .params
                         .iter()
-                        .zip(self.signature_prefixes.get(&owner).into_iter().flatten())
+                        .zip(self.signature_domains.get(&owner).into_iter().flatten())
                     {
                         let binding = local(parameter.hir_id);
                         let supplied = inputs
@@ -1123,41 +1500,69 @@ impl Checker<'_, '_> {
                             .position(|(id, _, _)| *id == binding)
                             .map(|index| inputs.remove(index));
                         let (ty, value) = match supplied {
-                            Some((_, ty, value)) => (ty, Some(value)),
-                            None => (domain.ty.clone(), None),
+                            Some((_, ty, value)) => (Some(ty), Some(value)),
+                            None => (domain.1.clone(), None),
                         };
-                        available.push((
-                            binding,
-                            Parameter {
-                                sort: domain.sort,
-                                ty,
-                            },
-                            value,
-                        ));
+                        let sort = if signature.modifiers.is_comptime && domain.0 == Sort::Runtime {
+                            if ty.as_ref() == Some(&p(P::Type)) {
+                                Sort::Type
+                            } else {
+                                Sort::ComptimeValue
+                            }
+                        } else {
+                            domain.0
+                        };
+                        available.push((binding, (sort, ty), value));
                     }
                 }
             }
             for (binding, ty, value) in inputs {
                 available.push((
                     binding,
-                    Parameter {
-                        sort: if ty == p(P::Type) {
+                    (
+                        if ty == p(P::Type) {
                             Sort::Type
                         } else {
                             Sort::ComptimeValue
                         },
-                        ty,
-                    },
+                        Some(ty),
+                    ),
                     Some(value),
                 ));
             }
-            let captured = nir::type_computations::capture_entry(
+            for (binding, ty, _) in live {
+                if let Some((_, (_, domain), value)) =
+                    available.iter_mut().find(|(id, _, _)| id == binding)
+                {
+                    if value.is_some() {
+                        return Err(error(expr.span, "duplicate required comptime input"));
+                    }
+                    if let Some(expected) = domain.as_ref() {
+                        self.require_expression(ty, expected, expr.span)?;
+                    }
+                    *domain = Some(ty.clone());
+                } else {
+                    available.push((
+                        *binding,
+                        (
+                            if *ty == p(P::Type) {
+                                Sort::Type
+                            } else {
+                                Sort::ComptimeValue
+                            },
+                            Some(ty.clone()),
+                        ),
+                        None,
+                    ));
+                }
+            }
+            let captured = nir::type_computations::capture_sparse_entry(
                 entry,
                 "<required-comptime>".into(),
                 root,
                 &available
                     .iter()
-                    .map(|(binding, parameter, _)| (*binding, parameter.clone()))
+                    .map(|(binding, parameter, _)| (*binding, parameter.0, parameter.1.clone()))
                     .collect::<Vec<_>>(),
                 &mut entry_fuel,
             );
@@ -1170,13 +1575,17 @@ impl Checker<'_, '_> {
                 other => other.to_string(),
             }))?;
             let selected = captured.slots.iter().copied().collect::<BTreeSet<_>>();
-            let inputs = available
+            let inputs: Vec<(n::LocalId, Term, Option<Term>)> = available
                 .into_iter()
                 .enumerate()
                 .filter_map(|(slot, (binding, parameter, value))| {
-                    selected
-                        .contains(&slot)
-                        .then_some((binding, parameter.ty, value))
+                    selected.contains(&slot).then(|| {
+                        (
+                            binding,
+                            parameter.1.expect("captured domain checked"),
+                            value,
+                        )
+                    })
                 })
                 .collect();
             functions.push(captured.function);
@@ -1216,11 +1625,18 @@ impl Checker<'_, '_> {
                 functions,
                 structs: self.structs.values().cloned().collect(),
                 newtypes: self.newtypes.values().cloned().collect(),
+                alias_contracts: self.alias_contracts.values().cloned().collect(),
                 enums: self.enums.values().cloned().collect(),
                 ..Default::default()
             };
             crate::verification::contracts::inherit(&mut package, &mut self.next_temporary_binding)
-                .map_err(|failure| error(expr.span, failure.to_string()))?;
+                .map_err(|mut failure| {
+                    failure.source = failure
+                        .source
+                        .original(&self.expansion_sources)
+                        .unwrap_or(failure.source);
+                    error(expr.span, failure.to_string())
+                })?;
             let invocation_assumptions =
                 if let Some(implementation) = self.initializer_implementation() {
                     crate::capabilities::capability_sources(
@@ -1257,11 +1673,98 @@ impl Checker<'_, '_> {
                 .and_then(|owner| self.type_parameters.get(&owner))
                 .cloned()
                 .unwrap_or_default();
+            abstract_parameters.retain(|id| {
+                self.trait_input_domain(*id)
+                    .is_none_or(|domain| domain == p(P::Type))
+            });
+            abstract_value_parameters.retain(|(id, _)| {
+                inputs.iter().any(|(_, _, value)| {
+                    value
+                        .as_ref()
+                        .is_some_and(|value| value.mentions_rigid(*id))
+                })
+            });
             abstract_parameters.extend(
                 scoped_parameters
                     .iter()
                     .map(|parameter| parameter.declaration),
             );
+            // A specialized declaration can receive an opaque Type from its
+            // generic caller. Retain that caller binder during invocation;
+            // the callee's original binder no longer names the supplied Type.
+            // Captured invocation values can carry these same opaque binders
+            // inside callable instances or closure snapshot arguments.
+            for argument in self
+                .alias_substitution
+                .values()
+                .map(std::sync::Arc::as_ref)
+                .chain(
+                    inputs
+                        .iter()
+                        .flat_map(|(_, ty, value)| std::iter::once(ty).chain(value.iter())),
+                )
+            {
+                let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                let before = fuel;
+                let bounded = nir::type_computations::charge_term(argument, &mut fuel);
+                self.required_steps -= (before - fuel) as u64;
+                bounded.map_err(|failure| error(expr.span, failure.to_string()))?;
+                for (id, sort) in argument
+                    .rigid_parameters()
+                    .map_err(|failure| error(expr.span, failure.to_string()))?
+                {
+                    if sort == Sort::Type && !abstract_parameters.contains(&id) {
+                        abstract_parameters.push(id);
+                    }
+                }
+            }
+            for (binding, _, value) in live {
+                if !free.contains(binding) {
+                    continue;
+                }
+                value
+                    .visit_owned_graph(&mut self.required_steps, &mut |value, fuel| {
+                        if let Value::TypeParameter(id) = value {
+                            if !abstract_parameters.contains(id) {
+                                abstract_parameters.push(*id);
+                            }
+                        }
+                        let mut types: Vec<&Term> = match value {
+                            Value::Type(ty) | Value::Newtype { ty, .. } => vec![ty],
+                            Value::TypeList(types) => types.iter().collect(),
+                            Value::Closure(closure) => {
+                                let mut types = vec![closure.ty()];
+                                if let Some((_, arguments)) = closure.declaration_instance() {
+                                    types.extend(arguments);
+                                }
+                                types
+                            }
+                            _ => vec![],
+                        };
+                        for ty in types.drain(..) {
+                            let mut remaining = usize::try_from(*fuel).unwrap_or(usize::MAX);
+                            let before = remaining;
+                            let bounded = nir::type_computations::charge_term(ty, &mut remaining);
+                            *fuel -= (before - remaining) as u64;
+                            bounded.map_err(|_| comptime_interpretor::ErrorKind::StepsExhausted)?;
+                            for (id, sort) in ty
+                                .rigid_parameters()
+                                .map_err(|_| comptime_interpretor::ErrorKind::Type)?
+                            {
+                                if sort == Sort::Type && !abstract_parameters.contains(&id) {
+                                    abstract_parameters.push(id);
+                                }
+                            }
+                        }
+                        Ok(())
+                    })
+                    .map_err(|failure| {
+                        error(
+                            expr.span,
+                            format!("live input Type scope failed: {failure:?}"),
+                        )
+                    })?;
+            }
             // Equality observations of opaque caller Type inputs need their
             // declaration facts. Dispatch preparation above still uses its
             // own world; these facts are supplied only to this invocation.
@@ -1271,34 +1774,54 @@ impl Checker<'_, '_> {
                 &self.context
             };
             crate::verification::flow::validate_machine_operations(&package)
-                .map_err(|failure| {
+                .map_err(|mut failure| {
+                    failure.source = failure.source.original(&self.expansion_sources).unwrap_or(failure.source);
                     if matches!(failure.reason, crate::verification::flow::Reason::Phase("runtime function is unavailable during comptime execution")) {
                         error(expr.span, format!("required comptime evaluation cannot execute a runtime function or normal-form head: {failure}"))
                     } else { error(expr.span, failure.to_string()) }
                 })?;
             let implementation_index = prepared::implementation_index(&package, expr.span)?;
-            let prepared = PreparedRequired {
-                package,
-                implementation_index,
-                entry,
-                inputs,
-                result_type,
-                scoped_parameters,
-                scoped_arguments,
-                input_frames,
-                invocation_assumptions,
-                abstract_parameters,
-                context: invocation_type_context.clone(),
-                in_signature: self
-                    .signature_owner
-                    .is_some_and(|owner| self.active_signatures.contains(&owner)),
-            };
+            let prepared =
+                PreparedRequired {
+                    copy_authority: self.protocols.copy.zip(self.protocols.drop).map(
+                        |(copy, drop)| {
+                            let resources = n::Package {
+                                traits: self.checked_traits.clone(),
+                                implementations: self.checked_implementations.clone(),
+                                normal_forms: package.normal_forms.clone(),
+                                structs: package.structs.clone(),
+                                newtypes: package.newtypes.clone(),
+                                alias_contracts: package.alias_contracts.clone(),
+                                enums: package.enums.clone(),
+                                ..Default::default()
+                            };
+                            (copy, drop, std::sync::Arc::new(resources))
+                        },
+                    ),
+                    package,
+                    implementation_index,
+                    entry,
+                    inputs,
+                    result_type,
+                    scoped_parameters,
+                    scoped_arguments,
+                    input_frames,
+                    invocation_assumptions,
+                    abstract_parameters,
+                    abstract_value_parameters,
+                    context: invocation_type_context.clone(),
+                    in_signature: self
+                        .signature_owner
+                        .is_some_and(|owner| self.active_signatures.contains(&owner)),
+                };
             Ok(prepared)
         })();
         let pending = std::mem::replace(&mut self.pending_type_uses, saved_pending).unwrap();
         if let Some(uses) = &mut self.pending_type_uses {
             uses.extend(pending);
         }
+        self.locals = saved_value_locals;
+        self.normal_default_bindings = saved_value_bindings;
         self.result = saved_result;
         self.partial_return_context = saved_partial_return;
         self.pending_optional_returns = saved_optional_returns;
@@ -1398,8 +1921,87 @@ impl Checker<'_, '_> {
     }
 }
 
+// Callable identities are execution dependencies wherever they occur in a
+// completed aggregate. Data types are not unfolded and no factory is invoked.
+pub(super) fn frozen_references<'a>(
+    values: impl IntoIterator<Item = &'a Term>,
+    steps: &mut u64,
+    span: Span,
+) -> Result<BTreeSet<DeclarationId>, Error> {
+    let mut declarations = BTreeSet::new();
+    for value in values {
+        let before = usize::try_from(*steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let bounded = nir::type_computations::charge_term(value, &mut fuel);
+        *steps -= (before - fuel) as u64;
+        bounded.map_err(|failure| error(span, failure.to_string()))?;
+        let mut pending = vec![value];
+        while let Some(value) = pending.pop() {
+            match value {
+                Term::FunctionValue {
+                    declaration,
+                    arguments,
+                } => {
+                    declarations.insert(*declaration);
+                    pending.extend(arguments);
+                }
+                Term::ClosureSnapshot { factory, arguments } => {
+                    declarations.insert(*factory);
+                    pending.extend(arguments);
+                }
+                Term::TupleValue(fields) => pending.extend(fields),
+                Term::RecordValue(fields) => pending.extend(fields.iter().map(|(_, value)| value)),
+                Term::NominalValue { fields, .. } => pending.extend(fields),
+                _ => {}
+            }
+        }
+    }
+    Ok(declarations)
+}
+
 // The traversal includes guards and pattern computations; a function hidden in
 // one of those positions must not escape phase/dependency checks.
+fn live_references(
+    value: &Value,
+    members: &mut BTreeSet<DeclarationId>,
+    associated: &mut BTreeSet<DeclarationId>,
+    steps: &mut u64,
+    span: Span,
+) -> Result<BTreeSet<DeclarationId>, Error> {
+    let mut found = BTreeSet::new();
+    value
+        .visit_owned_graph(steps, &mut |value, fuel| {
+            match value {
+                Value::Function(id)
+                | Value::RuntimeFunction {
+                    declaration: id, ..
+                } => {
+                    found.insert(*id);
+                }
+                Value::RuntimeTraitMethod(method) => {
+                    members.insert(method.member);
+                }
+                Value::Closure(closure) => {
+                    if let Some((declaration, _)) = closure.declaration_instance() {
+                        found.insert(declaration);
+                    }
+                    constants::charge_copy(closure.body(), fuel, span)
+                        .map_err(|_| comptime_interpretor::ErrorKind::StepsExhausted)?;
+                    found.extend(references(closure.body(), members, associated));
+                }
+                _ => {}
+            }
+            Ok(())
+        })
+        .map_err(|failure| {
+            error(
+                span,
+                format!("required comptime graph dependency inspection failed: {failure:?}"),
+            )
+        })?;
+    Ok(found)
+}
+
 pub(super) fn references(
     root: &n::Expr,
     members: &mut BTreeSet<DeclarationId>,
@@ -1423,7 +2025,9 @@ pub(super) fn references(
                     pending.push(Node::Pattern(pattern));
                     pending.push(Node::Expr(condition));
                 }
-                n::Pattern::Remap { pattern, .. } | n::Pattern::Binding { inner: pattern, .. } => {
+                n::Pattern::Observe { inner: pattern, .. }
+                | n::Pattern::Remap { pattern, .. }
+                | n::Pattern::Binding { inner: pattern, .. } => {
                     pending.push(Node::Pattern(pattern))
                 }
                 n::Pattern::Record { fields, .. }
@@ -1511,12 +2115,16 @@ pub(super) fn references(
                     pending.extend(environment.iter().map(Node::Expr));
                     pending.push(Node::Expr(signature));
                 }
-                K::NominalType {
+                K::CheckTypeAlias {
+                    arguments: fields, ..
+                }
+                | K::NominalType {
                     arguments: fields, ..
                 }
                 | K::FunctionType {
                     parameters: fields, ..
                 }
+                | K::TypeList(fields)
                 | K::TupleType(fields)
                 | K::Tuple(fields)
                 | K::AnonymousRecord { fields }
@@ -1679,7 +2287,7 @@ pub(super) fn references(
 pub(super) fn mentions_value_parameter(
     value: &Expr<'_>,
     depth: usize,
-    is_type: &impl Fn(hir::HirId) -> bool,
+    is_type: &impl Fn(&Expr<'_>) -> bool,
 ) -> Result<bool, Error> {
     if depth >= 128 {
         return Err(error(
@@ -1688,8 +2296,78 @@ pub(super) fn mentions_value_parameter(
         ));
     }
     Ok(match &value.kind {
-        H::ResolvedFnParam(_, id) => !is_type(*id),
+        H::ResolvedFnParam(..) | H::ResolvedClauseParam(..) => !is_type(value),
         H::SelfValue => true,
+        // Normal-form applications retain an opaque type identity even when
+        // indexed by comptime values. Their formation is checked on the type
+        // path; those indices do not turn a trait bound into a program test.
+        H::NFApplication(..) => false,
+        H::Application(callee, arguments) | H::ExtendedApplication(callee, arguments) => {
+            let mut found = mentions_value_parameter(callee, depth + 1, is_type)?;
+            for argument in *arguments {
+                let (Arg::Positional(value)
+                | Arg::Named(_, value)
+                | Arg::Expand(value)
+                | Arg::Implicit(value)
+                | Arg::PostLambda(value)) = argument;
+                found |= mentions_value_parameter(value, depth + 1, is_type)?;
+            }
+            found
+        }
+        H::Tuple(elements) | H::List(elements) => {
+            let mut found = false;
+            for element in *elements {
+                found |= mentions_value_parameter(element, depth + 1, is_type)?;
+            }
+            found
+        }
+        H::Block(block) => {
+            let mut found = false;
+            for expression in block.stmts.iter().chain(block.expr) {
+                found |= mentions_value_parameter(expression, depth + 1, is_type)?;
+            }
+            found
+        }
+        H::If(condition, block, otherwise) => {
+            let mut found = mentions_value_parameter(condition, depth + 1, is_type)?;
+            for expression in block.stmts.iter().chain(block.expr).chain(*otherwise) {
+                found |= mentions_value_parameter(expression, depth + 1, is_type)?;
+            }
+            found
+        }
+        H::When(arms) => {
+            let mut found = false;
+            for arm in *arms {
+                if let Some(condition) = arm.cond {
+                    found |= mentions_value_parameter(condition, depth + 1, is_type)?;
+                }
+                found |= mentions_value_parameter(arm.body, depth + 1, is_type)?;
+            }
+            found
+        }
+        H::Match(subject, arms) => {
+            let mut found = mentions_value_parameter(subject, depth + 1, is_type)?;
+            for arm in *arms {
+                found |= pattern_mentions_value_parameter(&arm.pat, depth + 1, is_type)?;
+                if let Some(guard) = arm.guard {
+                    found |= mentions_value_parameter(guard, depth + 1, is_type)?;
+                }
+                found |= mentions_value_parameter(arm.body, depth + 1, is_type)?;
+            }
+            found
+        }
+        H::Let(binding) => {
+            let mut found = pattern_mentions_value_parameter(&binding.pattern, depth + 1, is_type)?;
+            for expression in binding
+                .init
+                .into_iter()
+                .chain(binding.guard)
+                .chain(binding.otherwise)
+            {
+                found |= mentions_value_parameter(expression, depth + 1, is_type)?;
+            }
+            found
+        }
         H::RefinedType { requirement, base } => {
             mentions_value_parameter(requirement, depth + 1, is_type)?
                 || mentions_value_parameter(base, depth + 1, is_type)?
@@ -1704,7 +2382,9 @@ pub(super) fn mentions_value_parameter(
         | H::MultiDeref(value)
         | H::TakeBitVec(value)
         | H::TakeTagName(value)
+        | H::TakeTupleEnumerate(value)
         | H::Defer(value)
+        | H::InlineControl(value)
         | H::Unary(_, value)
         | H::Projection(value, _)
         | H::LiteralConversion { literal: value, .. } => {
@@ -1712,6 +2392,85 @@ pub(super) fn mentions_value_parameter(
         }
         _ => false,
     })
+}
+
+fn pattern_mentions_value_parameter(
+    pattern: &hir::pattern::Pattern<'_>,
+    depth: usize,
+    is_type: &impl Fn(&Expr<'_>) -> bool,
+) -> Result<bool, Error> {
+    if depth >= 128 {
+        return Err(error(
+            pattern.span,
+            "program precondition classification depth exhausted",
+        ));
+    }
+    use hir::pattern::PatternKind as P;
+    let mut patterns = Vec::new();
+    let mut expressions = Vec::new();
+    match &pattern.kind {
+        P::Then(first, value, next) => {
+            patterns.extend([*first, *next]);
+            expressions.push(*value);
+        }
+        P::Guard(inner, condition) => {
+            patterns.push(*inner);
+            expressions.push(*condition);
+        }
+        P::Const(value) | P::Comptime(value) => expressions.push(*value),
+        P::Binding(_, _, inner) => patterns.extend(*inner),
+        P::Projection(inner, _)
+        | P::OptionSome(inner)
+        | P::ErrorOk(inner)
+        | P::ErrorErr(inner)
+        | P::Not(inner)
+        | P::Ref(inner) => patterns.push(*inner),
+        P::Tuple(fields) | P::Or(fields) => patterns.extend(fields.iter()),
+        P::List(fields, rest) => {
+            patterns.extend(fields.iter());
+            patterns.extend(*rest);
+        }
+        P::AppTuple(head, fields) => {
+            patterns.push(*head);
+            patterns.extend(fields.iter());
+        }
+        P::Struct(head, fields, _) | P::AppStruct(head, fields) => {
+            patterns.push(*head);
+            patterns.extend(fields.iter().map(|field| &field.pat));
+        }
+        P::NormalForm(head, arguments) => {
+            expressions.push(*head);
+            patterns.extend(arguments.iter().map(|argument| &argument.pattern));
+        }
+        P::Range(start, end, _) => {
+            expressions.extend(*start);
+            expressions.extend(*end);
+        }
+        P::BitVec { segments, .. } => {
+            for segment in segments {
+                match segment {
+                    hir::pattern::BitSegment::Typed { pattern, ty } => {
+                        patterns.push(*pattern);
+                        expressions.push(*ty);
+                    }
+                    hir::pattern::BitSegment::Computed(value) => expressions.push(*value),
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    for value in expressions {
+        if mentions_value_parameter(value, depth + 1, is_type)? {
+            return Ok(true);
+        }
+    }
+    for pattern in patterns {
+        if pattern_mentions_value_parameter(pattern, depth + 1, is_type)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 // Only conjunction exposes individual positive capabilities. Do not extract
@@ -1749,7 +2508,7 @@ pub(super) fn signature_capability_atoms<'h>(
 
 // This is readiness, not type checking. Unknown expression forms wait for the
 // final signature pass, where normal elaboration supplies their diagnostics.
-fn signature_inputs_ready(
+pub(super) fn signature_inputs_ready(
     value: &Expr<'_>,
     depth: usize,
     available: &impl Fn(hir::HirId) -> bool,
@@ -1774,18 +2533,74 @@ fn signature_inputs_ready(
         | H::TySelf
         | H::Unit => true,
         H::TraitBound(a, b)
+        | H::Assign(a, b)
         | H::Binary(_, a, b)
         | H::Cast(a, b)
         | H::Index(a, b)
         | H::TyFnArrow(a, b)
         | H::TyClosure(a, b)
-        | H::EffectQualifiedType(a, b) => ready(a)? && ready(b)?,
+        | H::EffectQualifiedType(a, b) => ready(a)? & ready(b)?,
         H::Projection(value, _)
         | H::TyPtr(value)
         | H::TyOptional(value)
         | H::Unary(_, value)
         | H::LiteralConversion { literal: value, .. }
         | H::TypeOf(value) => ready(value)?,
+        H::Semi(value) => ready(value)?,
+        H::Let(binding) => {
+            let mut all = signature_pattern_inputs_ready(&binding.pattern, depth + 1, available)?;
+            for value in [binding.ty, binding.init, binding.guard, binding.otherwise]
+                .into_iter()
+                .flatten()
+            {
+                all &= ready(value)?;
+            }
+            all
+        }
+        H::Block(block) | H::Loop(block) => {
+            let mut all = true;
+            for statement in block.stmts {
+                all &= ready(statement)?;
+            }
+            if let Some(tail) = block.expr {
+                all &= ready(tail)?;
+            }
+            all
+        }
+        H::If(condition, yes, no) => {
+            let mut all = ready(condition)?;
+            for statement in yes.stmts {
+                all &= ready(statement)?;
+            }
+            if let Some(tail) = yes.expr {
+                all &= ready(tail)?;
+            }
+            if let Some(no) = no {
+                all &= ready(no)?;
+            }
+            all
+        }
+        H::When(arms) => {
+            let mut all = true;
+            for arm in *arms {
+                if let Some(condition) = arm.cond {
+                    all &= ready(condition)?;
+                }
+                all &= ready(arm.body)?;
+            }
+            all
+        }
+        H::Match(subject, arms) => {
+            let mut all = ready(subject)?;
+            for arm in *arms {
+                all &= signature_pattern_inputs_ready(&arm.pat, depth + 1, available)?;
+                if let Some(guard) = arm.guard {
+                    all &= ready(guard)?;
+                }
+                all &= ready(arm.body)?;
+            }
+            all
+        }
         H::Tuple(values) | H::List(values) => {
             let mut all = true;
             for value in *values {
@@ -1812,7 +2627,7 @@ fn signature_inputs_ready(
             for parameter in *parameters {
                 match parameter.kind {
                     TyParamKind::Optional(_, ty, default) => {
-                        all &= ready(ty)? && ready(default)?;
+                        all &= ready(ty)? & ready(default)?;
                     }
                     TyParamKind::Positional(ty)
                     | TyParamKind::PositionalDependencyCatched(_, ty)
@@ -1825,6 +2640,96 @@ fn signature_inputs_ready(
             all
         }
         _ => false,
+    })
+}
+
+fn signature_pattern_inputs_ready(
+    pattern: &hir::pattern::Pattern<'_>,
+    depth: usize,
+    available: &impl Fn(hir::HirId) -> bool,
+) -> Result<bool, Error> {
+    use hir::pattern::PatternKind as K;
+    if depth >= 128 {
+        return Err(error(
+            pattern.span,
+            "signature pattern dependency depth exhausted",
+        ));
+    }
+    let pat = |value| signature_pattern_inputs_ready(value, depth + 1, available);
+    let expr = |value| signature_inputs_ready(value, depth + 1, available);
+    Ok(match &pattern.kind {
+        K::Wild | K::OptionNull | K::Binding(_, _, None) => true,
+        K::Const(value) | K::Comptime(value) => expr(value)?,
+        K::Binding(_, _, Some(inner))
+        | K::Projection(inner, _)
+        | K::OptionSome(inner)
+        | K::ErrorOk(inner)
+        | K::ErrorErr(inner)
+        | K::Not(inner)
+        | K::Ref(inner) => pat(inner)?,
+        K::Guard(inner, guard) => pat(inner)? & expr(guard)?,
+        K::Then(first, view, second) => pat(first)? & expr(view)? & pat(second)?,
+        K::Tuple(fields) | K::Or(fields) => {
+            let mut all = true;
+            for field in *fields {
+                all &= pat(field)?;
+            }
+            all
+        }
+        K::List(fields, tail) => {
+            let mut all = true;
+            for field in *fields {
+                all &= pat(field)?;
+            }
+            if let Some(tail) = tail {
+                all &= pat(tail)?;
+            }
+            all
+        }
+        K::AppTuple(head, fields) => {
+            let mut all = pat(head)?;
+            for field in *fields {
+                all &= pat(field)?;
+            }
+            all
+        }
+        K::Struct(head, fields, _) | K::AppStruct(head, fields) => {
+            let mut all = pat(head)?;
+            for field in *fields {
+                all &= pat(&field.pat)?;
+            }
+            all
+        }
+        K::NormalForm(head, args) => {
+            let mut all = expr(head)?;
+            for argument in *args {
+                all &= pat(&argument.pattern)?;
+            }
+            all
+        }
+        K::BitVec { segments, .. } => {
+            let mut all = true;
+            for segment in segments {
+                match segment {
+                    hir::pattern::BitSegment::Literal { .. } => {}
+                    hir::pattern::BitSegment::Typed { pattern, ty } => {
+                        all &= pat(pattern)? & expr(ty)?;
+                    }
+                    hir::pattern::BitSegment::Computed(value) => {
+                        all &= expr(value)?;
+                    }
+                }
+            }
+            all
+        }
+        K::Range(start, end, _) => {
+            let mut all = true;
+            for value in [*start, *end].into_iter().flatten() {
+                all &= expr(value)?;
+            }
+            all
+        }
+        K::Async | K::Invalid => false,
     })
 }
 

@@ -290,11 +290,14 @@ impl<'a> AstScanner<'a> {
         )?;
         self.def_names.push((def_id, name));
 
-        // Scan clauses (child[4] in the old AST layout)
+        // Function/effect clauses use slot 3; associated declarations use slot 4.
         if self.ast.get_node_kind(item) == Some(NodeKind::NormalFormHeadDef) {
             self.scan_clauses(scope_id, def_id, item, 1)?;
             self.scan_clauses(scope_id, def_id, item, 3)?;
-        } else if self.ast.get_node_kind(item) == Some(NodeKind::AlgebraicEffect) {
+        } else if matches!(
+            self.ast.get_node_kind(item),
+            Some(NodeKind::Function | NodeKind::AlgebraicEffect)
+        ) {
             self.scan_clauses(scope_id, def_id, item, 3)?;
         } else {
             self.scan_clauses(scope_id, def_id, item, 4)?;

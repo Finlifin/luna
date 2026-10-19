@@ -103,8 +103,8 @@ pub struct LoweringContext<'hir, 'ast, 'resolver> {
 
     /// The current owner being lowered.
     pub(crate) current_owner: OwnerId,
-    /// Next `ItemLocalId` within the current owner.
-    next_local_id: u32,
+    /// Each owner keeps its allocation sequence across nested definitions.
+    next_local_ids: HashMap<OwnerId, u32>,
 
     /// Early name resolver – performs module-level name lookup.
     pub(crate) resolver: &'resolver mut Resolver<'resolver>,
@@ -135,7 +135,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             diag_ctx,
             package,
             current_owner: OwnerId::INVALID,
-            next_local_id: 0,
+            next_local_ids: HashMap::new(),
             resolver,
             file_scope,
             ast_ref_to_hir_id: HashMap::default(),
@@ -146,8 +146,9 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
     /// Allocate the next [`HirId`] within the current owner.
     pub(crate) fn next_hir_id(&mut self) -> HirId {
-        let local = ItemLocalId::new(self.next_local_id);
-        self.next_local_id += 1;
+        let next = self.next_local_ids.entry(self.current_owner).or_default();
+        let local = ItemLocalId::new(*next);
+        *next += 1;
         HirId::new(self.current_owner, local)
     }
 
@@ -216,9 +217,9 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         self.record_hir_id(ast_node_ref, hir_id);
     }
 
-    /// Reset the local id counter (called when switching owners).
-    pub(crate) fn reset_hir_id_counter(&mut self) {
-        self.next_local_id = 0;
+    /// Initialize a fresh owner's sequence without resetting resumed owners.
+    pub(crate) fn ensure_owner_counter(&mut self) {
+        self.next_local_ids.entry(self.current_owner).or_default();
     }
 
     /// Allocate a [`BodyId`] and insert the body into the package.

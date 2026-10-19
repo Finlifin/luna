@@ -452,3 +452,885 @@ fn pure_conditional_variant_patterns_check_every_residual_cleanup() {
             .unwrap_err();
     assert!(failure.contains("P4 evidence"), "{failure}");
 }
+
+#[test]
+fn pure_let_else_retirement_still_requires_selected_drop_evidence() {
+    for flag in [true, false] {
+        let source = format!(
+            "trait Copy {{}}trait Drop {{fn drop(*self);}}struct Owned {{}}impl Drop for Owned {{fn drop(*self) {{}}}}pure fn retire(value:Owned,flag:bool)->bool {{let true=flag else {{return true;}};true}}fn run()->bool {{retire(Owned {{}},{flag})}}"
+        );
+        let unbound = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(unbound.contains("P4 evidence"), "{unbound}");
+        let selectors = luna::protocols::type_constructors::Selectors {
+            drop: Some("input::Drop"),
+            ..Default::default()
+        };
+        let package = execution_support::compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            selectors,
+        )
+        .unwrap();
+        assert_eq!(
+            luna::execution::interpret_with_protocols_in_package(
+                &package, 0, "run", "Copy", "Drop", 100_000
+            )
+            .unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn finite_defaults_allow_checked_let_else_returns_but_not_divergence() {
+    for flag in [true, false] {
+        let package = compile(&format!(
+            "fn choose(flag:bool)->bool {{let true=flag else {{return false;}};true}}fn take(.flag:bool=choose({flag}))->bool {{flag}}fn run()->bool {{take()}}"
+        ));
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            Value::Bool(flag)
+        );
+    }
+    for failure in ["while true {}", "return spin();"] {
+        let source = format!(
+            "fn spin()->bool {{spin()}}fn choose(flag:bool)->bool {{let true=flag else {{{failure}}};true}}fn take(.flag:bool=choose(false))->bool {{flag}}"
+        );
+        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(
+            error.contains("P3 stability/termination evidence"),
+            "{failure}: {error}"
+        );
+    }
+    let source = "fn choose(flag:bool,p:*bool)->bool {let true=flag else {p.* = true;return true;};true}fn take(p:*bool,.flag:bool=choose(false,p))->bool {flag}";
+    let error = compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(
+        error.contains("P3 stability/termination evidence"),
+        "{error}"
+    );
+}
+
+#[test]
+fn finite_let_else_defaults_observe_each_call_storage_version() {
+    let package = compile(
+        "fn choose(p:*bool,flag:bool)->bool {let true=flag else {return p.*;};false}fn take(p:*bool,.value:bool=choose(p,false))->bool {value}fn run()->bool {var value=false;let first=take(value.ref);value=true;let second=take(value.ref);not first and second}",
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(&package, "run"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    let names = calls(&package, &vm);
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| name.as_str() == "choose")
+            .count(),
+        2,
+        "{names:?}"
+    );
+}
+
+#[test]
+fn finite_let_else_default_suppliers_check_cleanup_completion() {
+    for flag in [true, false] {
+        let source = format!(
+            "trait Copy {{}}trait Drop {{fn drop(*self);}}struct Owned {{}}impl Drop for Owned {{fn drop(*self) {{}}}}pure fn choose(flag:bool)->bool {{let value=Owned {{}};let true=flag else {{return true;}};true}}fn take(.flag:bool=choose({flag}))->bool {{flag}}fn run()->bool {{take()}}"
+        );
+        let selectors = luna::protocols::type_constructors::Selectors {
+            drop: Some("input::Drop"),
+            ..Default::default()
+        };
+        let package = execution_support::compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            selectors,
+        )
+        .unwrap();
+        assert_eq!(
+            luna::execution::interpret_with_protocols_in_package(
+                &package, 0, "run", "Copy", "Drop", 100_000
+            )
+            .unwrap(),
+            Value::Bool(true)
+        );
+    }
+    let source = "trait Copy {}trait Drop {fn drop(*self);}struct Owned {}impl Drop for Owned {fn drop(*self) {while true {}}}pure fn choose(flag:bool)->bool {let value=Owned {};let true=flag else {return true;};true}fn take(.flag:bool=choose(false))->bool {flag}";
+    let selectors = luna::protocols::type_constructors::Selectors {
+        drop: Some("input::Drop"),
+        ..Default::default()
+    };
+    let error =
+        execution_support::compile_with_source_bindings(source, &Default::default(), selectors)
+            .unwrap_err();
+    assert!(
+        error.contains("P3 stability/termination evidence"),
+        "{error}"
+    );
+}
+
+#[test]
+fn owned_default_arguments_have_checked_preparation_cleanup() {
+    for flag in [true, false] {
+        let source = format!(
+            "trait Copy {{}}trait Drop {{fn drop(*self);}}struct Owned {{}}impl Drop for Owned {{fn drop(*self) {{}}}}fn choose(value:Owned,flag:bool)->bool {{let true=flag else {{return true;}};true}}fn take(.flag:bool=choose(Owned {{}},{flag}))->bool {{flag}}fn run()->bool {{take()}}"
+        );
+        let selectors = luna::protocols::type_constructors::Selectors {
+            drop: Some("input::Drop"),
+            ..Default::default()
+        };
+        let package = execution_support::compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            selectors,
+        )
+        .unwrap();
+        assert_eq!(
+            luna::execution::interpret_with_protocols_in_package(
+                &package, 0, "run", "Copy", "Drop", 100_000
+            )
+            .unwrap(),
+            Value::Bool(true)
+        );
+    }
+    for source in [
+        "trait Copy {}trait Drop {fn drop(*self);}struct Owned {}impl Drop for Owned {fn drop(*self) {while true {}}}fn choose(value:Owned)->bool {true}fn take(.flag:bool=choose(Owned {}))->bool {flag}",
+        "trait Copy {}trait Drop {fn drop(*self);}struct Owned {}impl Drop for Owned {fn drop(*self) {}}fn consume(value:Owned)->bool {true}fn take(value:Owned,.flag:bool=consume(value))->bool {flag}",
+        "trait Copy {}trait Drop {fn drop(*self);}fn take(flag:bool,.value:bool=do {flag=false;true})->bool {value}",
+    ] {
+        let selectors = luna::protocols::type_constructors::Selectors {
+            drop: Some("input::Drop"),
+            ..Default::default()
+        };
+        let error =
+            execution_support::compile_with_source_bindings(source, &Default::default(), selectors)
+                .unwrap_err();
+        assert!(
+            error.contains("P3 stability/termination evidence"),
+            "{source}: {error}"
+        );
+    }
+}
+
+#[test]
+fn owned_defaults_copy_external_nominal_inputs_with_protocol_evidence() {
+    for (definition, construct, read) in [
+        ("newtype Flag=bool;", "true.as(Flag)", "flag.as(bool)"),
+        (
+            "struct Flag {value:bool}",
+            "Flag {value:true}",
+            "flag.value",
+        ),
+    ] {
+        for (implementation, selected, accepted) in [
+            ("impl Copy for Flag {}", true, true),
+            ("", true, false),
+            ("impl Copy for Flag {}", false, false),
+            (
+                "impl Copy for Flag {}impl Drop for Flag {fn drop(*self) {}}",
+                true,
+                false,
+            ),
+        ] {
+            let source = format!(
+                "trait Copy {{}}trait Drop {{fn drop(*self);}}{definition}{implementation}struct Owned {{}}impl Drop for Owned {{fn drop(*self) {{}}}}fn consume(value:Owned,flag:Flag)->bool {{{read}}}fn take(flag:Flag,.result:bool=consume(Owned {{}},flag))->bool {{result and {read}}}fn run()->bool {{take({construct})}}"
+            );
+            let result = execution_support::compile_with_source_bindings(
+                &source,
+                &Default::default(),
+                luna::protocols::type_constructors::Selectors {
+                    copy: selected.then_some("input::Copy"),
+                    drop: Some("input::Drop"),
+                    ..Default::default()
+                },
+            );
+            if accepted {
+                let package = result.unwrap_or_else(|error| panic!("{source}: {error}"));
+                assert_eq!(
+                    luna::execution::interpret_with_protocols_in_package(
+                        &package, 0, "run", "Copy", "Drop", 100_000
+                    )
+                    .unwrap(),
+                    Value::Bool(true)
+                );
+            } else {
+                let error = result.unwrap_err();
+                assert!(
+                    error.contains("P3 stability/termination evidence"),
+                    "{source}: {error}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn default_copy_evidence_checks_nested_representation() {
+    for (inner_impl, accepted) in [("impl Copy for Inner {}", true), ("", false)] {
+        let source = format!(
+            "trait Copy {{}}trait Drop {{fn drop(*self);}}struct Inner {{flag:bool}}{inner_impl}struct Outer {{inner:Inner}}impl Copy for Outer {{}}struct Owned {{}}impl Drop for Owned {{fn drop(*self) {{}}}}fn consume(value:Owned,outer:Outer)->bool {{outer.inner.flag}}fn take(outer:Outer,.result:bool=consume(Owned {{}},outer))->bool {{result and outer.inner.flag}}fn run()->bool {{take(Outer {{inner:Inner {{flag:true}}}})}}"
+        );
+        let result = execution_support::compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                copy: Some("input::Copy"),
+                drop: Some("input::Drop"),
+                ..Default::default()
+            },
+        );
+        if accepted {
+            let package = result.unwrap();
+            assert_eq!(
+                luna::execution::interpret_with_protocols_in_package(
+                    &package, 0, "run", "Copy", "Drop", 100_000
+                )
+                .unwrap(),
+                Value::Bool(true)
+            );
+        } else {
+            let error = result.unwrap_err();
+            assert!(
+                error.contains("P3 stability/termination evidence"),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn default_nominal_pointer_copies_preserve_external_storage() {
+    let prefix = "trait Copy {}trait Drop {fn drop(*self);}newtype Ref=*bool;impl Copy for Ref {}struct Owned {}impl Drop for Owned {fn drop(*self) {}}";
+    let source = format!(
+        "{prefix}fn read(value:Owned,p:Ref)->bool {{p.as(*bool).*}}fn take(p:Ref,.result:bool=read(Owned {{}},p))->bool {{result}}fn run()->bool {{var flag=true;let p=flag.ref.as(Ref);let first=take(p);flag=false;let second=take(p);first and not second}}"
+    );
+    let selectors = luna::protocols::type_constructors::Selectors {
+        copy: Some("input::Copy"),
+        drop: Some("input::Drop"),
+        ..Default::default()
+    };
+    let package =
+        execution_support::compile_with_source_bindings(&source, &Default::default(), selectors)
+            .unwrap();
+    assert_eq!(
+        luna::execution::interpret_with_protocols_in_package(
+            &package, 0, "run", "Copy", "Drop", 100_000
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+    let source = format!(
+        "{prefix}fn write(value:Owned,p:Ref)->bool {{p.as(*bool).* = false;true}}fn take(p:Ref,.result:bool=write(Owned {{}},p))->bool {{result}}"
+    );
+    let error =
+        execution_support::compile_with_source_bindings(&source, &Default::default(), selectors)
+            .unwrap_err();
+    assert!(
+        error.contains("P3 stability/termination evidence"),
+        "{error}"
+    );
+}
+
+#[test]
+fn default_pointer_purity_does_not_authorize_moved_targets() {
+    let source = "trait Copy {}trait Drop {fn drop(*self);}newtype Ref=*bool;impl Copy for Ref {}struct Owned {}impl Drop for Owned {fn drop(*self) {}}struct Cell {flag:bool}fn retire(value:Cell) {}fn read(value:Owned,p:Ref)->bool {p.as(*bool).*}fn take(p:Ref,.result:bool=read(Owned {},p))->bool {result}fn run()->bool {let cell=Cell {flag:true};let p=cell.flag.ref.as(Ref);retire(cell);take(p)}";
+    let package = execution_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            copy: Some("input::Copy"),
+            drop: Some("input::Drop"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let error = luna::execution::interpret_with_protocols_in_package(
+        &package, 0, "run", "Copy", "Drop", 100_000,
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("memory call target unavailable: NotPresent"),
+        "{error}"
+    );
+}
+
+#[test]
+fn default_pointer_reads_require_complete_copy_evidence() {
+    for (definition, construct, read) in [
+        (
+            "struct Flag {value:bool}",
+            "Flag {value:true}",
+            "let copied=p.*;copied.value",
+        ),
+        (
+            "newtype Flag=bool;",
+            "true.as(Flag)",
+            "let copied=p.*;copied.as(bool)",
+        ),
+    ] {
+        for (implementation, accepted) in [
+            ("impl Copy for Flag {}", true),
+            ("", false),
+            (
+                "impl Copy for Flag {}impl Drop for Flag {fn drop(*self) {}}",
+                false,
+            ),
+        ] {
+            let source = format!(
+                "trait Copy {{}}trait Drop {{fn drop(*self);}}{definition}{implementation}struct Owned {{}}impl Drop for Owned {{fn drop(*self) {{}}}}fn read(value:Owned,p:*Flag)->bool {{{read}}}fn take(p:*Flag,.result:bool=read(Owned {{}},p))->bool {{result}}fn run()->bool {{let flag={construct};take(flag.ref)}}"
+            );
+            let result = execution_support::compile_with_source_bindings(
+                &source,
+                &Default::default(),
+                luna::protocols::type_constructors::Selectors {
+                    copy: Some("input::Copy"),
+                    drop: Some("input::Drop"),
+                    ..Default::default()
+                },
+            );
+            if accepted {
+                let package = result.unwrap_or_else(|error| panic!("{source}: {error}"));
+                assert_eq!(
+                    luna::execution::interpret_with_protocols_in_package(
+                        &package, 0, "run", "Copy", "Drop", 100_000
+                    )
+                    .unwrap(),
+                    Value::Bool(true)
+                );
+            } else {
+                let error = result.unwrap_err();
+                assert!(
+                    error.contains("P3 stability/termination evidence"),
+                    "{source}: {error}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn nominal_default_loads_deliver_each_calls_current_value() {
+    for (definition, construct, consume, change) in [
+        (
+            "struct Flag {value:bool}",
+            "Flag {value:true}",
+            "value.value",
+            "flag.value=false",
+        ),
+        (
+            "newtype Flag=bool;",
+            "true.as(Flag)",
+            "value.as(bool)",
+            "flag=false.as(Flag)",
+        ),
+    ] {
+        for default in ["p.*", "load(p)"] {
+            let source = format!(
+                "trait Copy {{}}trait Drop {{fn drop(*self);}}{definition}impl Copy for Flag {{}}fn load(p:*Flag)->Flag {{p.*}}fn take(p:*Flag,.value:Flag={default})->bool {{{consume}}}fn run()->bool {{var flag={construct};let first=take(flag.ref);{change};let second=take(flag.ref);first and not second}}"
+            );
+            let package = execution_support::compile_with_source_bindings(
+                &source,
+                &Default::default(),
+                luna::protocols::type_constructors::Selectors {
+                    copy: Some("input::Copy"),
+                    drop: Some("input::Drop"),
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|error| panic!("{source}: {error}"));
+            assert_eq!(
+                luna::execution::interpret_with_protocols_in_package(
+                    &package, 0, "run", "Copy", "Drop", 100_000
+                )
+                .unwrap(),
+                Value::Bool(true)
+            );
+        }
+    }
+}
+
+#[test]
+fn pure_private_pointer_newtypes_keep_their_targets() {
+    let prefix = "trait Copy {}trait Drop {fn drop(*self);}newtype Ref=*bool;impl Copy for Ref {}newtype Outer=Ref;impl Copy for Outer {}";
+    for body in [
+        "var flag=false;let p=flag.ref.as(Ref);p.as(*bool).* = true;flag",
+        "var flag=false;let p=flag.ref.as(Ref).as(Outer);let q=p;q.as(Ref).as(*bool).* = true;flag",
+        "var a=false;var b=false;let p=if true {a.ref.as(Ref)} else {b.ref.as(Ref)};p.as(*bool).* = true;a and not b",
+        "var a=false;var b=false;var p=a.ref.as(Ref);var again=true;while again {p.as(*bool).* = true;p=b.ref.as(Ref);again=false;}a",
+        "var flag=false;let p=flag.ref.as(Ref);p match {q=>q.as(*bool).* = true};flag",
+    ] {
+        let source = format!("{prefix}pure fn run()->bool {{{body}}}");
+        let package = execution_support::compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                copy: Some("input::Copy"),
+                drop: Some("input::Drop"),
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|error| panic!("{source}: {error}"));
+        assert_eq!(
+            luna::execution::interpret_with_protocols_in_package(
+                &package, 0, "run", "Copy", "Drop", 100_000
+            )
+            .unwrap(),
+            Value::Bool(true)
+        );
+    }
+    for body in [
+        "let p=external.as(Ref);p.as(*bool).*",
+        "let p=external.as(Ref).as(Outer);p.as(Ref).as(*bool).* = true;true",
+        "var local=false;let p=if true {local.ref.as(Ref)} else {external.as(Ref)};p.as(*bool).*",
+        "var local=false;var p=local.ref.as(Ref);var again=true;while again {p.as(*bool).* = true;p=external.as(Ref);again=false;}true",
+    ] {
+        let source = format!("{prefix}pure fn bad(external:*bool)->bool {{{body}}}");
+        let error = execution_support::compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                copy: Some("input::Copy"),
+                drop: Some("input::Drop"),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("pure"), "{error}");
+    }
+}
+
+#[test]
+fn pure_private_pointer_slot_loads_preserve_all_target_origins() {
+    let prefix = "trait Copy {}trait Drop {fn drop(*self);}newtype Ref=*bool;impl Copy for Ref {}";
+    for body in [
+        "var flag=false;let p=flag.ref;let slot=p.ref;slot.*.* = true;flag",
+        "var flag=false;let p=flag.ref.as(Ref);let slot=p.ref;slot.*.as(*bool).* = true;flag",
+        "var a=false;var b=false;let p=a.ref;let q=b.ref;let slot=if true {p.ref} else {q.ref};slot.*.* = true;a and not b",
+        "var a=false;var b=false;var p=a.ref;let slot=p.ref;p=b.ref;slot.*.* = true;b and not a",
+    ] {
+        let source = format!("{prefix}pure fn run()->bool {{{body}}}");
+        let package = execution_support::compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                copy: Some("input::Copy"),
+                drop: Some("input::Drop"),
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|error| panic!("{source}: {error}"));
+        assert_eq!(
+            luna::execution::interpret_with_protocols_in_package(
+                &package, 0, "run", "Copy", "Drop", 100_000
+            )
+            .unwrap(),
+            Value::Bool(true)
+        );
+    }
+    for body in [
+        "let p=external;let slot=p.ref;slot.*.*",
+        "var local=false;let p=local.ref;let q=external;let slot=if true {p.ref} else {q.ref};slot.*.*",
+        "var local=false;let p=external;let q=local.ref;let slot=if true {p.ref} else {q.ref};slot.*.*",
+        "var local=false;var p=local.ref;let slot=p.ref;p=external;slot.*.* = true;true",
+    ] {
+        let source = format!("{prefix}pure fn bad(external:*bool)->bool {{{body}}}");
+        let error = execution_support::compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                copy: Some("input::Copy"),
+                drop: Some("input::Drop"),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("lacks P4 evidence"), "{error}");
+    }
+}
+
+#[test]
+fn pure_private_data_writes_check_copy_and_cleanup() {
+    for (definition, initial, replacement, result) in [
+        (
+            "newtype Flag=bool;",
+            "false.as(Flag)",
+            "true.as(Flag)",
+            "value.as(bool)",
+        ),
+        (
+            "struct Flag {flag:bool}",
+            "Flag {flag:false}",
+            "Flag {flag:true}",
+            "value.flag",
+        ),
+    ] {
+        for (implementation, accepted) in [
+            ("impl Copy for Flag {}", true),
+            ("", false),
+            (
+                "impl Copy for Flag {}impl Drop for Flag {fn drop(*self) {}}",
+                false,
+            ),
+        ] {
+            let source = format!(
+                "trait Copy {{}}trait Drop {{fn drop(*self);}}{definition}{implementation}pure fn run()->bool {{var value={initial};let p=value.ref;p.* = {replacement};{result}}}"
+            );
+            let compiled = execution_support::compile_with_source_bindings(
+                &source,
+                &Default::default(),
+                luna::protocols::type_constructors::Selectors {
+                    copy: Some("input::Copy"),
+                    drop: Some("input::Drop"),
+                    ..Default::default()
+                },
+            );
+            if accepted {
+                let package = compiled.unwrap_or_else(|error| panic!("{source}: {error}"));
+                assert_eq!(
+                    luna::execution::interpret_with_protocols_in_package(
+                        &package, 0, "run", "Copy", "Drop", 100_000
+                    )
+                    .unwrap(),
+                    Value::Bool(true)
+                );
+            } else {
+                let error = compiled.unwrap_err();
+                assert!(error.contains("lacks P4 evidence"), "{error}");
+            }
+        }
+    }
+}
+
+#[test]
+fn pure_data_write_rule_does_not_overwrite_pointer_or_code_evidence() {
+    for source in [
+        "trait Copy {}trait Drop {fn drop(*self);}newtype Ref=*bool;impl Copy for Ref {}pure fn bad(external:*bool)->bool {var local=false;var value=local.ref.as(Ref);let slot=value.ref;slot.* = external.as(Ref);value.as(*bool).*}",
+        "trait Copy {}trait Drop {fn drop(*self);}typealias Action=fn()->bool;impl Copy for Action {}struct Cell {action:Action}impl Copy for Cell {}fn yes()->bool {true}pure fn bad(external:Action)->bool {var cell=Cell {action:yes};let slot=cell.ref;slot.* = Cell {action:external};cell.action()}",
+    ] {
+        let error = execution_support::compile_with_source_bindings(
+            source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                copy: Some("input::Copy"),
+                drop: Some("input::Drop"),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("lacks P4 evidence"), "{error}");
+    }
+}
+
+#[test]
+fn pure_nested_data_replacement_preserves_copied_enum_values() {
+    let source = "trait Copy {}trait Drop {fn drop(*self);}enum Choice {yes(bool),no}impl Copy for Choice {}newtype Wrapped=Choice;impl Copy for Wrapped {}struct Cell {value:Wrapped}impl Copy for Cell {}pure fn run()->bool {var cell=Cell {value:Choice.no.as(Wrapped)};let old=cell.ref.*;cell.ref.* = Cell {value:Choice.yes(true).as(Wrapped)};let before=old.value.as(Choice) match {.no=>true,.yes(_)=>false};let after=cell.value.as(Choice) match {.yes(flag)=>flag,.no=>false};before and after}";
+    let package = execution_support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            copy: Some("input::Copy"),
+            drop: Some("input::Drop"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        luna::execution::interpret_with_protocols_in_package(
+            &package, 0, "run", "Copy", "Drop", 100_000
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+    let missing_copy = source.replace("impl Copy for Choice {}", "");
+    let error = execution_support::compile_with_source_bindings(
+        &missing_copy,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            copy: Some("input::Copy"),
+            drop: Some("input::Drop"),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(error.contains("lacks P4 evidence"), "{error}");
+}
+
+#[test]
+fn open_defaults_require_p3_even_when_unused_or_explicitly_overridden() {
+    for supplier in [
+        "pure fn spin()->bool {spin()}",
+        "pure fn spin()->bool {while true {}true}",
+        "pure fn spin()->bool {other()} pure fn other()->bool {spin()}",
+    ] {
+        for use_site in ["", "fn run()->bool {take(true,.value=true)}"] {
+            let source = format!(
+                "{supplier} fn take(comptime flag:bool,.value:bool=spin())->bool {{inline if flag {{value}} else {{false}}}} {use_site}"
+            );
+            let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+            assert!(
+                error.contains("P3 stability/termination"),
+                "{source}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn open_default_call_evidence_retains_input_dependencies_and_override_order() {
+    let package=compile("pure fn invert(value:bool)->bool {not value}
+        fn input()->bool {false} fn supplied()->bool {true}
+        fn take(comptime flag:bool,first:bool,.second:bool=invert(first))->bool {inline if flag {second} else {first}}
+        fn run()->bool {take(true,input())}
+        fn override_value()->bool {take(true,input(),.second=supplied())}");
+    for (entry, expected_calls) in [
+        ("run", vec!["run", "input", "invert", "take"]),
+        (
+            "override_value",
+            vec!["override_value", "input", "supplied", "take"],
+        ),
+    ] {
+        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        assert_eq!(
+            vm.invoke(id(&package, entry), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(calls(&package, &vm), expected_calls);
+        luna::instantiation::instantiate(&package, entry, 200_000).unwrap();
+    }
+}
+
+#[test]
+fn open_defaults_can_use_completed_pure_open_suppliers() {
+    let package=compile("pure fn supplier(comptime flag:bool)->bool {inline if flag {true} else {false}}
+        fn take(comptime flag:bool,.value:bool=supplier(true))->bool {inline if flag {value} else {false}}
+        fn run()->bool {take(true)}");
+    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(&package, "run"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(calls(&package, &vm), vec!["run", "supplier", "take"]);
+    luna::instantiation::instantiate(&package, "run", 200_000).unwrap();
+}
+
+#[test]
+fn open_default_call_graph_rejects_staged_recursion_and_external_writes() {
+    for source in [
+        "pure fn spin()->bool {spin()} pure fn supplier(comptime flag:bool)->bool {inline if flag {spin()} else {true}} fn take(comptime flag:bool,.value:bool=supplier(true))->bool {inline if flag {value} else {false}}",
+        "fn mutate(p:*bool)->bool {p.* = true;true} fn take(comptime flag:bool,p:*bool,.value:bool=mutate(p))->bool {inline if flag {value} else {false}}",
+    ] {
+        let error = compile_with_protocols(source, &Default::default()).unwrap_err();
+        assert!(error.contains("P3 stability/termination"), "{error}");
+    }
+}
+
+#[test]
+fn pure_open_recursion_is_p4_without_becoming_p3() {
+    let definitions =
+        "pure fn spin(comptime flag:bool)->bool {inline if flag {spin(flag)} else {true}}";
+    let package = compile(&format!(
+        "{definitions} fn run()->bool {{spin(true)}} fn finish()->bool {{spin(false)}}"
+    ));
+    assert_eq!(
+        luna::execution::interpret(&package, "finish", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let mut vm = Interpreter::new(
+        &package,
+        Budget {
+            steps: 100,
+            ..Budget::default()
+        },
+    )
+    .unwrap();
+    let error = vm.invoke(id(&package, "run"), vec![]).unwrap_err();
+    assert_eq!(error.kind, comptime_interpretor::ErrorKind::StepsExhausted);
+    luna::instantiation::instantiate(&package, "run", 200_000).unwrap();
+    let error = compile_with_protocols(
+        &format!("{definitions} fn take(.value:bool=spin(true))->bool {{value}}"),
+        &Default::default(),
+    )
+    .unwrap_err();
+    assert!(error.contains("P3 stability/termination"), "{error}");
+}
+
+#[test]
+fn recursive_open_behavior_keeps_unselected_effects_and_stage_checks() {
+    let effect = "pure fn recur(comptime enabled:bool,done:bool,p:*bool)->bool {inline if enabled {if done {true} else {recur(enabled,true,p)}} else {p.* = true;false}}";
+    let error = compile_with_protocols(effect, &Default::default()).unwrap_err();
+    assert!(error.contains("P4 evidence"), "{error}");
+    let stage = "pure fn recur(comptime enabled:bool,done:bool)->bool {inline if enabled {if done {true} else {recur(done,true)}} else {false}}";
+    let error = compile_with_protocols(stage, &Default::default()).unwrap_err();
+    assert!(error.contains("runtime parameter"), "{error}");
+}
+
+#[test]
+fn recursive_p4_checks_each_changed_callback_environment() {
+    let common="fn clean(p:*bool)->bool {true}
+        fn visit(callback:fn(*bool)->bool,p:*bool,done:bool)->bool {if done {callback(p)} else {visit(next,p,true)}}
+        pure fn caller(p:*bool)->bool {visit(clean,p,false)}";
+    let package = compile(&format!(
+        "{common} fn next(p:*bool)->bool {{true}} fn run()->bool {{var flag=false;caller(flag.ref)}}"
+    ));
+    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(&package, "run"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        calls(&package, &vm),
+        vec!["run", "caller", "visit", "visit", "next"]
+    );
+    luna::instantiation::instantiate(&package, "run", 200_000).unwrap();
+    let error = compile_with_protocols(
+        &format!("{common} fn next(p:*bool)->bool {{p.* = true;true}}"),
+        &Default::default(),
+    )
+    .unwrap_err();
+    assert!(error.contains("P4 evidence"), "{error}");
+}
+
+#[test]
+fn changed_recursive_callbacks_do_not_establish_p3_termination() {
+    let source = "fn clean()->bool {true} fn next()->bool {false}
+        fn visit(callback:fn()->bool,done:bool)->bool {if done {callback()} else {visit(next,true)}}
+        fn take(.value:bool=visit(clean,false))->bool {value}";
+    let error = compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(error.contains("P3 stability/termination"), "{error}");
+}
+
+#[test]
+fn recursive_callbacks_keep_factory_capture_identities_distinct() {
+    let common="trait Copy {} trait Drop {fn drop(*self);} typealias Wrapped=%{callback:fn(*bool)->bool} fn(*bool)->bool;
+        fn wrap(callback:fn(*bool)->bool)->Wrapped {|p| callback(p)}
+        fn clean(p:*bool)->bool {true}
+        fn visit(callback:Wrapped,p:*bool,done:bool)->bool {if done {callback(p)} else {visit(wrap(next),p,true)}}
+        pure fn caller(p:*bool)->bool {visit(wrap(clean),p,false)}";
+    let selectors = luna::protocols::type_constructors::Selectors {
+        copy: Some("input::Copy"),
+        drop: Some("input::Drop"),
+        ..Default::default()
+    };
+    let package=execution_support::compile_with_source_bindings(&format!("{common} fn next(p:*bool)->bool {{true}} fn run()->bool {{var flag=false;caller(flag.ref)}}"),&Default::default(),selectors).unwrap();
+    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(&package, "run"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        calls(&package, &vm),
+        vec!["run", "caller", "wrap", "visit", "wrap", "visit", "next"]
+    );
+    luna::instantiation::instantiate(&package, "run", 200_000).unwrap();
+    let error = execution_support::compile_with_source_bindings(
+        &format!("{common} fn next(p:*bool)->bool {{p.* = true;true}}"),
+        &Default::default(),
+        selectors,
+    )
+    .unwrap_err();
+    assert!(error.contains("P4 evidence"), "{error}");
+    let unknown = common.replace(
+        "pure fn caller(p:*bool)->bool {visit(wrap(clean),p,false)}",
+        "pure fn caller(callback:Wrapped,p:*bool)->bool {visit(callback,p,false)}",
+    );
+    let error = execution_support::compile_with_source_bindings(
+        &format!("{unknown} fn next(p:*bool)->bool {{true}}"),
+        &Default::default(),
+        selectors,
+    )
+    .unwrap_err();
+    assert!(error.contains("P4 evidence"), "{error}");
+}
+
+#[test]
+fn recursive_nested_closure_factories_preserve_each_capture_layer() {
+    let common="trait Copy {} trait Drop {fn drop(*self);}
+        typealias Wrapped=%{callback:fn(*bool)->bool} fn(*bool)->bool;
+        typealias Nested=%{inner:Wrapped} fn(*bool)->bool;
+        fn wrap(callback:fn(*bool)->bool)->Wrapped {|p| callback(p)}
+        fn nest(inner:Wrapped)->Nested {|p| inner(p)}
+        fn clean(p:*bool)->bool {true}
+        fn visit(callback:Nested,p:*bool,done:bool)->bool {if done {callback(p)} else {visit(nest(wrap(next)),p,true)}}
+        pure fn caller(p:*bool)->bool {visit(nest(wrap(clean)),p,false)}";
+    let selectors = luna::protocols::type_constructors::Selectors {
+        copy: Some("input::Copy"),
+        drop: Some("input::Drop"),
+        ..Default::default()
+    };
+    let package=execution_support::compile_with_source_bindings(&format!("{common} fn next(p:*bool)->bool {{true}} fn run()->bool {{var flag=false;caller(flag.ref)}}"),&Default::default(),selectors).unwrap();
+    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(&package, "run"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        calls(&package, &vm),
+        vec![
+            "run", "caller", "wrap", "nest", "visit", "wrap", "nest", "visit", "next"
+        ]
+    );
+    luna::instantiation::instantiate(&package, "run", 200_000).unwrap();
+    let error = execution_support::compile_with_source_bindings(
+        &format!("{common} fn next(p:*bool)->bool {{p.* = true;true}}"),
+        &Default::default(),
+        selectors,
+    )
+    .unwrap_err();
+    assert!(error.contains("P4 evidence"), "{error}");
+}
+
+#[test]
+fn closure_capture_code_evidence_preserves_absent_enum_payloads() {
+    let common="trait Copy {} trait Drop {fn drop(*self);}
+        enum Choice {none,some(fn(*bool)->bool)}
+        typealias Wrapped=%{choice:Choice} fn(*bool)->bool;
+        fn wrap(choice:Choice)->Wrapped {|p| choice match {.none=>true,.some(callback)=>callback(p)}}
+        fn clean(p:*bool)->bool {true} fn dirty(p:*bool)->bool {p.* = true;true}";
+    let selectors = luna::protocols::type_constructors::Selectors {
+        copy: Some("input::Copy"),
+        drop: Some("input::Drop"),
+        ..Default::default()
+    };
+    for choice in [
+        "Choice.none",
+        "Choice.some(clean)",
+        "if flag {Choice.none} else {Choice.some(clean)}",
+    ] {
+        let source = format!(
+            "{common} pure fn caller(flag:bool,p:*bool)->bool {{wrap(do {{{choice}}})(p)}} fn run()->bool {{var value=false;caller(true,value.ref)}} fn other()->bool {{var value=false;caller(false,value.ref)}}"
+        );
+        let package = execution_support::compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            selectors,
+        )
+        .unwrap_or_else(|error| panic!("{source}: {error}"));
+        for entry in ["run", "other"] {
+            assert_eq!(
+                luna::execution::interpret(&package, entry, 100_000).unwrap(),
+                Value::Bool(true)
+            );
+            luna::instantiation::instantiate(&package, entry, 200_000).unwrap();
+        }
+    }
+    for choice in [
+        "Choice.some(dirty)",
+        "if flag {Choice.none} else {Choice.some(dirty)}",
+        "Choice.some(callback)",
+    ] {
+        let source = format!(
+            "{common} pure fn caller(flag:bool,p:*bool,callback:fn(*bool)->bool)->bool {{wrap(do {{{choice}}})(p)}}"
+        );
+        let error = execution_support::compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            selectors,
+        )
+        .unwrap_err();
+        assert!(error.contains("P4 evidence"), "{error}");
+    }
+}

@@ -96,7 +96,6 @@ pub struct FnModifiers {
     pub is_normal_form_head: bool,
     pub is_pure: bool,
     pub is_comptime: bool,
-    pub is_extern: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

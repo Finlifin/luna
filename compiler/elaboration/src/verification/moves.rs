@@ -17,6 +17,8 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
 };
+mod cleanup_memory;
+pub use cleanup_memory::BorrowedRoot;
 mod effects;
 mod origins;
 mod patterns;
@@ -180,7 +182,7 @@ impl fmt::Display for VariantSelection {
 // Callable evidence paths qualify enum payloads with [VARIANT_PATH, tag].
 // Ownership paths remain ordinary field paths after a successful tag guard.
 // No allocated field layout can have usize::MAX entries.
-const VARIANT_PATH: usize = usize::MAX;
+pub(super) const VARIANT_PATH: usize = usize::MAX;
 
 fn display_callable_path(path: &[usize], f: &mut fmt::Formatter<'_>) -> fmt::Result {
     let mut components = path.iter();
@@ -670,6 +672,82 @@ impl fmt::Display for EnumParameter {
         f.write_str("))")
     }
 }
+// Empty prepared code or closed-summary pointer origins at a variant-qualified
+// leaf prove that combination of enclosing tags absent. Propagate an empty
+// nested domain to its parent.
+fn exclude_absent_code_leaf(
+    package: Option<&Package>,
+    subject: &Term,
+    fields: &[usize],
+    domains: &mut EnumDomains,
+    fuel: &mut usize,
+    source: SourceRange,
+) -> Result<bool, Error> {
+    *fuel = fuel
+        .checked_sub(fields.len() + 1)
+        .ok_or_else(|| error(source, "returned capture absence budget exhausted"))?;
+    if enum_path_excluded(fields, domains) {
+        return Ok(true);
+    }
+    let mut path = fields.to_vec();
+    loop {
+        *fuel = fuel
+            .checked_sub(path.len() + 1)
+            .ok_or_else(|| error(source, "returned capture absence budget exhausted"))?;
+        let Some(index) = path.iter().rposition(|field| *field == VARIANT_PATH) else {
+            return Ok(false);
+        };
+        let Some(variant) = path.get(index + 1).copied() else {
+            return Ok(false);
+        };
+        path.truncate(index);
+        let ty = owned_field_type(package, subject, &path, fuel, source)?;
+        let Term::Nominal {
+            declaration,
+            arguments,
+        } = ty
+        else {
+            return Ok(false);
+        };
+        let Some(definition) = package.and_then(|package| {
+            package
+                .enums
+                .iter()
+                .find(|item| item.declaration == declaration)
+        }) else {
+            return Ok(false);
+        };
+        let variants = callable_variant_layout(definition, &arguments, fuel, source)?;
+        *fuel = fuel
+            .checked_sub(variants.len() + path.len() + 1)
+            .ok_or_else(|| error(source, "returned capture absence budget exhausted"))?;
+        if variant >= variants.len() {
+            return Err(error(source, "absent code variant out of bounds"));
+        }
+        let tags = domains
+            .entry(path.clone())
+            .or_insert_with(|| (0..variants.len()).collect());
+        tags.remove(&variant);
+        if !tags.is_empty() {
+            break;
+        }
+        domains.remove(&path);
+    }
+    let mut excluded = vec![];
+    for path in domains.keys() {
+        *fuel = fuel
+            .checked_sub(path.len() + 1)
+            .ok_or_else(|| error(source, "returned capture absence budget exhausted"))?;
+        if enum_path_excluded(path, domains) {
+            excluded.push(path.clone());
+        }
+    }
+    for path in excluded {
+        domains.remove(&path);
+    }
+    Ok(true)
+}
+
 fn validate_enum_domains(
     package: Option<&Package>,
     subject: &Term,
@@ -949,6 +1027,22 @@ impl fmt::Display for HandlerReport {
         )
     }
 }
+/// Conditional validity of a pointer stored in an owned parameter field.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BorrowedField {
+    pub parameter: usize,
+    pub fields: Vec<usize>,
+    pub pointee: Term,
+}
+impl std::fmt::Display for BorrowedField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "(borrowed-field (parameter {}) (fields", self.parameter)?;
+        for field in &self.fields {
+            write!(f, " {field}")?;
+        }
+        write!(f, ") (pointee {}))", self.pointee)
+    }
+}
 #[derive(Debug, Default)]
 pub struct Report {
     /// Checked affine deliveries, executed after evaluating the exact source
@@ -968,6 +1062,11 @@ pub struct Report {
     pub effect_parameters: Vec<EffectResultInput>,
     /// Conditional initialized pointees; publication must check actual call targets.
     pub borrowed_parameters: Vec<(usize, Term)>,
+    pub borrowed_fields: Vec<BorrowedField>,
+    /// Symbolic origins of nonowned roots, retained for cleanup contract export.
+    pub borrowed_roots: BTreeMap<PlaceId, BorrowedRoot>,
+    /// Implicit accesses of executed closures, resolved in this caller's storage.
+    pub cleanup_call_accesses: Vec<(super::memory::Access, BTreeSet<Place>)>,
     pub incomplete: Vec<IncompleteCleanup>,
     pub cleanups: Vec<Cleanup>,
     /// Successful returns only; closure calls join these continuation states.
@@ -988,6 +1087,14 @@ pub struct Report {
     /// successful exit; aligned with `exits`, never a substitute for its state.
     pub captured_callable_exits: Vec<BTreeMap<Place, CallableEvidence>>,
     pub captured_enum_exits: Vec<BTreeMap<PlaceId, BTreeMap<Vec<usize>, BTreeSet<usize>>>>,
+    pub failed_capture_enum_exits: Vec<BTreeMap<PlaceId, EnumDomains>>,
+    pub effect_capture_enum_exits: Vec<BTreeMap<PlaceId, EnumDomains>>,
+    /// Pointer-slot origins retained by capture storage, aligned with each exit
+    /// kind. Missing slots are not proof of pointer freedom; consult the exit
+    /// state and layout. Targets remain in this invocation's coordinate system.
+    pub captured_pointer_exits: Vec<BTreeMap<Place, BTreeSet<Place>>>,
+    pub failed_capture_pointer_exits: Vec<BTreeMap<Place, BTreeSet<Place>>>,
+    pub effect_capture_pointer_exits: Vec<BTreeMap<Place, BTreeSet<Place>>>,
     /// Work charged by the outer analysis entry point, including nested summaries.
     pub entry_steps_used: usize,
     pub failed_exits: Vec<State>,
@@ -1054,6 +1161,26 @@ impl fmt::Display for Report {
         f.write_str(") (borrowed-parameters")?;
         for (slot, ty) in &self.borrowed_parameters {
             write!(f, " (borrowed-parameter (slot {slot}) (pointee {ty}))")?;
+        }
+        f.write_str(") (borrowed-fields")?;
+        for field in &self.borrowed_fields {
+            write!(f, " {field}")?;
+        }
+        f.write_str(") (borrowed-roots")?;
+        for (root, origin) in &self.borrowed_roots {
+            write!(
+                f,
+                " (borrowed-root (owner {}) (local {}) {origin})",
+                root.owner, root.local
+            )?;
+        }
+        f.write_str(") (cleanup-call-accesses")?;
+        for (access, targets) in &self.cleanup_call_accesses {
+            write!(f, " (cleanup-call-access {access} (targets")?;
+            for target in targets {
+                write!(f, " {target}")?;
+            }
+            f.write_str("))")?;
         }
         f.write_str(") (effect-parameters")?;
         for input in &self.effect_parameters {
@@ -1150,6 +1277,41 @@ impl fmt::Display for Report {
             f.write_str(" (captures")?;
             display_captured_enums(captures, f)?;
             f.write_str(")")?;
+        }
+        for (name, exits) in [
+            ("failed-capture-enum-exits", &self.failed_capture_enum_exits),
+            ("effect-capture-enum-exits", &self.effect_capture_enum_exits),
+        ] {
+            write!(f, ") ({name}")?;
+            for captures in exits {
+                f.write_str(" (captures")?;
+                display_captured_enums(captures, f)?;
+                f.write_str(")")?;
+            }
+        }
+        for (name, exits) in [
+            ("captured-pointer-exits", &self.captured_pointer_exits),
+            (
+                "failed-capture-pointer-exits",
+                &self.failed_capture_pointer_exits,
+            ),
+            (
+                "effect-capture-pointer-exits",
+                &self.effect_capture_pointer_exits,
+            ),
+        ] {
+            write!(f, ") ({name}")?;
+            for captures in exits {
+                f.write_str(" (captures")?;
+                for (slot, targets) in captures {
+                    write!(f, " (slot {slot} (targets")?;
+                    for target in targets {
+                        write!(f, " {target}")?;
+                    }
+                    f.write_str("))")?;
+                }
+                f.write_str(")")?;
+            }
         }
         f.write_str(") (failed-exits")?;
         for exit in &self.failed_exits {
@@ -1348,6 +1510,16 @@ impl Report {
             .append(&mut other.captured_callable_exits);
         self.captured_enum_exits
             .append(&mut other.captured_enum_exits);
+        self.captured_pointer_exits
+            .append(&mut other.captured_pointer_exits);
+        self.failed_capture_enum_exits
+            .append(&mut other.failed_capture_enum_exits);
+        self.effect_capture_enum_exits
+            .append(&mut other.effect_capture_enum_exits);
+        self.failed_capture_pointer_exits
+            .append(&mut other.failed_capture_pointer_exits);
+        self.effect_capture_pointer_exits
+            .append(&mut other.effect_capture_pointer_exits);
         self.failed_exits.append(&mut other.failed_exits);
         self.effect_exits.append(&mut other.effect_exits);
         self.lexical_returns.append(&mut other.lexical_returns);
@@ -1392,12 +1564,51 @@ struct Callable {
     // the nested owned positions imported at each invocation, never this tree.
     captures: BTreeMap<Place, Callable>,
 }
+fn bound_callable_copy(
+    value: &Callable,
+    fuel: &mut usize,
+    source: SourceRange,
+    depth: usize,
+) -> Result<(), Error> {
+    if depth >= 128 {
+        return Err(error(source, "callable copy depth exhausted"));
+    }
+    for definition in std::iter::once(&value.definition).chain(&value.alternatives) {
+        nir::visit::expression(definition, fuel, |expr, fuel| {
+            super::memory::bound_type(&expr.ty, fuel)?;
+            if let K::FunctionInstance { arguments, .. } = &expr.kind {
+                for argument in arguments {
+                    super::memory::bound_type(argument, fuel)?;
+                }
+            }
+            Ok(())
+        })
+        .map_err(|e| error(source, e))?;
+    }
+    for domains in value.enum_captures.values() {
+        for (path, tags) in domains {
+            *fuel = fuel
+                .checked_sub(path.len().saturating_add(tags.len()).saturating_add(1))
+                .ok_or_else(|| error(source, "callable copy budget exhausted"))?;
+        }
+    }
+    for (place, capture) in &value.captures {
+        *fuel = fuel
+            .checked_sub(place.fields.len().saturating_add(1))
+            .ok_or_else(|| error(source, "callable copy budget exhausted"))?;
+        bound_callable_copy(capture, fuel, source, depth + 1)?;
+    }
+    for choice in &value.choices {
+        bound_callable_copy(choice, fuel, source, depth + 1)?;
+    }
+    Ok(())
+}
 /// Values already prepared at their source evaluation points. Parameter slots
 /// are positional so different closure definitions can bind the same delivered
 /// arguments without evaluating source expressions again.
 #[derive(Clone)]
 struct ClosureArguments {
-    pointers: BTreeMap<usize, BTreeSet<Place>>,
+    pointers: MemoryTargets,
     callables: BTreeMap<usize, Callable>,
     fields: BTreeMap<usize, BTreeMap<Vec<usize>, Callable>>,
     domains: BTreeMap<usize, EnumDomains>,
@@ -1444,6 +1655,8 @@ fn invalidated_pointer_target() -> Place {
 // Known pointer leaves relative to the root of a value being delivered.
 // Missing leaves are unknown, not proof that the value has no dependencies.
 type ValueOrigins = BTreeMap<Vec<usize>, BTreeSet<Place>>;
+// Symbolic owned input paths; unlike ValueOrigins these omit pointer wrappers.
+type MemoryTargets = BTreeMap<usize, ValueOrigins>;
 
 #[derive(Clone, Default)]
 struct Flow {
@@ -1506,6 +1719,23 @@ pub trait CleanupPolicy {
         variants: &[VariantSelection],
         fuel: &mut usize,
     ) -> Result<super::drop::CleanupPlan, String>;
+    /// Domain keys use physical fields when enclosing tags are selected, or
+    /// `[usize::MAX, tag, field, ...]` qualifiers for conditional payloads.
+    /// Implementations may conservatively ignore domains, but must not interpret
+    /// a conditional domain as an unconditional physical-field constraint.
+    fn plan_with_domains(
+        &mut self,
+        ty: &Term,
+        state: &State,
+        place: &Place,
+        variants: &[VariantSelection],
+        domains: &BTreeMap<Vec<usize>, BTreeSet<usize>>,
+        pointers: Option<super::drop::PointerMemory<'_>>,
+        fuel: &mut usize,
+    ) -> Result<super::drop::CleanupPlan, String> {
+        let _ = domains;
+        self.plan_with_memory(ty, state, place, variants, pointers, fuel)
+    }
     fn plan_with_memory(
         &mut self,
         ty: &Term,
@@ -1589,6 +1819,7 @@ struct Analyzer<'a, F, G> {
     candidate_observations: Option<Report>,
     observation_region: bool,
     observation_locals: BTreeSet<PlaceId>,
+    method_callees: super::memory::MethodCallees,
     persistent_roots: BTreeSet<PlaceId>,
     captured_roots: BTreeSet<PlaceId>,
     defer_unknown_calls: bool,
@@ -1673,32 +1904,58 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
-    fn join_pointer_origins<K: Ord + Clone>(
+    fn stored_pointer_possible(
         &mut self,
-        left: &mut BTreeMap<K, BTreeSet<Place>>,
-        right: &BTreeMap<K, BTreeSet<Place>>,
+        flow: &Flow,
+        slot: &Place,
+        source: SourceRange,
+    ) -> Result<bool, Error> {
+        let Some(ty) = flow.types.get(&slot.root) else {
+            return Ok(true);
+        };
+        let unknown = EnumDomains::new();
+        origins::pointer_possible(
+            self.package,
+            ty,
+            &slot.fields,
+            flow.enum_domains.get(&slot.root).unwrap_or(&unknown),
+            &mut vec![],
+            &mut self.fuel,
+            source,
+            0,
+        )
+    }
+    fn join_pointer_origins(
+        &mut self,
+        left: &mut Flow,
+        right: &Flow,
         source: SourceRange,
     ) -> Result<(), Error> {
         self.fuel = self
             .fuel
-            .checked_sub(left.len().saturating_add(right.len()))
+            .checked_sub(left.pointers.len().saturating_add(right.pointers.len()))
             .ok_or_else(|| error(source, "pointer origin join budget exhausted"))?;
-        for (key, targets) in left.iter_mut() {
-            if !right.contains_key(key) {
+        for (slot, targets) in left.pointers.iter_mut() {
+            if !right.pointers.contains_key(slot)
+                && self.stored_pointer_possible(right, slot, source)?
+            {
                 targets.insert(unknown_pointer_target());
             }
         }
-        for (key, targets) in right {
+        for (slot, targets) in &right.pointers {
             self.pointer_work(targets, source)?;
-            match left.entry(key.clone()) {
-                std::collections::btree_map::Entry::Occupied(mut entry) => {
-                    entry.get_mut().extend(targets.iter().cloned())
-                }
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    let mut targets = targets.clone();
+            if let Some(previous) = left.pointers.get_mut(slot) {
+                previous.extend(targets.iter().cloned());
+            } else {
+                let mut targets = targets.clone();
+                if self.stored_pointer_possible(left, slot, source)? {
                     targets.insert(unknown_pointer_target());
-                    entry.insert(targets);
                 }
+                self.fuel = self
+                    .fuel
+                    .checked_sub(slot.fields.len().saturating_add(1))
+                    .ok_or_else(|| error(source, "pointer origin join budget exhausted"))?;
+                left.pointers.insert(slot.clone(), targets);
             }
         }
         Ok(())
@@ -2185,6 +2442,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         place: Place,
         ty: &Term,
         pointers: super::drop::PointerMemory<'_>,
+        variants: &[VariantSelection],
+        domains: &EnumDomains,
         source: SourceRange,
     ) -> Result<Option<CleanupAction>, Error> {
         let Some(remaining) = state
@@ -2201,12 +2460,79 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             return Ok(Some(candidate));
         };
         let plan = policy
-            .plan_with_memory(ty, state, &place, &[], Some(pointers), &mut self.fuel)
+            .plan_with_domains(
+                ty,
+                state,
+                &place,
+                variants,
+                domains,
+                Some(pointers),
+                &mut self.fuel,
+            )
             .map_err(|e| error(source, e))?;
         Ok(Some(CleanupAction::Planned {
             candidate: Box::new(candidate),
             plan: Box::new(plan),
         }))
+    }
+
+    // A nested tag is unconditional only when every enclosing variant is
+    // known. Callable evidence uses qualified paths; cleanup uses physical fields.
+    fn cleanup_variants(
+        &mut self,
+        flow: &Flow,
+        place: &Place,
+        source: SourceRange,
+    ) -> Result<(Vec<VariantSelection>, EnumDomains), Error> {
+        let domains = self.stored_enum_domains(flow, place, source)?;
+        let mut selections = vec![];
+        let mut allowed = EnumDomains::new();
+        for (path, tags) in &domains {
+            self.fuel = self
+                .fuel
+                .checked_sub(path.len() + tags.len() + 1)
+                .ok_or_else(|| error(source, "cleanup variant budget exhausted"))?;
+            if tags.is_empty() {
+                continue;
+            }
+            let mut fields = vec![];
+            let mut index = 0;
+            let mut established = true;
+            while index < path.len() {
+                if path[index] == VARIANT_PATH {
+                    let Some(tag) = path.get(index + 1) else {
+                        established = false;
+                        break;
+                    };
+                    if !domains
+                        .get(&path[..index])
+                        .is_some_and(|tags| tags.len() == 1 && tags.contains(tag))
+                    {
+                        established = false;
+                        break;
+                    }
+                    index += 2;
+                } else {
+                    fields.push(path[index]);
+                    index += 1;
+                }
+            }
+            if established {
+                if tags.len() == 1 {
+                    selections.push(VariantSelection {
+                        fields,
+                        index: *tags.first().unwrap(),
+                    });
+                } else {
+                    allowed.insert(fields, tags.clone());
+                }
+            } else {
+                // Retain the enclosing-tag conditions instead of treating this
+                // inner domain as unconditional physical-field evidence.
+                allowed.insert(path.clone(), tags.clone());
+            }
+        }
+        Ok((selections, allowed))
     }
 
     fn local_action(
@@ -2231,6 +2557,14 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 fields: vec![],
             }));
         }
+        let (variants, domains) = self.cleanup_variants(
+            flow,
+            &Place {
+                root: id,
+                fields: vec![],
+            },
+            source,
+        )?;
         self.owned_action(
             &flow.state,
             Place {
@@ -2243,6 +2577,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 slots: &flow.pointers,
                 retired: &possible_retired,
             },
+            &variants,
+            &domains,
             source,
         )
     }
@@ -2661,7 +2997,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 .ok_or_else(|| error(source, "conditional cleanup order budget exhausted"))?;
             left.cleanup_before.entry(*id).or_default().extend(before);
         }
-        self.join_pointer_origins(&mut left.pointers, &right.pointers, source)?;
+        self.join_pointer_origins(left, right, source)?;
         let mut callables = BTreeMap::new();
         for (id, value) in &left.callables {
             if let Some(other) = right.callables.get(id) {
@@ -2921,6 +3257,53 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             }
         }
         Ok(())
+    }
+    fn stored_enum_domains(
+        &mut self,
+        flow: &Flow,
+        place: &Place,
+        source: SourceRange,
+    ) -> Result<EnumDomains, Error> {
+        let mut domains = EnumDomains::new();
+        if let Some(stored) = flow.enum_domains.get(&place.root) {
+            for (path, tags) in stored {
+                self.fuel = self
+                    .fuel
+                    .checked_sub(path.len().saturating_add(tags.len()).saturating_add(1))
+                    .ok_or_else(|| error(source, "enum domain delivery budget exhausted"))?;
+                if let Some(relative) = path.strip_prefix(place.fields.as_slice()) {
+                    domains.insert(relative.to_vec(), tags.clone());
+                }
+            }
+        }
+        Ok(domains)
+    }
+    fn stored_code(
+        &mut self,
+        flow: &Flow,
+        place: &Place,
+        source: SourceRange,
+    ) -> Result<BTreeMap<Vec<usize>, Callable>, Error> {
+        let mut code = BTreeMap::new();
+        if place.fields.is_empty() {
+            if let Some(callable) = flow.callables.get(&place.root) {
+                bound_callable_copy(callable, &mut self.fuel, source, 0)?;
+                code.insert(vec![], callable.clone());
+            }
+        }
+        for (slot, callable) in &flow.callable_fields {
+            self.fuel = self
+                .fuel
+                .checked_sub(slot.fields.len().saturating_add(1))
+                .ok_or_else(|| error(source, "code pointer delivery budget exhausted"))?;
+            if slot.root == place.root {
+                if let Some(relative) = slot.fields.strip_prefix(place.fields.as_slice()) {
+                    bound_callable_copy(callable, &mut self.fuel, source, 0)?;
+                    code.insert(relative.to_vec(), callable.clone());
+                }
+            }
+        }
+        Ok(code)
     }
     fn install_enum_domains(
         &mut self,
@@ -3398,6 +3781,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         &mut self,
         code: &super::memory::PreparedCode,
         ty: &Term,
+        pointer_contract: bool,
+        absent_pointer_paths: &[Vec<usize>],
         source: SourceRange,
         depth: usize,
     ) -> Result<Option<Callable>, Error> {
@@ -3515,10 +3900,29 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 };
                 let prepared_captures = invariant.as_ref().unwrap_or(prepared_captures.as_ref());
                 let mut evidence = BTreeMap::new();
-                for capture in captures {
+                let mut enum_captures: BTreeMap<PlaceId, EnumDomains> = BTreeMap::new();
+                for (capture_index, capture) in captures.iter().enumerate() {
+                    for path in absent_pointer_paths {
+                        self.fuel = self.fuel.checked_sub(path.len() + 1).ok_or_else(|| {
+                            error(source, "returned pointer absence budget exhausted")
+                        })?;
+                        if path.first() == Some(&capture_index)
+                            && !exclude_absent_code_leaf(
+                                self.package,
+                                &capture.ty,
+                                &path[1..],
+                                enum_captures.entry(root(capture.binding)).or_default(),
+                                &mut self.fuel,
+                                source,
+                            )?
+                        {
+                            return Ok(None);
+                        }
+                    }
                     if !recoverable_return_capture_layout(
                         self.package,
                         &capture.ty,
+                        pointer_contract,
                         &mut self.fuel,
                         source,
                         0,
@@ -3570,11 +3974,41 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             &mut self.fuel,
                             source,
                         )?;
+                        if candidates.is_empty() {
+                            let domains = enum_captures.entry(root(capture.binding)).or_default();
+                            if !exclude_absent_code_leaf(
+                                self.package,
+                                &capture.ty,
+                                &fields,
+                                domains,
+                                &mut self.fuel,
+                                source,
+                            )? {
+                                return Ok(None);
+                            }
+                            continue;
+                        }
+                        let mut nested_absence = vec![];
+                        for path in absent_pointer_paths {
+                            self.fuel = self
+                                .fuel
+                                .checked_sub(path.len() + fields.len() + 1)
+                                .ok_or_else(|| {
+                                    error(source, "nested pointer absence budget exhausted")
+                                })?;
+                            if path.first() == Some(&capture_index)
+                                && path[1..].starts_with(&fields)
+                            {
+                                nested_absence.push(path[1 + fields.len()..].to_vec());
+                            }
+                        }
                         let mut joined = None;
                         for candidate in candidates {
                             let Some(value) = self.returned_code_candidate(
                                 candidate,
                                 &expected,
+                                pointer_contract,
+                                &nested_absence,
                                 source,
                                 depth + 1,
                             )?
@@ -3612,7 +4046,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     definition: definition.as_ref().clone(),
                     captures: evidence,
                     choices: vec![],
-                    enum_captures: Default::default(),
+                    enum_captures,
                     alternatives: vec![],
                     generation: 0,
                 }))
@@ -3626,6 +4060,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         inputs: &[CallableParameter],
         enum_inputs: &[EnumParameter],
         source: SourceRange,
+        may_complete: &mut bool,
         result_fields: &mut BTreeMap<Vec<usize>, Callable>,
         result_variants: &mut EnumDomains,
     ) -> Result<Option<Callable>, Error> {
@@ -3633,7 +4068,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             return Ok(None);
         };
         let result = completion_type(result);
-        if !contains_callable_value(self.package, result, &mut self.fuel, source, 0)? {
+        if !contains_return_evidence(self.package, result, &mut self.fuel, source, 0)? {
             return Ok(None);
         }
         let (declaration, arguments) = match &callee.kind {
@@ -3655,13 +4090,11 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let Some(package) = self.package else {
             return Ok(None);
         };
-        let original = package
-            .functions
-            .iter()
-            .find(|f| f.declaration == declaration)
+        let (original, body_arguments) = package
+            .runtime_body(declaration, &arguments)
             .ok_or_else(|| error(source, "callable result function is missing"))?;
         if original.phase != FunctionPhase::Runtime
-            || original.type_parameters.len() != arguments.len()
+            || original.type_parameters.len() != body_arguments.len()
         {
             return Err(error(
                 source,
@@ -3670,12 +4103,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         let mut function = original.clone();
         let instantiate = |expr: &Expr| {
-            expr.instantiate_types(&original.type_parameters, &arguments)
+            expr.instantiate_types(&original.type_parameters, body_arguments)
                 .map_err(|e| error(source, format!("callable result instantiation: {e}")))
         };
         function.signature = original
             .signature
-            .instantiate_types(&original.type_parameters, &arguments)
+            .instantiate_types(&original.type_parameters, body_arguments)
             .map_err(|e| error(source, format!("callable result signature: {e}")))?;
         if function.signature.callable_signature() != callee.ty.callable_signature() {
             return Err(error(source, "callable result signature mismatch"));
@@ -3700,14 +4133,41 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         // boundary's obligations. This summary never unfolds a normal-form head.
         function.type_parameters.clear();
         let mut borrows = vec![];
+        let mut fields = vec![];
         if let Term::Function { parameters, .. } = function.signature.callable_signature() {
             for (slot, parameter) in parameters.iter().enumerate() {
-                if let Term::Pointer(subject) = &parameter.ty {
-                    borrows.push((slot, (**subject).clone()));
+                if parameter.sort == nir::Sort::Type
+                    && parameter.ty == Term::Primitive(nir::Primitive::Type)
+                {
+                    continue;
+                }
+
+                for leaf in
+                    super::memory::pointer_input_layout(self.package, &parameter.ty, &mut self.fuel)
+                        .map_err(|reason| error(source, reason))?
+                {
+                    let path = leaf.input_fields;
+                    let pointee = leaf.pointee;
+                    if !path.is_empty() {
+                        fields.push(BorrowedField {
+                            parameter: slot,
+                            fields: path,
+                            pointee,
+                        });
+                    }
+                }
+                if let Some((_, subject)) = super::memory::pointer_representation(
+                    self.package,
+                    &parameter.ty,
+                    &mut self.fuel,
+                )
+                .map_err(|reason| error(source, reason))?
+                {
+                    borrows.push((slot, subject));
                 }
             }
         }
-        if !borrows.is_empty() {
+        if !borrows.is_empty() || !fields.is_empty() {
             let footprint = self
                 .memory_summary_with_inputs(callee, inputs, source)
                 .map_err(|reason| error(source, reason))?;
@@ -3730,6 +4190,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             enum_inputs,
             stack,
             effect_inputs,
+            &fields,
         )?;
         self.fuel = self
             .fuel
@@ -3738,6 +4199,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         if !report.deferred_calls.is_empty() {
             return Ok(None);
         }
+        // A fully analyzed callee can have only rejection/effect-escape exits.
+        // Missing callable evidence on that path is not an unknown callable:
+        // there is no delivered value and no continuation to invoke it.
+        *may_complete = !report.exits.is_empty();
         (*result_fields, *result_variants) =
             callable_aggregate_return_summary(&report, &mut self.fuel, source)?;
         callable_return_summary(&report, &mut self.fuel, source)
@@ -3786,6 +4251,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 required.push((slot, fields));
             }
         }
+        // Passing owned code does not invoke it. Analyze the callee with the
+        // available premises; an actual indirect call still requires identity.
+        // Pure transport must preserve enum/cleanup facts even when affine
+        // captures prevent reconstructing a callable candidate.
         if required.iter().any(|(slot, fields)| {
             !enums
                 .iter()
@@ -3794,20 +4263,49 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     .iter()
                     .any(|input| input.parameter == *slot && input.fields == *fields)
         }) {
-            // An ordinary checker can still describe this as an unresolved
-            // obligation; the source publisher must reject it before execution.
-            self.report.deferred_calls.push(source);
-            return Ok(None);
+            match self.memory_summary_with_inputs(callee, &callables, source) {
+                Ok(_) => (),
+                Err(reason)
+                    if reason.contains("budget exhausted")
+                        || reason.contains("depth exhausted") =>
+                {
+                    return Err(error(source, reason));
+                }
+                Err(_) => {
+                    self.report.deferred_calls.push(source);
+                    return Ok(None);
+                }
+            }
         }
+        let mut may_complete = true;
         let mut result = self.named_callable_result(
             callee,
             &callables,
             &enums,
             source,
+            &mut may_complete,
             &mut flow.value_callables,
             &mut flow.value_variants,
         )?;
-        {
+        if !may_complete {
+            // No returned callable does not remove the caller's unwind work.
+            // Record terminal paths before suppressing normal continuation;
+            // the usual post-call checkpoints only run for a live flow.
+            if self
+                .call_may_reject(callee)
+                .map_err(|reason| error(source, reason))?
+            {
+                let mut failed = flow.clone();
+                self.exit(&mut failed, source, CleanupReason::PredicateFailure)?;
+            }
+            if matches!(callee.ty.callable_signature(), Term::Function { result, .. }
+                if matches!(result.as_ref(), Term::Computation { effects, .. } if !effects.is_empty()))
+            {
+                self.effect_escape_checkpoint(flow, source)?;
+            }
+            flow.live = false;
+        }
+        if may_complete {
             let paths = callable_value_paths(self.package, result_ty, &mut self.fuel, source, 0)?;
             if paths.iter().any(|path| {
                 if path.is_empty() {
@@ -3829,6 +4327,42 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     Err(_) => None,
                 };
                 if let Some(summary) = summary {
+                    // Cleanup needs result tag facts even when affine captures
+                    // prevent recovering an invocable code candidate. Keep this
+                    // evidence independent from Copy-based code reconstruction.
+                    let layout = super::memory::pointer_input_layout(
+                        self.package,
+                        result_ty,
+                        &mut self.fuel,
+                    )
+                    .map_err(|reason| error(source, reason))?;
+                    let mut domains =
+                        copy_enum_domains(&flow.value_variants, &mut self.fuel, source)?;
+                    let mut consistent = true;
+                    for leaf in layout {
+                        if !leaf.guards.is_empty()
+                            && summary
+                                .pointer_fields
+                                .get(&leaf.input_fields)
+                                .and_then(Option::as_ref)
+                                .is_some_and(BTreeSet::is_empty)
+                        {
+                            consistent &= exclude_absent_code_leaf(
+                                self.package,
+                                result_ty,
+                                &leaf.input_fields,
+                                &mut domains,
+                                &mut self.fuel,
+                                source,
+                            )?;
+                            if !consistent {
+                                break;
+                            }
+                        }
+                    }
+                    if consistent {
+                        flow.value_variants = domains;
+                    }
                     for (path, evidence) in &summary.code_fields {
                         if if path.is_empty() {
                             result.is_some()
@@ -3847,14 +4381,42 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             &mut self.fuel,
                             source,
                         )?;
-                        // A memory footprint does not prove arbitrary capture
-                        // ownership. Recovery checks Copy data and stable code
-                        // captures separately; pointer/tag/affine environments
-                        // still require contextual environment-state evidence.
+                        // Recover pointer layouts only with complete origins for
+                        // every possible leaf. Ownership requires Copy and stable
+                        // code; this flag never grants pointee validity by itself.
+                        let layout =
+                            super::memory::pointer_input_layout(self.package, &ty, &mut self.fuel)
+                                .map_err(|reason| error(source, reason))?;
+                        let mut pointer_contract = true;
+                        let mut absent_pointer_paths = vec![];
+                        for leaf in &layout {
+                            self.fuel = self
+                                .fuel
+                                .checked_sub(path.len() + leaf.input_fields.len() + 1)
+                                .ok_or_else(|| {
+                                    error(source, "returned pointer contract budget exhausted")
+                                })?;
+                            let mut full = path.clone();
+                            full.extend(&leaf.input_fields);
+                            match summary.pointer_fields.get(&full).and_then(Option::as_ref) {
+                                Some(targets) if !targets.is_empty() => (),
+                                Some(_) if !leaf.guards.is_empty() => {
+                                    absent_pointer_paths.push(leaf.input_fields.clone())
+                                }
+                                _ => pointer_contract = false,
+                            }
+                        }
                         let mut joined = None;
                         let mut complete = !values.is_empty();
                         for code in values {
-                            let Some(value) = self.returned_code_candidate(code, &ty, source, 0)?
+                            let Some(value) = self.returned_code_candidate(
+                                code,
+                                &ty,
+                                pointer_contract,
+                                &absent_pointer_paths,
+                                source,
+                                0,
+                            )?
                             else {
                                 complete = false;
                                 break;
@@ -3986,9 +4548,22 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         flow: &mut Flow,
         depth: usize,
     ) -> Result<Option<BTreeSet<Place>>, Error> {
+        self.call_temporary_with_origins(expr, callee, arguments, parameter_bindings, flow, depth)
+            .map(|(pointer, _)| pointer)
+    }
+
+    fn call_temporary_with_origins(
+        &mut self,
+        expr: &Expr,
+        callee: &Expr,
+        arguments: &[nir::program::CallArgument],
+        parameter_bindings: &[LocalId],
+        flow: &mut Flow,
+        depth: usize,
+    ) -> Result<(Option<BTreeSet<Place>>, ValueOrigins), Error> {
         let origins = self.evaluate_value_origins(callee, flow, depth + 1)?;
         if !flow.live {
-            return Ok(None);
+            return Ok((None, BTreeMap::new()));
         }
         let callable = flow.value_callable.take().ok_or_else(|| {
             error(
@@ -4024,8 +4599,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let callable = flow.callables[&id].clone();
         self.report.callee_temporaries.push((id, callee.source));
         let mut pointer_result = None;
+        let mut result_origins = BTreeMap::new();
         if !callable.alternatives.is_empty() {
-            pointer_result = self.call_named_candidates(
+            (pointer_result, result_origins) = self.call_named_candidates_with_origins(
                 expr,
                 &callable,
                 arguments,
@@ -4034,8 +4610,14 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 depth + 1,
             )?;
         } else if matches!(callable.definition.kind, K::Closure { .. }) {
-            pointer_result =
-                self.call_closure(id, &callable, arguments, flow, expr.source, depth + 1)?;
+            (pointer_result, result_origins) = self.call_closure_with_origins(
+                id,
+                &callable,
+                arguments,
+                flow,
+                expr.source,
+                depth + 1,
+            )?;
         } else {
             let mut target = callable.definition;
             target.source = callee.source;
@@ -4063,10 +4645,13 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     parameter_bindings: bindings,
                 },
             };
-            if matches!(expr.ty, Term::Pointer(_)) {
+            if super::memory::pointer_representation(self.package, &expr.ty, &mut self.fuel)
+                .map_err(|reason| error(expr.source, reason))?
+                .is_some()
+            {
                 pointer_result = self.evaluate_pointer_value(&resolved, flow, depth + 1)?;
             } else {
-                self.expr(&resolved, flow, depth + 1)?;
+                result_origins = self.evaluate_value_origins(&resolved, flow, depth + 1)?;
             }
         }
         let result = flow.value_callable.clone();
@@ -4110,7 +4695,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             );
         }
         flow.value_callable = result;
-        Ok(pointer_result)
+        Ok((pointer_result, result_origins))
     }
     fn call_closure(
         &mut self,
@@ -4121,6 +4706,18 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         source: SourceRange,
         depth: usize,
     ) -> Result<Option<BTreeSet<Place>>, Error> {
+        self.call_closure_with_origins(binding, callable, arguments, flow, source, depth)
+            .map(|(pointer, _)| pointer)
+    }
+    fn call_closure_with_origins(
+        &mut self,
+        binding: PlaceId,
+        callable: &Callable,
+        arguments: &[nir::program::CallArgument],
+        flow: &mut Flow,
+        source: SourceRange,
+        depth: usize,
+    ) -> Result<(Option<BTreeSet<Place>>, ValueOrigins), Error> {
         if self.fuel == 0 || depth > 128 {
             return Err(error(
                 source,
@@ -4134,18 +4731,63 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         else {
             return Err(error(source, "closure invocation lacks a signature"));
         };
-        let memory = flow.memory_exposed
-            || matches!(result.as_ref(), Term::Pointer(_))
-            || parameters
-                .iter()
-                .any(|parameter| matches!(parameter.ty, Term::Pointer(_)))
+        // Ownership-only analysis has no package layouts or callable bodies.
+        // Preserve that API; pointer-dependent calls still need memory premises.
+        let result_paths = if self.package.is_some()
+            && matches!(
+                result.as_ref(),
+                Term::Tuple(_)
+                    | Term::Record(_)
+                    | Term::Nominal { .. }
+                    | Term::NormalForm { .. }
+                    | Term::Closure { .. }
+            )
+            && self.storage_inputs_are_closed(result, source)?
+            && super::memory::pointer_representation(self.package, result, &mut self.fuel)
+                .map_err(|reason| error(source, reason))?
+                .is_none()
+        {
+            super::memory::conditional_pointer_storage_paths(self.package, result, &mut self.fuel)
+                .map_err(|reason| error(source, reason))?
+        } else {
+            BTreeMap::new()
+        };
+        let mut result_origins: ValueOrigins = result_paths
+            .values()
+            .map(|path| (path.clone(), BTreeSet::new()))
+            .collect();
+        let mut memory = !result_paths.is_empty()
+            || flow.memory_exposed
+            || super::memory::pointer_representation(self.package, result, &mut self.fuel)
+                .map_err(|reason| error(source, reason))?
+                .is_some()
             || matches!(&callable.definition.kind,K::Closure {captures,..}
                 if captures.iter().any(|capture|matches!(capture.ty,Term::Pointer(_))));
+        for parameter in parameters {
+            memory |=
+                super::memory::pointer_representation(self.package, &parameter.ty, &mut self.fuel)
+                    .map_err(|reason| error(source, reason))?
+                    .is_some();
+        }
+        if let K::Closure { captures, .. } = &callable.definition.kind {
+            for capture in captures {
+                if self.package.is_some() && self.storage_inputs_are_closed(&capture.ty, source)? {
+                    memory |= !super::memory::pointer_input_layout(
+                        self.package,
+                        &capture.ty,
+                        &mut self.fuel,
+                    )
+                    .map_err(|reason| error(source, reason))?
+                    .is_empty();
+                }
+            }
+        }
         let Some(prepared) =
             self.prepare_closure_arguments(callable, arguments, flow, source, depth)?
         else {
-            return Ok(None);
+            return Ok((None, BTreeMap::new()));
         };
+        memory |= prepared.pointers.values().any(|fields| !fields.is_empty());
         // Arguments can mutate state. Do not resurrect a callable moved while
         // evaluating an argument, or confuse a replacement with this receiver.
         if flow.callables.get(&binding) != Some(callable) {
@@ -4172,26 +4814,38 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     .fuel
                     .checked_sub(prepared.pointers.len())
                     .ok_or_else(|| error(source, "closure pointer input budget exhausted"))?;
-                for targets in prepared.pointers.values() {
-                    self.pointer_work(targets, source)?;
+                for fields in prepared.pointers.values() {
+                    for (path, targets) in fields {
+                        self.fuel = self
+                            .fuel
+                            .checked_sub(path.len() + 1)
+                            .ok_or_else(|| error(source, "closure input path budget exhausted"))?;
+                        self.pointer_work(targets, source)?;
+                    }
                 }
                 let mut pointer_inputs = prepared.pointers.clone();
                 if let K::Closure { captures, .. } = &candidate.definition.kind {
                     let mut slot = parameters.len();
                     for (index, capture) in captures.iter().enumerate() {
-                        if matches!(capture.ty, Term::Pointer(_)) {
-                            let place = Place {
-                                root: binding,
-                                fields: vec![index],
-                            };
-                            branch.state.require_present(&place).map_err(|e| {
-                                error(source, format!("pointer capture unavailable: {e:?}"))
-                            })?;
-                            let targets = branch.pointers.get(&place).ok_or_else(|| {
-                                error(source, "captured pointer provenance is not established")
-                            })?;
-                            self.pointer_work(targets, source)?;
-                            pointer_inputs.insert(slot, targets.clone());
+                        let domains = copy_enum_domains(
+                            candidate
+                                .enum_captures
+                                .get(&root(capture.binding))
+                                .unwrap_or(&EnumDomains::new()),
+                            &mut self.fuel,
+                            source,
+                        )?;
+                        let inputs = self.capture_input_targets(
+                            &branch,
+                            binding,
+                            index,
+                            &capture.ty,
+                            &domains,
+                            true,
+                            source,
+                        )?;
+                        if !inputs.is_empty() {
+                            pointer_inputs.insert(slot, inputs);
                             slot += 1;
                         }
                     }
@@ -4254,10 +4908,14 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         &code_inputs,
                     )
                     .map(|summary| super::memory::ArgumentSummary {
+                        input_pointer_exits: BTreeMap::new(),
+                        input_code_exits: BTreeMap::new(),
                         code_fields: summary.code_fields,
                         accesses: summary.accesses,
                         may_reject: summary.may_reject,
+                        may_run_cleanup: summary.may_run_cleanup,
                         result_targets: summary.result_targets,
+                        pointer_fields: summary.pointer_fields,
                     })
                 };
                 let footprint = match footprint {
@@ -4272,11 +4930,41 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     {
                         self.report.deferred_calls.push(source);
                         result_targets = None;
+                        for targets in result_origins.values_mut() {
+                            targets.insert(unknown_pointer_target());
+                        }
                         None
                     }
                     Err(reason) => return Err(error(source, reason)),
                 };
                 if let Some(footprint) = footprint {
+                    for (path, storage) in &result_paths {
+                        self.fuel = self
+                            .fuel
+                            .checked_sub(path.len() + storage.len() + 1)
+                            .ok_or_else(|| {
+                                error(source, "closure result provenance budget exhausted")
+                            })?;
+                        let actual = result_origins
+                            .get_mut(storage)
+                            .expect("validated result path");
+                        if let Some(Some(targets)) = footprint.pointer_fields.get(path) {
+                            for target in targets {
+                                if let Some(mapped) = self.map_memory_target(
+                                    target,
+                                    &pointer_inputs,
+                                    &mut branch,
+                                    source,
+                                )? {
+                                    actual.extend(mapped);
+                                } else {
+                                    actual.insert(unknown_pointer_target());
+                                }
+                            }
+                        } else {
+                            actual.insert(unknown_pointer_target());
+                        }
+                    }
                     self.memory_accesses(
                         &footprint.accesses,
                         &pointer_inputs,
@@ -4345,7 +5033,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         } else {
             flow.live = false;
         }
-        Ok(if memory { result_targets } else { None })
+        Ok((if memory { result_targets } else { None }, result_origins))
     }
     // Mixed sets use the same completed argument frame as closure candidates.
     // Any pointer footprint has already been checked against actual targets.
@@ -4431,9 +5119,15 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             for argument in arguments {
                 let callable = callable_source(&argument.value, flow, &mut this.fuel)?;
                 let origins = this.evaluate_value_origins(&argument.value, flow, depth + 1)?;
-                if let Some(targets) = origins.get(&vec![]) {
-                    argument_pointers.insert(argument.parameter, targets.clone());
-                }
+                argument_pointers.insert(
+                    argument.parameter,
+                    this.memory_input_targets(
+                        &argument.value.ty,
+                        &origins,
+                        &flow.value_variants,
+                        source,
+                    )?,
+                );
                 let callable = flow.value_callable.clone().or(callable);
                 if !flow.live {
                     break;
@@ -4468,6 +5162,22 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         subject: &Term,
         source: SourceRange,
     ) -> Result<(), Error> {
+        let ty = flow
+            .types
+            .get(&root(binding))
+            .ok_or_else(|| error(source, "closure borrowed binding is missing"))?;
+        let Some((pointer_depth, actual)) =
+            super::memory::pointer_representation(self.package, ty, &mut self.fuel)
+                .map_err(|reason| error(source, reason))?
+        else {
+            return Err(error(
+                source,
+                "closure borrowed binding lacks pointer representation",
+            ));
+        };
+        if actual != *subject {
+            return Err(error(source, "closure borrowed pointee type mismatch"));
+        }
         // Conditional borrowed premises never become owned cleanup roots.
         // Actual pointees must separately satisfy the invocation footprint.
         let pointee = PlaceId {
@@ -4488,7 +5198,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         flow.pointers.insert(
             Place {
                 root: root(binding),
-                fields: vec![],
+                fields: vec![0; pointer_depth],
             },
             BTreeSet::from([Place {
                 root: pointee,
@@ -4498,6 +5208,145 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         flow.memory_exposed = true;
         Ok(())
     }
+    fn restore_capture_pointer_origins<'b>(
+        &mut self,
+        binding: PlaceId,
+        captures: &[nir::program::Capture],
+        report: &Report,
+        snapshots: &[BTreeMap<Place, BTreeSet<Place>>],
+        exit_states: impl Iterator<Item = &'b State> + Clone,
+        inputs: &MemoryTargets,
+        flow: &mut Flow,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        let Some(package) = self.package else {
+            return Ok(());
+        };
+        if snapshots.is_empty() {
+            return Ok(());
+        }
+        let mut restored: BTreeMap<Place, BTreeSet<Place>> = BTreeMap::new();
+        let mut counts: BTreeMap<Place, usize> = BTreeMap::new();
+        for snapshot in snapshots {
+            self.fuel = self
+                .fuel
+                .checked_sub(1)
+                .ok_or_else(|| error(source, "capture pointer writeback budget exhausted"))?;
+            for (slot, targets) in snapshot {
+                self.fuel = self
+                    .fuel
+                    .checked_sub(captures.len() + slot.fields.len() + 1)
+                    .ok_or_else(|| error(source, "capture pointer writeback budget exhausted"))?;
+                let (index, capture) = captures
+                    .iter()
+                    .enumerate()
+                    .find(|(_, capture)| root(capture.binding) == slot.root)
+                    .ok_or_else(|| error(source, "pointer exit names an unknown capture"))?;
+                let destination = Place {
+                    root: binding,
+                    fields: std::iter::once(index)
+                        .chain(slot.fields.iter().copied())
+                        .collect(),
+                };
+                if !self.captured_slot_present(
+                    &flow.state,
+                    &Place {
+                        root: binding,
+                        fields: vec![index],
+                    },
+                    &capture.ty,
+                    &slot.fields,
+                    source,
+                )? {
+                    continue;
+                }
+                let layout =
+                    super::memory::pointer_input_layout(self.package, &capture.ty, &mut self.fuel)
+                        .map_err(|e| error(source, e))?;
+                let subjects: Vec<_> = layout
+                    .into_iter()
+                    .filter(|leaf| leaf.storage_fields == slot.fields)
+                    .map(|leaf| leaf.pointee)
+                    .collect();
+                if subjects.is_empty() {
+                    return Err(error(
+                        source,
+                        "pointer exit names a non-pointer capture slot",
+                    ));
+                }
+                *counts.entry(destination.clone()).or_default() += 1;
+                let mapped = restored.entry(destination).or_default();
+                self.pointer_work(targets, source)?;
+                for target in targets {
+                    if *target == unknown_pointer_target()
+                        || *target == invalidated_pointer_target()
+                    {
+                        mapped.insert(target.clone());
+                        continue;
+                    }
+                    let (origin, ty) =
+                        cleanup_memory::project_origin(report, package, target, &mut self.fuel, 0)
+                            .map_err(|reason| error(source, reason))?
+                            .ok_or_else(|| {
+                                error(
+                                    source,
+                                    "captured pointer cannot retain invocation-local storage",
+                                )
+                            })?;
+                    if !subjects.contains(&ty) {
+                        return Err(error(
+                            source,
+                            "captured pointer writeback pointee type mismatch",
+                        ));
+                    }
+                    match self.map_memory_target(&origin, inputs, flow, source)? {
+                        Some(targets) => mapped.extend(targets),
+                        None => {
+                            mapped.insert(unknown_pointer_target());
+                        }
+                    }
+                }
+            }
+        }
+        for (slot, targets) in &mut restored {
+            self.fuel = self
+                .fuel
+                .checked_sub((slot.fields.len() + 1).saturating_mul(snapshots.len()))
+                .ok_or_else(|| error(source, "capture exit availability budget exhausted"))?;
+            let original = Place {
+                root: root(captures[slot.fields[0]].binding),
+                fields: slot.fields[1..].to_vec(),
+            };
+            let mut needed = 0;
+            for state in exit_states.clone() {
+                if self.captured_slot_present(
+                    state,
+                    &Place {
+                        root: original.root,
+                        fields: vec![],
+                    },
+                    &captures[slot.fields[0]].ty,
+                    &original.fields,
+                    source,
+                )? {
+                    needed += 1;
+                }
+            }
+            if counts.get(slot).copied().unwrap_or(0) != needed {
+                targets.insert(unknown_pointer_target());
+            }
+        }
+        // Retired capture slots lose their old provenance. Target availability
+        // remains a separate access obligation; rebasing never revives storage.
+        self.fuel = self
+            .fuel
+            .checked_sub(flow.pointers.len())
+            .ok_or_else(|| error(source, "capture pointer replacement budget exhausted"))?;
+        flow.pointers.retain(|slot, _| slot.root != binding);
+        flow.pointers.extend(restored);
+        Ok(())
+    }
+
     fn call_prepared_closure(
         &mut self,
         binding: PlaceId,
@@ -4536,6 +5385,16 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             ..Default::default()
         };
         let mut capture_roots = BTreeSet::new();
+        let mut borrowed_roots = BTreeMap::new();
+        for fields in argument_pointers.values() {
+            for (path, targets) in fields {
+                self.fuel = self.fuel.checked_sub(path.len() + 1).ok_or_else(|| {
+                    error(source, "closure cleanup input snapshot budget exhausted")
+                })?;
+                self.pointer_work(targets, source)?;
+            }
+        }
+        let mut cleanup_targets = argument_pointers.clone();
         for (index, capture) in captures.iter().enumerate() {
             let id = root(capture.binding);
             inner
@@ -4553,20 +5412,47 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             inner.roots.insert(id);
             inner.order.push(id);
             inner.types.insert(id, capture.ty.clone());
-            if let Term::Pointer(subject) = &capture.ty {
+            if let Some((pointer_depth, subject)) =
+                super::memory::pointer_representation(self.package, &capture.ty, &mut self.fuel)
+                    .map_err(|reason| error(source, reason))?
+            {
                 self.declare_closure_borrow(
                     &mut inner,
                     parameters.len() + index,
                     capture.binding,
-                    subject,
+                    &subject,
                     source,
                 )?;
+                let slot = parameters.len() + index;
+                borrowed_roots.insert(
+                    PlaceId {
+                        owner: u64::MAX - 1,
+                        local: u32::try_from(slot)
+                            .map_err(|_| error(source, "too many closure pointer parameters"))?,
+                    },
+                    BorrowedRoot::Parameter {
+                        parameter: slot,
+                        input_fields: vec![],
+                        pointee: subject.clone(),
+                    },
+                );
+                if let Some(targets) = flow.pointers.get(&Place {
+                    root: binding,
+                    fields: std::iter::once(index)
+                        .chain(std::iter::repeat_n(0, pointer_depth))
+                        .collect(),
+                }) {
+                    self.pointer_work(targets, source)?;
+                    cleanup_targets.insert(slot, BTreeMap::from([(vec![], targets.clone())]));
+                }
                 if !self.effect_memory_inputs.is_empty() {
                     let targets = flow
                         .pointers
                         .get(&Place {
                             root: binding,
-                            fields: vec![index],
+                            fields: std::iter::once(index)
+                                .chain(std::iter::repeat_n(0, pointer_depth))
+                                .collect(),
                         })
                         .ok_or_else(|| {
                             error(source, "captured pointer provenance is not established")
@@ -4578,6 +5464,54 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         capture.binding,
                         source,
                     )?;
+                }
+            }
+            if self.package.is_some() && self.storage_inputs_are_closed(&capture.ty, source)? {
+                let domains = copy_enum_domains(
+                    callable
+                        .enum_captures
+                        .get(&root(capture.binding))
+                        .unwrap_or(&EnumDomains::new()),
+                    &mut self.fuel,
+                    source,
+                )?;
+                let mut actual = self.capture_input_targets(
+                    flow,
+                    binding,
+                    index,
+                    &capture.ty,
+                    &domains,
+                    false,
+                    source,
+                )?;
+                actual.remove(&vec![]);
+                if !actual.is_empty() {
+                    let slot = parameters.len() + index;
+                    let fields = self.declare_input_field_borrows(
+                        &mut inner,
+                        capture.binding,
+                        &capture.ty,
+                        &actual,
+                        source,
+                    )?;
+                    for (path, targets) in fields {
+                        for target in targets {
+                            let pointee = inner.types.get(&target.root).ok_or_else(|| {
+                                error(source, "closure captured field type missing")
+                            })?;
+                            super::memory::bound_type(pointee, &mut self.fuel)
+                                .map_err(|reason| error(source, reason))?;
+                            borrowed_roots.insert(
+                                target.root,
+                                BorrowedRoot::Parameter {
+                                    parameter: slot,
+                                    input_fields: path.clone(),
+                                    pointee: pointee.clone(),
+                                },
+                            );
+                        }
+                    }
+                    cleanup_targets.insert(slot, actual);
                 }
             }
             if let Some(captured) = callable.captures.get(&Place {
@@ -4609,16 +5543,56 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         for (index, (parameter, ty)) in parameters.iter().zip(types).enumerate() {
             self.declare(&mut inner, *parameter, &ty.ty, source)?;
-            if let Term::Pointer(subject) = &ty.ty {
-                self.declare_closure_borrow(&mut inner, index, *parameter, subject, source)?;
+            if let Some((_, subject)) =
+                super::memory::pointer_representation(self.package, &ty.ty, &mut self.fuel)
+                    .map_err(|reason| error(source, reason))?
+            {
+                self.declare_closure_borrow(&mut inner, index, *parameter, &subject, source)?;
+                borrowed_roots.insert(
+                    PlaceId {
+                        owner: u64::MAX - 1,
+                        local: u32::try_from(index)
+                            .map_err(|_| error(source, "too many closure pointer parameters"))?,
+                    },
+                    BorrowedRoot::Parameter {
+                        parameter: index,
+                        input_fields: vec![],
+                        pointee: subject.clone(),
+                    },
+                );
                 if !self.effect_memory_inputs.is_empty() {
-                    let targets = argument_pointers.get(&index).ok_or_else(|| {
-                        error(
-                            source,
-                            "closure pointer argument provenance is not established",
-                        )
-                    })?;
+                    let targets = argument_pointers
+                        .get(&index)
+                        .and_then(|fields| fields.get(&vec![]))
+                        .ok_or_else(|| {
+                            error(
+                                source,
+                                "closure pointer argument provenance is not established",
+                            )
+                        })?;
                     self.authorize_effect_borrow(flow, targets, &mut inner, *parameter, source)?;
+                }
+            }
+            if let Some(actual) = argument_pointers.get(&index) {
+                let fields = self
+                    .declare_input_field_borrows(&mut inner, *parameter, &ty.ty, actual, source)?;
+                for (path, targets) in fields {
+                    for target in targets {
+                        let pointee = inner
+                            .types
+                            .get(&target.root)
+                            .ok_or_else(|| error(source, "closure borrowed field type missing"))?;
+                        super::memory::bound_type(pointee, &mut self.fuel)
+                            .map_err(|e| error(source, e))?;
+                        borrowed_roots.insert(
+                            target.root,
+                            BorrowedRoot::Parameter {
+                                parameter: index,
+                                input_fields: path.clone(),
+                                pointee: pointee.clone(),
+                            },
+                        );
+                    }
                 }
             }
             if let Some(callable) = argument_callables.remove(&index) {
@@ -4650,6 +5624,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let effect_inputs = self.effect_inputs_for(&callable.definition.ty, source)?;
         let memory_inputs = self.copy_effect_memory_inputs(source)?;
         let outer_report = std::mem::take(&mut self.report);
+        self.report.borrowed_roots = borrowed_roots;
         let outer_captured_callables = std::mem::replace(
             &mut self.captured_roots,
             captures.iter().map(|c| root(c.binding)).collect(),
@@ -4695,6 +5670,32 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         self.persistent_roots = outer_persistent;
         self.captured_roots = outer_captured_callables;
         result?;
+        if invocation.captured_pointer_exits.len() != invocation.exits.len()
+            || invocation.failed_capture_pointer_exits.len() != invocation.failed_exits.len()
+            || invocation.effect_capture_pointer_exits.len() != invocation.effect_exits.len()
+            || invocation.failed_capture_enum_exits.len() != invocation.failed_exits.len()
+            || invocation.effect_capture_enum_exits.len() != invocation.effect_exits.len()
+        {
+            return Err(error(
+                source,
+                "closure pointer snapshots disagree with exit states",
+            ));
+        }
+        if self.cleanup.is_some() {
+            let package = self
+                .package
+                .ok_or_else(|| error(source, "closure cleanup footprint needs a package"))?;
+            let accesses = invocation
+                .cleanup_memory_accesses(package, &mut self.fuel)
+                .map_err(|e| error(source, e))?;
+            self.memory_accesses(&accesses, &cleanup_targets, flow, source)?;
+            for access in accesses {
+                let targets = self
+                    .map_memory_target(&access.target, &cleanup_targets, flow, source)?
+                    .ok_or_else(|| error(source, "closure cleanup target is not established"))?;
+                self.report.cleanup_call_accesses.push((access, targets));
+            }
+        }
         // Failed checks unwind this invocation; they are never evidence for a
         // normal continuation. Reflect consumed captures before reporting the
         // caller's outstanding obligations. The call boundary has one runtime
@@ -4730,6 +5731,23 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     )
                     .map_err(|e| error(source, format!("closure failure writeback: {e:?}")))?;
             }
+            self.restore_capture_pointer_origins(
+                binding,
+                captures,
+                &invocation,
+                &invocation.failed_capture_pointer_exits,
+                invocation.failed_exits.iter(),
+                &cleanup_targets,
+                &mut failed_flow,
+                source,
+            )?;
+            self.restore_exit_capture_domains(
+                &mut failed_flow,
+                binding,
+                captures,
+                &invocation.failed_capture_enum_exits,
+                source,
+            )?;
             failure = Some(failed_flow);
         }
         let mut escaped_captures: Option<State> = None;
@@ -4765,6 +5783,23 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         error(source, format!("closure effect escape writeback: {e:?}"))
                     })?;
             }
+            self.restore_capture_pointer_origins(
+                binding,
+                captures,
+                &invocation,
+                &invocation.effect_capture_pointer_exits,
+                invocation.effect_exits.iter().map(|(_, state)| state),
+                &cleanup_targets,
+                &mut escaped_flow,
+                source,
+            )?;
+            self.restore_exit_capture_domains(
+                &mut escaped_flow,
+                binding,
+                captures,
+                &invocation.effect_capture_enum_exits,
+                source,
+            )?;
             self.effect_escape_checkpoint(&escaped_flow, source)?;
         }
         let mut exits = invocation.exits.iter();
@@ -4803,6 +5838,16 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 )
                 .map_err(|e| error(source, format!("closure environment writeback: {e:?}")))?;
         }
+        self.restore_capture_pointer_origins(
+            binding,
+            captures,
+            &invocation,
+            &invocation.captured_pointer_exits,
+            invocation.exits.iter(),
+            &cleanup_targets,
+            flow,
+            source,
+        )?;
         // A call mutates capture cells, not the enclosing code identity. Retain
         // a target only when every normal exit provides compatible evidence.
         if invocation.captured_callable_exits.len() != invocation.captured_enum_exits.len() {
@@ -4838,8 +5883,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 )
             });
         }
+        let (updated_captures, updated_domains) = updated.unwrap_or_default();
+        self.install_capture_domains(flow, binding, captures, &updated_domains, source)?;
         if let Some(receiver) = flow.callables.get_mut(&binding) {
-            (receiver.captures, receiver.enum_captures) = updated.unwrap_or_default();
+            (receiver.captures, receiver.enum_captures) = (updated_captures, updated_domains);
         }
         flow.value_callable = callable_return_summary(&invocation, &mut self.fuel, source)?;
         (flow.value_callables, flow.value_variants) =
@@ -5073,6 +6120,13 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         observed.value_callables,
                         observed.value_variants,
                     )
+                } else if matches!(argument.value.ty, Term::Pointer(_)) && !defaults {
+                    // A pointer is only an observation input here. The callee's
+                    // complete footprint is checked below before ordinary call
+                    // analysis can use it; provenance must already be known.
+                    self.observe_guard(&argument.value, input, depth + 1)?;
+                    self.observed_pointer_targets(&argument.value, input, depth + 1)?;
+                    (None, BTreeMap::new(), BTreeMap::new())
                 } else {
                     if !self.observation_value_type(&argument.value.ty, source)? {
                         return Err(error(
@@ -5194,7 +6248,36 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         self.fuel -= 1;
         let source = expr.source;
-        if matches!(expr.kind, K::Block { .. }) && self.package.is_some() {
+        if let K::Block {
+            statements,
+            result: Some(result),
+        } = &expr.kind
+        {
+            if statements.is_empty() && matches!(expr.ty, Term::Pointer(_)) {
+                return self.observe_guard_result(result, flow, depth + 1);
+            }
+        }
+        // A compound condition is one full expression. Discover owned
+        // observations before decomposing boolean operators: checking each
+        // projection independently would retire its temporary before later
+        // operands execute. Closure bodies belong to separate invocations.
+        let mut owned_observation = false;
+        if self.package.is_some() && !matches!(expr.kind, K::Block { .. }) {
+            nir::visit::expression_pruned(expr, &mut self.fuel, |node, _| {
+                if owned_observation || matches!(node.kind, K::Closure { .. }) {
+                    return Ok(false);
+                }
+                owned_observation = matches!(&node.kind, K::Call { arguments, .. }
+                    if arguments.iter().any(|argument| matches!(argument.value.ty,
+                        Term::Nominal { .. } | Term::Record(_) | Term::Tuple(_) | Term::NormalForm { .. })))
+                    || matches!(node.kind, K::Field { .. } | K::AnonymousField { .. })
+                        && expression_place(node).is_none()
+                    || matches!(&node.kind, K::NewtypeConvert(value) | K::EnumName(value)
+                        if expression_place(value).is_none());
+                Ok(!owned_observation)
+            }).map_err(|reason| error(source, reason))?;
+        }
+        if (matches!(expr.kind, K::Block { .. }) || owned_observation) && self.package.is_some() {
             let locals =
                 super::observation_region::check(expr, self.package.unwrap(), &mut self.fuel)
                     .map_err(|reason| error(source, reason))?;
@@ -5263,9 +6346,19 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     result_code = callable_source(expr, flow, &mut self.fuel)?;
                 }
             }
+            K::AddressOf(_) => {
+                for target in self.pointer_target(expr, flow, depth + 1)? {
+                    flow.state.require_place(&target).map_err(|reason| {
+                        error(
+                            source,
+                            format!("guard address target unavailable: {reason:?}"),
+                        )
+                    })?;
+                }
+            }
             K::PointerAnonymousField { pointer, .. } | K::PointerField { pointer, .. } => {
                 self.observe_guard(pointer, flow, depth + 1)?;
-                for target in self.pointer_target(expr, flow, depth + 1)? {
+                for target in self.observed_pointer_targets(expr, flow, depth + 1)? {
                     flow.state.require_place(&target).map_err(|e| {
                         error(source, format!("guard field target unavailable: {e:?}"))
                     })?;
@@ -5273,13 +6366,17 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             }
             K::ReadPointer(pointer) => {
                 self.observe_guard(pointer, flow, depth + 1)?;
-                if !nir::program::intrinsic_pointer_value(&expr.ty) {
+                if !super::memory::readable_representation(self.package, &expr.ty, &mut self.fuel)
+                    .map_err(|reason| error(source, reason))?
+                    || (self.delivery)(&expr.ty).map_err(|reason| error(source, reason))?
+                        != Delivery::Copy
+                {
                     return Err(error(
                         source,
                         "guard pointee observation requires Copy evidence",
                     ));
                 }
-                for target in self.pointer_target(pointer, flow, depth + 1)? {
+                for target in self.observed_pointer_targets(pointer, flow, depth + 1)? {
                     flow.state.require_present(&target).map_err(|e| {
                         error(source, format!("guard pointer target unavailable: {e:?}"))
                     })?;
@@ -5296,6 +6393,18 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 } else {
                     self.observe_guard(value, flow, depth + 1)?;
                 }
+            }
+            K::NewtypeConvert(value) => {
+                if !self.observation_value_type(&expr.ty, source)? {
+                    return Err(error(
+                        source,
+                        "guard conversion result needs failure-path resource transfer",
+                    ));
+                }
+                // Validate observation effects before ordinary delivery on a
+                // snapshot. Only that delivery records copies and temporaries.
+                self.check_guard_observation(value, flow, depth + 1)?;
+                result_code = self.observe_checked_expression(expr, flow, depth + 1)?;
             }
             K::Not(value)
             | K::IntegerNegate(value)
@@ -5560,7 +6669,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             let policy = self.cleanup.as_mut().ok_or_else(|| {
                 error(
                     expr.source,
-                    "owned guard arguments require cleanup evidence",
+                    "owned guard arguments require cleanup evidence for failure-path resource transfer",
                 )
             })?;
             if policy
@@ -5660,9 +6769,21 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             region_owned,
         )?;
         let known;
+        let selected;
         let targets: Vec<&Expr> =
             if matches!(callee.kind, K::Function(_) | K::FunctionInstance { .. }) {
                 vec![callee]
+            } else if matches!(callee.kind, K::TraitMethod { .. }) {
+                let package = self
+                    .package
+                    .ok_or_else(|| error(source, "guard method observation requires a package"))?;
+                // Selection retains the interface checks: method_callee refuses
+                // contracts that have not yet been composed into its footprint.
+                selected = self
+                    .method_callees
+                    .select(package, callee, &mut self.fuel)
+                    .map_err(|reason| error(source, reason))?;
+                vec![&selected]
             } else {
                 if !self.observation_value_type(&callee.ty, source)? {
                     return Err(error(
@@ -5698,6 +6819,27 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     source,
                     "guard code target needs an established observation contract",
                 ));
+            }
+            if arguments
+                .iter()
+                .any(|argument| matches!(argument.value.ty, Term::Pointer(_)))
+            {
+                let summary = self
+                    .memory_summary_with_inputs(target, &inputs, source)
+                    .map_err(|reason| {
+                        error(
+                            source,
+                            format!(
+                                "guard pointer observation requires a memory summary: {reason}"
+                            ),
+                        )
+                    })?;
+                if summary.accesses.iter().any(|access| access.write) || summary.may_run_cleanup {
+                    return Err(error(
+                        source,
+                        "guard pointer observation cannot write caller memory or run unverified cleanup",
+                    ));
+                }
             }
             let mut may_reject = self
                 .call_may_reject(target)
@@ -6230,15 +7372,105 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(true)
     }
+    fn observe_pattern_result(
+        &mut self,
+        value: &Expr,
+        flow: &Flow,
+        depth: usize,
+    ) -> Result<(Option<Callable>, ValueOrigins), Error> {
+        let callable = self.observe_candidate(value, flow, depth + 1)?;
+        let origins = if matches!(value.ty, Term::Pointer(_)) {
+            // Resolve the already checked expression's provenance without a
+            // second evaluation or another set of candidate cleanup records.
+            let targets = self.observed_pointer_targets(value, flow, depth + 1)?;
+            BTreeMap::from([(vec![], targets)])
+        } else {
+            BTreeMap::new()
+        };
+        Ok((callable, origins))
+    }
+    /// Conditions have already passed candidate observation, so they cannot
+    /// alter the caller's pointer slots. Keep general pointer_target conservative
+    /// for callers that have not established this observation boundary.
+    fn observed_pointer_targets(
+        &mut self,
+        value: &Expr,
+        flow: &Flow,
+        depth: usize,
+    ) -> Result<BTreeSet<Place>, Error> {
+        if depth >= 128 || self.fuel == 0 {
+            return Err(error(
+                value.source,
+                "observed pointer target budget exhausted",
+            ));
+        }
+        self.fuel -= 1;
+        match &value.kind {
+            K::PointerField { pointer, index, .. }
+            | K::PointerAnonymousField { pointer, index, .. } => {
+                let targets = self.observed_pointer_targets(pointer, flow, depth + 1)?;
+                self.pointer_work(&targets, value.source)?;
+                Ok(targets
+                    .into_iter()
+                    .map(|mut target| {
+                        target.fields.push(*index);
+                        target
+                    })
+                    .collect())
+            }
+            K::ReadPointer(pointer) => {
+                let slots = self.observed_pointer_targets(pointer, flow, depth + 1)?;
+                let mut targets = BTreeSet::new();
+                for slot in slots {
+                    flow.state.require_present(&slot).map_err(|reason| {
+                        error(
+                            value.source,
+                            format!("observed pointer slot unavailable: {reason:?}"),
+                        )
+                    })?;
+                    let contents = flow.pointers.get(&slot).ok_or_else(|| {
+                        error(
+                            value.source,
+                            "observed pointer slot contents provenance is not established",
+                        )
+                    })?;
+                    self.pointer_work(contents, value.source)?;
+                    targets.extend(contents.iter().cloned());
+                }
+                Ok(targets)
+            }
+            K::If {
+                condition,
+                then_branch,
+                else_branch: Some(other),
+            } => match constant_bool(condition, 0) {
+                Some(true) => self.observed_pointer_targets(then_branch, flow, depth + 1),
+                Some(false) => self.observed_pointer_targets(other, flow, depth + 1),
+                None => {
+                    let mut targets =
+                        self.observed_pointer_targets(then_branch, flow, depth + 1)?;
+                    let right = self.observed_pointer_targets(other, flow, depth + 1)?;
+                    self.pointer_work(&right, value.source)?;
+                    targets.extend(right);
+                    Ok(targets)
+                }
+            },
+            K::Block {
+                statements,
+                result: Some(result),
+            } if statements.is_empty() => self.observed_pointer_targets(result, flow, depth + 1),
+            _ => self.pointer_target(value, flow, depth + 1),
+        }
+    }
     fn observe_pattern_value(
         &mut self,
         value: &Expr,
         flow: &Flow,
         preparation: &PatternPreparation<'_>,
         depth: usize,
-    ) -> Result<Option<Callable>, Error> {
+    ) -> Result<(Option<Callable>, ValueOrigins), Error> {
         if preparation.binding_remaps.is_empty() {
-            return self.observe_candidate(value, flow, depth + 1);
+            return self.observe_pattern_result(value, flow, depth + 1);
         }
         // Executable candidate expressions precede their enclosing Remap;
         // analysis has already published canonical binding identities.
@@ -6257,7 +7489,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             Ok(())
         })
         .map_err(|reason| error(value.source, reason))?;
-        self.observe_candidate(&value, flow, depth + 1)
+        self.observe_pattern_result(&value, flow, depth + 1)
     }
     fn bind_components(
         &mut self,
@@ -6274,6 +7506,65 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         self.fuel -= 1;
         match pattern {
+            Pattern::Observe { binding, inner } => {
+                if flow.roots.contains(&root(*binding)) {
+                    return Err(error(
+                        source,
+                        "observation subject reuses an active binding",
+                    ));
+                }
+                // Establish provenance just as for a subject binding, but do
+                // not commit its ownership transfer: the match retains it.
+                let transfers = preparation.transfers.len();
+                let moved = preparation.moved_bindings.len();
+                let copied = std::mem::replace(&mut preparation.copy_bindings, false);
+                let shape = self.bind_components(
+                    &Pattern::Binding {
+                        binding: *binding,
+                        inner: Box::new(Pattern::Wild),
+                    },
+                    ty,
+                    flow,
+                    source,
+                    path,
+                    preparation,
+                    depth + 1,
+                );
+                preparation.transfers.truncate(transfers);
+                preparation.moved_bindings.truncate(moved);
+                preparation.copy_bindings = copied;
+                let shape = shape?;
+                preparation.copy_bindings = true;
+                let checked =
+                    self.bind_components(inner, ty, flow, source, path, preparation, depth + 1);
+                preparation.copy_bindings = copied;
+                checked?;
+                for (place, targets) in &flow.pointers {
+                    self.pointer_work(targets, source)?;
+                    if place.root != root(*binding)
+                        && targets.iter().any(|target| target.root == root(*binding))
+                    {
+                        return Err(error(
+                            source,
+                            "pattern observation subject address escapes its scope",
+                        ));
+                    }
+                }
+                let cleanups = self.report.cleanups.len();
+                self.remove_local(flow, root(*binding), source)?;
+                // Removing a nonowning alias is not a runtime cleanup action.
+                self.report.cleanups.truncate(cleanups);
+                if !copied && *ty != Term::Primitive(nir::Primitive::Void) {
+                    self.report.temporaries.push(TemporaryCleanup {
+                        scope: self.temporary_scope,
+                        source,
+                        ty: ty.clone(),
+                        fields: path.clone(),
+                    });
+                }
+                return Ok(shape);
+            }
+
             Pattern::Guard { pattern, condition } => {
                 let shape =
                     self.bind_components(pattern, ty, flow, source, path, preparation, depth + 1)?;
@@ -6283,20 +7574,23 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             Pattern::Then { first, value, next } => {
                 let shape =
                     self.bind_components(first, ty, flow, source, path, preparation, depth + 1)?;
-                if !self.observation_value_type(&value.ty, value.source)? {
+                let pointer = matches!(value.ty, Term::Pointer(_))
+                    && (self.delivery)(&value.ty).map_err(|reason| error(value.source, reason))?
+                        == Delivery::Copy;
+                if !pointer && !self.observation_value_type(&value.ty, value.source)? {
                     return Err(error(
                         value.source,
                         "computed pattern value needs independent resource and failure-path transfer",
                     ));
                 }
-                let callable = self.observe_pattern_value(value, flow, preparation, depth + 1)?;
+                let (callable, origins) =
+                    self.observe_pattern_value(value, flow, preparation, depth + 1)?;
                 let mut callables = BTreeMap::new();
                 if let Some(callable) = callable {
                     callables.insert(vec![], callable);
                 }
-                // Scalar and Copy environment-free code results have no
-                // residual owner. Their binders never subtract subject fields.
-                let origins = BTreeMap::new();
+                // Copy observations have no residual owner. Pointer results
+                // retain their targets; binders never subtract subject fields.
                 let mut computed = PatternPreparation {
                     origins: &origins,
                     domains: BTreeMap::new(),
@@ -6779,6 +8073,181 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+    fn captured_slot_present(
+        &mut self,
+        state: &State,
+        base: &Place,
+        ty: &Term,
+        fields: &[usize],
+        source: SourceRange,
+    ) -> Result<bool, Error> {
+        self.fuel = self
+            .fuel
+            .checked_sub(base.fields.len() + fields.len() + 1)
+            .ok_or_else(|| error(source, "capture presence budget exhausted"))?;
+        let slot = Place {
+            root: base.root,
+            fields: base.fields.iter().chain(fields).copied().collect(),
+        };
+        if let Ok(present) = state.may_be_present(&slot) {
+            return Ok(present);
+        }
+        let layout = super::memory::pointer_input_layout(self.package, ty, &mut self.fuel)
+            .map_err(|e| error(source, e))?;
+        for leaf in layout {
+            if leaf.storage_fields != fields {
+                continue;
+            }
+            for (guard, _) in leaf.guards {
+                self.fuel = self
+                    .fuel
+                    .checked_sub(base.fields.len() + guard.len() + 1)
+                    .ok_or_else(|| error(source, "capture presence budget exhausted"))?;
+                let owner = Place {
+                    root: base.root,
+                    fields: base.fields.iter().chain(&guard).copied().collect(),
+                };
+                if state.field_count(&owner).ok() == Some(None)
+                    && state.may_be_present(&owner).unwrap_or(false)
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    fn capture_enum_snapshot(
+        &mut self,
+        flow: &Flow,
+        source: SourceRange,
+    ) -> Result<BTreeMap<PlaceId, EnumDomains>, Error> {
+        let mut domains = BTreeMap::new();
+        for root in &self.captured_roots {
+            self.fuel = self
+                .fuel
+                .checked_sub(1)
+                .ok_or_else(|| error(source, "capture enum snapshot budget exhausted"))?;
+            if let Some(tags) = flow.enum_domains.get(root) {
+                domains.insert(*root, copy_enum_domains(tags, &mut self.fuel, source)?);
+            }
+        }
+        Ok(domains)
+    }
+    fn capture_storage_domains(
+        &mut self,
+        captures: &[nir::program::Capture],
+        domains: &BTreeMap<PlaceId, EnumDomains>,
+        source: SourceRange,
+    ) -> Result<EnumDomains, Error> {
+        let mut physical = EnumDomains::new();
+        for (index, capture) in captures.iter().enumerate() {
+            self.fuel = self
+                .fuel
+                .checked_sub(1)
+                .ok_or_else(|| error(source, "capture enum writeback budget exhausted"))?;
+            if let Some(tags) = domains.get(&root(capture.binding)) {
+                for (path, tags) in tags {
+                    self.fuel = self
+                        .fuel
+                        .checked_sub(path.len() + tags.len() + 1)
+                        .ok_or_else(|| error(source, "capture enum writeback budget exhausted"))?;
+                    physical.insert(
+                        std::iter::once(index).chain(path.iter().copied()).collect(),
+                        tags.clone(),
+                    );
+                }
+            }
+        }
+        Ok(physical)
+    }
+    fn install_capture_domains(
+        &mut self,
+        flow: &mut Flow,
+        binding: PlaceId,
+        captures: &[nir::program::Capture],
+        domains: &BTreeMap<PlaceId, EnumDomains>,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        let physical = self.capture_storage_domains(captures, domains, source)?;
+        self.install_enum_domains(
+            flow,
+            &Place {
+                root: binding,
+                fields: vec![],
+            },
+            physical,
+            source,
+        )
+    }
+    fn restore_exit_capture_domains(
+        &mut self,
+        flow: &mut Flow,
+        binding: PlaceId,
+        captures: &[nir::program::Capture],
+        exits: &[BTreeMap<PlaceId, EnumDomains>],
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        let mut merged = None;
+        for domains in exits {
+            merged = Some(if let Some(previous) = merged {
+                join_capture_evidence(
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    &previous,
+                    domains,
+                    &mut self.fuel,
+                    source,
+                    0,
+                )?
+                .1
+            } else {
+                copy_captured_enums(domains, &mut self.fuel, source)?
+            });
+        }
+        let domains = merged.unwrap_or_default();
+        self.install_capture_domains(flow, binding, captures, &domains, source)?;
+        if let Some(receiver) = flow.callables.get_mut(&binding) {
+            receiver.enum_captures = domains;
+        }
+        Ok(())
+    }
+
+    fn capture_pointer_snapshot(
+        &mut self,
+        flow: &Flow,
+        source: SourceRange,
+    ) -> Result<BTreeMap<Place, BTreeSet<Place>>, Error> {
+        let mut snapshot = BTreeMap::new();
+        if self.captured_roots.is_empty() {
+            return Ok(snapshot);
+        }
+        for (slot, targets) in &flow.pointers {
+            self.fuel = self
+                .fuel
+                .checked_sub(slot.fields.len() + 1)
+                .ok_or_else(|| error(source, "capture pointer snapshot budget exhausted"))?;
+            if self.captured_roots.contains(&slot.root)
+                && self.captured_slot_present(
+                    &flow.state,
+                    &Place {
+                        root: slot.root,
+                        fields: vec![],
+                    },
+                    flow.types
+                        .get(&slot.root)
+                        .ok_or_else(|| error(source, "capture type missing"))?,
+                    &slot.fields,
+                    source,
+                )?
+            {
+                self.pointer_work(targets, source)?;
+                snapshot.insert(slot.clone(), targets.clone());
+            }
+        }
+        Ok(snapshot)
+    }
+
     fn exit(
         &mut self,
         flow: &mut Flow,
@@ -6829,9 +8298,16 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             .collect();
         self.cleanup_exit(flow, locals, 0, 0, source, reason)?;
         self.incomplete_exit(source, 0);
+        let capture_pointers = self.capture_pointer_snapshot(flow, source)?;
+        let capture_domains = self.capture_enum_snapshot(flow, source)?;
         if reason == CleanupReason::PredicateFailure {
+            self.report.failed_capture_enum_exits.push(capture_domains);
+            self.report
+                .failed_capture_pointer_exits
+                .push(capture_pointers);
             self.report.failed_exits.push(flow.state.clone());
         } else {
+            self.report.captured_pointer_exits.push(capture_pointers);
             self.report.exits.push(flow.state.clone());
             self.report.callable_exits.push(callable_result);
             self.report
@@ -6868,13 +8344,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 })
                 .collect::<Result<_, Error>>()?;
             self.report.captured_callable_exits.push(captures);
-            let mut domains = BTreeMap::new();
-            for root in &self.captured_roots {
-                if let Some(tags) = flow.enum_domains.get(root) {
-                    domains.insert(*root, copy_enum_domains(tags, &mut self.fuel, source)?);
-                }
-            }
-            self.report.captured_enum_exits.push(domains);
+            self.report.captured_enum_exits.push(capture_domains);
         }
         let mut remaining: BTreeMap<_, Vec<_>> = BTreeMap::new();
         for (place, availability) in flow.state.remaining() {
@@ -7084,6 +8554,19 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         flow: &mut Flow,
         depth: usize,
     ) -> Result<Option<BTreeSet<Place>>, Error> {
+        self.call_named_candidates_with_origins(expr, callable, arguments, bindings, flow, depth)
+            .map(|(pointer, _)| pointer)
+    }
+
+    fn call_named_candidates_with_origins(
+        &mut self,
+        expr: &Expr,
+        callable: &Callable,
+        arguments: &[nir::program::CallArgument],
+        bindings: &[LocalId],
+        flow: &mut Flow,
+        depth: usize,
+    ) -> Result<(Option<BTreeSet<Place>>, ValueOrigins), Error> {
         if arguments.iter().any(|a| a.is_default) {
             return Err(error(
                 expr.source,
@@ -7113,7 +8596,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         target.source = expr.source;
         let mut prepared_callables = vec![];
         let mut prepared_enums = vec![];
-        let (result, summary) = self.memory_call(
+        let (result, summary, origins) = self.memory_call(
             &target,
             arguments,
             bindings,
@@ -7125,7 +8608,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             depth + 1,
         )?;
         let Some(summary) = summary else {
-            return Ok(result);
+            return Ok((result, origins));
         };
         flow.value_callable = if flow.live && matches!(expr.ty, Term::Function { .. }) {
             let definitions = match &summary.callable_result {
@@ -7247,7 +8730,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             source: expr.source,
             candidates,
         });
-        Ok(result)
+        Ok((result, origins))
     }
     fn memory_candidate_summary(
         &mut self,
@@ -7310,6 +8793,44 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     .callable_result
                     .join(&summary.callable_result, &mut self.fuel)
                     .map_err(|e| error(source, e))?;
+                let mut next_fields = summary.pointer_fields;
+                for (path, targets) in &mut combined.pointer_fields {
+                    self.fuel = self
+                        .fuel
+                        .checked_sub(path.len() + 1)
+                        .ok_or_else(|| error(source, "pointer result merge budget exhausted"))?;
+                    let other = next_fields.remove(path).unwrap_or(None);
+                    *targets = match (targets.take(), other) {
+                        (Some(mut left), Some(right)) => {
+                            for target in &right {
+                                self.fuel = self
+                                    .fuel
+                                    .checked_sub(
+                                        target.input_fields.len() + target.fields.len() + 1,
+                                    )
+                                    .ok_or_else(|| {
+                                        error(source, "pointer result merge budget exhausted")
+                                    })?;
+                                for path in &target.through {
+                                    self.fuel =
+                                        self.fuel.checked_sub(path.len() + 1).ok_or_else(|| {
+                                            error(source, "pointer result merge budget exhausted")
+                                        })?;
+                                }
+                            }
+                            left.extend(right);
+                            Some(left)
+                        }
+                        _ => None,
+                    };
+                }
+                for (path, _) in next_fields {
+                    self.fuel = self
+                        .fuel
+                        .checked_sub(path.len() + 1)
+                        .ok_or_else(|| error(source, "pointer result merge budget exhausted"))?;
+                    combined.pointer_fields.insert(path, None);
+                }
                 combined.result_targets =
                     match (combined.result_targets.take(), summary.result_targets) {
                         (Some(mut left), Some(right)) => {
@@ -7434,6 +8955,16 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             self.borrowed_pointees.insert(key, (id, (*subject).clone()));
             id
         };
+        if self.report.borrowed_roots.contains_key(&slot.root) {
+            super::memory::bound_type(&subject, &mut self.fuel).map_err(|e| error(source, e))?;
+            self.report.borrowed_roots.insert(
+                pointee,
+                BorrowedRoot::Indirect {
+                    slot: slot.clone(),
+                    pointee: (*subject).clone(),
+                },
+            );
+        }
         if !flow.types.contains_key(&pointee) {
             let shape = (self.shape)(&subject).map_err(|e| error(source, e))?;
             flow.state
@@ -7450,14 +8981,142 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         );
         Ok(())
     }
+    fn declare_input_field_borrows(
+        &mut self,
+        flow: &mut Flow,
+        binding: LocalId,
+        ty: &Term,
+        actual: &ValueOrigins,
+        source: SourceRange,
+    ) -> Result<ValueOrigins, Error> {
+        let mut targets = BTreeMap::new();
+        if actual.is_empty() {
+            return Ok(targets);
+        }
+        let paths = super::memory::pointer_input_layout(self.package, ty, &mut self.fuel)
+            .map_err(|reason| error(source, reason))?;
+        for leaf in paths {
+            let input = leaf.input_fields;
+            let storage = leaf.storage_fields;
+            if input.is_empty() || !actual.contains_key(&input) {
+                continue;
+            }
+            let subject = leaf.pointee;
+            let local = self.next_borrowed_pointer;
+            self.next_borrowed_pointer = local
+                .checked_add(1)
+                .ok_or_else(|| error(source, "borrowed input field identity exhausted"))?;
+            let id = PlaceId {
+                owner: u64::MAX - 4,
+                local,
+            };
+            let shape = (self.shape)(&subject).map_err(|reason| error(source, reason))?;
+            flow.state
+                .declare(id, &shape, true, &mut self.fuel)
+                .map_err(|reason| {
+                    error(source, format!("borrowed input field shape: {reason:?}"))
+                })?;
+            flow.types.insert(id, subject);
+            let borrowed = BTreeSet::from([Place {
+                root: id,
+                fields: vec![],
+            }]);
+            flow.pointers
+                .entry(Place {
+                    root: root(binding),
+                    fields: storage,
+                })
+                .or_default()
+                .extend(borrowed.iter().cloned());
+            targets.insert(input, borrowed);
+            flow.memory_exposed = true;
+        }
+        Ok(targets)
+    }
+    fn capture_input_targets(
+        &mut self,
+        flow: &Flow,
+        binding: PlaceId,
+        index: usize,
+        ty: &Term,
+        domains: &EnumDomains,
+        require_present: bool,
+        source: SourceRange,
+    ) -> Result<ValueOrigins, Error> {
+        let layout = super::memory::pointer_input_layout(self.package, ty, &mut self.fuel)
+            .map_err(|reason| error(source, reason))?;
+        let mut inputs = ValueOrigins::new();
+        for leaf in layout {
+            self.fuel = self
+                .fuel
+                .checked_sub(
+                    leaf.input_fields
+                        .len()
+                        .saturating_add(leaf.storage_fields.len())
+                        .saturating_add(1),
+                )
+                .ok_or_else(|| error(source, "capture input binding budget exhausted"))?;
+            if enum_path_excluded(&leaf.input_fields, domains) {
+                inputs.insert(leaf.input_fields, BTreeSet::new());
+                continue;
+            }
+            let place = Place {
+                root: binding,
+                fields: std::iter::once(index).chain(leaf.storage_fields).collect(),
+            };
+            if require_present {
+                // Payload fields are opaque until the matching tag is selected.
+                // A complete capture proves their storage is present conditionally.
+                let owner = if leaf.guards.is_empty() {
+                    place.clone()
+                } else {
+                    Place {
+                        root: binding,
+                        fields: vec![index],
+                    }
+                };
+                flow.state
+                    .require_present(&owner)
+                    .map_err(|e| error(source, format!("pointer capture unavailable: {e:?}")))?;
+            }
+            if let Some(targets) = flow.pointers.get(&place) {
+                self.pointer_work(targets, source)?;
+                inputs.insert(leaf.input_fields, targets.clone());
+            } else if require_present {
+                return Err(error(
+                    source,
+                    "captured pointer provenance is not established",
+                ));
+            }
+        }
+        Ok(inputs)
+    }
+
+    fn memory_input_targets(
+        &mut self,
+        ty: &Term,
+        origins: &ValueOrigins,
+        domains: &EnumDomains,
+        source: SourceRange,
+    ) -> Result<ValueOrigins, Error> {
+        if origins.is_empty() && domains.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let layout = super::memory::pointer_input_layout(self.package, ty, &mut self.fuel)
+            .map_err(|reason| error(source, reason))?;
+        origins::bind_input_origins(&layout, origins, domains, &mut self.fuel, source)
+    }
     fn map_memory_target(
         &mut self,
         target: &super::memory::ParameterPlace,
-        arguments: &BTreeMap<usize, BTreeSet<Place>>,
+        arguments: &MemoryTargets,
         flow: &mut Flow,
         source: SourceRange,
     ) -> Result<Option<BTreeSet<Place>>, Error> {
-        let Some(candidates) = arguments.get(&target.parameter) else {
+        let Some(candidates) = arguments
+            .get(&target.parameter)
+            .and_then(|fields| fields.get(&target.input_fields))
+        else {
             return Ok(None);
         };
         self.pointer_work(candidates, source)?;
@@ -7501,7 +9160,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
     fn memory_accesses(
         &mut self,
         accesses: &[super::memory::Access],
-        targets: &BTreeMap<usize, BTreeSet<Place>>,
+        targets: &MemoryTargets,
         flow: &mut Flow,
         source: SourceRange,
     ) -> Result<(), Error> {
@@ -7542,13 +9201,22 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         flow: &mut Flow,
         source: SourceRange,
         depth: usize,
-    ) -> Result<(Option<BTreeSet<Place>>, Option<super::memory::Summary>), Error> {
+    ) -> Result<
+        (
+            Option<BTreeSet<Place>>,
+            Option<super::memory::Summary>,
+            ValueOrigins,
+        ),
+        Error,
+    > {
         let selected;
         let callee = if matches!(callee.kind, K::TraitMethod { .. }) {
             let package = self
                 .package
                 .ok_or_else(|| error(source, "method memory analysis requires a package"))?;
-            selected = super::memory::method_callee(package, callee, &mut self.fuel)
+            selected = self
+                .method_callees
+                .select(package, callee, &mut self.fuel)
                 .map_err(|reason| error(source, reason))?;
             &selected
         } else {
@@ -7604,6 +9272,46 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     if !flow.live {
                         return Ok(());
                     }
+                    if !argument_summary.pointer_fields.is_empty() {
+                        let storage_paths = super::memory::conditional_pointer_storage_paths(
+                            this.package,
+                            &argument.value.ty,
+                            &mut this.fuel,
+                        )
+                        .map_err(|reason| error(argument.value.source, reason))?;
+                        let mut actual_fields = BTreeMap::new();
+                        for (path, alternatives) in &argument_summary.pointer_fields {
+                            this.fuel = this.fuel.checked_sub(path.len() + 1).ok_or_else(|| {
+                                error(source, "default result field budget exhausted")
+                            })?;
+                            let storage = storage_paths.get(path).ok_or_else(|| {
+                                error(source, "default result field layout mismatch")
+                            })?;
+                            let mut actual = BTreeSet::new();
+                            if let Some(alternatives) = alternatives {
+                                for target in alternatives {
+                                    if let Some(mapped) = this.map_memory_target(
+                                        target,
+                                        &targets,
+                                        flow,
+                                        argument.value.source,
+                                    )? {
+                                        actual.extend(mapped);
+                                    } else {
+                                        actual.insert(unknown_pointer_target());
+                                    }
+                                }
+                            } else {
+                                actual.insert(unknown_pointer_target());
+                            }
+                            origins
+                                .entry(storage.clone())
+                                .or_insert_with(BTreeSet::new)
+                                .extend(actual.iter().cloned());
+                            actual_fields.insert(path.clone(), actual);
+                        }
+                        targets.insert(argument.parameter, actual_fields);
+                    }
                     if let Some(alternatives) = argument_summary.result_targets {
                         let mut actual = BTreeSet::new();
                         let mut local = BTreeSet::new();
@@ -7634,16 +9342,32 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             actual.insert(unknown_pointer_target());
                             local.insert(unknown_pointer_target());
                         }
-                        origins.insert(vec![], actual.clone());
-                        targets.insert(argument.parameter, actual);
+                        let pointer_depth = super::memory::pointer_representation(
+                            this.package,
+                            &argument.value.ty,
+                            &mut this.fuel,
+                        )
+                        .map_err(|reason| error(source, reason))?
+                        .ok_or_else(|| {
+                            error(source, "default pointer result lacks representation")
+                        })?
+                        .0;
+                        origins.insert(vec![0; pointer_depth], actual.clone());
+                        targets.insert(argument.parameter, BTreeMap::from([(vec![], actual)]));
                         default_targets = Some(local);
                     }
                 } else {
                     // Snapshot in source order, before later argument effects.
                     origins = this.evaluate_value_origins(&argument.value, flow, depth + 1)?;
-                    if let Some(target) = origins.get(&vec![]) {
-                        targets.insert(argument.parameter, target.clone());
-                    }
+                    targets.insert(
+                        argument.parameter,
+                        this.memory_input_targets(
+                            &argument.value.ty,
+                            &origins,
+                            &flow.value_variants,
+                            source,
+                        )?,
+                    );
                     if !flow.live {
                         return Ok(());
                     }
@@ -7699,10 +9423,16 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     domains,
                     source,
                 )?;
-                if let Term::Pointer(pointee) = ty {
+                if let Some((pointer_depth, pointee)) =
+                    super::memory::pointer_representation(this.package, ty, &mut this.fuel)
+                        .map_err(|reason| error(source, reason))?
+                {
                     let borrowed = if argument.is_default {
                         default_targets
-                    } else if targets.contains_key(&argument.parameter) {
+                    } else if targets
+                        .get(&argument.parameter)
+                        .is_some_and(|fields| fields.contains_key(&vec![]))
+                    {
                         // Separate borrowed roots avoid collisions between caller
                         // locals and callee parameter IDs, including recursion.
                         let id = PlaceId {
@@ -7710,14 +9440,14 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             local: u32::try_from(argument.parameter)
                                 .map_err(|_| error(source, "too many borrowed argument slots"))?,
                         };
-                        let shape = (this.shape)(pointee).map_err(|e| error(source, e))?;
+                        let shape = (this.shape)(&pointee).map_err(|e| error(source, e))?;
                         frame
                             .state
                             .declare(id, &shape, true, &mut this.fuel)
                             .map_err(|e| {
                                 error(source, format!("borrowed argument shape: {e:?}"))
                             })?;
-                        frame.types.insert(id, (**pointee).clone());
+                        frame.types.insert(id, pointee.clone());
                         Some(BTreeSet::from([Place {
                             root: id,
                             fields: vec![],
@@ -7726,16 +9456,29 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         None
                     };
                     if let Some(borrowed) = borrowed {
-                        frame_targets.insert(argument.parameter, borrowed.clone());
+                        frame_targets.insert(
+                            argument.parameter,
+                            BTreeMap::from([(vec![], borrowed.clone())]),
+                        );
                         frame.pointers.insert(
                             Place {
                                 root: root(binding),
-                                fields: vec![],
+                                fields: vec![0; pointer_depth],
                             },
                             borrowed,
                         );
                     }
                     frame.memory_exposed = true;
+                }
+                if let Some(actual) = targets.get(&argument.parameter) {
+                    let fields =
+                        this.declare_input_field_borrows(&mut frame, binding, ty, actual, source)?;
+                    if !fields.is_empty() {
+                        frame_targets
+                            .entry(argument.parameter)
+                            .or_default()
+                            .extend(fields);
+                    }
                 }
                 prepared.push((binding, ty.clone(), argument.parameter));
             }
@@ -7753,7 +9496,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             }
         }
         if !flow.live {
-            return Ok((None, None));
+            return Ok((None, None, BTreeMap::new()));
         }
         let summary = match self.memory_candidate_summary(
             callee,
@@ -7771,7 +9514,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 // Preserve the obligation for invocation without inventing an
                 // access summary or a returned pointer target.
                 self.report.deferred_calls.push(source);
-                return Ok((None, None));
+                return Ok((None, None, BTreeMap::new()));
             }
             Err(failure) => return Err(failure),
         };
@@ -7789,10 +9532,49 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             }
         }
         if !flow.live {
-            return Ok((None, Some(summary)));
+            return Ok((None, Some(summary), BTreeMap::new()));
+        }
+        let mut origins = BTreeMap::new();
+        let Term::Function { result, .. } = summary.signature.callable_signature() else {
+            return Err(error(source, "memory result lacks a signature"));
+        };
+        let storage_paths = if summary.pointer_fields.is_empty() {
+            BTreeMap::new()
+        } else {
+            super::memory::conditional_pointer_storage_paths(
+                self.package,
+                completion_type(result),
+                &mut self.fuel,
+            )
+            .map_err(|reason| error(source, reason))?
+        };
+        for (path, results) in &summary.pointer_fields {
+            self.fuel = self
+                .fuel
+                .checked_sub(path.len() + 1)
+                .ok_or_else(|| error(source, "memory result field budget exhausted"))?;
+            let storage = storage_paths
+                .get(path)
+                .ok_or_else(|| error(source, "memory result field layout mismatch"))?;
+            let mut actual = BTreeSet::new();
+            if let Some(results) = results {
+                for result in results {
+                    if let Some(targets) = self.map_memory_target(result, &targets, flow, source)? {
+                        actual.extend(targets);
+                    } else {
+                        actual.insert(unknown_pointer_target());
+                    }
+                }
+            } else {
+                actual.insert(unknown_pointer_target());
+            }
+            origins
+                .entry(storage.clone())
+                .or_insert_with(BTreeSet::new)
+                .extend(actual);
         }
         let Some(results) = &summary.result_targets else {
-            return Ok((None, Some(summary)));
+            return Ok((None, Some(summary), origins));
         };
         let mut all = BTreeSet::new();
         for target in results {
@@ -7802,7 +9584,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 all.insert(unknown_pointer_target());
             }
         }
-        Ok((Some(all), Some(summary)))
+        Ok((Some(all), Some(summary), origins))
     }
     fn pointer_work(
         &mut self,
@@ -7983,6 +9765,123 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(origins)
     }
+    fn storage_inputs_are_closed(&mut self, ty: &Term, source: SourceRange) -> Result<bool, Error> {
+        // Whole generic values can be transferred before their field layout is
+        // known. Materialized calls are checked again with concrete inputs.
+        super::memory::bound_type(ty, &mut self.fuel).map_err(|reason| error(source, reason))?;
+        Ok(ty
+            .rigid_parameters()
+            .map_err(|reason| error(source, reason.to_string()))?
+            .is_empty()
+            && ty
+                .substitution_parameters()
+                .map_err(|reason| error(source, reason.to_string()))?
+                .is_empty())
+    }
+
+    #[inline(never)]
+    fn evaluate_named_pointer_aggregate(
+        &mut self,
+        expr: &Expr,
+        callee: &Expr,
+        arguments: &[nir::program::CallArgument],
+        parameter_bindings: &[LocalId],
+        flow: &mut Flow,
+        depth: usize,
+    ) -> Result<ValueOrigins, Error> {
+        if !matches!(
+            callee.kind,
+            K::Local(_) | K::Function(_) | K::FunctionInstance { .. }
+        ) {
+            return self
+                .call_temporary_with_origins(
+                    expr,
+                    callee,
+                    arguments,
+                    parameter_bindings,
+                    flow,
+                    depth + 1,
+                )
+                .map(|(_, origins)| origins);
+        }
+        if matches!(callee.kind, K::Local(_)) {
+            // Resolve identity before evaluating arguments, but still consume the
+            // original callable exactly once under the ordinary resource rules.
+            if let Some(resolved) = self.indirect_named_call(expr, flow) {
+                self.expr(callee, flow, depth + 1)?;
+                return self.evaluate_value_origins(&resolved, flow, depth + 1);
+            }
+            let K::Local(binding) = callee.kind else {
+                unreachable!()
+            };
+            if let Some(callable) = flow
+                .callables
+                .get(&root(binding))
+                .filter(|callable| matches!(callable.definition.kind, K::Closure { .. }))
+                .cloned()
+            {
+                return self
+                    .call_closure_with_origins(
+                        root(binding),
+                        &callable,
+                        arguments,
+                        flow,
+                        expr.source,
+                        depth + 1,
+                    )
+                    .map(|(_, origins)| origins);
+            }
+            let callable = flow
+                .callables
+                .get(&root(binding))
+                .filter(|callable| !callable.alternatives.is_empty())
+                .cloned()
+                .ok_or_else(|| {
+                    error(
+                        expr.source,
+                        "aggregate call result requires named callable provenance",
+                    )
+                })?;
+            self.expr(callee, flow, depth + 1)?;
+            if !flow.live {
+                return Ok(BTreeMap::new());
+            }
+            return self
+                .call_named_candidates_with_origins(
+                    expr,
+                    &callable,
+                    arguments,
+                    parameter_bindings,
+                    flow,
+                    depth + 1,
+                )
+                .map(|(_, origins)| origins);
+        }
+        let mut prepared_callables = vec![];
+        let mut prepared_enums = vec![];
+        let (_, _, origins) = self.memory_call(
+            callee,
+            arguments,
+            parameter_bindings,
+            &[],
+            &mut prepared_callables,
+            &mut prepared_enums,
+            flow,
+            expr.source,
+            depth + 1,
+        )?;
+        if flow.live {
+            flow.value_callable = self.record_named_call(
+                callee,
+                prepared_callables,
+                prepared_enums,
+                expr.source,
+                flow,
+            )?;
+        }
+        Ok(origins)
+    }
+
     fn evaluate_value_origins_inner(
         &mut self,
         expr: &Expr,
@@ -8158,6 +10057,66 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             }
             _ => {}
         }
+        if let K::NewtypeConvert(value) = &expr.kind {
+            let package = self.package.ok_or_else(|| {
+                error(expr.source, "newtype conversion requires nominal metadata")
+            })?;
+            let conversion = nir::newtypes::conversion(
+                &package.newtypes,
+                &value.ty,
+                &expr.ty,
+                &[],
+                &mut self.fuel,
+            )
+            .map_err(|reason| error(expr.source, reason.to_string()))?
+            .ok_or_else(|| error(expr.source, "invalid newtype conversion edge"))?;
+            let origins = self.evaluate_value_origins(value, flow, depth + 1)?;
+            if !flow.live {
+                return Ok(origins);
+            }
+            // These are private representation paths, not source projections.
+            // Evaluate the complete operand once before moving its evidence.
+            fn remap<T>(
+                values: BTreeMap<Vec<usize>, T>,
+                direction: nir::newtypes::Direction,
+                fuel: &mut usize,
+                source: SourceRange,
+            ) -> Result<BTreeMap<Vec<usize>, T>, Error> {
+                let mut result = BTreeMap::new();
+                for (mut path, value) in values {
+                    *fuel = fuel
+                        .checked_sub(path.len().saturating_add(1))
+                        .ok_or_else(|| error(source, "newtype origin budget exhausted"))?;
+                    match direction {
+                        nir::newtypes::Direction::Wrap => path.insert(0, 0),
+                        nir::newtypes::Direction::Unwrap => {
+                            if path.first() != Some(&0) {
+                                return Err(error(source, "invalid newtype representation origin"));
+                            }
+                            path.remove(0);
+                        }
+                    }
+                    result.insert(path, value);
+                }
+                Ok(result)
+            }
+            let direction = conversion.direction();
+            let origins = remap(origins, direction, &mut self.fuel, expr.source)?;
+            flow.value_callables = remap(
+                std::mem::take(&mut flow.value_callables),
+                direction,
+                &mut self.fuel,
+                expr.source,
+            )?;
+            flow.value_variants = remap(
+                std::mem::take(&mut flow.value_variants),
+                direction,
+                &mut self.fuel,
+                expr.source,
+            )?;
+            flow.value_callable = flow.value_callables.get(&vec![]).cloned();
+            return Ok(origins);
+        }
         if let K::Snapshot(value) = &expr.kind {
             if value.ty != expr.ty
                 || (self.delivery)(&expr.ty).map_err(|e| error(expr.source, e))? != Delivery::Copy
@@ -8169,6 +10128,19 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             }
             return self.evaluate_value_origins(value, flow, depth + 1);
         }
+        if matches!(expr.kind, K::Call { .. } | K::ReadPointer(_))
+            && !matches!(expr.ty, Term::Pointer(_))
+        {
+            if let Some((pointer_depth, _)) =
+                super::memory::pointer_representation(self.package, &expr.ty, &mut self.fuel)
+                    .map_err(|reason| error(expr.source, reason))?
+            {
+                return Ok(self
+                    .evaluate_pointer_value(expr, flow, depth + 1)?
+                    .map(|targets| BTreeMap::from([(vec![0; pointer_depth], targets)]))
+                    .unwrap_or_default());
+            }
+        }
         if matches!(expr.ty, Term::Pointer(_)) {
             return Ok(self
                 .evaluate_pointer_value(expr, flow, depth + 1)?
@@ -8176,6 +10148,34 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 .unwrap_or_default());
         }
         match &expr.kind {
+            K::Call {
+                callee,
+                arguments,
+                parameter_bindings,
+            } if self.package.is_some()
+                && !matches!(callee.kind, K::TraitMethod { .. })
+                && matches!(
+                    expr.ty,
+                    Term::Tuple(_)
+                        | Term::Record(_)
+                        | Term::Nominal { .. }
+                        | Term::NormalForm { .. }
+                        | Term::Closure { .. }
+                )
+                && self.storage_inputs_are_closed(&expr.ty, expr.source)?
+                && !super::memory::pointer_input_layout(self.package, &expr.ty, &mut self.fuel)
+                    .map_err(|reason| error(expr.source, reason))?
+                    .is_empty() =>
+            {
+                self.evaluate_named_pointer_aggregate(
+                    expr,
+                    callee,
+                    arguments,
+                    parameter_bindings,
+                    flow,
+                    depth,
+                )
+            }
             K::Closure { .. } => {
                 flow.constructed_capture_origins.clear();
                 self.expr(expr, flow, depth + 1)?;
@@ -8393,8 +10393,16 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         if let Some(message) = nir::program::pointer_operation_error(expr) {
             return Err(error(expr.source, message));
         }
-        if matches!(expr.ty, Term::Pointer(_)) {
+        if super::memory::pointer_representation(self.package, &expr.ty, &mut self.fuel)
+            .map_err(|reason| error(expr.source, reason))?
+            .is_some()
+        {
             match &expr.kind {
+                K::NewtypeConvert(_) => {
+                    let mut origins = self.evaluate_value_origins(expr, flow, depth + 1)?;
+                    return Ok(origins.remove(&vec![]));
+                }
+
                 K::AnonymousField { .. } | K::Field { .. } if expression_place(expr).is_none() => {
                     let mut origins = self.project_temporary(expr, flow, depth + 1)?;
                     return Ok(origins.remove(&vec![]));
@@ -8495,6 +10503,21 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     };
                 }
                 K::ReadPointer(pointer) => {
+                    if (self.delivery)(&expr.ty).map_err(|e| error(expr.source, e))?
+                        != Delivery::Copy
+                    {
+                        return Err(error(
+                            expr.source,
+                            "pointer read requires checked Copy permission",
+                        ));
+                    }
+                    let (pointer_depth, _) = super::memory::pointer_representation(
+                        self.package,
+                        &expr.ty,
+                        &mut self.fuel,
+                    )
+                    .map_err(|reason| error(expr.source, reason))?
+                    .ok_or_else(|| error(expr.source, "pointer read representation is missing"))?;
                     let slots = self.evaluate_pointer_value(pointer, flow, depth + 1)?;
                     if !flow.live {
                         return Ok(None);
@@ -8511,8 +10534,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                                 format!("pointer read target unavailable: {e:?}"),
                             )
                         })?;
-                        self.borrowed_pointer_contents(flow, slot, expr.source)?;
-                        if let Some(targets) = flow.pointers.get(slot) {
+                        let mut leaf = slot.clone();
+                        leaf.fields.extend(std::iter::repeat_n(0, pointer_depth));
+                        self.borrowed_pointer_contents(flow, &leaf, expr.source)?;
+                        if let Some(targets) = flow.pointers.get(&leaf) {
                             self.pointer_work(targets, expr.source)?;
                             result.extend(targets.iter().cloned());
                         } else {
@@ -8594,7 +10619,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     }
                     let mut prepared_callables = vec![];
                     let mut prepared_enums = vec![];
-                    let (result, _) = self.memory_call(
+                    let (result, _, _) = self.memory_call(
                         callee,
                         arguments,
                         parameter_bindings,
@@ -8747,6 +10772,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         } else if !matches!(
             expr.kind,
             K::Tuple(_)
+                | K::Closure { .. }
                 | K::Record { .. }
                 | K::AnonymousRecord { .. }
                 | K::Variant { .. }
@@ -8761,11 +10787,13 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 | K::Call { .. }
                 | K::Field { .. }
                 | K::AnonymousField { .. }
+                | K::NewtypeConvert(_)
+                | K::ReadPointer(_)
         ) {
             flow.value_callables.clear();
             flow.value_variants.clear();
         }
-        if !flow.live || matches!(expr.kind, K::Closure { .. }) {
+        if !flow.live {
             flow.value_variants.clear();
         } else if let Some(domains) = delivered_variants {
             flow.value_variants = domains;
@@ -8788,8 +10816,118 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 | K::If { .. }
                 | K::Match { .. }
                 | K::Call { .. }
+                | K::NewtypeConvert(_)
+                | K::ReadPointer(_)
         ) {
             flow.value_callable = None;
+        }
+        Ok(())
+    }
+    // Keep the pointer update's candidate maps off the recursive expression frame.
+    #[inline(never)]
+    fn write_pointer(
+        &mut self,
+        pointer: &Expr,
+        value: &Expr,
+        flow: &mut Flow,
+        source: SourceRange,
+        depth: usize,
+    ) -> Result<(), Error> {
+        let target = self.evaluate_pointer_value(pointer, flow, depth + 1)?;
+        if !flow.live {
+            return Ok(());
+        }
+        let target =
+            target.ok_or_else(|| error(source, "pointer target provenance is not established"))?;
+        let pointer_depth =
+            super::memory::pointer_representation(self.package, &value.ty, &mut self.fuel)
+                .map_err(|reason| error(source, reason))?
+                .map(|(depth, _)| depth);
+        let mut origins = self.evaluate_value_origins(value, flow, depth + 1)?;
+        let replacement = pointer_depth.and_then(|depth| origins.remove(&vec![0; depth]));
+        if flow.live {
+            if !super::memory::readable_representation(self.package, &value.ty, &mut self.fuel)
+                .map_err(|reason| error(source, reason))?
+            {
+                return Err(error(
+                    source,
+                    "pointer write requires a memory transfer contract",
+                ));
+            }
+            if (self.delivery)(&value.ty).map_err(|reason| error(source, reason))? != Delivery::Copy
+            {
+                return Err(error(
+                    source,
+                    "pointer write requires checked Copy permission",
+                ));
+            }
+            for slot in &target {
+                flow.state.require_present(slot).map_err(|e| {
+                    error(source, format!("pointer write target unavailable: {e:?}"))
+                })?;
+            }
+            let exact = target.len() == 1;
+            let replacement_domains =
+                copy_enum_domains(&flow.value_variants, &mut self.fuel, source)?;
+            for callable in flow.value_callables.values() {
+                bound_callable_copy(callable, &mut self.fuel, source, 0)?;
+            }
+            let replacement_code = flow.value_callables.clone();
+            for slot in &target {
+                let previous_domains = self.stored_enum_domains(flow, slot, source)?;
+                let code = if exact {
+                    for callable in replacement_code.values() {
+                        bound_callable_copy(callable, &mut self.fuel, source, 0)?;
+                    }
+                    replacement_code.clone()
+                } else {
+                    let previous_code = self.stored_code(flow, slot, source)?;
+                    join_guarded_callables(
+                        &previous_code,
+                        &replacement_code,
+                        &previous_domains,
+                        &replacement_domains,
+                        &mut self.fuel,
+                        source,
+                    )?
+                };
+                let domains = if exact {
+                    copy_enum_domains(&replacement_domains, &mut self.fuel, source)?
+                } else {
+                    let previous = self.stored_enum_domains(flow, slot, source)?;
+                    join_enum_domains(&previous, &replacement_domains, &mut self.fuel, source)?
+                };
+                if slot.fields.is_empty() {
+                    flow.callables.remove(&slot.root);
+                    if let Some(callable) = code.get(&vec![]) {
+                        self.store_callable(flow, slot.root, callable.clone(), source)?;
+                    }
+                }
+                self.install_callable_fields(flow, slot, code, source)?;
+                self.install_enum_domains(flow, slot, domains, source)?;
+                let mut leaf = slot.clone();
+                leaf.fields
+                    .extend(std::iter::repeat_n(0, pointer_depth.unwrap_or(0)));
+                let slot = &leaf;
+                let updated = if exact {
+                    if let Some(replacement) = &replacement {
+                        self.pointer_work(replacement, source)?;
+                    }
+                    replacement.clone()
+                } else {
+                    match (flow.pointers.get(slot), &replacement) {
+                        (Some(previous), Some(replacement)) => {
+                            self.pointer_work(previous, source)?;
+                            self.pointer_work(replacement, source)?;
+                            let mut all = previous.clone();
+                            all.extend(replacement.iter().cloned());
+                            Some(all)
+                        }
+                        _ => None,
+                    }
+                };
+                self.replace_pointer_slot(flow, slot, updated, source)?;
+            }
         }
         Ok(())
     }
@@ -8824,17 +10962,49 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 }
                 let target = target
                     .ok_or_else(|| error(source, "pointer target provenance is not established"))?;
-                if !nir::program::intrinsic_pointer_value(&expr.ty) {
+                if !super::memory::readable_representation(self.package, &expr.ty, &mut self.fuel)
+                    .map_err(|reason| error(source, reason))?
+                {
                     return Err(error(
                         source,
-                        "pointer delivery requires a memory transfer contract",
+                        "owned pointer read requires a memory transfer contract",
                     ));
                 }
+                if (self.delivery)(&expr.ty).map_err(|e| error(source, e))? != Delivery::Copy {
+                    return Err(error(
+                        source,
+                        "pointer read requires checked Copy permission",
+                    ));
+                }
+                let mut domains = None;
+                let mut code = None;
                 for target in &target {
                     flow.state.require_present(target).map_err(|e| {
                         error(source, format!("pointer read target unavailable: {e:?}"))
                     })?;
+                    let next = self.stored_enum_domains(flow, target, source)?;
+                    let next_code = self.stored_code(flow, target, source)?;
+                    code = Some(if let Some(previous) = code {
+                        join_guarded_callables(
+                            &previous,
+                            &next_code,
+                            domains.as_ref().unwrap(),
+                            &next,
+                            &mut self.fuel,
+                            source,
+                        )?
+                    } else {
+                        next_code
+                    });
+                    domains = Some(if let Some(previous) = domains {
+                        join_enum_domains(&previous, &next, &mut self.fuel, source)?
+                    } else {
+                        next
+                    });
                 }
+                flow.value_variants = domains.unwrap_or_default();
+                flow.value_callables = code.unwrap_or_default();
+                flow.value_callable = flow.value_callables.get(&vec![]).cloned();
             }
             K::BitWritePointer {
                 pointer,
@@ -8887,47 +11057,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 )?;
             }
             K::WritePointer { pointer, value } => {
-                let target = self.evaluate_pointer_value(pointer, flow, depth + 1)?;
-                if !flow.live {
-                    return Ok(());
-                }
-                let target = target
-                    .ok_or_else(|| error(source, "pointer target provenance is not established"))?;
-                let replacement = self.evaluate_pointer_value(value, flow, depth + 1)?;
-                if flow.live {
-                    if !nir::program::intrinsic_pointer_value(&value.ty) {
-                        return Err(error(
-                            source,
-                            "pointer write requires a memory transfer contract",
-                        ));
-                    }
-                    for slot in &target {
-                        flow.state.require_present(slot).map_err(|e| {
-                            error(source, format!("pointer write target unavailable: {e:?}"))
-                        })?;
-                    }
-                    let exact = target.len() == 1;
-                    for slot in &target {
-                        let updated = if exact {
-                            if let Some(replacement) = &replacement {
-                                self.pointer_work(replacement, source)?;
-                            }
-                            replacement.clone()
-                        } else {
-                            match (flow.pointers.get(slot), &replacement) {
-                                (Some(previous), Some(replacement)) => {
-                                    self.pointer_work(previous, source)?;
-                                    self.pointer_work(replacement, source)?;
-                                    let mut all = previous.clone();
-                                    all.extend(replacement.iter().cloned());
-                                    Some(all)
-                                }
-                                _ => None,
-                            }
-                        };
-                        self.replace_pointer_slot(flow, slot, updated, source)?;
-                    }
-                }
+                self.write_pointer(pointer, value, flow, source, depth)?;
             }
             K::Local(_) | K::AnonymousField { .. } | K::Field { .. } => {
                 let Some(p) = expression_place(expr) else {
@@ -9075,14 +11205,33 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             captured.extend(path);
                             capture_origins.insert(captured, targets.clone());
                         }
+                        let input_origins = this.memory_input_targets(
+                            &capture.ty,
+                            &origins,
+                            &flow.value_variants,
+                            source,
+                        )?;
                         this.remember_pending_origins(value, slot, flow, origins)?;
                         this.declare(&mut inner, capture.binding, &capture.ty, source)?;
-                        if let Term::Pointer(subject) = &capture.ty {
+                        this.declare_input_field_borrows(
+                            &mut inner,
+                            capture.binding,
+                            &capture.ty,
+                            &input_origins,
+                            source,
+                        )?;
+                        if let Some((_, subject)) = super::memory::pointer_representation(
+                            this.package,
+                            &capture.ty,
+                            &mut this.fuel,
+                        )
+                        .map_err(|reason| error(source, reason))?
+                        {
                             this.declare_closure_borrow(
                                 &mut inner,
                                 parameters.len() + slot,
                                 capture.binding,
-                                subject,
+                                &subject,
                                 source,
                             )?;
                         }
@@ -9121,8 +11270,14 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     parameters.iter().zip(parameter_types).enumerate()
                 {
                     self.declare(&mut inner, *binding, &parameter.ty, source)?;
-                    if let Term::Pointer(subject) = &parameter.ty {
-                        self.declare_closure_borrow(&mut inner, slot, *binding, subject, source)?;
+                    if let Some((_, subject)) = super::memory::pointer_representation(
+                        self.package,
+                        &parameter.ty,
+                        &mut self.fuel,
+                    )
+                    .map_err(|reason| error(source, reason))?
+                    {
+                        self.declare_closure_borrow(&mut inner, slot, *binding, &subject, source)?;
                     }
                 }
                 // Analyze a possible invocation independently from construction.
@@ -9184,6 +11339,11 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         .collect(),
                     invocation,
                 });
+                // Capture initializer code leaves are not fields of the newly
+                // constructed callable; its environment has separate evidence.
+                flow.value_callables.clear();
+                flow.value_variants =
+                    self.capture_storage_domains(captures, &construction.enum_captures, source)?;
                 flow.value_callable = Some(construction);
                 flow.constructed_capture_origins = capture_origins;
             }
@@ -9321,6 +11481,19 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             } => {
                 if self.captured_roots.contains(&root(target.root))
                     && !matches!(value.ty, Term::Function { .. } | Term::Closure { .. })
+                    && !super::memory::capture_pointer_replacement_layout(
+                        self.package,
+                        &value.ty,
+                        &mut self.fuel,
+                    )
+                    .map_err(|reason| {
+                        error(
+                            source,
+                            format!(
+                                "captured write requires an established memory contract: {reason}"
+                            ),
+                        )
+                    })?
                 {
                     super::memory::require_pointer_free_owned(
                         self.package,
@@ -9359,14 +11532,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                                 root: root(target.root),
                                 fields: target.fields.iter().map(|(_, index)| *index).collect(),
                             };
-                            let leaves = flow.value_callables.clone();
-                            this.install_callable_fields(flow, &destination, leaves, source)?;
-                            this.install_enum_domains(
-                                flow,
-                                &destination,
-                                flow.value_variants.clone(),
-                                source,
-                            )?;
+                            let (variants, domains) =
+                                this.cleanup_variants(flow, &destination, source)?;
                             if let Some(action) = this.owned_action(
                                 &flow.state,
                                 destination.clone(),
@@ -9376,6 +11543,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                                     slots: &flow.pointers,
                                     retired: &[],
                                 },
+                                &variants,
+                                &domains,
                                 source,
                             )? {
                                 this.report.cleanup_sites.push(CleanupSite {
@@ -9387,6 +11556,14 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                                     actions: vec![action],
                                 });
                             }
+                            let leaves = flow.value_callables.clone();
+                            this.install_callable_fields(flow, &destination, leaves, source)?;
+                            this.install_enum_domains(
+                                flow,
+                                &destination,
+                                flow.value_variants.clone(),
+                                source,
+                            )?;
                             this.install_value_origins(flow, &destination, origins, source)?;
                             for (place, availability) in flow
                                 .state
@@ -9546,7 +11723,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     let package = self.package.ok_or_else(|| {
                         error(source, "method memory analysis requires a package")
                     })?;
-                    let selected = super::memory::method_callee(package, callee, &mut self.fuel)
+                    let selected = self
+                        .method_callees
+                        .select(package, callee, &mut self.fuel)
                         .map_err(|reason| error(source, reason))?;
                     let resolved = Expr {
                         source,
@@ -9635,11 +11814,53 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         .call_closure(root(binding), &callable, arguments, flow, source, depth + 1)
                         .map(|_| ());
                 }
-                if (flow.memory_exposed
-                    || arguments
-                        .iter()
-                        .any(|arg| matches!(arg.value.ty, Term::Pointer(_))))
-                {
+                let mut pointer_arguments = false;
+                for argument in arguments {
+                    // An opaque aggregate local may already carry pointers even
+                    // when evaluating it contains no address-taking expression.
+                    if self.package.is_some()
+                        && !matches!(
+                            argument.value.ty,
+                            Term::Function { .. }
+                                | Term::Closure { .. }
+                                | Term::Rigid { .. }
+                                | Term::Bound { .. }
+                                | Term::Hole { .. }
+                                | Term::Runtime(_)
+                                | Term::AssociatedType { .. }
+                        )
+                        && self.storage_inputs_are_closed(&argument.value.ty, source)?
+                    {
+                        pointer_arguments |= !super::memory::pointer_input_layout(
+                            self.package,
+                            &argument.value.ty,
+                            &mut self.fuel,
+                        )
+                        .map_err(|reason| error(source, reason))?
+                        .is_empty();
+                    }
+                    // A pointer constructed inside a record/block is just as
+                    // observable as a pointer-valued root argument. Inspect
+                    // evaluation structure without evaluating it twice or
+                    // treating deferred closure bodies as argument effects.
+                    nir::visit::expression_in_scope(
+                        &argument.value,
+                        &mut self.fuel,
+                        |node, fuel| {
+                            if !pointer_arguments {
+                                pointer_arguments = super::memory::pointer_representation(
+                                    self.package,
+                                    &node.ty,
+                                    fuel,
+                                )?
+                                .is_some();
+                            }
+                            Ok(())
+                        },
+                    )
+                    .map_err(|reason| error(source, reason))?;
+                }
+                if flow.memory_exposed || pointer_arguments {
                     if matches!(callee.kind, K::Function(_) | K::FunctionInstance { .. }) {
                         let mut prepared_callables = vec![];
                         let mut prepared_enums = vec![];
@@ -9690,11 +11911,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     flow.value_variants.clear();
                     return Ok(());
                 }
-                if flow.memory_exposed
-                    || arguments
-                        .iter()
-                        .any(|a| matches!(a.value.ty, Term::Pointer(_)))
-                {
+                if flow.memory_exposed || pointer_arguments {
                     return Err(error(
                         source,
                         "call with pointer dependencies requires a memory contract",
@@ -9713,6 +11930,20 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             )
                             .map(|_| ());
                     }
+                    // Moving a closure removes its callable evidence. Report
+                    // the unavailable owner before diagnosing unknown code;
+                    // known, partially consumed closures retain their own
+                    // per-capture invocation checks above.
+                    let place = Place {
+                        root: root(*binding),
+                        fields: vec![],
+                    };
+                    flow.state.require_present(&place).map_err(|reason| {
+                        error(
+                            source,
+                            format!("call of unavailable value {place}: {reason:?}"),
+                        )
+                    })?;
                 }
                 if matches!(callee.ty, Term::Closure { .. })
                     || matches!(callee.kind, K::Closure { .. })
@@ -9837,7 +12068,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             } => {
                 self.effect_request_resources(expr, *abi, signature, arguments, flow, depth + 1)?;
             }
-            K::EffectComputation { .. } | K::EffectRun { .. } | K::Snapshot(_) => {
+            K::EffectComputation { .. }
+            | K::EffectRun { .. }
+            | K::Snapshot(_)
+            | K::NewtypeConvert(_) => {
                 self.evaluate_value_origins(expr, flow, depth + 1)?;
             }
             K::RequirePredicate(condition)
@@ -9947,6 +12181,7 @@ pub fn analyze(
         &[],
         vec![],
         vec![],
+        &[],
     )
 }
 
@@ -9962,6 +12197,7 @@ fn analyze_with_shapes<'a>(
     enum_parameters: &[EnumParameter],
     return_stack: Vec<(nir::DeclarationId, Vec<Term>)>,
     effect_result_inputs: Vec<EffectResultInput>,
+    borrowed_fields: &[BorrowedField],
 ) -> Result<Report, Error> {
     let source = function.body.source;
     if function.phase != FunctionPhase::Runtime {
@@ -9986,6 +12222,7 @@ fn analyze_with_shapes<'a>(
         candidate_observations: None,
         observation_region: false,
         observation_locals: BTreeSet::new(),
+        method_callees: Default::default(),
         persistent_roots: BTreeSet::new(),
         captured_roots: BTreeSet::new(),
         defer_unknown_calls: false,
@@ -10124,7 +12361,19 @@ fn analyze_with_shapes<'a>(
             .parameters
             .get(*slot)
             .ok_or_else(|| error(source, "borrowed parameter is missing"))?;
-        if parameters[*slot].ty != Term::Pointer(Box::new(subject.clone())) {
+        let representation = super::memory::pointer_representation(
+            analyzer.package,
+            &parameters[*slot].ty,
+            &mut analyzer.fuel,
+        )
+        .map_err(|reason| error(source, reason))?;
+        let Some((pointer_depth, actual)) = representation else {
+            return Err(error(
+                source,
+                "borrowed parameter lacks a pointer representation",
+            ));
+        };
+        if actual != *subject {
             return Err(error(
                 source,
                 "borrowed pointee type disagrees with parameter",
@@ -10137,6 +12386,14 @@ fn analyze_with_shapes<'a>(
             local: u32::try_from(*slot)
                 .map_err(|_| error(source, "too many borrowed parameters"))?,
         };
+        analyzer.report.borrowed_roots.insert(
+            pointee,
+            BorrowedRoot::Parameter {
+                parameter: *slot,
+                input_fields: vec![],
+                pointee: subject.clone(),
+            },
+        );
         let shape = (analyzer.shape)(subject).map_err(|e| error(source, e))?;
         flow.state
             .declare(pointee, &shape, true, &mut analyzer.fuel)
@@ -10145,7 +12402,7 @@ fn analyze_with_shapes<'a>(
         flow.pointers.insert(
             Place {
                 root: root(*binding),
-                fields: vec![],
+                fields: vec![0; pointer_depth],
             },
             BTreeSet::from([Place {
                 root: pointee,
@@ -10164,6 +12421,56 @@ fn analyze_with_shapes<'a>(
             flow.effect_borrows.insert(pointee);
         }
         flow.memory_exposed = true;
+    }
+    let mut seen_fields = BTreeSet::new();
+    for premise in borrowed_fields {
+        super::memory::bound_type(&premise.pointee, &mut analyzer.fuel)
+            .map_err(|reason| error(source, reason))?;
+        analyzer.fuel = analyzer
+            .fuel
+            .checked_sub(premise.fields.len() + 1)
+            .ok_or_else(|| error(source, "borrowed field premise budget exhausted"))?;
+        if premise.fields.is_empty()
+            || !seen_fields.insert((premise.parameter, premise.fields.clone()))
+        {
+            return Err(error(source, "duplicate or empty borrowed field premise"));
+        }
+        let parameter = parameters
+            .get(premise.parameter)
+            .ok_or_else(|| error(source, "borrowed field parameter is missing"))?;
+        let leaves =
+            super::memory::pointer_input_layout(package, &parameter.ty, &mut analyzer.fuel)
+                .map_err(|reason| error(source, reason))?;
+        if !leaves
+            .iter()
+            .any(|leaf| leaf.input_fields == premise.fields && leaf.pointee == premise.pointee)
+        {
+            return Err(error(
+                source,
+                "borrowed field pointee disagrees with parameter layout",
+            ));
+        }
+        let binding = function.parameters[premise.parameter];
+        let roots = analyzer.declare_input_field_borrows(
+            &mut flow,
+            binding,
+            &parameter.ty,
+            &BTreeMap::from([(premise.fields.clone(), BTreeSet::new())]),
+            source,
+        )?;
+        for (path, targets) in roots {
+            for target in targets {
+                analyzer.report.borrowed_roots.insert(
+                    target.root,
+                    BorrowedRoot::Parameter {
+                        parameter: premise.parameter,
+                        input_fields: path.clone(),
+                        pointee: premise.pointee.clone(),
+                    },
+                );
+            }
+        }
+        analyzer.report.borrowed_fields.push(premise.clone());
     }
     for snapshot in &function.entry_snapshots {
         if !function.parameters.contains(&snapshot.parameter) {
@@ -10338,6 +12645,33 @@ pub fn analyze_in_package_with_effect_context<'a>(
     enum_parameters: &[EnumParameter],
     effects: Vec<EffectResultInput>,
 ) -> Result<Report, Error> {
+    analyze_in_package_with_field_context(
+        package,
+        function,
+        delivery,
+        fuel,
+        cleanup,
+        borrowed_parameters,
+        callable_parameters,
+        enum_parameters,
+        effects,
+        &[],
+    )
+}
+
+/// Field validity premises must be discharged by the caller's full memory footprint.
+pub fn analyze_in_package_with_field_context<'a>(
+    package: &'a Package,
+    function: &'a Function,
+    delivery: impl FnMut(&Term) -> Result<Delivery, String>,
+    fuel: usize,
+    cleanup: Option<&'a mut dyn CleanupPolicy>,
+    borrowed_parameters: &[(usize, Term)],
+    callable_parameters: &[CallableParameter],
+    enum_parameters: &[EnumParameter],
+    effects: Vec<EffectResultInput>,
+    borrowed_fields: &[BorrowedField],
+) -> Result<Report, Error> {
     let mut shape_fuel = fuel;
     analyze_with_shapes(
         Some(package),
@@ -10351,6 +12685,7 @@ pub fn analyze_in_package_with_effect_context<'a>(
         enum_parameters,
         vec![],
         effects,
+        borrowed_fields,
     )
 }
 
@@ -10822,10 +13157,8 @@ fn infer_callable_memory_with_effects(
     fuel: &mut usize,
     source: SourceRange,
 ) -> Result<super::memory::Summary, String> {
-    let function = package
-        .functions
-        .iter()
-        .find(|f| f.declaration == declaration)
+    let (function, body_arguments) = package
+        .runtime_body(declaration, arguments)
         .ok_or("memory function is missing")?;
     super::memory::bound_type(&function.signature, fuel)?;
     for argument in arguments {
@@ -10833,7 +13166,7 @@ fn infer_callable_memory_with_effects(
     }
     let signature = function
         .signature
-        .instantiate_types(&function.type_parameters, arguments)
+        .instantiate_types(&function.type_parameters, body_arguments)
         .map_err(|e| e.to_string())?;
     let Term::Function { parameters, .. } = signature.callable_signature() else {
         return Err("memory callee lacks a signature".into());
@@ -11445,6 +13778,25 @@ fn callable_value_paths(
             declaration,
             arguments,
         } => {
+            if let Some(definition) = package.and_then(|package| {
+                package
+                    .newtypes
+                    .iter()
+                    .find(|definition| definition.declaration == *declaration)
+            }) {
+                let representation = definition
+                    .representation_budgeted(arguments, &[], fuel)
+                    .map_err(|reason| error(source, reason.to_string()))?;
+                let mut paths =
+                    callable_value_paths(package, &representation, fuel, source, depth + 1)?;
+                for path in &mut paths {
+                    *fuel = fuel
+                        .checked_sub(path.len().saturating_add(1))
+                        .ok_or_else(|| error(source, "newtype callable path budget exhausted"))?;
+                    path.insert(0, 0);
+                }
+                return Ok(paths);
+            }
             if let Some(definition) =
                 package.and_then(|p| p.enums.iter().find(|e| e.declaration == *declaration))
             {
@@ -11500,11 +13852,13 @@ fn callable_value_paths(
 
 // Closed return captures may contain plain data and environment-free function
 // slots. Function slots require separate complete, stable code evidence. Enum
-// domains, pointers and nested closure environments need richer state transport.
+// domains and nested closure environments need richer state transport. Pointer
+// layouts additionally require a complete independently checked result contract.
 // Copy acquisition is checked separately; this predicate never supplies it.
 fn recoverable_return_capture_layout(
     package: Option<&Package>,
     ty: &Term,
+    pointer_contract: bool,
     fuel: &mut usize,
     source: SourceRange,
     depth: usize,
@@ -11516,6 +13870,9 @@ fn recoverable_return_capture_layout(
     super::memory::bound_type(ty, fuel).map_err(|e| error(source, e))?;
     if matches!(ty, Term::Primitive(_)) {
         return Ok(nir::program::intrinsic_pointer_value(ty));
+    }
+    if matches!(ty, Term::Pointer(_)) {
+        return Ok(pointer_contract);
     }
     if matches!(ty, Term::Function { .. }) {
         return Ok(true);
@@ -11530,6 +13887,24 @@ fn recoverable_return_capture_layout(
                 declaration,
                 arguments,
             } => {
+                if let Some(definition) = package.and_then(|package| {
+                    package
+                        .newtypes
+                        .iter()
+                        .find(|definition| definition.declaration == *declaration)
+                }) {
+                    let representation = definition
+                        .representation_budgeted(arguments, &[], fuel)
+                        .map_err(|reason| error(source, reason.to_string()))?;
+                    return recoverable_return_capture_layout(
+                        package,
+                        &representation,
+                        pointer_contract,
+                        fuel,
+                        source,
+                        depth + 1,
+                    );
+                }
                 if let Some(definition) =
                     package.and_then(|p| p.enums.iter().find(|e| e.declaration == *declaration))
                 {
@@ -11538,6 +13913,7 @@ fn recoverable_return_capture_layout(
                             if !recoverable_return_capture_layout(
                                 package,
                                 &field,
+                                pointer_contract,
                                 fuel,
                                 source,
                                 depth + 1,
@@ -11567,13 +13943,29 @@ fn recoverable_return_capture_layout(
         }
     };
     for field in &fields {
-        if !recoverable_return_capture_layout(package, field, fuel, source, depth + 1)? {
+        if !recoverable_return_capture_layout(
+            package,
+            field,
+            pointer_contract,
+            fuel,
+            source,
+            depth + 1,
+        )? {
             return Ok(false);
         }
     }
     Ok(true)
 }
 
+fn contains_return_evidence(
+    package: Option<&Package>,
+    ty: &Term,
+    fuel: &mut usize,
+    source: SourceRange,
+    depth: usize,
+) -> Result<bool, Error> {
+    contains_return_evidence_kind(package, ty, fuel, source, depth, true)
+}
 fn contains_callable_value(
     package: Option<&Package>,
     ty: &Term,
@@ -11581,13 +13973,26 @@ fn contains_callable_value(
     source: SourceRange,
     depth: usize,
 ) -> Result<bool, Error> {
+    contains_return_evidence_kind(package, ty, fuel, source, depth, false)
+}
+
+// Code identities and enum tags both require a contextual return summary.
+fn contains_return_evidence_kind(
+    package: Option<&Package>,
+    ty: &Term,
+    fuel: &mut usize,
+    source: SourceRange,
+    depth: usize,
+    include_tags: bool,
+) -> Result<bool, Error> {
     if *fuel == 0 || depth >= 128 {
         return Err(error(source, "callable result layout budget exhausted"));
     }
     *fuel -= 1;
     if let Some(fields) = nir::normal_forms::tuple_fields(package, ty) {
         for field in fields {
-            if contains_callable_value(package, field, fuel, source, depth + 1)? {
+            if contains_return_evidence_kind(package, field, fuel, source, depth + 1, include_tags)?
+            {
                 return Ok(true);
             }
         }
@@ -11597,14 +14002,28 @@ fn contains_callable_value(
         Term::Function { .. } | Term::Closure { .. } => return Ok(true),
         Term::Tuple(fields) => {
             for field in fields {
-                if contains_callable_value(package, field, fuel, source, depth + 1)? {
+                if contains_return_evidence_kind(
+                    package,
+                    field,
+                    fuel,
+                    source,
+                    depth + 1,
+                    include_tags,
+                )? {
                     return Ok(true);
                 }
             }
         }
         Term::Record(fields) => {
             for (_, field) in fields {
-                if contains_callable_value(package, field, fuel, source, depth + 1)? {
+                if contains_return_evidence_kind(
+                    package,
+                    field,
+                    fuel,
+                    source,
+                    depth + 1,
+                    include_tags,
+                )? {
                     return Ok(true);
                 }
             }
@@ -11613,13 +14032,44 @@ fn contains_callable_value(
             declaration,
             arguments,
         } => {
+            if let Some(definition) = package.and_then(|package| {
+                package
+                    .newtypes
+                    .iter()
+                    .find(|definition| definition.declaration == *declaration)
+            }) {
+                let representation = definition
+                    .representation_budgeted(arguments, &[], fuel)
+                    .map_err(|reason| error(source, reason.to_string()))?;
+                return contains_return_evidence_kind(
+                    package,
+                    &representation,
+                    fuel,
+                    source,
+                    depth + 1,
+                    include_tags,
+                );
+            }
             if let Some(definition) =
                 package.and_then(|p| p.enums.iter().find(|e| e.declaration == *declaration))
             {
+                // A tag constrains reachable branches even when no variant
+                // stores code. Validate its instantiated layout before requesting
+                // the bounded body summary that supplies actual tag evidence.
                 let variants = callable_variant_layout(definition, arguments, fuel, source)?;
+                if include_tags {
+                    return Ok(true);
+                }
                 for variant in variants {
                     for field in variant.fields {
-                        if contains_callable_value(package, &field, fuel, source, depth + 1)? {
+                        if contains_return_evidence_kind(
+                            package,
+                            &field,
+                            fuel,
+                            source,
+                            depth + 1,
+                            false,
+                        )? {
                             return Ok(true);
                         }
                     }
@@ -11643,7 +14093,14 @@ fn contains_callable_value(
                 .instantiate_fields(arguments)
                 .map_err(|e| error(source, format!("callable result fields: {e}")))?;
             for (_, field) in fields {
-                if contains_callable_value(package, &field, fuel, source, depth + 1)? {
+                if contains_return_evidence_kind(
+                    package,
+                    &field,
+                    fuel,
+                    source,
+                    depth + 1,
+                    include_tags,
+                )? {
                     return Ok(true);
                 }
             }
@@ -11708,8 +14165,8 @@ fn validate_callable_input(
         _ => None,
     };
     if let Some((declaration, arguments)) = named {
-        let function = package
-            .and_then(|p| p.functions.iter().find(|f| f.declaration == declaration))
+        let (function, body_arguments) = package
+            .and_then(|p| p.runtime_body(declaration, arguments))
             .ok_or_else(|| error(expr.source, "callable input refers to an unknown function"))?;
         if function.phase != FunctionPhase::Runtime {
             return Err(error(
@@ -11717,7 +14174,7 @@ fn validate_callable_input(
                 "callable input requires a runtime function",
             ));
         }
-        if arguments.len() != function.type_parameters.len() {
+        if body_arguments.len() != function.type_parameters.len() {
             return Err(error(
                 expr.source,
                 "callable input has invalid function type arguments",
@@ -11729,7 +14186,7 @@ fn validate_callable_input(
         }
         let signature = function
             .signature
-            .instantiate_types(&function.type_parameters, arguments)
+            .instantiate_types(&function.type_parameters, body_arguments)
             .map_err(|_| {
                 error(
                     expr.source,
@@ -11848,6 +14305,23 @@ fn owned_field_type(
                 declaration,
                 arguments,
             } => {
+                if let Some(definition) = package.and_then(|package| {
+                    package
+                        .newtypes
+                        .iter()
+                        .find(|definition| definition.declaration == *declaration)
+                }) {
+                    if *index != 0 {
+                        return Err(error(
+                            source,
+                            "newtype representation path index out of bounds",
+                        ));
+                    }
+                    current = definition
+                        .representation_budgeted(arguments, &[], fuel)
+                        .map_err(|reason| error(source, reason.to_string()))?;
+                    continue;
+                }
                 if *index == VARIANT_PATH {
                     let variant = components
                         .next()
@@ -12051,6 +14525,58 @@ mod record_shape_tests {
         assert!(!dump.contains(&usize::MAX.to_string()), "{dump}");
     }
     #[test]
+    fn newtype_return_capture_layout_is_bounded_and_preserves_pointer_rejection() {
+        let source = SourceRange { start: 0, end: 0 };
+        let declaration = nir::DeclarationId {
+            package: 0,
+            local: 100,
+        };
+        let ty = Term::Nominal {
+            declaration,
+            arguments: vec![],
+        };
+        let boolean = Term::Primitive(nir::Primitive::Bool);
+        let mut package = Package::default();
+        package.newtypes.push(nir::newtypes::Newtype {
+            capture_count: 0,
+            parameter_types: vec![],
+            declaration,
+            name: "Flag".into(),
+            type_parameters: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            representation: boolean.clone(),
+        });
+        assert!(
+            recoverable_return_capture_layout(Some(&package), &ty, false, &mut 100, source, 0)
+                .unwrap()
+        );
+        assert!(
+            recoverable_return_capture_layout(Some(&package), &ty, false, &mut 0, source, 0)
+                .is_err()
+        );
+        package.newtypes[0].representation = Term::Pointer(Box::new(boolean.clone()));
+        assert!(
+            !recoverable_return_capture_layout(Some(&package), &ty, false, &mut 100, source, 0)
+                .unwrap()
+        );
+        assert!(
+            recoverable_return_capture_layout(Some(&package), &ty, true, &mut 100, source, 0)
+                .unwrap()
+        );
+        package.newtypes[0].representation = ty.clone();
+        assert!(
+            recoverable_return_capture_layout(Some(&package), &ty, false, &mut 100, source, 0)
+                .is_err()
+        );
+        package.newtypes[0].representation = boolean;
+        assert!(
+            recoverable_return_capture_layout(Some(&package), &ty, false, &mut 100, source, 0)
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn enum_evidence_layout_validates_tags_fields_substitution_and_budget() {
         let source = SourceRange { start: 0, end: 0 };
         let declaration = nir::DeclarationId {
@@ -12060,6 +14586,7 @@ mod record_shape_tests {
         let boolean = Term::Primitive(nir::Primitive::Bool);
         let mut package = Package::default();
         package.enums.push(nir::program::Enum {
+            parameter_types: vec![],
             groups: vec![],
             encoding: None,
             symbol_encoding: None,

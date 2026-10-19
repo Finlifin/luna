@@ -118,7 +118,8 @@ pub fn capability_sources_in_scope(
         if contract.type_parameters.len() != current.interface_arguments.len() {
             continue;
         }
-        contract.validate_arguments_in_declarations(
+        contract.validate_arguments_for_subject(
+            &current.subject,
             &current.interface_arguments,
             frames,
             traits,
@@ -188,7 +189,8 @@ pub fn subject_requirements(
             continue;
         }
         if contract
-            .validate_arguments_in_declarations(
+            .validate_arguments_for_subject(
+                &assumption.subject,
                 &assumption.interface_arguments,
                 &[],
                 traits,
@@ -285,6 +287,24 @@ impl World<'_> {
             remaining: budget.steps,
         }
         .given_frames(requirement, budget, &[], self.context.scope())
+    }
+
+    /// Search caller-owned premises while some runtime domains are unavailable.
+    /// All subjects and interface arguments are validated in the supplied sort
+    /// frame. Equality needs the world's own context; no type wrapper is invented.
+    pub(crate) fn given_in_input_scope(
+        &self,
+        requirement: &TraitRequirement,
+        budget: Budget,
+        frames: &[Vec<nir::Sort>],
+    ) -> Option<TraitRequirement> {
+        Solver {
+            world: self,
+            scope: ResolutionScope::capture(self),
+            active: HashSet::new(),
+            remaining: budget.steps,
+        }
+        .given_frames(requirement, budget, &[], frames)
     }
     pub fn resolve(
         &self,
@@ -420,7 +440,8 @@ impl Solver<'_, '_> {
             .iter()
             .find(|t| t.declaration == interface.declaration)
         {
-            contract.validate_arguments_in_declarations(
+            contract.validate_arguments_for_subject(
+                subject,
                 &interface.arguments,
                 self.world.context.scope(),
                 self.world.traits,
@@ -521,7 +542,8 @@ impl Solver<'_, '_> {
             {
                 let mut fuel = budget.steps;
                 contract
-                    .validate_arguments_in_declarations(
+                    .validate_arguments_for_subject(
+                        &requirement.subject,
                         &requirement.interface_arguments,
                         frames,
                         self.world.traits,
@@ -635,7 +657,7 @@ impl Solver<'_, '_> {
         if depth >= budget.max_depth.min(64) {
             return Err("capability normalization depth exhausted".into());
         }
-        if matches!(ty, Term::Symbol(_)) {
+        if ty.is_structural_index_value() {
             crate::associated::charge_projection_copy(ty, &mut self.remaining)?;
             ty.check_scope(self.world.context.scope())
                 .map_err(|e| e.to_string())?;
@@ -697,17 +719,20 @@ impl Solver<'_, '_> {
         };
         let mut witnesses = Vec::new();
         let mut pending = None;
+        let parameters = match implementation.parameter_binders() {
+            Ok(parameters) => parameters,
+            Err(error) => return Qualification::Pending(error.to_string()),
+        };
         for capability in &implementation.capabilities {
             if self.remaining == 0 {
                 return Qualification::Pending("capability resolution budget exhausted".into());
             }
             self.remaining -= 1;
-            let requirement = match capability
-                .instantiate_types(&implementation.type_parameters, &evidence.type_arguments)
-            {
-                Ok(requirement) => requirement,
-                Err(e) => return Qualification::Pending(e.to_string()),
-            };
+            let requirement =
+                match capability.instantiate_parameters(&parameters, &evidence.type_arguments) {
+                    Ok(requirement) => requirement,
+                    Err(e) => return Qualification::Pending(e.to_string()),
+                };
             if let Some(given) = self.given(&requirement, budget) {
                 witnesses.push(Witness {
                     requirement,

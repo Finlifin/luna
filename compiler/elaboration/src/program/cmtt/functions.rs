@@ -36,7 +36,7 @@ impl Checker<'_, '_> {
             }
         };
         if sig.clause_params.iter().any(|parameter|!matches!(parameter.kind,
-            hir::clause::ClauseParamKind::Type(_) | hir::clause::ClauseParamKind::TraitBound(..) | hir::clause::ClauseParamKind::Optional(..)))
+            hir::clause::ClauseParamKind::Type(_) | hir::clause::ClauseParamKind::TraitBound(..) | hir::clause::ClauseParamKind::Positional(..) | hir::clause::ClauseParamKind::Optional(..)))
             || sig.params.iter().any(|param|
                 // Ordinary supply/lambda markers use the shared router;
                 // comptime inputs use staged binding before expansion.
@@ -97,7 +97,21 @@ struct Expansion<'a> {
     internal_packets: &'a mut BTreeSet<DeclarationId>,
     empty_replacements: &'a mut BTreeMap<(u32, u32), DeclarationId>,
     depth: usize,
+    active: Vec<(DeclarationId, Vec<Term>, n::SourceRange)>,
     runtime: bool,
+}
+
+// Scratch state retained while child templates expand. Keeping it on the heap
+// lets the preparation and completion stack frames return before recursion.
+struct PreparedTemplate {
+    body: n::Expr,
+    postconditions: Vec<n::Expr>,
+    result_binding: Option<n::LocalId>,
+    connections: BTreeMap<n::LocalId, n::LocalId>,
+    effects: Option<Vec<nir::effects::Operation>>,
+    delivered_type: Term,
+    prepared: Vec<n::Expr>,
+    statements: Vec<n::Expr>,
 }
 impl Expansion<'_> {
     fn fresh(&mut self, span: Span) -> Result<n::LocalId, Error> {
@@ -154,9 +168,37 @@ impl Expansion<'_> {
                 "quote fn expansion depth exhausted",
             ));
         }
+        let mut origin = expression.source;
+        while let Some(index) = origin.expansion_index() {
+            *self.fuel = self
+                .fuel
+                .checked_sub(1)
+                .ok_or_else(|| error(at(expression.source), "quote origin budget exhausted"))?;
+            origin = self
+                .sources
+                .get(index as usize)
+                .ok_or_else(|| error(at(expression.source), "missing quote expansion origin"))?
+                .original;
+        }
+        if self.active.iter().any(|(active, arguments, site)| {
+            *active == id && arguments == &types && *site == origin
+        }) {
+            return Err(error(
+                at(expression.source),
+                "quote fn expansion depth exhausted: recursive concrete instance",
+            ));
+        }
+        let mut fuel = usize::try_from(*self.fuel).unwrap_or(usize::MAX);
+        for ty in &types {
+            nir::type_computations::charge_term(ty, &mut fuel)
+                .map_err(|failure| error(at(expression.source), failure.to_string()))?;
+        }
+        *self.fuel = fuel as u64;
+        self.active.push((id, types.clone(), origin));
         self.depth += 1;
         let result = self.expand_inner(expression, id, types);
         self.depth -= 1;
+        self.active.pop();
         result
     }
     fn expand_inner(
@@ -535,6 +577,24 @@ impl Expansion<'_> {
         source_template: &n::Function,
         types: Vec<Term>,
     ) -> Result<(), Error> {
+        let mut prepared = self.prepare_template(expression, source_template, types)?;
+        for value in &mut prepared.prepared {
+            value.rewrite_with(self)?;
+        }
+        for value in &mut prepared.statements {
+            value.rewrite_with(self)?;
+        }
+        prepared.body.rewrite_with(self)?;
+        self.finish_template(expression, prepared)
+    }
+
+    #[inline(never)]
+    fn prepare_template(
+        &mut self,
+        expression: &mut n::Expr,
+        source_template: &n::Function,
+        types: Vec<Term>,
+    ) -> Result<Box<PreparedTemplate>, Error> {
         let span = at(expression.source);
         // Charge the complete template before copying any owned tree.
         let mut fuel = usize::try_from(*self.fuel).unwrap_or(usize::MAX);
@@ -617,7 +677,6 @@ impl Expansion<'_> {
                     span,
                 )?;
             }
-            value.rewrite_with(self)?;
             // Give preparation its own identity without ending temporaries.
             // Reusing the value's source aliases its projection/temporary hook
             // with this binding's hook after quote or inline expansion.
@@ -688,7 +747,6 @@ impl Expansion<'_> {
                 self.sources,
                 span,
             )?;
-            predicate.rewrite_with(self)?;
             let source = predicate.source;
             statements.push(self.node(
                 p(P::Void),
@@ -707,30 +765,47 @@ impl Expansion<'_> {
             self.sources,
             span,
         )?;
-        body.rewrite_with(self)?;
+        Ok(Box::new(PreparedTemplate {
+            body,
+            postconditions: template.postconditions,
+            result_binding: template.result_binding,
+            connections,
+            effects,
+            delivered_type,
+            prepared,
+            statements,
+        }))
+    }
+
+    #[inline(never)]
+    fn finish_template(
+        &mut self,
+        expression: &mut n::Expr,
+        frame: Box<PreparedTemplate>,
+    ) -> Result<(), Error> {
+        let span = at(expression.source);
+        let PreparedTemplate {
+            mut body,
+            postconditions,
+            result_binding,
+            connections,
+            effects,
+            delivered_type,
+            prepared,
+            statements,
+        } = *frame;
         // Explicit returns check postconditions before retiring lexical locals.
         // Turning them into block completion would move that check past cleanup.
-        if template.postconditions.is_empty() {
+        if postconditions.is_empty() {
             let mut fuel = usize::try_from(*self.fuel).unwrap_or(usize::MAX);
             let simplified =
                 nir::inline_return::simplify_tail_returns(&mut body, &delivered_type, &mut fuel);
             *self.fuel = fuel as u64;
             simplified.map_err(|message| error(span, message))?;
         }
-        if !template.postconditions.is_empty() {
-            self.contract_returns(
-                &mut body,
-                &template.postconditions,
-                template.result_binding,
-                &connections,
-                0,
-            )?;
-            body = self.checked_result(
-                body,
-                &template.postconditions,
-                template.result_binding,
-                &connections,
-            )?;
+        if !postconditions.is_empty() {
+            self.contract_returns(&mut body, &postconditions, result_binding, &connections, 0)?;
+            body = self.checked_result(body, &postconditions, result_binding, &connections)?;
         }
         // A tail result already has the block's ordinary ownership boundary.
         // Only lexical early returns need a private packet and exit loop.
@@ -1014,6 +1089,7 @@ pub(in crate::program) fn expand_retained_quote_functions(
         internal_packets: &mut output.internal_return_packets,
         empty_replacements: &mut output.internal_return_empty_replacements,
         depth: 0,
+        active: Vec::new(),
         runtime: true,
     };
     let result = (|| {
@@ -1071,6 +1147,7 @@ pub(crate) fn expand_materialized_quotes(
         internal_packets: &mut packets,
         empty_replacements: &mut empty,
         depth: 0,
+        active: Vec::new(),
         runtime: true,
     };
     let result = expression
@@ -1113,6 +1190,7 @@ pub(crate) fn expand_bound_quote(
         internal_packets: &mut packets,
         empty_replacements: &mut empty,
         depth: 0,
+        active: Vec::new(),
         runtime: true,
     };
     let result = expansion
@@ -1147,6 +1225,7 @@ pub(crate) fn inline_template(
         internal_packets: packets,
         empty_replacements: empty,
         depth: 0,
+        active: Vec::new(),
         runtime: true,
     };
     let result = expansion

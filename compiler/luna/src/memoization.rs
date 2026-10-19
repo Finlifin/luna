@@ -137,6 +137,7 @@ impl Invocation {
             index
                 .insert(
                     ImplementationHead {
+                        parameter_types: i.parameter_types.clone(),
                         declaration: i.declaration,
                         interface: i.interface,
                         interface_arguments: i.interface_arguments.clone(),
@@ -670,12 +671,8 @@ fn prepare_bound_entry<'a>(
                 retained.push(value);
             }
         }
-        let mut bound = iir::staging::bind_inputs_with_layouts(
-            &package.normal_forms,
-            &template,
-            &inputs,
-            &mut fuel,
-        )?;
+        let mut bound =
+            iir::staging::bind_inputs_with_layouts(package, &template, &inputs, &mut fuel)?;
         let mut identity = DeclarationId {
             package: u64::MAX,
             local: u32::MAX,

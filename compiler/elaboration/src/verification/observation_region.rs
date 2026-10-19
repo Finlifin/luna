@@ -131,7 +131,7 @@ fn pattern_locals(
             .checked_sub(1)
             .ok_or("observation pattern binding budget exhausted")?;
         match pattern {
-            Pattern::Binding { binding, inner } => {
+            Pattern::Observe { binding, inner } | Pattern::Binding { binding, inner } => {
                 locals.insert(*binding);
                 pending.push(inner);
             }
@@ -236,6 +236,7 @@ pub(super) fn check(
             | K::IntegerNegate(_)
             | K::FloatNegate(_)
             | K::BitConvert(_)
+            | K::NewtypeConvert(_)
             | K::Snapshot(_)
             | K::TakeBits(_)
             | K::SymbolName(_)

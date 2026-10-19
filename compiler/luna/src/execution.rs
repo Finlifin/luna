@@ -134,6 +134,7 @@ fn interpret_selected(
         index
             .insert(
                 elaboration::implementation::ImplementationHead {
+                    parameter_types: implementation.parameter_types.clone(),
                     declaration: implementation.declaration,
                     interface: implementation.interface,
                     interface_arguments: implementation.interface_arguments.clone(),
@@ -277,6 +278,12 @@ fn interpret_protocols_selected(
     let world = protocols.world(&package);
     let solver =
         |predicate: &nir::program::TypePredicate| runtime_type_predicate(&world, predicate);
+    let pointer_copy = |ty: &nir::Term| {
+        matches!(
+            crate::protocols::copy_delivery(&package, &world, &protocols.items, ty, budget),
+            Ok(elaboration::verification::moves::Delivery::Copy)
+        )
+    };
     Interpreter::from_iir(
         &executable.graph,
         Budget {
@@ -286,6 +293,7 @@ fn interpret_protocols_selected(
     )
     .map_err(|e| format!("cannot prepare runtime reference execution: {e}"))?
     .with_type_solver(&solver)
+    .with_pointer_copy_permission(&pointer_copy)
     .with_cleanup_schedule(&executable.schedule)
     .map_err(|e| format!("cannot install runtime cleanup: {e}"))?
     .invoke_instance(&executable.entry, vec![])

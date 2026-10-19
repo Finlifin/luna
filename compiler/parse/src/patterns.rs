@@ -193,6 +193,31 @@ impl Parser<'_> {
                 | TokenKind::Underscore
                 | TokenKind::Null => p.try_atomic(),
 
+                TokenKind::Minus | TokenKind::SeparatedMinus => {
+                    p.eat_tokens(1);
+                    if !matches!(
+                        p.peek_next_token().kind,
+                        TokenKind::Int
+                            | TokenKind::IntBin
+                            | TokenKind::IntOct
+                            | TokenKind::IntHex
+                            | TokenKind::Real
+                            | TokenKind::RealSci
+                    ) {
+                        return Err(ParseError::invalid_syntax(
+                            "Expected a numeric literal after `-` in a pattern".into(),
+                            p.peek_next_token().kind,
+                            p.next_token_span(),
+                        ));
+                    }
+                    let mut value = p.try_atomic()?;
+                    if p.peek_next_token().kind == TokenKind::Id {
+                        value = p.try_literal_extension_expr(value)?;
+                    }
+                    Ok(NodeBuilder::new(NodeKind::Negative, p.current_span())
+                        .add_single_child(value)
+                        .build(&mut p.ast))
+                }
                 TokenKind::Dot => p.try_range_to_or_symbol(option),
                 TokenKind::LBracket => p.try_list_pattern(),
                 TokenKind::LParen => p.try_tuple_pattern(),
@@ -301,7 +326,7 @@ impl Parser<'_> {
     ) -> ParseResult {
         let option_ = option.clone();
 
-        self.scoped(|p| {
+        let node = self.scoped(|p| {
             match token_kind {
                 TokenKind::LParen => {
                     // 模式调用
@@ -451,8 +476,12 @@ impl Parser<'_> {
                 TokenKind::If => {
                     // if 守卫
                     p.eat_tokens(1);
-                    let mut guard_options =
-                        super::expressions::ExprOption::new().with_no_extended_call(true);
+                    // Inherit the surrounding brace boundary. Match arms and
+                    // bindings may contain ordinary constructors/property
+                    // calls in their guards; a condition followed by a body
+                    // block still reserves that brace for the caller.
+                    let mut guard_options = super::expressions::ExprOption::new()
+                        .with_no_extended_call(option.no_extended_call);
                     guard_options.stop_at_do = true;
                     let guard = match p.try_expr_with_option(guard_options)? {
                         0 => {
@@ -530,7 +559,11 @@ impl Parser<'_> {
 
                 _ => Ok(0),
             }
-        })
+        })?;
+        if node != 0 {
+            self.include_left_span(left, node);
+        }
+        Ok(node)
     }
 
     /// Parse a bit vector pattern.

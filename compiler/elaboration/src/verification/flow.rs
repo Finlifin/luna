@@ -189,9 +189,50 @@ impl fmt::Display for Point {
         f.write_str("))")
     }
 }
+type ChangedPlaces = BTreeSet<(LocalId, Vec<(nir::program::FieldOwner, usize)>)>;
+type InvariantLoads<'a> = Option<(&'a State, &'a ChangedPlaces)>;
+type InputPointerPlaces = BTreeMap<(usize, Vec<usize>), Vec<nir::program::Place>>;
+#[derive(Clone)]
+enum PointerOrigin {
+    Local(nir::program::Place),
+    External(Projection),
+}
+impl PointerOrigin {
+    fn path_len(&self) -> usize {
+        match self {
+            Self::Local(place) => place.fields.len(),
+            Self::External(p) => p.path.fields.len(),
+        }
+    }
+    fn current(&self, state: &State) -> bool {
+        match self {
+            Self::Local(_) => true,
+            Self::External(p) => state.facts.value(p.path.root) == Some(p.root_version),
+        }
+    }
+    fn project(&mut self, fields: &[(nir::program::FieldOwner, usize)]) {
+        match self {
+            Self::Local(place) => place.fields.extend_from_slice(fields),
+            Self::External(p) => p.path.fields.extend(paths::record_path(fields)),
+        }
+    }
+}
+impl fmt::Display for PointerOrigin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Local(place) => write!(f, "(local {place})"),
+            Self::External(projection) => write!(f, "(external {projection})"),
+        }
+    }
+}
 #[derive(Default)]
 struct Value {
+    // Mathematical Integer can carry scalar facts without a finite interval.
+    unbounded_integer: bool,
     pointer_target: Option<(u64, Vec<nir::program::Place>)>,
+    // Complete local/external address alternatives, not observations of their
+    // contents. Reads consult the current state; copies keep frame/version guards.
+    pointer_origins: Option<(u64, Vec<PointerOrigin>)>,
     evidence: Option<std::sync::Arc<copies::PreparedCopy>>,
     polynomial: Option<Polynomial>,
     projection: Option<Projection>,
@@ -303,7 +344,11 @@ impl State {
             limits.step(1)?;
             // Synthetic observations are not lexical locals. Preserve only
             // scalar by-value storage that has never had its address exposed.
-            if domain.is_some()
+            if (domain.is_some()
+                || self
+                    .aggregates
+                    .get(place)
+                    .is_some_and(|value| value.unbounded_integer))
                 && addressed.is_some_and(|addressed| {
                     u32::try_from(place.owner).ok().is_some_and(|owner| {
                         !addressed.contains(&LocalId {
@@ -592,7 +637,10 @@ fn bind_place(
     }
     state.invalidate_paths(Some(place), &[], limits)?;
     state.aggregates.remove(&place);
-    if matches!(ty, Term::Nominal { .. } | Term::Tuple(_)) {
+    if matches!(
+        ty,
+        Term::Nominal { .. } | Term::Tuple(_) | Term::Primitive(nir::Primitive::Integer)
+    ) {
         state.aggregates.insert(place, Value::unknown(ty, limits)?);
     }
     let domain = domain(ty, limits)?;
@@ -827,7 +875,7 @@ struct Walker<'a> {
     input_frames: Vec<Vec<nir::Sort>>,
     next_frame: u64,
     memory_summaries:
-        std::collections::HashMap<iir::InstanceKey, Option<std::sync::Arc<super::memory::Summary>>>,
+        std::collections::HashMap<iir::InstanceKey, std::sync::Arc<super::memory::Summary>>,
     exit_contract: Option<ExitContract<'a>>,
     assuming_postcondition: bool,
     next_field: u32,
@@ -979,9 +1027,16 @@ impl Walker<'_> {
         pointer: &Expr,
         state: &State,
     ) -> Result<Option<FieldPath>, Reason> {
-        let Some(mut path) = self.external_read_path(pointer)? else {
+        let Some(path) = self.external_read_path(pointer)? else {
             return Ok(None);
         };
+        self.canonical_read_path(path, state).map(Some)
+    }
+    fn canonical_read_path(
+        &mut self,
+        mut path: FieldPath,
+        state: &State,
+    ) -> Result<FieldPath, Reason> {
         if let Some((original, source_version, alias_version)) = state.read_aliases.get(&path.root)
         {
             self.limits.step(
@@ -1002,8 +1057,108 @@ impl Walker<'_> {
                 };
             }
         }
-        Ok(Some(path))
+        Ok(path)
     }
+    fn pointer_value_origins(
+        &mut self,
+        value: &Value,
+        state: &State,
+    ) -> Result<Option<Vec<PointerOrigin>>, Reason> {
+        if let Some((frame, targets)) = &value.pointer_origins {
+            if *frame != state.frame {
+                return Ok(None);
+            }
+            for target in targets {
+                self.limits.step(target.path_len().saturating_add(1))?;
+                if !target.current(state) {
+                    return Ok(None);
+                }
+            }
+            return Ok(Some(targets.clone()));
+        }
+        if let Some((frame, targets)) = value.copy_pointer_target(self.limits)? {
+            return Ok((frame == state.frame)
+                .then(|| targets.into_iter().map(PointerOrigin::Local).collect()));
+        }
+        let Some(projection) = &value.projection else {
+            return Ok(None);
+        };
+        if state.facts.value(projection.path.root) != Some(projection.root_version) {
+            return Ok(None);
+        }
+        self.limits
+            .step(projection.path.fields.len().saturating_add(1))?;
+        let path = self.canonical_read_path(projection.path.clone(), state)?;
+        Ok(state
+            .facts
+            .value(path.root)
+            .map(|root_version| vec![PointerOrigin::External(Projection { root_version, path })]))
+    }
+    fn pointer_input_origins(
+        &mut self,
+        value: &Value,
+        fields: &[usize],
+        state: &State,
+    ) -> Result<Option<Vec<PointerOrigin>>, Reason> {
+        if fields.is_empty() {
+            return self.pointer_value_origins(value, state);
+        }
+        // Formal nominal inputs may have no materialized payload yet. Obtain
+        // their owned layout from declarations, without unfolding type heads.
+        let mut expanded = value.snapshot(self.limits, 0)?;
+        if let Some(source) = &value.projection {
+            self.limits
+                .step(source.path.fields.len().saturating_add(1))?;
+            expanded.projection = Some(source.clone());
+        }
+        self.expand_owned_shape(&mut expanded, 0)?;
+        let mut value = &expanded;
+        let mut projection = None;
+        for index in fields {
+            self.limits.step(1)?;
+            if let Some(source) = &value.projection {
+                self.limits
+                    .step(source.path.fields.len().saturating_add(1))?;
+                projection = Some(source.clone());
+            }
+            let Some(kind) = value.aggregate_kind else {
+                return Ok(None);
+            };
+            let Some(field) = value.fields.as_ref().and_then(|fields| fields.get(*index)) else {
+                return Ok(None);
+            };
+            if let Some(path) = &mut projection {
+                path.path.fields.push((kind, *index));
+            }
+            value = field;
+        }
+        // Explicit leaf origins override its container's structural projection.
+        if value.pointer_origins.is_some() || value.projection.is_some() || fields.is_empty() {
+            return self.pointer_value_origins(value, state);
+        }
+        self.pointer_value_origins(
+            &Value {
+                projection,
+                ..Value::default()
+            },
+            state,
+        )
+    }
+    fn pointer_value_path(
+        &mut self,
+        value: &Value,
+        state: &State,
+    ) -> Result<Option<FieldPath>, Reason> {
+        Ok(self
+            .pointer_value_origins(value, state)?
+            .filter(|targets| targets.len() == 1)
+            .and_then(|mut targets| targets.pop())
+            .and_then(|target| match target {
+                PointerOrigin::External(p) => Some(p.path),
+                PointerOrigin::Local(_) => None,
+            }))
+    }
+
     fn observe_external_read(
         &mut self,
         pointer: &Expr,
@@ -1013,8 +1168,18 @@ impl Walker<'_> {
         let Some(address) = self.aliased_read_path(pointer, state)? else {
             return self.unknown_value(ty);
         };
+        self.observe_external_path(address, ty, state)
+    }
+    fn observe_external_path(
+        &mut self,
+        address: FieldPath,
+        ty: &Term,
+        state: &mut State,
+    ) -> Result<Value, Reason> {
         let view = self.scalar_type_view(ty)?;
-        if !matches!(view, Term::Primitive(p) if p == nir::Primitive::Bool || p.fixed_integer_layout().is_some())
+        let pointer_slot = matches!(view, Term::Pointer(_));
+        if !pointer_slot
+            && !matches!(view, Term::Primitive(p) if p == nir::Primitive::Bool || p.fixed_integer_layout().is_some())
         {
             return self.unknown_value(ty);
         }
@@ -1024,13 +1189,339 @@ impl Walker<'_> {
                 return self.local_value_at(state, *root);
             }
         }
-        let root = self.result_root(&view)?.ok_or(Reason::Unsupported)?;
+        let root = if pointer_slot {
+            // Each observed load gets an independent pointer identity. A later
+            // store retires the read cache; reloading must allocate a new root.
+            let local = self.next_field;
+            self.next_field = local.checked_add(1).ok_or(Unknown::VersionExhausted)?;
+            PlaceId {
+                owner: u64::MAX - 1,
+                local,
+            }
+        } else {
+            self.result_root(&view)?.ok_or(Reason::Unsupported)?
+        };
         let value = self.unknown_value(&view)?;
         bind_value_place(state, root, &view, value, self.limits)?;
         state.reads.insert(address, (view, root));
         self.local_value_at(state, root)
     }
 
+    fn contract_pointer_origins(
+        &mut self,
+        pointer: &Expr,
+        bindings: &[LocalId],
+        arguments: &BTreeMap<(usize, Vec<usize>), Vec<PointerOrigin>>,
+        state: &mut State,
+        depth: usize,
+    ) -> Result<Option<Vec<PointerOrigin>>, Reason> {
+        self.limits.step(1)?;
+        if depth >= 128 {
+            return Err(Reason::DepthLimit);
+        }
+        if let Some(path) = self.external_read_path(pointer)? {
+            self.limits.step(bindings.len())?;
+            let Some(parameter) = bindings
+                .iter()
+                .position(|binding| place(*binding) == path.root)
+            else {
+                return Ok(None);
+            };
+            let owned = owned_pointer_input_path(pointer, self.limits)?;
+            let Some(inputs) = arguments.get(&(parameter, owned.clone())) else {
+                return Ok(None);
+            };
+            let mut fields = Vec::new();
+            for (kind, index) in &path.fields[owned.len()..] {
+                let owner = match kind {
+                    AggregateKind::Record(id) => nir::program::FieldOwner::Nominal(*id),
+                    AggregateKind::AnonymousRecord => nir::program::FieldOwner::Anonymous,
+                    _ => return Ok(None),
+                };
+                fields.push((owner, *index));
+            }
+            let mut origins = Vec::new();
+            for input in inputs {
+                self.limits.step(
+                    input
+                        .path_len()
+                        .saturating_add(fields.len())
+                        .saturating_add(1),
+                )?;
+                if !input.current(state) {
+                    return Ok(None);
+                }
+                let mut origin = input.clone();
+                origin.project(&fields);
+                insert_pointer_origin(&mut origins, origin, self.limits)?;
+            }
+            return Ok(Some(origins));
+        }
+        match &pointer.kind {
+            K::ReadPointer(base) => {
+                let Some(inputs) =
+                    self.contract_pointer_origins(base, bindings, arguments, state, depth + 1)?
+                else {
+                    return Ok(None);
+                };
+                let mut origins = Vec::new();
+                for input in inputs {
+                    let value = self.read_pointer_origin(input, &pointer.ty, state)?;
+                    let Some(loaded) = self.pointer_value_origins(&value, state)? else {
+                        return Ok(None);
+                    };
+                    for origin in loaded {
+                        insert_pointer_origin(&mut origins, origin, self.limits)?;
+                    }
+                }
+                Ok(Some(origins))
+            }
+            K::PointerField {
+                pointer: base,
+                declaration,
+                index,
+            } => {
+                let Some(mut origins) =
+                    self.contract_pointer_origins(base, bindings, arguments, state, depth + 1)?
+                else {
+                    return Ok(None);
+                };
+                for origin in &mut origins {
+                    self.limits.step(1)?;
+                    origin.project(&[(nir::program::FieldOwner::Nominal(*declaration), *index)]);
+                }
+                Ok(Some(origins))
+            }
+            K::PointerAnonymousField {
+                pointer: base,
+                index,
+                ..
+            } => {
+                let Some(mut origins) =
+                    self.contract_pointer_origins(base, bindings, arguments, state, depth + 1)?
+                else {
+                    return Ok(None);
+                };
+                for origin in &mut origins {
+                    self.limits.step(1)?;
+                    origin.project(&[(nir::program::FieldOwner::Anonymous, *index)]);
+                }
+                Ok(Some(origins))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn load_pointer_origins(
+        &mut self,
+        inputs: &[PointerOrigin],
+        through: &[Vec<(nir::program::FieldOwner, usize)>],
+        loaded_types: &[Term],
+        state: &mut State,
+    ) -> Result<Option<Vec<PointerOrigin>>, Reason> {
+        for input in inputs {
+            self.limits.step(input.path_len().saturating_add(1))?;
+        }
+        let mut current = inputs.to_vec();
+        if loaded_types.len() != through.len() {
+            return Ok(None);
+        }
+        for (fields, ty) in through.iter().zip(loaded_types) {
+            self.limits.step(fields.len().saturating_add(1))?;
+            let mut loaded = Vec::new();
+            for mut origin in current {
+                self.limits.step(
+                    origin
+                        .path_len()
+                        .saturating_add(fields.len())
+                        .saturating_add(1),
+                )?;
+                if !origin.current(state) {
+                    return Ok(None);
+                }
+                origin.project(fields);
+                // The summary supplies the actual loaded pointer type. An
+                // external slot load obtains a fresh/reused observation identity,
+                // never the address identity of the slot itself.
+                let value = self.read_pointer_origin(origin, ty, state)?;
+                let Some(targets) = self.pointer_value_origins(&value, state)? else {
+                    return Ok(None);
+                };
+                for target in targets {
+                    insert_pointer_origin(&mut loaded, target, self.limits)?;
+                }
+            }
+            if loaded.is_empty() {
+                return Ok(None);
+            }
+            current = loaded;
+        }
+        Ok(Some(current))
+    }
+
+    fn summary_pointer_origins(
+        &mut self,
+        accesses: &[super::memory::Access],
+        may_run_cleanup: bool,
+        preserves_pointer_storage: bool,
+        targets: Option<&BTreeSet<super::memory::ParameterPlace>>,
+        arguments: &BTreeMap<(usize, Vec<usize>), Vec<PointerOrigin>>,
+        state: &mut State,
+    ) -> Result<Option<Vec<PointerOrigin>>, Reason> {
+        if may_run_cleanup {
+            return Ok(None);
+        }
+        self.limits.step(accesses.len())?;
+        let readonly = accesses.iter().all(|access| !access.write);
+        let Some(targets) = targets else {
+            return Ok(None);
+        };
+        let mut result = Vec::new();
+        for target in targets {
+            // Direct input addresses survive value writes. Stored-pointer
+            // loads still require a readonly body: entry and exit contents
+            // cannot be substituted for an unknown intermediate load.
+            if !readonly && !preserves_pointer_storage && !target.through.is_empty() {
+                return Ok(None);
+            }
+
+            self.limits
+                .step(target.input_fields.len().saturating_add(1))?;
+            let Some(inputs) = arguments.get(&(target.parameter, target.input_fields.clone()))
+            else {
+                return Ok(None);
+            };
+            let mut types = Vec::new();
+            for (index, fields) in target.through.iter().enumerate() {
+                let mut loaded = None;
+                for access in accesses {
+                    let cost = access.target.through.iter().fold(
+                        access
+                            .target
+                            .input_fields
+                            .len()
+                            .saturating_add(access.target.fields.len())
+                            .saturating_add(1),
+                        |cost, fields| cost.saturating_add(fields.len()).saturating_add(1),
+                    );
+                    self.limits.step(cost)?;
+                    if access.read_value
+                        && access.target.parameter == target.parameter
+                        && access.target.input_fields == target.input_fields
+                        && access.target.through.as_slice() == &target.through[..index]
+                        && access.target.fields == *fields
+                        && matches!(access.ty, Term::Pointer(_))
+                    {
+                        super::memory::bound_type(&access.ty, &mut self.limits.arithmetic.steps)
+                            .map_err(|_| {
+                                Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into())
+                            })?;
+                        loaded = Some(access.ty.clone());
+                        break;
+                    }
+                }
+                let Some(ty) = loaded else {
+                    return Ok(None);
+                };
+                types.push(ty);
+            }
+            let Some(origins) =
+                self.load_pointer_origins(inputs, &target.through, &types, state)?
+            else {
+                return Ok(None);
+            };
+            for mut origin in origins {
+                self.limits.step(
+                    origin
+                        .path_len()
+                        .saturating_add(target.fields.len())
+                        .saturating_add(1),
+                )?;
+                if !origin.current(state) {
+                    return Ok(None);
+                }
+                origin.project(&target.fields);
+                insert_pointer_origin(&mut result, origin, self.limits)?;
+            }
+        }
+        Ok((!result.is_empty()).then_some(result))
+    }
+
+    fn indirect_scalar_write_plan(
+        &mut self,
+        callee: &Expr,
+        inputs: &BTreeMap<(usize, Vec<usize>), Vec<PointerOrigin>>,
+        state: &mut State,
+    ) -> Result<Option<CallMemoryPlan>, Reason> {
+        if !self.call_preserves_pointer_bindings(callee)? {
+            return Ok(None);
+        }
+        let Some(summary) = self.call_summary(callee) else {
+            return Ok(None);
+        };
+        if summary.may_run_cleanup {
+            return Ok(None);
+        }
+        let mut writes = Vec::new();
+        for access in &summary.accesses {
+            self.limits.step(1)?;
+            if !access.write {
+                continue;
+            }
+            // Scalar-only writes cannot replace the pointer slots used by this
+            // path. Resolve all destinations before invalidating caller facts.
+            self.limits.step(
+                access.target.through.iter().fold(
+                    access
+                        .target
+                        .input_fields
+                        .len()
+                        .saturating_add(access.target.fields.len())
+                        .saturating_add(1),
+                    |cost, fields| cost.saturating_add(fields.len()).saturating_add(1),
+                ),
+            )?;
+            let targets = BTreeSet::from([access.target.clone()]);
+            let Some(origins) = self.summary_pointer_origins(
+                &summary.accesses,
+                summary.may_run_cleanup,
+                true,
+                Some(&targets),
+                inputs,
+                state,
+            )?
+            else {
+                return Ok(None);
+            };
+            for origin in origins {
+                let PointerOrigin::Local(target) = origin else {
+                    return Ok(None);
+                };
+                super::memory::bound_type(&access.ty, &mut self.limits.arithmetic.steps).map_err(
+                    |_| Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into()),
+                )?;
+                writes.push((target, access.ty.clone()));
+            }
+        }
+        Ok(Some(CallMemoryPlan {
+            writes,
+            returned: None,
+        }))
+    }
+
+    fn read_pointer_origin(
+        &mut self,
+        origin: PointerOrigin,
+        ty: &Term,
+        state: &mut State,
+    ) -> Result<Value, Reason> {
+        match origin {
+            PointerOrigin::Local(place) => self.read_pointer_place(state, &place),
+            PointerOrigin::External(projection) => {
+                self.observe_external_path(projection.path, ty, state)
+            }
+        }
+    }
     fn read_pointer_place(
         &mut self,
         state: &mut State,
@@ -1128,7 +1619,8 @@ impl Walker<'_> {
                         &mut fuel,
                     )
                     .ok()?;
-                    if summary.accesses.iter().any(|access| access.write) {
+                    if summary.may_run_cleanup || summary.accesses.iter().any(|access| access.write)
+                    {
                         return None;
                     }
                 }
@@ -1170,14 +1662,16 @@ impl Walker<'_> {
             let summary = if let Some(cached) = self.memory_summaries.get(&key) {
                 cached.clone()
             } else {
-                let summary =
+                // A failed attempt is not a property of the instance: resource
+                // exhaustion must not become permanent negative evidence.
+                let summary = std::sync::Arc::new(
                     super::memory::infer_in_package(package, declaration, arguments, &mut fuel)
-                        .ok()
-                        .map(std::sync::Arc::new);
+                        .ok()?,
+                );
                 self.memory_summaries.insert(key, summary.clone());
                 summary
-            }?;
-            if summary.signature != *callee.ty.callable_signature() {
+            };
+            if summary.may_run_cleanup || summary.signature != *callee.ty.callable_signature() {
                 return None;
             }
             Some(summary)
@@ -1202,21 +1696,46 @@ impl Walker<'_> {
         arguments: &[nir::program::CallArgument],
         bindings: &[LocalId],
         evaluated: Option<&BTreeMap<usize, Option<Vec<nir::program::Place>>>>,
+        input_fields: Option<&InputPointerPlaces>,
+        invariant_loads: InvariantLoads<'_>,
+        result_field: Option<&[usize]>,
     ) -> Option<CallMemoryPlan> {
         type Targets = BTreeMap<usize, Option<Vec<nir::program::Place>>>;
         fn rebase(
             target: &super::memory::ParameterPlace,
             targets: &Targets,
+            input_fields: Option<&InputPointerPlaces>,
+            invariant_loads: InvariantLoads<'_>,
             fuel: &mut usize,
         ) -> Option<Vec<nir::program::Place>> {
-            // This analysis has no stored-pointer provenance. Indirect writes
-            // must invalidate conservatively rather than masquerade as fields.
-            if !target.through.is_empty() {
-                return None;
-            }
-            let bases = targets.get(&target.parameter)?.as_ref()?;
-            let mut resolved = Vec::new();
+            let bases = if target.input_fields.is_empty() {
+                targets.get(&target.parameter)?.as_ref()?
+            } else {
+                *fuel = fuel.checked_sub(target.input_fields.len().saturating_add(1))?;
+                input_fields?.get(&(target.parameter, target.input_fields.clone()))?
+            };
+            let mut current = Vec::new();
             for base in bases {
+                *fuel = fuel.checked_sub(base.fields.len().saturating_add(1))?;
+                current.push(base.clone());
+            }
+            for fields in &target.through {
+                let (state, changed) = invariant_loads?;
+                let mut loaded = Vec::new();
+                for mut slot in current {
+                    *fuel = fuel.checked_sub(fields.len().saturating_add(1))?;
+                    slot.fields.extend_from_slice(fields);
+                    for target in invariant_slot_targets(&slot, state, changed, fuel)? {
+                        insert_pointer_target(&mut loaded, target, fuel).ok()?;
+                    }
+                }
+                if loaded.is_empty() {
+                    return None;
+                }
+                current = loaded;
+            }
+            let mut resolved = Vec::new();
+            for base in &current {
                 *fuel = fuel.checked_sub(
                     base.fields
                         .len()
@@ -1232,13 +1751,17 @@ impl Walker<'_> {
         fn collect(
             accesses: &[super::memory::Access],
             targets: &Targets,
+            input_fields: Option<&InputPointerPlaces>,
+            invariant_loads: InvariantLoads<'_>,
             fuel: &mut usize,
             writes: &mut Vec<(nir::program::Place, Term)>,
         ) -> Option<()> {
             for access in accesses {
                 *fuel = fuel.checked_sub(1)?;
                 if access.write {
-                    for target in rebase(&access.target, targets, fuel)? {
+                    for target in
+                        rebase(&access.target, targets, input_fields, invariant_loads, fuel)?
+                    {
                         super::memory::bound_type(&access.ty, fuel).ok()?;
                         writes.push((target, access.ty.clone()));
                     }
@@ -1247,6 +1770,15 @@ impl Walker<'_> {
             Some(())
         }
         let summary = self.call_summary(callee)?;
+        // Loading a slot across a call requires proof that the callee cannot
+        // replace pointer storage. Defaults below must be readonly as well.
+        let invariant_loads = if invariant_loads.is_some()
+            && matches!(self.call_preserves_pointer_bindings(callee), Ok(true))
+        {
+            invariant_loads
+        } else {
+            None
+        };
         let package = self.package?;
         let Term::Function { parameters, .. } = callee.ty.callable_signature() else {
             return None;
@@ -1255,6 +1787,16 @@ impl Walker<'_> {
         let allowance = (self.limits.arithmetic.steps / 4).min(20_000);
         let mut fuel = allowance;
         let result = (|| {
+            let mut owned_inputs = BTreeMap::new();
+            if let Some(inputs) = input_fields {
+                for ((parameter, fields), places) in inputs {
+                    fuel = fuel.checked_sub(fields.len().saturating_add(1))?;
+                    for place in places {
+                        fuel = fuel.checked_sub(place.fields.len().saturating_add(1))?;
+                    }
+                    owned_inputs.insert((*parameter, fields.clone()), places.clone());
+                }
+            }
             let mut writes = Vec::new();
             let mut targets = Targets::new();
             let mut prepared = Vec::new();
@@ -1295,12 +1837,60 @@ impl Walker<'_> {
                         &mut fuel,
                     )
                     .ok()?;
-                    collect(&default.accesses, &targets, &mut fuel, &mut writes)?;
+                    if default.may_run_cleanup
+                        || (invariant_loads.is_some() && default.accesses.iter().any(|a| a.write))
+                    {
+                        return None;
+                    }
+                    collect(
+                        &default.accesses,
+                        &targets,
+                        Some(&owned_inputs),
+                        invariant_loads,
+                        &mut fuel,
+                        &mut writes,
+                    )?;
+                    // Each prepared aggregate contributes its own pointer
+                    // fields to later defaults and the callee write footprint.
+                    // Resolve all sources against the earlier prepared inputs.
+                    let mut fields = Vec::new();
+                    for (path, relative) in &default.pointer_fields {
+                        fuel = fuel.checked_sub(path.len().saturating_add(1))?;
+                        let resolved = (|| {
+                            let mut places = Vec::new();
+                            for target in relative.as_ref()? {
+                                for place in rebase(
+                                    target,
+                                    &targets,
+                                    Some(&owned_inputs),
+                                    invariant_loads,
+                                    &mut fuel,
+                                )? {
+                                    insert_pointer_target(&mut places, place, &mut fuel).ok()?;
+                                }
+                            }
+                            (!places.is_empty()).then_some(places)
+                        })();
+                        fields.push((path.clone(), resolved));
+                    }
+                    for (path, places) in fields {
+                        let key = (argument.parameter, path);
+                        owned_inputs.remove(&key);
+                        if let Some(places) = places {
+                            owned_inputs.insert(key, places);
+                        }
+                    }
                     match default.result_targets {
                         Some(relative) => {
                             let mut actual = Vec::new();
                             for target in relative {
-                                actual.extend(rebase(&target, &targets, &mut fuel)?);
+                                actual.extend(rebase(
+                                    &target,
+                                    &targets,
+                                    Some(&owned_inputs),
+                                    invariant_loads,
+                                    &mut fuel,
+                                )?);
                             }
                             Some(actual)
                         }
@@ -1327,11 +1917,28 @@ impl Walker<'_> {
                     prepared.push((*binding, argument.value.ty.clone(), argument.parameter));
                 }
             }
-            collect(&summary.accesses, &targets, &mut fuel, &mut writes)?;
+            collect(
+                &summary.accesses,
+                &targets,
+                Some(&owned_inputs),
+                invariant_loads,
+                &mut fuel,
+                &mut writes,
+            )?;
             let returned = (|| {
                 let mut result = Vec::new();
-                for relative in summary.result_targets.as_ref()? {
-                    for target in rebase(relative, &targets, &mut fuel)? {
+                let relative_targets = match result_field {
+                    Some(path) => summary.pointer_fields.get(path)?.as_ref()?,
+                    None => summary.result_targets.as_ref()?,
+                };
+                for relative in relative_targets {
+                    for target in rebase(
+                        relative,
+                        &targets,
+                        Some(&owned_inputs),
+                        invariant_loads,
+                        &mut fuel,
+                    )? {
                         insert_pointer_target(&mut result, target, &mut fuel).ok()?;
                     }
                 }
@@ -1344,7 +1951,427 @@ impl Walker<'_> {
             Some(CallMemoryPlan { writes, returned })
         })();
         self.limits.arithmetic.steps -= allowance - fuel;
-        result
+        result.or_else(|| {
+            // A writing default may still have a complete direct footprint;
+            // preserve that path without importing any stored-pointer loads.
+            invariant_loads?;
+            self.call_memory_plan(
+                callee,
+                arguments,
+                bindings,
+                evaluated,
+                input_fields,
+                None,
+                result_field,
+            )
+        })
+    }
+
+    fn invariant_scalar_write_plan(
+        &mut self,
+        callee: &Expr,
+        arguments: &[nir::program::CallArgument],
+        state: &State,
+        changed: &BTreeSet<(LocalId, Vec<(nir::program::FieldOwner, usize)>)>,
+    ) -> Result<Option<CallMemoryPlan>, Unknown> {
+        self.limits.step(arguments.len())?;
+        if arguments.iter().any(|argument| argument.is_default)
+            || !matches!(self.call_preserves_pointer_bindings(callee), Ok(true))
+        {
+            return Ok(None);
+        }
+        let Some(summary) = self.call_summary(callee) else {
+            return Ok(None);
+        };
+        if summary.may_run_cleanup {
+            return Ok(None);
+        }
+        let mut writes = Vec::new();
+        for access in &summary.accesses {
+            self.limits.step(1)?;
+            if !access.write {
+                continue;
+            }
+            let target = &access.target;
+            self.limits.step(
+                arguments
+                    .len()
+                    .saturating_add(target.input_fields.len())
+                    .saturating_add(1),
+            )?;
+            let Some(argument) = arguments
+                .iter()
+                .find(|argument| argument.parameter == target.parameter)
+            else {
+                return Ok(None);
+            };
+            let Some(mut current) = self.invariant_input_pointer_targets(
+                &argument.value,
+                &target.input_fields,
+                state,
+                changed,
+                0,
+            )?
+            else {
+                return Ok(None);
+            };
+            for fields in &target.through {
+                for place in &mut current {
+                    self.limits.step(fields.len().saturating_add(1))?;
+                    place.fields.extend_from_slice(fields);
+                }
+                let Some(loaded) = self.invariant_load_pointer_targets(current, state, changed)?
+                else {
+                    return Ok(None);
+                };
+                current = loaded;
+            }
+            if current.is_empty() {
+                return Ok(None);
+            }
+            for mut place in current {
+                self.limits.step(target.fields.len().saturating_add(1))?;
+                place.fields.extend_from_slice(&target.fields);
+                super::memory::bound_type(&access.ty, &mut self.limits.arithmetic.steps)
+                    .map_err(|_| Unknown::from(comptime_runtime::Error::BudgetExhausted))?;
+                writes.push((place, access.ty.clone()));
+            }
+        }
+        Ok(Some(CallMemoryPlan {
+            writes,
+            returned: None,
+        }))
+    }
+
+    fn invariant_input_pointer_targets(
+        &mut self,
+        expr: &Expr,
+        input: &[usize],
+        state: &State,
+        changed: &BTreeSet<(LocalId, Vec<(nir::program::FieldOwner, usize)>)>,
+        depth: usize,
+    ) -> Result<Option<Vec<nir::program::Place>>, Unknown> {
+        self.limits.step(1)?;
+        if depth >= 128 {
+            return Ok(None);
+        }
+        let Some((index, rest)) = input.split_first() else {
+            return self.invariant_pointer_targets(expr, state, changed, depth + 1);
+        };
+        match &expr.kind {
+            K::Tuple(fields) | K::AnonymousRecord { fields } | K::Record { fields, .. } => {
+                match fields.get(*index) {
+                    Some(field) => {
+                        self.invariant_input_pointer_targets(field, rest, state, changed, depth + 1)
+                    }
+                    None => Ok(None),
+                }
+            }
+            K::Block {
+                result: Some(result),
+                ..
+            } => self.invariant_input_pointer_targets(result, input, state, changed, depth + 1),
+            K::If {
+                then_branch,
+                else_branch: Some(other),
+                ..
+            } => {
+                let mut targets = Vec::new();
+                for branch in [then_branch.as_ref(), other.as_ref()] {
+                    let Some(origins) = self.invariant_input_pointer_targets(
+                        branch,
+                        input,
+                        state,
+                        changed,
+                        depth + 1,
+                    )?
+                    else {
+                        return Ok(None);
+                    };
+                    for target in origins {
+                        insert_pointer_target(
+                            &mut targets,
+                            target,
+                            &mut self.limits.arithmetic.steps,
+                        )?;
+                    }
+                }
+                Ok(Some(targets))
+            }
+            K::Match { arms, .. } => {
+                let mut targets = Vec::new();
+                for arm in arms {
+                    let Some(origins) = self.invariant_input_pointer_targets(
+                        &arm.body,
+                        input,
+                        state,
+                        changed,
+                        depth + 1,
+                    )?
+                    else {
+                        return Ok(None);
+                    };
+                    for target in origins {
+                        insert_pointer_target(
+                            &mut targets,
+                            target,
+                            &mut self.limits.arithmetic.steps,
+                        )?;
+                    }
+                }
+                Ok(if targets.is_empty() {
+                    None
+                } else {
+                    Some(targets)
+                })
+            }
+            K::Call {
+                callee,
+                arguments,
+                parameter_bindings,
+            } => {
+                if !matches!(self.call_preserves_pointer_bindings(callee), Ok(true)) {
+                    return Ok(None);
+                }
+                let mut origins = BTreeMap::new();
+                for argument in arguments.iter().filter(|argument| !argument.is_default) {
+                    let targets =
+                        self.invariant_pointer_targets(&argument.value, state, changed, depth + 1)?;
+                    origins.insert(argument.parameter, targets);
+                }
+                let inputs = self.invariant_input_places(
+                    callee,
+                    arguments,
+                    parameter_bindings,
+                    state,
+                    changed,
+                    depth + 1,
+                )?;
+                // Use the same preparation and rebase rules as scalar pointer
+                // results, but select the requested owned result field. Defaults
+                // are callee-frame expressions, not caller-local bindings.
+                Ok(self
+                    .call_memory_plan(
+                        callee,
+                        arguments,
+                        parameter_bindings,
+                        Some(&origins),
+                        Some(&inputs),
+                        Some((state, changed)),
+                        Some(input),
+                    )
+                    .and_then(|plan| plan.returned))
+            }
+            K::Local(_) | K::Field { .. } | K::AnonymousField { .. } => {
+                let Some(mut source) =
+                    syntactic_place(expr, &mut self.limits.arithmetic.steps, false)
+                        .map_err(|_| Unknown::from(comptime_runtime::Error::BudgetExhausted))?
+                else {
+                    if let K::Field { value, index, .. } | K::AnonymousField { value, index, .. } =
+                        &expr.kind
+                    {
+                        self.limits.step(input.len().saturating_add(1))?;
+                        let mut path = vec![*index];
+                        path.extend_from_slice(input);
+                        return self.invariant_input_pointer_targets(
+                            value,
+                            &path,
+                            state,
+                            changed,
+                            depth + 1,
+                        );
+                    }
+                    return Ok(None);
+                };
+                let Some(mut value) = state.aggregates.get(&place(source.root)) else {
+                    return Ok(None);
+                };
+                for (owner, index) in &source.fields {
+                    self.limits.step(1)?;
+                    if value.aggregate_kind != Some(field_owner_kind(*owner)) {
+                        return Ok(None);
+                    }
+                    let Some(field) = value.fields.as_ref().and_then(|fields| fields.get(*index))
+                    else {
+                        return Ok(None);
+                    };
+                    value = field;
+                }
+                let mut tuple_projection = false;
+                for index in input {
+                    self.limits.step(1)?;
+                    let owner = match value.aggregate_kind {
+                        Some(AggregateKind::Record(declaration)) => {
+                            Some(nir::program::FieldOwner::Nominal(declaration))
+                        }
+                        Some(AggregateKind::AnonymousRecord) => {
+                            Some(nir::program::FieldOwner::Anonymous)
+                        }
+                        Some(AggregateKind::Tuple) => {
+                            // Program places have no tuple-element owner. Keep
+                            // the enclosing storage prefix for invalidation;
+                            // do not invent a record identity for Tuple.
+                            tuple_projection = true;
+                            None
+                        }
+                        _ => return Ok(None),
+                    };
+                    let Some(field) = value.fields.as_ref().and_then(|fields| fields.get(*index))
+                    else {
+                        return Ok(None);
+                    };
+                    if !tuple_projection {
+                        if let Some(owner) = owner {
+                            source.fields.push((owner, *index));
+                        }
+                    }
+                    value = field;
+                }
+                for (root, fields) in changed {
+                    self.limits.step(
+                        fields
+                            .len()
+                            .saturating_add(source.fields.len())
+                            .saturating_add(1),
+                    )?;
+                    if *root == source.root
+                        && (fields.starts_with(&source.fields) || source.fields.starts_with(fields))
+                    {
+                        return Ok(None);
+                    }
+                }
+                Ok(value
+                    .copy_pointer_target(self.limits)?
+                    .filter(|(frame, _)| *frame == state.frame)
+                    .map(|(_, targets)| targets))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn invariant_input_places(
+        &mut self,
+        callee: &Expr,
+        arguments: &[nir::program::CallArgument],
+        bindings: &[LocalId],
+        state: &State,
+        changed: &BTreeSet<(LocalId, Vec<(nir::program::FieldOwner, usize)>)>,
+        depth: usize,
+    ) -> Result<InputPointerPlaces, Unknown> {
+        let mut inputs = InputPointerPlaces::new();
+        let Some(summary) = self.call_summary(callee) else {
+            return Ok(inputs);
+        };
+        // Defaults can consume an owned pointer field that the callee never
+        // mentions: its body sees only the prepared default result. Collect
+        // dependencies from both summaries before resolving explicit inputs.
+        let mut needed = BTreeSet::new();
+        let mut collect = |target: &super::memory::ParameterPlace, fuel: &mut usize| {
+            *fuel = fuel
+                .checked_sub(target.input_fields.len().saturating_add(1))
+                .ok_or_else(|| Unknown::from(comptime_runtime::Error::BudgetExhausted))?;
+            if !target.input_fields.is_empty() {
+                needed.insert((target.parameter, target.input_fields.clone()));
+            }
+            Ok::<_, Unknown>(())
+        };
+        for target in summary
+            .accesses
+            .iter()
+            .map(|access| &access.target)
+            .chain(summary.result_targets.iter().flatten())
+            .chain(summary.pointer_fields.values().flatten().flatten())
+        {
+            collect(target, &mut self.limits.arithmetic.steps)?;
+        }
+        if arguments.iter().any(|argument| argument.is_default) {
+            let mut prepared = Vec::new();
+            for argument in arguments {
+                self.limits.step(1)?;
+                if argument.is_default
+                    && let Some(package) = self.package
+                {
+                    let allowance = (self.limits.arithmetic.steps / 4).min(20_000);
+                    let mut fuel = allowance;
+                    let default = super::memory::infer_argument(
+                        package,
+                        &argument.value,
+                        &prepared,
+                        &mut fuel,
+                    );
+                    self.limits.arithmetic.steps -= allowance - fuel;
+                    if let Ok(default) = default {
+                        for target in default
+                            .accesses
+                            .iter()
+                            .map(|access| &access.target)
+                            .chain(default.result_targets.iter().flatten())
+                            .chain(default.pointer_fields.values().flatten().flatten())
+                        {
+                            collect(target, &mut self.limits.arithmetic.steps)?;
+                        }
+                    }
+                }
+                let Some(binding) = bindings.get(argument.parameter) else {
+                    return Ok(inputs);
+                };
+                super::memory::bound_type(&argument.value.ty, &mut self.limits.arithmetic.steps)
+                    .map_err(|_| Unknown::from(comptime_runtime::Error::BudgetExhausted))?;
+                prepared.push((*binding, argument.value.ty.clone(), argument.parameter));
+            }
+        }
+        for (parameter, fields) in needed {
+            self.limits.step(arguments.len().saturating_add(1))?;
+            let Some(argument) = arguments
+                .iter()
+                .find(|argument| argument.parameter == parameter && !argument.is_default)
+            else {
+                continue;
+            };
+            if let Some(places) = self.invariant_input_pointer_targets(
+                &argument.value,
+                &fields,
+                state,
+                changed,
+                depth + 1,
+            )? {
+                inputs.insert((parameter, fields), places);
+            }
+        }
+        Ok(inputs)
+    }
+
+    fn invariant_place_pointer_targets(
+        &mut self,
+        source: &nir::program::Place,
+        state: &State,
+        changed: &BTreeSet<(LocalId, Vec<(nir::program::FieldOwner, usize)>)>,
+    ) -> Result<Option<Vec<nir::program::Place>>, Unknown> {
+        Ok(invariant_slot_targets(
+            source,
+            state,
+            changed,
+            &mut self.limits.arithmetic.steps,
+        ))
+    }
+
+    fn invariant_load_pointer_targets(
+        &mut self,
+        slots: Vec<nir::program::Place>,
+        state: &State,
+        changed: &BTreeSet<(LocalId, Vec<(nir::program::FieldOwner, usize)>)>,
+    ) -> Result<Option<Vec<nir::program::Place>>, Unknown> {
+        let mut loaded = Vec::new();
+        for slot in slots {
+            self.limits.step(slot.fields.len().saturating_add(1))?;
+            let Some(targets) = self.invariant_place_pointer_targets(&slot, state, changed)? else {
+                return Ok(None);
+            };
+            for target in targets {
+                insert_pointer_target(&mut loaded, target, &mut self.limits.arithmetic.steps)?;
+            }
+        }
+        Ok((!loaded.is_empty()).then_some(loaded))
     }
 
     fn invariant_pointer_targets(
@@ -1412,39 +2439,28 @@ impl Walker<'_> {
                 let Some(source) = syntactic_place(expr, &mut self.limits.arithmetic.steps, false)
                     .map_err(|_| Unknown::from(comptime_runtime::Error::BudgetExhausted))?
                 else {
-                    return Ok(None);
-                };
-                for (root, fields) in changed {
-                    self.limits.step(
-                        fields
-                            .len()
-                            .saturating_add(source.fields.len())
-                            .saturating_add(1),
-                    )?;
-                    if *root == source.root
-                        && (fields.starts_with(&source.fields) || source.fields.starts_with(fields))
+                    if let K::Field { value, index, .. } | K::AnonymousField { value, index, .. } =
+                        &expr.kind
                     {
-                        return Ok(None);
+                        return self.invariant_input_pointer_targets(
+                            value,
+                            &[*index],
+                            state,
+                            changed,
+                            depth + 1,
+                        );
                     }
-                }
-                let Some(mut value) = state.aggregates.get(&place(source.root)) else {
                     return Ok(None);
                 };
-                for (declaration, index) in source.fields {
-                    self.limits.step(1)?;
-                    if value.aggregate_kind != Some(field_owner_kind(declaration)) {
-                        return Ok(None);
-                    }
-                    let Some(field) = value.fields.as_ref().and_then(|fields| fields.get(index))
-                    else {
-                        return Ok(None);
-                    };
-                    value = field;
-                }
-                Ok(value
-                    .copy_pointer_target(self.limits)?
-                    .filter(|(frame, _)| *frame == state.frame)
-                    .map(|(_, targets)| targets))
+                self.invariant_place_pointer_targets(&source, state, changed)
+            }
+            K::ReadPointer(pointer) => {
+                let Some(slots) =
+                    self.invariant_pointer_targets(pointer, state, changed, depth + 1)?
+                else {
+                    return Ok(None);
+                };
+                self.invariant_load_pointer_targets(slots, state, changed)
             }
             K::Block {
                 result: Some(result),
@@ -1509,9 +2525,81 @@ impl Walker<'_> {
                         self.invariant_pointer_targets(&argument.value, state, changed, depth + 1)?;
                     origins.insert(argument.parameter, targets);
                 }
-                Ok(self
-                    .call_memory_plan(callee, arguments, parameter_bindings, Some(&origins))
-                    .and_then(|plan| plan.returned))
+                let inputs = self.invariant_input_places(
+                    callee,
+                    arguments,
+                    parameter_bindings,
+                    state,
+                    changed,
+                    depth + 1,
+                )?;
+                if let Some(returned) = self
+                    .call_memory_plan(
+                        callee,
+                        arguments,
+                        parameter_bindings,
+                        Some(&origins),
+                        Some(&inputs),
+                        Some((state, changed)),
+                        None,
+                    )
+                    .and_then(|plan| plan.returned)
+                {
+                    return Ok(Some(returned));
+                }
+                let Some(summary) = self.call_summary(callee) else {
+                    return Ok(None);
+                };
+                self.limits.step(summary.accesses.len())?;
+                if summary.may_run_cleanup
+                    || !matches!(self.call_preserves_pointer_bindings(callee), Ok(true))
+                {
+                    return Ok(None);
+                }
+                let Some(targets) = &summary.result_targets else {
+                    return Ok(None);
+                };
+                let mut returned = Vec::new();
+                for target in targets {
+                    self.limits
+                        .step(target.input_fields.len().saturating_add(1))?;
+                    let base = if target.input_fields.is_empty() {
+                        origins
+                            .get(&target.parameter)
+                            .and_then(|value| value.as_ref())
+                    } else {
+                        inputs.get(&(target.parameter, target.input_fields.clone()))
+                    };
+                    let Some(base) = base else {
+                        return Ok(None);
+                    };
+                    for place in base {
+                        self.limits.step(place.fields.len().saturating_add(1))?;
+                    }
+                    let mut current = base.clone();
+                    for fields in &target.through {
+                        for place in &mut current {
+                            self.limits.step(fields.len().saturating_add(1))?;
+                            place.fields.extend_from_slice(fields);
+                        }
+                        let Some(loaded) =
+                            self.invariant_load_pointer_targets(current, state, changed)?
+                        else {
+                            return Ok(None);
+                        };
+                        current = loaded;
+                    }
+                    for mut place in current {
+                        self.limits.step(target.fields.len().saturating_add(1))?;
+                        place.fields.extend_from_slice(&target.fields);
+                        insert_pointer_target(
+                            &mut returned,
+                            place,
+                            &mut self.limits.arithmetic.steps,
+                        )?;
+                    }
+                }
+                Ok((!returned.is_empty()).then_some(returned))
             }
             _ => Ok(None),
         }
@@ -1566,12 +2654,33 @@ impl Walker<'_> {
                                         .map_err(|_| "loop origin budget exhausted")?;
                                     origins.insert(argument.parameter, targets);
                                 }
-                                if let Some(plan) = self.call_memory_plan(
+                                let inputs = self
+                                    .invariant_input_places(
+                                        callee,
+                                        arguments,
+                                        parameter_bindings,
+                                        state,
+                                        &changed,
+                                        0,
+                                    )
+                                    .map_err(|_| "loop input origin budget exhausted")?;
+                                let mut plan = self.call_memory_plan(
                                     callee,
                                     arguments,
                                     parameter_bindings,
                                     Some(&origins),
-                                ) {
+                                    Some(&inputs),
+                                    Some((state, &changed)),
+                                    None,
+                                );
+                                if plan.is_none() {
+                                    plan = self
+                                        .invariant_scalar_write_plan(
+                                            callee, arguments, state, &changed,
+                                        )
+                                        .map_err(|_| "loop indirect write budget exhausted")?;
+                                }
+                                if let Some(plan) = plan {
                                     for (target, _) in plan.writes {
                                         if state.domains.contains_key(&place(target.root)) {
                                             changed.insert((target.root, target.fields));
@@ -1694,7 +2803,7 @@ impl Walker<'_> {
                 if let Some(result) = result {
                     self.tail(result, state, depth + 1)?;
                 } else {
-                    self.check_exit(Value::default(), state, depth + 1)?;
+                    self.check_exit(Value::default(), None, state, depth + 1)?;
                 }
             }
             K::If {
@@ -1713,7 +2822,7 @@ impl Walker<'_> {
                 if let Some(otherwise) = else_branch {
                     self.tail(otherwise, &mut no, depth + 1)?;
                 } else {
-                    self.check_exit(Value::default(), &mut no, depth + 1)?;
+                    self.check_exit(Value::default(), None, &mut no, depth + 1)?;
                 }
                 *state = yes.merge(no, self.limits)?;
             }
@@ -1722,12 +2831,18 @@ impl Walker<'_> {
             }
             _ => {
                 let value = self.child(expr, state, depth + 1)?;
-                self.check_exit(value, state, depth + 1)?;
+                self.check_exit(value, Some(expr), state, depth + 1)?;
             }
         }
         Ok(())
     }
-    fn check_exit(&mut self, value: Value, state: &mut State, depth: usize) -> Result<(), Reason> {
+    fn check_exit(
+        &mut self,
+        value: Value,
+        expression: Option<&Expr>,
+        state: &mut State,
+        depth: usize,
+    ) -> Result<(), Reason> {
         if !state.facts.is_reachable() {
             return Ok(());
         }
@@ -1742,7 +2857,32 @@ impl Walker<'_> {
             return Ok(());
         }
         if let Some(binding) = binding {
+            // A direct returned pointer path denotes the same storage in the
+            // exit contract. Keep version checks so rebinding cannot reuse an
+            // obsolete memory observation through the result name.
+            let alias = if matches!(ty, Term::Pointer(_)) {
+                let path = if let Some(expression) = expression {
+                    self.aliased_read_path(expression, state)?
+                } else {
+                    None
+                };
+                let path = match path {
+                    Some(path) => Some(path),
+                    None => self.pointer_value_path(&value, state)?,
+                };
+                path.and_then(|path| state.facts.value(path.root).map(|version| (path, version)))
+            } else {
+                None
+            };
             self.bind_related_value(state, binding, ty, value)?;
+            state.read_aliases.remove(&place(binding));
+            if let Some((path, source_version)) = alias {
+                if let Some(alias_version) = state.facts.value(place(binding)) {
+                    state
+                        .read_aliases
+                        .insert(place(binding), (path, source_version, alias_version));
+                }
+            }
         }
         for predicate in conditions {
             self.failure_source = Some(predicate.source);
@@ -1792,7 +2932,15 @@ impl Walker<'_> {
         })
     }
     fn child(&mut self, expr: &Expr, state: &mut State, depth: usize) -> Result<Value, Reason> {
-        self.inner(expr, state, depth).map_err(|reason| {
+        let result = self.inner(expr, state, depth).and_then(|mut value| {
+            if matches!(expr.ty, Term::Pointer(_)) && value.pointer_origins.is_none() {
+                value.pointer_origins = self
+                    .pointer_value_origins(&value, state)?
+                    .map(|origins| (state.frame, origins));
+            }
+            Ok(value)
+        });
+        result.map_err(|reason| {
             self.failure_source.get_or_insert(expr.source);
             reason
         })
@@ -2056,9 +3204,103 @@ impl Walker<'_> {
         }
         let readonly_postconditions = stable_postcondition_parameters
             && self.call_preserves_memory(callee, arguments, parameter_bindings);
+        let mut reads = Vec::new();
+        for predicate in preconditions
+            .iter()
+            .chain(postconditions.iter().filter(|_| readonly_postconditions))
+        {
+            iir::visit::expression(predicate, &mut self.limits.arithmetic.steps, |expr, _| {
+                if let K::ReadPointer(pointer) = &expr.kind {
+                    reads.push((pointer.as_ref(), &expr.ty));
+                }
+                Ok(())
+            })
+            .map_err(|_| Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into()))?;
+        }
+        // Contract inputs are required even when the body has no usable
+        // memory summary (for example, because it stores a new pointer).
+        let mut contract_inputs = BTreeSet::new();
+        let mut input_pointers: Vec<_> = reads.iter().map(|(pointer, _)| *pointer).collect();
+        for argument in arguments.iter().filter(|argument| argument.is_default) {
+            iir::visit::expression(
+                &argument.value,
+                &mut self.limits.arithmetic.steps,
+                |expr, _| {
+                    if matches!(expr.ty, Term::Pointer(_)) {
+                        input_pointers.push(expr);
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(|_| Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into()))?;
+        }
+        for pointer in input_pointers {
+            let Some(path) = self.external_read_path(pointer)? else {
+                continue;
+            };
+            self.limits.step(parameter_bindings.len())?;
+            if let Some(parameter) = parameter_bindings
+                .iter()
+                .position(|binding| place(*binding) == path.root)
+            {
+                contract_inputs
+                    .insert((parameter, owned_pointer_input_path(pointer, self.limits)?));
+            }
+        }
+        let mut default_summaries = BTreeMap::new();
+        self.limits.step(arguments.len())?;
+        if let Some(package) = self
+            .package
+            .filter(|_| arguments.iter().any(|argument| argument.is_default))
+        {
+            let mut prepared = Vec::new();
+            for argument in arguments {
+                self.limits.step(1)?;
+                if argument.is_default {
+                    let allowance = (self.limits.arithmetic.steps / 4).min(20_000);
+                    let mut fuel = allowance;
+                    let summary = super::memory::infer_argument(
+                        package,
+                        &argument.value,
+                        &prepared,
+                        &mut fuel,
+                    );
+                    self.limits.arithmetic.steps -= allowance - fuel;
+                    if let Ok(summary) = summary {
+                        if !summary.may_run_cleanup
+                            && !summary.accesses.iter().any(|access| access.write)
+                        {
+                            for target in summary.result_targets.iter().flatten().chain(
+                                summary
+                                    .pointer_fields
+                                    .values()
+                                    .filter_map(|targets| targets.as_ref())
+                                    .flatten(),
+                            ) {
+                                self.limits
+                                    .step(target.input_fields.len().saturating_add(1))?;
+                                contract_inputs
+                                    .insert((target.parameter, target.input_fields.clone()));
+                            }
+                            default_summaries.insert(argument.parameter, summary);
+                        }
+                    }
+                }
+                let Some(binding) = parameter_bindings.get(argument.parameter) else {
+                    return Err(Reason::InvalidSignature);
+                };
+                super::memory::bound_type(&argument.value.ty, &mut self.limits.arithmetic.steps)
+                    .map_err(|_| {
+                        Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into())
+                    })?;
+                prepared.push((*binding, argument.value.ty.clone(), argument.parameter));
+            }
+        }
         let mut evaluated_targets = BTreeMap::new();
         let mut observed_inputs = BTreeMap::new();
         let mut evaluated_addresses = BTreeMap::new();
+        let mut returned_addresses = BTreeMap::new();
+        let mut returned_places = BTreeMap::new();
         let mut defaults = State {
             frame: self.fresh_frame()?,
             facts: Facts::default(),
@@ -2094,6 +3336,135 @@ impl Walker<'_> {
             } else {
                 self.child(&argument.value, state, depth)?
             };
+            if argument.is_default
+                && stable_defaults
+                && matches!(argument.value.ty, Term::Pointer(_))
+            {
+                let origins = if let Some(summary) = default_summaries.get(&argument.parameter) {
+                    self.summary_pointer_origins(
+                        &summary.accesses,
+                        summary.may_run_cleanup,
+                        false,
+                        summary.result_targets.as_ref(),
+                        &returned_addresses,
+                        state,
+                    )?
+                } else {
+                    self.contract_pointer_origins(
+                        &argument.value,
+                        parameter_bindings,
+                        &returned_addresses,
+                        state,
+                        0,
+                    )?
+                };
+                if let Some(origins) = origins {
+                    // Fixed loads in a readonly default use caller storage.
+                    // The ordinary default-frame evaluation above still checks
+                    // the expression; only explicit pointer provenance crosses.
+                    value.set_pointer_origins(state.frame, origins, self.limits)?;
+                }
+            }
+            if argument.is_default && stable_defaults {
+                if let Some(summary) = default_summaries.get(&argument.parameter) {
+                    for (fields, targets) in &summary.pointer_fields {
+                        self.limits.step(fields.len().saturating_add(1))?;
+                        if let Some(origins) = self.summary_pointer_origins(
+                            &summary.accesses,
+                            summary.may_run_cleanup,
+                            false,
+                            targets.as_ref(),
+                            &returned_addresses,
+                            state,
+                        )? {
+                            // Keep aggregate field provenance beside the prepared
+                            // values: an opaque nominal result need not materialize
+                            // caller storage into the private default frame.
+                            returned_addresses
+                                .insert((argument.parameter, fields.clone()), origins);
+                        }
+                    }
+                }
+            }
+            if !argument.is_default || stable_defaults {
+                for (parameter, fields) in &contract_inputs {
+                    self.limits.step(fields.len().saturating_add(1))?;
+                    if *parameter == argument.parameter {
+                        let origins = if argument.is_default {
+                            // Prepared values may carry caller-owned provenance,
+                            // but their scalar projections belong to the default
+                            // frame. Never reinterpret those local IDs in caller
+                            // storage when explicit provenance is unavailable.
+                            let mut leaf = Some(&value);
+                            for index in fields {
+                                leaf = leaf.and_then(|value| value.fields.as_ref()?.get(*index));
+                            }
+                            match leaf {
+                                Some(leaf) => leaf
+                                    .copy_pointer_origins(self.limits)?
+                                    .filter(|(frame, _)| *frame == state.frame)
+                                    .map(|(_, origins)| origins),
+                                None => None,
+                            }
+                        } else {
+                            self.pointer_input_origins(&value, fields, state)?
+                        };
+                        if let Some(origins) = origins {
+                            returned_addresses.insert((*parameter, fields.clone()), origins);
+                        }
+                    }
+                }
+            }
+            if !argument.is_default {
+                if let Some(summary) = self.call_summary(callee) {
+                    {
+                        for target in summary
+                            .accesses
+                            .iter()
+                            .map(|access| &access.target)
+                            .chain(summary.result_targets.iter().flatten())
+                            .chain(
+                                summary
+                                    .pointer_fields
+                                    .values()
+                                    .filter_map(|targets| targets.as_ref())
+                                    .flatten(),
+                            )
+                        {
+                            self.limits.step(1)?;
+                            if target.parameter != argument.parameter {
+                                continue;
+                            }
+                            self.limits
+                                .step(target.input_fields.len().saturating_add(1))?;
+                            let mut leaf = Some(&value);
+                            for index in &target.input_fields {
+                                self.limits.step(1)?;
+                                leaf = leaf.and_then(|value| value.fields.as_ref()?.get(*index));
+                            }
+                            if let Some(leaf) = leaf {
+                                if let Some((_, places)) = leaf
+                                    .copy_pointer_target(self.limits)?
+                                    .filter(|(frame, _)| *frame == state.frame)
+                                {
+                                    returned_places.insert(
+                                        (argument.parameter, target.input_fields.clone()),
+                                        places,
+                                    );
+                                }
+                            }
+                            if let Some(paths) =
+                                self.pointer_input_origins(&value, &target.input_fields, state)?
+                            {
+                                returned_addresses.insert(
+                                    (argument.parameter, target.input_fields.clone()),
+                                    paths,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
             {
                 let target = value
                     .copy_pointer_target(self.limits)?
@@ -2202,20 +3573,76 @@ impl Walker<'_> {
             // Import pointee observations only after every actual argument
             // has run. Captured targets preserve address evaluation order;
             // unknown-pointer evidence must still be current in the caller.
-            let mut reads = Vec::new();
-            for predicate in preconditions
-                .iter()
-                .chain(postconditions.iter().filter(|_| readonly_postconditions))
-            {
-                iir::visit::expression(predicate, &mut self.limits.arithmetic.steps, |expr, _| {
-                    if let K::ReadPointer(pointer) = &expr.kind {
-                        reads.push((pointer.as_ref(), &expr.ty));
-                    }
-                    Ok(())
-                })
-                .map_err(|_| Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into()))?;
-            }
+            let mut ordered = Vec::new();
             for (pointer, ty) in reads {
+                if let Some(load_depth) = fixed_pointer_load_depth(pointer, self.limits)? {
+                    ordered.push((load_depth, pointer, ty));
+                }
+            }
+            self.limits.step(
+                ordered
+                    .len()
+                    .saturating_mul(ordered.len().max(1).ilog2() as usize + 1),
+            )?;
+            ordered.sort_by_key(|(depth, _, _)| *depth);
+            for (load_depth, pointer, ty) in ordered {
+                if load_depth > 0 || matches!(ty, Term::Pointer(_)) {
+                    let Some(origins) = self.contract_pointer_origins(
+                        pointer,
+                        parameter_bindings,
+                        &returned_addresses,
+                        state,
+                        0,
+                    )?
+                    else {
+                        continue;
+                    };
+                    let mut observed: Option<Value> = None;
+                    for origin in origins {
+                        let value = self.read_pointer_origin(origin, ty, state)?;
+                        observed = Some(match observed {
+                            Some(previous) => previous.join(&value, self.limits, 0)?,
+                            None => value,
+                        });
+                    }
+                    let Some(value) = observed else {
+                        continue;
+                    };
+                    let path = if let Some(path) = self.external_read_path(pointer)? {
+                        path
+                    } else {
+                        // Inner pointer observations have already been installed.
+                        // Evaluate only the structurally fixed pointer chain in
+                        // the private contract frame, never a source call.
+                        let pointer_value = self.child(pointer, &mut defaults, depth)?;
+                        let Some(path) = self.pointer_value_path(&pointer_value, &defaults)? else {
+                            continue;
+                        };
+                        path
+                    };
+                    if matches!(ty, Term::Pointer(_)) {
+                        // Keep caller origins outside the callee frame. This
+                        // ghost identifies the corresponding loaded pointer.
+                        self.observe_external_path(path, ty, &mut defaults)?;
+                    } else {
+                        let view = self.scalar_type_view(ty)?;
+                        let Some(root) = self.result_root(&view)? else {
+                            continue;
+                        };
+                        let transfer = self.prepare_copy(&value, state)?;
+                        bind_value_place(&mut defaults, root, &view, value, self.limits)?;
+                        if let Some(transfer) = transfer {
+                            transfers.extend(self.install_copy_at(
+                                &mut defaults,
+                                root,
+                                &[],
+                                transfer,
+                            )?);
+                        }
+                        defaults.reads.insert(path, (view, root));
+                    }
+                    continue;
+                }
                 let Some(path) = self.external_read_path(pointer)? else {
                     continue;
                 };
@@ -2234,18 +3661,27 @@ impl Walker<'_> {
                 {
                     continue;
                 }
-                let observed = if let Some(Some(targets)) = evaluated_targets.get(&parameter) {
+                let input_fields = owned_pointer_input_path(pointer, self.limits)?;
+                let pointee_fields = &path.fields[input_fields.len()..];
+                let local_targets = if input_fields.is_empty() {
+                    evaluated_targets
+                        .get(&parameter)
+                        .and_then(|targets| targets.as_ref())
+                } else {
+                    returned_places.get(&(parameter, input_fields.clone()))
+                };
+                let observed = if let Some(targets) = local_targets {
                     let mut joined: Option<Value> = None;
                     for target in targets {
                         self.limits.step(
                             target
                                 .fields
                                 .len()
-                                .saturating_add(path.fields.len())
+                                .saturating_add(pointee_fields.len())
                                 .saturating_add(1),
                         )?;
                         let mut target = target.clone();
-                        for (owner, index) in &path.fields {
+                        for (owner, index) in pointee_fields {
                             let owner = match owner {
                                 AggregateKind::Record(id) => nir::program::FieldOwner::Nominal(*id),
                                 AggregateKind::AnonymousRecord => {
@@ -2260,6 +3696,43 @@ impl Walker<'_> {
                             Some(old) => old.join(&value, self.limits, 0)?,
                             None => value,
                         });
+                    }
+                    joined
+                } else if let Some(addresses) = returned_addresses.get(&(parameter, input_fields)) {
+                    let mut joined: Option<Value> = None;
+                    {
+                        for address in addresses {
+                            self.limits.step(
+                                address
+                                    .path_len()
+                                    .saturating_add(pointee_fields.len())
+                                    .saturating_add(1),
+                            )?;
+                            if !address.current(state) {
+                                joined = None;
+                                break;
+                            }
+                            let mut address = address.clone();
+                            let mut fields = Vec::new();
+                            for (kind, index) in pointee_fields {
+                                let owner = match kind {
+                                    AggregateKind::Record(id) => {
+                                        nir::program::FieldOwner::Nominal(*id)
+                                    }
+                                    AggregateKind::AnonymousRecord => {
+                                        nir::program::FieldOwner::Anonymous
+                                    }
+                                    _ => return Err(Reason::InvalidSignature),
+                                };
+                                fields.push((owner, *index));
+                            }
+                            address.project(&fields);
+                            let current = self.read_pointer_origin(address, ty, state)?;
+                            joined = Some(match joined {
+                                Some(previous) => previous.join(&current, self.limits, 0)?,
+                                None => current,
+                            });
+                        }
                     }
                     joined
                 } else if let Some(observations) = observed_inputs.get(&parameter) {
@@ -2340,12 +3813,19 @@ impl Walker<'_> {
         // aliases using argument values captured before later effects.
         let mut returned_pointer = None;
         if state.facts.is_reachable() {
-            if let Some(plan) = self.call_memory_plan(
+            let mut plan = self.call_memory_plan(
                 callee,
                 arguments,
                 parameter_bindings,
                 Some(&evaluated_targets),
-            ) {
+                Some(&returned_places),
+                None,
+                None,
+            );
+            if plan.is_none() && stable_defaults {
+                plan = self.indirect_scalar_write_plan(callee, &returned_addresses, state)?;
+            }
+            if let Some(plan) = plan {
                 returned_pointer = plan.returned;
                 // Known destinations do not imply disjointness from an
                 // external pointer. Any write invalidates its cached
@@ -2456,6 +3936,52 @@ impl Walker<'_> {
                         &[],
                     )?;
                     result = self.local_value_at(state, root)?;
+                }
+            }
+        }
+        if matches!(expr.ty, Term::Pointer(_)) && result.pointer_target.is_none() {
+            if let Some(summary) = self.call_summary(callee) {
+                let stable_storage = self.call_preserves_pointer_bindings(callee)?;
+                if let Some(origins) = self.summary_pointer_origins(
+                    &summary.accesses,
+                    summary.may_run_cleanup,
+                    stable_storage,
+                    summary.result_targets.as_ref(),
+                    &returned_addresses,
+                    state,
+                )? {
+                    result.set_pointer_origins(state.frame, origins, self.limits)?;
+                }
+            }
+        }
+        if stable_defaults && state.facts.is_reachable() {
+            if let Some(summary) = self.call_summary(callee) {
+                if !summary.pointer_fields.is_empty() && !summary.may_run_cleanup {
+                    let stable_storage = self.call_preserves_pointer_bindings(callee)?;
+                    self.expand_owned_shape(&mut result, 0)?;
+                    for (fields, targets) in &summary.pointer_fields {
+                        self.limits.step(fields.len().saturating_add(1))?;
+                        let Some(origins) = self.summary_pointer_origins(
+                            &summary.accesses,
+                            summary.may_run_cleanup,
+                            stable_storage,
+                            targets.as_ref(),
+                            &returned_addresses,
+                            state,
+                        )?
+                        else {
+                            continue;
+                        };
+                        let mut leaf = Some(&mut result);
+                        for index in fields {
+                            leaf = leaf.and_then(|value| value.fields.as_mut()?.get_mut(*index));
+                        }
+                        if let Some(leaf) = leaf {
+                            // Preserve field-specific caller provenance without
+                            // identifying the returned aggregate with an input.
+                            leaf.set_pointer_origins(state.frame, origins, self.limits)?;
+                        }
+                    }
                 }
             }
         }
@@ -2705,6 +4231,24 @@ impl Walker<'_> {
         }
         Ok(())
     }
+    fn integer_spelling(&mut self, text: &str) -> Result<Integer, Reason> {
+        // NIR constants and patterns can carry a materialized sign even though
+        // lexical integer tokens are unsigned. Both consumers share the same
+        // parsing and arithmetic budget, including the cost of negation.
+        let (negative, digits) = text
+            .strip_prefix('-')
+            .map_or((false, text), |digits| (true, digits));
+        let value =
+            Integer::parse_literal(digits, &mut self.limits.arithmetic).map_err(Unknown::from)?;
+        if negative {
+            Ok(value
+                .negate(&mut self.limits.arithmetic)
+                .map_err(Unknown::from)?)
+        } else {
+            Ok(value)
+        }
+    }
+
     #[inline(never)]
     fn binding_expression(
         &mut self,
@@ -2718,10 +4262,7 @@ impl Walker<'_> {
                 let number = match literal {
                     Literal::SignedInteger(n) => Some(Integer::from_i128(*n)),
                     Literal::UnsignedInteger(n) => Some(Integer::from_u128(*n)),
-                    Literal::Integer(text) => Some(
-                        Integer::parse_literal(text, &mut self.limits.arithmetic)
-                            .map_err(Unknown::from)?,
-                    ),
+                    Literal::Integer(text) => Some(self.integer_spelling(text)?),
                     Literal::Bool(value) => {
                         result.condition = Some(Condition::Bool(*value));
                         let encoded = Integer::from_u128(u128::from(*value));
@@ -2768,7 +4309,11 @@ impl Walker<'_> {
                 let value_result = self.child(value, state, depth)?;
                 if state.facts.is_reachable() {
                     let alias = if matches!(value.ty, Term::Pointer(_)) {
-                        self.aliased_read_path(value, state)?.and_then(|path| {
+                        let path = match self.aliased_read_path(value, state)? {
+                            Some(path) => Some(path),
+                            None => self.pointer_value_path(&value_result, state)?,
+                        };
+                        path.and_then(|path| {
                             state.facts.value(path.root).map(|version| (path, version))
                         })
                     } else {
@@ -2814,6 +4359,225 @@ impl Walker<'_> {
             Ok(value)
         }
     }
+    fn normal_input_value(
+        &mut self,
+        input: &nir::program::NormalFormArgument,
+        domain: Option<&Term>,
+        state: &mut State,
+        depth: usize,
+    ) -> Result<(Value, Term), Reason> {
+        self.limits.step(1)?;
+        if depth >= 128 {
+            return Err(Reason::DepthLimit);
+        }
+        if let Some(expression) = input.expression() {
+            return Ok((
+                self.child(expression, state, depth + 1)?,
+                expression.ty.clone(),
+            ));
+        }
+        if !state.facts.is_reachable() {
+            return Ok((
+                Value::default(),
+                domain
+                    .cloned()
+                    .unwrap_or(Term::Primitive(nir::Primitive::Never)),
+            ));
+        }
+        use nir::program::NormalFormArgument as A;
+        match input {
+            A::Integer {
+                source,
+                spelling,
+                negative,
+            } if domain == Some(&Term::Primitive(nir::Primitive::Integer)) => {
+                let ty = Term::Primitive(nir::Primitive::Integer);
+                let literal = Expr {
+                    source: *source,
+                    ty: ty.clone(),
+                    kind: K::Literal(Literal::Integer(spelling.clone())),
+                };
+                let expression = if *negative {
+                    Expr {
+                        source: *source,
+                        ty: ty.clone(),
+                        kind: K::IntegerNegate(Box::new(literal)),
+                    }
+                } else {
+                    literal
+                };
+                Ok((self.child(&expression, state, depth + 1)?, ty))
+            }
+            A::Integer {
+                source,
+                spelling,
+                negative,
+            } if matches!(domain, Some(Term::Primitive(primitive)) if primitive.fixed_integer_layout().is_some()) =>
+            {
+                let ty = domain.unwrap();
+                let Term::Primitive(primitive) = ty else {
+                    unreachable!()
+                };
+                let (signed, bits) = primitive.fixed_integer_layout().unwrap();
+                let mut value = self.integer_spelling(spelling)?;
+                if *negative {
+                    value = value
+                        .negate(&mut self.limits.arithmetic)
+                        .map_err(Unknown::from)?;
+                }
+                // These intrinsic conversions preserve the mathematical value
+                // only within the target domain. Do not model them as wrapping.
+                let literal = if signed {
+                    Literal::SignedInteger(value.to_signed(bits).map_err(Unknown::from)?)
+                } else {
+                    Literal::UnsignedInteger(value.to_unsigned(bits).map_err(Unknown::from)?)
+                };
+                let expression = Expr {
+                    source: *source,
+                    ty: ty.clone(),
+                    kind: K::Literal(literal),
+                };
+                Ok((self.child(&expression, state, depth + 1)?, ty.clone()))
+            }
+            A::Integer {
+                spelling, negative, ..
+            } if matches!(domain, Some(Term::Primitive(nir::Primitive::BitVec(_)))) => {
+                let ty = domain.unwrap();
+                let Term::Primitive(nir::Primitive::BitVec(width)) = ty else {
+                    unreachable!()
+                };
+                let mut value = self.integer_spelling(spelling)?;
+                if *negative {
+                    value = value
+                        .negate(&mut self.limits.arithmetic)
+                        .map_err(Unknown::from)?;
+                }
+                value
+                    .to_bitvec(*width, &mut self.limits.arithmetic)
+                    .map_err(|failure| {
+                        Unknown::from(match failure {
+                            comptime_runtime::bitvec::Error::Resource(resource) => resource,
+                            _ => comptime_runtime::Error::OutOfRange,
+                        })
+                    })?;
+                // Exact bit construction grants no storage/unsafe permission
+                // and no integer-program fact about later bit operations.
+                Ok((self.unknown_value(ty)?, ty.clone()))
+            }
+            A::Block {
+                statements, result, ..
+            } => {
+                for statement in statements {
+                    self.child(statement, state, depth + 1)?;
+                }
+                match result {
+                    Some(result) => self.normal_input_value(result, domain, state, depth + 1),
+                    None => Ok((Value::default(), Term::Primitive(nir::Primitive::Void))),
+                }
+            }
+            A::If {
+                condition,
+                then_input,
+                else_input,
+                ..
+            } => {
+                let ty = domain.ok_or(Reason::Unsupported)?;
+                let condition = self.child(condition, state, depth + 1)?.condition;
+                let mut yes = state.fork(self.limits)?;
+                let mut no = state.fork(self.limits)?;
+                if let Some(condition) = condition {
+                    yes.facts.assume(&condition, true, self.limits)?;
+                    no.facts.assume(&condition, false, self.limits)?;
+                }
+                let (a, _) = self.normal_input_value(then_input, domain, &mut yes, depth + 1)?;
+                let (b, _) = self.normal_input_value(else_input, domain, &mut no, depth + 1)?;
+                let result = if let Some(root) = self.result_root(ty)? {
+                    self.bind_result(&mut yes, root, ty, a)?;
+                    self.bind_result(&mut no, root, ty, b)?;
+                    *state = yes.merge(no, self.limits)?;
+                    if state.facts.is_reachable() {
+                        self.local_value_at(state, root)?
+                    } else {
+                        Value::default()
+                    }
+                } else {
+                    let result = if !yes.facts.is_reachable() {
+                        b
+                    } else if !no.facts.is_reachable() {
+                        a
+                    } else {
+                        a.join(&b, self.limits, 0)?
+                    };
+                    *state = yes.merge(no, self.limits)?;
+                    result
+                };
+                Ok((result, ty.clone()))
+            }
+            A::Match { value, arms, .. } => {
+                let ty = domain.ok_or(Reason::Unsupported)?;
+                Ok((
+                    self.normal_match_input(value, arms, ty, state, depth + 1)?,
+                    ty.clone(),
+                ))
+            }
+            A::Unit { .. }
+                if matches!(
+                    domain,
+                    Some(Term::Primitive(nir::Primitive::Void | nir::Primitive::Type))
+                ) =>
+            {
+                Ok((Value::default(), domain.unwrap().clone()))
+            }
+            A::Tuple { items, .. } => {
+                let ty = domain.ok_or(Reason::Unsupported)?;
+                if *ty == Term::Primitive(nir::Primitive::Type) {
+                    for item in items {
+                        if !state.facts.is_reachable() {
+                            break;
+                        }
+                        self.normal_input_value(item, Some(ty), state, depth + 1)?;
+                    }
+                    return Ok((Value::default(), ty.clone()));
+                }
+                let domains = self.tuple_field_types(ty)?.ok_or(Reason::Unsupported)?;
+                if domains.len() != items.len() {
+                    return Err(Reason::Unsupported);
+                }
+                let mut fields = Vec::new();
+                for (item, domain) in items.iter().zip(&domains) {
+                    if !state.facts.is_reachable() {
+                        return Ok((Value::default(), ty.clone()));
+                    }
+                    let (mut value, _) =
+                        self.normal_input_value(item, Some(domain), state, depth + 1)?;
+                    if !state.facts.is_reachable() {
+                        return Ok((Value::default(), ty.clone()));
+                    }
+                    value.evidence = self.prepare_copy(&value, state)?;
+                    fields.push(value.snapshot(self.limits, 0)?);
+                }
+                let value = Value {
+                    fields: Some(fields),
+                    aggregate_kind: Some(AggregateKind::Tuple),
+                    ..Value::default()
+                };
+                Ok((self.materialize_aggregate(value, ty, state)?, ty.clone()))
+            }
+            nir::program::NormalFormArgument::TypeList { items, .. } => {
+                for item in items {
+                    if !state.facts.is_reachable() {
+                        break;
+                    }
+                    self.normal_input_value(item, None, state, depth + 1)?;
+                }
+                // The collector stores Type descriptions, not program scalar
+                // evidence. Keep its declared list domain and operand effects.
+                Ok((Value::default(), domain.ok_or(Reason::Unsupported)?.clone()))
+            }
+            _ => Err(Reason::Unsupported),
+        }
+    }
+
     #[inline(never)]
     fn general_expression(
         &mut self,
@@ -2925,7 +4689,9 @@ impl Walker<'_> {
                 declaration,
                 index,
             } => {
-                if let Some((frame, targets)) = self.child(pointer, state, depth)?.pointer_target {
+                let input = self.child(pointer, state, depth)?;
+                let origins = self.pointer_value_origins(&input, state)?;
+                if let Some((frame, targets)) = input.pointer_target {
                     let mut projected = Vec::new();
                     for mut target in targets {
                         self.limits.step(1)?;
@@ -2939,10 +4705,19 @@ impl Walker<'_> {
                         )?;
                     }
                     result.pointer_target = Some((frame, projected));
+                } else if let Some(mut targets) = origins {
+                    for target in &mut targets {
+                        self.limits.step(1)?;
+                        target
+                            .project(&[(nir::program::FieldOwner::Nominal(*declaration), *index)]);
+                    }
+                    result.pointer_origins = Some((state.frame, targets));
                 }
             }
             K::PointerAnonymousField { pointer, index, .. } => {
-                if let Some((frame, targets)) = self.child(pointer, state, depth)?.pointer_target {
+                let input = self.child(pointer, state, depth)?;
+                let origins = self.pointer_value_origins(&input, state)?;
+                if let Some((frame, targets)) = input.pointer_target {
                     let mut projected = Vec::new();
                     for mut target in targets {
                         self.limits.step(1)?;
@@ -2956,11 +4731,18 @@ impl Walker<'_> {
                         )?;
                     }
                     result.pointer_target = Some((frame, projected));
+                } else if let Some(mut targets) = origins {
+                    for target in &mut targets {
+                        self.limits.step(1)?;
+                        target.project(&[(nir::program::FieldOwner::Anonymous, *index)]);
+                    }
+                    result.pointer_origins = Some((state.frame, targets));
                 }
             }
             K::ReadPointer(pointer) => {
-                let targets = self
-                    .child(pointer, state, depth)?
+                let pointer_value = self.child(pointer, state, depth)?;
+                let origins = self.pointer_value_origins(&pointer_value, state)?;
+                let targets = pointer_value
                     .pointer_target
                     .filter(|(frame, _)| *frame == state.frame)
                     .map(|(_, targets)| targets);
@@ -2968,6 +4750,19 @@ impl Walker<'_> {
                     let mut joined: Option<Value> = None;
                     for target in targets {
                         let current = self.read_pointer_place(state, &target)?;
+                        joined = Some(match joined {
+                            Some(previous) => previous.join(&current, self.limits, 0)?,
+                            None => current,
+                        });
+                    }
+                    match joined {
+                        Some(value) => value,
+                        None => self.unknown_value(&expr.ty)?,
+                    }
+                } else if let Some(addresses) = origins {
+                    let mut joined: Option<Value> = None;
+                    for address in addresses {
+                        let current = self.read_pointer_origin(address, &expr.ty, state)?;
                         joined = Some(match joined {
                             Some(previous) => previous.join(&current, self.limits, 0)?,
                             None => current,
@@ -3170,7 +4965,7 @@ impl Walker<'_> {
                 if let Some(value) = value {
                     self.tail(value, state, depth)?;
                 } else {
-                    self.check_exit(Value::default(), state, depth)?;
+                    self.check_exit(Value::default(), None, state, depth)?;
                 }
                 state
                     .facts
@@ -3203,6 +4998,96 @@ impl Walker<'_> {
                     depth,
                 )?;
             }
+            K::NormalFormType {
+                head,
+                arguments,
+                plan,
+            } => {
+                let metadata = self.package.and_then(|package| {
+                    package
+                        .normal_forms
+                        .iter()
+                        .find(|item| item.declaration == *head)
+                });
+                if let Some(plan) = plan {
+                    self.limits
+                        .step(arguments.len().saturating_add(plan.preparations.len()))?;
+                    if !plan.valid(arguments.len()) {
+                        return Err(Reason::Unsupported);
+                    }
+                    let mut preparations = plan.preparations.iter().peekable();
+                    for (position, slot) in plan.order.iter().copied().enumerate() {
+                        while preparations.peek().is_some_and(|p| p.before == position) {
+                            self.child(&preparations.next().unwrap().expression, state, depth)?;
+                        }
+                        if !state.facts.is_reachable() {
+                            break;
+                        }
+                        let domain = metadata
+                            .and_then(|head| head.parameters.get(slot))
+                            .map(|parameter| &parameter.ty);
+                        let (value, ty) =
+                            self.normal_input_value(&arguments[slot], domain, state, depth)?;
+                        if state.facts.is_reachable() {
+                            self.bind_related_value(state, plan.bindings[slot], &ty, value)?;
+                        }
+                    }
+                    for preparation in preparations {
+                        self.child(&preparation.expression, state, depth)?;
+                    }
+                } else {
+                    for (slot, argument) in arguments.iter().enumerate() {
+                        if !state.facts.is_reachable() {
+                            break;
+                        }
+                        let domain = metadata
+                            .and_then(|head| head.parameters.get(slot))
+                            .map(|parameter| &parameter.ty);
+                        self.normal_input_value(argument, domain, state, depth)?;
+                    }
+                }
+            }
+            K::NominalType { arguments, .. }
+            | K::CheckTypeAlias { arguments, .. }
+            | K::TypeList(arguments)
+            | K::TupleType(arguments)
+            | K::FunctionType {
+                parameters: arguments,
+                ..
+            } => {
+                // Formation predicates belong to the type checker/invocation,
+                // but computing their operands is ordinary program evaluation.
+                // Preserve operand order, effects and early exits here without
+                // importing type propositions into the program facts.
+                for argument in arguments {
+                    self.child(argument, state, depth)?;
+                }
+            }
+            K::PointerType(value) | K::BitVecType(value) => {
+                self.child(value, state, depth)?;
+            }
+            K::FunctionResultType {
+                signature,
+                result: output,
+            } => {
+                self.child(signature, state, depth)?;
+                self.child(output, state, depth)?;
+            }
+            K::ClosureType {
+                environment,
+                signature,
+            } => {
+                for field in environment {
+                    self.child(field, state, depth)?;
+                }
+                self.child(signature, state, depth)?;
+            }
+            K::TypeEqual(left, right) => {
+                self.child(left, state, depth)?;
+                self.child(right, state, depth)?;
+                // This layer tracks the evaluation, not type-theory equality.
+                // Its Bool result remains unknown without program evidence.
+            }
             K::Tuple(values)
             | K::AnonymousRecord { fields: values }
             | K::Record { fields: values, .. }
@@ -3210,6 +5095,11 @@ impl Walker<'_> {
                 let mut fields = Vec::new();
                 for value in values {
                     let mut evaluated = self.child(value, state, depth)?;
+                    if matches!(value.ty, Term::Pointer(_)) && evaluated.pointer_target.is_none() {
+                        evaluated.pointer_origins = self
+                            .pointer_value_origins(&evaluated, state)?
+                            .map(|targets| (state.frame, targets));
+                    }
                     evaluated.evidence = self.prepare_copy(&evaluated, state)?;
                     fields.push(evaluated.snapshot(self.limits, 0)?);
                 }
@@ -3369,6 +5259,7 @@ impl Value {
             return Err(Unknown::ConditionDepthLimit);
         }
         Ok(Self {
+            unbounded_integer: *ty == Term::Primitive(nir::Primitive::Integer),
             range: domain(ty, limits)?,
             nominal_type: if matches!(ty, Term::Nominal { .. } | Term::Record(_)) {
                 Some(std::sync::Arc::new(ty.clone()))
@@ -3405,6 +5296,7 @@ impl Value {
     fn forget_observations(&mut self, limits: &mut Limits) -> Result<bool, Unknown> {
         limits.step(1)?;
         self.pointer_target = None;
+        self.pointer_origins = None;
         self.range = None;
         self.scalar = None;
         self.polynomial = None;
@@ -3421,7 +5313,7 @@ impl Value {
         }
         self.fields = None;
         self.aggregate_kind = None;
-        Ok(self.nominal_type.is_some())
+        Ok(self.nominal_type.is_some() || self.unbounded_integer)
     }
     fn clear_evidence(&mut self, limits: &mut Limits) -> Result<(), Unknown> {
         limits.step(1)?;
@@ -3433,13 +5325,33 @@ impl Value {
         }
         Ok(())
     }
+    fn copy_pointer_origins(
+        &self,
+        limits: &mut Limits,
+    ) -> Result<Option<(u64, Vec<PointerOrigin>)>, Unknown> {
+        if let Some((frame, targets)) = &self.pointer_origins {
+            for target in targets {
+                limits.step(target.path_len().saturating_add(1))?;
+            }
+            Ok(Some((*frame, targets.clone())))
+        } else {
+            Ok(self.copy_pointer_target(limits)?.map(|(frame, targets)| {
+                (
+                    frame,
+                    targets.into_iter().map(PointerOrigin::Local).collect(),
+                )
+            }))
+        }
+    }
     fn snapshot(&self, limits: &mut Limits, depth: usize) -> Result<Self, Unknown> {
         limits.step(1)?;
         if depth >= 128 {
             return Err(Unknown::ConditionDepthLimit);
         }
         Ok(Self {
+            unbounded_integer: self.unbounded_integer,
             pointer_target: self.copy_pointer_target(limits)?,
+            pointer_origins: self.copy_pointer_origins(limits)?,
             projection: None,
             polynomial: None,
             evidence: self.evidence.clone(),
@@ -3472,6 +5384,7 @@ impl Value {
             return Err(Unknown::ConditionDepthLimit);
         }
         Ok(Self {
+            unbounded_integer: self.unbounded_integer && other.unbounded_integer,
             pointer_target: {
                 let left = self.copy_pointer_target(limits)?;
                 let right = other.copy_pointer_target(limits)?;
@@ -3488,6 +5401,18 @@ impl Value {
                     }
                     _ => None,
                 }
+            },
+            pointer_origins: match (
+                self.copy_pointer_origins(limits)?,
+                other.copy_pointer_origins(limits)?,
+            ) {
+                (Some((a, mut targets)), Some((b, others))) if a == b => {
+                    for target in others {
+                        insert_pointer_origin(&mut targets, target, limits)?;
+                    }
+                    Some((a, targets))
+                }
+                _ => None,
             },
             projection: None,
             polynomial: None,
@@ -3533,6 +5458,27 @@ impl Value {
         })
     }
 }
+fn insert_pointer_origin(
+    targets: &mut Vec<PointerOrigin>,
+    target: PointerOrigin,
+    limits: &mut Limits,
+) -> Result<(), Unknown> {
+    for previous in targets.iter() {
+        limits.step(previous.path_len().min(target.path_len()).saturating_add(1))?;
+        let same = match (previous, &target) {
+            (PointerOrigin::Local(a), PointerOrigin::Local(b)) => a == b,
+            (PointerOrigin::External(a), PointerOrigin::External(b)) => {
+                a.root_version == b.root_version && a.path == b.path
+            }
+            _ => false,
+        };
+        if same {
+            return Ok(());
+        }
+    }
+    targets.push(target);
+    Ok(())
+}
 fn copy_aggregates(
     aggregates: &BTreeMap<PlaceId, Value>,
     limits: &mut Limits,
@@ -3564,6 +5510,7 @@ fn bind_value_place(
         || value.aggregate_kind.is_some()
         || value.nominal_type.is_some()
         || value.pointer_target.is_some()
+        || value.pointer_origins.is_some()
     {
         Some(value.snapshot(limits, 0)?)
     } else {
@@ -3600,8 +5547,23 @@ impl State {
 }
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("(range-value (pointer-target ")?;
+        write!(
+            f,
+            "(range-value (unbounded-integer {}) (pointer-target ",
+            self.unbounded_integer
+        )?;
         match &self.pointer_target {
+            Some((frame, targets)) => {
+                write!(f, "(frame {frame}) (targets")?;
+                for target in targets {
+                    write!(f, " {target}")?;
+                }
+                f.write_str(")")?;
+            }
+            None => f.write_str("unknown")?,
+        }
+        f.write_str(") (pointer-origins ")?;
+        match &self.pointer_origins {
             Some((frame, targets)) => {
                 write!(f, "(frame {frame}) (targets")?;
                 for target in targets {
@@ -3661,6 +5623,28 @@ impl fmt::Display for Value {
 }
 
 impl Value {
+    fn set_pointer_origins(
+        &mut self,
+        frame: u64,
+        origins: Vec<PointerOrigin>,
+        limits: &mut Limits,
+    ) -> Result<(), Unknown> {
+        let mut local = Vec::new();
+        let mut all_local = !origins.is_empty();
+        for origin in &origins {
+            limits.step(origin.path_len().saturating_add(1))?;
+            match origin {
+                PointerOrigin::Local(place) => local.push(place.clone()),
+                PointerOrigin::External(_) => all_local = false,
+            }
+        }
+        // Selective writes require the complete set, never a local subset of
+        // a mixed result. Reads retain the full provenance in either case.
+        self.pointer_target = all_local.then_some((frame, local));
+        self.pointer_origins = Some((frame, origins));
+        Ok(())
+    }
+
     fn copy_pointer_target(
         &self,
         limits: &mut Limits,
@@ -3677,7 +5661,7 @@ impl Value {
             return Ok(Some(p.copy(limits)?));
         }
         match &self.scalar {
-            Some(Scalar::Local(id)) if self.range.is_some() => {
+            Some(Scalar::Local(id)) if self.range.is_some() || self.unbounded_integer => {
                 Polynomial::variable(*id, limits).map(Some)
             }
             Some(Scalar::Constant(n)) => Polynomial::constant(limits.integer(n)?, limits).map(Some),
@@ -3715,6 +5699,11 @@ impl Walker<'_> {
         };
         let range = match p.enclosure(&state.facts, self.limits) {
             Ok((range, _)) => range,
+            Err(Unknown::MissingBound(_)) if state.facts.relation_is_current(p, self.limits)? => {
+                // No finite enclosure is not loss of the expression identity.
+                // It remains useful for exact program-contract substitution.
+                return Ok(());
+            }
             Err(
                 Unknown::StaleValue(_)
                 | Unknown::MissingBound(_)
@@ -3748,6 +5737,49 @@ impl Walker<'_> {
 
 // Export result and explicit entry-snapshot guarantees. Bare parameter names
 // denote exit-state bindings and cannot stand for original caller arguments.
+fn fixed_pointer_load_depth(
+    mut pointer: &Expr,
+    limits: &mut Limits,
+) -> Result<Option<usize>, Unknown> {
+    let mut loads = 0;
+    for _ in 0..128 {
+        limits.step(1)?;
+        pointer = match &pointer.kind {
+            K::Local(_) => return Ok(Some(loads)),
+            K::Field { value, .. } | K::AnonymousField { value, .. } => value,
+            K::PointerField { pointer, .. } | K::PointerAnonymousField { pointer, .. } => pointer,
+            K::ReadPointer(pointer) => {
+                loads += 1;
+                pointer
+            }
+            _ => return Ok(None),
+        };
+    }
+    Err(Unknown::ConditionDepthLimit)
+}
+
+fn owned_pointer_input_path(
+    mut pointer: &Expr,
+    limits: &mut Limits,
+) -> Result<Vec<usize>, Unknown> {
+    let mut fields = Vec::new();
+    loop {
+        limits.step(1)?;
+        match &pointer.kind {
+            K::PointerField { pointer: base, .. }
+            | K::PointerAnonymousField { pointer: base, .. } => pointer = base,
+            K::Field { value, index, .. } | K::AnonymousField { value, index, .. } => {
+                fields.push(*index);
+                pointer = value;
+            }
+            _ => {
+                fields.reverse();
+                return Ok(fields);
+            }
+        }
+    }
+}
+
 fn external_read_path(
     mut pointer: &Expr,
     limits: &mut Limits,
@@ -3767,6 +5799,11 @@ fn external_read_path(
                 pointer: base,
                 declaration,
                 index,
+            }
+            | K::Field {
+                value: base,
+                declaration,
+                index,
             } => {
                 fields.push((nir::program::FieldOwner::Nominal(*declaration), *index));
                 pointer = base;
@@ -3775,6 +5812,9 @@ fn external_read_path(
                 pointer: base,
                 index,
                 ..
+            }
+            | K::AnonymousField {
+                value: base, index, ..
             } => {
                 fields.push((nir::program::FieldOwner::Anonymous, *index));
                 pointer = base;
@@ -3782,6 +5822,50 @@ fn external_read_path(
             _ => return Ok(None),
         }
     }
+}
+
+// Resolve only already imported observations. In particular, traversing a
+// pointer load must not invent a new ghost or evaluate a source expression.
+fn observed_pointer_path(
+    pointer: &Expr,
+    reads: &BTreeMap<FieldPath, (Term, PlaceId)>,
+    limits: &mut Limits,
+    depth: usize,
+) -> Result<Option<FieldPath>, Unknown> {
+    limits.step(1)?;
+    if depth >= 128 {
+        return Err(Unknown::ConditionDepthLimit);
+    }
+    if let Some(path) = external_read_path(pointer, limits)? {
+        return Ok(Some(path));
+    }
+    let (base, field) = match &pointer.kind {
+        K::ReadPointer(base) => {
+            let Some(path) = observed_pointer_path(base, reads, limits, depth + 1)? else {
+                return Ok(None);
+            };
+            return Ok(reads.get(&path).and_then(|(ty, root)| {
+                matches!(ty, Term::Pointer(_)).then(|| FieldPath {
+                    root: *root,
+                    fields: Vec::new(),
+                })
+            }));
+        }
+        K::PointerField {
+            pointer,
+            declaration,
+            index,
+        } => (pointer, (AggregateKind::Record(*declaration), *index)),
+        K::PointerAnonymousField { pointer, index, .. } => {
+            (pointer, (AggregateKind::AnonymousRecord, *index))
+        }
+        _ => return Ok(None),
+    };
+    let Some(mut path) = observed_pointer_path(base, reads, limits, depth + 1)? else {
+        return Ok(None);
+    };
+    path.fields.push(field);
+    Ok(Some(path))
 }
 
 fn exportable_postcondition(
@@ -3796,10 +5880,13 @@ fn exportable_postcondition(
         limits.step(1)?;
         match &expr.kind {
             K::ReadPointer(pointer) => {
-                let Some(path) = external_read_path(pointer, limits)? else {
+                let Some(reads) = reads else {
                     return Ok(false);
                 };
-                if !reads.is_some_and(|reads| reads.contains_key(&path)) {
+                let Some(path) = observed_pointer_path(pointer, reads, limits, 0)? else {
+                    return Ok(false);
+                };
+                if !reads.contains_key(&path) {
                     return Ok(false);
                 }
             }
@@ -3927,4 +6014,136 @@ mod interval_observation_tests {
             }
         }
     }
+}
+
+#[cfg(test)]
+mod memory_summary_cache_tests {
+    use super::*;
+
+    #[test]
+    fn budget_failure_can_retry_and_completed_summary_is_reused() {
+        let declaration = nir::DeclarationId {
+            package: 0,
+            local: 1,
+        };
+        let unit = || Expr {
+            source: SourceRange { start: 0, end: 1 },
+            ty: Term::Primitive(nir::Primitive::Void),
+            kind: K::Unit,
+        };
+        let signature = Term::Function {
+            parameters: vec![],
+            result: Box::new(unit().ty),
+        };
+        let package = nir::program::Package {
+            functions: vec![Function {
+                phase: nir::program::FunctionPhase::Runtime,
+                inline: false,
+                pure: false,
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+                capabilities: vec![],
+                requirements: vec![],
+                type_parameters: vec![],
+                declaration,
+                name: "work".into(),
+                signature: signature.clone(),
+                parameters: vec![],
+                body: Expr {
+                    kind: K::Block {
+                        statements: (0..100).map(|_| unit()).collect(),
+                        result: Some(Box::new(unit())),
+                    },
+                    ..unit()
+                },
+                defaults: vec![],
+            }],
+            ..Default::default()
+        };
+        let callee = Expr {
+            ty: signature,
+            kind: K::Function(declaration),
+            ..unit()
+        };
+        let mut limits = Limits::default();
+        limits.arithmetic.steps = 200;
+        let mut walker = Walker {
+            addressed_locals: BTreeSet::new(),
+            type_context: crate::ptc::Context::with_scope(vec![]),
+            input_frames: vec![],
+            next_frame: 1,
+            memory_summaries: Default::default(),
+            exit_contract: None,
+            assuming_postcondition: false,
+            next_field: 0,
+            limits: &mut limits,
+            package: Some(&package),
+            points: vec![],
+            failure_source: None,
+            closure_context: vec![],
+            single_pass_exits: BTreeMap::new(),
+        };
+        assert!(walker.call_summary(&callee).is_none());
+        assert!(walker.limits.arithmetic.steps < 200);
+        assert!(walker.memory_summaries.is_empty());
+
+        // Retry the same instance with enough resources; partial fixed-point
+        // state from the failed attempt must not stand in for its full body.
+        walker.limits.arithmetic.steps = 100_000;
+        let summary = walker.call_summary(&callee).expect("retry succeeds");
+        assert!(summary.accesses.is_empty());
+        assert_eq!(walker.memory_summaries.len(), 1);
+        walker.limits.arithmetic.steps = 200;
+        let cached = walker.call_summary(&callee).expect("completed cache hit");
+        assert!(std::sync::Arc::ptr_eq(&summary, &cached));
+
+        let incompatible = Expr {
+            ty: Term::Function {
+                parameters: vec![],
+                result: Box::new(Term::Primitive(nir::Primitive::Bool)),
+            },
+            ..callee.clone()
+        };
+        assert!(walker.call_summary(&incompatible).is_none());
+        assert!(walker.call_summary(&callee).is_some());
+    }
+}
+
+fn invariant_slot_targets(
+    source: &nir::program::Place,
+    state: &State,
+    changed: &ChangedPlaces,
+    fuel: &mut usize,
+) -> Option<Vec<nir::program::Place>> {
+    for (root, fields) in changed {
+        *fuel = fuel.checked_sub(
+            fields
+                .len()
+                .saturating_add(source.fields.len())
+                .saturating_add(1),
+        )?;
+        if *root == source.root
+            && (fields.starts_with(&source.fields) || source.fields.starts_with(fields))
+        {
+            return None;
+        }
+    }
+    let mut value = state.aggregates.get(&place(source.root))?;
+    for (owner, index) in &source.fields {
+        *fuel = fuel.checked_sub(1)?;
+        if value.aggregate_kind != Some(field_owner_kind(*owner)) {
+            return None;
+        }
+        value = value.fields.as_ref()?.get(*index)?;
+    }
+    let (frame, targets) = value.pointer_target.as_ref()?;
+    if *frame != state.frame || targets.is_empty() {
+        return None;
+    }
+    for target in targets {
+        *fuel = fuel.checked_sub(target.fields.len().saturating_add(1))?;
+    }
+    Some(targets.clone())
 }

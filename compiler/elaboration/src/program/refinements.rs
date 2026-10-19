@@ -208,6 +208,7 @@ impl Checker<'_, '_> {
             (known, None) | (None, known) => known,
         };
         Ok(match pattern {
+            P::Observe { .. } => None,
             P::Guard { pattern, condition } => {
                 // The canonical constant Type pattern binds its input and
                 // immediately compares that snapshot with a TypeValue. No

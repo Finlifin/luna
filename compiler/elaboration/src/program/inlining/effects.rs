@@ -35,6 +35,60 @@ pub(super) fn expand(package: &mut n::Package, fuel: &mut usize) -> Result<(usiz
     Ok((pass.installations, pass.requests))
 }
 
+/// Retry closed inline installations after staged quote inputs and Type
+/// substitutions have completed. No ordinary callee expansion is attempted;
+/// unsupported installations retain the same transactional fallback as NIR.
+pub(crate) fn expand_materialized(
+    package: &n::Package,
+    inline: &BTreeSet<DeclarationId>,
+    expression: &mut n::Expr,
+    next: &mut u32,
+    sources: &mut Vec<n::ExpansionSource>,
+    enums: &mut Vec<n::Enum>,
+    fuel: &mut usize,
+) -> Result<(usize, usize), String> {
+    if inline.is_empty() {
+        return Ok((0, 0));
+    }
+    // Avoid copying package-wide rollback metadata for unrelated functions.
+    // This traversal also pays for the type clones performed by Rewriter.
+    let mut eligible = false;
+    let checked = nir::visit::expression(expression, fuel, |node, fuel| {
+        if let K::EffectHandle { handlers, .. } = &node.kind {
+            eligible |= !handlers.is_empty()
+                && handlers.iter().all(|handler| {
+                    handler.abi == nir::effects::Abi::Direct
+                        && inline.contains(&handler.operation.declaration)
+                });
+        }
+        nir::type_computations::charge_term(&node.ty, fuel).map_err(|e| e.to_string())
+    });
+    if checked.is_err() || !eligible {
+        return Ok((0, 0));
+    }
+    let Some(remaining) = fuel.checked_sub(
+        package.internal_return_packets.len() + package.internal_return_empty_replacements.len(),
+    ) else {
+        return Ok((0, 0));
+    };
+    *fuel = remaining;
+    let mut packets = package.internal_return_packets.clone();
+    let mut empty = package.internal_return_empty_replacements.clone();
+    let mut pass = Installations {
+        inline,
+        next,
+        sources,
+        enums,
+        packets: &mut packets,
+        empty: &mut empty,
+        fuel,
+        installations: 0,
+        requests: 0,
+    };
+    expression.rewrite_with(&mut pass)?;
+    Ok((pass.installations, pass.requests))
+}
+
 fn charge(expression: &n::Expr, fuel: &mut usize) -> Result<(), String> {
     nir::visit::expression(expression, fuel, |expr, fuel| {
         nir::type_computations::charge_term(&expr.ty, fuel).map_err(|e| e.to_string())
@@ -592,5 +646,78 @@ impl Requests<'_> {
             owner: u32::MAX,
             index,
         })
+    }
+}
+
+#[cfg(test)]
+mod materialized_tests {
+    use super::*;
+
+    #[test]
+    fn unrelated_body_does_not_copy_package_return_metadata() {
+        let mut package = n::Package::default();
+        for local in 0..1000 {
+            package
+                .internal_return_packets
+                .insert(DeclarationId { package: 7, local });
+        }
+        let mut body = n::Expr {
+            ty: Term::Primitive(nir::Primitive::Void),
+            source: n::SourceRange { start: 0, end: 1 },
+            kind: K::Unit,
+        };
+        let original = body.clone();
+        let inline = BTreeSet::from([DeclarationId {
+            package: 7,
+            local: 1001,
+        }]);
+        let mut next = 17;
+        let mut sources = Vec::new();
+        let mut enums = Vec::new();
+        let mut fuel = 2000;
+        assert_eq!(
+            expand_materialized(
+                &package,
+                &inline,
+                &mut body,
+                &mut next,
+                &mut sources,
+                &mut enums,
+                &mut fuel
+            )
+            .unwrap(),
+            (0, 0)
+        );
+        assert!(
+            fuel > 1900,
+            "unrelated metadata consumed the body budget: {fuel}"
+        );
+        assert_eq!(body, original);
+        assert_eq!(next, 17);
+        assert!(sources.is_empty() && enums.is_empty());
+    }
+
+    #[test]
+    fn empty_inline_index_skips_the_optional_pass_without_work() {
+        let mut body = n::Expr {
+            ty: Term::Primitive(nir::Primitive::Void),
+            source: n::SourceRange { start: 0, end: 1 },
+            kind: K::Unit,
+        };
+        let mut fuel = 0;
+        assert_eq!(
+            expand_materialized(
+                &n::Package::default(),
+                &BTreeSet::new(),
+                &mut body,
+                &mut 0,
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut fuel
+            )
+            .unwrap(),
+            (0, 0)
+        );
+        assert_eq!(fuel, 0);
     }
 }

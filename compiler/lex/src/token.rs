@@ -105,7 +105,6 @@ pub enum TokenKind {
     Error,     // error
     Exists,    // exists
     Extend,    // extend
-    Extern,    // extern
     False,     // false
     Fn,        // fn
     FnCap,     // Fn
@@ -277,7 +276,6 @@ impl TokenKind {
             TokenKind::Error => "error",
             TokenKind::Exists => "exists",
             TokenKind::Extend => "extend",
-            TokenKind::Extern => "extern",
             TokenKind::False => "false",
             TokenKind::Fn => "fn",
             TokenKind::FnCap => "Fn",
@@ -394,7 +392,6 @@ impl Token {
         map.insert("error", TokenKind::Error);
         map.insert("exists", TokenKind::Exists);
         map.insert("extend", TokenKind::Extend);
-        map.insert("extern", TokenKind::Extern);
         map.insert("false", TokenKind::False);
         map.insert("fn", TokenKind::Fn);
         map.insert("Fn", TokenKind::FnCap);

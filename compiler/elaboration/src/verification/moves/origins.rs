@@ -2,6 +2,43 @@
 use super::{EnumDomains, Error, SourceRange, VARIANT_PATH, error};
 use nir::{Term, program::Package};
 
+/// Bind symbolic inputs without treating an absent payload as unknown storage.
+/// Empty sets are reserved for leaves excluded by established tag evidence;
+/// missing physical origins remain missing and therefore unknown to callers.
+pub(super) fn bind_input_origins(
+    layout: &[crate::verification::memory::PointerInputLeaf],
+    origins: &super::ValueOrigins,
+    domains: &EnumDomains,
+    fuel: &mut usize,
+    source: SourceRange,
+) -> Result<super::ValueOrigins, Error> {
+    let mut inputs = super::ValueOrigins::new();
+    for leaf in layout {
+        *fuel = fuel
+            .checked_sub(
+                leaf.input_fields
+                    .len()
+                    .saturating_add(leaf.storage_fields.len())
+                    .saturating_add(1),
+            )
+            .ok_or_else(|| error(source, "pointer input binding budget exhausted"))?;
+        if super::enum_path_excluded(&leaf.input_fields, domains) {
+            inputs.insert(leaf.input_fields.clone(), Default::default());
+        } else if let Some(targets) = origins
+            .get(&leaf.storage_fields)
+            .filter(|targets| !targets.is_empty())
+        {
+            for target in targets {
+                *fuel = fuel
+                    .checked_sub(target.fields.len() + 1)
+                    .ok_or_else(|| error(source, "pointer input binding budget exhausted"))?;
+            }
+            inputs.insert(leaf.input_fields.clone(), targets.clone());
+        }
+    }
+    Ok(inputs)
+}
+
 pub(super) fn pointer_possible(
     package: Option<&Package>,
     ty: &Term,
@@ -18,7 +55,14 @@ pub(super) fn pointer_possible(
     *fuel = fuel
         .checked_sub(1)
         .ok_or_else(|| error(source, "pointer layout budget exhausted"))?;
-    if let Some(types) = nir::normal_forms::tuple_fields(package, ty) {
+    // A closure's captured environment has the same physical field indexing
+    // as its ownership shape. Inspect that layout without exporting a memory
+    // contract for the closure or unfolding its code.
+    let fields_layout = match ty {
+        Term::Closure { environment, .. } => Some(environment.as_slice()),
+        _ => nir::normal_forms::tuple_fields(package, ty),
+    };
+    if let Some(types) = fields_layout {
         let Some((&field, rest)) = fields.split_first() else {
             return Ok(false);
         };
@@ -103,6 +147,33 @@ pub(super) fn pointer_possible(
                 return result;
             }
             if let Some(definition) = package
+                .newtypes
+                .iter()
+                .find(|item| item.declaration == *declaration)
+            {
+                // Ownership represents a newtype's private representation as
+                // field zero. This is layout inspection, not source projection.
+                if field != 0 {
+                    return Ok(false);
+                }
+                let representation = definition
+                    .representation_budgeted(arguments, &[], fuel)
+                    .map_err(|e| error(source, e.to_string()))?;
+                qualified.push(0);
+                let result = pointer_possible(
+                    Some(package),
+                    &representation,
+                    rest,
+                    domains,
+                    qualified,
+                    fuel,
+                    source,
+                    depth + 1,
+                );
+                qualified.pop();
+                return result;
+            }
+            if let Some(definition) = package
                 .enums
                 .iter()
                 .find(|item| item.declaration == *declaration)
@@ -156,6 +227,75 @@ pub(super) fn pointer_possible(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn conditional_input_binding_distinguishes_absence_unknown_and_live_targets() {
+        use crate::verification::{PlaceId, memory::PointerInputLeaf, ownership::Place};
+        use std::collections::{BTreeMap, BTreeSet};
+        let source = SourceRange { start: 1, end: 2 };
+        let leaf = |tag, field| PointerInputLeaf {
+            input_fields: vec![VARIANT_PATH, tag, field],
+            storage_fields: vec![field],
+            guards: vec![(vec![], tag)],
+            pointee: Term::Primitive(nir::Primitive::Bool),
+        };
+        let layout = vec![leaf(0, 0), leaf(1, 0), leaf(2, 1)];
+        let target = Place {
+            root: PlaceId {
+                owner: 10,
+                local: 1,
+            },
+            fields: vec![2],
+        };
+        let origins = BTreeMap::from([(vec![0], BTreeSet::from([target.clone()]))]);
+        let selected = BTreeMap::from([(vec![], BTreeSet::from([1]))]);
+        assert!(bind_input_origins(&layout, &origins, &selected, &mut 1, source).is_err());
+        let result = bind_input_origins(&layout, &origins, &selected, &mut 1000, source).unwrap();
+        assert!(result[&layout[0].input_fields].is_empty());
+        assert_eq!(
+            result[&layout[1].input_fields],
+            BTreeSet::from([target.clone()])
+        );
+        assert!(result[&layout[2].input_fields].is_empty());
+        let unknown =
+            bind_input_origins(&layout, &origins, &EnumDomains::new(), &mut 1000, source).unwrap();
+        assert_eq!(
+            unknown[&layout[0].input_fields],
+            BTreeSet::from([target.clone()])
+        );
+        assert_eq!(unknown[&layout[1].input_fields], BTreeSet::from([target]));
+        assert!(!unknown.contains_key(&layout[2].input_fields));
+        let empty = BTreeMap::from([(vec![0], BTreeSet::new())]);
+        let unknown = bind_input_origins(&layout, &empty, &selected, &mut 1000, source).unwrap();
+        assert!(!unknown.contains_key(&layout[1].input_fields));
+        assert!(unknown[&layout[0].input_fields].is_empty());
+        let nested = PointerInputLeaf {
+            input_fields: vec![VARIANT_PATH, 1, 0, VARIANT_PATH, 2, 0],
+            storage_fields: vec![0, 0],
+            guards: vec![(vec![], 1), (vec![0], 2)],
+            pointee: Term::Primitive(nir::Primitive::Bool),
+        };
+        let domains = BTreeMap::from([(vec![], BTreeSet::from([0]))]);
+        let absent = bind_input_origins(
+            &[nested.clone()],
+            &Default::default(),
+            &domains,
+            &mut 1000,
+            source,
+        )
+        .unwrap();
+        assert!(absent[&nested.input_fields].is_empty());
+        let domains = BTreeMap::from([(vec![VARIANT_PATH, 1, 0], BTreeSet::from([1]))]);
+        let absent = bind_input_origins(
+            &[nested.clone()],
+            &Default::default(),
+            &domains,
+            &mut 1000,
+            source,
+        )
+        .unwrap();
+        assert!(absent[&nested.input_fields].is_empty());
+    }
+
     #[test]
     fn opaque_types_and_exhausted_analysis_are_not_absence_evidence() {
         let source = SourceRange { start: 1, end: 2 };

@@ -204,6 +204,7 @@ fn nominal_fields_and_variants_instantiate_in_explicit_input_frames() {
         result: Box::new(rigid(1, Sort::Type)),
     };
     let record = nir::program::Struct {
+        parameter_types: vec![],
         declaration: id(20),
         name: "Box".into(),
         type_parameters: vec![id(1)],
@@ -229,6 +230,7 @@ fn nominal_fields_and_variants_instantiate_in_explicit_input_frames() {
     );
     assert!(record.instantiate_fields_in_scope(&[], &frames).is_err());
     let enumeration = nir::program::Enum {
+        parameter_types: vec![],
         declaration: id(21),
         name: "Choice".into(),
         type_parameters: vec![id(1)],

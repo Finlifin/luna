@@ -500,6 +500,11 @@ impl State {
             Err(Error::NotPresent)
         }
     }
+    /// Whether a construction guard can still establish this value. This is
+    /// metadata for conditional cleanup, not permission to read or move it.
+    pub fn may_be_present(&self, place: &Place) -> Result<bool, Error> {
+        Ok(self.node(place)?.may_be_present())
+    }
     /// Establish a syntactic owned position without reading or transferring its
     /// contents. A wildcard can ignore an existing position even after a move.
     pub fn require_place(&self, place: &Place) -> Result<(), Error> {

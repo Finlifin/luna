@@ -3,6 +3,93 @@
 use super::*;
 
 impl Checker<'_, '_> {
+    /// Formation only: nominal Copy and resource legality are checked later.
+    pub(super) fn wrapped_read_input(&self, ty: &Term) -> bool {
+        // A staged generic body can form a transfer before its representation
+        // is known. Required invocation checks the instantiated type against
+        // the immutable Copy/Drop world before reading or replacing storage.
+        // Quoted runtime code still follows the runtime formation rules.
+        let staged = !self.in_code_body
+            && self.captures.last().map(|frame| frame.comptime).unwrap_or_else(|| {
+                self.in_required_comptime
+                    || self.in_staged_input
+                    || self.signature_owner.and_then(|owner| self.package.item(owner)).is_some_and(
+                        |item| matches!(&item.kind, ItemKind::Fn(sig, _) if sig.modifiers.is_comptime || sig.modifiers.is_normal_form_head),
+                    )
+            });
+        if staged {
+            return true;
+        }
+        self.readable_storage_input(ty, &mut 10_000, 0, true)
+            .unwrap_or(false)
+    }
+    fn readable_storage_input(
+        &self,
+        ty: &Term,
+        fuel: &mut usize,
+        depth: usize,
+        pointer: bool,
+    ) -> Result<bool, String> {
+        if depth >= 128 {
+            return Err("read layout depth exhausted".into());
+        }
+        crate::verification::memory::bound_type(ty, fuel)?;
+        if n::intrinsic_pointer_value(ty) {
+            return Ok(pointer || !matches!(ty, Term::Pointer(_)));
+        }
+        if let Some(fields) = self.bound_tuple_elements(ty).or_else(|| match ty {
+            Term::Tuple(fields) => Some(fields.as_slice()),
+            _ => None,
+        }) {
+            for field in fields {
+                if !self.readable_storage_input(field, fuel, depth + 1, false)? {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
+        if matches!(ty, Term::Function { .. }) {
+            return Ok(true);
+        }
+        let fields = match ty {
+            Term::Record(fields) => fields.iter().map(|(_, ty)| ty.clone()).collect::<Vec<_>>(),
+            Term::Nominal {
+                declaration,
+                arguments,
+            } => {
+                if let Some(definition) = self.newtypes.get(declaration) {
+                    let value = definition
+                        .representation_budgeted(arguments, &[], fuel)
+                        .map_err(|e| e.to_string())?;
+                    return self.readable_storage_input(&value, fuel, depth + 1, pointer);
+                }
+                if let Some(definition) = self.structs.get(declaration) {
+                    definition
+                        .instantiate_fields(arguments)
+                        .map_err(|e| e.to_string())?
+                        .into_iter()
+                        .map(|(_, ty)| ty)
+                        .collect()
+                } else if let Some(definition) = self.enums.get(declaration) {
+                    definition
+                        .instantiate_variants(arguments)
+                        .map_err(|e| e.to_string())?
+                        .into_iter()
+                        .flat_map(|variant| variant.fields)
+                        .collect()
+                } else {
+                    return Ok(false);
+                }
+            }
+            _ => return Ok(false),
+        };
+        for field in fields {
+            if !self.readable_storage_input(&field, fuel, depth + 1, false)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
     pub(super) fn intrinsic_pointer_input(&self, ty: &Term) -> bool {
         n::intrinsic_pointer_value(ty)
             || self
@@ -103,6 +190,64 @@ impl Checker<'_, '_> {
         value: &Expr<'_>,
         expected: Option<&Term>,
     ) -> Result<n::Expr, Error> {
+        let mut storage = target;
+        let mut indices = Vec::new();
+        while let H::Index(base, index) = &storage.kind {
+            indices.push(*index);
+            storage = base;
+        }
+        indices.reverse();
+        let take_bits = if let H::TakeBitVec(base) = &storage.kind {
+            storage = base;
+            true
+        } else {
+            false
+        };
+        if take_bits || !indices.is_empty() {
+            let pointer = if let Some(pointer) = self.dereferenced_place(storage)? {
+                pointer
+            } else {
+                if let H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) = storage.kind {
+                    if self.immutable.contains(&local(id)) {
+                        return Err(error(
+                            target.span,
+                            "cannot reassign a let binding; use var for whole-value assignment",
+                        ));
+                    }
+                }
+                self.expr(
+                    &Expr {
+                        kind: H::Ref(storage),
+                        ..storage.clone()
+                    },
+                    None,
+                )?
+            };
+            let Term::Pointer(ty) = &pointer.ty else {
+                unreachable!()
+            };
+            let shape = self.structural_type(ty, target.span)?;
+            let width = match shape {
+                Term::Primitive(P::BitVec(width)) => width,
+                Term::Primitive(primitive) if take_bits => primitive
+                    .unrestricted_scalar_width()
+                    .map(|width| width as usize)
+                    .ok_or_else(|| {
+                        error(
+                            target.span,
+                            "bit writeback requires an unrestricted scalar representation",
+                        )
+                    })?,
+                _ => {
+                    return Err(error(
+                        target.span,
+                        "bit writeback requires a direct bit view or a BitVec place",
+                    ));
+                }
+            };
+            return self
+                .bit_compound_writeback(expression, op, pointer, width, &indices, value, expected);
+        }
         let Some(pointer) = self.dereferenced_place(target)? else {
             // Restrict this rewrite to stable local field paths. Indexing needs
             // its own prepared location protocol, not duplicated source code.

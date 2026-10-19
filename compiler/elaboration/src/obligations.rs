@@ -8,17 +8,17 @@ use std::{
     fmt,
 };
 
-fn scope_frames(scope: &[nir::Parameter]) -> Vec<Vec<Sort>> {
+fn scope_frames(scope: &[(Sort, Option<Term>)]) -> Vec<Vec<Sort>> {
     if scope.is_empty() {
         vec![]
     } else {
-        vec![scope.iter().map(|p| p.sort).collect()]
+        vec![scope.iter().map(|p| p.0).collect()]
     }
 }
 fn scoped_equality(
     a: Term,
     b: Term,
-    scope: &[nir::Parameter],
+    scope: &[(Sort, Option<Term>)],
     native_scope: bool,
 ) -> Result<Formula, InferenceError> {
     if native_scope {
@@ -37,7 +37,18 @@ fn scoped_equality(
             ty
         } else {
             Term::Function {
-                parameters: scope.to_vec(),
+                parameters: scope
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, (sort, ty))| {
+                        Ok(nir::Parameter {
+                            sort: *sort,
+                            ty: ty.clone().ok_or(InferenceError::InvalidSubstitution(
+                                nir::TypeError::MissingArgument(slot),
+                            ))?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, InferenceError>>()?,
                 result: Box::new(ty),
             }
         };
@@ -84,7 +95,7 @@ impl Requirement {
     fn freeze(
         &self,
         inference: &InferenceContext,
-        scope: &[nir::Parameter],
+        scope: &[(Sort, Option<Term>)],
         native_scope: bool,
     ) -> Result<Formula, InferenceError> {
         Ok(match self {
@@ -151,7 +162,7 @@ pub struct Engine {
     parent: Option<(u64, u64)>,
     inference: InferenceContext,
     context: ptc::Context,
-    scope: Vec<nir::Parameter>,
+    scope: Vec<(Sort, Option<Term>)>,
     obligations: BTreeMap<ObligationId, Obligation>,
     ready: BTreeSet<ObligationId>,
     watchers: BTreeMap<MetaId, BTreeSet<ObligationId>>,
@@ -181,10 +192,58 @@ impl Engine {
     pub(crate) fn with_call_scope(context: ptc::Context, scope: Vec<nir::Parameter>) -> Self {
         Self {
             context,
-            scope,
+            scope: scope
+                .into_iter()
+                .map(|parameter| (parameter.sort, Some(parameter.ty)))
+                .collect(),
             ..Self::default()
         }
     }
+
+    /// Sparse caller domains are lexical inputs, never fabricated types. Closed
+    /// assumptions can enter this scope unchanged; assumptions in another open
+    /// scope cannot be silently discarded or reinterpreted.
+    pub(crate) fn with_sparse_call_scope(
+        context: ptc::Context,
+        scope: Vec<(Sort, Option<Term>)>,
+    ) -> Result<Self, Error> {
+        let frames = scope_frames(&scope);
+        for (slot, (sort, domain)) in scope.iter().enumerate() {
+            if let Some(domain) = domain {
+                domain
+                    .check_scope(&[scope[..slot].iter().map(|entry| entry.0).collect()])
+                    .map_err(|error| {
+                        Error::Inference(InferenceError::InvalidSubstitution(error))
+                    })?;
+                if domain.sort() != Sort::Type {
+                    return Err(Error::InvalidContext);
+                }
+            } else if *sort == Sort::Type {
+                return Err(Error::InvalidContext);
+            }
+        }
+        let context = if context.scope() == frames.as_slice() {
+            context
+        } else if context.scope().is_empty() {
+            let mut scoped = context.theory_in_scope(frames);
+            let mut budget = Budget::default();
+            for assumption in context.assumptions() {
+                context
+                    .validate_formula(assumption, &mut budget)
+                    .map_err(|_| Error::InvalidContext)?;
+                scoped.assume(assumption.clone());
+            }
+            scoped
+        } else {
+            return Err(Error::InvalidContext);
+        };
+        Ok(Self {
+            context,
+            scope,
+            ..Self::default()
+        })
+    }
+
     pub(crate) fn check_context_type(&self, ty: &Term) -> Result<(), Error> {
         ty.check_scope(&scope_frames(&self.scope))
             .map_err(|error| Error::Inference(InferenceError::InvalidSubstitution(error)))
@@ -471,8 +530,11 @@ impl fmt::Display for Engine {
         f.write_str("(obligations")?;
         if !self.scope.is_empty() {
             f.write_str(" (scope")?;
-            for parameter in &self.scope {
-                write!(f, " (parameter {} {})", parameter.sort, parameter.ty)?;
+            for (sort, domain) in &self.scope {
+                match domain {
+                    Some(ty) => write!(f, " (parameter {sort} {ty})")?,
+                    None => write!(f, " (parameter {sort} (unknown-domain))")?,
+                }
             }
             f.write_str(")")?;
         }

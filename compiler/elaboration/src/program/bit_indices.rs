@@ -2,6 +2,173 @@
 use super::*;
 
 impl Checker<'_, '_> {
+    /// Prepare the location and selectors before observing its old payload.
+    /// Both the read and final write use these private, immutable values.
+    pub(super) fn bit_compound_writeback(
+        &mut self,
+        expr: &Expr<'_>,
+        op: &BinOp,
+        pointer: n::Expr,
+        input_width: usize,
+        indices: &[&Expr<'_>],
+        rhs: &Expr<'_>,
+        expected: Option<&Term>,
+    ) -> Result<n::Expr, Error> {
+        let saved_locals = self.locals.clone();
+        let rhs_source = rhs;
+        let result = (|| {
+            let (mut selections, width, rhs, ty) =
+                self.bit_writeback_plan(expr, input_width, indices, rhs, expected, true)?;
+            let mut statements = Vec::new();
+            let pointer = self.prepare_bit_operand(pointer, &mut statements, expr.span)?;
+            for selection in &mut selections {
+                match selection {
+                    n::BitSelection::Static { .. } => {}
+                    n::BitSelection::Index(index) => {
+                        **index = self.prepare_bit_operand(
+                            (**index).clone(),
+                            &mut statements,
+                            expr.span,
+                        )?;
+                    }
+                    n::BitSelection::Window { start, end, .. } => {
+                        **start = self.prepare_bit_operand(
+                            (**start).clone(),
+                            &mut statements,
+                            expr.span,
+                        )?;
+                        **end =
+                            self.prepare_bit_operand((**end).clone(), &mut statements, expr.span)?;
+                    }
+                }
+            }
+            let Term::Pointer(storage_type) = &pointer.ty else {
+                unreachable!()
+            };
+            let read = n::Expr {
+                ty: (**storage_type).clone(),
+                source: source(expr.span),
+                kind: K::ReadPointer(Box::new(pointer.clone())),
+            };
+            let mut read = n::Expr {
+                ty: p(P::BitVec(input_width)),
+                source: source(expr.span),
+                kind: K::TakeBits(Box::new(read)),
+            };
+            let mut current_width = input_width;
+            for selection in &selections {
+                current_width = selection
+                    .output_width(current_width)
+                    .ok_or_else(|| error(expr.span, "invalid prepared BitVec selection"))?;
+                let kind = match selection {
+                    n::BitSelection::Static { start, end } => K::BitSlice {
+                        value: Box::new(read),
+                        start: *start,
+                        end: *end,
+                    },
+                    n::BitSelection::Index(index) => K::BitIndex(Box::new(read), index.clone()),
+                    n::BitSelection::Window { start, end, .. } => K::BitWindow {
+                        value: Box::new(read),
+                        start: start.clone(),
+                        end: end.clone(),
+                    },
+                };
+                read = n::Expr {
+                    ty: p(P::BitVec(current_width)),
+                    source: source(expr.span),
+                    kind,
+                };
+            }
+            if statements.iter().any(|statement| is_never(&statement.ty)) {
+                read.ty = p(P::Never);
+            }
+            let old = self.prepare_bit_operand(read, &mut statements, expr.span)?;
+            let prepared_rhs = rhs
+                .map(|rhs| self.prepare_bit_operand(rhs, &mut statements, expr.span))
+                .transpose()?;
+            let proxy = |value: &n::Expr| {
+                let K::Local(binding) = value.kind else {
+                    unreachable!()
+                };
+                let id =
+                    hir::HirId::new(hir::OwnerId::INVALID, hir::ItemLocalId::new(binding.index));
+                Expr {
+                    hir_id: id,
+                    span: expr.span,
+                    kind: H::ResolvedLocal(hir::Symbol::invalid(), id),
+                }
+            };
+            let left = proxy(&old);
+            let right = prepared_rhs.as_ref().map(proxy);
+            let binary = Expr {
+                kind: H::Binary(*op, &left, right.as_ref().unwrap_or(rhs_source)),
+                ..expr.clone()
+            };
+            let computed = self.expr(&binary, Some(&p(P::BitVec(width))))?;
+            let ty = if is_never(&computed.ty) {
+                p(P::Never)
+            } else {
+                ty
+            };
+            if let Some(expected) = expected {
+                self.require_expression(&ty, expected, expr.span)?;
+            }
+            Ok(n::Expr {
+                ty: ty.clone(),
+                source: source(expr.span),
+                kind: K::Block {
+                    statements,
+                    result: Some(Box::new(n::Expr {
+                        ty,
+                        source: source(expr.span),
+                        kind: K::BitWritePointer {
+                            pointer: Box::new(pointer),
+                            selections,
+                            value: Box::new(computed),
+                        },
+                    })),
+                },
+            })
+        })();
+        self.locals = saved_locals;
+        result
+    }
+
+    fn prepare_bit_operand(
+        &mut self,
+        value: n::Expr,
+        statements: &mut Vec<n::Expr>,
+        span: Span,
+    ) -> Result<n::Expr, Error> {
+        let binding = self.spread_binding(span)?;
+        let ty = value.ty.clone();
+        self.locals.insert(binding, ty.clone());
+        let index = u32::try_from(self.expansion_sources.len())
+            .map_err(|_| error(span, "BitVec preparation source space exhausted"))?;
+        self.expansion_sources.push(n::ExpansionSource {
+            original: source(span),
+            site: source(span),
+        });
+        let generated = n::SourceRange::generated(index);
+        statements.push(n::Expr {
+            ty: if is_never(&ty) {
+                p(P::Never)
+            } else {
+                p(P::Void)
+            },
+            source: generated,
+            kind: K::Let {
+                binding,
+                value: Box::new(value),
+            },
+        });
+        Ok(n::Expr {
+            ty,
+            source: generated,
+            kind: K::Local(binding),
+        })
+    }
+
     pub(super) fn bit_window(
         &mut self,
         expr: &Expr<'_>,
@@ -120,7 +287,8 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
     ) -> Result<n::Expr, Error> {
         let (selections, width, value, ty) =
-            self.bit_writeback_plan(expr, input_width, indices, value, expected)?;
+            self.bit_writeback_plan(expr, input_width, indices, value, expected, false)?;
+        let value = value.expect("ordinary bit write checks its RHS");
         let mut offset = 0usize;
         let mut all_static = true;
         for selection in &selections {
@@ -165,7 +333,8 @@ impl Checker<'_, '_> {
         indices: &[&Expr<'_>],
         value: &Expr<'_>,
         expected: Option<&Term>,
-    ) -> Result<(Vec<n::BitSelection>, usize, n::Expr, Term), Error> {
+        compound: bool,
+    ) -> Result<(Vec<n::BitSelection>, usize, Option<n::Expr>, Term), Error> {
         let mut checked_rhs = None;
         let mut width = input_width;
         let mut selections = Vec::new();
@@ -247,19 +416,29 @@ impl Checker<'_, '_> {
                 .ok_or_else(|| error(index.span, "BitVec index or slice is out of bounds"))?;
             selections.push(selection);
         }
+        if compound && checked_rhs.is_none() {
+            checked_rhs = self.argument_attempt(value, None, None)?;
+        }
         let value = match checked_rhs {
             Some(value) => {
-                self.require_expression(&value.ty, &p(P::BitVec(width)), expr.span)?;
-                value
+                if !compound {
+                    self.require_expression(&value.ty, &p(P::BitVec(width)), expr.span)?;
+                }
+                Some(value)
             }
-            None => self.expr(value, Some(&p(P::BitVec(width))))?,
+            // A compound RHS may require the operator's heterogeneous input
+            // context. Keep it pending until the selected old bit type is known.
+            None if compound => None,
+            None => Some(self.expr(value, Some(&p(P::BitVec(width))))?),
         };
-        let ty = p(if divergent || is_never(&value.ty) {
-            P::Never
-        } else {
-            P::Void
-        });
-        if let Some(expected) = expected {
+        let ty = p(
+            if divergent || value.as_ref().is_some_and(|value| is_never(&value.ty)) {
+                P::Never
+            } else {
+                P::Void
+            },
+        );
+        if let Some(expected) = expected.filter(|_| !compound) {
             self.require_expression(&ty, expected, expr.span)?;
         }
 
@@ -275,7 +454,8 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
     ) -> Result<n::Expr, Error> {
         let (selections, _, value, ty) =
-            self.bit_writeback_plan(expr, width, indices, value, expected)?;
+            self.bit_writeback_plan(expr, width, indices, value, expected, false)?;
+        let value = value.expect("ordinary bit write checks its RHS");
         Ok(n::Expr {
             source: source(expr.span),
             ty,

@@ -84,7 +84,8 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             | NodeKind::Char
             | NodeKind::Bool
             | NodeKind::Symbol
-            | NodeKind::LiteralExtension => {
+            | NodeKind::LiteralExtension
+            | NodeKind::Negative => {
                 let expr = self.lower_expr(ExprContext::PatternConstant, node);
                 let expr_ref = self.arena.alloc_expr(expr);
                 Pattern {
@@ -133,7 +134,17 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             NodeKind::TuplePattern => {
                 let elems_node = children[0];
                 let elem_nodes = self.ast.get_multi_child_slice(elems_node).unwrap_or(&[]);
-                let pats: Vec<_> = elem_nodes.iter().map(|&n| self.lower_pattern(n)).collect();
+                // Later tuple fields may observe bindings established by
+                // earlier fields. Keep these candidate bindings private until
+                // the caller publishes the complete successful pattern.
+                let scope = self.local_enter(resolve::RibKind::MatchBody);
+                let mut pats = Vec::with_capacity(elem_nodes.len());
+                for &node in elem_nodes {
+                    let pattern = self.lower_pattern(node);
+                    self.bind_arm_pattern(node, &pattern);
+                    pats.push(pattern);
+                }
+                self.local_exit(scope);
                 let pats_slice = self.arena.alloc_pattern_slice(pats);
                 Pattern {
                     hir_id: self.next_hir_id(),
@@ -146,7 +157,14 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             NodeKind::ListPattern => {
                 let elems_node = children[0];
                 let elem_nodes = self.ast.get_multi_child_slice(elems_node).unwrap_or(&[]);
-                let pats: Vec<_> = elem_nodes.iter().map(|&n| self.lower_pattern(n)).collect();
+                let scope = self.local_enter(resolve::RibKind::MatchBody);
+                let mut pats = Vec::with_capacity(elem_nodes.len());
+                for &node in elem_nodes {
+                    let pattern = self.lower_pattern(node);
+                    self.bind_arm_pattern(node, &pattern);
+                    pats.push(pattern);
+                }
+                self.local_exit(scope);
                 let pats_slice = self.arena.alloc_pattern_slice(pats);
                 Pattern {
                     hir_id: self.next_hir_id(),
@@ -158,6 +176,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             // Ctor(a, b) application pattern
             NodeKind::NormalFormHeadApplicationPattern => {
                 let head = self.lower_expr(ExprContext::PatternConstant, children[0]);
+                let scope = self.local_enter(resolve::RibKind::MatchBody);
                 let mut arguments = Vec::new();
                 for node in self.ast.get_multi_child_slice(children[1]).unwrap_or(&[]) {
                     let (name, pattern) =
@@ -167,11 +186,14 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                         } else {
                             (None, *node)
                         };
+                    let lowered = self.lower_pattern(pattern);
+                    self.bind_arm_pattern(pattern, &lowered);
                     arguments.push(hir::pattern::TypePatternArg {
                         name,
-                        pattern: self.lower_pattern(pattern),
+                        pattern: lowered,
                     });
                 }
+                self.local_exit(scope);
                 Pattern {
                     hir_id: self.next_hir_id(),
                     span,
@@ -187,7 +209,18 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
                 let args_node = children[1];
                 let arg_nodes = self.ast.get_multi_child_slice(args_node).unwrap_or(&[]);
-                let sub_pats: Vec<_> = arg_nodes.iter().map(|&n| self.lower_pattern(n)).collect();
+                // Positional variant payloads have the same left-to-right
+                // candidate scope as tuple patterns. Later observations may
+                // use earlier payload bindings, but no candidate-local name
+                // escapes until the caller publishes the complete pattern.
+                let scope = self.local_enter(resolve::RibKind::MatchBody);
+                let mut sub_pats = Vec::with_capacity(arg_nodes.len());
+                for &node in arg_nodes {
+                    let pattern = self.lower_pattern(node);
+                    self.bind_arm_pattern(node, &pattern);
+                    sub_pats.push(pattern);
+                }
+                self.local_exit(scope);
                 let sub_pats_slice = self.arena.alloc_pattern_slice(sub_pats);
 
                 Pattern {
@@ -204,10 +237,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
                 let fields_node = children[1];
                 let field_nodes = self.ast.get_multi_child_slice(fields_node).unwrap_or(&[]);
-                let field_pats: Vec<_> = field_nodes
-                    .iter()
-                    .map(|&n| self.lower_field_pattern(n))
-                    .collect();
+                let field_pats = self.lower_candidate_fields(field_nodes);
                 let field_pats_slice = self.arena.alloc_field_pat_slice(field_pats);
 
                 Pattern {
@@ -221,10 +251,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             NodeKind::StructPattern => {
                 let fields_node = children[0];
                 let field_nodes = self.ast.get_multi_child_slice(fields_node).unwrap_or(&[]);
-                let field_pats: Vec<_> = field_nodes
-                    .iter()
-                    .map(|&n| self.lower_field_pattern(n))
-                    .collect();
+                let field_pats = self.lower_candidate_fields(field_nodes);
                 let field_pats_slice = self.arena.alloc_field_pat_slice(field_pats);
 
                 // Use an empty path for anonymous struct patterns
@@ -393,6 +420,25 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 self.make_error_pattern(span)
             }
         }
+    }
+
+    /// Publish preceding fields only inside this candidate. Elaboration still
+    /// checks that references are available in the declaration's match order.
+    fn lower_candidate_fields(&mut self, nodes: &[NodeIndex]) -> Vec<FieldPat<'hir>> {
+        let scope = self.local_enter(resolve::RibKind::MatchBody);
+        let mut fields = Vec::with_capacity(nodes.len());
+        for &node in nodes {
+            let field = self.lower_field_pattern(node);
+            let pattern_node = if self.ast.get_node_kind(node) == Some(NodeKind::PropertyPattern) {
+                self.ast.get_children(node)[1]
+            } else {
+                node
+            };
+            self.bind_arm_pattern(pattern_node, &field.pat);
+            fields.push(field);
+        }
+        self.local_exit(scope);
+        fields
     }
 
     /// Lower a field pattern node (`id: pattern`).

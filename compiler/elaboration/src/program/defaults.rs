@@ -90,18 +90,8 @@ impl Checker<'_, '_> {
                 let value = self.with_staged_input(ty.sort != Sort::Runtime, |this| {
                     this.expr(value, Some(&ty.ty))
                 })?;
-                if !sig.modifiers.is_comptime
-                    && !parameter.ty.is_comptime()
-                    && !stable_default(&value)
-                {
-                    let viewed = self.default_stability_view(&value, parameter.span)?;
-                    if !stable_default(&viewed) {
-                        // Function bodies are not all available while defaults
-                        // are demanded. Retain this definition-scoped obligation
-                        // and discharge it against the complete checked package.
-                        self.pending_default_stability
-                            .push((viewed, parameter.span));
-                    }
+                if !sig.modifiers.is_comptime && !parameter.ty.is_comptime() {
+                    self.require_stable_default(&value, parameter.span)?;
                 }
                 Some(value)
             } else {
@@ -140,18 +130,34 @@ impl Checker<'_, '_> {
             self.signature_type_uses.extend(uses.iter().cloned());
         }
         self.default_uses.insert(key, uses);
-        self.defaults
-            .entry(owner)
-            .or_insert_with(|| vec![None; count])[index] = default;
+        // Open declarations initially publish an empty lazy-default table.
+        // A behavior witness may subsequently demand an ordinary default using
+        // its formed signature; initialize missing slots even if the entry
+        // already exists, preserving defaults checked by earlier demands.
+        let defaults = self.defaults.entry(owner).or_default();
+        if defaults.len() < count {
+            defaults.resize_with(count, || None);
+        }
+        defaults[index] = default;
         Ok(())
     }
 
-    pub(super) fn stable_default_under_contract(
+    pub(super) fn require_stable_default(
         &mut self,
         value: &n::Expr,
         span: Span,
-    ) -> Result<bool, Error> {
-        Ok(stable_default(&self.default_stability_view(value, span)?))
+    ) -> Result<(), Error> {
+        if stable_default(value) {
+            return Ok(());
+        }
+        let viewed = self.default_stability_view(value, span)?;
+        if !stable_default(&viewed) {
+            // Ordinary and open defaults share P3 evidence. Bodies need not
+            // be available while signatures/defaults are demanded, so retain
+            // the scoped analysis view for the complete-package check.
+            self.pending_default_stability.push((viewed, span));
+        }
+        Ok(())
     }
 
     fn default_stability_view(&mut self, value: &n::Expr, span: Span) -> Result<n::Expr, Error> {
