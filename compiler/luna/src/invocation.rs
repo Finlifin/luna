@@ -61,6 +61,20 @@ fn invoke_selected(
     let context = elaboration::ptc::Context::from_package(package)
         .map_err(|error| format!("cannot prepare invocation type context: {error}"))?;
     let mut index = elaboration::implementation::Index::default();
+    index.set_nominal_layouts(
+        package.structs.clone(),
+        package.enums.clone(),
+        package.newtypes.clone(),
+    );
+    for (id, domain) in package
+        .declaration_parameter_domains(&mut 100_000)
+        .map_err(|error| format!("invocation declaration domains: {error}"))?
+    {
+        index
+            .register_parameter_domain(id, domain)
+            .map_err(|error| format!("invocation declaration domains: {error}"))?;
+    }
+
     for implementation in package
         .implementations
         .iter()

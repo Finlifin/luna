@@ -57,7 +57,7 @@ impl Checker<'_, '_> {
         result.ok_or_else(|| error(site.span, "generator match requires a code-producing arm"))
     }
 
-    pub(super) fn generator_match<T>(
+    pub(in crate::program::cmtt) fn generator_match<T>(
         &mut self,
         site: &Expr<'_>,
         subject: &Expr<'_>,

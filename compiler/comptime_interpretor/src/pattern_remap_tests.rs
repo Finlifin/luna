@@ -306,3 +306,19 @@ fn pattern_receipt_is_discarded_when_external_guard_fails() {
     assert!(receipt.0.is_empty());
     assert!(receipt.1.is_empty());
 }
+
+#[test]
+fn abstract_pattern_code_cannot_match_or_export_runtime_bindings() {
+    let package = Package::default();
+    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    let mut environment = Environment::from([(id(0), Value::Bool(true))]);
+    let before = environment.clone();
+    let pattern = Pattern::CodeEvidence {
+        outputs: vec![(id(1), Term::Primitive(Primitive::Bool))],
+    };
+    let error = vm
+        .match_pattern(&pattern, &Value::Bool(false), &mut environment)
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::TypeContractUnresolved);
+    assert_eq!(environment, before);
+}

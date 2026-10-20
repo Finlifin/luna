@@ -507,6 +507,7 @@ splice_pattern -> ~<expr> | ~[ substitution* ] <expr>
 
 literal_pattern -> literal
     | literal_suffix
+    | - (integer | float) id?
 
 prefix_pattern -> symbol
     | error_pattern

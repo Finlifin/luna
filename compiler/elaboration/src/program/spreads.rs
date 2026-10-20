@@ -772,6 +772,43 @@ impl Checker<'_, '_> {
         outcome
     }
 
+    /// Invocation-dependent slots are filled after routing, not by the clause
+    /// inference frame. Retain only independent hints during packet discovery.
+    fn dependent_spread_hints(
+        signature: &Term,
+        generics: &[DeclarationId],
+        span: Span,
+    ) -> Result<Option<Vec<Option<Term>>>, Error> {
+        let Term::Function { parameters, result } = signature.callable_signature() else {
+            return Ok(None);
+        };
+        let dependent = parameters
+            .iter()
+            .map(|p| &p.ty)
+            .chain(std::iter::once(result.as_ref()))
+            .map(Term::substitution_parameters)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|cause| error(span, cause.to_string()))?
+            .iter()
+            .any(|slots| !slots.is_empty());
+        if !dependent {
+            return Ok(None);
+        }
+        parameters
+            .iter()
+            .map(|parameter| {
+                let ty = &parameter.ty;
+                let independent = ty
+                    .substitution_parameters()
+                    .map_err(|cause| error(span, cause.to_string()))?
+                    .is_empty()
+                    && !generics.iter().any(|id| ty.mentions_rigid(*id));
+                Ok(independent.then(|| ty.clone()))
+            })
+            .collect::<Result<Vec<_>, Error>>()
+            .map(Some)
+    }
+
     /// Obtain positional slot contexts independently of packet partitioning.
     /// Packet lengths are resolved separately, without executing their code.
     fn spread_context(
@@ -826,47 +863,59 @@ impl Checker<'_, '_> {
                     }
                 })
             });
-            let types = if self.incomplete_method_instance(callee) {
-                let (owner, arguments) = self.method_instantiation_inputs(callee).unwrap();
-                let remaining = &self.type_parameters[&owner][arguments.len()..];
-                let scheme = crate::calls::Scheme {
-                    type_parameters: remaining.len(),
-                    signature: signature
-                        .abstract_types(remaining)
-                        .map_err(|cause| error(span, cause.to_string()))?,
-                };
-                let mut actual = vec![None; parameters.len()];
-                for (index, value) in prefix.iter().enumerate() {
-                    if !is_never(&value.ty) {
-                        actual[index] = Some(value.ty.clone());
+            let generics = self
+                .method_instantiation_inputs(callee)
+                .map(|(owner, arguments)| self.type_parameters[&owner][arguments.len()..].to_vec())
+                .unwrap_or_default();
+            let types =
+                if let Some(hints) = Self::dependent_spread_hints(signature, &generics, span)? {
+                    hints[offset..].to_vec()
+                } else if self.incomplete_method_instance(callee) {
+                    let (owner, arguments) = self.method_instantiation_inputs(callee).unwrap();
+                    let remaining = &self.type_parameters[&owner][arguments.len()..];
+                    let scheme = crate::calls::Scheme {
+                        parameter_sorts: self
+                            .input_binders(remaining)
+                            .iter()
+                            .map(|input| input.sort)
+                            .collect(),
+                        type_parameters: remaining.len(),
+                        signature: signature
+                            .abstract_parameters(&self.input_binders(remaining))
+                            .map_err(|cause| error(span, cause.to_string()))?,
+                    };
+                    let mut actual = vec![None; parameters.len()];
+                    for (index, value) in prefix.iter().enumerate() {
+                        if !is_never(&value.ty) {
+                            actual[index] = Some(value.ty.clone());
+                        }
                     }
-                }
-                let candidate = self.infer_spread_inputs(
-                    &scheme,
-                    actual,
-                    args,
-                    declarations,
-                    offset,
-                    expected,
-                    partial,
-                    None,
-                    None,
-                    span,
-                    checked,
-                )?;
-                (offset..parameters.len())
-                    .map(|index| {
-                        candidate
-                            .parameter_type(index)
-                            .map_err(|cause| call_inference_error(span, cause))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-            } else {
-                parameters[offset..]
-                    .iter()
-                    .map(|parameter| Some(parameter.ty.clone()))
-                    .collect()
-            };
+                    let candidate = self.infer_spread_inputs(
+                        &scheme,
+                        actual,
+                        args,
+                        declarations,
+                        offset,
+                        expected,
+                        partial,
+                        None,
+                        None,
+                        span,
+                        checked,
+                    )?;
+                    (offset..parameters.len())
+                        .map(|index| {
+                            candidate
+                                .parameter_type(index)
+                                .map_err(|cause| call_inference_error(span, cause))
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                } else {
+                    parameters[offset..]
+                        .iter()
+                        .map(|parameter| Some(parameter.ty.clone()))
+                        .collect()
+                };
             return self.spread_parameter_context(
                 types,
                 declarations,
@@ -951,6 +1000,21 @@ impl Checker<'_, '_> {
         }
         let signature = self.signatures[&owner].clone();
         let type_parameters = self.type_parameters[&owner].clone();
+        if let Some(types) = Self::dependent_spread_hints(&signature, &type_parameters, span)? {
+            let Term::Function { parameters, .. } = signature.callable_signature() else {
+                unreachable!()
+            };
+            return self.spread_parameter_context(
+                types,
+                Some(declarations),
+                &parameters
+                    .iter()
+                    .map(|p| declaration.modifiers.is_comptime || p.sort != Sort::Runtime)
+                    .collect::<Vec<_>>(),
+                args,
+                span,
+            );
+        }
         let types = if let Some(explicit) = explicit {
             let value = self.explicit_function_instance(callee, head, explicit, None, true)?;
             let signature = self.callable_input_view(&value.ty, span)?;
@@ -969,9 +1033,14 @@ impl Checker<'_, '_> {
             parameters.iter().map(|p| Some(p.ty.clone())).collect()
         } else {
             let scheme = crate::calls::Scheme {
+                parameter_sorts: self
+                    .input_binders(&type_parameters)
+                    .iter()
+                    .map(|input| input.sort)
+                    .collect(),
                 type_parameters: type_parameters.len(),
                 signature: signature
-                    .abstract_types(&type_parameters)
+                    .abstract_parameters(&self.input_binders(&type_parameters))
                     .map_err(|cause| error(span, cause.to_string()))?,
             };
             let candidate = self.infer_spread_inputs(

@@ -8,6 +8,7 @@ fn contract() -> Contract {
     Contract {
         declaration: id(1),
         parameters: vec![id(2)],
+        parameter_types: vec![],
         requirements: vec![TypePredicate::Equal(
             Term::Rigid {
                 declaration: id(2),
@@ -80,4 +81,44 @@ fn alias_contract_dump_exposes_telescope_and_predicate_structure() {
         }
     }
     assert_eq!(depth, 0);
+}
+
+#[test]
+fn alias_contract_domains_are_a_typed_telescope() {
+    let mut value = contract();
+    value.parameters.push(id(3));
+    value.parameter_types = vec![
+        Term::Primitive(Primitive::Type),
+        Term::Rigid {
+            declaration: id(2),
+            sort: Sort::Type,
+        },
+    ];
+    let index = Term::Rigid {
+        declaration: id(3),
+        sort: Sort::ComptimeValue,
+    };
+    let indexed_type = Term::Nominal {
+        declaration: id(40),
+        arguments: vec![index],
+    };
+    value.requirements = vec![TypePredicate::Equal(indexed_type.clone(), indexed_type)];
+    assert!(validate(&[value.clone()]).is_ok());
+    assert_eq!(
+        value.parameter_binders().unwrap()[1].sort,
+        Sort::ComptimeValue
+    );
+    assert!(value.to_string().contains("(domains "));
+    value.parameter_types[1] = Term::Rigid {
+        declaration: id(3),
+        sort: Sort::Type,
+    };
+    assert!(validate(&[value.clone()]).is_err());
+    value.parameter_types[1] = Term::Rigid {
+        declaration: id(2),
+        sort: Sort::ComptimeValue,
+    };
+    assert!(validate(&[value.clone()]).is_err());
+    value.parameter_types.pop();
+    assert!(validate(&[value]).is_err());
 }

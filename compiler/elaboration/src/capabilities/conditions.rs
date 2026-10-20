@@ -120,12 +120,17 @@ impl Solver<'_, '_> {
         if contract.type_parameters.len() != query.arguments.len() {
             return Err("conditional requirement interface argument count mismatch".into());
         }
-        contract.validate_arguments_for_subject(
+        contract.validate_arguments_with_layouts(
             &query.subject,
             &query.arguments,
             &[],
             self.world.traits,
+            &self.world.index.parameter_domains,
             &mut self.remaining,
+            |left, right, fuel| {
+                super::equivalent_domains(self.world.context, left, right, budget.max_depth, fuel)
+            },
+            Some(&self.world.index.nominal_layouts),
         )?;
         let parameter_binders = contract.parameter_binders(&mut self.remaining)?;
         for requirement in &contract.requirements {

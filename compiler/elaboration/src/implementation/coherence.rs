@@ -44,6 +44,39 @@ fn index_overlap(
             relations.push(Formula::equal(left.clone(), right.clone()));
             continue;
         }
+        if let (
+            Term::NominalValue {
+                ty: a,
+                variant: av,
+                fields: af,
+            },
+            Term::NominalValue {
+                ty: b,
+                variant: bv,
+                fields: bf,
+            },
+        ) = (left, right)
+        {
+            if av != bv || af.len() != bf.len() {
+                return Ok(vec![Formula::False]);
+            }
+            if af.len().saturating_add(1) > fuel.saturating_sub(pending.len()) {
+                return Err("index overlap budget exhausted".into());
+            }
+            pending.push((a, b, depth + 1));
+            pending.extend(af.iter().zip(bf).rev().map(|(a, b)| (a, b, depth + 1)));
+            continue;
+        }
+        if let (Term::TupleValue(a), Term::TupleValue(b)) = (left, right) {
+            if a.len() != b.len() {
+                return Ok(vec![Formula::False]);
+            }
+            if a.len() > fuel.saturating_sub(pending.len()) {
+                return Err("index overlap budget exhausted".into());
+            }
+            pending.extend(a.iter().zip(b).rev().map(|(a, b)| (a, b, depth + 1)));
+            continue;
+        }
         if let (Term::RecordValue(a), Term::RecordValue(b)) = (left, right) {
             if a.len() != b.len() || a.iter().zip(b).any(|((a, _), (b, _))| a != b) {
                 return Ok(vec![Formula::False]);
@@ -62,7 +95,10 @@ fn index_overlap(
         let known = |term: &Term| {
             term.sort() == Sort::Type
                 || term.scalar_index_domain().is_some()
-                || matches!(term, Term::RecordValue(_))
+                || matches!(
+                    term,
+                    Term::RecordValue(_) | Term::TupleValue(_) | Term::NominalValue { .. }
+                )
         };
         if known(left) && known(right) && left != right {
             return Ok(vec![Formula::False]);

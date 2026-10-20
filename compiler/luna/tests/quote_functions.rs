@@ -194,6 +194,16 @@ fn quote_expansion_cycles_preserve_finite_nested_calls() {
 
 #[test]
 fn quote_expansion_depth_limit_preserves_finite_chains() {
+    std::thread::Builder::new()
+        .name("quote-depth-boundary".into())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(check_quote_expansion_depth_limit)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn check_quote_expansion_depth_limit() {
     let mut source = String::from("quote fn q0(value:bool)->bool {value}");
     for index in 1..32 {
         source.push_str(&format!(
@@ -501,7 +511,7 @@ fn quote_type_default_definition_errors_and_requirements_cannot_be_erased() {
         "quote fn bad(value:T)->T where .T:.Type'builtin=T {value}",
         "quote fn bad(value:T)->T where .T:.Type'builtin=U,.U:.Type'builtin=bool {value}",
         "quote fn keep(value:T)->T where .T:.Type'builtin=bool,requires T == bool {value} fn run(){keep<.T=.char'builtin>('a');}",
-        "quote fn bad(value:bool)->bool where .N:.u8'builtin=3 {value}",
+        "quote fn bad(value:bool)->bool where .N:.u8'builtin=256 {value}",
     ] {
         assert!(compile(source, Emit::Nir).is_err(), "{source}");
     }
@@ -1582,9 +1592,9 @@ fn quote_explicit_type_clause_domains_use_ordinary_instantiation() {
 }
 
 #[test]
-fn quote_explicit_type_clause_domains_reject_value_domains_and_failed_constraints() {
+fn quote_clause_domains_reject_invalid_values_and_failed_constraints() {
     for source in [
-        "quote fn invalid()->bool where value:bool {value}",
+        "quote fn invalid()->bool where value:bool {value} fn run()->bool {invalid<'x'>()}",
         "quote fn keep(value:T)->T where T:.Type'builtin {value} fn run()->bool {keep<bool>('x')}",
         "trait Flag {} quote fn keep(value:T)->T where T:.Type'builtin, requires T :- Flag {value} fn run()->bool {keep(true)}",
     ] {
@@ -1595,5 +1605,136 @@ fn quote_explicit_type_clause_domains_reject_value_domains_and_failed_constraint
             failure.contains("elaboration failed"),
             "{source}: {failure}"
         );
+    }
+}
+
+#[test]
+fn quote_methods_capture_nominal_value_parameters() {
+    let source = "struct Switch where enabled:bool {
+        pub quote fn choose(value:bool)->bool {enabled and value}
+    }
+    fn run()->bool {Switch<true>.choose(true) and not Switch<false>.choose(true)}";
+    let (value, calls) = execute(source, vec![]);
+    assert_eq!(value, comptime_interpretor::Value::Bool(true));
+    assert_eq!(calls, ["run"]);
+}
+
+#[test]
+fn quote_methods_preserve_dependent_values_and_single_argument_evaluation() {
+    let source = "struct Holder where T,value:T {
+        pub quote fn read(unused:bool)->T {value}
+    }
+    fn input()->bool {true}
+    fn run()->bool {Holder<bool,true>.read(input()) and Holder<.u8'builtin,201>.read(input()) == 201}";
+    let (value, calls) = execute(source, vec![]);
+    assert_eq!(value, comptime_interpretor::Value::Bool(true));
+    assert_eq!(calls, ["run", "input", "input"]);
+    let invalid = source.replace(".u8'builtin,201", ".u8'builtin,256");
+    assert!(compile(&invalid, Emit::Nir).is_err());
+}
+
+#[test]
+fn quote_trait_defaults_capture_value_indices_without_runtime_dispatch() {
+    let source = "trait Select where enabled:bool {
+        quote fn choose(value:bool)->bool {enabled and value}
+    }
+    struct Switch {} impl Select<true> for Switch {} impl Select<false> for Switch {}
+    fn input()->bool {true}
+    fn run()->bool {Switch.as(Select<true>).choose(input()) and not Switch.as(Select<false>).choose(input())}";
+    let (value, calls) = execute(source, vec![]);
+    assert_eq!(value, comptime_interpretor::Value::Bool(true));
+    assert_eq!(calls, ["run", "input", "input"]);
+}
+
+#[test]
+fn quote_value_indexed_interface_contracts_survive_implementation_expansion() {
+    let source = "trait Select where enabled:bool {
+        quote fn choose(value:bool)->result:bool where requires value == enabled, ensures result == enabled;
+    }
+    struct Switch {}
+    impl Select<true> for Switch {quote fn choose(value:bool)->bool {value}}
+    impl Select<false> for Switch {quote fn choose(value:bool)->bool {value}}
+    fn run()->bool {Switch.as(Select<true>).choose(true) and not Switch.as(Select<false>).choose(false)}";
+    let (value, calls) = execute(source, vec![]);
+    assert_eq!(value, comptime_interpretor::Value::Bool(true));
+    assert_eq!(calls, ["run"]);
+    for invalid in [
+        source.replace("choose(true)", "choose(false)"),
+        source.replace("->bool {value}", "->bool {not value}"),
+    ] {
+        let failure = compile(&invalid, Emit::Nir)
+            .err()
+            .expect("invalid contract accepted");
+        assert!(failure.contains("not proven"), "{failure}");
+    }
+}
+
+#[test]
+fn quote_integer_value_contracts_prove_completed_bounds() {
+    let source = "trait Offset where amount:.u8'builtin {
+        quote fn add(value:.u8'builtin)->result:.u8'builtin
+            where requires value <= 255 - amount, ensures result >= amount;
+    }
+    struct Add {}
+    impl Offset<3> for Add {
+        quote fn add(value:.u8'builtin)->.u8'builtin where requires value <= 252 {value + 3}
+    }
+    fn run()->bool {Add.as(Offset<3>).add(250) == 253}";
+    assert_eq!(
+        execute(source, vec![]).0,
+        comptime_interpretor::Value::Bool(true)
+    );
+    let invalid = source.replace("add(250)", "add(253)");
+    assert!(compile(&invalid, Emit::Nir).is_err());
+}
+
+#[test]
+fn quote_dependent_signed_value_contracts_preserve_negative_bounds() {
+    let source = "trait Lower where T,minimum:T, requires T == .i8'builtin {
+        quote fn keep(value:T)->result:T where requires value >= minimum, ensures result >= minimum;
+    }
+    struct Keep {}
+    impl Lower<.i8'builtin,-5> for Keep {
+        quote fn keep(value:.i8'builtin)->.i8'builtin where requires value >= -5 {value}
+    }
+    fn run()->bool {Keep.as(Lower<.i8'builtin,-5>).keep(-2) == -2}";
+    assert_eq!(
+        execute(source, vec![]).0,
+        comptime_interpretor::Value::Bool(true)
+    );
+    let invalid = source.replace("keep(-2)", "keep(-6)");
+    assert!(compile(&invalid, Emit::Nir).is_err());
+}
+
+#[test]
+fn quote_value_clauses_expand_without_runtime_call_residue() {
+    let source = "struct Flag where enabled:bool {}
+        quote fn read(value:Flag<flag>)->bool where flag:bool,.fallback:bool=flag {fallback}
+        fn run()->bool {read(Flag<true>{}) and not read(Flag<false>{})
+            and read<false,.fallback=true>(Flag<false>{})}";
+    let (value, calls) = execute(source, vec![]);
+    assert_eq!(value, comptime_interpretor::Value::Bool(true));
+    assert_eq!(calls, ["run"]);
+}
+
+#[test]
+fn quote_trait_value_clauses_expand_selected_and_default_bodies() {
+    for implementation in [
+        "impl Read<true> for Host {}",
+        "impl Read<true> for Host {quote fn read(self,value:Flag<flag>)->bool where flag:bool {flag}}",
+    ] {
+        let source = format!(
+            "struct Flag where enabled:bool {{}}
+            trait Read where outer:bool {{
+                quote fn read(self,value:Flag<flag>)->bool where flag:bool {{outer and flag}}
+            }}
+            struct Host {{}}
+            {implementation}
+            fn run()->bool {{Host{{}}.as(Read<true>).read(Flag<true>{{}})
+                and not Host{{}}.as(Read<true>).read<false>(Flag<false>{{}})}}"
+        );
+        let (value, calls) = execute(&source, vec![]);
+        assert_eq!(value, comptime_interpretor::Value::Bool(true));
+        assert_eq!(calls, ["run"]);
     }
 }

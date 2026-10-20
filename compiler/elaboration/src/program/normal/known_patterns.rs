@@ -52,7 +52,8 @@ where
         }
         use n::Pattern as Pat;
         match pattern {
-            Pat::Observe { .. } => None,
+            Pat::CodeEvidence { .. } => None,
+            Pat::Observe { .. } | Pat::NominalType { .. } => None,
             Pat::Wild => Some(true),
             Pat::Unit => match value {
                 Term::Unit => Some(true),

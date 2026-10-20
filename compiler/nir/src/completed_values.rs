@@ -127,6 +127,11 @@ fn value_in<'a>(
         K::Literal(Literal::BitVec { words, .. }) => charge(fuel, words.len()),
         K::Literal(_) | K::Unit | K::Function(_) => Ok(()),
         K::TypeValue(t) => ty(t, fuel),
+        // A captured data parameter is already a value, not a deferred program.
+        // Specialization supplies its domain-checked concrete representation.
+        K::ComptimeValue(t) => {
+            crate::comptime_values::validate(t, &value.ty, fuel).map_err(|error| error.message())
+        }
         K::TypeListValue(types) => {
             for element in types {
                 ty(element, fuel)?;

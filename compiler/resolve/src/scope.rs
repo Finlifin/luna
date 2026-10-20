@@ -54,6 +54,10 @@ pub struct Scope {
     pub ordered: bool,
     /// The names visible in this scope.
     pub items: ItemScope,
+    /// Syntactic success ports of a function's pattern-code result. Collected
+    /// before body lowering so callers do not depend on declaration order.
+    /// This is name metadata only, not a checked code interface.
+    pub pattern_result_outputs: Option<Vec<(Symbol, rustc_span::Span)>>,
     /// Direct child scope IDs.
     pub children: Vec<ScopeId>,
 }
@@ -76,6 +80,7 @@ impl Scope {
             owner_def,
             ordered,
             items: ItemScope::new(),
+            pattern_result_outputs: None,
             children: Vec::new(),
         }
     }
@@ -97,6 +102,7 @@ impl fmt::Debug for Scope {
             .field("name", &self.name)
             .field("owner_def", &self.owner_def)
             .field("ordered", &self.ordered)
+            .field("pattern_result_outputs", &self.pattern_result_outputs)
             .field("children", &self.children)
             .finish()
     }

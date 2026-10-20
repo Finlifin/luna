@@ -22,6 +22,12 @@ pub fn machine_arithmetic_functions(
     package: &Package,
 ) -> Result<std::collections::BTreeSet<crate::DeclarationId>, Error> {
     let mut machine_owners = std::collections::BTreeSet::new();
+    let parameter_domains = package
+        .declaration_parameter_domains(&mut 100_000)
+        .map_err(|_| Error {
+            source: SourceRange { start: 0, end: 0 },
+            message: "invalid declaration parameter domains",
+        })?;
     crate::type_aliases::validate(&package.alias_contracts).map_err(|message| Error {
         source: SourceRange { start: 0, end: 0 },
         message,
@@ -209,6 +215,15 @@ pub fn machine_arithmetic_functions(
         while let Some(node) = work.pop() {
             match node {
                 Work::Pattern(pattern, ct) => match pattern {
+                    Pattern::NominalType { fields, .. } => {
+                        if !ct {
+                            return Err(fail(
+                                function.body.source,
+                                "nominal input decomposition requires comptime",
+                            ));
+                        }
+                        work.extend(fields.iter().map(|field| Work::Pattern(field, ct)));
+                    }
                     Pattern::Then { first, value, next } => {
                         work.push(Work::Pattern(first, ct));
                         work.push(Work::Expr(value, false, ct));
@@ -256,6 +271,12 @@ pub fn machine_arithmetic_functions(
                     | Pattern::Tuple(fields)
                     | Pattern::Or(fields) => {
                         work.extend(fields.iter().map(|pattern| Work::Pattern(pattern, ct)));
+                    }
+                    Pattern::CodeEvidence { .. } => {
+                        return Err(fail(
+                            function.body.source,
+                            "unresolved pattern-code evidence",
+                        ));
                     }
                     Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => {}
                 },
@@ -432,7 +453,12 @@ pub fn machine_arithmetic_functions(
                                 .collect();
                             let ty = member
                                 .ty
-                                .instantiate_types(&contract.parameters_with_self(), &arguments)
+                                .instantiate_parameters(
+                                    &contract.binders_with_self(&mut 100_000).map_err(|_| {
+                                        error("invalid associated value parameter domains")
+                                    })?,
+                                    &arguments,
+                                )
                                 .map_err(|_| {
                                     error("associated value contract substitution failed")
                                 })?;
@@ -484,7 +510,13 @@ pub fn machine_arithmetic_functions(
                                 .chain(method.type_parameters.iter().map(|id| {
                                     crate::DeclarationParameter {
                                         declaration: *id,
-                                        sort: crate::Sort::Type,
+                                        sort: if parameter_domains.get(id).is_some_and(|domain| {
+                                            *domain != Term::Primitive(Primitive::Type)
+                                        }) {
+                                            Sort::ComptimeValue
+                                        } else {
+                                            Sort::Type
+                                        },
                                     }
                                 }))
                                 .collect();
@@ -621,6 +653,9 @@ pub fn machine_arithmetic_functions(
                         K::CheckTypeAlias {
                             declaration,
                             arguments,
+                            body,
+                            preparations,
+                            ..
                         } => {
                             if !ct {
                                 return Err(error(
@@ -632,24 +667,96 @@ pub fn machine_arithmetic_functions(
                                 .iter()
                                 .find(|contract| contract.declaration == *declaration)
                                 .ok_or_else(|| error("missing alias formation contract"))?;
-                            if arguments.len() != contract.parameters.len()
-                                || expr.ty != Term::Primitive(Primitive::Void)
-                                || arguments
+                            let diverges = arguments
+                                .iter()
+                                .any(crate::program::NormalFormArgument::is_diverging)
+                                || preparations
                                     .iter()
-                                    .any(|argument| argument.ty != Term::Primitive(Primitive::Type))
+                                    .any(|p| p.expression.ty == Term::Primitive(Primitive::Never));
+                            let expected = if diverges {
+                                Term::Primitive(Primitive::Never)
+                            } else {
+                                body.as_ref()
+                                    .map_or(Term::Primitive(Primitive::Void), |body| {
+                                        body.ty.clone()
+                                    })
+                            };
+                            if arguments.len() != contract.parameters.len()
+                                || expr.kind.nominal_local_bindings().is_none()
+                                || body.as_ref().is_some_and(|body| {
+                                    !matches!(
+                                        body.ty,
+                                        Term::Primitive(Primitive::Type | Primitive::Never)
+                                    )
+                                })
+                                || expr.ty != expected
+                                || arguments.iter().enumerate().any(|(index, argument)| {
+                                    let domain = contract
+                                        .parameter_types
+                                        .get(index)
+                                        .unwrap_or(&Term::Primitive(Primitive::Type));
+                                    !contract
+                                        .parameters
+                                        .iter()
+                                        .any(|id| domain.mentions_rigid(*id))
+                                        && argument.expression().is_some_and(|argument| {
+                                            &argument.ty != domain
+                                                && argument.ty != Term::Primitive(Primitive::Never)
+                                        })
+                                })
                             {
                                 return Err(error("invalid alias formation guard inputs"));
+                            }
+                            if let Some(body) = body {
+                                work.push(Work::Expr(body, false, ct));
+                            }
+                            work.extend(
+                                preparations
+                                    .iter()
+                                    .map(|p| Work::Expr(&p.expression, false, ct)),
+                            );
+                            work.extend(
+                                arguments
+                                    .iter()
+                                    .flat_map(|a| a.expressions())
+                                    .map(|e| Work::Expr(e, false, ct)),
+                            );
+                            work.extend(
+                                arguments
+                                    .iter()
+                                    .flat_map(|a| a.patterns())
+                                    .map(|p| Work::Pattern(p, ct)),
+                            );
+                        }
+                        K::NominalType {
+                            arguments,
+                            preparations,
+                            ..
+                        } => {
+                            work.extend(
+                                preparations
+                                    .iter()
+                                    .map(|p| Work::Expr(&p.expression, false, ct)),
+                            );
+                            work.extend(
+                                arguments
+                                    .iter()
+                                    .flat_map(|a| a.patterns())
+                                    .map(|pattern| Work::Pattern(pattern, ct)),
+                            );
+                            if !ct {
+                                return Err(error(
+                                    "nominal type construction requires comptime execution",
+                                ));
                             }
                             work.extend(
                                 arguments
                                     .iter()
-                                    .map(|argument| Work::Expr(argument, false, ct)),
+                                    .flat_map(|a| a.expressions())
+                                    .map(|e| Work::Expr(e, false, ct)),
                             );
                         }
-                        K::NominalType {
-                            arguments: fields, ..
-                        }
-                        | K::FunctionType {
+                        K::FunctionType {
                             parameters: fields, ..
                         }
                         | K::TypeList(fields)
@@ -975,6 +1082,10 @@ pub fn machine_arithmetic_functions(
                             if let Some(e) = value {
                                 work.push(Work::Expr(e, false, ct));
                             }
+                        }
+                        K::ComptimeValue(value) => {
+                            crate::comptime_values::validate(value, &expr.ty, &mut 100_000)
+                                .map_err(|error| fail(expr.source, error.message()))?;
                         }
                         K::TypeValue(_)
                         | K::TypeListValue(_)

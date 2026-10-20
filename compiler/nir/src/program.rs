@@ -787,6 +787,9 @@ pub enum ExprKind {
     },
     /// A checked type identity, never an instruction to execute its head.
     TypeValue(Term),
+    /// A captured comptime value. Invocation substitutes its declaration identity;
+    /// reading it never invokes or unfolds a normal-form head.
+    ComptimeValue(Term),
     /// Completed immutable meta.List<Type> data, distinct from Type and tuple data.
     TypeListValue(Vec<Term>),
     /// Ordered comptime construction of immutable meta.List<Type> data.
@@ -813,13 +816,23 @@ pub enum ExprKind {
     /// Evaluates Type-valued fields in source order and constructs a tuple type.
     TupleType(Vec<Expr>),
     NominalType {
+        preparations: Vec<NormalFormPreparation>,
+        /// Invocation-local input bindings, available to omitted defaults.
+        bindings: Option<Vec<LocalId>>,
+        /// Source evaluation order; None means declaration order.
+        order: Option<Vec<usize>>,
         declaration: DeclarationId,
-        arguments: Vec<Expr>,
+        arguments: Vec<NormalFormArgument>,
     },
     /// Comptime-only guard before expanding a transparent type alias.
     CheckTypeAlias {
         declaration: DeclarationId,
-        arguments: Vec<Expr>,
+        preparations: Vec<NormalFormPreparation>,
+        bindings: Option<Vec<LocalId>>,
+        order: Option<Vec<usize>>,
+        arguments: Vec<NormalFormArgument>,
+        /// Execute after admission, specializing captured and own input types.
+        body: Option<Box<Expr>>,
     },
     PointerType(Box<Expr>),
     /// Address a checked local/field place without delivering its contents.
@@ -1087,6 +1100,15 @@ pub struct Capture {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Pattern {
+    /// Definition-only pattern-code evidence. Never executable or lowerable.
+    CodeEvidence {
+        outputs: Vec<(LocalId, Term)>,
+    },
+    /// Internal decomposition of the checked inputs of a nominal Type value.
+    NominalType {
+        declaration: DeclarationId,
+        fields: Vec<Pattern>,
+    },
     /// Read-only candidate-local alias of the current subject. The alias is
     /// available while matching `inner`, but is never a successful export.
     Observe {
@@ -1144,6 +1166,14 @@ pub struct MatchArm {
 impl fmt::Display for Pattern {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::CodeEvidence { outputs } => {
+                f.write_str("(pattern-code-evidence (outputs")?;
+                for (id, ty) in outputs {
+                    write!(f, " (output {id} {ty})")?;
+                }
+                f.write_str("))")
+            }
+
             Self::Observe { binding, inner } => {
                 write!(f, "(observe-pattern (subject {binding}) (inner {inner}))")
             }
@@ -1177,6 +1207,19 @@ impl fmt::Display for Pattern {
                 fields,
             } => {
                 write!(f, "(record-pattern {declaration} (fields")?;
+                for field in fields {
+                    write!(f, " {field}")?;
+                }
+                f.write_str("))")
+            }
+            Self::NominalType {
+                declaration,
+                fields,
+            } => {
+                write!(
+                    f,
+                    "(nominal-type-pattern (declaration {declaration}) (inputs"
+                )?;
                 for field in fields {
                     write!(f, " {field}")?;
                 }
@@ -1516,6 +1559,9 @@ impl fmt::Display for TraitRequirement {
 }
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Package {
+    /// Callable declaration telescopes; available even when a body is omitted
+    /// from a required invocation snapshot. They do not authorize execution.
+    pub function_parameters: Vec<crate::function_parameters::Declaration>,
     /// Completed residual bodies supplied by a concrete runtime graph. Keys
     /// retain both clause arguments and ordinary staged invocation inputs.
     pub runtime_instances: Vec<RuntimeInstance>,
@@ -1674,6 +1720,11 @@ pub struct DispatchInstance {
     pub methods: Vec<MethodInstance>,
     /// Demanded, completed associated values selected by elaboration.
     pub associated: Vec<(DeclarationId, Expr)>,
+    /// Required comptime programs, kept separate from completed data values.
+    pub associated_initializers: Vec<(
+        DeclarationId,
+        crate::associated_initializers::AssociatedInitializer,
+    )>,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct MethodInstance {
@@ -1727,6 +1778,10 @@ impl fmt::Display for DispatchInstance {
         write!(f, ") (associated")?;
         for (member, value) in &self.associated {
             write!(f, " (value (member {member}) {value})")?;
+        }
+        write!(f, ") (associated-initializers")?;
+        for (member, value) in &self.associated_initializers {
+            write!(f, " (initializer {member} {value})")?;
         }
         write!(f, "))")
     }
@@ -1815,6 +1870,11 @@ pub struct Implementation {
     pub parameter_types: Vec<Term>,
     /// Values indexed by the originating interface member, in declaration order.
     pub associated: Vec<(DeclarationId, Expr)>,
+    /// Required comptime programs, kept separate from completed data values.
+    pub associated_initializers: Vec<(
+        DeclarationId,
+        crate::associated_initializers::AssociatedInitializer,
+    )>,
     pub interface_arguments: Vec<Term>,
     pub capabilities: Vec<TraitRequirement>,
     /// Rigid declaration parameters; invocation substitutes only after selection.
@@ -1951,6 +2011,10 @@ impl fmt::Display for Implementation {
         for (member, value) in &self.associated {
             write!(f, " (value {member} {value})")?;
         }
+        write!(f, ") (associated-initializers")?;
+        for (member, value) in &self.associated_initializers {
+            write!(f, " (initializer {member} {value})")?;
+        }
         write!(f, "))")
     }
 }
@@ -1987,7 +2051,7 @@ impl Enum {
         &self,
         arguments: &[Term],
         fuel: &mut usize,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::nominal_parameters::AdmissionError> {
         crate::nominal_parameters::validate_completed(
             &self.type_parameters,
             &self.parameter_types,
@@ -2227,7 +2291,7 @@ impl Struct {
         &self,
         arguments: &[Term],
         fuel: &mut usize,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::nominal_parameters::AdmissionError> {
         crate::nominal_parameters::validate_completed(
             &self.type_parameters,
             &self.parameter_types,
@@ -2628,6 +2692,7 @@ impl fmt::Display for ExprKind {
                 write!(f, "(bit-slice (value {value}) (start {start}) (end {end}))")
             }
             Self::TypeValue(ty) => write!(f, "(type-value {ty})"),
+            Self::ComptimeValue(value) => write!(f, "(comptime-value {value})"),
             Self::TypeListValue(types) => {
                 f.write_str("(type-list-value")?;
                 for ty in types {
@@ -2660,6 +2725,10 @@ impl fmt::Display for ExprKind {
             Self::CheckTypeAlias {
                 declaration,
                 arguments,
+                body,
+                preparations,
+                bindings,
+                order,
             } => {
                 write!(
                     f,
@@ -2668,9 +2737,36 @@ impl fmt::Display for ExprKind {
                 for argument in arguments {
                     write!(f, " {argument}")?;
                 }
+                f.write_str(") (preparations")?;
+                for preparation in preparations {
+                    write!(
+                        f,
+                        " (before {} {})",
+                        preparation.before, preparation.expression
+                    )?;
+                }
+                f.write_str(") (bindings")?;
+                if let Some(bindings) = bindings {
+                    for binding in bindings {
+                        write!(f, " {binding}")?;
+                    }
+                }
+                f.write_str(") (order")?;
+                if let Some(order) = order {
+                    for slot in order {
+                        write!(f, " {slot}")?;
+                    }
+                }
+                f.write_str(") (body")?;
+                if let Some(body) = body {
+                    write!(f, " {body}")?;
+                }
                 f.write_str("))")
             }
             Self::NominalType {
+                preparations,
+                bindings,
+                order,
                 declaration,
                 arguments,
             } => {
@@ -2681,7 +2777,29 @@ impl fmt::Display for ExprKind {
                 for argument in arguments {
                     write!(f, " {argument}")?;
                 }
-                f.write_str("))")
+                f.write_str(")")?;
+                if let Some(order) = order {
+                    f.write_str(" (order")?;
+                    for slot in order {
+                        write!(f, " {slot}")?;
+                    }
+                    f.write_str(")")?;
+                }
+                if let Some(bindings) = bindings {
+                    f.write_str(" (bindings")?;
+                    for binding in bindings {
+                        write!(f, " {binding}")?;
+                    }
+                    f.write_str(")")?;
+                }
+                for preparation in preparations {
+                    write!(
+                        f,
+                        " (prepare (before {}) {})",
+                        preparation.before, preparation.expression
+                    )?;
+                }
+                f.write_str(")")
             }
             Self::ScalarGreater(left, right) => {
                 write!(f, "(scalar-greater (left {left}) (right {right}))")
@@ -2854,6 +2972,9 @@ impl fmt::Display for Package {
         for identity in &self.runtime_function_identities {
             write!(f, "\n {identity}")?;
         }
+        for declaration in &self.function_parameters {
+            write!(f, "\n {declaration}")?;
+        }
         for head in &self.normal_forms {
             write!(f, "\n {head}")?;
         }
@@ -2968,6 +3089,25 @@ impl Expr {
             return Ok(());
         }
         self.ty = rewriter.ty(&self.ty)?;
+        // Expanded code retains many lexical boundaries. Do not retain the
+        // large operation dispatcher frame while descending through each one.
+        match &mut self.kind {
+            ExprKind::Block { statements, result }
+            | ExprKind::CallPreparation { statements, result } => {
+                for statement in statements {
+                    (statement).rewrite_with(rewriter)?;
+                }
+                if let Some(result) = result {
+                    (result).rewrite_with(rewriter)?;
+                }
+            }
+            _ => return self.rewrite_operation(rewriter),
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn rewrite_operation<R: Rewriter>(&mut self, rewriter: &mut R) -> Result<(), R::Error> {
         match &mut self.kind {
             ExprKind::EffectHandle {
                 computation,
@@ -3027,7 +3167,7 @@ impl Expr {
                     *argument = rewriter.ty(argument)?;
                 }
             }
-            ExprKind::TypeValue(ty) => {
+            ExprKind::TypeValue(ty) | ExprKind::ComptimeValue(ty) => {
                 *ty = rewriter.ty(ty)?;
             }
             ExprKind::TypeListValue(types) => {
@@ -3127,13 +3267,49 @@ impl Expr {
                 }
                 (signature).rewrite_with(rewriter)?;
             }
+            ExprKind::NominalType {
+                arguments,
+                preparations,
+                ..
+            } => {
+                for preparation in preparations {
+                    preparation.expression.rewrite_with(rewriter)?;
+                }
+                for pattern in arguments
+                    .iter_mut()
+                    .flat_map(NormalFormArgument::patterns_mut)
+                {
+                    pattern.rewrite_with(rewriter)?;
+                }
+                for field in arguments
+                    .iter_mut()
+                    .flat_map(NormalFormArgument::expressions_mut)
+                {
+                    field.rewrite_with(rewriter)?;
+                }
+            }
             ExprKind::CheckTypeAlias {
-                arguments: fields, ..
+                arguments,
+                body,
+                preparations,
+                ..
+            } => {
+                for preparation in preparations {
+                    preparation.expression.rewrite_with(rewriter)?;
+                }
+                for argument in arguments {
+                    for pattern in argument.patterns_mut() {
+                        pattern.rewrite_with(rewriter)?;
+                    }
+                    for expression in argument.expressions_mut() {
+                        expression.rewrite_with(rewriter)?;
+                    }
+                }
+                if let Some(body) = body {
+                    body.rewrite_with(rewriter)?;
+                }
             }
-            | ExprKind::NominalType {
-                arguments: fields, ..
-            }
-            | ExprKind::FunctionType {
+            ExprKind::FunctionType {
                 parameters: fields, ..
             }
             | ExprKind::TypeList(fields)
@@ -3215,14 +3391,8 @@ impl Expr {
                     (&mut arm.body).rewrite_with(rewriter)?;
                 }
             }
-            ExprKind::Block { statements, result }
-            | ExprKind::CallPreparation { statements, result } => {
-                for statement in statements {
-                    (statement).rewrite_with(rewriter)?;
-                }
-                if let Some(result) = result {
-                    (result).rewrite_with(rewriter)?;
-                }
+            ExprKind::Block { .. } | ExprKind::CallPreparation { .. } => {
+                unreachable!("lexical nodes are handled by rewrite_with")
             }
             ExprKind::LetPattern {
                 pattern,
@@ -3571,6 +3741,12 @@ impl Pattern {
     pub fn rewrite_with<R: Rewriter>(&mut self, rewriter: &mut R) -> Result<(), R::Error> {
         rewriter.pattern(self)?;
         match self {
+            Self::CodeEvidence { outputs } => {
+                for (_, ty) in outputs {
+                    *ty = rewriter.ty(ty)?;
+                }
+            }
+
             Self::Then { first, value, next } => {
                 first.rewrite_with(rewriter)?;
                 value.rewrite_with(rewriter)?;
@@ -3589,6 +3765,7 @@ impl Pattern {
             | Self::TypeTuple(fields)
             | Self::Tuple(fields)
             | Self::Or(fields)
+            | Self::NominalType { fields, .. }
             | Self::Record { fields, .. }
             | Self::AnonymousRecord { fields, .. }
             | Self::Variant { fields, .. } => {
@@ -3622,6 +3799,15 @@ pub fn checkable_predicate(expression: &Expr) -> bool {
                 pending.extend([value.as_ref(), start.as_ref(), end.as_ref()])
             }
             ExprKind::Literal(_) | ExprKind::Local(_) | ExprKind::Unit => {}
+            // A checked associated value is initialized at comptime. Reading
+            // it is a predicate operand; invoking a callable stored in it is
+            // still subject to the separate call admission rules below.
+            ExprKind::AssociatedValue { .. } => {}
+            ExprKind::ComptimeValue(value) => {
+                if crate::comptime_values::validate(value, &expr.ty, &mut remaining).is_err() {
+                    return false;
+                }
+            }
             ExprKind::ReadPointer(value) => {
                 if !intrinsic_pointer_value(&expr.ty) || pointer_operation_error(expr).is_some() {
                     return false;
@@ -3947,4 +4133,63 @@ pub fn bit_update_error(
         return None;
     }
     bit_writeback_error(storage, 0, width, value, result)
+}
+
+impl ExprKind {
+    /// Validate constructor-local binding ownership, including packet producers.
+    pub fn nominal_local_bindings(&self) -> Option<Vec<LocalId>> {
+        let (Self::NominalType {
+            arguments,
+            bindings,
+            preparations,
+            ..
+        }
+        | Self::CheckTypeAlias {
+            arguments,
+            bindings,
+            preparations,
+            ..
+        }) = self
+        else {
+            return None;
+        };
+        if bindings
+            .as_ref()
+            .is_some_and(|bindings| bindings.len() != arguments.len())
+            || preparations.iter().any(|p| p.before > arguments.len())
+            || preparations.windows(2).any(|p| p[0].before > p[1].before)
+        {
+            return None;
+        }
+        let mut locals = bindings.clone().unwrap_or_default();
+        for preparation in preparations {
+            let Self::LetPattern {
+                pattern: Pattern::Tuple(fields),
+                guard: None,
+                otherwise: None,
+                ..
+            } = &preparation.expression.kind
+            else {
+                return None;
+            };
+            for field in fields {
+                let Pattern::Binding { binding, inner } = field else {
+                    return None;
+                };
+                if !matches!(inner.as_ref(), Pattern::Wild) {
+                    return None;
+                }
+                locals.push(*binding);
+            }
+        }
+        if locals
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != locals.len()
+        {
+            return None;
+        }
+        Some(locals)
+    }
 }

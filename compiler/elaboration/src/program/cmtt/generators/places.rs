@@ -52,7 +52,7 @@ impl Checker<'_, '_> {
         checkpoint.map_err(|failure| error(span, format!("generator checkpoint failed: {failure}")))
     }
 
-    pub(super) fn generator_value_needs_live_storage(
+    pub(in crate::program::cmtt) fn generator_value_needs_live_storage(
         &mut self,
         value: &comptime_interpretor::Value,
         span: Span,
@@ -140,6 +140,50 @@ impl Checker<'_, '_> {
             self.generator_cells.insert(id, (snapshot, cell));
         }
         Ok(())
+    }
+
+    fn generator_pointer_snapshot_checks(
+        &mut self,
+        id: n::LocalId,
+        ty: &Term,
+        cell: &comptime_interpretor::Storage,
+        statements: &mut Vec<n::Expr>,
+        span: Span,
+    ) -> Result<(), Error> {
+        let Term::Pointer(pointee) = ty else {
+            return Ok(());
+        };
+        let comptime_interpretor::Value::Pointer(pointer) = self.read_generator_cell(cell, span)?
+        else {
+            return Ok(());
+        };
+        let package = n::Package::default();
+        let mut vm = comptime_interpretor::Interpreter::for_comptime(
+            &package,
+            comptime_interpretor::Budget {
+                steps: self.required_steps,
+                depth: 128,
+            },
+        )
+        .map_err(|e| error(span, format!("generator pointer observation failed: {e}")))?;
+        let value = vm.observe_pointer_scalar(&pointer);
+        self.required_steps = vm.remaining_steps();
+        let Some(value) =
+            value.map_err(|e| error(span, format!("generator pointer observation failed: {e}")))?
+        else {
+            return Ok(());
+        };
+        let snapshot = self.materialize_generator_data(value, (**pointee).clone(), span)?;
+        let place = n::Expr {
+            source: source(span),
+            ty: (**pointee).clone(),
+            kind: K::ReadPointer(Box::new(n::Expr {
+                source: source(span),
+                ty: ty.clone(),
+                kind: K::Local(id),
+            })),
+        };
+        self.generator_snapshot_checks(place, &snapshot, statements, span, 0)
     }
 
     fn generator_snapshot_checks(
@@ -413,6 +457,13 @@ impl Checker<'_, '_> {
                     ty.clone(),
                     comptime_interpretor::Value::Storage(cell.clone()),
                 ));
+                self.generator_pointer_snapshot_checks(
+                    id,
+                    &ty,
+                    &cell,
+                    &mut statements,
+                    value.span,
+                )?;
                 cells.insert(id, cell);
                 self.generator_snapshot_checks(
                     n::Expr {

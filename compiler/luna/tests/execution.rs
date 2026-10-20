@@ -11388,6 +11388,7 @@ fn parameterized_interface_package() -> Package {
     ] {
         let ty = T::Primitive(primitive);
         package.implementations.push(n::Implementation {
+            associated_initializers: vec![],
             parameter_types: vec![],
             associated: vec![],
             declaration: d(20 + serial),
@@ -11624,6 +11625,7 @@ fn parameterized_interface_nir_parent_requirements_keep_their_arguments() {
     });
     for (n, primitive) in [(0, Primitive::Bool), (1, Primitive::Char)] {
         package.implementations.push(Implementation {
+            associated_initializers: vec![],
             parameter_types: vec![],
             associated: vec![],
             declaration: d(50 + n),
@@ -26445,9 +26447,19 @@ fn associated_callable_values_can_be_returned_from_comptime_without_running_them
     let package = compile(
         "trait Source {fn read()->bool;} impl Source for bool {fn read()->bool {true}} trait Stored {assoc callback:fn()->bool;} impl Stored for bool {assoc callback:fn()->bool=bool.as(Source).read;} comptime fn load()->fn()->bool where T :- Stored {T.as(Stored).callback} comptime fn entry()->fn()->bool {load<bool>()}",
     );
+    let origin = package
+        .traits
+        .iter()
+        .find(|item| item.name == "Source")
+        .unwrap();
     assert_eq!(
         luna::invocation::invoke(&package, "entry", 100_000).unwrap(),
-        Value::Function(id(&package, "read"))
+        Value::RuntimeTraitMethod(Box::new(comptime_interpretor::TraitMethodIdentity {
+            interface: origin.declaration.into(),
+            subject: nir::Term::Primitive(nir::Primitive::Bool),
+            member: origin.methods[0].declaration,
+            method_arguments: vec![],
+        }))
     );
 }
 

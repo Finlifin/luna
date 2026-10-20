@@ -262,12 +262,13 @@ pub(crate) fn dispatch_instances_in_context(
     package: &n::Package,
     context: &Context,
     assumptions: &[n::TraitRequirement],
+    live_methods: &[comptime_interpretor::TraitMethodIdentity],
     budget: Budget,
 ) -> Result<Vec<n::DispatchInstance>, String> {
     build(
         package,
         budget,
-        Roots::All,
+        Roots::AllWithMethods(live_methods),
         BTreeSet::new(),
         &[],
         Some((context, assumptions)),
@@ -360,6 +361,7 @@ pub(crate) fn normalize_concrete_type(
 
 enum Roots<'a> {
     All,
+    AllWithMethods(&'a [comptime_interpretor::TraitMethodIdentity]),
     TypeAnnotation(&'a Term, &'a mut Option<Term>),
     Annotations(&'a mut n::Function),
     Dispatch(&'a [iir::InstanceKey]),
@@ -396,6 +398,8 @@ fn build(
             .map_err(|reason| format!("dispatch type context: {reason}"))?,
     };
     let mut index = Index::default();
+    index.sync_nominal_layouts(&package.structs, &package.enums, &package.newtypes);
+
     for implementation in &package.implementations {
         if implementation.interface.is_some() {
             index
@@ -415,7 +419,23 @@ fn build(
         }
     }
     let mut input_fuel = budget.steps;
-    let declaration_parameter_sorts = package.declaration_parameter_sorts(&mut input_fuel)?;
+    let domains = package.declaration_parameter_domains(&mut input_fuel)?;
+    let declaration_parameter_sorts = domains
+        .iter()
+        .map(|(id, domain)| {
+            (
+                *id,
+                if *domain == Term::Primitive(nir::Primitive::Type) {
+                    nir::Sort::Type
+                } else {
+                    nir::Sort::ComptimeValue
+                },
+            )
+        })
+        .collect();
+    for (id, domain) in domains {
+        index.register_parameter_domain(id, domain)?;
+    }
     let inline_effects = if matches!(roots, Roots::Iir(_)) {
         input_fuel = input_fuel
             .checked_sub(package.effects.len())
@@ -438,7 +458,10 @@ fn build(
         } else {
             Vec::new()
         },
-        retain_templates: matches!(roots, Roots::All | Roots::Invocation(_)),
+        retain_templates: matches!(
+            roots,
+            Roots::All | Roots::AllWithMethods(_) | Roots::Invocation(_)
+        ),
         package,
         index,
         context,
@@ -517,6 +540,30 @@ fn build(
         }
         *selected = Some(method);
     } else {
+        if let Roots::AllWithMethods(methods) = roots {
+            for method in methods {
+                builder.tick(0)?;
+                for term in std::iter::once(&method.subject)
+                    .chain(&method.interface.arguments)
+                    .chain(&method.method_arguments)
+                {
+                    crate::associated::charge_projection_copy(term, &mut builder.fuel)?;
+                }
+                let slot = builder.interface(method.interface.clone(), method.subject.clone())?;
+                let interface = builder.output[slot].interface_instance();
+                let subject = builder.output[slot].subject.clone();
+                let selected = builder.specialize_method(
+                    slot,
+                    &interface,
+                    &subject,
+                    method.member,
+                    &method.method_arguments,
+                )?;
+                builder
+                    .queue
+                    .push_back(Task::Function(selected.body, selected.arguments));
+            }
+        }
         for function in &package.functions {
             if function.type_parameters.is_empty() && function.requirements.is_empty() {
                 builder
@@ -597,6 +644,19 @@ impl Builder<'_> {
         self.fuel -= 1;
         Ok(())
     }
+    fn input_binders(&self, parameters: &[Id]) -> Vec<nir::DeclarationParameter> {
+        parameters
+            .iter()
+            .map(|id| nir::DeclarationParameter {
+                declaration: *id,
+                sort: self
+                    .declaration_parameter_sorts
+                    .get(id)
+                    .copied()
+                    .unwrap_or(nir::Sort::Type),
+            })
+            .collect()
+    }
     fn function(&mut self, id: Id, arguments: Vec<Term>) -> Result<(), String> {
         // Dispatch-only traversal can encounter ever-growing generic recursion
         // even when argument types do not occur in the function signature.
@@ -618,7 +678,7 @@ impl Builder<'_> {
             }
             let signature = identity
                 .signature
-                .instantiate_types(&identity.type_parameters, &arguments)
+                .instantiate_parameters(&self.input_binders(&identity.type_parameters), &arguments)
                 .map_err(|e| e.to_string())?;
             self.queue.push_back(Task::Type(signature));
             return Ok(());
@@ -655,18 +715,7 @@ impl Builder<'_> {
             {
                 return Err("staged runtime function requires a specialized direct call".into());
             }
-            let parameters = f
-                .type_parameters
-                .iter()
-                .map(|id| nir::DeclarationParameter {
-                    declaration: *id,
-                    sort: self
-                        .declaration_parameter_sorts
-                        .get(id)
-                        .copied()
-                        .unwrap_or(nir::Sort::Type),
-                })
-                .collect::<Vec<_>>();
+            let parameters = self.input_binders(&f.type_parameters);
             f.instantiate_parameters(&parameters, &arguments)
                 .map_err(|e| e.to_string())?
         };
@@ -793,8 +842,14 @@ impl Builder<'_> {
         .types;
         let Selection::Selected(id) = resolution.selection else {
             return Err(format!(
-                "dispatch selection is unresolved: {}",
-                resolution.selection
+                "dispatch selection is unresolved for {subject}: {}; candidates: {}",
+                resolution.selection,
+                resolution
+                    .assessments
+                    .iter()
+                    .map(|(id, assessment)| format!("{id}: {assessment}"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
             ));
         };
         let Some(TypeAssessment::Applicable(evidence)) = resolution.assessments.get(&id) else {
@@ -919,6 +974,7 @@ impl Builder<'_> {
         }
         let slot = self.output.len();
         self.output.push(n::DispatchInstance {
+            associated_initializers: vec![],
             interface: interface.declaration,
             interface_arguments: interface.arguments.clone(),
             subject: subject.clone(),
@@ -978,15 +1034,7 @@ impl Builder<'_> {
         let parameters: Vec<_> = contract
             .binders_with_self(&mut self.fuel)?
             .into_iter()
-            .chain(
-                template
-                    .type_parameters
-                    .iter()
-                    .map(|id| nir::DeclarationParameter {
-                        declaration: *id,
-                        sort: nir::Sort::Type,
-                    }),
-            )
+            .chain(self.input_binders(&template.type_parameters))
             .collect();
         let arguments: Vec<_> = std::iter::once(subject.clone())
             .chain(interface.arguments.iter().cloned())
@@ -1039,7 +1087,7 @@ impl Builder<'_> {
         if self.instances.is_some() {
             self.normalize_method_contract(&mut specialized)?;
         }
-        self.formation_requirements(&specialized.requirements, &[], &[])?;
+        self.formation_requirements_with_parameters(&specialized.requirements, &[], &[])?;
         for capability in &specialized.capabilities {
             self.queue.push_back(Task::Interface(
                 capability.interface_instance(),
@@ -1132,21 +1180,6 @@ impl Builder<'_> {
         }
         .check_predicate(requirement, self.budget)
     }
-    fn formation_requirements(
-        &mut self,
-        requirements: &[n::TypePredicate],
-        parameters: &[Id],
-        arguments: &[Term],
-    ) -> Result<(), String> {
-        let parameters: Vec<_> = parameters
-            .iter()
-            .map(|id| nir::DeclarationParameter {
-                declaration: *id,
-                sort: nir::Sort::Type,
-            })
-            .collect();
-        self.formation_requirements_with_parameters(requirements, &parameters, arguments)
-    }
     fn formation_requirements_with_parameters(
         &mut self,
         requirements: &[n::TypePredicate],
@@ -1186,7 +1219,7 @@ impl Builder<'_> {
             .normalized_type(method.signature.ordinary().map_err(|e| e.to_string())?)?
             .into();
         for argument in &mut method.type_arguments {
-            *argument = self.normalized_type(argument)?;
+            *argument = self.normalized_interface_input(argument)?;
         }
         for requirement in &mut method.requirements {
             *requirement = self.normalized_predicate(requirement, 0)?;
@@ -1222,6 +1255,66 @@ impl Builder<'_> {
                 &mut self.quote_sources,
                 &mut self.fuel,
             )?;
+            if matches!(expr.kind, K::ComptimeValue(_)) {
+                *expr = self.invoke_staged_input(expr)?;
+            }
+            if let K::Call {
+                callee, arguments, ..
+            } = &mut expr.kind
+            {
+                if let Term::Function { parameters, .. } = callee.ty.callable_signature() {
+                    for argument in arguments {
+                        let parameter = parameters
+                            .get(argument.parameter)
+                            .ok_or("staged argument parameter index is invalid")?;
+                        if parameter.sort == nir::Sort::Runtime || argument.is_default {
+                            continue;
+                        }
+                        let mut captures = false;
+                        iir::visit::expression(&argument.value, &mut self.fuel, |node, _| {
+                            captures |= matches!(node.kind, K::AssociatedValue { .. })
+                                && node.ty.is_comptime_callable()
+                                && matches!(&node.ty, Term::Closure { environment, .. } if !environment.is_empty());
+                            Ok(())
+                        })?;
+                        if captures
+                            && nir::free_bindings::collect(&argument.value, &mut self.fuel)?
+                                .is_empty()
+                        {
+                            // The required input is the freezing boundary, not an
+                            // intermediate callback. Its local bindings and mutable
+                            // capture graph must share one interpreter invocation.
+                            argument.value = self.invoke_staged_input(&argument.value)?;
+                        }
+                    }
+                }
+            }
+            let captured_associated_call = if let K::Call { callee, .. } = &expr.kind {
+                let mut target = callee.as_ref();
+                while let K::Block {
+                    statements,
+                    result: Some(result),
+                } = &target.kind
+                {
+                    if !statements.is_empty() {
+                        break;
+                    }
+                    self.tick(0)?;
+                    target = result;
+                }
+                callee.ty.is_comptime_callable()
+                    && matches!(&callee.ty, Term::Closure { environment, .. } if !environment.is_empty())
+                    && matches!(target.kind, K::AssociatedValue { .. })
+            } else {
+                false
+            };
+            if captured_associated_call
+                && nir::free_bindings::collect(expr, &mut self.fuel)?.is_empty()
+            {
+                // Keep the initialized callable and its capture graph inside
+                // one invocation. Only its result crosses the freezing boundary.
+                *expr = self.invoke_staged_input(expr)?;
+            }
             if let K::AssociatedValue {
                 interface,
                 member,
@@ -1233,7 +1326,7 @@ impl Builder<'_> {
                     arguments: interface
                         .arguments
                         .iter()
-                        .map(|ty| self.normalized_type(ty))
+                        .map(|ty| self.normalized_interface_input(ty))
                         .collect::<Result<_, _>>()?,
                 };
                 let subject = self.normalized_type(subject)?;
@@ -1245,7 +1338,7 @@ impl Builder<'_> {
                     assumptions: &self.assumptions,
                     context: &self.context,
                 }
-                .resolve_associated_value_budgeted(
+                .resolve_associated_value_plan_budgeted(
                     &interface,
                     *member,
                     &subject,
@@ -1259,8 +1352,17 @@ impl Builder<'_> {
                     return Err("associated expression type disagrees with selected member".into());
                 }
                 let source = expr.source;
-                *expr = selected.value;
+                *expr = if selected.requires_invocation {
+                    self.invoke_staged_input(&selected.value)?
+                } else {
+                    selected.value
+                };
                 expr.source = source;
+                // Selection can expose a completed captured input after the
+                // visitor has already handled the original node's kind.
+                if matches!(expr.kind, K::ComptimeValue(_)) {
+                    *expr = self.invoke_staged_input(expr)?;
+                }
             }
             *fuel = self.fuel;
             Ok(())
@@ -1477,7 +1579,10 @@ impl Builder<'_> {
                         return Ok(true);
                     }
                     let mut bound = template
-                        .instantiate_types(&template.type_parameters, &selected.arguments)
+                        .instantiate_parameters(
+                            &self.input_binders(&template.type_parameters),
+                            &selected.arguments,
+                        )
                         .map_err(|e| e.to_string())?;
                     bound.type_parameters.clear();
                     // Keep the TraitMethod callee until expansion has merged its
@@ -1565,12 +1670,7 @@ impl Builder<'_> {
                     let parameters = interface_contract
                         .binders_with_self(&mut self.fuel)?
                         .into_iter()
-                        .chain(contract.type_parameters.iter().map(|declaration| {
-                            nir::DeclarationParameter {
-                                declaration: *declaration,
-                                sort: nir::Sort::Type,
-                            }
-                        }))
+                        .chain(self.input_binders(&contract.type_parameters))
                         .collect::<Vec<_>>();
                     let inputs = std::iter::once(subject.clone())
                         .chain(instance.arguments.iter().cloned())
@@ -1702,7 +1802,7 @@ impl Builder<'_> {
                 return Ok(true);
             }
             let mut bound = template
-                .instantiate_types(&template.type_parameters, &arguments)
+                .instantiate_parameters(&self.input_binders(&template.type_parameters), &arguments)
                 .map_err(|e| e.to_string())?;
             bound.type_parameters.clear();
             return self
@@ -1711,7 +1811,7 @@ impl Builder<'_> {
         }
         // Declaration substitution closes the type inputs before staged evaluation.
         let mut template = template
-            .instantiate_types(&template.type_parameters, &arguments)
+            .instantiate_parameters(&self.input_binders(&template.type_parameters), &arguments)
             .map_err(|e| e.to_string())?;
         template.type_parameters.clear();
         if let Some((requirements, capabilities, program)) = entry_contract {
@@ -1938,13 +2038,40 @@ impl Builder<'_> {
             }
         })
     }
+    fn admit_nominal_index(&mut self, input: &Term) -> Result<bool, String> {
+        let Term::NominalValue { ty, .. } = input else {
+            return Ok(false);
+        };
+        let Term::Nominal { declaration, .. } = ty.as_ref() else {
+            return Err("nominal value index has no nominal domain".into());
+        };
+        nir::validate_declaration_arguments_with_layouts(
+            &[*declaration],
+            std::slice::from_ref(ty.as_ref()),
+            std::slice::from_ref(input),
+            &mut self.fuel,
+            |ty, variant, fuel| {
+                nir::normal_forms::nominal_value_fields_budgeted(self.package, ty, variant, fuel)
+                    .ok_or_else(|| {
+                        if *fuel == 0 {
+                            nir::NominalAdmissionError::Budget
+                        } else {
+                            nir::NominalAdmissionError::from("invalid nominal value layout")
+                        }
+                    })
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+
     fn normalized_interface_input(&mut self, input: &Term) -> Result<Term, String> {
         if input.sort() == nir::Sort::Type {
             return self.normalized_type(input);
         }
         crate::associated::charge_projection_copy(input, &mut self.fuel)?;
         input.check_scope(&[]).map_err(|e| e.to_string())?;
-        if input.is_structural_index_value() {
+        if self.admit_nominal_index(input)? || input.is_structural_index_value() {
             return Ok(input.clone());
         }
         Err("interface value input normalization requires domain evidence".into())
@@ -1978,7 +2105,7 @@ impl Builder<'_> {
     }
     fn staging_type_view(&mut self, ty: &Term) -> Result<Term, String> {
         // The annotation walker also visits complete interface identity inputs.
-        if ty.is_structural_index_value() {
+        if self.admit_nominal_index(ty)? || ty.is_structural_index_value() {
             crate::associated::charge_projection_copy(ty, &mut self.fuel)?;
             return Ok(ty.clone());
         }
@@ -2040,7 +2167,29 @@ impl Builder<'_> {
                     .find(|s| s.declaration == *declaration)
                 {
                     if self.instances.is_some() {
-                        s.validate_completed_arguments(arguments, &mut self.fuel)?;
+                        nir::validate_declaration_arguments_with_layouts(
+                            &s.type_parameters,
+                            &s.parameter_types,
+                            arguments,
+                            &mut self.fuel,
+                            |ty, variant, fuel| {
+                                nir::normal_forms::nominal_value_fields_budgeted(
+                                    self.package,
+                                    ty,
+                                    variant,
+                                    fuel,
+                                )
+                                .ok_or_else(|| {
+                                    if *fuel == 0 {
+                                        nir::NominalAdmissionError::Budget
+                                    } else {
+                                        nir::NominalAdmissionError::Invalid(
+                                            "nominal value layout unavailable".into(),
+                                        )
+                                    }
+                                })
+                            },
+                        )?;
                     }
                     let parameters = s.parameter_binders().map_err(|e| e.to_string())?;
                     self.formation_requirements_with_parameters(
@@ -2096,7 +2245,29 @@ impl Builder<'_> {
                     .find(|e| e.declaration == *declaration)
                 {
                     if self.instances.is_some() {
-                        e.validate_completed_arguments(arguments, &mut self.fuel)?;
+                        nir::validate_declaration_arguments_with_layouts(
+                            &e.type_parameters,
+                            &e.parameter_types,
+                            arguments,
+                            &mut self.fuel,
+                            |ty, variant, fuel| {
+                                nir::normal_forms::nominal_value_fields_budgeted(
+                                    self.package,
+                                    ty,
+                                    variant,
+                                    fuel,
+                                )
+                                .ok_or_else(|| {
+                                    if *fuel == 0 {
+                                        nir::NominalAdmissionError::Budget
+                                    } else {
+                                        nir::NominalAdmissionError::Invalid(
+                                            "nominal value layout unavailable".into(),
+                                        )
+                                    }
+                                })
+                            },
+                        )?;
                     }
                     let parameters = e.parameter_binders().map_err(|e| e.to_string())?;
                     self.formation_requirements_with_parameters(
@@ -2155,7 +2326,27 @@ impl Builder<'_> {
                     .iter()
                     .find(|n| n.declaration == *declaration)
                 {
-                    n.validate_completed_arguments(arguments, &mut self.fuel)?;
+                    n.validate_completed_arguments_with_layouts(
+                        arguments,
+                        &mut self.fuel,
+                        |ty, variant, fuel| {
+                            nir::normal_forms::nominal_value_fields_budgeted(
+                                self.package,
+                                ty,
+                                variant,
+                                fuel,
+                            )
+                            .ok_or_else(|| {
+                                if *fuel == 0 {
+                                    nir::NominalAdmissionError::Budget
+                                } else {
+                                    nir::NominalAdmissionError::Invalid(
+                                        "nominal value layout unavailable".into(),
+                                    )
+                                }
+                            })
+                        },
+                    )?;
                     let parameters = n.parameter_binders().map_err(|e| e.to_string())?;
                     self.formation_requirements_with_parameters(
                         &n.requirements,
@@ -2239,9 +2430,20 @@ impl Builder<'_> {
                     let parameters: Vec<_> = descriptor
                         .parameters
                         .iter()
-                        .map(|p| p.declaration)
+                        .map(|p| nir::DeclarationParameter {
+                            declaration: p.declaration,
+                            sort: match p.kind {
+                                nir::normal_forms::Kind::Type => nir::Sort::Type,
+                                nir::normal_forms::Kind::Value
+                                | nir::normal_forms::Kind::TypeList => nir::Sort::ComptimeValue,
+                            },
+                        })
                         .collect();
-                    self.formation_requirements(&descriptor.requirements, &parameters, arguments)?;
+                    self.formation_requirements_with_parameters(
+                        &descriptor.requirements,
+                        &parameters,
+                        arguments,
+                    )?;
                 }
                 children.extend(arguments.iter().cloned());
             }
@@ -2275,7 +2477,7 @@ impl Builder<'_> {
                         assumptions: &self.assumptions,
                         context: &self.context,
                     }
-                    .resolve_associated_value_budgeted(
+                    .resolve_associated_value_plan_budgeted(
                         &selected_interface,
                         origin.member,
                         &selected_subject,
@@ -2331,6 +2533,7 @@ impl Builder<'_> {
     fn pattern(&mut self, pattern: &P, depth: usize) -> Result<(), String> {
         self.tick(depth)?;
         match pattern {
+            P::CodeEvidence { .. } => return Err("unresolved pattern-code evidence".into()),
             P::Then { first, value, next } => {
                 self.pattern(first, depth + 1)?;
                 self.expr(value, depth + 1)?;
@@ -2343,7 +2546,8 @@ impl Builder<'_> {
             P::Observe { inner: pattern, .. }
             | P::Remap { pattern, .. }
             | P::Binding { inner: pattern, .. } => self.pattern(pattern, depth + 1)?,
-            P::Record { fields, .. }
+            P::NominalType { fields, .. }
+            | P::Record { fields, .. }
             | P::AnonymousRecord { fields, .. }
             | P::Variant { fields, .. }
             | P::NormalForm {
@@ -2457,6 +2661,10 @@ impl Builder<'_> {
                     .associated
                     .iter()
                     .any(|(id, _)| id == member)
+                    && !self.output[slot]
+                        .associated_initializers
+                        .iter()
+                        .any(|(id, _)| id == member)
                 {
                     let (selected, remaining) = crate::capabilities::World {
                         index: &self.index,
@@ -2465,7 +2673,7 @@ impl Builder<'_> {
                         assumptions: &self.assumptions,
                         context: &self.context,
                     }
-                    .resolve_associated_value_budgeted(
+                    .resolve_associated_value_plan_budgeted(
                         &interface,
                         *member,
                         &subject,
@@ -2475,9 +2683,26 @@ impl Builder<'_> {
                         },
                     )?;
                     self.fuel = remaining;
-                    // Retain function identities/layout dependencies carried by values.
-                    self.expr(&selected.value, depth + 1)?;
-                    self.output[slot].associated.push((*member, selected.value));
+                    // Publish the demand before traversing dependencies; recursive
+                    // initialization is bounded by the comptime interpreter.
+                    if selected.requires_invocation {
+                        let mut copy_fuel = self.fuel as u64;
+                        let copied =
+                            nir::copy_budget::charge_expression(&selected.value, &mut copy_fuel);
+                        self.fuel = copy_fuel as usize;
+                        copied.map_err(|_| "associated initializer copy budget exhausted")?;
+                        let template = nir::associated_initializers::AssociatedInitializer::new(
+                            selected.value.clone(),
+                            &mut self.fuel,
+                        )?;
+                        self.output[slot]
+                            .associated_initializers
+                            .push((*member, template));
+                        self.expr(&selected.value, depth + 1)?;
+                    } else {
+                        self.expr(&selected.value, depth + 1)?;
+                        self.output[slot].associated.push((*member, selected.value));
+                    }
                 }
             }
             // A value can retain an ordinary-Type telescope without invoking
@@ -2544,6 +2769,21 @@ impl Builder<'_> {
                     self.expr(e, depth + 1)?;
                 }
             }
+            K::NominalType {
+                arguments,
+                preparations,
+                ..
+            } => {
+                for preparation in preparations {
+                    self.expr(&preparation.expression, depth + 1)?;
+                }
+                for pattern in arguments.iter().flat_map(|a| a.patterns()) {
+                    self.pattern(pattern, depth + 1)?;
+                }
+                for value in arguments.iter().flat_map(|a| a.expressions()) {
+                    self.expr(value, depth + 1)?;
+                }
+            }
             K::ClosureType {
                 environment,
                 signature,
@@ -2553,15 +2793,30 @@ impl Builder<'_> {
                 }
                 self.expr(signature, depth + 1)?;
             }
+            K::CheckTypeAlias {
+                arguments,
+                body,
+                preparations,
+                ..
+            } => {
+                for preparation in preparations {
+                    self.expr(&preparation.expression, depth + 1)?;
+                }
+                for argument in arguments {
+                    for pattern in argument.patterns() {
+                        self.pattern(pattern, depth + 1)?;
+                    }
+                    for expression in argument.expressions() {
+                        self.expr(expression, depth + 1)?;
+                    }
+                }
+                if let Some(body) = body {
+                    self.expr(body, depth + 1)?;
+                }
+            }
             K::Variant { fields, .. }
             | K::AnonymousRecord { fields }
             | K::Record { fields, .. }
-            | K::CheckTypeAlias {
-                arguments: fields, ..
-            }
-            | K::NominalType {
-                arguments: fields, ..
-            }
             | K::FunctionType {
                 parameters: fields, ..
             }
@@ -2740,7 +2995,7 @@ impl Builder<'_> {
                 self.expr(a, depth + 1)?;
                 self.expr(b, depth + 1)?;
             }
-            K::TypeValue(ty) => {
+            K::ComptimeValue(ty) | K::TypeValue(ty) => {
                 if self.instances.is_some() {
                     iir::completed_type(ty, &self.runtime_bindings, &mut self.fuel)?;
                 }

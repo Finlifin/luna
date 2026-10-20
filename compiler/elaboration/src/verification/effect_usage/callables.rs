@@ -89,6 +89,7 @@ fn pattern_binds(
             Pattern::Tuple(fields)
             | Pattern::TypeTuple(fields)
             | Pattern::Or(fields)
+            | Pattern::NominalType { fields, .. }
             | Pattern::Record { fields, .. }
             | Pattern::AnonymousRecord { fields, .. }
             | Pattern::Variant { fields, .. }

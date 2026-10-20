@@ -250,6 +250,8 @@ pub fn elaborate_packages_with_protocols(
         self_types: BTreeMap::new(),
         self_containers: BTreeMap::new(),
         interfaces_ready: false,
+        checking_method_contract: false,
+        pending_contract_projections: Vec::new(),
         checked_traits: Vec::new(),
         checked_implementations: Vec::new(),
         associated_initializers: BTreeMap::new(),
@@ -261,6 +263,7 @@ pub fn elaborate_packages_with_protocols(
         associated_signature_values: BTreeMap::new(),
         implementation_index: crate::implementation::Index::default(),
         trait_parameter_types: BTreeMap::new(),
+        nominal_input_prefixes: BTreeMap::new(),
         inherent_index: crate::implementation::InherentIndex::default(),
         type_parameters: BTreeMap::new(),
         normal_parameters: BTreeMap::new(),
@@ -288,6 +291,9 @@ pub fn elaborate_packages_with_protocols(
         defaults: BTreeMap::new(),
         locals: BTreeMap::new(),
         code_values: BTreeMap::new(),
+        pattern_codes: BTreeMap::new(),
+        pattern_quote_pending: None,
+        pattern_generators: BTreeMap::new(),
         code_generators: BTreeMap::new(),
         code_method_captures: BTreeMap::new(),
         code_method_targets: BTreeMap::new(),
@@ -389,7 +395,7 @@ pub fn elaborate_packages_with_protocols(
                     ) || matches!(
                         &info.node.expect_item().kind,
                         ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)
-                            if sig.return_ty.is_some_and(|ty| matches!(ty.kind, H::ContextualExprType(..)))
+                            if sig.return_ty.is_some_and(|ty| matches!(ty.kind, H::ContextualExprType(..) | H::ContextualPatternType(..)))
                     ) =>
                 {
                     p.definition.map(|id| DeclarationId {
@@ -423,12 +429,6 @@ pub fn elaborate_packages_with_protocols(
         if let Some(clauses) = clauses {
             let mut parameters = Vec::new();
             let mut trait_domains = Vec::new();
-            checker.prepare_parameter_capabilities(owner, clauses)?;
-            let capabilities = checker
-                .capabilities
-                .get(&owner)
-                .cloned()
-                .unwrap_or_default();
             for parameter in clauses {
                 let trait_domain = if matches!(
                     info.node.expect_item().kind,
@@ -436,6 +436,7 @@ pub fn elaborate_packages_with_protocols(
                         | ItemKind::Struct(_)
                         | ItemKind::Enum(_)
                         | ItemKind::Newtype(..)
+                        | ItemKind::TypeAlias(..)
                         | ItemKind::Impl(_)
                 ) {
                     match parameter.kind {
@@ -492,10 +493,32 @@ pub fn elaborate_packages_with_protocols(
                 let id = parameter
                     .definition
                     .ok_or_else(|| error(parameter.span, "missing clause parameter identity"))?;
-                parameters.push(DeclarationId {
+                let id = DeclarationId {
                     package: semantic_package(package_identities, id.pkg),
                     local: id.index,
-                });
+                };
+                parameters.push(id);
+                if let Some(domain) = trait_domain {
+                    checker
+                        .implementation_index
+                        .register_parameter_domain(id, domain.clone())
+                        .map_err(|message| error(parameter.span, message))?;
+                    checker
+                        .inherent_index
+                        .register_parameter_domain(id, domain.clone())
+                        .map_err(|message| error(parameter.span, message))?;
+                    checker.nominal_input_prefixes.insert(id, domain);
+                }
+                checker.prepare_parameter_capabilities_prefix(owner, clauses, false)?;
+            }
+            checker.prepare_parameter_capabilities_prefix(owner, clauses, true)?;
+            let capabilities = checker
+                .capabilities
+                .get(&owner)
+                .cloned()
+                .unwrap_or_default();
+            for parameter in &parameters {
+                checker.nominal_input_prefixes.remove(parameter);
             }
             checker.type_parameters.insert(owner, parameters);
             if !trait_domains.is_empty() {
@@ -662,6 +685,10 @@ pub fn elaborate_packages_with_protocols(
         checker.signature_owner = Some(owner);
         match &item.kind {
             ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) => {
+                if checker.is_pattern_generator(owner) {
+                    checker.ensure_pattern_generator(owner, item.span)?;
+                    continue;
+                }
                 if checker.is_code_generator(owner) {
                     checker.ensure_code_generator(owner, item.span)?;
                     continue;
@@ -695,6 +722,7 @@ pub fn elaborate_packages_with_protocols(
             }
             ItemKind::Mod(_) | ItemKind::Use(_) | ItemKind::Trait(_) | ItemKind::Impl(_) => {}
             ItemKind::TypeAlias(value, ..) => {
+                checker.check_type_defaults(owner)?;
                 if checker.type_parameters[&owner].is_empty() {
                     checker.alias_type(owner, value, &[], item.span)?;
                 } else {
@@ -722,7 +750,7 @@ pub fn elaborate_packages_with_protocols(
     checker.checking_contract = true;
     for (owner, info) in package.owners() {
         checker.signature_owner = Some(owner);
-        if checker.is_code_generator(owner) {
+        if checker.is_code_generator(owner) || checker.is_pattern_generator(owner) {
             continue;
         }
         if !matches!(
@@ -795,7 +823,7 @@ pub fn elaborate_packages_with_protocols(
     // Definition-scope default checking precedes body checking. Only earlier
     // parameters are available; no caller-local lookup or evaluation occurs.
     for (owner, info) in package.owners() {
-        if checker.is_code_generator(owner) {
+        if checker.is_code_generator(owner) || checker.is_pattern_generator(owner) {
             continue;
         }
         if !matches!(
@@ -831,6 +859,7 @@ pub fn elaborate_packages_with_protocols(
     }
     let mut output = n::Package::default();
     output.normal_forms = checker.normal_form_metadata();
+    output.function_parameters = checker.function_parameter_metadata();
     for (owner, info) in package.owners() {
         let item = info.node.expect_item();
         if let ItemKind::Effect(_, modifiers) = &item.kind {
@@ -887,6 +916,14 @@ pub fn elaborate_packages_with_protocols(
     output.enums = checker.enums.values().cloned().collect();
     for owner in checker.open_functions.keys().copied().collect::<Vec<_>>() {
         checker.check_open_definition(owner)?;
+    }
+    for owner in checker
+        .pattern_generators
+        .keys()
+        .copied()
+        .collect::<Vec<_>>()
+    {
+        checker.check_pattern_generator(owner)?;
     }
     for owner in checker.code_generators.keys().copied().collect::<Vec<_>>() {
         checker.check_code_generator(owner)?;
@@ -1116,6 +1153,8 @@ struct Checker<'a, 'h> {
     self_types: BTreeMap<OwnerId, Term>,
     self_containers: BTreeMap<OwnerId, OwnerId>,
     interfaces_ready: bool,
+    checking_method_contract: bool,
+    pending_contract_projections: Vec<interfaces::PendingProjection>,
     checked_traits: Vec<n::Trait>,
     checked_implementations: Vec<n::Implementation>,
     associated_initializers:
@@ -1128,6 +1167,7 @@ struct Checker<'a, 'h> {
     associated_signature_values: BTreeMap<OwnerId, n::Expr>,
     implementation_index: crate::implementation::Index,
     trait_parameter_types: BTreeMap<OwnerId, Vec<Term>>,
+    nominal_input_prefixes: BTreeMap<DeclarationId, Term>,
     inherent_index: crate::implementation::InherentIndex,
     type_parameters: BTreeMap<OwnerId, Vec<DeclarationId>>,
     normal_parameters: BTreeMap<OwnerId, Vec<(DeclarationId, n::LocalId, Term)>>,
@@ -1164,6 +1204,9 @@ struct Checker<'a, 'h> {
     defaults: BTreeMap<OwnerId, Vec<Option<n::Expr>>>,
     locals: BTreeMap<n::LocalId, Term>,
     code_values: BTreeMap<n::LocalId, std::sync::Arc<cmtt::ExpressionCode>>,
+    pattern_codes: BTreeMap<n::LocalId, std::sync::Arc<cmtt::patterns::PatternCode>>,
+    pattern_quote_pending: Option<bool>,
+    pattern_generators: BTreeMap<OwnerId, cmtt::patterns::PatternGenerator>,
     code_generators: BTreeMap<OwnerId, cmtt::Generator>,
     // Invocation-local environments; recursive calls restore the previous entry.
     // The shared generator declaration cache always remains unspecialized.
@@ -1243,6 +1286,9 @@ impl Checker<'_, '_> {
     /// cycles through type observations are diagnosed explicitly.
     fn ensure_signature(&mut self, owner: OwnerId, span: Span) -> Result<(), Error> {
         self.validate_quote_function(owner, span)?;
+        if self.is_pattern_generator(owner) {
+            return self.ensure_pattern_generator(owner, span);
+        }
         if self.is_code_generator(owner) {
             return self.ensure_code_generator(owner, span);
         }
@@ -1362,11 +1408,9 @@ impl Checker<'_, '_> {
             }
             let mut normal_parameters = Vec::new();
             for parameter in sig.clause_params {
-                if sig.modifiers.is_normal_form_head {
-                    let prefix = self.normal_input_prefixes.entry(owner).or_default();
-                    let prepared = prefix.len();
-                    prefix.extend(normal_parameters[prepared..].iter().cloned());
-                }
+                let prefix = self.normal_input_prefixes.entry(owner).or_default();
+                let prepared = prefix.len();
+                prefix.extend(normal_parameters[prepared..].iter().cloned());
                 self.ready_signature_capabilities(owner, &mut pending_capabilities, false)?;
                 if let hir::clause::ClauseParamKind::Varadic(_, declared) = parameter.kind {
                     let ty = self.type_expr(declared)?;
@@ -1397,15 +1441,24 @@ impl Checker<'_, '_> {
                 }
                 if let hir::clause::ClauseParamKind::Positional(_, ty) = parameter.kind {
                     let ty = self.type_expr(ty)?;
-                    if ty != p(P::Type) && !sig.modifiers.is_normal_form_head {
-                        return Err(error(
-                            parameter.span,
-                            "comptime/generic/contract clause kind is not implemented",
-                        ));
-                    }
-                    if !nir::normal_forms::supported_input_type_with_layouts(
+                    if !nir::normal_forms::supported_input_type_in_scope(
                         &ty,
-                        &type_parameters,
+                        &type_parameters
+                            .iter()
+                            .map(|declaration| nir::DeclarationParameter {
+                                declaration: *declaration,
+                                sort: Sort::Type,
+                            })
+                            .chain(
+                                normal_parameters
+                                    .iter()
+                                    .filter(|(_, _, ty)| *ty != p(P::Type))
+                                    .map(|(declaration, _, _)| nir::DeclarationParameter {
+                                        declaration: *declaration,
+                                        sort: Sort::ComptimeValue,
+                                    }),
+                            )
+                            .collect::<Vec<_>>(),
                         |head| Some(head) == self.protocols.tuple,
                         |id| {
                             self.structs.contains_key(&id)
@@ -1423,6 +1476,12 @@ impl Checker<'_, '_> {
                         let id = parameter.definition.ok_or_else(|| {
                             error(parameter.span, "missing normal-form parameter identity")
                         })?;
+                        if !sig.modifiers.is_normal_form_head {
+                            type_parameters.push(DeclarationId {
+                                package: semantic_package(&self.package_identities, id.pkg),
+                                local: id.index,
+                            });
+                        }
                         normal_parameters.push((
                             DeclarationId {
                                 package: semantic_package(&self.package_identities, id.pkg),
@@ -1436,15 +1495,24 @@ impl Checker<'_, '_> {
                 } else if let hir::clause::ClauseParamKind::Optional(_, ty, _) = parameter.kind {
                     let ty = self.type_expr(ty)?;
                     if ty != p(P::Type) {
-                        if !sig.modifiers.is_normal_form_head {
-                            return Err(error(
-                                parameter.span,
-                                "comptime/generic/contract clause kind is not implemented: optional function clause currently requires Type",
-                            ));
-                        }
-                        if !nir::normal_forms::supported_input_type_with_layouts(
+                        if !nir::normal_forms::supported_input_type_in_scope(
                             &ty,
-                            &type_parameters,
+                            &type_parameters
+                                .iter()
+                                .map(|declaration| nir::DeclarationParameter {
+                                    declaration: *declaration,
+                                    sort: Sort::Type,
+                                })
+                                .chain(
+                                    normal_parameters
+                                        .iter()
+                                        .filter(|(_, _, ty)| *ty != p(P::Type))
+                                        .map(|(declaration, _, _)| nir::DeclarationParameter {
+                                            declaration: *declaration,
+                                            sort: Sort::ComptimeValue,
+                                        }),
+                                )
+                                .collect::<Vec<_>>(),
                             |head| Some(head) == self.protocols.tuple,
                             |id| {
                                 self.structs.contains_key(&id)
@@ -1461,6 +1529,12 @@ impl Checker<'_, '_> {
                         let id = parameter.definition.ok_or_else(|| {
                             error(parameter.span, "missing normal-form parameter identity")
                         })?;
+                        if !sig.modifiers.is_normal_form_head {
+                            type_parameters.push(DeclarationId {
+                                package: semantic_package(&self.package_identities, id.pkg),
+                                local: id.index,
+                            });
+                        }
                         normal_parameters.push((
                             DeclarationId {
                                 package: semantic_package(&self.package_identities, id.pkg),
@@ -1492,16 +1566,19 @@ impl Checker<'_, '_> {
                     // Later input types may refer only to Type inputs already
                     // encountered in this declaration telescope.
                     self.type_parameters.insert(owner, type_parameters.clone());
-                    normal_parameters.push((
-                        DeclarationId {
-                            package: semantic_package(&self.package_identities, id.pkg),
-                            local: id.index,
-                        },
-                        local(parameter.hir_id),
-                        p(P::Type),
-                    ));
                 }
+                normal_parameters.push((
+                    DeclarationId {
+                        package: semantic_package(&self.package_identities, id.pkg),
+                        local: id.index,
+                    },
+                    local(parameter.hir_id),
+                    p(P::Type),
+                ));
             }
+            let prefix = self.normal_input_prefixes.entry(owner).or_default();
+            let prepared = prefix.len();
+            prefix.extend(normal_parameters[prepared..].iter().cloned());
             capabilities = self.capabilities.get(&owner).cloned().unwrap_or_default();
             if had_contract {
                 for requirement in saved_capabilities.iter().flatten() {
@@ -1511,10 +1588,32 @@ impl Checker<'_, '_> {
                 }
             }
             self.capabilities.insert(owner, capabilities);
+            if !sig.modifiers.is_normal_form_head {
+                let domains: Vec<_> = type_parameters
+                    .iter()
+                    .map(|id| {
+                        normal_parameters
+                            .iter()
+                            .find(|(input, _, _)| input == id)
+                            .map(|(_, _, ty)| ty.clone())
+                            .or_else(|| self.trait_input_domain(*id))
+                            .unwrap_or_else(|| p(P::Type))
+                    })
+                    .collect();
+                for (id, domain) in type_parameters.iter().zip(&domains) {
+                    self.implementation_index
+                        .register_parameter_domain(*id, domain.clone())
+                        .map_err(|message| error(span, message))?;
+                    self.inherent_index
+                        .register_parameter_domain(*id, domain.clone())
+                        .map_err(|message| error(span, message))?;
+                }
+                self.trait_parameter_types.insert(owner, domains);
+            }
             self.type_parameters.insert(owner, type_parameters);
             let mut parameters = normal_parameters
                 .iter()
-                .filter(|(_, _, ty)| *ty != p(P::Type))
+                .filter(|(_, _, ty)| sig.modifiers.is_normal_form_head && *ty != p(P::Type))
                 .map(|(_, _, ty)| Parameter {
                     sort: Sort::ComptimeValue,
                     ty: ty.clone(),
@@ -1928,8 +2027,10 @@ impl Checker<'_, '_> {
                 self.expr(value, Some(ty))?
             } else {
                 self.field_default(owner, Some(index), slot)?
-                    .instantiate_types_in_scope(
-                        &self.enums[&id].type_parameters,
+                    .instantiate_parameters_in_scope(
+                        &self.enums[&id]
+                            .parameter_binders()
+                            .map_err(|e| error(expr.span, e.to_string()))?,
                         arguments,
                         &self.call_input_frames(),
                     )
@@ -1982,16 +2083,48 @@ impl Checker<'_, '_> {
                     .then_some(owner)
             })
             .ok_or_else(|| error(expr.span, "enum declaration owner is unavailable"))?;
+        let binders = definition
+            .parameter_binders()
+            .map_err(|e| error(expr.span, e.to_string()))?;
+        let mut open_binders = Vec::new();
+        let mut supplied = Vec::new();
+        for (slot, binder) in binders.iter().enumerate() {
+            if binder.sort == Sort::Type {
+                open_binders.push(*binder);
+                supplied.push(Term::Rigid {
+                    declaration: binder.declaration,
+                    sort: binder.sort,
+                });
+            } else {
+                let value = match context {
+                    crate::calls::InputContext::Nominal {
+                        declaration,
+                        arguments,
+                    } if *declaration == id => match arguments.get(slot) {
+                        Some(crate::calls::InputContext::Known(value)) => Some(value),
+                        _ => None,
+                    },
+                    crate::calls::InputContext::Known(Term::Nominal {
+                        declaration,
+                        arguments,
+                    }) if *declaration == id => arguments.get(slot),
+                    _ => None,
+                }
+                .filter(|value| value.sort() == binder.sort);
+                if let Some(value) = value {
+                    supplied.push(self.copy_alias_type(value, expr.span)?);
+                } else {
+                    open_binders.push(*binder);
+                    supplied.push(Term::Rigid {
+                        declaration: binder.declaration,
+                        sort: binder.sort,
+                    });
+                }
+            }
+        }
         let result = Term::Nominal {
             declaration: id,
-            arguments: definition
-                .type_parameters
-                .iter()
-                .map(|id| Term::Rigid {
-                    declaration: *id,
-                    sort: Sort::Type,
-                })
-                .collect(),
+            arguments: supplied.clone(),
         };
         let signature = Term::Function {
             parameters: variant
@@ -2001,7 +2134,7 @@ impl Checker<'_, '_> {
                     Ok(Parameter {
                         sort: Sort::Runtime,
                         ty: ty
-                            .abstract_parameters(&[])
+                            .instantiate_parameters(&binders, &supplied)
                             .map_err(|e| error(expr.span, e.to_string()))?,
                     })
                 })
@@ -2012,10 +2145,11 @@ impl Checker<'_, '_> {
                     .map_err(|e| error(expr.span, e.to_string()))?,
             ),
         }
-        .abstract_types(&definition.type_parameters)
+        .abstract_parameters(&open_binders)
         .map_err(|e| error(expr.span, e.to_string()))?;
         let scheme = crate::calls::Scheme {
-            type_parameters: definition.type_parameters.len(),
+            parameter_sorts: open_binders.iter().map(|binder| binder.sort).collect(),
+            type_parameters: open_binders.len(),
             signature,
         };
         let mut inputs = vec![None; variant.fields.len()];
@@ -2196,7 +2330,15 @@ impl Checker<'_, '_> {
                 ));
             }
         };
-        self.check_type_application(owner, &instance.type_arguments, expr.span)?;
+        let complete_arguments = supplied
+            .iter()
+            .map(|value| {
+                value
+                    .instantiate_parameters(&open_binders, &instance.type_arguments)
+                    .map_err(|e| error(expr.span, e.to_string()))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        self.check_type_application(owner, &complete_arguments, expr.span)?;
         let variants = self.instantiated_variants(&instance.result, expr.span)?;
         let mut fields = Vec::with_capacity(checked.len());
         for (slot, (value, default)) in checked.into_iter().zip(defaults).enumerate() {
@@ -2204,9 +2346,9 @@ impl Checker<'_, '_> {
                 Some(value) => value,
                 None => default
                     .expect("omitted payload has a checked default")
-                    .instantiate_types_in_scope(
-                        &definition.type_parameters,
-                        &instance.type_arguments,
+                    .instantiate_parameters_in_scope(
+                        &binders,
+                        &complete_arguments,
                         &self.call_input_frames(),
                     )
                     .map_err(|e| error(expr.span, e.to_string()))?,
@@ -3107,14 +3249,16 @@ impl Checker<'_, '_> {
                     }
                 }
                 if !self.alias_substitution.is_empty() {
-                    let parameters: Vec<_> = self.alias_substitution.keys().copied().collect();
+                    let parameters = self.input_binders(
+                        &self.alias_substitution.keys().copied().collect::<Vec<_>>(),
+                    );
                     let arguments: Vec<_> = self
                         .alias_substitution
                         .values()
                         .map(|ty| ty.as_ref().clone())
                         .collect();
                     return ty
-                        .instantiate_types(&parameters, &arguments)
+                        .instantiate_parameters(&parameters, &arguments)
                         .map_err(|e| error(expr.span, e.to_string()));
                 }
                 Ok(ty)
@@ -3918,10 +4062,12 @@ impl Checker<'_, '_> {
     // the body's chosen operations or relying on the transient checker state.
     fn definition_requirements(&self, owner: OwnerId) -> Vec<n::TypePredicate> {
         let mut requirements = self.requirements.get(&owner).cloned().unwrap_or_default();
-        for requirement in crate::capabilities::subject_requirements(
+        for requirement in crate::capabilities::subject_requirements_with_layouts(
             &self.checked_traits,
             &self.binder_assumptions(owner),
             crate::ptc::Budget::default(),
+            &self.implementation_index.parameter_domains,
+            Some(&self.implementation_index.nominal_layouts),
         ) {
             if !requirements.contains(&requirement) {
                 requirements.push(requirement);
@@ -3931,10 +4077,12 @@ impl Checker<'_, '_> {
     }
     fn binder_context(&self, owner: OwnerId) -> crate::ptc::Context {
         let mut context = self.nominal_context();
-        for requirement in crate::capabilities::subject_requirements(
+        for requirement in crate::capabilities::subject_requirements_with_layouts(
             &self.checked_traits,
             &self.binder_assumptions(owner),
             crate::ptc::Budget::default(),
+            &self.implementation_index.parameter_domains,
+            Some(&self.implementation_index.nominal_layouts),
         ) {
             context.assume(crate::ptc::Formula::from_predicate(&requirement));
         }
@@ -4283,6 +4431,7 @@ impl Checker<'_, '_> {
     ) -> Result<n::Expr, Error> {
         let saved = self.locals.clone();
         let saved_code = self.code_values.clone();
+        let saved_patterns = self.pattern_codes.clone();
         let saved_context = self.context.clone();
         let saved_staged: BTreeSet<_> = self
             .specialization_inputs
@@ -4363,6 +4512,7 @@ impl Checker<'_, '_> {
             .retain(|binding, _| saved_values.contains(binding));
         self.locals = saved;
         self.code_values = saved_code;
+        self.pattern_codes = saved_patterns;
         self.context = saved_context;
         result
     }
@@ -4454,7 +4604,12 @@ impl Checker<'_, '_> {
             .definition_owner(def_id)
             .ok_or_else(|| error(expr.span, "generic function has no HIR owner"))?;
         self.ensure_signature(owner, expr.span)?;
-        if self.has_optional_type_clauses(owner) {
+        if self.has_optional_type_clauses(owner)
+            || self
+                .trait_domains(owner)?
+                .iter()
+                .any(|domain| *domain != p(P::Type))
+        {
             let arguments = self.type_clause_arguments(owner, args, None, expr.span)?;
             let value = self.function_instance(expr, owner, arguments, None, allow_optional)?;
             return if allow_optional {
@@ -4589,9 +4744,14 @@ impl Checker<'_, '_> {
             self.instantiate_input_types(original, all_parameters, &template, expr.span)?;
         // Refine stable components after method-local binders enter inference.
         let scheme = crate::calls::Scheme {
+            parameter_sorts: self
+                .input_binders(&generic_parameters)
+                .iter()
+                .map(|p| p.sort)
+                .collect(),
             type_parameters: generic_parameters.len(),
             signature: signature
-                .abstract_types(&generic_parameters)
+                .abstract_parameters(&self.input_binders(&generic_parameters))
                 .map_err(|e| error(expr.span, e.to_string()))?,
         };
         let scope = self.call_inference_domains();
@@ -4953,6 +5113,7 @@ impl Checker<'_, '_> {
         let saved = (
             self.locals.clone(),
             self.code_values.clone(),
+            self.pattern_codes.clone(),
             self.aliases.clone(),
             self.result.clone(),
             self.partial_return_context.clone(),
@@ -4971,7 +5132,11 @@ impl Checker<'_, '_> {
         );
         let pending_len = self.pending_type_uses.as_ref().map(Vec::len);
         let old_defaults = std::mem::replace(&mut self.numeric_defaults, allow_defaults);
+        let pattern_pending = self.pattern_quote_pending;
         let attempt = check(self);
+        if attempt.is_err() {
+            self.pattern_quote_pending = pattern_pending;
+        }
         self.numeric_defaults = old_defaults;
         if !commit || attempt.is_err() {
             if let (Some(pending), Some(len)) = (&mut self.pending_type_uses, pending_len) {
@@ -4980,6 +5145,7 @@ impl Checker<'_, '_> {
             (
                 self.locals,
                 self.code_values,
+                self.pattern_codes,
                 self.aliases,
                 self.result,
                 self.partial_return_context,
@@ -5146,11 +5312,21 @@ impl Checker<'_, '_> {
             vec![caller_scope.iter().map(|p| p.0).collect()]
         };
         let prepared_signature = signature
-            .instantiate_types_in_scope(&known_inputs, &known_values, &caller_frames)
+            .instantiate_parameters_in_scope(
+                &self.input_binders(&known_inputs),
+                &known_values,
+                &caller_frames,
+            )
             .map_err(|e| error(expr.span, e.to_string()))?;
         let preview_arguments = template
             .iter()
-            .map(|ty| ty.instantiate_types_in_scope(&known_inputs, &known_values, &caller_frames))
+            .map(|ty| {
+                ty.instantiate_parameters_in_scope(
+                    &self.input_binders(&known_inputs),
+                    &known_values,
+                    &caller_frames,
+                )
+            })
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| error(expr.span, e.to_string()))?;
         let preview = n::Expr {
@@ -5205,9 +5381,14 @@ impl Checker<'_, '_> {
             ),
         };
         let scheme = crate::calls::Scheme {
+            parameter_sorts: self
+                .input_binders(&parameters)
+                .iter()
+                .map(|p| p.sort)
+                .collect(),
             type_parameters: parameters.len(),
             signature: inference_signature
-                .abstract_types(&parameters)
+                .abstract_parameters(&self.input_binders(&parameters))
                 .map_err(|e| error(expr.span, e.to_string()))?,
         };
         let mut inputs = vec![None; declarations.len()];
@@ -5337,7 +5518,7 @@ impl Checker<'_, '_> {
                         .filter(|v| {
                             assigned[index]
                                 || v.ty
-                                    .abstract_types(&parameters)
+                                    .abstract_parameters(&self.input_binders(&parameters))
                                     .is_ok_and(|t| t.check_scope(&[]).is_ok())
                         })
                         .filter(|v| !is_never(&v.ty))
@@ -5541,8 +5722,12 @@ impl Checker<'_, '_> {
         let full_arguments = template
             .iter()
             .map(|ty| {
-                ty.instantiate_types_in_scope(&parameters, &instance.type_arguments, &caller_frames)
-                    .map_err(|e| error(expr.span, e.to_string()))
+                ty.instantiate_parameters_in_scope(
+                    &self.input_binders(&parameters),
+                    &instance.type_arguments,
+                    &caller_frames,
+                )
+                .map_err(|e| error(expr.span, e.to_string()))
             })
             .collect::<Result<Vec<_>, _>>()?;
         self.check_type_application(owner, &full_arguments, expr.span)?;
@@ -5576,8 +5761,8 @@ impl Checker<'_, '_> {
                 let mut value = checked[parameter].take().unwrap();
                 value
                     .rewrite_types(&mut |ty| {
-                        ty.instantiate_types_in_scope(
-                            &parameters,
+                        ty.instantiate_parameters_in_scope(
+                            &self.input_binders(&parameters),
                             &instance.type_arguments,
                             &caller_frames,
                         )
@@ -5605,8 +5790,8 @@ impl Checker<'_, '_> {
                     ty: self.callable_type(
                         owner,
                         signature
-                            .instantiate_types_in_scope(
-                                &parameters,
+                            .instantiate_parameters_in_scope(
+                                &self.input_binders(&parameters),
                                 &instance.type_arguments,
                                 &caller_frames,
                             )
@@ -5644,11 +5829,9 @@ impl Checker<'_, '_> {
             callee
         };
         if let H::ResolvedDef { def_id, .. } = head.kind {
-            if self
-                .package
-                .definition_owner(def_id)
-                .is_some_and(|owner| self.is_code_generator(owner))
-            {
+            if self.package.definition_owner(def_id).is_some_and(|owner| {
+                self.is_code_generator(owner) || self.is_pattern_generator(owner)
+            }) {
                 return Err(error(
                     expr.span,
                     "code generator must be invoked in a comptime code position",
@@ -5999,9 +6182,9 @@ impl Checker<'_, '_> {
             Some(Term::Closure { signature, .. }) => Some(signature.as_ref()),
             other => other,
         };
-        let comptime = self.in_required_comptime || self.in_staged_input || self.signature_owner
+        let comptime = self.in_required_comptime || self.in_staged_input || (!self.in_code_body && self.signature_owner
             .and_then(|owner| self.package.item(owner))
-            .is_some_and(|item| matches!(&item.kind, ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) if sig.modifiers.is_comptime));
+            .is_some_and(|item| matches!(&item.kind, ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) if sig.modifiers.is_comptime)));
         let contextual = match expected_signature.map(Term::callable_signature) {
             Some(Term::Function { parameters, result }) => Some((parameters, result)),
             Some(_) => {
@@ -6430,6 +6613,10 @@ impl Checker<'_, '_> {
     ) -> Result<n::Pattern, Error> {
         use hir::pattern::PatternKind as HP;
         match &pattern.kind {
+            HP::CodeSplice(operand, outputs) => {
+                self.record_quote_hole(pattern.span)?;
+                self.connect_pattern_code(operand, outputs, ty, pattern.span)
+            }
             HP::OptionSome(inner) => {
                 let (declaration, _, index, payload) = self.optional_layout(ty, pattern.span)?;
                 Ok(n::Pattern::Variant {
@@ -6885,7 +7072,7 @@ impl Checker<'_, '_> {
                 {
                     let argument = argument.expect("arity and routing cover every parameter");
                     let ty = declared_ty
-                        .instantiate_types(&known_parameters, &known_types)
+                        .instantiate_parameters(&known_parameters, &known_types)
                         .map_err(|failure| error(argument.span, failure.to_string()))?;
                     let dependent = parameters
                         .iter()
@@ -6920,8 +7107,28 @@ impl Checker<'_, '_> {
                         {
                             // This evidence belongs only to the successful
                             // candidate; do not install a global solver fact.
-                            known_parameters.push(*parameter);
+                            known_parameters.push(nir::DeclarationParameter {
+                                declaration: *parameter,
+                                sort: Sort::Type,
+                            });
                             known_types.push(value.clone());
+                        }
+                    }
+                    if ty != p(P::Type) {
+                        let evidence = self
+                            .matched_value_pattern_input(&field, &ty, argument.span, 0)?
+                            .or_else(|| {
+                                observed_arguments
+                                    .and_then(|args| args.get(slot))
+                                    .filter(|value| value.sort() == Sort::ComptimeValue)
+                                    .cloned()
+                            });
+                        if let Some(value) = evidence {
+                            known_parameters.push(nir::DeclarationParameter {
+                                declaration: *parameter,
+                                sort: Sort::ComptimeValue,
+                            });
+                            known_types.push(value);
                         }
                     }
                     fields.push(field);
@@ -8207,11 +8414,9 @@ impl Checker<'_, '_> {
             ));
         }
         if let H::ResolvedDef { def_id, .. } = expr.kind {
-            if self
-                .package
-                .definition_owner(def_id)
-                .is_some_and(|owner| self.is_code_generator(owner))
-            {
+            if self.package.definition_owner(def_id).is_some_and(|owner| {
+                self.is_code_generator(owner) || self.is_pattern_generator(owner)
+            }) {
                 return Err(error(
                     expr.span,
                     "code generator must be invoked in a comptime code position",
@@ -8340,6 +8545,48 @@ impl Checker<'_, '_> {
                     kind: K::Local(*binding),
                 });
             }
+            // Container value parameters are generic inputs, not function locals.
+            // Keep their identity until the selected callable is instantiated.
+            if self.signature_owner.is_some_and(|owner| {
+                // Associated defaults share the trait's input telescope, but
+                // must retain the existing symbolic associated-member lookup.
+                let associated_parent = self
+                    .package
+                    .item(owner)
+                    .filter(|item| matches!(item.kind, ItemKind::Associated(_)))
+                    .and_then(|_| {
+                        self.package.owners().find_map(|(parent, info)| {
+                            match &info.node.expect_item().kind {
+                                ItemKind::Trait(def) if def.items.contains(&owner) => Some(parent),
+                                _ => None,
+                            }
+                        })
+                    });
+                std::iter::once(owner)
+                    .chain(self.self_containers.get(&owner).copied())
+                    .chain(associated_parent)
+                    .any(|scope| {
+                        self.type_parameters
+                            .get(&scope)
+                            .is_some_and(|parameters| parameters.contains(&declaration))
+                    })
+            }) && let Some(domain) = self
+                .trait_input_domain(declaration)
+                .filter(|ty| *ty != p(P::Type))
+            {
+                let ty = self.substituted_trait_domain(&domain, expr.span)?;
+                if let Some(expected) = expected {
+                    self.require_expression(&ty, expected, expr.span)?;
+                }
+                return Ok(n::Expr {
+                    source: source(expr.span),
+                    ty,
+                    kind: K::ComptimeValue(Term::Rigid {
+                        declaration,
+                        sort: Sort::ComptimeValue,
+                    }),
+                });
+            }
         }
         // Type observations form values without evaluating the observed term.
         // Only the explicit builtin BitVec head is an executable constructor;
@@ -8448,12 +8695,18 @@ impl Checker<'_, '_> {
                         let kind = if dynamic {
                             self.ensure_nominal(owner, expr.span)?;
                             K::NominalType {
+                                preparations: vec![],
+                                bindings: None,
+                                order: None,
                                 declaration: declaration(
                                     self.package,
                                     &self.package_identities,
                                     owner,
                                 ),
-                                arguments: values,
+                                arguments: values
+                                    .into_iter()
+                                    .map(n::NormalFormArgument::Value)
+                                    .collect(),
                             }
                         } else {
                             K::TypeValue(Term::Nominal {
@@ -8557,8 +8810,11 @@ impl Checker<'_, '_> {
                         expr.span,
                     )?;
                     K::NominalType {
+                        preparations: vec![],
+                        bindings: None,
+                        order: None,
                         declaration,
-                        arguments: vec![inner],
+                        arguments: vec![n::NormalFormArgument::Value(inner)],
                     }
                 };
                 return Ok(n::Expr {
@@ -10001,6 +10257,7 @@ fn stable_pattern(pattern: &n::Pattern) -> bool {
         | n::Pattern::TypeTuple(fields)
         | n::Pattern::Tuple(fields)
         | n::Pattern::Or(fields)
+        | n::Pattern::NominalType { fields, .. }
         | n::Pattern::Record { fields, .. }
         | n::Pattern::AnonymousRecord { fields, .. }
         | n::Pattern::Variant { fields, .. } => fields.iter().all(stable_pattern),
@@ -10152,7 +10409,9 @@ fn stable_default(expr: &n::Expr) -> bool {
         | K::EffectRun { .. }
         | K::EffectComputation { .. }
         | K::EffectRequest { .. } => false,
-        K::AssociatedValue { .. } | K::Literal(_) | K::Local(_) | K::Unit => true,
+        K::ComptimeValue(_) | K::AssociatedValue { .. } | K::Literal(_) | K::Local(_) | K::Unit => {
+            true
+        }
         K::BitSlice { value, .. }
         | K::BitConvert(value)
         | K::Snapshot(value)
@@ -10312,6 +10571,16 @@ fn pattern_bindings(
     use hir::pattern::PatternKind;
     let mut result = BTreeMap::new();
     match &pattern.kind {
+        PatternKind::CodeSplice(_, outputs) => {
+            for output in outputs {
+                if result
+                    .insert(output.name.name.to_string(), local(output.hir_id))
+                    .is_some()
+                {
+                    return Err(error(pattern.span, "duplicate pattern binding"));
+                }
+            }
+        }
         PatternKind::Then(first, _, next) => {
             result = pattern_bindings(first)?;
             for (name, id) in pattern_bindings(next)? {

@@ -37,10 +37,14 @@ fn staged_pattern_inputs<'a>(
             .checked_sub(1)
             .ok_or_else(|| error(span, "staged pattern structure budget exhausted"))?;
         match pattern {
+            n::Pattern::CodeEvidence { .. } => {
+                return Err(error(span, "unresolved pattern-code evidence"));
+            }
             n::Pattern::Wild | n::Pattern::Unit | n::Pattern::Literal(_) => {}
             n::Pattern::Tuple(fields)
             | n::Pattern::TypeTuple(fields)
             | n::Pattern::Or(fields)
+            | n::Pattern::NominalType { fields, .. }
             | n::Pattern::Record { fields, .. }
             | n::Pattern::AnonymousRecord { fields, .. }
             | n::Pattern::Variant { fields, .. }
@@ -499,6 +503,17 @@ impl Checker<'_, '_> {
                 kind,
             });
         }
+        // Runtime declaration identities are transportable data even though
+        // they are not scalar normal terms. Reconstruct the typed identity;
+        // the ordinary phase gate still forbids calling it during generation.
+        if matches!(&ty, Term::Function { .. })
+            && matches!(
+                value,
+                Value::RuntimeFunction { .. } | Value::RuntimeTraitMethod(_)
+            )
+        {
+            return self.materialize_local_constant(value, ty, span);
+        }
         // Captureless comptime callbacks carry no live
         // capture graph. Anonymous bodies and generic instances reuse constant
         // reconstruction as local callable constants.
@@ -755,15 +770,25 @@ impl Checker<'_, '_> {
                         return Err(error(span, "closure snapshot graph budget exhausted"));
                     }
                     for argument in arguments {
-                        let argument = self.copy_alias_type(argument, span)?;
-                        self.validate_closure_snapshot(
-                            &Value::Type(argument),
-                            span,
-                            depth + 1,
-                            active,
-                            completed,
+                        let mut budget = comptime_runtime::Budget {
+                            steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
+                            max_limbs: 4096,
+                        };
+                        let before = budget.steps;
+                        let checked = comptime_interpretor::validate_snapshot_term(
+                            argument,
+                            &mut budget,
                             type_scope,
-                        )?;
+                        );
+                        self.required_steps -= (before - budget.steps) as u64;
+                        checked.map_err(|cause| {
+                            error(
+                                span,
+                                format!(
+                                    "closure snapshot requires completed nominal inputs: {cause:?}"
+                                ),
+                            )
+                        })?;
                     }
                 }
                 if fields.len() as u64 > self.required_steps {
@@ -925,6 +950,23 @@ impl Checker<'_, '_> {
                     error(
                         span,
                         format!("closure snapshot requires completed capture data: {cause:?}"),
+                    )
+                })
+            }
+            Value::RuntimeFunction { .. } | Value::RuntimeTraitMethod(_) => {
+                let mut budget = comptime_runtime::Budget {
+                    steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
+                    max_limbs: 4096,
+                };
+                let before = budget.steps;
+                let checked = value.validate_runtime_identity_snapshot(&mut budget, type_scope);
+                self.required_steps -= (before - budget.steps) as u64;
+                checked.map_err(|cause| {
+                    error(
+                        span,
+                        format!(
+                            "closure snapshot requires completed runtime identity inputs: {cause:?}"
+                        ),
                     )
                 })
             }
@@ -1164,6 +1206,7 @@ impl Checker<'_, '_> {
                 }
                 n::Pattern::Tuple(fields)
                 | n::Pattern::AnonymousRecord { fields, .. }
+                | n::Pattern::NominalType { fields, .. }
                 | n::Pattern::Record { fields, .. } => pending.extend(fields),
                 n::Pattern::Guard { pattern, .. } | n::Pattern::Then { first: pattern, .. } => {
                     pending.push(pattern)
@@ -1336,6 +1379,7 @@ impl Checker<'_, '_> {
                 let patterns = match pattern {
                     n::Pattern::Wild => vec![n::Pattern::Wild; types.len()],
                     n::Pattern::Tuple(fields)
+                    | n::Pattern::NominalType { fields, .. }
                     | n::Pattern::Record { fields, .. }
                     | n::Pattern::AnonymousRecord { fields, .. } => fields,
                     _ => return Ok(None),
@@ -1690,6 +1734,7 @@ impl Checker<'_, '_> {
                                     pending.push(inner);
                                 }
                                 n::Pattern::Tuple(fields)
+                                | n::Pattern::NominalType { fields, .. }
                                 | n::Pattern::Record { fields, .. }
                                 | n::Pattern::AnonymousRecord { fields, .. } => {
                                     pending.extend(fields)
@@ -2237,7 +2282,7 @@ impl Checker<'_, '_> {
                     pending.extend(guard.as_deref());
                     pending.extend(otherwise.as_deref());
                 }
-                K::TypeValue(ty) => {
+                K::TypeValue(ty) | K::ComptimeValue(ty) => {
                     deferred |= type_bindings.iter().any(|id| ty.mentions_rigid(*id));
                     deferred |= !ty
                         .substitution_parameters()
@@ -2788,166 +2833,8 @@ impl Checker<'_, '_> {
 }
 
 pub(super) fn charge_copy(value: &n::Expr, steps: &mut u64, span: Span) -> Result<(), Error> {
-    enum Node<'a> {
-        Expr(&'a n::Expr),
-        Type(&'a Term),
-    }
-    let mut work = vec![(Node::Expr(value), 0usize)];
-    while let Some((node, depth)) = work.pop() {
-        if depth >= 128 || *steps == 0 {
-            return Err(error(span, "constant copy budget exhausted"));
-        }
-        *steps -= 1;
-        let size = match node {
-            Node::Expr(expr) => {
-                work.push((Node::Type(&expr.ty), depth + 1));
-                match &expr.kind {
-                    K::Call {
-                        callee,
-                        arguments,
-                        parameter_bindings,
-                    } => {
-                        work.push((Node::Expr(callee), depth + 1));
-                        work.extend(
-                            arguments
-                                .iter()
-                                .map(|argument| (Node::Expr(&argument.value), depth + 1)),
-                        );
-                        parameter_bindings.len()
-                    }
-                    K::Block { statements, result } | K::CallPreparation { statements, result } => {
-                        work.extend(statements.iter().map(|expr| (Node::Expr(expr), depth + 1)));
-                        if let Some(result) = result {
-                            work.push((Node::Expr(result), depth + 1));
-                        }
-                        0
-                    }
-                    K::Let { value, .. } => {
-                        work.push((Node::Expr(value), depth + 1));
-                        0
-                    }
-                    K::Closure {
-                        parameters,
-                        captures,
-                        ..
-                    } => {
-                        for capture in captures {
-                            work.push((Node::Type(&capture.ty), depth + 1));
-                            if let Some(value) = &capture.value {
-                                work.push((Node::Expr(value), depth + 1));
-                            }
-                        }
-                        // Expr::clone shares the immutable Arc body. Captured
-                        // initializers and parameter bindings are actual copies.
-                        parameters.len()
-                    }
-                    K::FunctionInstance { arguments, .. } => {
-                        work.extend(arguments.iter().map(|ty| (Node::Type(ty), depth + 1)));
-                        0
-                    }
-                    K::TraitMethod {
-                        subject,
-                        interface_arguments,
-                        method_arguments,
-                        ..
-                    } => {
-                        work.push((Node::Type(subject), depth + 1));
-                        work.extend(
-                            interface_arguments
-                                .iter()
-                                .chain(method_arguments)
-                                .map(|ty| (Node::Type(ty), depth + 1)),
-                        );
-                        0
-                    }
-                    K::TypeValue(ty) => {
-                        work.push((Node::Type(ty), depth + 1));
-                        0
-                    }
-                    K::TypeListValue(types) => {
-                        work.extend(types.iter().map(|ty| (Node::Type(ty), depth + 1)));
-                        0
-                    }
-                    K::TypeList(items)
-                    | K::Tuple(items)
-                    | K::AnonymousRecord { fields: items }
-                    | K::Record { fields: items, .. }
-                    | K::Variant { fields: items, .. } => {
-                        work.extend(items.iter().map(|e| (Node::Expr(e), depth + 1)));
-                        0
-                    }
-                    K::Literal(
-                        n::Literal::Symbol(s) | n::Literal::String(s) | n::Literal::Integer(s),
-                    ) => s.len(),
-                    K::Literal(n::Literal::BitVec { words, .. }) => words.len(),
-                    _ => 0,
-                }
-            }
-            Node::Type(ty) => match ty {
-                Term::AssociatedType {
-                    arguments, subject, ..
-                } => {
-                    work.push((Node::Type(subject), depth + 1));
-                    work.extend(arguments.iter().map(|t| (Node::Type(t), depth + 1)));
-                    0
-                }
-                Term::NominalValue { ty, fields, .. } => {
-                    work.push((Node::Type(ty), depth + 1));
-                    work.extend(fields.iter().map(|field| (Node::Type(field), depth + 1)));
-                    0
-                }
-                Term::Record(fields) | Term::RecordValue(fields) => {
-                    work.extend(fields.iter().map(|(_, ty)| (Node::Type(ty), depth + 1)));
-                    fields.iter().map(|(name, _)| name.len()).sum()
-                }
-                Term::Tuple(items)
-                | Term::TypeListValue(items)
-                | Term::TypeListConcat(items)
-                | Term::TupleValue(items)
-                | Term::Nominal {
-                    arguments: items, ..
-                }
-                | Term::NormalForm {
-                    arguments: items, ..
-                } => {
-                    work.extend(items.iter().map(|t| (Node::Type(t), depth + 1)));
-                    0
-                }
-                Term::Pointer(t) | Term::ComptimeFunction(t) => {
-                    work.push((Node::Type(t), depth + 1));
-                    0
-                }
-                Term::Function { parameters, result } => {
-                    work.push((Node::Type(result), depth + 1));
-                    work.extend(parameters.iter().map(|p| (Node::Type(&p.ty), depth + 1)));
-                    0
-                }
-                Term::Closure {
-                    environment,
-                    signature,
-                } => {
-                    work.push((Node::Type(signature), depth + 1));
-                    work.extend(environment.iter().map(|t| (Node::Type(t), depth + 1)));
-                    0
-                }
-                Term::String(s) | Term::Symbol(s) => s.len(),
-                Term::Integer(n) => n.bit_len().div_ceil(32),
-                Term::Float(value) => value
-                    .digits()
-                    .len()
-                    .saturating_add(value.exponent().bit_len().div_ceil(32)),
-                Term::BitVec(v) => v.words().len(),
-                _ => 0,
-            },
-        };
-        *steps = steps
-            .checked_sub(size as u64)
-            .ok_or_else(|| error(span, "constant copy budget exhausted"))?;
-        if work.len() as u64 > *steps {
-            return Err(error(span, "constant copy budget exhausted"));
-        }
-    }
-    Ok(())
+    nir::copy_budget::charge_expression(value, steps)
+        .map_err(|_| error(span, "constant copy budget exhausted"))
 }
 
 #[cfg(test)]
@@ -3063,5 +2950,119 @@ mod tests {
             };
             assert!(super::super::normal::clone_known_term(&ty, &mut budget).is_none());
         }
+    }
+
+    #[test]
+    fn contextual_constructor_copy_charges_unselected_literals_and_patterns() {
+        use n::NormalFormArgument as A;
+        let span = Span::default();
+        let location = source(span);
+        let large = "x".repeat(1024);
+        let input = A::Match {
+            source: location,
+            value: n::Expr {
+                source: location,
+                ty: p(P::Str),
+                kind: K::Literal(n::Literal::String("x".into())),
+            },
+            arms: vec![
+                n::NormalMatchArm {
+                    pattern: n::Pattern::Literal(n::Literal::String(large.clone())),
+                    guard: None,
+                    body: A::Integer {
+                        source: location,
+                        spelling: "1".into(),
+                        negative: false,
+                    },
+                },
+                n::NormalMatchArm {
+                    pattern: n::Pattern::Wild,
+                    guard: None,
+                    body: A::Integer {
+                        source: location,
+                        spelling: "7".repeat(1024),
+                        negative: false,
+                    },
+                },
+            ],
+        };
+        for nominal in [true, false] {
+            let arguments = vec![input.clone()];
+            let head = DeclarationId {
+                package: 1,
+                local: 1,
+            };
+            let value = n::Expr {
+                source: location,
+                ty: p(P::Type),
+                kind: if nominal {
+                    K::NominalType {
+                        preparations: vec![],
+                        bindings: None,
+                        order: None,
+                        declaration: head,
+                        arguments,
+                    }
+                } else {
+                    K::NormalFormType {
+                        head,
+                        arguments,
+                        plan: None,
+                    }
+                },
+            };
+            assert!(charge_copy(&value, &mut 128, span).is_err());
+            charge_copy(&value, &mut 4096, span).unwrap();
+        }
+    }
+
+    #[test]
+    fn contextual_constructor_copy_bounds_width_and_depth() {
+        use n::NormalFormArgument as A;
+        let span = Span::default();
+        let location = source(span);
+        let root = |argument| n::Expr {
+            source: location,
+            ty: p(P::Type),
+            kind: K::NominalType {
+                preparations: vec![],
+                bindings: None,
+                order: None,
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 1,
+                },
+                arguments: vec![argument],
+            },
+        };
+        let wide = root(A::Tuple {
+            source: location,
+            type_head: None,
+            items: vec![A::Unit { source: location }; 512],
+        });
+        assert!(charge_copy(&wide, &mut 64, span).is_err());
+        charge_copy(&wide, &mut 4096, span).unwrap();
+        let mut deep = A::Unit { source: location };
+        for _ in 0..129 {
+            deep = A::Block {
+                source: location,
+                statements: vec![],
+                result: Some(Box::new(deep)),
+            };
+        }
+        assert!(charge_copy(&root(deep), &mut 10000, span).is_err());
+        charge_copy(&root(A::Unit { source: location }), &mut 64, span).unwrap();
+    }
+
+    #[test]
+    fn constant_copy_charges_exact_float_literal_spelling() {
+        let span = Span::default();
+        let value = n::Expr {
+            source: source(span),
+            ty: p(P::Float),
+            kind: K::Literal(n::Literal::Float(format!("0.{}1", "0".repeat(1024)))),
+        };
+        assert!(charge_copy(&value, &mut 128, span).is_err());
+        charge_copy(&value, &mut 2048, span).unwrap();
     }
 }

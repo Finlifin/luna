@@ -208,6 +208,7 @@ impl Checker<'_, '_> {
             (known, None) | (None, known) => known,
         };
         Ok(match pattern {
+            P::CodeEvidence { .. } => None,
             P::Observe { .. } => None,
             P::Guard { pattern, condition } => {
                 // The canonical constant Type pattern binds its input and
@@ -270,6 +271,7 @@ impl Checker<'_, '_> {
             }
             P::Tuple(fields)
             | P::TypeTuple(fields)
+            | P::NominalType { fields, .. }
             | P::Record { fields, .. }
             | P::AnonymousRecord { fields, .. }
             | P::Variant { fields, .. }

@@ -89,6 +89,7 @@ fn at(source: n::SourceRange) -> Span {
 }
 struct Expansion<'a> {
     selection: Option<&'a n::Package>,
+    parameter_sorts: Option<BTreeMap<DeclarationId, nir::Sort>>,
     templates: BTreeMap<DeclarationId, &'a n::Function>,
     next: &'a mut u32,
     fuel: &'a mut u64,
@@ -114,6 +115,37 @@ struct PreparedTemplate {
     statements: Vec<n::Expr>,
 }
 impl Expansion<'_> {
+    fn binders(
+        &mut self,
+        ids: &[DeclarationId],
+        span: Span,
+    ) -> Result<Vec<nir::DeclarationParameter>, Error> {
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut fuel = usize::try_from(*self.fuel).unwrap_or(usize::MAX);
+        let result = (|| {
+            fuel = fuel
+                .checked_sub(ids.len())
+                .ok_or_else(|| "quote parameter budget exhausted".to_string())?;
+            if self.parameter_sorts.is_none() {
+                self.parameter_sorts = Some(match self.selection {
+                    Some(package) => package.declaration_parameter_sorts(&mut fuel)?,
+                    None => BTreeMap::new(),
+                });
+            }
+            let sorts = self.parameter_sorts.as_ref().unwrap();
+            Ok(ids
+                .iter()
+                .map(|id| nir::DeclarationParameter {
+                    declaration: *id,
+                    sort: sorts.get(id).copied().unwrap_or(nir::Sort::Type),
+                })
+                .collect())
+        })();
+        *self.fuel = fuel as u64;
+        result.map_err(|reason: String| error(span, reason))
+    }
     fn fresh(&mut self, span: Span) -> Result<n::LocalId, Error> {
         let id = n::LocalId {
             owner: u32::MAX,
@@ -410,9 +442,10 @@ impl Expansion<'_> {
             .chain(interface_arguments.iter().cloned())
             .chain(method_arguments.iter().cloned())
             .collect::<Vec<_>>();
+        let binders = self.binders(&declarations, at(expression.source))?;
         let mut program = method
             .program
-            .instantiate_types(&declarations, &arguments)
+            .instantiate_parameters(&binders, &arguments)
             .map_err(|failure| error(at(expression.source), failure.to_string()))?;
         if method.parameter_bindings.len() != template.parameters.len() {
             return Err(error(
@@ -608,8 +641,9 @@ impl Expansion<'_> {
                 .map_err(|failure| error(span, failure.to_string()))?;
         }
         *self.fuel = fuel as u64;
+        let binders = self.binders(&source_template.type_parameters, span)?;
         let mut template = source_template
-            .instantiate_types(&source_template.type_parameters, &types)
+            .instantiate_parameters(&binders, &types)
             .map_err(|failure| error(span, format!("quote fn instantiation: {failure}")))?;
         self.merge_entry_contract(expression, &mut template)?;
         if let Some(package) = self.selection {
@@ -1057,10 +1091,15 @@ pub(in crate::program) fn expand_retained_quote_functions(
     next: &mut u32,
     fuel: &mut u64,
 ) -> Result<(), Error> {
-    let selection = if output
-        .traits
-        .iter()
-        .any(|item| item.methods.iter().any(|method| method.is_quote))
+    let mut remaining = usize::try_from(*fuel).unwrap_or(usize::MAX);
+    let sorts = output.declaration_parameter_sorts(&mut remaining);
+    *fuel = remaining as u64;
+    let sorts = sorts.map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
+    let selection = if sorts.values().any(|sort| *sort == nir::Sort::ComptimeValue)
+        || output
+            .traits
+            .iter()
+            .any(|item| item.methods.iter().any(|method| method.is_quote))
     {
         let mut remaining = usize::try_from(*fuel).unwrap_or(usize::MAX);
         for function in output.functions.iter().chain(&output.quote_templates) {
@@ -1080,6 +1119,7 @@ pub(in crate::program) fn expand_retained_quote_functions(
         .map(|template| (template.declaration, template))
         .collect();
     let mut expansion = Expansion {
+        parameter_sorts: Some(sorts),
         selection: selection.as_ref(),
         templates,
         next,
@@ -1138,6 +1178,7 @@ pub(crate) fn expand_materialized_quotes(
     let mut packets = BTreeSet::new();
     let mut empty = BTreeMap::new();
     let mut expansion = Expansion {
+        parameter_sorts: None,
         selection: Some(package),
         templates,
         next,
@@ -1181,6 +1222,7 @@ pub(crate) fn expand_bound_quote(
     let mut packets = BTreeSet::new();
     let mut empty = BTreeMap::new();
     let mut expansion = Expansion {
+        parameter_sorts: None,
         selection: Some(package),
         templates,
         next,
@@ -1216,6 +1258,7 @@ pub(crate) fn inline_template(
 ) -> Result<(), String> {
     let mut remaining = *fuel as u64;
     let mut expansion = Expansion {
+        parameter_sorts: None,
         selection,
         templates: BTreeMap::new(),
         next,

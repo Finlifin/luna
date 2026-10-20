@@ -373,6 +373,51 @@ impl Checker<'_, '_> {
         Ok(supplied)
     }
 
+    /// Lexically visible declaration parameters used by both invocation and
+    /// reification. A member's outer value parameters remain invocation-scoped.
+    pub(super) fn visible_comptime_parameters(
+        &mut self,
+        span: Span,
+    ) -> Result<Vec<DeclarationId>, Error> {
+        let mut owner = self.signature_owner;
+        let mut seen = BTreeSet::new();
+        let mut parameters = BTreeSet::new();
+        while let Some(current) = owner {
+            if seen.len() >= 64 || !seen.insert(current) {
+                return Err(error(
+                    span,
+                    "abstract value capture environment is excessively deep",
+                ));
+            }
+            let current_parameters = self
+                .type_parameters
+                .get(&current)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            self.required_steps = self
+                .required_steps
+                .checked_sub(current_parameters.len() as u64 + 1)
+                .ok_or_else(|| error(span, "abstract value scope preparation budget exhausted"))?;
+            parameters.extend(current_parameters.iter().copied());
+            for inputs in self
+                .normal_parameters
+                .get(&current)
+                .into_iter()
+                .chain(self.normal_input_prefixes.get(&current))
+            {
+                self.required_steps = self
+                    .required_steps
+                    .checked_sub(inputs.len() as u64)
+                    .ok_or_else(|| {
+                        error(span, "abstract value scope preparation budget exhausted")
+                    })?;
+                parameters.extend(inputs.iter().map(|(id, _, _)| *id));
+            }
+            owner = self.self_containers.get(&current).copied();
+        }
+        Ok(parameters.into_iter().collect())
+    }
+
     pub(super) fn normal_value_argument(
         &mut self,
         value: &Expr<'_>,
@@ -407,19 +452,7 @@ impl Checker<'_, '_> {
             }
             Value::TypeList(types) => Term::TypeListValue(types),
             value => {
-                let parameters: BTreeSet<DeclarationId> = self
-                    .signature_owner
-                    .and_then(|owner| self.type_parameters.get(&owner))
-                    .into_iter()
-                    .flatten()
-                    .copied()
-                    .collect();
-                self.required_steps = self
-                    .required_steps
-                    .checked_sub(parameters.len() as u64)
-                    .ok_or_else(|| {
-                        error(span, "abstract value reification scope budget exhausted")
-                    })?;
+                let parameters = self.visible_comptime_parameters(span)?;
                 let mut value_parameters = BTreeMap::new();
                 for id in &parameters {
                     if let Some(domain) = self
@@ -611,6 +644,42 @@ impl Checker<'_, '_> {
 }
 
 impl Checker<'_, '_> {
+    pub(super) fn function_parameter_metadata(&self) -> Vec<nir::function_parameters::Declaration> {
+        self.signatures
+            .keys()
+            .chain(self.interface_signatures.keys())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .filter_map(|owner| {
+                let parameters = self.type_parameters.get(owner)?;
+                let (parameters, domains): (Vec<DeclarationId>, Vec<Term>) = if let Some(inputs) =
+                    self.normal_parameters.get(owner)
+                {
+                    (
+                        inputs.iter().map(|(id, _, _)| *id).collect(),
+                        inputs.iter().map(|(_, _, domain)| domain.clone()).collect(),
+                    )
+                } else {
+                    (
+                        parameters.clone(),
+                        parameters
+                            .iter()
+                            .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
+                            .collect(),
+                    )
+                };
+                if parameters.is_empty() {
+                    return None;
+                }
+                Some(nir::function_parameters::Declaration {
+                    declaration: declaration(self.package, &self.package_identities, *owner),
+                    parameters,
+                    domains,
+                })
+            })
+            .collect()
+    }
+
     pub(super) fn normal_form_metadata(&self) -> Vec<nir::normal_forms::Head> {
         self.normal_parameters
             .iter()
@@ -801,13 +870,11 @@ impl Checker<'_, '_> {
             let mut budget = comptime_runtime::Budget::default();
             let known = self.known_normal_input(&value, 0, &mut budget);
             let known = known.filter(|value| declared != p(P::Type) || value.sort() == Sort::Type);
-            if declared == p(P::Type) {
-                if let Some(ty) = &known {
-                    known_parameters.push(parameter);
-                    known_types.push(ty.clone());
-                } else {
-                    pending_parameters.insert(parameter);
-                }
+            if let Some(value) = &known {
+                known_parameters.push(parameter);
+                known_types.push(value.clone());
+            } else {
+                pending_parameters.insert(parameter);
             }
             formation_arguments[slot] = Some(known.unwrap_or_else(|| {
                 pending_inputs.insert(parameter);
@@ -871,6 +938,77 @@ impl Checker<'_, '_> {
 }
 
 impl Checker<'_, '_> {
+    pub(super) fn matched_value_pattern_input(
+        &mut self,
+        pattern: &n::Pattern,
+        ty: &Term,
+        span: Span,
+        depth: usize,
+    ) -> Result<Option<Term>, Error> {
+        if depth >= 128 {
+            return Err(error(span, "value pattern evidence depth exhausted"));
+        }
+        self.required_steps = self
+            .required_steps
+            .checked_sub(1)
+            .ok_or_else(|| error(span, "value pattern evidence budget exhausted"))?;
+        match pattern {
+            // Float equality need not identify one retained bit representation
+            // (notably signed zero). A known observed input may still supply it.
+            n::Pattern::Literal(
+                n::Literal::Float(_) | n::Literal::Float32(_) | n::Literal::Float64(_),
+            ) => Ok(None),
+            n::Pattern::Literal(literal) => {
+                let expr = n::Expr {
+                    source: source(span),
+                    ty: ty.clone(),
+                    kind: K::Literal(literal.clone()),
+                };
+                let mut budget = comptime_runtime::Budget {
+                    steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
+                    max_limbs: 4096,
+                };
+                let before = budget.steps;
+                let value = self.known_normal_input(&expr, 0, &mut budget);
+                self.required_steps -= (before - budget.steps) as u64;
+                Ok(value)
+            }
+            n::Pattern::Binding { inner, .. }
+            | n::Pattern::Remap { pattern: inner, .. }
+            | n::Pattern::Guard { pattern: inner, .. } => {
+                self.matched_value_pattern_input(inner, ty, span, depth + 1)
+            }
+            n::Pattern::Then { first, value, next } => {
+                if let Some(value) = self.matched_value_pattern_input(first, ty, span, depth + 1)? {
+                    return Ok(Some(value));
+                }
+                if let (n::Pattern::Binding { binding, inner }, K::Local(id)) =
+                    (first.as_ref(), &value.kind)
+                {
+                    if binding == id && matches!(inner.as_ref(), n::Pattern::Wild) {
+                        return self.matched_value_pattern_input(next, ty, span, depth + 1);
+                    }
+                }
+                Ok(None)
+            }
+            n::Pattern::Or(arms) => {
+                let mut common = None;
+                for arm in arms {
+                    let Some(value) = self.matched_value_pattern_input(arm, ty, span, depth + 1)?
+                    else {
+                        return Ok(None);
+                    };
+                    if common.as_ref().is_some_and(|previous| previous != &value) {
+                        return Ok(None);
+                    }
+                    common = Some(value);
+                }
+                Ok(common)
+            }
+            _ => Ok(None),
+        }
+    }
+
     // Recover an identity from already elaborated structure, never by running a
     // function or reducing a normal-form body. Keep the original expression so
     // its execution order and invocation-time validation remain unchanged.
@@ -894,7 +1032,7 @@ impl Checker<'_, '_> {
             return None;
         }
         match &expr.kind {
-            K::TypeValue(ty) => clone_known_term(ty, budget),
+            K::TypeValue(ty) | K::ComptimeValue(ty) => clone_known_term(ty, budget),
             K::TypeListValue(types) if self.is_type_list_type(&expr.ty) => {
                 let mut values = Vec::new();
                 for ty in types {
@@ -1511,6 +1649,21 @@ impl Checker<'_, '_> {
                     return clone_known_term(&symbol, budget);
                 }
                 if self.locals.contains_key(binding) {
+                    // Generator clause inputs use local expressions, but can
+                    // already have a stable symbolic value. Keep that value
+                    // instead of invoking an unavailable
+                    // definition-time local. Unknown defaults stay unknown.
+                    if self.generator_data.contains_key(binding)
+                        && let Some(value) = self.normal_default_bindings.iter().find_map(
+                            |(declaration, (local, _))| {
+                                (local == binding)
+                                    .then(|| self.alias_substitution.get(declaration))
+                                    .flatten()
+                            },
+                        )
+                    {
+                        return clone_known_term(value, budget);
+                    }
                     if let Some((symbol, _)) = self.value_input_bindings.get(binding) {
                         return clone_known_term(symbol, budget);
                     }
@@ -1532,7 +1685,7 @@ impl Checker<'_, '_> {
 }
 
 impl Checker<'_, '_> {
-    fn dependent_normal_argument(
+    pub(super) fn dependent_normal_argument(
         &mut self,
         input: &Expr<'_>,
         depth: usize,
@@ -1920,7 +2073,7 @@ mod tests {
         let flag = Term::Primitive(Primitive::Bool);
         let byte = Term::Primitive(Primitive::U8);
         let resolve = |e: &Expr, budget: &mut Budget| match &e.kind {
-            K::TypeValue(ty) => super::clone_known_term(ty, budget),
+            K::TypeValue(ty) | K::ComptimeValue(ty) => super::clone_known_term(ty, budget),
             K::TypeListValue(types) => Some(Term::TypeListValue(types.clone())),
             _ => None,
         };
@@ -2132,12 +2285,17 @@ impl Checker<'_, '_> {
         let ty = value.ty.clone();
         self.locals.insert(binding, ty.clone());
         let location = value.source;
-        let tuple_ty = self.tuple_value_type(vec![ty.clone()], span)?;
+        let diverges = is_never(&ty);
+        let tuple_ty = if diverges {
+            p(P::Never)
+        } else {
+            self.tuple_value_type(vec![ty.clone()], span)?
+        };
         preparations.push(n::NormalFormPreparation {
             before,
             expression: n::Expr {
                 source: location,
-                ty: p(P::Void),
+                ty: if diverges { p(P::Never) } else { p(P::Void) },
                 kind: K::LetPattern {
                     pattern: n::Pattern::Tuple(vec![n::Pattern::Binding {
                         binding,
@@ -2290,12 +2448,13 @@ impl Checker<'_, '_> {
                         Some(context) => self.input_context_expression(packet, &context)?,
                         None => self.expr(packet, None)?,
                     };
-                    let Term::Tuple(fields) = self.structural_type(&value.ty, packet.span)? else {
-                        return Err(error(
-                            packet.span,
-                            "normal-form spread requires a tuple value",
-                        ));
-                    };
+                    let fields = self.prepared_packet_fields(
+                        &value,
+                        &layout_inputs,
+                        input_index,
+                        &positional_types,
+                        packet.span,
+                    )?;
                     let mut budget = comptime_runtime::Budget {
                         steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
                         max_limbs: 4096,
@@ -2353,7 +2512,11 @@ impl Checker<'_, '_> {
                                 start: value.source.end,
                                 end: value.source.end,
                             },
-                            ty: p(P::Void),
+                            ty: if is_never(&value.ty) {
+                                p(P::Never)
+                            } else {
+                                p(P::Void)
+                            },
                             kind: K::LetPattern {
                                 pattern: n::Pattern::Tuple(pattern),
                                 value: Box::new(value),
@@ -2498,6 +2661,15 @@ impl Checker<'_, '_> {
                                         .insert(parameters[previous].0, bindings[previous]);
                                 }
                             } else {
+                                // A value prefix contributes to later type identities
+                                // as well as to executable default expressions. Keep
+                                // the local for evaluation and the known term for
+                                // dependent nominal domains; neither runs input code.
+                                if let Some(value) = &known[previous] {
+                                    let value = self.copy_alias_type(value, span)?;
+                                    self.alias_substitution
+                                        .insert(parameters[previous].0, std::sync::Arc::new(value));
+                                }
                                 self.normal_default_bindings.insert(
                                     parameters[previous].0,
                                     (
@@ -2538,9 +2710,7 @@ impl Checker<'_, '_> {
                         "cyclic or excessively deep normal-form default",
                     ));
                 }
-                let dependent = self.type_parameters[&owner]
-                    .iter()
-                    .any(|id| ty.mentions_rigid(*id));
+                let dependent = parameters.iter().any(|(id, _, _)| ty.mentions_rigid(*id));
                 let checked = if let Some(RoutedNormalInput::Collected(items)) = explicit {
                     Ok(n::NormalFormArgument::TypeList {
                         source: source(span),
@@ -2581,11 +2751,9 @@ impl Checker<'_, '_> {
                         std::sync::Arc::new(self.copy_alias_type(known, span)?),
                     );
                 }
-                if parameters[slot].2 == p(P::Type) {
-                    if let Some(ty) = &known[slot] {
-                        known_parameters.push(parameters[slot].0);
-                        known_types.push(ty.clone());
-                    }
+                if let Some(value) = &known[slot] {
+                    known_parameters.push(parameters[slot].0);
+                    known_types.push(value.clone());
                 }
                 self.locals.insert(
                     bindings[slot],
@@ -2625,7 +2793,9 @@ impl Checker<'_, '_> {
                 span,
             )?;
             let arguments: Vec<_> = values.into_iter().map(Option::unwrap).collect();
-            let ty = if arguments.iter().any(n::NormalFormArgument::is_diverging) {
+            let ty = if arguments.iter().any(n::NormalFormArgument::is_diverging)
+                || preparations.iter().any(|p| is_never(&p.expression.ty))
+            {
                 p(P::Never)
             } else {
                 p(P::Type)

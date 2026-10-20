@@ -301,6 +301,21 @@ impl Walker<'_> {
                     }),
                     _ => None,
                 };
+                let current = match &result.condition {
+                    Some(condition) => condition.is_current(&state.facts, self.limits, 0)?,
+                    None => false,
+                };
+                if !current {
+                    // A right-hand observation may exist only on the continued
+                    // path. Its identity does not survive the join, but the
+                    // already evaluated Boolean still has the joined range.
+                    result.condition = None;
+                    let root = self
+                        .result_root(&expr.ty)?
+                        .ok_or(Reason::InvalidSignature)?;
+                    self.bind_result(state, root, &expr.ty, result)?;
+                    result = self.local_value_at(state, root)?;
+                }
             }
             _ => unreachable!("flow operator dispatcher selected an incompatible expression"),
         }

@@ -8,7 +8,37 @@ mod parents;
 mod program_contracts;
 mod signatures;
 
+// Associated reads in program contracts need the complete implementation world.
+// Retain their exact declaration context without assuming the obligation itself.
+pub(super) struct PendingProjection {
+    requirement: n::TraitRequirement,
+    assumptions: Vec<n::TraitRequirement>,
+    context: crate::ptc::Context,
+    span: Span,
+}
+
 impl Checker<'_, '_> {
+    fn defer_contract_projection(
+        &mut self,
+        requirement: n::TraitRequirement,
+        span: Span,
+    ) -> Result<bool, Error> {
+        if !self.checking_method_contract || self.interfaces_ready {
+            return Ok(false);
+        }
+        self.required_steps = self
+            .required_steps
+            .checked_sub(1)
+            .ok_or_else(|| error(span, "program contract projection budget exhausted"))?;
+        self.pending_contract_projections.push(PendingProjection {
+            requirement,
+            assumptions: self.capability_assumptions(),
+            context: self.context.clone(),
+            span,
+        });
+        Ok(true)
+    }
+
     fn method_contract(
         &mut self,
         owner: OwnerId,
@@ -69,15 +99,20 @@ impl Checker<'_, '_> {
             // Forward only subject guarantees from already-declared parent
             // capabilities. Parameter-only requirements still need independent
             // formation evidence; they cannot bootstrap their own admission.
-            for requirement in
-                crate::capabilities::subject_requirements(traits, &[assumption], Budget::default())
-            {
+            for requirement in crate::capabilities::subject_requirements_with_layouts(
+                traits,
+                &[assumption],
+                Budget::default(),
+                &self.implementation_index.parameter_domains,
+                Some(&self.implementation_index.nominal_layouts),
+            ) {
                 context.assume(Formula::from_predicate(&requirement));
             }
         }
         let saved_context = std::mem::replace(&mut self.context, context);
         let saved_locals = std::mem::take(&mut self.locals);
         let mut code_signature = None;
+        let saved_contract_mode = std::mem::replace(&mut self.checking_method_contract, true);
         let program = (|| {
             if self.is_code_generator(owner) {
                 let (signature, program) = self.code_method_contract(owner, item.span)?;
@@ -107,6 +142,7 @@ impl Checker<'_, '_> {
                 entry_snapshots,
             })
         })();
+        self.checking_method_contract = saved_contract_mode;
         self.signature_owner = saved_owner;
         self.context = saved_context;
         self.locals = saved_locals;
@@ -267,7 +303,16 @@ impl Checker<'_, '_> {
         // binders, but the implementation being checked is never an assumption.
         self.checked_traits = traits.values().cloned().collect();
         let mut index = crate::implementation::Index::default();
+        for (id, domain) in &self.implementation_index.parameter_domains {
+            index
+                .register_parameter_domain(*id, domain.clone())
+                .map_err(|message| error(Span::default(), message))?;
+        }
         let mut inherent_index = crate::implementation::InherentIndex::default();
+        // Collect and admit every head before elaborating any implementation
+        // member. A head is candidate data, not evidence of a complete trait
+        // implementation; keep this index private until all checks succeed.
+        let mut headers = Vec::new();
         for (owner, info) in self.package.owners() {
             let item = info.node.expect_item();
             self.signature_owner = Some(owner);
@@ -390,6 +435,61 @@ impl Checker<'_, '_> {
                     )
                 })?;
             }
+            headers.push((
+                owner,
+                subject,
+                interface,
+                interface_arguments,
+                parameters,
+                requirements,
+                members,
+            ));
+        }
+        inherent_index.set_nominal_layouts(
+            self.structs.values().cloned().collect(),
+            self.enums.values().cloned().collect(),
+            self.newtypes.values().cloned().collect(),
+        );
+        let coherence_context = self.nominal_context();
+        let coherence = index.check_type_coherence(&coherence_context, Budget::default());
+        if !index.verify_type_coherence(&coherence, &coherence_context, Budget::default()) {
+            let pair = coherence
+                .pairs
+                .iter()
+                .find(|(_, _, result)| !result.is_proved());
+            let span = self
+                .package
+                .owners()
+                .find_map(|(owner, info)| {
+                    let item = info.node.expect_item();
+                    (matches!(item.kind, ItemKind::Impl(_))
+                        && pair.is_none_or(|(_, right, _)| {
+                            matches_declaration(
+                                self.package,
+                                &self.package_identities,
+                                owner,
+                                *right,
+                            )
+                        }))
+                    .then_some(item.span)
+                })
+                .unwrap_or_default();
+            return Err(error(
+                span,
+                format!(
+                    "implementation overlap is not provably disjoint{}",
+                    pair.map_or_else(
+                        || " (coherence budget or proof replay incomplete)".into(),
+                        |(left, right, _)| format!(" between {left} and {right}")
+                    )
+                ),
+            ));
+        }
+        for (owner, subject, interface, interface_arguments, parameters, requirements, members) in
+            headers
+        {
+            self.signature_owner = Some(owner);
+            let item = self.package.item(owner).unwrap();
             let mut supplied = BTreeMap::new();
             let mut supplied_associated = BTreeMap::new();
             let mut supplied_names = BTreeSet::new();
@@ -499,7 +599,16 @@ impl Checker<'_, '_> {
                                             {
                                                 Sort::ComptimeValue
                                             }
-                                            _ => Sort::Type,
+                                            _ => {
+                                                if self
+                                                    .trait_input_domain(*id)
+                                                    .is_some_and(|domain| domain != p(P::Type))
+                                                {
+                                                    Sort::ComptimeValue
+                                                } else {
+                                                    Sort::Type
+                                                }
+                                            }
                                         },
                                     }
                                     },
@@ -520,7 +629,16 @@ impl Checker<'_, '_> {
                                         {
                                             Sort::ComptimeValue
                                         }
-                                        _ => Sort::Type,
+                                        _ => {
+                                            if self
+                                                .trait_input_domain(*id)
+                                                .is_some_and(|domain| domain != p(P::Type))
+                                            {
+                                                Sort::ComptimeValue
+                                            } else {
+                                                Sort::Type
+                                            }
+                                        }
                                     },
                                 }
                             }))
@@ -595,6 +713,35 @@ impl Checker<'_, '_> {
                             item.span,
                             contract.name.clone(),
                         ));
+                        let clause_domains = contract
+                            .type_parameters
+                            .iter()
+                            .zip(&actual.type_parameters)
+                            .map(|(expected, actual)| {
+                                let expected = self
+                                    .trait_input_domain(*expected)
+                                    .unwrap_or_else(|| p(P::Type))
+                                    .instantiate_parameters(
+                                        &substitution_parameters,
+                                        &substitution_arguments,
+                                    )
+                                    .map_err(|e| error(item.span, e.to_string()))?;
+                                let actual = self
+                                    .trait_input_domain(*actual)
+                                    .unwrap_or_else(|| p(P::Type));
+                                Ok((expected, actual))
+                            })
+                            .collect::<Result<Vec<_>, Error>>()?;
+                        if !signatures::equivalent(
+                            &context,
+                            clause_domains.iter().map(|(a, b)| (a, b)),
+                            Budget::default(),
+                        ) {
+                            return Err(error(
+                                item.span,
+                                "method clause domains do not match its trait signature",
+                            ));
+                        }
                         // Open matching function binders in the contract's input
                         // frame. Comparing only the closed function terms would
                         // hide A == B premises from their parameter/result types.
@@ -818,6 +965,7 @@ impl Checker<'_, '_> {
                 ));
             }
             implementations.push(n::Implementation {
+                associated_initializers: vec![],
                 parameter_types: self
                     .trait_parameter_types
                     .get(&owner)
@@ -838,40 +986,21 @@ impl Checker<'_, '_> {
         inherent_index
             .check_coherence(&coherence_context, Budget::default())
             .map_err(|message| error(Span::default(), message))?;
-        let coherence = index.check_type_coherence(&coherence_context, Budget::default());
-        if !index.verify_type_coherence(&coherence, &coherence_context, Budget::default()) {
-            let pair = coherence
-                .pairs
-                .iter()
-                .find(|(_, _, result)| !result.is_proved());
-            let span = self
-                .package
-                .owners()
-                .find_map(|(owner, info)| {
-                    let item = info.node.expect_item();
-                    (matches!(item.kind, ItemKind::Impl(_))
-                        && pair.is_none_or(|(_, right, _)| {
-                            matches_declaration(
-                                self.package,
-                                &self.package_identities,
-                                owner,
-                                *right,
-                            )
-                        }))
-                    .then_some(item.span)
-                })
-                .unwrap_or_default();
-            return Err(error(
-                span,
-                format!(
-                    "implementation overlap is not provably disjoint{}",
-                    pair.map_or_else(
-                        || " (coherence budget or proof replay incomplete)".into(),
-                        |(left, right, _)| format!(" between {left} and {right}")
-                    )
-                ),
-            ));
+        for (id, domain) in &self.implementation_index.parameter_domains {
+            index
+                .register_parameter_domain(*id, domain.clone())
+                .map_err(|message| error(Span::default(), message))?;
         }
+        for (id, domain) in &self.implementation_index.parameter_domains {
+            inherent_index
+                .register_parameter_domain(*id, domain.clone())
+                .map_err(|message| error(Span::default(), message))?;
+        }
+        index.sync_nominal_layouts(
+            self.structs.values(),
+            self.enums.values(),
+            self.newtypes.values(),
+        );
         let trait_values: Vec<_> = traits.values().cloned().collect();
         for (requirements, assumptions, context, span, name) in method_capability_checks {
             let world = crate::capabilities::World {
@@ -986,6 +1115,27 @@ impl Checker<'_, '_> {
                         ));
                     }
                 }
+            }
+        }
+        for pending in std::mem::take(&mut self.pending_contract_projections) {
+            let world = crate::capabilities::World {
+                index: &index,
+                implementations: &implementations,
+                traits: &trait_values,
+                assumptions: &pending.assumptions,
+                context: &pending.context,
+            };
+            let decision = world
+                .decide_trait(
+                    &crate::ptc::TraitQuery::from(&pending.requirement),
+                    Budget::default(),
+                )
+                .map_err(|message| error(pending.span, message))?;
+            if decision.truth() != crate::capabilities::TraitTruth::Established {
+                return Err(error(
+                    pending.span,
+                    "program contract associated projection requires an established interface implementation",
+                ));
             }
         }
         self.implementation_index = index;
@@ -1123,6 +1273,11 @@ impl Checker<'_, '_> {
         name: &str,
         span: Span,
     ) -> Result<Option<(DeclarationId, Vec<Term>)>, Error> {
+        self.inherent_index.sync_nominal_layouts(
+            self.structs.values(),
+            self.enums.values(),
+            self.newtypes.values(),
+        );
         let resolution = self
             .resolve_inherent_capability(name, subject, Budget::default())
             .map_err(|e| error(span, format!("inherent method query failed: {e:?}")))?;
@@ -1163,7 +1318,16 @@ impl Checker<'_, '_> {
             other => {
                 return Err(error(
                     span,
-                    format!("inherent method applicability is unresolved: {other}"),
+                    format!(
+                        "inherent method applicability is unresolved: {other}; candidates: {}",
+                        resolution
+                            .types
+                            .assessments
+                            .iter()
+                            .map(|(id, assessment)| format!("{id}: {assessment}"))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ),
                 ));
             }
         })
@@ -1254,7 +1418,15 @@ impl Checker<'_, '_> {
                 other => {
                     return Err(error(
                         span,
-                        format!("method implementation is not uniquely established: {other}"),
+                        format!(
+                            "method implementation is not uniquely established: {other}; candidates: {}",
+                            resolution
+                                .assessments
+                                .iter()
+                                .map(|(id, assessment)| format!("{id}: {assessment}"))
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        ),
                     ));
                 }
             }
@@ -1611,6 +1783,13 @@ impl Checker<'_, '_> {
 
 impl Checker<'_, '_> {
     pub(super) fn self_type(&mut self, owner: OwnerId, span: Span) -> Result<Term, Error> {
+        let nominal = self.self_containers.get(&owner).copied().unwrap_or(owner);
+        if matches!(
+            self.package.item(nominal).map(|item| &item.kind),
+            Some(ItemKind::Struct(_) | ItemKind::Enum(_))
+        ) {
+            return Ok(self.nominal_self_type(nominal));
+        }
         if let Some(ty) = self.self_types.get(&owner) {
             return Ok(ty.clone());
         }
@@ -1683,6 +1862,9 @@ impl Checker<'_, '_> {
             return Ok(None);
         }
         let (base, interface) = match view.kind {
+            // A conversion to a Type produces the receiver; only a trait
+            // target selects a method interface on the original receiver.
+            H::Cast(_, target) if self.is_type_head(target) => (view, None),
             H::Cast(base, interface) if !self.is_static_method_subject(base) => {
                 (base, Some(interface))
             }
@@ -2299,7 +2481,11 @@ impl Checker<'_, '_> {
                 "explicit instantiation requires a generic method",
             )
         })?;
-        if self.has_optional_type_clauses(owner) {
+        if self.has_optional_type_clauses(owner)
+            || self.trait_domains(owner)?[fixed.len()..]
+                .iter()
+                .any(|domain| *domain != p(P::Type))
+        {
             let full =
                 self.type_clause_arguments_with_prefix(owner, args, None, expr.span, fixed)?;
             let value = self.function_instance(expr, owner, full, None, allow_optional)?;

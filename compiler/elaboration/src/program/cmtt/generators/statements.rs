@@ -2,24 +2,37 @@
 //! quote remains ordinary NIR and never targets these construction loops.
 use super::*;
 
-pub(super) enum Control {
+enum CodeWitness {
+    Expression(Arc<ExpressionCode>),
+    Pattern(Arc<patterns::PatternCode>),
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::program::cmtt) enum ResultInterface<'a> {
+    Expression(Option<&'a Interface>),
+    Pattern(&'a patterns::PatternInterface),
+}
+
+pub(in crate::program::cmtt) enum Control {
     Next,
     Break(n::LocalId),
     Continue(n::LocalId),
     Return(Arc<ExpressionCode>),
+    PatternReturn(Arc<patterns::PatternCode>),
     Abstract(Flow),
 }
 
 #[derive(Default)]
-pub(super) struct Flow {
-    pub(super) next: bool,
+pub(in crate::program::cmtt) struct Flow {
+    pub(in crate::program::cmtt) next: bool,
     breaks: BTreeSet<n::LocalId>,
     continues: BTreeSet<n::LocalId>,
-    pub(super) returns: Vec<Arc<ExpressionCode>>,
+    pub(in crate::program::cmtt) returns: Vec<Arc<ExpressionCode>>,
+    pub(in crate::program::cmtt) pattern_returns: Vec<Arc<patterns::PatternCode>>,
 }
 
 impl Control {
-    pub(super) fn flow(self) -> Flow {
+    pub(in crate::program::cmtt) fn flow(self) -> Flow {
         match self {
             Self::Next => Flow {
                 next: true,
@@ -37,12 +50,16 @@ impl Control {
                 returns: vec![code],
                 ..Default::default()
             },
+            Self::PatternReturn(code) => Flow {
+                pattern_returns: vec![code],
+                ..Default::default()
+            },
             Self::Abstract(flow) => flow,
         }
     }
 }
 impl Flow {
-    pub(super) fn has_transfer(&self) -> bool {
+    pub(in crate::program::cmtt) fn has_transfer(&self) -> bool {
         !self.breaks.is_empty() || !self.continues.is_empty()
     }
 }
@@ -59,6 +76,9 @@ impl fmt::Display for Flow {
         f.write_str(") (returns")?;
         for code in &self.returns {
             write!(f, " {code}")?;
+        }
+        for code in &self.pattern_returns {
+            write!(f, " (pattern {code})")?;
         }
         f.write_str("))")
     }
@@ -131,7 +151,9 @@ impl Checker<'_, '_> {
             .saturating_add(left.returns.len())
             .saturating_add(right.breaks.len())
             .saturating_add(right.continues.len())
-            .saturating_add(right.returns.len());
+            .saturating_add(right.returns.len())
+            .saturating_add(left.pattern_returns.len())
+            .saturating_add(right.pattern_returns.len());
         self.required_steps = self
             .required_steps
             .checked_sub(work as u64)
@@ -140,10 +162,11 @@ impl Checker<'_, '_> {
         left.breaks.extend(right.breaks);
         left.continues.extend(right.continues);
         left.returns.extend(right.returns);
+        left.pattern_returns.extend(right.pattern_returns);
         Ok(left)
     }
 
-    pub(super) fn sequence_generator_control(
+    pub(in crate::program::cmtt) fn sequence_generator_control(
         &mut self,
         previous: Control,
         next: Control,
@@ -163,6 +186,21 @@ impl Checker<'_, '_> {
         depth: usize,
         loops: &mut Vec<n::LocalId>,
     ) -> Result<Control, Error> {
+        self.generator_statement_with_result(
+            value,
+            ResultInterface::Expression(interface),
+            depth,
+            loops,
+        )
+    }
+
+    pub(in crate::program::cmtt) fn generator_statement_with_result(
+        &mut self,
+        value: &Expr<'_>,
+        interface: ResultInterface<'_>,
+        depth: usize,
+        loops: &mut Vec<n::LocalId>,
+    ) -> Result<Control, Error> {
         if depth >= 64 {
             return Err(error(
                 value.span,
@@ -174,7 +212,9 @@ impl Checker<'_, '_> {
             .checked_sub(1)
             .ok_or_else(|| error(value.span, "generator construction step budget exhausted"))?;
         match &value.kind {
-            H::Semi(inner) => self.generator_statement(inner, interface, depth + 1, loops),
+            H::Semi(inner) => {
+                self.generator_statement_with_result(inner, interface, depth + 1, loops)
+            }
             H::Let(decl) if decl.otherwise.is_some() => {
                 self.generator_conditional_binding(value, decl, interface, depth + 1, loops)
             }
@@ -203,7 +243,7 @@ impl Checker<'_, '_> {
             H::InlineControl(inner)
                 if matches!(inner.kind, H::If(..) | H::When(..) | H::Match(..)) =>
             {
-                self.generator_statement(inner, interface, depth + 1, loops)
+                self.generator_statement_with_result(inner, interface, depth + 1, loops)
             }
             H::InlineControl(inner) if matches!(inner.kind, H::For { .. }) => {
                 self.generator_inline_range(inner, interface, depth + 1, loops)
@@ -215,7 +255,7 @@ impl Checker<'_, '_> {
                     self.validate_generator_data(&condition_ir, condition.span)?;
                     let yes = self.generator_statement_block(yes, interface, depth + 1, loops)?;
                     let no = if let Some(no) = no {
-                        self.generator_statement(no, interface, depth + 1, loops)?
+                        self.generator_statement_with_result(no, interface, depth + 1, loops)?
                     } else {
                         Control::Next
                     };
@@ -236,7 +276,12 @@ impl Checker<'_, '_> {
                             self.generator_statement_block(yes, interface, depth + 1, loops)
                         }
                         comptime_interpretor::Value::Bool(false) => match no {
-                            Some(no) => self.generator_statement(no, interface, depth + 1, loops),
+                            Some(no) => self.generator_statement_with_result(
+                                no,
+                                interface,
+                                depth + 1,
+                                loops,
+                            ),
                             None => Ok(Control::Next),
                         },
                         _ => Err(error(
@@ -253,7 +298,12 @@ impl Checker<'_, '_> {
                     let selected = self.generator_when_condition(arm.cond)?;
                     if self.checking_code_generator {
                         let control = self.generator_scope(arm.span, |this| {
-                            this.generator_statement(arm.body, interface, depth + 1, loops)
+                            this.generator_statement_with_result(
+                                arm.body,
+                                interface,
+                                depth + 1,
+                                loops,
+                            )
                         })?;
                         if pending && selected != Some(false) {
                             flow = self.join_generator_flows(flow, control.flow(), arm.span)?;
@@ -263,7 +313,12 @@ impl Checker<'_, '_> {
                         }
                     } else if selected == Some(true) {
                         return self.generator_scope(arm.span, |this| {
-                            this.generator_statement(arm.body, interface, depth + 1, loops)
+                            this.generator_statement_with_result(
+                                arm.body,
+                                interface,
+                                depth + 1,
+                                loops,
+                            )
                         });
                     }
                 }
@@ -277,7 +332,7 @@ impl Checker<'_, '_> {
             H::Match(subject, arms) => {
                 let controls =
                     self.generator_match(value, subject, arms, None, |this, _, body| {
-                        this.generator_statement(body, interface, depth + 1, loops)
+                        this.generator_statement_with_result(body, interface, depth + 1, loops)
                     })?;
                 if self.checking_code_generator {
                     let mut flow = Flow::default();
@@ -351,11 +406,16 @@ impl Checker<'_, '_> {
                     Control::Continue(target)
                 })
             }
-            H::Return(Some(code)) => Ok(Control::Return(self.code_value(
-                code,
-                interface,
-                depth + 1,
-            )?)),
+            H::Return(Some(code)) => {
+                match interface {
+                    ResultInterface::Expression(interface) => Ok(Control::Return(
+                        self.code_value(code, interface, depth + 1)?,
+                    )),
+                    ResultInterface::Pattern(definition) => Ok(Control::PatternReturn(
+                        self.pattern_generator_value(code, definition, depth + 1)?,
+                    )),
+                }
+            }
             H::Return(None) => Err(error(
                 value.span,
                 "code generator return requires a code value",
@@ -379,7 +439,7 @@ impl Checker<'_, '_> {
     fn generator_inline_range(
         &mut self,
         value: &Expr<'_>,
-        interface: Option<&Interface>,
+        interface: ResultInterface<'_>,
         depth: usize,
         loops: &mut Vec<n::LocalId>,
     ) -> Result<Control, Error> {
@@ -608,7 +668,7 @@ impl Checker<'_, '_> {
         &mut self,
         value: &Expr<'_>,
         input: &Expr<'_>,
-        interface: Option<&Interface>,
+        interface: ResultInterface<'_>,
         depth: usize,
         loops: &mut Vec<n::LocalId>,
     ) -> Result<Control, Error> {
@@ -802,18 +862,20 @@ impl Checker<'_, '_> {
         &mut self,
         site: &Expr<'_>,
         decl: &hir::decl::LetDecl<'_>,
-        interface: Option<&Interface>,
+        interface: ResultInterface<'_>,
         depth: usize,
         loops: &mut Vec<n::LocalId>,
     ) -> Result<Control, Error> {
         let initializer = decl
             .init
             .ok_or_else(|| error(decl.span, "generator binding needs an initializer"))?;
-        if self.code_producer(initializer) {
-            return Err(error(
-                decl.span,
-                "conditional destructuring requires generator data, not a code witness",
-            ));
+        if self.pattern_code_producer(initializer, decl.ty)
+            || self.code_producer(initializer)
+            || decl
+                .ty
+                .is_some_and(|ty| matches!(ty.kind, H::ContextualExprType(..)))
+        {
+            return self.generator_conditional_code_binding(decl, interface, depth, loops);
         }
         let expected = decl.ty.map(|ty| self.type_expr(ty)).transpose()?;
         let otherwise = decl.otherwise.unwrap();
@@ -844,7 +906,8 @@ impl Checker<'_, '_> {
             expected.as_ref(),
             |this, index, body| {
                 if index == 1 {
-                    let control = this.generator_statement(body, interface, depth + 1, loops)?;
+                    let control =
+                        this.generator_statement_with_result(body, interface, depth + 1, loops)?;
                     let falls_through = match &control {
                         Control::Next => true,
                         Control::Abstract(flow) => flow.next,
@@ -902,17 +965,109 @@ impl Checker<'_, '_> {
         })
     }
 
+    fn generator_conditional_code_binding(
+        &mut self,
+        decl: &hir::decl::LetDecl<'_>,
+        interface: ResultInterface<'_>,
+        depth: usize,
+        loops: &mut Vec<n::LocalId>,
+    ) -> Result<Control, Error> {
+        // Bind the whole witness only on the success path. The initializer and
+        // guard run once; the failure branch sees the original lexical scope.
+        let (condition, bindings) = self.generator_scope(decl.span, |this| {
+            let mut plain = decl.clone();
+            plain.guard = None;
+            plain.otherwise = None;
+            let pattern = this.pattern_code_producer(plain.init.unwrap(), plain.ty);
+            if pattern {
+                this.pattern_code_binding_mode(&plain, None, true)?;
+            } else {
+                this.code_binding(&plain, None, true)?;
+            }
+            let condition = this.generator_when_condition(decl.guard)?;
+            let bindings = pattern_bindings(&decl.pattern)?
+                .into_values()
+                .map(|id| {
+                    (if pattern {
+                        this.pattern_codes
+                            .get(&id)
+                            .cloned()
+                            .map(CodeWitness::Pattern)
+                    } else {
+                        this.code_values
+                            .get(&id)
+                            .cloned()
+                            .map(CodeWitness::Expression)
+                    })
+                    .map(|code| (id, code))
+                    .ok_or_else(|| error(decl.span, "conditional code binding has no witness"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((condition, bindings))
+        })?;
+        let failure = if self.checking_code_generator || condition == Some(false) {
+            let otherwise = decl.otherwise.unwrap();
+            let failure = self.generator_scope(otherwise.span, |this| {
+                this.generator_statement_with_result(otherwise, interface, depth + 1, loops)
+            })?;
+            if matches!(&failure, Control::Next)
+                || matches!(&failure, Control::Abstract(flow) if flow.next)
+            {
+                return Err(error(
+                    otherwise.span,
+                    "generator let-else branch must diverge",
+                ));
+            }
+            Some(failure)
+        } else {
+            None
+        };
+        if self.checking_code_generator || condition == Some(true) {
+            for (id, code) in bindings {
+                match code {
+                    CodeWitness::Expression(code) => {
+                        self.code_values.insert(id, code);
+                    }
+                    CodeWitness::Pattern(code) => {
+                        self.pattern_codes.insert(id, code);
+                    }
+                }
+                if decl.mutable {
+                    self.immutable.remove(&id);
+                } else {
+                    self.immutable.insert(id);
+                }
+            }
+        }
+        match condition {
+            Some(true) => Ok(Control::Next),
+            Some(false) => Ok(failure.unwrap()),
+            None if self.checking_code_generator => {
+                Ok(Control::Abstract(self.join_generator_flows(
+                    Control::Next.flow(),
+                    failure.unwrap().flow(),
+                    decl.span,
+                )?))
+            }
+            None => Err(error(
+                decl.span,
+                "generator binding guard requires a comptime boolean",
+            )),
+        }
+    }
+
     fn generator_statement_block(
         &mut self,
         block: &hir::Block<'_>,
-        interface: Option<&Interface>,
+        interface: ResultInterface<'_>,
         depth: usize,
         loops: &mut Vec<n::LocalId>,
     ) -> Result<Control, Error> {
         self.generator_scope(block.span, |this| {
             let mut result = Control::Next;
             for value in block.stmts.iter().chain(block.expr.into_iter()) {
-                let control = this.generator_statement(value, interface, depth + 1, loops)?;
+                let control =
+                    this.generator_statement_with_result(value, interface, depth + 1, loops)?;
                 if this.checking_code_generator {
                     result = this.sequence_generator_control(result, control, value.span)?;
                 } else if !matches!(control, Control::Next) {

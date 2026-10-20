@@ -12,6 +12,7 @@ pub struct ExprOption {
     pub stop_at_pipe: bool,
     pub stop_at_do: bool,
     pub stop_at_pattern_gt: bool,
+    pub stop_at_pattern_context: bool,
     pub stop_at_type_qualifier: bool,
     pub stop_at_call: bool,
     pub stop_at_named_parameter: bool,
@@ -24,6 +25,7 @@ impl ExprOption {
             stop_at_pipe: false,
             stop_at_do: false,
             stop_at_pattern_gt: false,
+            stop_at_pattern_context: false,
             stop_at_type_qualifier: false,
             stop_at_call: false,
             stop_at_named_parameter: false,
@@ -98,6 +100,14 @@ impl Parser<'_> {
                     break;
                 }
                 if option.stop_at_pattern_gt && token.kind == TokenKind::SeparatedGt {
+                    break;
+                }
+                if option.stop_at_pattern_context
+                    && (p.peek(&[TokenKind::Minus, TokenKind::Pipe])
+                        || p.peek(&[TokenKind::SeparatedMinus, TokenKind::Pipe])
+                        || p.peek(&[TokenKind::Minus, TokenKind::PipeGt])
+                        || p.peek(&[TokenKind::SeparatedMinus, TokenKind::PipeGt]))
+                {
                     break;
                 }
                 if option.stop_at_do && token.kind == TokenKind::Do {

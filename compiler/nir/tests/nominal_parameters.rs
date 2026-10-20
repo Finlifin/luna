@@ -209,6 +209,7 @@ fn completed_nominal_integer_indices_must_fit_without_truncation() {
 fn synthetic_impls_share_container_binders_only_with_identical_domains() {
     let declaration = record(vec![Term::Primitive(P::Type), Term::Primitive(P::Bool)]);
     let implementation = nir::program::Implementation {
+        associated_initializers: vec![],
         parameter_types: declaration.parameter_types.clone(),
         type_parameters: declaration.type_parameters.clone(),
         declaration: id(10),
@@ -305,4 +306,260 @@ fn nominal_field_projection_preserves_abstract_value_binders() {
             arguments: vec![rigid(11, Sort::ComptimeValue)]
         }
     );
+}
+
+#[test]
+fn admission_budget_failures_are_not_domain_failures() {
+    use nir::{
+        NominalAdmissionError as AdmissionError,
+        validate_declaration_arguments as validate_completed,
+    };
+    let name = "long_record_field_name".to_string();
+    let domains = [Term::Record(vec![(name.clone(), Term::Primitive(P::Bool))])];
+    let arguments = [Term::RecordValue(vec![(name, Term::Bool(true))])];
+    let mut exhausted = false;
+    let mut completed = false;
+    for budget in 0..512 {
+        match validate_completed(&[id(1)], &domains, &arguments, &mut { budget }) {
+            Ok(()) => completed = true,
+            Err(AdmissionError::Budget) => exhausted = true,
+            Err(error) => panic!("valid input failed at budget {budget}: {error}"),
+        }
+    }
+    assert!(exhausted && completed);
+    assert!(matches!(
+        validate_completed(&[], &[], &arguments, &mut 0),
+        Err(AdmissionError::Invalid(_))
+    ));
+}
+
+#[test]
+fn package_parameter_domains_preserve_dependent_telescope_evidence() {
+    let package = nir::program::Package {
+        structs: vec![record(vec![Term::Primitive(P::Type), rigid(1, Sort::Type)])],
+        ..Default::default()
+    };
+    let domains = package.declaration_parameter_domains(&mut 1000).unwrap();
+    assert_eq!(domains[&id(1)], Term::Primitive(P::Type));
+    assert_eq!(domains[&id(2)], rigid(1, Sort::Type));
+    assert!(package.declaration_parameter_domains(&mut 0).is_err());
+    assert_eq!(
+        package.declaration_parameter_domains(&mut 1000).unwrap(),
+        domains
+    );
+    let sorts = package.declaration_parameter_sorts(&mut 1000).unwrap();
+    assert_eq!(sorts[&id(1)], Sort::Type);
+    assert_eq!(sorts[&id(2)], Sort::ComptimeValue);
+}
+
+#[test]
+fn newtype_and_alias_domains_include_shared_captured_inputs() {
+    let mut package = nir::program::Package {
+        structs: vec![record(vec![Term::Primitive(P::Type), rigid(1, Sort::Type)])],
+        newtypes: vec![nir::newtypes::Newtype {
+            declaration: id(30),
+            name: "Member".into(),
+            capture_count: 2,
+            type_parameters: vec![id(3), id(1), id(2)],
+            parameter_types: vec![
+                Term::Primitive(P::Bool),
+                Term::Primitive(P::Type),
+                rigid(1, Sort::Type),
+            ],
+            representation: Term::Primitive(P::Bool),
+            requirements: vec![],
+            capabilities: vec![],
+        }],
+        alias_contracts: vec![nir::type_aliases::Contract {
+            declaration: id(40),
+            parameters: vec![id(1), id(2), id(4)],
+            parameter_types: vec![
+                Term::Primitive(P::Type),
+                rigid(1, Sort::Type),
+                Term::Primitive(P::U8),
+            ],
+            requirements: vec![],
+            capabilities: vec![],
+        }],
+        ..Default::default()
+    };
+    let domains = package.declaration_parameter_domains(&mut 1000).unwrap();
+    assert_eq!(domains.get(&id(3)), Some(&Term::Primitive(P::Bool)));
+    assert_eq!(domains.get(&id(4)), Some(&Term::Primitive(P::U8)));
+    assert_eq!(domains.get(&id(2)), Some(&rigid(1, Sort::Type)));
+    package.newtypes[0].parameter_types[2] = Term::Primitive(P::Char);
+    assert!(package.declaration_parameter_domains(&mut 1000).is_err());
+    package.newtypes[0].parameter_types[2] = rigid(1, Sort::Type);
+    package.alias_contracts[0].parameter_types[1] = Term::Primitive(P::Bool);
+    assert!(package.declaration_parameter_domains(&mut 1000).is_err());
+    package.alias_contracts[0].parameter_types[1] = rigid(1, Sort::Type);
+    assert_eq!(
+        package.declaration_parameter_domains(&mut 1000).unwrap(),
+        domains
+    );
+}
+
+#[test]
+fn nominal_payload_admission_requires_layout_and_checks_every_field() {
+    use nir::{NominalAdmissionError as E, validate_declaration_arguments_with_layouts as admit};
+    let ty = Term::Nominal {
+        declaration: id(70),
+        arguments: vec![Term::Bool(true)],
+    };
+    let value = Term::NominalValue {
+        ty: Box::new(ty.clone()),
+        variant: None,
+        fields: vec![Term::Bool(true)],
+    };
+    let check = |value: Term, domain: Term, budget: usize| {
+        admit(
+            &[id(1)],
+            &[domain],
+            &[value],
+            &mut { budget },
+            |actual, variant, fuel| {
+                *fuel = fuel.checked_sub(1).ok_or(E::Budget)?;
+                if actual != &ty || variant.is_some() {
+                    return Err(E::Invalid("unknown layout".into()));
+                }
+                Ok(vec![Term::Primitive(P::Bool)])
+            },
+        )
+    };
+    assert!(check(value.clone(), ty.clone(), 1000).is_ok());
+    assert!(
+        nir::validate_declaration_arguments(&[id(1)], &[ty.clone()], &[value.clone()], &mut 1000)
+            .is_err()
+    );
+    for forged in [
+        Term::NominalValue {
+            ty: Box::new(ty.clone()),
+            variant: Some(0),
+            fields: vec![Term::Bool(true)],
+        },
+        Term::NominalValue {
+            ty: Box::new(ty.clone()),
+            variant: None,
+            fields: vec![],
+        },
+        Term::NominalValue {
+            ty: Box::new(ty.clone()),
+            variant: None,
+            fields: vec![Term::Char('x')],
+        },
+        Term::NominalValue {
+            ty: Box::new(Term::Nominal {
+                declaration: id(70),
+                arguments: vec![Term::Bool(false)],
+            }),
+            variant: None,
+            fields: vec![Term::Bool(true)],
+        },
+    ] {
+        assert!(matches!(
+            check(forged, ty.clone(), 1000),
+            Err(E::Invalid(_))
+        ));
+    }
+    let domain = Term::Record(vec![("nested".into(), Term::Tuple(vec![ty.clone()]))]);
+    let nested = Term::RecordValue(vec![(
+        "nested".into(),
+        Term::TupleValue(vec![value.clone()]),
+    )]);
+    assert!(check(nested.clone(), domain.clone(), 1000).is_ok());
+    let mut succeeded = false;
+    for budget in 0..1000 {
+        match check(nested.clone(), domain.clone(), budget) {
+            Ok(()) => {
+                succeeded = true;
+                break;
+            }
+            Err(E::Budget) => {}
+            Err(error) => panic!("{budget}: {error}"),
+        }
+    }
+    assert!(succeeded);
+}
+
+#[test]
+fn layout_lookup_preserves_exhaustion_evidence_for_valid_indices() {
+    let mut package = nir::program::Package {
+        structs: vec![record(vec![
+            Term::Primitive(P::Type),
+            Term::Primitive(P::U8),
+        ])],
+        newtypes: vec![nir::newtypes::Newtype {
+            declaration: id(5),
+            name: "Captured".into(),
+            type_parameters: vec![id(6), id(7)],
+            parameter_types: vec![rigid(7, Sort::Type), Term::Primitive(P::Type)],
+            capture_count: 1,
+            representation: Term::Primitive(P::Bool),
+            requirements: vec![],
+            capabilities: vec![],
+        }],
+        ..Default::default()
+    };
+    let inner = Term::Nominal {
+        declaration: id(5),
+        arguments: vec![Term::Bool(true), Term::Primitive(P::Bool)],
+    };
+    package.structs.push(Struct {
+        declaration: id(10),
+        name: "Nested".into(),
+        type_parameters: vec![id(11)],
+        parameter_types: vec![inner.clone()],
+        fields: vec![],
+        requirements: vec![],
+        capabilities: vec![],
+    });
+    let mut invalid_fuel = 2000;
+    let invalid = Term::Nominal {
+        declaration: id(5),
+        arguments: vec![Term::Char('x'), Term::Primitive(P::Bool)],
+    };
+    assert!(
+        nir::normal_forms::nominal_value_fields_budgeted(
+            &package,
+            &invalid,
+            None,
+            &mut invalid_fuel
+        )
+        .is_none()
+    );
+    assert!(invalid_fuel > 0);
+    for ty in [
+        Term::Nominal {
+            declaration: id(10),
+            arguments: vec![Term::NominalValue {
+                ty: Box::new(inner),
+                variant: None,
+                fields: vec![Term::Bool(true)],
+            }],
+        },
+        Term::Nominal {
+            declaration: id(0),
+            arguments: vec![
+                Term::Primitive(P::Bool),
+                Term::Integer(comptime_runtime::Integer::from_u128(255)),
+            ],
+        },
+        Term::Nominal {
+            declaration: id(5),
+            arguments: vec![Term::Bool(true), Term::Primitive(P::Bool)],
+        },
+    ] {
+        let mut succeeded = false;
+        for budget in 0..2000 {
+            let mut fuel = budget;
+            match nir::normal_forms::nominal_value_fields_budgeted(&package, &ty, None, &mut fuel) {
+                Some(_) => {
+                    succeeded = true;
+                    break;
+                }
+                None => assert_eq!(fuel, 0, "valid layout reported invalid at budget {budget}"),
+            }
+        }
+        assert!(succeeded);
+    }
 }

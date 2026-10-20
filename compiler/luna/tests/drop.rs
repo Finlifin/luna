@@ -19754,6 +19754,19 @@ fn optional_inline_trait_method_preserves_receiver_and_body_cleanup() {
 
 #[test]
 fn optional_inline_call_chains_preserve_defaults_contracts_and_owned_returns() {
+    // Inline expansion adds nested blocks and conditionals. Exercise all
+    // contract failures and cleanup paths on a fixed ordinary thread stack,
+    // independently of RUST_MIN_STACK in the surrounding test runner.
+    std::thread::Builder::new()
+        .name("inline-contract-cleanup".into())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(check_optional_inline_call_chains)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn check_optional_inline_call_chains() {
     use comptime_interpretor::{ErrorKind, Interpreter, Value};
     let original=compile("trait Duplicate {} trait Retire {fn drop(*self);}
         struct Caller {} struct Input {} struct Outer {} struct Middle {} struct Leaf {} struct Output {}
@@ -29594,4 +29607,190 @@ fn pointer_guard_arguments_cannot_hide_mutation_in_address_selection() {
         .err()
         .expect("address selection must remain an observation");
     assert!(failure.contains("guard pointer observation"), "{failure}");
+}
+
+#[test]
+fn value_indexed_trait_memory_calls_preserve_writes_and_pointer_results() {
+    use comptime_interpretor::Value;
+    let prefix = "trait Retire {fn drop(*self);} trait Duplicate {}
+        trait Access where tag:bool {fn set(*self);fn view(*self)->*bool;}
+        struct Item {flag:bool}
+        impl Retire for Item {fn drop(*self) {}}
+        impl Access<tag> for Item where tag:bool {
+            fn set(*self) {self.*.flag = tag;}
+            fn view(*self)->*bool {self.*.flag.ref}
+        }
+        fn consume(value:Item) {}";
+    let package = compile(&format!(
+        "{prefix} fn entry()->bool {{let source=Item {{flag:false}};
+        source.as(Access<true>).set();let pointer=source.as(Access<true>).view();
+        let first=pointer.*;source.as(Access<false>).set();first and not pointer.*}}"
+    ));
+    for name in ["set", "view"] {
+        let function = package.functions.iter().find(|f| f.name == name).unwrap();
+        for tag in [true, false, true] {
+            let summary = elaboration::verification::memory::infer_in_package(
+                &package,
+                function.declaration,
+                &[nir::Term::Bool(tag)],
+                &mut 100_000,
+            )
+            .unwrap();
+            assert_eq!(summary.arguments, vec![nir::Term::Bool(tag)]);
+            if name == "view" {
+                assert!(!summary.result_targets.as_ref().unwrap().is_empty());
+            } else {
+                assert!(!summary.accesses.is_empty());
+            }
+        }
+    }
+    assert_eq!(
+        luna::execution::interpret_with_protocols(
+            &package,
+            "entry",
+            "Duplicate",
+            "Retire",
+            100_000
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+    let package = compile(&format!(
+        "{prefix} fn entry()->bool {{let source=Item {{flag:false}};
+        let pointer=source.as(Access<true>).view();consume(source);pointer.*}}"
+    ));
+    let failure = source_executable(&package, "entry").unwrap_err();
+    assert!(
+        failure.contains("unavailable") || failure.contains("moved"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn value_indexed_memory_summaries_specialize_dependent_closures_and_callbacks() {
+    use elaboration::verification::memory::{self, CallableInput, CallableResult};
+    use nir::{Primitive, Term};
+    let package = compile(
+        "struct Cell where T, tag:T {value:T}
+        impl Cell<T,tag> where T, tag:T {
+            fn same(pointer:*T)->*T {pointer}
+            fn view(*self)->*T {let pass=|pointer:*T| pointer;pass(self.*.value.ref)}
+            fn call(*self,action:fn(*T)->*T)->*T {action(self.*.value.ref)}
+            fn closure(*self,action:fn(*T)->*T)->*T {
+                let pass=|pointer:*T| action(pointer);pass(self.*.value.ref)
+            }
+        }",
+    );
+    let id = |name| {
+        package
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .declaration
+    };
+    for tag in [true, false, true] {
+        let arguments = vec![Term::Primitive(Primitive::Bool), Term::Bool(tag)];
+        let view =
+            memory::infer_in_package(&package, id("view"), &arguments, &mut 100_000).unwrap();
+        assert!(!view.result_targets.as_ref().unwrap().is_empty());
+        let inputs = std::collections::BTreeMap::from([(
+            CallableInput {
+                parameter: 1,
+                fields: vec![],
+            },
+            CallableResult::Known(iir::InstanceKey {
+                declaration: id("same"),
+                arguments: arguments.clone(),
+            }),
+        )]);
+        for method in ["call", "closure"] {
+            let summary =
+                memory::infer_with_inputs(&package, id(method), &arguments, &inputs, &mut 100_000)
+                    .unwrap();
+            assert_eq!(summary.result_targets, view.result_targets);
+            assert_eq!(summary.arguments, arguments);
+        }
+    }
+    assert!(
+        memory::infer_in_package(
+            &package,
+            id("view"),
+            &[Term::Bool(true), Term::Bool(false)],
+            &mut 100_000
+        )
+        .is_err()
+    );
+    let valid = vec![Term::Primitive(Primitive::Bool), Term::Bool(true)];
+    let wrong = std::collections::BTreeMap::from([(
+        CallableInput {
+            parameter: 1,
+            fields: vec![],
+        },
+        CallableResult::Known(iir::InstanceKey {
+            declaration: id("same"),
+            arguments: vec![
+                Term::Primitive(Primitive::U8),
+                Term::Integer(comptime_runtime::Integer::from_i128(7)),
+            ],
+        }),
+    )]);
+    assert!(
+        memory::infer_with_inputs(&package, id("closure"), &valid, &wrong, &mut 100_000).is_err()
+    );
+    assert!(memory::infer_in_package(&package, id("view"), &valid, &mut 1).is_err());
+    assert!(memory::infer_in_package(&package, id("view"), &valid, &mut 100_000).is_ok());
+}
+
+#[test]
+fn value_indexed_memory_results_select_only_the_completed_boolean_branch() {
+    use elaboration::verification::memory;
+    let package = compile(
+        "struct Picker where left:bool {
+        pub fn pick(a:*bool,b:*bool)->*bool {if left {a} else {b}}
+        pub fn dynamic(flag:bool,a:*bool,b:*bool)->*bool {if flag {a} else {b}}
+        pub fn closure(a:*bool,b:*bool)->*bool {
+            let choose=|x:*bool,y:*bool| if not left or false {y} else {x};choose(a,b)
+        }
+    }",
+    );
+    let dynamic = package
+        .functions
+        .iter()
+        .find(|f| f.name == "dynamic")
+        .unwrap();
+    let summary = memory::infer_in_package(
+        &package,
+        dynamic.declaration,
+        &[nir::Term::Bool(true)],
+        &mut 100_000,
+    )
+    .unwrap();
+    assert_eq!(
+        summary
+            .result_targets
+            .unwrap()
+            .into_iter()
+            .map(|p| p.parameter)
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from([1, 2])
+    );
+    for name in ["pick", "closure"] {
+        let function = package.functions.iter().find(|f| f.name == name).unwrap();
+        for left in [true, false, true] {
+            let summary = memory::infer_in_package(
+                &package,
+                function.declaration,
+                &[nir::Term::Bool(left)],
+                &mut 100_000,
+            )
+            .unwrap();
+            let targets = summary.result_targets.unwrap();
+            assert_eq!(targets.len(), 1, "{name} {left}: {targets:?}");
+            assert_eq!(
+                targets.iter().next().unwrap().parameter,
+                if left { 0 } else { 1 }
+            );
+        }
+    }
 }

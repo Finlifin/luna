@@ -6308,7 +6308,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             return Err(error(source, message));
         }
         match &expr.kind {
-            K::Literal(_) | K::Unit => (),
+            K::ComptimeValue(_) | K::Literal(_) | K::Unit => (),
             K::RequirePredicate(condition)
             | K::EnsurePredicate(condition)
             | K::CheckPredicate(condition)
@@ -10943,6 +10943,80 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         if let Some(message) = nir::program::pointer_operation_error(expr) {
             return Err(error(source, message));
         }
+        // Keep recursive lexical/control nodes off the large operation match
+        // frame. Inline expansion adds these nodes even to short source bodies.
+        match &expr.kind {
+            K::Block { .. } | K::CallPreparation { .. } | K::If { .. } => {
+                self.expr_control(expr, flow, depth)
+            }
+            _ => self.expr_operation(expr, flow, depth),
+        }
+    }
+    #[inline(never)]
+    fn expr_control(&mut self, expr: &Expr, flow: &mut Flow, depth: usize) -> Result<(), Error> {
+        let source = expr.source;
+        match &expr.kind {
+            K::Block { statements, result } | K::CallPreparation { statements, result } => {
+                let outer = flow.roots.clone();
+                for statement in statements {
+                    if matches!(expr.kind, K::CallPreparation { .. }) {
+                        self.prepared_binding(statement, flow, depth + 1)?;
+                    } else {
+                        self.full_expression(statement, flow, depth + 1)?;
+                    }
+                }
+                if let Some(result) = result {
+                    self.expr(result, flow, depth + 1)?;
+                    if flow.live
+                        && self.temporary_scope.boundary == TemporaryBoundary::FunctionResult
+                        && self.temporary_scope.source == source
+                    {
+                        self.finish_temporaries(flow, source, self.temporary_scope_id)?;
+                    }
+                }
+                if flow.live {
+                    let locals: Vec<_> = flow
+                        .order
+                        .iter()
+                        .rev()
+                        .filter(|id| !outer.contains(id))
+                        .copied()
+                        .collect();
+                    for id in locals {
+                        self.retire(flow, id, source)?;
+                    }
+                }
+            }
+            K::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                self.in_temporary_scope(
+                    condition.source,
+                    TemporaryBoundary::Condition,
+                    flow,
+                    |this, flow| this.expr(condition, flow, depth + 1),
+                )?;
+                if flow.live {
+                    match constant_bool(condition, 0) {
+                        Some(true) => self.scope(then_branch, flow, depth + 1)?,
+                        Some(false) => {
+                            if let Some(other) = else_branch {
+                                self.scope(other, flow, depth + 1)?;
+                            }
+                        }
+                        _ => self.fork(then_branch, else_branch.as_deref(), flow, depth)?,
+                    }
+                }
+            }
+            _ => unreachable!("control dispatcher"),
+        }
+        Ok(())
+    }
+    #[inline(never)]
+    fn expr_operation(&mut self, expr: &Expr, flow: &mut Flow, depth: usize) -> Result<(), Error> {
+        let source = expr.source;
         match &expr.kind {
             K::AddressOf(place) => {
                 flow.memory_exposed = true;
@@ -11086,7 +11160,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     self.report.copies.push((source, p));
                 }
             }
-            K::Literal(_)
+            K::ComptimeValue(_)
+            | K::Literal(_)
             | K::Unit
             | K::Function(_)
             | K::FunctionInstance { .. }
@@ -11582,60 +11657,6 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         Ok(())
                     },
                 )?;
-            }
-            K::Block { statements, result } | K::CallPreparation { statements, result } => {
-                let outer = flow.roots.clone();
-                for statement in statements {
-                    if matches!(expr.kind, K::CallPreparation { .. }) {
-                        self.prepared_binding(statement, flow, depth + 1)?;
-                    } else {
-                        self.full_expression(statement, flow, depth + 1)?;
-                    }
-                }
-                if let Some(result) = result {
-                    self.expr(result, flow, depth + 1)?;
-                    if flow.live
-                        && self.temporary_scope.boundary == TemporaryBoundary::FunctionResult
-                        && self.temporary_scope.source == source
-                    {
-                        self.finish_temporaries(flow, source, self.temporary_scope_id)?;
-                    }
-                }
-                if flow.live {
-                    let locals: Vec<_> = flow
-                        .order
-                        .iter()
-                        .rev()
-                        .filter(|id| !outer.contains(id))
-                        .copied()
-                        .collect();
-                    for id in locals {
-                        self.retire(flow, id, source)?;
-                    }
-                }
-            }
-            K::If {
-                condition,
-                then_branch,
-                else_branch,
-            } => {
-                self.in_temporary_scope(
-                    condition.source,
-                    TemporaryBoundary::Condition,
-                    flow,
-                    |this, flow| this.expr(condition, flow, depth + 1),
-                )?;
-                if flow.live {
-                    match constant_bool(condition, 0) {
-                        Some(true) => self.scope(then_branch, flow, depth + 1)?,
-                        Some(false) => {
-                            if let Some(other) = else_branch {
-                                self.scope(other, flow, depth + 1)?;
-                            }
-                        }
-                        _ => self.fork(then_branch, else_branch.as_deref(), flow, depth)?,
-                    }
-                }
             }
             K::Loop { identity, body } => {
                 self.loop_body(*identity, body, flow, source, depth + 1)?

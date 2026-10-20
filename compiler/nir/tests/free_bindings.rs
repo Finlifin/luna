@@ -282,3 +282,141 @@ fn observation_aliases_bind_only_inside_the_pattern_and_visit_computations() {
         2
     );
 }
+
+#[test]
+fn nominal_default_bindings_are_local_to_one_constructor() {
+    use nir::program::NormalFormArgument as A;
+    let nominal = expr(K::NominalType {
+        preparations: vec![],
+        declaration: nir::DeclarationId {
+            package: 1,
+            local: 8,
+        },
+        arguments: vec![A::Value(local(1)), A::Value(local(2))],
+        order: Some(vec![0, 1]),
+        bindings: Some(vec![id(2), id(3)]),
+    });
+    assert_eq!(result(&nominal), vec![id(1)]);
+    let body = expr(K::Block {
+        statements: vec![nominal.clone()],
+        result: Some(Box::new(local(2))),
+    });
+    assert_eq!(result(&body), vec![id(1), id(2)]);
+    let mut malformed = nominal;
+    let K::NominalType { bindings, .. } = &mut malformed.kind else {
+        unreachable!()
+    };
+    *bindings = Some(vec![id(2), id(2)]);
+    assert!(nir::free_bindings::collect(&malformed, &mut 10_000).is_err());
+}
+
+#[test]
+fn nominal_packet_bindings_exist_only_after_their_producer() {
+    use nir::program::{NormalFormArgument as A, NormalFormPreparation};
+    let mut value = expr(K::NominalType {
+        declaration: nir::DeclarationId {
+            package: 1,
+            local: 8,
+        },
+        arguments: vec![A::Value(local(2))],
+        order: None,
+        bindings: None,
+        preparations: vec![NormalFormPreparation {
+            before: 0,
+            expression: expr(K::LetPattern {
+                pattern: P::Tuple(vec![P::Binding {
+                    binding: id(2),
+                    inner: Box::new(P::Wild),
+                }]),
+                value: Box::new(local(1)),
+                guard: None,
+                otherwise: None,
+            }),
+        }],
+    });
+    assert_eq!(result(&value), vec![id(1)]);
+    assert!(value.to_string().contains("(prepare (before 0)"));
+    let K::NominalType { preparations, .. } = &mut value.kind else {
+        unreachable!()
+    };
+    preparations[0].before = 1;
+    assert_eq!(result(&value), vec![id(1), id(2)]);
+    let K::NominalType { preparations, .. } = &mut value.kind else {
+        unreachable!()
+    };
+    preparations[0].before = 2;
+    assert!(nir::free_bindings::collect(&value, &mut 10_000).is_err());
+}
+
+#[test]
+fn alias_body_is_visible_to_free_binding_analysis_and_rewrites() {
+    let mut value = expr(K::CheckTypeAlias {
+        preparations: vec![],
+        bindings: None,
+        order: None,
+        declaration: nir::DeclarationId {
+            package: 1,
+            local: 20,
+        },
+        arguments: vec![local(1)]
+            .into_iter()
+            .map(nir::program::NormalFormArgument::Value)
+            .collect(),
+        body: Some(Box::new(local(2))),
+    });
+    assert_eq!(result(&value), vec![id(1), id(2)]);
+    value
+        .rewrite_types(&mut |ty| {
+            Ok::<_, ()>(if *ty == Term::Primitive(Primitive::Bool) {
+                Term::Primitive(Primitive::Char)
+            } else {
+                ty.clone()
+            })
+        })
+        .unwrap();
+    let K::CheckTypeAlias {
+        body: Some(body), ..
+    } = &value.kind
+    else {
+        panic!()
+    };
+    assert_eq!(body.ty, Term::Primitive(Primitive::Char));
+    assert!(value.to_string().contains("(body (expr"));
+}
+
+#[test]
+fn contextual_alias_input_bindings_are_local_to_its_body() {
+    let value = expr(K::CheckTypeAlias {
+        declaration: nir::DeclarationId {
+            package: 1,
+            local: 20,
+        },
+        preparations: vec![],
+        bindings: Some(vec![id(2)]),
+        order: Some(vec![0]),
+        arguments: vec![nir::program::NormalFormArgument::Value(local(1))],
+        body: Some(Box::new(local(2))),
+    });
+    assert_eq!(result(&value), vec![id(1)]);
+    let sibling = expr(K::Tuple(vec![value, local(2)]));
+    assert_eq!(result(&sibling), vec![id(1), id(2)]);
+}
+
+#[test]
+fn pattern_code_evidence_binds_only_declared_success_outputs() {
+    let arm = MatchArm {
+        pattern: P::CodeEvidence {
+            outputs: vec![(id(1), Term::Primitive(Primitive::Bool))],
+        },
+        guard: Some(local(1)),
+        body: local(2),
+    };
+    let free = nir::free_bindings::collect_arm(&arm, &mut 100).unwrap();
+    assert_eq!(free.into_iter().collect::<Vec<_>>(), vec![id(2)]);
+    assert!(nir::free_bindings::collect_arm(&arm, &mut 0).is_err());
+    let dump = arm.pattern.to_string();
+    assert!(
+        dump.starts_with("(pattern-code-evidence (outputs (output "),
+        "{dump}"
+    );
+}

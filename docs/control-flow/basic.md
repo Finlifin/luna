@@ -59,7 +59,7 @@ continue_stmt -> continue id? (while expr)?
 - 二者为**语句**。
 - **标签**：`for:name` / `while:name`。`break name` / `continue name` 作用到该标签；无标签则作用到最内层循环。label 与普通名称共用[命名空间](../code-organization/scope-and-paths.md)，同名局部绑定可以遮蔽它；选中非标签绑定时静态拒绝，不跳过该绑定重新寻找标签。
 
-当前实现中，`for` 在 HIR 中保留 iterable、模式、守卫、循环身份及主体，尚未展开为可执行 NIR。主语在元素绑定作用域之外解析；元素绑定只进入守卫和循环体，标签按上述名称规则解析。AST lowering 不再生成 `__into_iter__`／`__next__` 等约定方法调用；迭代协议 evidence 与 inline effect 的展开仍待接通，NIR 入口对此明确报错。
+当前实现中，普通 `for` 在 HIR 中保留 iterable、模式、守卫、循环身份及主体，尚未展开为可执行 NIR。有界 `Integer` 范围的 `inline for` 已接通展开及 comptime guard，参见[inline 控制流](../comptime/inlining-comptime-code.md)。主语在元素绑定作用域之外解析；元素绑定只进入守卫和循环体，标签按上述名称规则解析。AST lowering 不再生成 `__into_iter__`／`__next__` 等约定方法调用；迭代协议 evidence 与 inline effect 的展开仍待接通，NIR 入口对此明确报错。
 
 当循环没有可达的正常出口时，其内部类型为 `never`；这不为 `while` 增加结果值或带值 `break`。例如，下面两个函数都不需要在循环之后补一个 `bool` 值：前者不终止，后者通过 `return` 返回。
 

@@ -208,3 +208,70 @@ fn type_list_index_rewriting_reaches_both_operands_and_keeps_head_identity() {
     assert!(matches!(position.kind, K::Literal(_)));
     assert!(index.to_string().contains("(type-list-index (values"));
 }
+
+#[test]
+fn lexical_rewriting_keeps_order_pruning_and_failure_on_an_ordinary_stack() {
+    std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            struct Rewrite {
+                visits: Vec<u32>,
+                types: usize,
+                stop: Option<(u32, bool)>,
+            }
+            impl nir::program::Rewriter for Rewrite {
+                type Error = [u64; 8];
+                fn expression(&mut self, expression: &mut Expr) -> Result<bool, Self::Error> {
+                    let index = expression.source.start;
+                    self.visits.push(index);
+                    if let Some((stop, fail)) = self.stop {
+                        if stop == index {
+                            return if fail { Err([42; 8]) } else { Ok(false) };
+                        }
+                    }
+                    Ok(true)
+                }
+                fn ty(&mut self, _: &Term) -> Result<Term, Self::Error> {
+                    self.types += 1;
+                    Ok(Term::Primitive(Primitive::Bool))
+                }
+            }
+            let node = |index, kind| Expr {
+                source: SourceRange {
+                    start: index,
+                    end: index + 1,
+                },
+                ty: rigid(),
+                kind,
+            };
+            for stop in [None, Some((64, false)), Some((64, true))] {
+                let mut tree = node(384, K::Unit);
+                for index in (0..192).rev() {
+                    let statements = vec![node(index * 2 + 1, K::Unit)];
+                    let result = Some(Box::new(tree));
+                    tree = node(
+                        index * 2,
+                        if index % 2 == 0 {
+                            K::Block { statements, result }
+                        } else {
+                            K::CallPreparation { statements, result }
+                        },
+                    );
+                }
+                let mut rewrite = Rewrite {
+                    visits: vec![],
+                    types: 0,
+                    stop,
+                };
+                let result = tree.rewrite_with(&mut rewrite);
+                assert_eq!(result.is_err(), stop.is_some_and(|(_, fail)| fail));
+                let count = if stop.is_some() { 65 } else { 385 };
+                assert_eq!(rewrite.visits, (0..count).collect::<Vec<_>>());
+                assert_eq!(rewrite.types, if stop.is_some() { 64 } else { 385 });
+                assert_eq!(tree.ty, Term::Primitive(Primitive::Bool));
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

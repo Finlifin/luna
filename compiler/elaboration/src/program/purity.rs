@@ -598,6 +598,12 @@ pub(super) fn validate_runtime_promises(
 ) -> Result<(), Error> {
     let mut analysis = Analysis::new(package, false);
     analysis.protocols = protocols.clone();
+    if analysis.parameter_sorts.is_none() {
+        return Err(error(
+            Span::default(),
+            "invalid declaration parameter sorts in purity analysis",
+        ));
+    }
     for function in &package.functions {
         if function.phase != n::FunctionPhase::Runtime || !function.pure {
             continue;
@@ -607,7 +613,13 @@ pub(super) fn validate_runtime_promises(
             .iter()
             .map(|declaration| Term::Rigid {
                 declaration: *declaration,
-                sort: Sort::Type,
+                sort: analysis
+                    .parameter_sorts
+                    .as_ref()
+                    .unwrap()
+                    .get(declaration)
+                    .copied()
+                    .unwrap_or(Sort::Type),
             })
             .collect::<Vec<_>>();
         if !analysis.function(function.declaration, &types, 0) {
@@ -655,6 +667,7 @@ struct Analysis<'a> {
     protocols: Protocols,
     functions: HashMap<DeclarationId, &'a n::Function>,
     tuple_heads: HashSet<DeclarationId>,
+    parameter_sorts: Option<BTreeMap<DeclarationId, Sort>>,
     finite: bool,
     resource_scope: bool,
     callables: BTreeMap<CallablePlace, Codes>,
@@ -673,7 +686,10 @@ struct Analysis<'a> {
 
 impl<'a> Analysis<'a> {
     fn new(package: &'a n::Package, finite: bool) -> Self {
+        let mut fuel = 100_000;
+        let parameter_sorts = package.declaration_parameter_sorts(&mut fuel).ok();
         Self {
+            parameter_sorts,
             package,
             method_callees: Default::default(),
             protocols: Protocols::default(),
@@ -698,7 +714,7 @@ impl<'a> Analysis<'a> {
             result_fields: BTreeMap::new(),
             active: HashSet::new(),
             proven: HashMap::new(),
-            fuel: 100_000,
+            fuel,
         }
     }
 
@@ -803,6 +819,11 @@ impl<'a> Analysis<'a> {
     fn resource_world_parts(&self) -> Option<(crate::ptc::Context, crate::implementation::Index)> {
         let context = crate::ptc::Context::from_package(self.package).ok()?;
         let mut index = crate::implementation::Index::default();
+        index.sync_nominal_layouts(
+            &self.package.structs,
+            &self.package.enums,
+            &self.package.newtypes,
+        );
         let budget = crate::ptc::Budget {
             steps: self.fuel,
             ..Default::default()
@@ -1125,6 +1146,9 @@ impl<'a> Analysis<'a> {
                 arguments: patterns,
                 ..
             }
+            | n::Pattern::NominalType {
+                fields: patterns, ..
+            }
             | n::Pattern::Record {
                 fields: patterns, ..
             }
@@ -1359,6 +1383,7 @@ impl<'a> Analysis<'a> {
                 | n::Pattern::NormalForm {
                     arguments: fields, ..
                 }
+                | n::Pattern::NominalType { fields, .. }
                 | n::Pattern::Record { fields, .. }
                 | n::Pattern::AnonymousRecord { fields, .. }
                 | n::Pattern::Variant { fields, .. } => fields
@@ -1407,6 +1432,9 @@ impl<'a> Analysis<'a> {
                 false
             }
             n::Pattern::Tuple(patterns)
+            | n::Pattern::NominalType {
+                fields: patterns, ..
+            }
             | n::Pattern::Record {
                 fields: patterns, ..
             }
@@ -1649,7 +1677,9 @@ impl<'a> Analysis<'a> {
                     addresses.and_then(|places| self.project_private_targets(value, places));
                 true
             }
-            K::Literal(_) | K::Unit | K::AssociatedValue { .. } => self.copy_type(&value.ty),
+            K::ComptimeValue(_) | K::Literal(_) | K::Unit | K::AssociatedValue { .. } => {
+                self.copy_type(&value.ty)
+            }
             K::Assign { place, value } => {
                 if !private.contains(&place.root)
                     || (self.finite && !self.resource_scope && !self.copy_type(&value.ty))
@@ -2714,6 +2744,7 @@ impl<'a> Analysis<'a> {
                     pattern_sources(inner, value, path, out, fuel, depth + 1)?;
                 }
                 n::Pattern::Tuple(fields)
+                | n::Pattern::NominalType { fields, .. }
                 | n::Pattern::Record { fields, .. }
                 | n::Pattern::AnonymousRecord { fields, .. } => {
                     for (index, field) in fields.iter().enumerate() {
@@ -3224,9 +3255,9 @@ impl<'a> Analysis<'a> {
                 if promised && !self.finite {
                     return true;
                 }
-                let Ok(method) = self
-                    .method_callees
-                    .select(self.package, callee, &mut self.fuel)
+                let Ok(method) =
+                    self.method_callees
+                        .select_behavior(self.package, callee, &mut self.fuel)
                 else {
                     return false;
                 };
@@ -3879,9 +3910,20 @@ impl<'a> Analysis<'a> {
         {
             return false;
         }
-        // Instantiation substitutes types only. The source function and its
-        // opaque type heads remain untouched, and runtime inputs are not read.
-        let Ok(function) = function.instantiate_types(&function.type_parameters, types) else {
+        // Substitute declaration inputs with their declared sorts. This does
+        // not unfold opaque heads or observe runtime inputs.
+        let Some(sorts) = &self.parameter_sorts else {
+            return false;
+        };
+        let binders = function
+            .type_parameters
+            .iter()
+            .map(|id| nir::DeclarationParameter {
+                declaration: *id,
+                sort: sorts.get(id).copied().unwrap_or(Sort::Type),
+            })
+            .collect::<Vec<_>>();
+        let Ok(function) = function.instantiate_parameters(&binders, types) else {
             return false;
         };
         let Term::Function { parameters, result } = &function.signature else {

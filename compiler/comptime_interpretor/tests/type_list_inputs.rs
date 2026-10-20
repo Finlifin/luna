@@ -375,3 +375,68 @@ fn explicit_list_role_does_not_require_a_variadic_consumer() {
     let mut vm = Interpreter::for_comptime(&impostor, Budget::default()).unwrap();
     assert!(vm.invoke(id(3), vec![Value::TypeList(vec![])]).is_err());
 }
+
+#[test]
+fn planned_input_type_rewrite_charges_unused_closure_body() {
+    use nir::program::{Literal, NormalFormInputPlan};
+    let mut package = package();
+    let source = SourceRange { start: 0, end: 1 };
+    package.functions[0].parameters.clear();
+    package.functions[0].signature = Term::Function {
+        parameters: vec![],
+        result: Box::new(ty(P::Type)),
+    };
+    let closure = Expr {
+        source,
+        ty: Term::Function {
+            parameters: vec![],
+            result: Box::new(ty(P::Str)),
+        }
+        .with_comptime_phase(true),
+        kind: K::Closure {
+            parameters: vec![],
+            captures: vec![],
+            body: std::sync::Arc::new(Expr {
+                source,
+                ty: ty(P::Str),
+                kind: K::Literal(Literal::String("x".repeat(4096))),
+            }),
+        },
+    };
+    package.functions[0].body.kind = K::NormalFormType {
+        head: id(2),
+        plan: Some(NormalFormInputPlan {
+            order: vec![0],
+            bindings: vec![LocalId { owner: 3, index: 1 }],
+            preparations: vec![],
+        }),
+        arguments: vec![NormalFormArgument::Block {
+            source,
+            statements: vec![Expr {
+                source,
+                ty: ty(P::Void),
+                kind: K::Let {
+                    binding: LocalId { owner: 3, index: 2 },
+                    value: Box::new(closure),
+                },
+            }],
+            result: Some(Box::new(NormalFormArgument::Value(Expr {
+                source,
+                ty: list_type(),
+                kind: K::TypeListValue(vec![]),
+            }))),
+        }],
+    };
+    let mut low = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    low.charge_preparation((low.remaining_steps() - 512) as usize)
+        .unwrap();
+    assert_eq!(
+        low.invoke(id(3), vec![]).unwrap_err().kind,
+        comptime_interpretor::ErrorKind::StepsExhausted
+    );
+    let mut enough = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert_eq!(
+        enough.invoke(id(3), vec![]).unwrap(),
+        Value::Type(tuple_type(vec![]))
+    );
+}

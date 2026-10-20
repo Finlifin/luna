@@ -269,7 +269,7 @@ impl<'a> AstScanner<'a> {
         let scope_id = self.scope_gen.next();
 
         // Function body scope (ordered – names must be declared before use)
-        let scope = Scope::new(
+        let mut scope = Scope::new(
             scope_id,
             ScopeKind::FnBody,
             Some(parent_scope),
@@ -277,6 +277,24 @@ impl<'a> AstScanner<'a> {
             def_id,
             true, // ordered
         );
+        if self.ast.get_node_kind(item) == Some(NodeKind::Function) {
+            let mut result = self.ast.get_children(item)[2];
+            if self.ast.get_node_kind(result) == Some(NodeKind::ResultWithId) {
+                result = self.ast.get_children(result)[1];
+            }
+            if self.ast.get_node_kind(result) == Some(NodeKind::ContextualPatternType) {
+                let entries = self.ast.get_children(result)[1];
+                let mut outputs = Vec::new();
+                for &entry in self.ast.get_multi_child_slice(entries).unwrap_or(&[]) {
+                    let name = self.ast.get_children(entry)[0];
+                    outputs.push((
+                        self.extract_name(name)?,
+                        self.ast.get_span(name).unwrap_or_default(),
+                    ));
+                }
+                scope.pattern_result_outputs = Some(outputs);
+            }
+        }
         self.scope_tree.add_scope(scope);
         self.scope_tree.add_child(parent_scope, scope_id);
 

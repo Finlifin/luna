@@ -728,7 +728,7 @@ fn matches_check_exhaustiveness_guards_and_arm_result_types() {
 fn unsupported_pattern_protocols_are_not_silently_erased() {
     rejected(
         "fn bad() { (true,false) match { [a,b] => (), _ => (), } }",
-        "pattern view/protocol",
+        "list patterns require a bound ListPatternView protocol",
     );
     rejected(
         "fn bad() { true match { a or b => (), } }",
@@ -3888,9 +3888,12 @@ fn generic_aliases_check_arity_scope_cycles_and_target_types() {
         "cyclic type alias",
     );
     rejected("typealias Loop<T> = Loop<(T, T)>;", "cyclic type alias");
+    accepted(
+        "typealias Sized<N: .Integer'builtin> = true'type; fn keep(value: Sized<7>)->bool {value}",
+    );
     rejected(
-        "typealias Sized<N: .Integer'builtin> = true'type;",
-        "clause kind is not implemented",
+        "typealias Sized<N: .Integer'builtin> = true'type; fn bad(value: Sized<true>) {}",
+        "type mismatch",
     );
     rejected(
         "typealias Type = .Type'builtin; pure comptime fn Identity<T> -> Type { T } typealias Alias<T> = Identity<T>; fn bad(value: Alias<true'type>) -> true'type { value }",
@@ -8362,4 +8365,23 @@ fn unresolved_abi_attributes_cannot_publish_default_abi_functions() {
     ] {
         rejected(source, "definition attribute or modifier");
     }
+}
+
+#[test]
+fn implementation_heads_are_checked_before_member_program_contracts() {
+    let first = "impl Flag for S {fn read()->bool where requires S.as(Missing).flag {true}}";
+    let second = "impl Flag for S {fn read()->bool {false}}";
+    for (left, right) in [(first, second), (second, first)] {
+        rejected(
+            &format!(
+                "trait Missing {{assoc flag:bool;}} trait Flag {{fn read()->bool;}} struct S {{}} {left} {right}"
+            ),
+            "implementation overlap",
+        );
+    }
+    // An admitted head alone still must not satisfy its own parent capability.
+    rejected(
+        "trait Parent {} trait Child :- Parent {} struct S {} impl Child for S {}",
+        "required parent interface implementation is not established",
+    );
 }

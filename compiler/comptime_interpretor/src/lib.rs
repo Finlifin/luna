@@ -38,6 +38,23 @@ pub enum InvocationValue {
     Live(Value),
 }
 
+/// Check completion and scope of an already domain-admitted immutable input.
+/// Type and value inputs retain their semantic sort. This checks representation,
+/// not the declaration's parameter domains or permission to invoke a callable.
+pub fn validate_snapshot_term(
+    term: &Term,
+    budget: &mut comptime_runtime::Budget,
+    parameters: &BTreeSet<DeclarationId>,
+) -> Result<(), ErrorKind> {
+    nir::type_computations::charge_term(term, &mut budget.steps)
+        .map_err(|_| ErrorKind::StepsExhausted)?;
+    term.check_scope(&[]).map_err(|_| ErrorKind::Type)?;
+    let work =
+        scoped_term_value_work_with_layouts(term, &BTreeMap::new(), parameters, |_, _, _| None)
+            .ok_or(ErrorKind::Type)?;
+    budget.consume(work).map_err(|_| ErrorKind::StepsExhausted)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Pointer(PointerValue),
@@ -227,7 +244,7 @@ impl Value {
                         return None;
                     }
                     arguments.iter().try_fold(0usize, |n, ty| {
-                        let total = n.checked_add(type_value_work(ty, &BTreeMap::new())?)?;
+                        let total = n.checked_add(instance_argument_work(ty, &BTreeMap::new())?)?;
                         (total <= 100_000).then_some(total)
                     })?
                 }
@@ -292,6 +309,43 @@ impl Value {
         parameters: &BTreeSet<DeclarationId>,
     ) -> Result<Term, ErrorKind> {
         self.into_scoped_term(budget, parameters, &BTreeMap::new(), true)
+    }
+    /// Validate immutable runtime declaration identity for capture snapshots.
+    /// This does not turn it into a callable comptime value or a normal term.
+    pub fn validate_runtime_identity_snapshot(
+        &self,
+        budget: &mut comptime_runtime::Budget,
+        parameters: &BTreeSet<DeclarationId>,
+    ) -> Result<(), ErrorKind> {
+        let terms: Vec<&Term> = match self {
+            Self::RuntimeFunction { arguments, .. } => {
+                budget
+                    .consume(arguments.len().saturating_add(1))
+                    .map_err(|_| ErrorKind::StepsExhausted)?;
+                arguments.iter().collect()
+            }
+            Self::RuntimeTraitMethod(identity) => {
+                budget
+                    .consume(
+                        identity
+                            .interface
+                            .arguments
+                            .len()
+                            .saturating_add(identity.method_arguments.len())
+                            .saturating_add(2),
+                    )
+                    .map_err(|_| ErrorKind::StepsExhausted)?;
+                std::iter::once(&identity.subject)
+                    .chain(identity.interface.arguments.iter())
+                    .chain(identity.method_arguments.iter())
+                    .collect()
+            }
+            _ => return Err(ErrorKind::Type),
+        };
+        for term in terms {
+            validate_snapshot_term(term, budget, parameters)?;
+        }
+        Ok(())
     }
     /// Freeze a substitution value within an explicitly supplied Type scope.
     /// Immutable export must use `into_normal_term`, which remains closed.
@@ -501,8 +555,13 @@ impl Value {
                 } => {
                     charge(budget, arguments.len().saturating_add(fields.len()))?;
                     for argument in arguments {
-                        let work = scoped_type_value_work(argument, &BTreeMap::new(), parameters)
-                            .ok_or(ErrorKind::Type)?;
+                        let work = scoped_term_value_work_with_layouts(
+                            argument,
+                            &BTreeMap::new(),
+                            parameters,
+                            |_, _, _| None,
+                        )
+                        .ok_or(ErrorKind::Type)?;
                         charge(budget, work)?;
                     }
                     let ty = Term::Nominal {
@@ -807,6 +866,7 @@ pub struct Interpreter<'a> {
     type_solver: Option<&'a dyn Fn(&nir::program::TypePredicate) -> ContractOutcome>,
     pointer_copy: Option<PointerCopyPermission<'a>>,
     declaration_parameter_sorts: BTreeMap<DeclarationId, nir::Sort>,
+    declaration_parameter_domains: BTreeMap<DeclarationId, Term>,
     method_parameters: HashMap<(DeclarationId, DeclarationId), Vec<LocalId>>,
     method_contracts: HashMap<
         (DeclarationId, DeclarationId),
@@ -819,6 +879,8 @@ pub struct Interpreter<'a> {
     assumed_interfaces: HashSet<(InterfaceInstance, Term)>,
     method_bodies: HashMap<(InterfaceInstance, Term, DeclarationId), (DeclarationId, Vec<Term>)>,
     associated_values: HashMap<(InterfaceInstance, Term, DeclarationId), &'a Expr>,
+    associated_initializers: HashMap<(InterfaceInstance, Term, DeclarationId), &'a Expr>,
+    active_associated_initializers: HashSet<(InterfaceInstance, Term, DeclarationId)>,
     instances: HashMap<(DeclarationId, Vec<Term>), Arc<Closure>>,
     functions: BTreeMap<DeclarationId, &'a nir::program::Function>,
     runtime_function_identities: BTreeMap<DeclarationId, &'a nir::program::RuntimeFunctionIdentity>,
@@ -974,9 +1036,22 @@ impl<'a> Interpreter<'a> {
             .collect();
         let mut premise_fuel = budget.steps;
         let mut trait_parameter_fuel = usize::try_from(budget.steps).unwrap_or(usize::MAX);
-        let declaration_parameter_sorts = package
-            .declaration_parameter_sorts(&mut trait_parameter_fuel)
+        let declaration_parameter_domains = package
+            .declaration_parameter_domains(&mut trait_parameter_fuel)
             .map_err(|_| invalid())?;
+        let declaration_parameter_sorts: BTreeMap<_, _> = declaration_parameter_domains
+            .iter()
+            .map(|(id, domain)| {
+                (
+                    *id,
+                    if *domain == Term::Primitive(Primitive::Type) {
+                        nir::Sort::Type
+                    } else {
+                        nir::Sort::ComptimeValue
+                    },
+                )
+            })
+            .collect();
         let input_binders = |parameters: &[DeclarationId]| {
             parameters
                 .iter()
@@ -1076,12 +1151,15 @@ impl<'a> Interpreter<'a> {
             }
             if concrete {
                 contract
-                    .validate_arguments_for_subject(
+                    .validate_arguments_with_layouts(
                         &implementation.subject,
                         &interface.arguments,
                         &[],
                         &package.traits,
+                        &BTreeMap::new(),
                         &mut trait_parameter_fuel,
+                        |_, _, _| false,
+                        Some(package),
                     )
                     .map_err(|_| invalid())?;
             }
@@ -1151,6 +1229,7 @@ impl<'a> Interpreter<'a> {
             }
         }
         let mut associated_values = HashMap::new();
+        let mut associated_initializers = HashMap::new();
         for instance in &package.dispatch_instances {
             for (member, value) in &instance.associated {
                 if associated_values
@@ -1163,6 +1242,23 @@ impl<'a> Interpreter<'a> {
                         value,
                     )
                     .is_some()
+                {
+                    return Err(invalid());
+                }
+            }
+        }
+
+        for instance in &package.dispatch_instances {
+            for (member, initializer) in &instance.associated_initializers {
+                let key = (
+                    instance.interface_instance(),
+                    instance.subject.clone(),
+                    *member,
+                );
+                if associated_values.contains_key(&key)
+                    || associated_initializers
+                        .insert(key, initializer.expression())
+                        .is_some()
                 {
                     return Err(invalid());
                 }
@@ -1207,6 +1303,54 @@ impl<'a> Interpreter<'a> {
                 return Err(invalid());
             }
             let contract = traits.get(&instance.interface).ok_or_else(invalid)?;
+            for (member, initializer) in &instance.associated_initializers {
+                let member_contract = contract
+                    .associated
+                    .iter()
+                    .find(|m| m.declaration == *member)
+                    .ok_or_else(invalid)?;
+                let inputs: Vec<_> = std::iter::once(instance.subject.clone())
+                    .chain(instance.interface_arguments.iter().cloned())
+                    .collect();
+                let expected = member_contract
+                    .ty
+                    .instantiate_parameters(
+                        &contract
+                            .binders_with_self(&mut trait_parameter_fuel)
+                            .map_err(|_| invalid())?,
+                        &inputs,
+                    )
+                    .map_err(|_| invalid())?;
+                if !selected_types::same(
+                    &initializer.expression().ty,
+                    &expected,
+                    &associated_values,
+                ) {
+                    return Err(invalid());
+                }
+                if implementation.associated.iter().any(|(id, _)| id == member) {
+                    return Err(invalid());
+                }
+                let mut originals = implementation
+                    .associated_initializers
+                    .iter()
+                    .filter(|(id, _)| id == member);
+                let (_, original) = originals.next().ok_or_else(invalid)?;
+                if originals.next().is_some() {
+                    return Err(invalid());
+                }
+                let mut fuel = usize::try_from(budget.steps).unwrap_or(usize::MAX);
+                let specialized = original
+                    .instantiate(
+                        &input_binders(&implementation.type_parameters),
+                        &instance.arguments,
+                        &mut fuel,
+                    )
+                    .map_err(|_| invalid())?;
+                if specialized != *initializer {
+                    return Err(invalid());
+                }
+            }
             for (member, value) in &instance.associated {
                 let member_contract = contract
                     .associated
@@ -1310,7 +1454,10 @@ impl<'a> Interpreter<'a> {
                 } else if let Some(identity) = runtime_function_identities.get(&method.body) {
                     identity
                         .signature
-                        .instantiate_types(&identity.type_parameters, &method.arguments)
+                        .instantiate_parameters(
+                            &input_binders(&identity.type_parameters),
+                            &method.arguments,
+                        )
                         .map_err(|_| invalid())?
                 } else {
                     return Err(invalid());
@@ -1322,12 +1469,7 @@ impl<'a> Interpreter<'a> {
                             .binders_with_self(&mut trait_parameter_fuel)
                             .map_err(|_| invalid())?
                             .into_iter()
-                            .chain(member.type_parameters.iter().map(|id| {
-                                nir::DeclarationParameter {
-                                    declaration: *id,
-                                    sort: nir::Sort::Type,
-                                }
-                            }))
+                            .chain(input_binders(&member.type_parameters))
                             .collect::<Vec<_>>(),
                         &std::iter::once(instance.subject.clone())
                             .chain(instance.interface_arguments.iter().cloned())
@@ -1436,15 +1578,7 @@ impl<'a> Interpreter<'a> {
                 .map_err(|_| invalid())?;
             for member in &contract.methods {
                 let mut binders = parameters.clone();
-                binders.extend(
-                    member
-                        .type_parameters
-                        .iter()
-                        .map(|id| nir::DeclarationParameter {
-                            declaration: *id,
-                            sort: nir::Sort::Type,
-                        }),
-                );
+                binders.extend(input_binders(&member.type_parameters));
                 method_contracts.insert(
                     (contract.declaration, member.declaration),
                     (binders, member),
@@ -1477,11 +1611,14 @@ impl<'a> Interpreter<'a> {
             pointer_copy: None,
             method_parameters,
             declaration_parameter_sorts,
+            declaration_parameter_domains,
             method_contracts,
             implemented_interfaces: worlds,
             assumed_interfaces,
             method_bodies,
             associated_values,
+            associated_initializers,
+            active_associated_initializers: HashSet::new(),
             instances: HashMap::new(),
             functions,
             runtime_function_identities,
@@ -1784,7 +1921,7 @@ impl<'a> Interpreter<'a> {
         }
         self.invoke_value(Value::Function(function), arguments)
     }
-    /// Invoke an explicit type instance through the same specialization and
+    /// Invoke explicit declaration inputs through the same specialization and
     /// contract path used by source FunctionInstance expressions. No binder or
     /// obligation is erased to make a template look monomorphic.
     pub fn invoke_instantiated(
@@ -1804,7 +1941,7 @@ impl<'a> Interpreter<'a> {
         }
         self.tick(None)?;
         for ty in &types {
-            let work = scoped_type_value_work_with_layouts(
+            let work = scoped_term_value_work_with_layouts(
                 ty,
                 &self.normal_forms,
                 &BTreeSet::new(),
@@ -2348,8 +2485,12 @@ impl<'a> Interpreter<'a> {
                     });
             }
             return self.newtypes.get(declaration).is_some_and(|d| {
-                d.validate_completed_arguments(arguments, &mut 100_000)
-                    .is_ok()
+                d.validate_completed_arguments_with_layouts(
+                    arguments,
+                    &mut 100_000,
+                    |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
+                )
+                .is_ok()
                     && d.parameter_binders().is_ok_and(|parameters| {
                         self.capabilities_hold_parameters(&d.capabilities, &parameters, arguments)
                     })
@@ -2442,9 +2583,14 @@ impl<'a> Interpreter<'a> {
                         .enums
                         .get(declaration)
                         .filter(|definition| {
-                            definition
-                                .validate_completed_arguments(arguments, &mut 100_000)
-                                .is_ok()
+                            nir::validate_declaration_arguments_with_layouts(
+                                &definition.type_parameters,
+                                &definition.parameter_types,
+                                arguments,
+                                &mut 100_000,
+                                |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
+                            )
+                            .is_ok()
                                 && definition.parameter_binders().is_ok_and(|parameters| {
                                     self.capabilities_hold_parameters(
                                         &definition.capabilities,
@@ -2557,8 +2703,14 @@ impl<'a> Interpreter<'a> {
                 },
             ) if declaration == expected && actual_arguments == arguments => {
                 self.structs.get(declaration).is_some_and(|s| {
-                    if s.validate_completed_arguments(arguments, &mut 100_000)
-                        .is_err()
+                    if nir::validate_declaration_arguments_with_layouts(
+                        &s.type_parameters,
+                        &s.parameter_types,
+                        arguments,
+                        &mut 100_000,
+                        |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
+                    )
+                    .is_err()
                         || !s.parameter_binders().is_ok_and(|parameters| {
                             self.capabilities_hold_parameters(
                                 &s.capabilities,
@@ -2609,12 +2761,21 @@ impl<'a> Interpreter<'a> {
                 .runtime_function_identities
                 .get(declaration)
                 .is_some_and(|identity| {
-                    identity
-                        .signature
-                        .instantiate_types(&identity.type_parameters, arguments)
-                        .is_ok_and(|signature| {
-                            selected_types::same(&signature, ty, &self.associated_values)
-                        })
+                    self.validate_function_inputs(
+                        &identity.type_parameters,
+                        arguments,
+                        &mut 100_000,
+                    )
+                    .is_ok()
+                        && identity
+                            .signature
+                            .instantiate_parameters(
+                                &self.input_binders(&identity.type_parameters),
+                                arguments,
+                            )
+                            .is_ok_and(|signature| {
+                                selected_types::same(&signature, ty, &self.associated_values)
+                            })
                 }),
             (Value::RuntimeTraitMethod(identity), ty) => {
                 let TraitMethodIdentity {
@@ -2633,7 +2794,13 @@ impl<'a> Interpreter<'a> {
                                 .chain(interface.arguments.iter().cloned())
                                 .chain(method_arguments.iter().cloned())
                                 .collect();
-                            !contract.signature.is_comptime_callable()
+                            let ids: Vec<_> = parameters
+                                .iter()
+                                .map(|parameter| parameter.declaration)
+                                .collect();
+                            self.validate_function_inputs(&ids, &arguments, &mut 100_000)
+                                .is_ok()
+                                && !contract.signature.is_comptime_callable()
                                 && contract.program.preconditions.is_empty()
                                 && contract
                                     .signature
@@ -2888,21 +3055,6 @@ impl<'a> Interpreter<'a> {
         }
         result
     }
-    fn capabilities_hold(
-        &self,
-        requirements: &[nir::program::TraitRequirement],
-        parameters: &[DeclarationId],
-        arguments: &[Term],
-    ) -> bool {
-        let binders: Vec<_> = parameters
-            .iter()
-            .map(|id| nir::DeclarationParameter {
-                declaration: *id,
-                sort: nir::Sort::Type,
-            })
-            .collect();
-        self.capabilities_hold_parameters(requirements, &binders, arguments)
-    }
     fn capabilities_hold_parameters(
         &self,
         requirements: &[nir::program::TraitRequirement],
@@ -3026,7 +3178,9 @@ impl<'a> Interpreter<'a> {
             K::Unit | K::Local(_) | K::Function(_) | K::Break(_) | K::Continue(_) => {
                 self.eval_leaf(expr, environment)
             }
-            K::TypeValue(..) | K::TypeListValue(..) => self.eval_type_value(expr, environment),
+            K::ComptimeValue(..) | K::TypeValue(..) | K::TypeListValue(..) => {
+                self.eval_type_value(expr, environment)
+            }
             K::NormalFormType { .. } => self.eval_normal_form_type(expr, environment),
             K::FunctionType { .. } | K::FunctionResultType { .. } => {
                 self.eval_function_type(expr, environment)
@@ -3035,7 +3189,7 @@ impl<'a> Interpreter<'a> {
                 self.eval_environment_type(expr, environment)
             }
             K::NominalType { .. } => self.eval_nominal_type(expr, environment),
-            K::CheckTypeAlias { .. } => self.eval_type_alias_guard(expr, environment),
+            K::CheckTypeAlias { .. } => self.eval_nominal_type(expr, environment),
             K::ScalarEqual(..)
             | K::ScalarLessEqual(..)
             | K::ScalarLess(..)
@@ -3251,6 +3405,10 @@ impl<'a> Interpreter<'a> {
         let expected_result = if arguments
             .iter()
             .any(nir::program::NormalFormArgument::is_diverging)
+            || plan
+                .iter()
+                .flat_map(|p| &p.preparations)
+                .any(|p| p.expression.ty == Term::Primitive(Primitive::Never))
         {
             Primitive::Never
         } else {
@@ -3260,6 +3418,24 @@ impl<'a> Interpreter<'a> {
             || arguments.len() != metadata.parameters.len()
         {
             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+        }
+        self.integer_operation(Some(expr.source), |budget| budget.consume(arguments.len()))?;
+        if plan.is_some() {
+            nir::copy_budget::charge_type_rewrite(expr, &mut self.budget.steps).map_err(
+                |error| {
+                    self.failure(
+                        match error {
+                            nir::copy_budget::CopyBudgetExhausted::Steps => {
+                                ErrorKind::StepsExhausted
+                            }
+                            nir::copy_budget::CopyBudgetExhausted::Depth => {
+                                ErrorKind::DepthExhausted
+                            }
+                        },
+                        Some(expr.source),
+                    )
+                },
+            )?;
         }
         let mut values = vec![None; arguments.len()];
         let mut pending: Vec<
@@ -3282,31 +3458,25 @@ impl<'a> Interpreter<'a> {
                 value!(self.eval(&preparation.expression, environment));
             }
             let parameter = &metadata.parameters[slot];
-            let mut instantiated;
-            let argument = if plan.is_some() {
-                instantiated = arguments[slot].clone();
-                for expression in instantiated.expressions_mut() {
-                    expression
-                        .rewrite_types(&mut |ty| {
-                            ty.instantiate_types(&type_parameters, &type_arguments)
-                        })
-                        .map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?;
-                }
-                &instantiated
-            } else {
-                &arguments[slot]
-            };
-            let expected = parameter
-                .ty
-                .instantiate_types(&type_parameters, &type_arguments)
-                .map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?;
-            let unresolved = metadata.parameters.iter().any(|p| {
-                p.kind == nir::normal_forms::Kind::Type && expected.mentions_rigid(p.declaration)
-            });
+            let mut instantiated = plan.as_ref().map(|_| Box::new(arguments[slot].clone()));
+            if let Some(input) = &mut instantiated {
+                self.specialize_contextual_input(input, &type_parameters, &type_arguments)?;
+            }
+            let argument = instantiated.as_deref().unwrap_or(&arguments[slot]);
+            let expected = self.instantiate_contextual_domain(
+                &parameter.ty,
+                &type_parameters,
+                &type_arguments,
+                expr.source,
+            )?;
+            let unresolved = metadata
+                .parameters
+                .iter()
+                .any(|p| expected.mentions_rigid(p.declaration));
             if unresolved && plan.is_some() {
                 // Box before staging: contextual literal identities stay valid
                 // while the pending input moves through this invocation.
-                let argument = Box::new(argument.clone());
+                let argument = instantiated.take().unwrap();
                 let staged = match self.stage_normal_argument(&argument, environment, 0)? {
                     std::ops::ControlFlow::Continue(value) => value,
                     std::ops::ControlFlow::Break(flow) => return Ok(flow),
@@ -3322,41 +3492,50 @@ impl<'a> Interpreter<'a> {
                 environment.insert(plan.bindings[slot], value.clone());
             }
             let term = self.normal_input_term(value, argument.source())?;
-            if parameter.kind == nir::normal_forms::Kind::Type {
-                type_parameters.push(parameter.declaration);
-                type_arguments.push(term.clone());
-            }
+            type_parameters.push(nir::DeclarationParameter {
+                declaration: parameter.declaration,
+                sort: if parameter.kind == nir::normal_forms::Kind::Type {
+                    nir::Sort::Type
+                } else {
+                    nir::Sort::ComptimeValue
+                },
+            });
+            type_arguments.push(term.clone());
             values[slot] = Some(term);
-            if parameter.kind != nir::normal_forms::Kind::Type {
-                continue;
-            }
             for index in pending_slots.iter().copied().collect::<Vec<_>>() {
                 self.tick(Some(expr.source))?;
-                let expected = metadata.parameters[index]
-                    .ty
-                    .instantiate_types(&type_parameters, &type_arguments)
-                    .map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?;
-                if metadata.parameters.iter().any(|p| {
-                    p.kind == nir::normal_forms::Kind::Type
-                        && expected.mentions_rigid(p.declaration)
-                }) {
+                let expected = self.instantiate_contextual_domain(
+                    &metadata.parameters[index].ty,
+                    &type_parameters,
+                    &type_arguments,
+                    expr.source,
+                )?;
+                if metadata
+                    .parameters
+                    .iter()
+                    .any(|p| expected.mentions_rigid(p.declaration))
+                {
                     continue;
                 }
                 let (mut input, staged) = pending[index].take().unwrap();
                 pending_slots.remove(&index);
-                for expression in input.expressions_mut() {
-                    expression
-                        .rewrite_types(&mut |ty| {
-                            ty.instantiate_types(&type_parameters, &type_arguments)
-                        })
-                        .map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?;
-                }
+                self.specialize_contextual_input(&mut input, &type_parameters, &type_arguments)?;
                 let mut literals = BTreeMap::new();
                 self.prepare_normal_argument(&input, &expected, &mut literals, 0)?;
                 let value =
                     self.finish_staged_normal_argument(staged, &mut literals, input.source(), 0)?;
                 environment.insert(plan.as_ref().unwrap().bindings[index], value.clone());
-                values[index] = Some(self.normal_input_term(value, input.source())?);
+                let term = self.normal_input_term(value, input.source())?;
+                type_parameters.push(nir::DeclarationParameter {
+                    declaration: metadata.parameters[index].declaration,
+                    sort: if metadata.parameters[index].kind == nir::normal_forms::Kind::Type {
+                        nir::Sort::Type
+                    } else {
+                        nir::Sort::ComptimeValue
+                    },
+                });
+                type_arguments.push(term.clone());
+                values[index] = Some(term);
             }
         }
         for preparation in preparations {
@@ -3834,6 +4013,23 @@ impl<'a> Interpreter<'a> {
         _environment: &mut Environment,
     ) -> Result<Flow, Error> {
         let result = match &expr.kind {
+            K::ComptimeValue(value) => {
+                let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+                let before = fuel;
+                let checked = nir::comptime_values::validate(value, &expr.ty, &mut fuel);
+                self.budget.steps -= (before - fuel) as u64;
+                checked.map_err(|error| {
+                    self.failure(
+                        if error == nir::comptime_values::Error::Budget {
+                            ErrorKind::StepsExhausted
+                        } else {
+                            ErrorKind::Type
+                        },
+                        Some(expr.source),
+                    )
+                })?;
+                self.normal_pattern_value(value, &expr.ty)?
+            }
             K::TypeListValue(types) => {
                 if !self.is_type_list_input(&expr.ty) || types.len() > 100_000 {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
@@ -4012,94 +4208,204 @@ impl<'a> Interpreter<'a> {
     }
 
     #[inline(never)]
-    fn eval_type_alias_guard(
-        &mut self,
-        expr: &Expr,
-        environment: &mut Environment,
-    ) -> Result<Flow, Error> {
-        let K::CheckTypeAlias {
-            declaration,
-            arguments,
-        } = &expr.kind
-        else {
-            unreachable!()
-        };
-        let contract = self
-            .alias_contracts
-            .get(declaration)
-            .copied()
-            .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?;
-        if expr.ty != Term::Primitive(Primitive::Void)
-            || arguments.len() != contract.parameters.len()
-            || arguments
-                .iter()
-                .any(|argument| argument.ty != Term::Primitive(Primitive::Type))
-        {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-        }
-        self.integer_operation(Some(expr.source), |budget| {
-            budget.consume(arguments.len().saturating_add(1))
-        })?;
-        let mut types = Vec::with_capacity(arguments.len());
-        for argument in arguments {
-            let value = value!(self.eval(argument, environment));
-            types.push(self.type_description_term(value, argument.source)?);
-        }
-        for requirement in &contract.requirements {
-            self.tick(Some(expr.source))?;
-            let predicate = requirement
-                .instantiate_types(&contract.parameters, &types)
-                .map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?;
-            self.check_type_contract(&predicate, expr.source)?;
-        }
-        if !self.capabilities_hold(&contract.capabilities, &contract.parameters, &types) {
-            return Err(self.failure(ErrorKind::TypeContractUnresolved, Some(expr.source)));
-        }
-        Ok(Flow::Value(Value::Unit))
-    }
-
-    #[inline(never)]
     fn eval_nominal_type(
         &mut self,
         expr: &Expr,
         environment: &mut Environment,
     ) -> Result<Flow, Error> {
-        let K::NominalType {
-            declaration,
+        let (K::NominalType {
             arguments,
-        } = &expr.kind
+            preparations,
+            ..
+        }
+        | K::CheckTypeAlias {
+            arguments,
+            preparations,
+            ..
+        }) = &expr.kind
         else {
             unreachable!()
         };
-        let (parameters, requirements, capabilities) =
-            if let Some(def) = self.structs.get(declaration).copied() {
-                (
-                    def.parameter_binders(),
-                    &def.requirements,
-                    &def.capabilities,
-                )
-            } else if let Some(def) = self.enums.get(declaration).copied() {
-                (
-                    def.parameter_binders(),
-                    &def.requirements,
-                    &def.capabilities,
-                )
-            } else if let Some(def) = self.newtypes.get(declaration).copied() {
-                (
-                    def.parameter_binders(),
-                    &def.requirements,
-                    &def.capabilities,
-                )
-            } else {
-                return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-            };
+        self.integer_operation(Some(expr.source), |budget| {
+            budget.consume(arguments.len().saturating_add(preparations.len()))
+        })?;
+        for preparation in preparations {
+            if let K::LetPattern {
+                pattern: nir::program::Pattern::Tuple(fields),
+                ..
+            } = &preparation.expression.kind
+            {
+                self.integer_operation(Some(expr.source), |budget| budget.consume(fields.len()))?;
+            }
+        }
+        let locals = expr
+            .kind
+            .nominal_local_bindings()
+            .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?;
+        if locals.iter().any(|id| environment.contains_key(id)) {
+            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+        }
+        let result = self.eval_nominal_type_inner(expr, environment);
+        for binding in locals {
+            environment.remove(&binding);
+        }
+        result
+    }
+
+    fn instantiate_contextual_domain(
+        &mut self,
+        ty: &Term,
+        parameters: &[nir::DeclarationParameter],
+        types: &[Term],
+        source: SourceRange,
+    ) -> Result<Term, Error> {
+        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let mut remaining = before;
+        let result = (|| {
+            if parameters.len() != types.len() {
+                return Err(nir::type_computations::Error::Scope(
+                    nir::TypeError::ArgumentCount {
+                        expected: parameters.len(),
+                        actual: types.len(),
+                    },
+                ));
+            }
+            nir::type_computations::charge_term(ty, &mut remaining)?;
+            remaining = remaining
+                .checked_sub(parameters.len())
+                .ok_or(nir::type_computations::Error::Budget)?;
+            let referenced = ty
+                .rigid_parameters()
+                .map_err(nir::type_computations::Error::Scope)?;
+            let mut selected_parameters = Vec::new();
+            let mut selected_types = Vec::new();
+            for (parameter, value) in parameters.iter().zip(types) {
+                if referenced.contains_key(&parameter.declaration) {
+                    nir::type_computations::charge_term(value, &mut remaining)?;
+                    selected_parameters.push(parameter.clone());
+                    selected_types.push(value.clone());
+                }
+            }
+            nir::type_computations::instantiate_parameters_bounded(
+                ty,
+                &selected_parameters,
+                &selected_types,
+                &[],
+                &mut remaining,
+            )
+        })();
+        self.budget.steps -= (before - remaining) as u64;
+        result.map_err(|error| {
+            self.failure(
+                if matches!(error, nir::type_computations::Error::Budget) {
+                    ErrorKind::StepsExhausted
+                } else {
+                    ErrorKind::Type
+                },
+                Some(source),
+            )
+        })
+    }
+
+    fn specialize_contextual_input(
+        &mut self,
+        input: &mut nir::program::NormalFormArgument,
+        parameters: &[nir::DeclarationParameter],
+        types: &[Term],
+    ) -> Result<(), Error> {
+        let source = input.source();
+        let mut rewrite =
+            |ty: &Term| self.instantiate_contextual_domain(ty, parameters, types, source);
+        for pattern in input.patterns_mut() {
+            pattern.rewrite_types(&mut rewrite)?;
+        }
+        for expression in input.expressions_mut() {
+            expression.rewrite_types(&mut rewrite)?;
+        }
+        Ok(())
+    }
+
+    fn eval_nominal_type_inner(
+        &mut self,
+        expr: &Expr,
+        environment: &mut Environment,
+    ) -> Result<Flow, Error> {
+        let (K::NominalType {
+            preparations,
+            bindings,
+            order,
+            declaration,
+            arguments,
+        }
+        | K::CheckTypeAlias {
+            preparations,
+            bindings,
+            order,
+            declaration,
+            arguments,
+            ..
+        }) = &expr.kind
+        else {
+            unreachable!()
+        };
+        let alias = if matches!(expr.kind, K::CheckTypeAlias { .. }) {
+            Some(
+                self.alias_contracts
+                    .get(declaration)
+                    .copied()
+                    .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?,
+            )
+        } else {
+            None
+        };
+        let (parameters, domains, requirements, capabilities) = if let Some(def) = alias {
+            (
+                def.parameter_binders(),
+                &def.parameter_types,
+                &def.requirements,
+                &def.capabilities,
+            )
+        } else if let Some(def) = self.structs.get(declaration).copied() {
+            (
+                def.parameter_binders(),
+                &def.parameter_types,
+                &def.requirements,
+                &def.capabilities,
+            )
+        } else if let Some(def) = self.enums.get(declaration).copied() {
+            (
+                def.parameter_binders(),
+                &def.parameter_types,
+                &def.requirements,
+                &def.capabilities,
+            )
+        } else if let Some(def) = self.newtypes.get(declaration).copied() {
+            (
+                def.parameter_binders(),
+                &def.parameter_types,
+                &def.requirements,
+                &def.capabilities,
+            )
+        } else {
+            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+        };
         let parameters =
             parameters.map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?;
         let expected = if arguments
             .iter()
-            .any(|field| field.ty == Term::Primitive(Primitive::Never))
+            .any(nir::program::NormalFormArgument::is_diverging)
+            || preparations
+                .iter()
+                .any(|p| p.expression.ty == Term::Primitive(Primitive::Never))
         {
             Primitive::Never
+        } else if let K::CheckTypeAlias { body, .. } = &expr.kind {
+            match body {
+                None => Primitive::Void,
+                Some(body) if body.ty == Term::Primitive(Primitive::Type) => Primitive::Type,
+                Some(body) if body.ty == Term::Primitive(Primitive::Never) => Primitive::Never,
+                _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
+            }
         } else {
             Primitive::Type
         };
@@ -4109,28 +4415,255 @@ impl<'a> Interpreter<'a> {
         self.integer_operation(Some(expr.source), |budget| {
             budget.consume(arguments.len().saturating_add(1))
         })?;
-        let mut types = Vec::with_capacity(arguments.len());
-        for argument in arguments {
-            let value = value!(self.eval(argument, environment));
-            let ty = self.normal_input_term(value, argument.source)?;
-            types.push(ty);
+        if let Some(order) = order {
+            self.integer_operation(Some(expr.source), |budget| budget.consume(order.len()))?;
+            if order.len() != arguments.len() {
+                return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+            }
+            let mut seen = vec![false; arguments.len()];
+            for &slot in order {
+                if slot >= seen.len() || seen[slot] {
+                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                }
+                seen[slot] = true;
+            }
+        }
+        let specialize = bindings.is_some()
+            || domains.iter().any(|domain| {
+                parameters
+                    .iter()
+                    .any(|parameter| domain.mentions_rigid(parameter.declaration))
+            });
+        if specialize {
+            for argument in arguments {
+                nir::copy_budget::charge_argument_type_rewrite(argument, &mut self.budget.steps)
+                    .map_err(|error| {
+                        self.failure(
+                            match error {
+                                nir::copy_budget::CopyBudgetExhausted::Steps => {
+                                    ErrorKind::StepsExhausted
+                                }
+                                nir::copy_budget::CopyBudgetExhausted::Depth => {
+                                    ErrorKind::DepthExhausted
+                                }
+                            },
+                            Some(expr.source),
+                        )
+                    })?;
+            }
+        }
+        let mut specialized = specialize.then(|| arguments.clone());
+        let mut types = parameters
+            .iter()
+            .map(|parameter| Term::Rigid {
+                declaration: parameter.declaration,
+                sort: parameter.sort,
+            })
+            .collect::<Vec<_>>();
+        let mut ready = BTreeSet::new();
+        let mut pending = (0..arguments.len()).map(|_| None).collect::<Vec<_>>();
+        let mut pending_slots = BTreeSet::new();
+        let mut preparations = preparations.iter().peekable();
+        for position in 0..arguments.len() {
+            while preparations.peek().is_some_and(|p| p.before == position) {
+                value!(self.eval(&preparations.next().unwrap().expression, environment));
+            }
+            let slot = order.as_ref().map_or(position, |order| order[position]);
+            if let Some(specialized) = &mut specialized {
+                self.specialize_contextual_input(&mut specialized[slot], &parameters, &types)?;
+            }
+            let argument = specialized
+                .as_ref()
+                .map_or(&arguments[slot], |inputs| &inputs[slot]);
+            if parameters[slot].sort == nir::Sort::Type
+                && let nir::program::NormalFormArgument::Value(value) = argument
+                && !matches!(
+                    value.ty,
+                    Term::Primitive(Primitive::Type | Primitive::Never)
+                )
+            {
+                return Err(self.failure(ErrorKind::Type, Some(value.source)));
+            }
+            let domain = domains
+                .get(slot)
+                .unwrap_or(&Term::Primitive(Primitive::Type));
+            let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+            let mut remaining = before;
+            let expected = nir::type_computations::instantiate_parameters_bounded(
+                domain,
+                &parameters,
+                &types,
+                &[],
+                &mut remaining,
+            );
+            self.budget.steps -= (before - remaining) as u64;
+            let expected = expected.map_err(|error| {
+                self.failure(
+                    if matches!(error, nir::type_computations::Error::Budget) {
+                        ErrorKind::StepsExhausted
+                    } else {
+                        ErrorKind::Type
+                    },
+                    Some(argument.source()),
+                )
+            })?;
+            let unresolved = parameters.iter().enumerate().any(|(i, parameter)| {
+                !ready.contains(&i) && expected.mentions_rigid(parameter.declaration)
+            });
+            if unresolved {
+                pending_slots.insert(slot);
+                pending[slot] = Some(
+                    match self.stage_normal_argument(argument, environment, 0)? {
+                        std::ops::ControlFlow::Continue(staged) => staged,
+                        std::ops::ControlFlow::Break(flow) => return Ok(flow),
+                    },
+                );
+            } else {
+                if alias.is_some()
+                    && let nir::program::NormalFormArgument::Value(value) = argument
+                    && value.ty != expected
+                    && value.ty != Term::Primitive(Primitive::Never)
+                {
+                    return Err(self.failure(ErrorKind::Type, Some(value.source)));
+                }
+                let mut literals = BTreeMap::new();
+                self.prepare_normal_argument(argument, &expected, &mut literals, 0)?;
+                let value = value!(self.eval_normal_argument(argument, &mut literals, environment));
+                if let Some(bindings) = bindings {
+                    let copy = self.checkpoint_representation(&value, argument.source())?;
+                    environment.insert(bindings[slot], copy);
+                }
+                types[slot] = self.normal_input_term(value, argument.source())?;
+                ready.insert(slot);
+            }
+            // Captures are stored after own inputs. Resolve pending inputs as
+            // soon as their domains become available, without replaying effects.
+            loop {
+                let mut progress = false;
+                self.integer_operation(Some(expr.source), |budget| {
+                    budget.consume(pending_slots.len())
+                })?;
+                for index in pending_slots.iter().copied().collect::<Vec<_>>() {
+                    let domain = domains
+                        .get(index)
+                        .unwrap_or(&Term::Primitive(Primitive::Type));
+                    let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+                    let mut remaining = before;
+                    let expected = nir::type_computations::instantiate_parameters_bounded(
+                        domain,
+                        &parameters,
+                        &types,
+                        &[],
+                        &mut remaining,
+                    );
+                    self.budget.steps -= (before - remaining) as u64;
+                    let expected = expected.map_err(|error| {
+                        self.failure(
+                            if matches!(error, nir::type_computations::Error::Budget) {
+                                ErrorKind::StepsExhausted
+                            } else {
+                                ErrorKind::Type
+                            },
+                            Some(arguments[index].source()),
+                        )
+                    })?;
+                    if parameters.iter().enumerate().any(|(i, parameter)| {
+                        !ready.contains(&i) && expected.mentions_rigid(parameter.declaration)
+                    }) {
+                        continue;
+                    }
+                    if let Some(specialized) = &mut specialized {
+                        self.specialize_contextual_input(
+                            &mut specialized[index],
+                            &parameters,
+                            &types,
+                        )?;
+                    }
+                    let input = specialized
+                        .as_ref()
+                        .map_or(&arguments[index], |inputs| &inputs[index]);
+                    if alias.is_some()
+                        && let nir::program::NormalFormArgument::Value(value) = input
+                        && value.ty != expected
+                        && value.ty != Term::Primitive(Primitive::Never)
+                    {
+                        return Err(self.failure(ErrorKind::Type, Some(value.source)));
+                    }
+                    let mut literals = BTreeMap::new();
+                    self.prepare_normal_argument(input, &expected, &mut literals, 0)?;
+                    pending_slots.remove(&index);
+                    let staged = pending[index].take().unwrap();
+                    let value = self.finish_staged_normal_argument(
+                        staged,
+                        &mut literals,
+                        input.source(),
+                        0,
+                    )?;
+                    if let Some(bindings) = bindings {
+                        let copy = self.checkpoint_representation(&value, input.source())?;
+                        environment.insert(bindings[index], copy);
+                    }
+                    types[index] = self.normal_input_term(value, input.source())?;
+                    ready.insert(index);
+                    progress = true;
+                }
+                if !progress {
+                    break;
+                }
+            }
+        }
+        for preparation in preparations {
+            value!(self.eval(&preparation.expression, environment));
+        }
+        if ready.len() != arguments.len() {
+            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
         }
         let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
         let mut remaining = before;
-        let valid = if let Some(def) = self.structs.get(declaration) {
-            def.validate_completed_arguments(&types, &mut remaining)
-        } else if let Some(def) = self.enums.get(declaration) {
-            def.validate_completed_arguments(&types, &mut remaining)
+        let ids = parameters.iter().map(|p| p.declaration).collect::<Vec<_>>();
+        // Captured newtype binders follow their own capture-first admission
+        // order; do not replace it with the ordinary declaration telescope.
+        let valid = if let Some(def) = self.newtypes.get(declaration).filter(|_| alias.is_none()) {
+            def.validate_completed_arguments_with_layouts(
+                &types,
+                &mut remaining,
+                |ty, variant, fuel| {
+                    self.normal_value_fields(ty, variant, fuel).ok_or_else(|| {
+                        if *fuel == 0 {
+                            nir::NominalAdmissionError::Budget
+                        } else {
+                            nir::NominalAdmissionError::Invalid(
+                                "nominal value layout unavailable".into(),
+                            )
+                        }
+                    })
+                },
+            )
         } else {
-            self.newtypes[declaration].validate_completed_arguments(&types, &mut remaining)
+            nir::validate_declaration_arguments_with_layouts(
+                &ids,
+                domains,
+                &types,
+                &mut remaining,
+                |ty, variant, fuel| {
+                    self.normal_value_fields(ty, variant, fuel).ok_or_else(|| {
+                        if *fuel == 0 {
+                            nir::NominalAdmissionError::Budget
+                        } else {
+                            nir::NominalAdmissionError::Invalid(
+                                "nominal value layout unavailable".into(),
+                            )
+                        }
+                    })
+                },
+            )
         };
         self.budget.steps -= (before - remaining) as u64;
-        valid.map_err(|_| {
+        valid.map_err(|error| {
             self.failure(
-                if remaining == 0 {
-                    ErrorKind::StepsExhausted
-                } else {
-                    ErrorKind::Type
+                match error {
+                    nir::NominalAdmissionError::Budget => ErrorKind::StepsExhausted,
+                    nir::NominalAdmissionError::Invalid(_) => ErrorKind::Type,
                 },
                 Some(expr.source),
             )
@@ -4144,6 +4677,32 @@ impl<'a> Interpreter<'a> {
         }
         if !self.capabilities_hold_parameters(capabilities, &parameters, &types) {
             return Err(self.failure(ErrorKind::TypeContractUnresolved, Some(expr.source)));
+        }
+        if let K::CheckTypeAlias { body, .. } = &expr.kind {
+            return if let Some(body) = body {
+                nir::copy_budget::charge_type_rewrite(body, &mut self.budget.steps).map_err(
+                    |error| {
+                        self.failure(
+                            match error {
+                                nir::copy_budget::CopyBudgetExhausted::Steps => {
+                                    ErrorKind::StepsExhausted
+                                }
+                                nir::copy_budget::CopyBudgetExhausted::Depth => {
+                                    ErrorKind::DepthExhausted
+                                }
+                            },
+                            Some(body.source),
+                        )
+                    },
+                )?;
+                let mut specialized = (**body).clone();
+                specialized.rewrite_types(&mut |ty| {
+                    self.instantiate_contextual_domain(ty, &parameters, &types, body.source)
+                })?;
+                self.eval(&specialized, environment)
+            } else {
+                Ok(Flow::Value(Value::Unit))
+            };
         }
         Ok(Flow::Value(Value::Type(Term::Nominal {
             declaration: *declaration,
@@ -4703,15 +5262,29 @@ impl<'a> Interpreter<'a> {
             declaration: interface.declaration,
             arguments: selected_arguments,
         };
+        let key = (selected_interface, selected_subject, *member);
         let selected = *self
             .associated_values
-            .get(&(selected_interface, selected_subject, *member))
+            .get(&key)
+            .or_else(|| {
+                self.comptime_only
+                    .then(|| self.associated_initializers.get(&key))
+                    .flatten()
+            })
             .ok_or_else(|| self.failure(ErrorKind::UnmaterializedDispatch, Some(expr.source)))?;
         if !selected_types::same(&selected.ty, &expr.ty, &self.associated_values) {
             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
         }
         // Associated values cannot read a caller's lexical environment.
-        let result = self.eval(selected, &mut Environment::default())?;
+        let initializing = self.associated_initializers.contains_key(&key);
+        if initializing && !self.active_associated_initializers.insert(key.clone()) {
+            return Err(self.failure(ErrorKind::InvalidControlFlow, Some(expr.source)));
+        }
+        let result = self.eval(selected, &mut Environment::default());
+        if initializing {
+            self.active_associated_initializers.remove(&key);
+        }
+        let result = result?;
         let Flow::Value(value) = result else {
             return Err(self.failure(ErrorKind::InvalidControlFlow, Some(expr.source)));
         };
@@ -4782,10 +5355,14 @@ impl<'a> Interpreter<'a> {
                         self.failure(ErrorKind::UnmaterializedDispatch, Some(expr.source))
                     })?;
                 arguments.extend(method_arguments.iter().cloned());
-                if let Some(identity) = self.runtime_function_identities.get(&body) {
+                if let Some(identity) = self.runtime_function_identities.get(&body).copied() {
+                    self.admit_function_inputs(&identity.type_parameters, &arguments, expr.source)?;
                     let signature = identity
                         .signature
-                        .instantiate_types(&identity.type_parameters, &arguments)
+                        .instantiate_parameters(
+                            &self.input_binders(&identity.type_parameters),
+                            &arguments,
+                        )
                         .map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?;
                     if !selected_types::same(&signature, &expr.ty, &self.associated_values)
                         || !contract.program.preconditions.is_empty()
@@ -4819,6 +5396,29 @@ impl<'a> Interpreter<'a> {
                 if !selected_types::same(&ty, &expr.ty, &self.associated_values) {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 }
+                if self.comptime_only && definition.phase == nir::program::FunctionPhase::Runtime {
+                    self.admit_function_inputs(
+                        &definition.type_parameters,
+                        &arguments,
+                        expr.source,
+                    )?;
+                    if !contract.program.preconditions.is_empty() {
+                        return Err(self.failure(ErrorKind::InvalidCallPlan, Some(expr.source)));
+                    }
+                    // Transport the public interface identity even when this
+                    // snapshot also contains its implementation's runtime body.
+                    return Ok(Flow::Value(Value::RuntimeTraitMethod(Box::new(
+                        TraitMethodIdentity {
+                            interface: InterfaceInstance {
+                                declaration: *interface,
+                                arguments: interface_arguments.clone(),
+                            },
+                            subject: subject.clone(),
+                            member: *member,
+                            method_arguments: method_arguments.clone(),
+                        },
+                    ))));
+                }
                 let resolved = Expr {
                     ty,
                     source: expr.source,
@@ -4838,6 +5438,83 @@ impl<'a> Interpreter<'a> {
         Ok(Flow::Value(result))
     }
 
+    fn validate_function_inputs(
+        &self,
+        parameters: &[DeclarationId],
+        arguments: &[Term],
+        fuel: &mut usize,
+    ) -> Result<(), ErrorKind> {
+        *fuel = fuel
+            .checked_sub(parameters.len())
+            .ok_or(ErrorKind::StepsExhausted)?;
+        if parameters.len() != arguments.len() {
+            return Err(ErrorKind::Type);
+        }
+        let binders = self.input_binders(parameters);
+        for (binder, argument) in binders.iter().zip(arguments) {
+            if argument.sort() != binder.sort {
+                return Err(ErrorKind::Type);
+            }
+            if binder.sort == nir::Sort::Type {
+                continue;
+            }
+            let raw = self
+                .declaration_parameter_domains
+                .get(&binder.declaration)
+                .ok_or(ErrorKind::Type)?;
+            let domain = nir::type_computations::instantiate_parameters_bounded(
+                raw,
+                &binders,
+                arguments,
+                &[],
+                fuel,
+            )
+            .map_err(|failure| {
+                if matches!(failure, nir::type_computations::Error::Budget) {
+                    ErrorKind::StepsExhausted
+                } else {
+                    ErrorKind::Type
+                }
+            })?;
+            if let Term::Rigid {
+                declaration,
+                sort: nir::Sort::ComptimeValue,
+            } = argument
+                && self.abstract_value_parameters.get(declaration) == Some(&domain)
+            {
+                continue;
+            }
+            nir::validate_declaration_arguments_with_layouts(
+                &[binder.declaration],
+                &[domain],
+                std::slice::from_ref(argument),
+                fuel,
+                |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
+            )
+            .map_err(|failure| {
+                if matches!(failure, nir::NominalAdmissionError::Budget) {
+                    ErrorKind::StepsExhausted
+                } else {
+                    ErrorKind::Type
+                }
+            })?;
+        }
+        Ok(())
+    }
+
+    fn admit_function_inputs(
+        &mut self,
+        parameters: &[DeclarationId],
+        arguments: &[Term],
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let checked = self.validate_function_inputs(parameters, arguments, &mut fuel);
+        self.budget.steps -= (before - fuel) as u64;
+        checked.map_err(|kind| self.failure(kind, Some(source)))
+    }
+
     #[inline(never)]
     fn eval_function_instance(
         &mut self,
@@ -4849,10 +5526,14 @@ impl<'a> Interpreter<'a> {
             arguments,
         } = &expr.kind
         {
-            if let Some(identity) = self.runtime_function_identities.get(declaration) {
+            if let Some(identity) = self.runtime_function_identities.get(declaration).copied() {
+                self.admit_function_inputs(&identity.type_parameters, arguments, expr.source)?;
                 let signature = identity
                     .signature
-                    .instantiate_types(&identity.type_parameters, arguments)
+                    .instantiate_parameters(
+                        &self.input_binders(&identity.type_parameters),
+                        arguments,
+                    )
                     .map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?;
                 if !selected_types::same(&signature, &expr.ty, &self.associated_values) {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
@@ -4868,6 +5549,11 @@ impl<'a> Interpreter<'a> {
                 declaration,
                 arguments,
             } => {
+                let definition = *self
+                    .functions
+                    .get(declaration)
+                    .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(expr.source)))?;
+                self.admit_function_inputs(&definition.type_parameters, arguments, expr.source)?;
                 let key = (*declaration, arguments.clone());
                 if self.comptime_only {
                     let definition = *self.functions.get(declaration).ok_or_else(|| {
@@ -6872,6 +7558,9 @@ impl Interpreter<'_> {
             return Err(self.failure(ErrorKind::TypeContractUnresolved, None));
         }
         let matched = match pattern {
+            Pattern::CodeEvidence { .. } => {
+                return Err(self.failure(ErrorKind::TypeContractUnresolved, None));
+            }
             Pattern::Wild => true,
             Pattern::Unit => matches!(input, Value::Unit),
             Pattern::Literal(..) => return self.match_literal(pattern, input, environment, undo),
@@ -6893,6 +7582,9 @@ impl Interpreter<'_> {
             }
             Pattern::Remap { .. } => return self.match_remap(pattern, input, environment, undo),
             Pattern::Or(..) => return self.match_or(pattern, input, environment, undo),
+            Pattern::NominalType { .. } => {
+                return self.match_nominal_type(pattern, input, environment, undo);
+            }
             Pattern::NormalForm { .. } => {
                 return self.match_normal_form(pattern, input, environment, undo);
             }
@@ -7198,6 +7890,80 @@ impl Interpreter<'_> {
         Ok(Flow::Value(Value::Bool(matched)))
     }
 
+    fn match_nominal_type(
+        &mut self,
+        pattern: &nir::program::Pattern,
+        input: &Value,
+        environment: &mut Environment,
+        undo: &mut PatternJournal,
+    ) -> Result<Flow, Error> {
+        let nir::program::Pattern::NominalType {
+            declaration,
+            fields,
+        } = pattern
+        else {
+            unreachable!()
+        };
+        let Value::Type(Term::Nominal {
+            declaration: actual,
+            arguments,
+        }) = input
+        else {
+            return Ok(Flow::Value(Value::Bool(false)));
+        };
+        if actual != declaration {
+            return Ok(Flow::Value(Value::Bool(false)));
+        }
+        let (binders, domains) = if let Some(def) = self.structs.get(declaration).copied() {
+            (def.parameter_binders(), &def.parameter_types)
+        } else if let Some(def) = self.enums.get(declaration).copied() {
+            (def.parameter_binders(), &def.parameter_types)
+        } else if let Some(def) = self.newtypes.get(declaration).copied() {
+            (def.parameter_binders(), &def.parameter_types)
+        } else {
+            return Err(self.failure(ErrorKind::Type, None));
+        };
+        let binders = binders.map_err(|_| self.failure(ErrorKind::Type, None))?;
+        if fields.len() != arguments.len() || binders.len() != arguments.len() {
+            return Err(self.failure(ErrorKind::Type, None));
+        }
+        // Domain substitution is based on the completed telescope, including captures.
+        for (index, (pattern, argument)) in fields.iter().zip(arguments).enumerate() {
+            self.tick(None)?;
+            let domain = domains
+                .get(index)
+                .unwrap_or(&Term::Primitive(Primitive::Type));
+            let before = self.budget.steps as usize;
+            let mut remaining = before;
+            let domain = nir::type_computations::instantiate_parameters_bounded(
+                domain,
+                &binders,
+                arguments,
+                &[],
+                &mut remaining,
+            );
+            self.budget.steps -= (before - remaining) as u64;
+            let domain = domain.map_err(|e| {
+                self.failure(
+                    if matches!(e, nir::type_computations::Error::Budget) {
+                        ErrorKind::StepsExhausted
+                    } else {
+                        ErrorKind::Type
+                    },
+                    None,
+                )
+            })?;
+            let value = self.normal_pattern_value(argument, &domain)?;
+            if !matches!(
+                value!(self.match_pattern_field(pattern, &value, environment, undo, None)),
+                Value::Bool(true)
+            ) {
+                return Ok(Flow::Value(Value::Bool(false)));
+            }
+        }
+        Ok(Flow::Value(Value::Bool(true)))
+    }
+
     #[inline(never)]
     fn match_normal_form(
         &mut self,
@@ -7250,12 +8016,17 @@ impl Interpreter<'_> {
         {
             let ty = parameter
                 .ty
-                .instantiate_types(&type_parameters, &type_arguments)
+                .instantiate_parameters(&type_parameters, &type_arguments)
                 .map_err(|_| self.failure(ErrorKind::Type, None))?;
-            if parameter.kind == nir::normal_forms::Kind::Type {
-                type_parameters.push(parameter.declaration);
-                type_arguments.push(argument.clone());
-            }
+            type_parameters.push(nir::DeclarationParameter {
+                declaration: parameter.declaration,
+                sort: if parameter.kind == nir::normal_forms::Kind::Type {
+                    nir::Sort::Type
+                } else {
+                    nir::Sort::ComptimeValue
+                },
+            });
+            type_arguments.push(argument.clone());
             if matches!(pattern, nir::program::Pattern::Wild) {
                 continue;
             }
@@ -8815,5 +9586,110 @@ mod invocation_environment_tests {
         assert_eq!(vm.depth, 0);
         assert_eq!(vm.effect_state.invocation, 7);
         assert_eq!(vm.effect_state.resume, Some(9));
+    }
+}
+
+#[cfg(test)]
+mod nominal_environment_tests {
+    use super::*;
+    use nir::program::{NormalFormArgument as A, NormalFormPreparation, Pattern};
+
+    #[test]
+    fn nominal_input_and_packet_bindings_are_removed_on_every_exit() {
+        let id = |local| DeclarationId { package: 1, local };
+        let local = |index| LocalId { owner: 0, index };
+        let ty = |primitive| Term::Primitive(primitive);
+        let source = SourceRange { start: 1, end: 2 };
+        let type_value = || Expr {
+            source,
+            ty: ty(Primitive::Type),
+            kind: K::TypeValue(ty(Primitive::Bool)),
+        };
+        let package = Package {
+            structs: vec![nir::program::Struct {
+                declaration: id(20),
+                name: "Pair".into(),
+                type_parameters: vec![id(21), id(22)],
+                parameter_types: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                fields: vec![],
+            }],
+            ..Default::default()
+        };
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let mut environment = Environment::from([(local(99), Value::Bool(true))]);
+        for mode in 0..3 {
+            let second = match mode {
+                0 => A::Value(type_value()),
+                1 => A::Integer {
+                    source,
+                    spelling: "7".into(),
+                    negative: false,
+                },
+                _ => A::Value(Expr {
+                    source,
+                    ty: ty(Primitive::Never),
+                    kind: K::Return(Some(Box::new(type_value()))),
+                }),
+            };
+            let expression = Expr {
+                source,
+                ty: ty(if second.is_diverging() {
+                    Primitive::Never
+                } else {
+                    Primitive::Type
+                }),
+                kind: K::NominalType {
+                    declaration: id(20),
+                    order: None,
+                    bindings: Some(vec![local(1), local(2)]),
+                    arguments: vec![
+                        A::Value(Expr {
+                            source,
+                            ty: ty(Primitive::Type),
+                            kind: K::Local(local(3)),
+                        }),
+                        second,
+                    ],
+                    preparations: vec![NormalFormPreparation {
+                        before: 0,
+                        expression: Expr {
+                            source,
+                            ty: ty(Primitive::Void),
+                            kind: K::LetPattern {
+                                pattern: Pattern::Tuple(vec![Pattern::Binding {
+                                    binding: local(3),
+                                    inner: Box::new(Pattern::Wild),
+                                }]),
+                                value: Box::new(Expr {
+                                    source,
+                                    ty: Term::Tuple(vec![ty(Primitive::Type)]),
+                                    kind: K::Tuple(vec![type_value()]),
+                                }),
+                                guard: None,
+                                otherwise: None,
+                            },
+                        },
+                    }],
+                },
+            };
+            for _ in 0..2 {
+                let result = vm.eval(&expression, &mut environment);
+                match mode {
+                    0 => assert!(matches!(
+                        result,
+                        Ok(Flow::Value(Value::Type(Term::Nominal { .. })))
+                    )),
+                    1 => assert_eq!(result.unwrap_err().kind, ErrorKind::Type),
+                    _ => assert!(matches!(
+                        result,
+                        Ok(Flow::Return(Value::Type(Term::Primitive(Primitive::Bool))))
+                    )),
+                }
+                assert_eq!(environment.len(), 1);
+                assert_eq!(environment.get(&local(99)), Some(&Value::Bool(true)));
+            }
+        }
     }
 }

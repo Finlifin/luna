@@ -19,6 +19,41 @@ quote fn 的普通调用沿用参数语法；contextual 输入使用 implicit qu
 
 ## 正式定义
 
+### 容器值参数的捕获
+
+quote 方法可以读取所属类型或 trait 已完成的值参数；展开按声明区分 Type 输入和值输入，依赖域先替换前面的类型参数。
+
+```flurry
+struct Switch where enabled: bool {
+    pub quote fn choose(value: bool) -> bool {
+        enabled and value
+    }
+}
+
+fn run() -> bool {
+    Switch<true>.choose(true) and not Switch<false>.choose(true)
+}
+```
+
+结果为 true。两次 choose 都必须展开，普通实参各求值一次，即使 enabled 为 false 也不能省去实参自身的副作用。trait 默认方法使用所选 trait 实例的值；实现方法展开后仍检查公开接口的前置和后置条件，不能因调用边界消失而丢失契约。未确定的值不视为已知常量，也不展开 normal-form 的头。已完成的整数捕获可以参与程序契约的范围与多项式推导，例如 `amount = 3` 时用 `value <= 252` 证明 `value <= 255 - amount`。证明前仍核验整数的声明域；`u8` 的 256 或 `i8` 的 -129 不能作为合法输入建立事实。任意精度整数也受证明器的计算和大小预算约束，预算耗尽不表示契约成立。
+
+### 自身的值子句
+
+quote fn 也可以声明自己的值子句，从普通实参的类型身份推导，或在应用时显式填写；依赖默认值在先行输入确定后取得。
+
+```flurry
+struct Flag where enabled: bool {}
+quote fn read(value: Flag<flag>) -> bool
+where flag: bool, .fallback: bool = flag { fallback }
+
+fn run() -> bool {
+    read(Flag<true>{}) and not read(Flag<false>{})
+        and read<false, .fallback = true>(Flag<false>{})
+}
+```
+
+三次 `read` 都在接入时展开，不留下对 `read` 的 runtime 调用。值子句仍检查声明域；接受值子句不使 quote fn 成为 comptime fn。
+
 ### 三种不同工作
 
 | 构造 | 必须完成的工作 | 运行时主体 |
@@ -31,7 +66,11 @@ quote fn 不属于 comptime fn。所有 quoted code 是 comptime 值，描述的
 
 `inline if` 等控制流构造还承担实例化时选择代码的工作。一个普通 fn 可以含 inline if，却仍保留普通调用；一个 quote fn 也可以接入包含普通 runtime if 的代码，其分支要等 runtime 条件。函数展开、编译时分支选择和运行时求值是三件事。
 
-当前实现已将 `inline fn` 的声明意向从解析、HIR 保留到 NIR 和具体 IIR 实例，dump 中以 `(inline true)` 表示。泛型实例、带 comptime 实参的实例、延迟签名实例和已选择的 trait 方法保留各自定义的意向；`pure` 和 comptime 阶段仍分别检查。默认执行路径保留普通调用。显式 NIR 优化入口 `elaboration::program::inlining::expand` 可展开普通 runtime 直接调用，复用卫生重命名、默认参数、契约和返回边界降码；同一 pass 继续展开复制主体中的非递归 inline 调用链；当前展开链重复出现同一声明、达到深度界限或预算耗尽时，保留剩余普通调用。候选展开失败会撤销该候选的代码与元数据修改，保留普通调用。调用者在转换之后重新运行资源验证与清理计划发布。命令行可用 `--interpret entry --inline-functions --copy-protocol Copy --drop-protocol Drop` 显式启用此转换，其中协议名按源程序定义指定。驱动先展开，再检查资源并发布清理计划，最后执行；准备失败在执行前报告，runtime 失败不重跑原程序。此选项不用于无资源检查的解释执行。带 comptime 实参的调用等待输入完成，具体 trait 方法通过受检实现选择取得 inline 方法体，并合并接口的程序契约后展开；在实现的参数、结果和入口快照绑定下，已经继承的完全相同谓词不重复插入；实现放宽入口条件时，也识别以入口快照为守卫的已继承保证，实现自行声明的不同谓词仍分别检查；同一轮转换按接口、成员、Self、接口实参及方法实参的完整表示复用选择结果，不展开 opaque head 来制造缓存命中。尚含开放类型输入的选择与间接调用保留原调用。泛型模板的类型实参完成后，展开候选还会按已检查的实现规范化签名、主体、默认值和契约中的关联类型注解；例如 `emit<T.as(Producer).Item>` 在 Item 选定为 bool 后与调用处的 `emit<bool>` 对齐。这一步不调用类型函数，不展开 normal-form 头，也不把仍开放的投影当作已完成实例。callee 展开之后，可将封闭 direct inline effect 的请求和 handler 分支一并降为局部 pattern match，保留参数单次求值、分支顺序及局部清理。显式 resume 使用请求私有的结果交付边界，交付后回到请求点；请求参数自身的 return 留在边界外。handler 的 return 保持原函数目标，break/continue 保持安装位置的词法循环目标，跨过展开 callee 时仍执行相应清理。handler 局部循环使用每份展开代码的新身份；其中已展开的 inline/quote 调用连同结果槽清理证据一起复制。不含效应的闭包保留自身调用与 return 边界，捕获身份随绑定重新建立；拥有型捕获和指针来源在转换后的资源检查中核验。独立封闭的嵌套安装先展开内部；callee 的效应行可以是当前行的子集或采用不同顺序，逐层按槽映射核对完整操作身份。直接请求外层 effect 的分支可以继续展开：先按安装位置的外层行规范化 handler，再把主体中的外层槽位映射回该行。向外请求同一操作不会重新进入当前 handler；多层 map/filter 风格的安装可逐层消除。部分 direct handler 也可展开：原候选之后生成最后一个外层请求分支，按已经检查的 fallback 槽位转发原载荷；匹配或守卫失败的候选先撤销，实参不重新求值。外层返回后，后续请求仍经过原内层候选。带效应的闭包及仍未展开的 effectful callee 保留相应安装的普通执行路径。更一般的联合控制流转换仍未完成。
+当前实现已将 `inline fn` 的声明意向从解析、HIR 保留到 NIR 和具体 IIR 实例，dump 中以 `(inline true)` 表示。泛型实例、带 comptime 实参的实例、延迟签名实例和已选择的 trait 方法保留各自定义的意向；`pure` 和 comptime 阶段仍分别检查。非 staged 调用的默认路径保留普通调用；带 comptime 输入的 inline 调用在物化后尝试展开，见下文。显式 NIR 优化入口 `elaboration::program::inlining::expand` 可展开普通 runtime 直接调用，复用卫生重命名、默认参数、契约和返回边界降码；同一 pass 继续展开复制主体中的非递归 inline 调用链；当前展开链重复出现同一声明、达到深度界限或预算耗尽时，保留剩余普通调用。候选展开失败会撤销该候选的代码与元数据修改，保留普通调用。调用者在转换之后重新运行资源验证与清理计划发布。命令行可用 `--interpret entry --inline-functions --copy-protocol Copy --drop-protocol Drop` 显式启用此转换，其中协议名按源程序定义指定。驱动先展开，再检查资源并发布清理计划，最后执行；准备失败在执行前报告，runtime 失败不重跑原程序。此选项不用于无资源检查的解释执行。带 comptime 实参的调用等待输入完成，具体 trait 方法通过受检实现选择取得 inline 方法体，并合并接口的程序契约后展开；在实现的参数、结果和入口快照绑定下，已经继承的完全相同谓词不重复插入；实现放宽入口条件时，也识别以入口快照为守卫的已继承保证，实现自行声明的不同谓词仍分别检查；同一轮转换按接口、成员、Self、接口实参及方法实参的完整表示复用选择结果，不展开 opaque head 来制造缓存命中。尚含开放类型输入的选择与间接调用保留原调用。泛型模板的类型实参完成后，展开候选还会按已检查的实现规范化签名、主体、默认值和契约中的关联类型注解；例如 `emit<T.as(Producer).Item>` 在 Item 选定为 bool 后与调用处的 `emit<bool>` 对齐。这一步不调用类型函数，不展开 normal-form 头，也不把仍开放的投影当作已完成实例。callee 展开之后，可将封闭 direct inline effect 的请求和 handler 分支一并降为局部 pattern match，保留参数单次求值、分支顺序及局部清理。显式 resume 使用请求私有的结果交付边界，交付后回到请求点；请求参数自身的 return 留在边界外。handler 的 return 保持原函数目标，break/continue 保持安装位置的词法循环目标，跨过展开 callee 时仍执行相应清理。handler 局部循环使用每份展开代码的新身份；其中已展开的 inline/quote 调用连同结果槽清理证据一起复制。不含效应的闭包保留自身调用与 return 边界，捕获身份随绑定重新建立；拥有型捕获和指针来源在转换后的资源检查中核验。独立封闭的嵌套安装先展开内部；callee 的效应行可以是当前行的子集或采用不同顺序，逐层按槽映射核对完整操作身份。直接请求外层 effect 的分支可以继续展开：先按安装位置的外层行规范化 handler，再把主体中的外层槽位映射回该行。向外请求同一操作不会重新进入当前 handler；多层 map/filter 风格的安装可逐层消除。部分 direct handler 也可展开：原候选之后生成最后一个外层请求分支，按已经检查的 fallback 槽位转发原载荷；匹配或守卫失败的候选先撤销，实参不重新求值。外层返回后，后续请求仍经过原内层候选。带效应的闭包及仍未展开的 effectful callee 保留相应安装的普通执行路径。更一般的联合控制流转换仍未完成。
+
+带 comptime 参数的 `inline fn` 在输入绑定后重试展开；其主体中的普通 inline 直接调用、泛型调用和具体 trait 方法调用可以继续展开，之后再尝试消除封闭的 direct inline handler。类型要求、接口契约、实参单次求值与资源清理边界均保留。递归链遇到同一声明或达到深度界限时保留普通调用，不获得 `quote fn` 的强制展开语义，详见[代数效应](../algebraic-effect-and-delimited-continuation/algebraic-effect.md)。
+
+在这条展开链内，立即用于尾部调用的局部函数别名可以接回已知目标，例如 `let first = leaf; let action = first; action(item)`。效应调用的行映射包装同样保留。此转换要求取得别名与调用之间没有其它操作，且实参不读取、改写或捕获该绑定；存在这些观察时保留原调用。例如 `var action = leaf; action(do { action = other; item })` 必须先取得原 callee，再执行实参里的赋值，不能被改成对 `other` 的调用。
 
 展开主体没有当前函数的词法 `return` 时，尾表达式直接交付结果，保留普通块作用域和清理；没有后置条件时，尾位置的显式 `return`（包括尾位置 if/match 分支）也可直接交付；跨越后续语句的早退仍需要私有返回值存储及退出边界。带后置条件的显式返回保留边界，确保条件检查发生在局部清理之前。闭包主体的 `return` 属于闭包自身，捕获初始化表达式仍属于外层。这个区别也使仅含标量观察的尾表达式函数可以在模式 guard 中展开，默认实参仍只求值一次。跨越后续语句的早退通过生成的局部返回槽完成交付。guard 验证检查该区域的局部绑定、循环目标和每个实际调用的观察契约，再用普通资源分析发布清理计划；它不因此获得修改调用者变量、写入指针或转移调用者资源的权限。普通观察块和生成返回区域共用检查，允许布局不含数据指针、且固定的 Drop 选择已证明不会拒绝的拥有型局部值。责任取得时检查这个前提，实际退出仍使用普通清理计划，包括嵌套字段、枚举分支、替换旧值和提前退出。调用者拥有型输入的交付、带环境闭包和含指针的拥有型局部值仍待接入。已知恒真的前后置条件保留检查位置；可能拒绝的条件仍需要尚未接入的失败路径资源转移。
 

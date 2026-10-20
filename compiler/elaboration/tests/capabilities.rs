@@ -28,6 +28,7 @@ fn implementation(
     capabilities: Vec<TraitRequirement>,
 ) -> Implementation {
     Implementation {
+        associated_initializers: vec![],
         parameter_types: vec![],
         associated: vec![],
         interface_arguments: vec![],
@@ -2032,4 +2033,414 @@ fn metered_world_propositions_share_budget_and_preserve_evidence() {
             .unwrap(),
         Outcome::Entailed(_)
     ));
+}
+
+#[test]
+fn rigid_value_domains_control_matching_replay_and_index_revision() {
+    use elaboration::implementation::TypeAssessment;
+    let parameter = id(701);
+    let external = id(702);
+    let rigid = |id| Term::Rigid {
+        declaration: id,
+        sort: Sort::ComptimeValue,
+    };
+    let head = ImplementationHead {
+        declaration: id(703),
+        interface: Some(id(704)),
+        subject: boxed(rigid(parameter)),
+        interface_arguments: vec![rigid(parameter)],
+        type_parameters: vec![parameter],
+        parameter_types: vec![Term::Primitive(Primitive::Bool)],
+        requirements: vec![],
+    };
+    let context = Context::default();
+    let subject = boxed(rigid(external));
+    let arguments = [rigid(external)];
+    let mut index = Index::default();
+    index.insert(head.clone(), Budget::default()).unwrap();
+    let before = index
+        .resolve_types(id(704), &arguments, &subject, &context, Budget::default())
+        .unwrap();
+    assert!(!matches!(before.selection, Selection::Selected(_)));
+    index
+        .register_parameter_domain(external, Term::Primitive(Primitive::Bool))
+        .unwrap();
+    assert!(!index.type_resolution_is_current(&before));
+    let valid = index
+        .resolve_types(id(704), &arguments, &subject, &context, Budget::default())
+        .unwrap();
+    assert!(matches!(valid.selection, Selection::Selected(_)));
+    let TypeAssessment::Applicable(evidence) = &valid.assessments[&head.declaration] else {
+        panic!("{valid}")
+    };
+    let domains = std::collections::BTreeMap::from([(external, Term::Primitive(Primitive::Bool))]);
+    head.verify_type_evidence_with_domains(
+        evidence,
+        &subject,
+        &arguments,
+        &context,
+        Budget::default(),
+        &domains,
+    )
+    .unwrap();
+    assert!(
+        head.verify_type_evidence(evidence, &subject, &arguments, &context, Budget::default())
+            .is_err()
+    );
+    let wrong = std::collections::BTreeMap::from([(external, Term::Primitive(Primitive::Char))]);
+    assert!(
+        head.verify_type_evidence_with_domains(
+            evidence,
+            &subject,
+            &arguments,
+            &context,
+            Budget::default(),
+            &wrong
+        )
+        .is_err()
+    );
+    assert!(
+        index
+            .register_parameter_domain(external, Term::Primitive(Primitive::Char))
+            .is_err()
+    );
+    assert!(index.type_resolution_is_current(&valid));
+    let other = id(705);
+    index
+        .register_parameter_domain(other, Term::Primitive(Primitive::Bool))
+        .unwrap();
+    let uncertain = index
+        .resolve_types(
+            id(704),
+            &[rigid(other)],
+            &subject,
+            &context,
+            Budget::default(),
+        )
+        .unwrap();
+    assert!(!matches!(uncertain.selection, Selection::Selected(_)));
+    assert!(index.to_string().contains("(parameter-domain"));
+}
+
+#[test]
+fn external_value_domains_preserve_only_subject_guarantees_through_parents() {
+    use elaboration::capabilities::subject_requirements_with_domains;
+    use nir::program::{InterfaceInstance, TypePredicate};
+    let rigid = |local, sort| Term::Rigid {
+        declaration: id(local),
+        sort,
+    };
+    let parent = Trait {
+        declaration: id(801),
+        self_parameter: id(802),
+        type_parameters: vec![id(803), id(804)],
+        parameter_types: vec![
+            Term::Primitive(Primitive::Type),
+            Term::Primitive(Primitive::Bool),
+        ],
+        name: "Parent".into(),
+        parents: vec![],
+        methods: vec![],
+        associated: vec![],
+        capabilities: vec![],
+        requirements: vec![
+            TypePredicate::Equal(rigid(802, Sort::Type), rigid(803, Sort::Type)),
+            TypePredicate::Equal(rigid(803, Sort::Type), Term::Primitive(Primitive::Bool)),
+        ],
+    };
+    let child = Trait {
+        declaration: id(811),
+        self_parameter: id(812),
+        type_parameters: vec![id(813), id(814)],
+        parameter_types: parent.parameter_types.clone(),
+        name: "Child".into(),
+        parents: vec![InterfaceInstance {
+            declaration: parent.declaration,
+            arguments: vec![rigid(813, Sort::Type), rigid(814, Sort::ComptimeValue)],
+        }],
+        requirements: vec![],
+        methods: vec![],
+        associated: vec![],
+        capabilities: vec![],
+    };
+    let assumptions = [TraitRequirement {
+        subject: rigid(821, Sort::Type),
+        interface: child.declaration,
+        interface_arguments: vec![rigid(822, Sort::Type), rigid(823, Sort::ComptimeValue)],
+    }];
+    let traits = [parent, child];
+    let mut domains = std::collections::BTreeMap::new();
+    for domain in [None, Some(Term::Primitive(Primitive::Char))] {
+        domains.clear();
+        if let Some(domain) = domain {
+            domains.insert(id(823), domain);
+        }
+        assert!(
+            subject_requirements_with_domains(&traits, &assumptions, Budget::default(), &domains)
+                .is_empty()
+        );
+    }
+    domains.insert(id(823), Term::Primitive(Primitive::Bool));
+    assert!(
+        subject_requirements_with_domains(
+            &traits,
+            &assumptions,
+            Budget {
+                steps: 0,
+                ..Default::default()
+            },
+            &domains
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        subject_requirements_with_domains(&traits, &assumptions, Budget::default(), &domains),
+        vec![TypePredicate::Equal(
+            rigid(821, Sort::Type),
+            rigid(822, Sort::Type)
+        )]
+    );
+}
+
+#[test]
+fn repeated_value_indices_do_not_prove_absence_from_an_unknown_input() {
+    use elaboration::{capabilities::TraitTruth, ptc::TraitQuery};
+    let value = |n| Term::Rigid {
+        declaration: id(n),
+        sort: Sort::ComptimeValue,
+    };
+    let mut imp = implementation(
+        200,
+        100,
+        Term::Primitive(Primitive::Bool),
+        vec![id(1)],
+        vec![],
+    );
+    imp.parameter_types = vec![Term::Primitive(Primitive::Bool)];
+    imp.interface_arguments = vec![value(1), value(1)];
+    let implementations = [imp];
+    let mut index = index(&implementations);
+    index
+        .register_parameter_domain(id(2), Term::Primitive(Primitive::Bool))
+        .unwrap();
+    let traits = [Trait {
+        declaration: id(100),
+        self_parameter: id(101),
+        type_parameters: vec![id(102), id(103)],
+        parameter_types: vec![Term::Primitive(Primitive::Bool); 2],
+        name: "Pair".into(),
+        parents: vec![],
+        methods: vec![],
+        associated: vec![],
+        requirements: vec![],
+        capabilities: vec![],
+    }];
+    let context = Context::default();
+    let world = World {
+        index: &index,
+        implementations: &implementations,
+        traits: &traits,
+        assumptions: &[],
+        context: &context,
+    };
+    for (arguments, expected) in [
+        (vec![value(2), Term::Bool(true)], TraitTruth::Pending),
+        (vec![Term::Bool(true), value(2)], TraitTruth::Pending),
+        (vec![value(2), value(2)], TraitTruth::Established),
+        (
+            vec![Term::Bool(true), Term::Bool(true)],
+            TraitTruth::Established,
+        ),
+        (
+            vec![Term::Bool(true), Term::Bool(false)],
+            TraitTruth::Excluded,
+        ),
+    ] {
+        let query = TraitQuery {
+            interface: id(100),
+            subject: Term::Primitive(Primitive::Bool),
+            arguments,
+        };
+        assert_eq!(
+            world
+                .decide_trait(&query, Budget::default())
+                .unwrap()
+                .truth(),
+            expected,
+            "{query:?}"
+        );
+    }
+}
+
+#[test]
+fn nominal_trait_indices_resolve_only_with_valid_layouts() {
+    let config_id = id(90);
+    let config = Term::Nominal {
+        declaration: config_id,
+        arguments: vec![],
+    };
+    let value = Term::NominalValue {
+        ty: Box::new(config.clone()),
+        variant: None,
+        fields: vec![Term::Bool(true)],
+    };
+    let mut contract = marker(100);
+    contract.type_parameters = vec![id(2)];
+    contract.parameter_types = vec![config];
+    let traits = vec![contract];
+    let subject = Term::Primitive(Primitive::Bool);
+    let mut supplied = implementation(20, 100, subject.clone(), vec![], vec![]);
+    supplied.interface_arguments = vec![value.clone()];
+    let implementations = vec![supplied];
+    let mut ix = index(&implementations);
+    let mut context = Context::default();
+    context.admit_nominal_constructor(config_id);
+    let query = nir::program::InterfaceInstance {
+        declaration: id(100),
+        arguments: vec![value],
+    };
+    let resolve = |ix: &Index, query: &nir::program::InterfaceInstance| {
+        World {
+            index: ix,
+            implementations: &implementations,
+            traits: &traits,
+            assumptions: &[],
+            context: &context,
+        }
+        .resolve_instance(query, &subject, Budget::default())
+    };
+    assert!(resolve(&ix, &query).is_err());
+    ix.set_nominal_layouts(
+        vec![nir::program::Struct {
+            declaration: config_id,
+            name: "Config".into(),
+            type_parameters: vec![],
+            parameter_types: vec![],
+            fields: vec![("flag".into(), Term::Primitive(Primitive::Bool))],
+            requirements: vec![],
+            capabilities: vec![],
+        }],
+        vec![],
+        vec![],
+    );
+    let result = resolve(&ix, &query).unwrap();
+    assert_eq!(
+        result.types.selection,
+        Selection::Selected(id(20)),
+        "{}",
+        result.types
+    );
+    let mut forged = query.clone();
+    let Term::NominalValue { fields, .. } = &mut forged.arguments[0] else {
+        unreachable!()
+    };
+    fields[0] = Term::Char('x');
+    assert!(resolve(&ix, &forged).is_err());
+}
+
+#[test]
+fn nominal_capability_sources_and_subject_facts_require_layout_evidence() {
+    use elaboration::capabilities::{
+        capability_sources_with_layouts, subject_requirements_with_layouts,
+    };
+    use nir::program::TypePredicate;
+    let config_id = id(900);
+    let config = Term::Nominal {
+        declaration: config_id,
+        arguments: vec![],
+    };
+    let mut contract = marker(100);
+    contract.type_parameters = vec![id(2)];
+    contract.parameter_types = vec![config.clone()];
+    contract.requirements.push(TypePredicate::Equal(
+        Term::Rigid {
+            declaration: contract.self_parameter,
+            sort: Sort::Type,
+        },
+        Term::Primitive(Primitive::Bool),
+    ));
+    let traits = vec![contract];
+    let assumption = TraitRequirement {
+        interface: id(100),
+        subject: var(),
+        interface_arguments: vec![Term::NominalValue {
+            ty: Box::new(config),
+            variant: None,
+            fields: vec![Term::Bool(true)],
+        }],
+    };
+    let mut package = nir::program::Package::default();
+    package.structs.push(nir::program::Struct {
+        declaration: config_id,
+        name: "Config".into(),
+        type_parameters: vec![],
+        parameter_types: vec![],
+        fields: vec![("flag".into(), Term::Primitive(Primitive::Bool))],
+        requirements: vec![],
+        capabilities: vec![],
+    });
+    let assumptions = vec![assumption];
+    let domains = Default::default();
+    assert!(
+        capability_sources_with_layouts(
+            &traits,
+            &assumptions,
+            Budget::default(),
+            &[],
+            &domains,
+            None
+        )
+        .is_err()
+    );
+    assert!(
+        subject_requirements_with_layouts(&traits, &assumptions, Budget::default(), &domains, None)
+            .is_empty()
+    );
+    assert_eq!(
+        capability_sources_with_layouts(
+            &traits,
+            &assumptions,
+            Budget::default(),
+            &[],
+            &domains,
+            Some(&package)
+        )
+        .unwrap(),
+        assumptions
+    );
+    assert_eq!(
+        subject_requirements_with_layouts(
+            &traits,
+            &assumptions,
+            Budget::default(),
+            &domains,
+            Some(&package)
+        ),
+        vec![TypePredicate::Equal(
+            var(),
+            Term::Primitive(Primitive::Bool)
+        )]
+    );
+    package.structs[0].fields[0].1 = Term::Primitive(Primitive::Char);
+    assert!(
+        capability_sources_with_layouts(
+            &traits,
+            &assumptions,
+            Budget::default(),
+            &[],
+            &domains,
+            Some(&package)
+        )
+        .is_err()
+    );
+    assert!(
+        subject_requirements_with_layouts(
+            &traits,
+            &assumptions,
+            Budget::default(),
+            &domains,
+            Some(&package)
+        )
+        .is_empty()
+    );
 }

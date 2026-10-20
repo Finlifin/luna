@@ -17,6 +17,9 @@ impl Checker<'_, '_> {
                 .checked_sub(1)
                 .ok_or_else(|| error(span, "inline pattern behavior budget exhausted"))?;
             let computation = match pattern {
+                n::Pattern::CodeEvidence { .. } => {
+                    return Err(error(span, "unresolved pattern-code evidence"));
+                }
                 n::Pattern::Then { first, value, next } => {
                     pending.push(first);
                     pending.push(next);
@@ -35,6 +38,7 @@ impl Checker<'_, '_> {
                 n::Pattern::Tuple(fields)
                 | n::Pattern::TypeTuple(fields)
                 | n::Pattern::Or(fields)
+                | n::Pattern::NominalType { fields, .. }
                 | n::Pattern::Record { fields, .. }
                 | n::Pattern::AnonymousRecord { fields, .. }
                 | n::Pattern::Variant { fields, .. }

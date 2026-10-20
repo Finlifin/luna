@@ -73,6 +73,8 @@ pub struct World<'a> {
     pub context: &'a Context,
 }
 
+pub(crate) use crate::implementation::equivalent_domains;
+
 /// Member lookup roots implied by capabilities. Parents are traversed for
 /// their parameter capabilities, but remain inside their child's member lookup
 /// so a child's own member continues to shadow a same-named parent member.
@@ -91,6 +93,27 @@ pub fn capability_sources_in_scope(
     assumptions: &[TraitRequirement],
     budget: Budget,
     frames: &[Vec<nir::Sort>],
+) -> Result<Vec<TraitRequirement>, String> {
+    capability_sources_with_domains(traits, assumptions, budget, frames, &BTreeMap::new())
+}
+
+pub fn capability_sources_with_domains(
+    traits: &[Trait],
+    assumptions: &[TraitRequirement],
+    budget: Budget,
+    frames: &[Vec<nir::Sort>],
+    domains: &BTreeMap<Id, Term>,
+) -> Result<Vec<TraitRequirement>, String> {
+    capability_sources_with_layouts(traits, assumptions, budget, frames, domains, None)
+}
+
+pub fn capability_sources_with_layouts(
+    traits: &[Trait],
+    assumptions: &[TraitRequirement],
+    budget: Budget,
+    frames: &[Vec<nir::Sort>],
+    domains: &BTreeMap<Id, Term>,
+    layouts: Option<&nir::program::Package>,
 ) -> Result<Vec<TraitRequirement>, String> {
     for assumption in assumptions {
         assumption
@@ -118,12 +141,15 @@ pub fn capability_sources_in_scope(
         if contract.type_parameters.len() != current.interface_arguments.len() {
             continue;
         }
-        contract.validate_arguments_for_subject(
+        contract.validate_arguments_with_layouts(
             &current.subject,
             &current.interface_arguments,
             frames,
             traits,
+            domains,
             &mut remaining,
+            |_, _, _| false,
+            layouts,
         )?;
         let parameters = contract.binders_with_self(&mut remaining)?;
         let arguments: Vec<_> = std::iter::once(current.subject.clone())
@@ -165,6 +191,27 @@ pub fn subject_requirements(
     assumptions: &[TraitRequirement],
     budget: Budget,
 ) -> Vec<nir::program::TypePredicate> {
+    subject_requirements_with_domains(traits, assumptions, budget, &BTreeMap::new())
+}
+
+/// Propagate subject guarantees with immutable declaration-domain evidence.
+/// Domain evidence admits inputs; it does not establish parameter-only requirements.
+pub fn subject_requirements_with_domains(
+    traits: &[Trait],
+    assumptions: &[TraitRequirement],
+    budget: Budget,
+    domains: &BTreeMap<Id, Term>,
+) -> Vec<nir::program::TypePredicate> {
+    subject_requirements_with_layouts(traits, assumptions, budget, domains, None)
+}
+
+pub fn subject_requirements_with_layouts(
+    traits: &[Trait],
+    assumptions: &[TraitRequirement],
+    budget: Budget,
+    domains: &BTreeMap<Id, Term>,
+    layouts: Option<&nir::program::Package>,
+) -> Vec<nir::program::TypePredicate> {
     let mut pending: Vec<_> = assumptions.iter().cloned().map(|a| (a, 0)).collect();
     let mut seen = HashSet::new();
     let mut output = Vec::new();
@@ -189,12 +236,15 @@ pub fn subject_requirements(
             continue;
         }
         if contract
-            .validate_arguments_for_subject(
+            .validate_arguments_with_layouts(
                 &assumption.subject,
                 &assumption.interface_arguments,
                 &[],
                 traits,
+                domains,
                 &mut remaining,
+                |_, _, _| false,
+                layouts,
             )
             .is_err()
         {
@@ -440,12 +490,17 @@ impl Solver<'_, '_> {
             .iter()
             .find(|t| t.declaration == interface.declaration)
         {
-            contract.validate_arguments_for_subject(
+            contract.validate_arguments_with_layouts(
                 subject,
                 &interface.arguments,
                 self.world.context.scope(),
                 self.world.traits,
+                &self.world.index.parameter_domains,
                 &mut self.remaining,
+                |left, right, fuel| {
+                    equivalent_domains(self.world.context, left, right, budget.max_depth, fuel)
+                },
+                Some(&self.world.index.nominal_layouts),
             )?;
         }
         let key = (interface.clone(), subject.clone());
@@ -466,20 +521,26 @@ impl Solver<'_, '_> {
                     ..budget
                 },
                 |head, allowance| {
-                    let assessment =
-                        match head.match_types(subject, &interface.arguments, context, allowance) {
-                            Ok(matched) => {
-                                let mut support = Vec::new();
-                                let assessment = matched.discharge_with(|goal, allowance| {
-                                    self.prove_condition(goal, allowance, depth + 1, &mut support)
-                                });
-                                if !support.is_empty() {
-                                    condition_support.insert(head.declaration, support);
-                                }
-                                assessment
+                    let assessment = match head.match_types_with_layouts(
+                        subject,
+                        &interface.arguments,
+                        context,
+                        allowance,
+                        &index.parameter_domains,
+                        Some(&index.nominal_layouts),
+                    ) {
+                        Ok(matched) => {
+                            let mut support = Vec::new();
+                            let assessment = matched.discharge_with(|goal, allowance| {
+                                self.prove_condition(goal, allowance, depth + 1, &mut support)
+                            });
+                            if !support.is_empty() {
+                                condition_support.insert(head.declaration, support);
                             }
-                            Err(assessment) => assessment,
-                        };
+                            assessment
+                        }
+                        Err(assessment) => assessment,
+                    };
                     let state = match &assessment {
                         crate::implementation::TypeAssessment::Applicable(evidence) => {
                             let qualification = self.qualify(evidence, allowance, depth + 1);
@@ -542,12 +603,23 @@ impl Solver<'_, '_> {
             {
                 let mut fuel = budget.steps;
                 contract
-                    .validate_arguments_for_subject(
+                    .validate_arguments_with_layouts(
                         &requirement.subject,
                         &requirement.interface_arguments,
                         frames,
                         self.world.traits,
+                        &self.world.index.parameter_domains,
                         &mut fuel,
+                        |left, right, fuel| {
+                            equivalent_domains(
+                                self.world.context,
+                                left,
+                                right,
+                                budget.max_depth,
+                                fuel,
+                            )
+                        },
+                        Some(&self.world.index.nominal_layouts),
                     )
                     .is_ok()
             } else {

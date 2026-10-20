@@ -86,6 +86,9 @@ fn subject_pattern_bindings(
                 }
             }
             Work::Visit(pattern) => match pattern {
+                n::Pattern::CodeEvidence { .. } => {
+                    return Err(error(span, "unresolved pattern-code evidence"));
+                }
                 n::Pattern::Binding { binding, inner } => {
                     pending.push(Work::Bind(*binding));
                     pending.push(Work::Visit(inner));
@@ -100,6 +103,7 @@ fn subject_pattern_bindings(
                 n::Pattern::Tuple(fields)
                 | n::Pattern::TypeTuple(fields)
                 | n::Pattern::AnonymousRecord { fields, .. }
+                | n::Pattern::NominalType { fields, .. }
                 | n::Pattern::Record { fields, .. }
                 | n::Pattern::Variant { fields, .. }
                 | n::Pattern::NormalForm {
@@ -4068,13 +4072,6 @@ impl Checker<'_, '_> {
         let Some(definition) = self.open_functions.get(&owner).cloned() else {
             return Ok(None);
         };
-        if self
-            .declaration_binders(owner)
-            .iter()
-            .any(|binder| binder.sort != Sort::Type)
-        {
-            return Ok(None);
-        }
         let all = self.type_parameters[&owner].clone();
         let (generic, template, _) = self.function_type_plan(owner, &[], span)?;
         let mut parameters = Vec::new();
@@ -4114,12 +4111,17 @@ impl Checker<'_, '_> {
             (p(P::Void), None)
         };
         let scheme = crate::calls::Scheme {
+            parameter_sorts: self
+                .input_binders(&generic)
+                .iter()
+                .map(|input| input.sort)
+                .collect(),
             type_parameters: generic.len(),
             signature: Term::Function {
                 parameters,
                 result: Box::new(result),
             }
-            .abstract_types(&generic)
+            .abstract_parameters(&self.input_binders(&generic))
             .map_err(|e| error(span, e.to_string()))?,
         };
         let actual = vec![None; definition.parameters.len()];
@@ -4618,9 +4620,14 @@ impl Checker<'_, '_> {
         let signature =
             self.instantiate_input_types(&signature, &all_generic, &template, expr.span)?;
         let scheme = crate::calls::Scheme {
+            parameter_sorts: self
+                .input_binders(&generic)
+                .iter()
+                .map(|input| input.sort)
+                .collect(),
             type_parameters: generic.len(),
             signature: signature
-                .abstract_types(&generic)
+                .abstract_parameters(&self.input_binders(&generic))
                 .map_err(|e| error(expr.span, e.to_string()))?,
         };
         let (routes, assigned) =
@@ -5426,16 +5433,6 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         mut description: Option<(&mut BTreeMap<n::LocalId, D>, Option<&D>, usize)>,
     ) -> Result<OpenClauseInference, Error> {
-        if self
-            .declaration_binders(owner)
-            .iter()
-            .any(|binder| binder.sort != Sort::Type)
-        {
-            return Err(error(
-                expr.span,
-                "open declaration value arguments require explicit instantiation",
-            ));
-        }
         if !self.active_open_definitions.contains(&owner) {
             self.check_open_definition(owner)?;
         }
@@ -5858,12 +5855,17 @@ impl Checker<'_, '_> {
         // Void is an unused inference result when the real result is pending;
         // this signature is never published as a callable or runtime IR type.
         let scheme = crate::calls::Scheme {
+            parameter_sorts: self
+                .input_binders(&generic)
+                .iter()
+                .map(|input| input.sort)
+                .collect(),
             type_parameters: generic.len(),
             signature: Term::Function {
                 parameters,
                 result: Box::new(result.unwrap_or_else(|| p(P::Void))),
             }
-            .abstract_types(&generic)
+            .abstract_parameters(&self.input_binders(&generic))
             .map_err(|e| error(expr.span, e.to_string()))?,
         };
         let scope = self.call_inference_domains();

@@ -156,12 +156,13 @@ impl<'h> Checker<'_, 'h> {
                         continue;
                     }
                     let value = self.expr(value, contexts[index].as_ref())?;
-                    let Term::Tuple(fields) = self.structural_type(&value.ty, span)? else {
-                        return Err(error(
-                            span,
-                            "type argument spread requires a tuple of Type values",
-                        ));
-                    };
+                    let fields = self.prepared_packet_fields(
+                        &value,
+                        args,
+                        index,
+                        &vec![p(P::Type); count],
+                        span,
+                    )?;
                     let mut pattern = Vec::new();
                     for field in fields {
                         self.require(&field, &p(P::Type), span)?;
@@ -185,7 +186,11 @@ impl<'h> Checker<'_, 'h> {
                             start: value.source.end,
                             end: value.source.end,
                         },
-                        ty: p(P::Void),
+                        ty: if is_never(&value.ty) {
+                            p(P::Never)
+                        } else {
+                            p(P::Void)
+                        },
                         kind: K::LetPattern {
                             pattern: n::Pattern::Tuple(pattern),
                             value: Box::new(value),
@@ -209,12 +214,38 @@ impl<'h> Checker<'_, 'h> {
         statements: &mut Vec<n::Expr>,
         span: Span,
     ) -> Result<Vec<(Option<hir::common::Ident>, n::Expr)>, Error> {
-        let domains = self.trait_domains(owner)?;
+        let declared_domains = self.trait_domains(owner)?;
+        // A recursive use of this declaration has a fresh input telescope.
+        // Only lexical captures may specialize its domains before routing the
+        // new arguments; the caller still supplies explicit expressions.
+        let saved = self.alias_substitution.clone();
+        for parameter in &self.type_parameters[&owner] {
+            self.alias_substitution.remove(parameter);
+        }
+        let domains = declared_domains
+            .iter()
+            .map(|domain| self.substituted_trait_domain(domain, span))
+            .collect::<Result<Vec<_>, _>>();
+        self.alias_substitution = saved;
+        self.prepared_nominal_inputs_in_domains(owner, args, count, statements, span, &domains?)
+    }
+
+    pub(super) fn prepared_nominal_inputs_in_domains(
+        &mut self,
+        owner: OwnerId,
+        args: &[Arg<'_>],
+        count: usize,
+        statements: &mut Vec<n::Expr>,
+        span: Span,
+        domains: &[Term],
+    ) -> Result<Vec<(Option<hir::common::Ident>, n::Expr)>, Error> {
         if domains.iter().all(|domain| *domain == p(P::Type)) {
             return self.prepared_type_inputs(args, count, statements, span);
         }
         if let Some(expanded) = normal::literal_spreads(args) {
-            return self.prepared_nominal_inputs(owner, &expanded, count, statements, span);
+            return self.prepared_nominal_inputs_in_domains(
+                owner, &expanded, count, statements, span, domains,
+            );
         }
         let clauses = self.type_clause_params(owner);
         let parameters = self.type_parameters[&owner].clone();
@@ -222,26 +253,51 @@ impl<'h> Checker<'_, 'h> {
         let mut inputs = Vec::new();
         let mut known_binders = Vec::new();
         let mut known_values = Vec::new();
-        for arg in args {
+        let mut pending_types = parameters
+            .iter()
+            .zip(domains)
+            .filter_map(|(parameter, domain)| (*domain == p(P::Type)).then_some(*parameter))
+            .collect::<BTreeSet<_>>();
+        // Captured values can determine a nominal domain just like captured
+        // Types. Concrete captures are already substituted by the projection;
+        // any remaining dependency must wait for the selected instance.
+        pending_types.extend(self.nominal_captures(owner, span)?);
+        for (argument_index, arg) in args.iter().enumerate() {
             if let Arg::Expand(input) = arg {
                 let packet = self.expr(input, None)?;
-                let Term::Tuple(fields) = self.structural_type(&packet.ty, input.span)? else {
-                    return Err(error(input.span, "nominal input spread requires a tuple"));
-                };
+                let positional_domains = clauses
+                    .iter()
+                    .zip(domains)
+                    .filter_map(|(clause, domain)| {
+                        (!matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..)))
+                            .then_some(domain.clone())
+                    })
+                    .collect::<Vec<_>>();
+                let fields = self.prepared_packet_fields(
+                    &packet,
+                    args,
+                    argument_index,
+                    &positional_domains,
+                    input.span,
+                )?;
                 let mut pattern = Vec::with_capacity(fields.len());
                 for field in fields {
                     let slot = Self::type_input_slot(&clauses, None, &mut positional, span)?;
                     let domain = domains
                         .get(slot)
                         .ok_or_else(|| error(span, "type argument count mismatch"))?;
-                    let domain = self.substituted_trait_domain(domain, span)?;
                     let domain = self.instantiate_trait_domain(
                         &domain,
                         &known_binders,
                         &known_values,
                         span,
                     )?;
-                    self.require(&field, &domain, input.span)?;
+                    if !pending_types.iter().any(|id| domain.mentions_rigid(*id)) {
+                        self.require(&field, &domain, input.span)?;
+                    }
+                    if domains[slot] == p(P::Type) {
+                        pending_types.insert(parameters[slot]);
+                    }
                     let binding = self.spread_binding(input.span)?;
                     self.locals.insert(binding, field.clone());
                     pattern.push(n::Pattern::Binding {
@@ -286,20 +342,58 @@ impl<'h> Checker<'_, 'h> {
             let domain = domains
                 .get(slot)
                 .ok_or_else(|| error(span, "type argument count mismatch"))?;
-            let domain = self.substituted_trait_domain(domain, span)?;
             let domain =
                 self.instantiate_trait_domain(&domain, &known_binders, &known_values, span)?;
-            let value = self.expr(input, Some(&domain))?;
+            let dependent = pending_types.iter().any(|id| domain.mentions_rigid(*id));
+            let value = self.expr(input, (!dependent).then_some(&domain))?;
             if let K::TypeValue(ty) = &value.kind {
                 known_binders.push(nir::DeclarationParameter {
                     declaration: parameters[slot],
                     sort: Sort::Type,
                 });
                 known_values.push(ty.clone());
+                pending_types.remove(&parameters[slot]);
+            } else if domains[slot] == p(P::Type) {
+                pending_types.insert(parameters[slot]);
             }
             inputs.push((name, self.bind_type_input(value, statements, span)?));
         }
         Ok(inputs)
+    }
+
+    pub(super) fn prepared_packet_fields(
+        &mut self,
+        packet: &n::Expr,
+        args: &[Arg<'_>],
+        index: usize,
+        domains: &[Term],
+        span: Span,
+    ) -> Result<Vec<Term>, Error> {
+        // Early exit does not erase the checked type of an unreachable tail.
+        let mut shape = packet;
+        while is_never(&shape.ty) {
+            match &shape.kind {
+                K::Block {
+                    result: Some(result),
+                    ..
+                } => shape = result,
+                _ => break,
+            }
+        }
+        if let Term::Tuple(fields) = self.structural_type(&shape.ty, span)? {
+            Ok(fields)
+        } else if is_never(&shape.ty) {
+            self.spread_packet_layout(args, domains, span)?[index]
+                .clone()
+                .ok_or_else(|| {
+                    error(
+                        span,
+                        "diverging type input spread has ambiguous packet width",
+                    )
+                })
+        } else {
+            Err(error(span, "type input spread requires a tuple"))
+        }
     }
 
     pub(super) fn type_clause_params(&self, owner: OwnerId) -> Vec<hir::clause::ClauseParam<'h>> {
@@ -331,6 +425,9 @@ impl<'h> Checker<'_, 'h> {
         span: Span,
         expected: Option<&Term>,
     ) -> Result<n::Expr, Error> {
+        if let Some(value) = self.contextual_nominal_expression(owner, args, span, expected)? {
+            return Ok(value);
+        }
         self.prepared_type_instance(owner, args, span, expected)
             .map(|(value, _)| value)
     }
@@ -421,7 +518,11 @@ impl<'h> Checker<'_, 'h> {
                         return Err(error(span, "cyclic or excessively deep type default"));
                     }
                     let domain = self.substituted_trait_domain(&domains[slot], span)?;
-                    let value = self.expr(default, Some(&domain));
+                    let dependent = self
+                        .alias_value_bindings
+                        .keys()
+                        .any(|id| domain.mentions_rigid(*id));
+                    let value = self.expr(default, (!dependent).then_some(&domain));
                     self.active_type_defaults.remove(&(owner, slot));
                     self.bind_type_input(value?, &mut statements, span)?
                 };
@@ -522,8 +623,14 @@ impl<'h> Checker<'_, 'h> {
                 } else {
                     self.ensure_nominal(owner, span)?;
                     K::NominalType {
+                        preparations: vec![],
+                        bindings: None,
+                        order: None,
                         declaration: declaration(self.package, &self.package_identities, owner),
-                        arguments,
+                        arguments: arguments
+                            .into_iter()
+                            .map(n::NormalFormArgument::Value)
+                            .collect(),
                     }
                 };
                 n::Expr {
@@ -643,14 +750,14 @@ impl<'h> Checker<'_, 'h> {
                     inferred.push(parameters[index]);
                     inputs.push(Term::Rigid {
                         declaration: parameters[index],
-                        sort: Sort::Type,
+                        sort: self.input_binders(&parameters)[index].sort,
                     });
                 }
             } else {
                 inferred.push(parameters[index]);
                 inputs.push(Term::Rigid {
                     declaration: parameters[index],
-                    sort: Sort::Type,
+                    sort: self.input_binders(&parameters)[index].sort,
                 });
             }
         }
@@ -669,7 +776,7 @@ impl<'h> Checker<'_, 'h> {
             return Ok(Vec::new());
         }
         let clauses = self.type_clause_params(owner);
-        let hir::clause::ClauseParamKind::Optional(_, _, value) = clauses[slot].kind else {
+        let hir::clause::ClauseParamKind::Optional(_, domain, value) = clauses[slot].kind else {
             unreachable!()
         };
         if self.active_type_defaults.len() >= 64 || !self.active_type_defaults.insert((owner, slot))
@@ -695,7 +802,25 @@ impl<'h> Checker<'_, 'h> {
                 .zip(inputs.iter().cloned().map(std::sync::Arc::new)),
         );
         let result = (|| {
-            let mut checked = self.expr(value, Some(&p(P::Type)))?;
+            let domain = self.type_expr(domain)?;
+            if domain != p(P::Type) {
+                let dependencies = std::cell::RefCell::new(BTreeSet::new());
+                super::required::signature_inputs_ready_with_clauses(value, 0, &|_| true, &|id| {
+                    let id = DeclarationId {
+                        package: semantic_package(&self.package_identities, id.pkg),
+                        local: id.index,
+                    };
+                    if inferred.contains(&id) {
+                        dependencies.borrow_mut().insert(id);
+                    }
+                    true
+                })?;
+                let dependencies = dependencies.into_inner();
+                if !dependencies.is_empty() {
+                    return Ok(dependencies.into_iter().collect());
+                }
+            }
+            let mut checked = self.expr(value, Some(&domain))?;
             let mut budget = comptime_runtime::Budget {
                 steps: self.required_steps as usize,
                 max_limbs: 4096,
@@ -826,14 +951,11 @@ impl<'h> Checker<'_, 'h> {
     ) -> Result<Vec<Term>, Error> {
         let clauses = self.type_clause_params(owner);
         let domains = self.trait_domains(owner)?;
-        if domains.iter().any(|ty| *ty != p(P::Type)) {
-            if !prefix.is_empty() {
-                return Err(error(
-                    span,
-                    "mixed trait inputs cannot use a method type prefix",
-                ));
-            }
-            return self.trait_clause_arguments(owner, args, subject, span, &domains);
+        let own_start = domains.len().saturating_sub(clauses.len());
+        if domains[own_start..].iter().any(|ty| *ty != p(P::Type)) {
+            return self.trait_clause_arguments_with_prefix(
+                owner, args, subject, span, &domains, None, prefix,
+            );
         }
         let count = clauses
             .iter()
@@ -876,7 +998,10 @@ impl<'h> Checker<'_, 'h> {
     /// Concrete normalization is performed separately when the slot is omitted.
     pub(super) fn check_type_defaults(&mut self, owner: OwnerId) -> Result<(), Error> {
         let domains = self.trait_domains(owner)?;
-        if domains.iter().any(|ty| *ty != p(P::Type)) {
+        let own_start = domains
+            .len()
+            .saturating_sub(self.type_clause_params(owner).len());
+        if domains[own_start..].iter().any(|ty| *ty != p(P::Type)) {
             return self.check_trait_defaults(owner, &domains);
         }
         if self
@@ -958,9 +1083,6 @@ impl<'h> Checker<'_, 'h> {
             );
         }
         let result = (|| {
-            if self.type_expr(ty)? != p(P::Type) {
-                return Err(error(ty.span, "type default parameter must have type Type"));
-            }
             let parameters: Vec<_> = subject
                 .map(|_| declaration(self.package, &self.package_identities, owner))
                 .into_iter()
@@ -979,7 +1101,8 @@ impl<'h> Checker<'_, 'h> {
                     .copied()
                     .zip(arguments.iter().cloned().map(std::sync::Arc::new)),
             );
-            let default = self.type_expr(value)?;
+            let domain = self.type_expr(ty)?;
+            let default = self.normal_value_argument(value, &domain)?;
             if self.type_parameters[&owner][slot_index..]
                 .iter()
                 .any(|id| default.mentions_rigid(*id))
@@ -990,7 +1113,11 @@ impl<'h> Checker<'_, 'h> {
                 ));
             }
             default
-                .instantiate_types_in_scope(&parameters, &arguments, &caller_frames)
+                .instantiate_parameters_in_scope(
+                    &self.input_binders(&parameters),
+                    &arguments,
+                    &caller_frames,
+                )
                 .map_err(|e| error(span, e.to_string()))
         })();
         self.alias_substitution = saved_substitution;

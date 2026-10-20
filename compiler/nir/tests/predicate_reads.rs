@@ -13,6 +13,65 @@ fn expr(ty: Term, kind: K) -> Expr {
 fn boolean() -> Term {
     Term::Primitive(P::Bool)
 }
+
+#[test]
+fn associated_predicate_operands_do_not_admit_callable_invocation() {
+    let id = nir::DeclarationId {
+        package: 1,
+        local: 1,
+    };
+    let value = expr(
+        boolean(),
+        K::AssociatedValue {
+            interface: nir::program::InterfaceInstance {
+                declaration: id,
+                arguments: vec![],
+            },
+            member: nir::DeclarationId {
+                package: 1,
+                local: 2,
+            },
+            subject: boolean(),
+        },
+    );
+    assert!(checkable_predicate(&value));
+    assert!(checkable_predicate(&expr(
+        boolean(),
+        K::Not(Box::new(value.clone()))
+    )));
+    let old = LocalId { owner: 7, index: 0 };
+    let new = LocalId { owner: 8, index: 3 };
+    let mut predicate = expr(
+        boolean(),
+        K::And(
+            Box::new(expr(boolean(), K::Local(old))),
+            Box::new(value.clone()),
+        ),
+    );
+    nir::contracts::remap_predicate(&mut predicate, &[(old, new)].into_iter().collect()).unwrap();
+    let K::And(local, associated) = &predicate.kind else {
+        panic!("expected conjunction")
+    };
+    assert!(matches!(local.kind, K::Local(id) if id == new));
+    assert_eq!(**associated, value);
+    assert!(checkable_predicate(&predicate));
+    let callable = Expr {
+        ty: Term::Function {
+            parameters: vec![],
+            result: Box::new(boolean()),
+        },
+        ..value
+    };
+    assert!(!checkable_predicate(&callable));
+    assert!(!checkable_predicate(&expr(
+        boolean(),
+        K::Call {
+            callee: Box::new(callable),
+            arguments: vec![],
+            parameter_bindings: vec![],
+        }
+    )));
+}
 fn pointer() -> Expr {
     expr(
         Term::Pointer(Box::new(boolean())),
@@ -295,4 +354,27 @@ fn predicate_or_patterns_remap_candidate_and_exported_bindings_once() {
     assert!(matches!(arms[0].body.kind,K::Local(binding) if binding==target));
     assert!(matches!(arms[0].guard.as_ref().unwrap().kind,K::Local(binding) if binding==target));
     assert!(checkable_predicate(&predicate));
+}
+
+#[test]
+fn captured_predicate_data_preserves_identity_and_rejects_malformed_payloads() {
+    use std::collections::BTreeMap;
+    let captured = expr(boolean(), K::ComptimeValue(Term::Bool(true)));
+    assert!(checkable_predicate(&captured));
+    let mut remapped = captured.clone();
+    nir::contracts::remap_predicate(&mut remapped, &BTreeMap::new()).unwrap();
+    assert_eq!(captured, remapped);
+    for payload in [
+        Term::Char('x'),
+        Term::Primitive(P::Bool),
+        Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: nir::Sort::ComptimeValue,
+        },
+    ] {
+        let mut invalid = expr(boolean(), K::ComptimeValue(payload));
+        assert!(!checkable_predicate(&invalid));
+        assert!(nir::contracts::remap_predicate(&mut invalid, &BTreeMap::new()).is_err());
+    }
 }

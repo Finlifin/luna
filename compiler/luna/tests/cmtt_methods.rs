@@ -6,6 +6,32 @@ use comptime_interpretor::Value;
 use support::run_iir as run;
 
 #[test]
+fn trait_code_methods_accept_pattern_code_inputs() {
+    let source = "trait Builder {
+        comptime fn build(p:<bool -| value:bool>)-><input:bool|-bool>;
+    }
+    struct Rule {}
+    impl Builder for Rule {
+        comptime fn build(p:<bool -| value:bool>)-><input:bool|-bool> {
+            '(input match {~<p> => true,_ => false})
+        }
+    }
+    fn run()->bool {
+        const code=Rule.as(Builder).build('<true as value>);
+        let t=true;let f=false;
+        ~[input=t]<code> and not ~[input=f]<code>
+    }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace(
+        "impl Builder for Rule {
+        comptime fn build(p:<bool -| value:bool>)",
+        "impl Builder for Rule {
+        comptime fn build(p:<bool -| other:bool>)",
+    );
+    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+}
+
+#[test]
 fn code_method_declarations_coexist_with_ordinary_trait_dispatch() {
     let source = "trait Builder {
             comptime fn build(code:<x:bool|-bool>)-><x:bool|-bool>;
@@ -1597,4 +1623,69 @@ fn generator_aggregate_replacement_keeps_old_pointer_values_and_owner_addresses(
         }
         fn run()->bool {~<build()>}";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn code_method_contracts_observe_associated_values() {
+    let source = "trait Flags {assoc enabled:bool=true;}
+        struct Builder {}
+        impl Builder {
+            comptime fn build()-><|-bool>
+                where requires Self.as(Flags).enabled, ensures Self.as(Flags).enabled {'(true)}
+        }
+        impl Flags for Builder {}
+        fn run()->bool {~<Builder.build()>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("enabled:bool=true", "enabled:bool=false");
+    let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(failure.contains("precondition"), "{failure}");
+    let bad_postcondition = invalid.replace("requires Self.as(Flags).enabled, ", "");
+    let failure =
+        support::compile_with_protocols(&bad_postcondition, &Default::default()).unwrap_err();
+    assert!(failure.contains("postcondition"), "{failure}");
+}
+
+#[test]
+fn generic_code_method_contracts_preserve_associated_instances() {
+    let source = "trait Flags where enabled:bool {assoc flag:bool=enabled;}
+        struct Holder where enabled:bool {}
+        trait Builder where enabled:bool {
+            comptime fn build(code:<x:bool|-bool>)-><x:bool|-bool>
+                where requires Holder<enabled>.as(Flags<enabled>).flag,
+                      ensures Holder<enabled>.as(Flags<enabled>).flag {code}
+        }
+        impl Builder<enabled> for Holder<enabled> where enabled:bool {}
+        impl Flags<enabled> for Holder<enabled> where enabled:bool {}
+        fn run(value:bool)->bool {const original:<source:bool|-bool> = '(not source);const code=Holder<true>.as(Builder<true>).build(original);~[x=value]<code>}";
+    assert_eq!(
+        run(source, "run", vec![Value::Bool(false)]),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        run(source, "run", vec![Value::Bool(true)]),
+        Value::Bool(false)
+    );
+    let explicit = source.replace(
+        "impl Builder<enabled> for Holder<enabled> where enabled:bool {}",
+        "impl Builder<enabled> for Holder<enabled> where enabled:bool {comptime fn build(input:<a:bool|-bool>)-><b:bool|-bool> where requires Holder<enabled>.as(Flags<enabled>).flag, ensures Holder<enabled>.as(Flags<enabled>).flag {input}}",
+    );
+    assert_eq!(
+        run(&explicit, "run", vec![Value::Bool(false)]),
+        Value::Bool(true)
+    );
+    let stronger = explicit.replace(
+        "where requires Holder<enabled>.as(Flags<enabled>).flag, ensures",
+        "where requires Holder<enabled>.as(Flags<enabled>).flag and Holder<false>.as(Flags<false>).flag, ensures",
+    );
+    let failure = support::compile_with_protocols(&stronger, &Default::default()).unwrap_err();
+    assert!(
+        failure.contains("precondition") || failure.contains("program-domain"),
+        "{failure}"
+    );
+    let invalid = source.replace(
+        "Holder<true>.as(Builder<true>)",
+        "Holder<false>.as(Builder<false>)",
+    );
+    let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(failure.contains("precondition"), "{failure}");
 }

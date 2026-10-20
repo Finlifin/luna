@@ -1475,3 +1475,17 @@ mod computed_structure_tests {
         );
     }
 }
+
+#[test]
+fn abstract_pattern_code_is_not_coverage_evidence() {
+    let pattern = Pattern::CodeEvidence { outputs: vec![] };
+    assert_ne!(
+        check(
+            &BTreeMap::new(),
+            &Term::Primitive(Primitive::Bool),
+            &[&pattern],
+            1000
+        ),
+        Coverage::Exhaustive
+    );
+}

@@ -39,7 +39,7 @@ Fn  axiom  default  extend  ghost  lemma  move  opaque  opens  static
 
 预留不等于可以按其他语言同名构造使用。已定义属性路径中的成员名按路径位置解释，例如 attrs.derivation.default；该成员不使 default 成为一个普通的顶层绑定名。
 
-Type、Any、any、u32、attrs、builtin 等名称不因常用或内置就自动成为关键字。它们按各自声明、值或内置命名环境的规则解析。单独的 _ 是通配符标点，其含义由表达式、模式或参数位置决定。
+Type、Any、any、u32、attrs、builtin、extern 等名称不因常用或内置就自动成为关键字。它们按各自声明、值或内置命名环境的规则解析。函数 ABI 使用 `^attrs.abi(.c)` 等属性指定，不存在 extern 修饰语法。单独的 _ 是通配符标点，其含义由表达式、模式或参数位置决定。
 
 ## 运算符与空格敏感性
 

@@ -1118,6 +1118,15 @@ pub(super) fn implementation_index(
     span: Span,
 ) -> Result<crate::implementation::Index, Error> {
     let mut index = crate::implementation::Index::default();
+    index.sync_nominal_layouts(&package.structs, &package.enums, &package.newtypes);
+    for (id, domain) in package
+        .declaration_parameter_domains(&mut 100_000)
+        .map_err(|message| error(span, message))?
+    {
+        index
+            .register_parameter_domain(id, domain)
+            .map_err(|message| error(span, message))?;
+    }
     for implementation in &package.implementations {
         if implementation.interface.is_none() {
             continue;

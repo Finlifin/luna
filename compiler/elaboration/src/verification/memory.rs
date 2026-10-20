@@ -1264,6 +1264,7 @@ struct Infer<'a> {
     fuel: &'a mut usize,
     package: Option<&'a Package>,
     parameters: &'a [DeclarationId],
+    declarations: Vec<nir::DeclarationParameter>,
     arguments: &'a [Term],
     round: &'a mut Round,
     effect_row: Vec<nir::effects::Operation>,
@@ -1930,11 +1931,110 @@ impl<'a> Infer<'a> {
         self.type_views.insert(ty.clone(), view.clone());
         Ok(view)
     }
+    // Observe immutable declaration data without executing user code or
+    // unfolding normal-form heads. Admission precedes projection, so a field
+    // cannot hide malformed siblings or a mismatched record domain.
+    fn known_data(&mut self, expr: &Expr, depth: usize) -> Result<Option<Term>, String> {
+        self.step(depth)?;
+        match &expr.kind {
+            K::ComptimeValue(value) => {
+                let domain = self.ty(&expr.ty)?;
+                let value = nir::type_computations::instantiate_parameters_bounded(
+                    value,
+                    &self.declarations,
+                    self.arguments,
+                    &[],
+                    self.fuel,
+                )
+                .map_err(|e| e.to_string())?;
+                nir::comptime_values::validate(&value, &domain, self.fuel)
+                    .map_err(|e| e.to_string())?;
+                if !value.is_structural_index_value() {
+                    return Ok(None);
+                }
+                // This singleton binder is local to admission; it is never
+                // inserted into the package or used to identify a declaration.
+                nir::validate_declaration_arguments(
+                    &[DeclarationId {
+                        package: 0,
+                        local: 0,
+                    }],
+                    &[domain],
+                    std::slice::from_ref(&value),
+                    self.fuel,
+                )
+                .map_err(|e| e.to_string())?;
+                Ok(Some(value))
+            }
+            K::AnonymousField { value, index, .. } => {
+                let Some(Term::RecordValue(fields)) = self.known_data(value, depth + 1)? else {
+                    return Ok(None);
+                };
+                let Term::Record(domains) = self.ty(&value.ty)? else {
+                    return Err("captured record projection requires a record domain".into());
+                };
+                let Some((_, domain)) = domains.get(*index) else {
+                    return Err("captured record projection is out of bounds".into());
+                };
+                if *domain != self.ty(&expr.ty)? {
+                    return Err("captured record projection type mismatch".into());
+                }
+                Ok(fields.into_iter().nth(*index).map(|(_, value)| value))
+            }
+            _ => Ok(None),
+        }
+    }
+    fn captured_data_domain(&mut self, ty: &Term, depth: usize) -> Result<bool, String> {
+        self.step(depth)?;
+        match ty {
+            Term::Primitive(_) => Ok(true),
+            Term::Record(fields) => {
+                for (_, field) in fields {
+                    if !self.captured_data_domain(field, depth + 1)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+    fn captured_data(&mut self, expr: &Expr, depth: usize) -> Result<(), String> {
+        let domain = self.ty(&expr.ty)?;
+        if !self.captured_data_domain(&domain, depth)? {
+            return Err("captured value requires a richer memory contract".into());
+        }
+        self.known_data(expr, depth)?;
+        Ok(())
+    }
+    fn known_bool(&mut self, expr: &Expr, depth: usize) -> Result<Option<bool>, String> {
+        self.step(depth)?;
+        Ok(match &expr.kind {
+            K::ComptimeValue(_) | K::AnonymousField { .. } => {
+                match self.known_data(expr, depth + 1)? {
+                    Some(Term::Bool(value)) => Some(value),
+                    _ => None,
+                }
+            }
+            K::Not(value) => self.known_bool(value, depth + 1)?.map(|v| !v),
+            K::And(left, right) => match self.known_bool(left, depth + 1)? {
+                Some(false) => Some(false),
+                Some(true) => self.known_bool(right, depth + 1)?,
+                None => None,
+            },
+            K::Or(left, right) => match self.known_bool(left, depth + 1)? {
+                Some(true) => Some(true),
+                Some(false) => self.known_bool(right, depth + 1)?,
+                None => None,
+            },
+            _ => constant_bool(expr, depth),
+        })
+    }
     fn ty(&mut self, ty: &Term) -> Result<Term, String> {
         self.step(0)?;
         bound_type(ty, self.fuel)?;
         let ty = ty
-            .instantiate_types(self.parameters, self.arguments)
+            .instantiate_parameters(&self.declarations, self.arguments)
             .map_err(|error| error.to_string())?;
         bound_type(&ty, self.fuel)?;
         self.type_view(&ty)
@@ -2309,7 +2409,7 @@ impl<'a> Infer<'a> {
             bound_type(&expr.ty, fuel)
         })?;
         let owned = definition
-            .instantiate_types(self.parameters, self.arguments)
+            .instantiate_parameters(&self.declarations, self.arguments)
             .map_err(|e| e.to_string())?;
         self.local_code.push(LocalCode::Closure {
             definition: std::sync::Arc::new(owned),
@@ -2486,7 +2586,7 @@ impl<'a> Infer<'a> {
                 then_branch,
                 else_branch,
             } => {
-                let known = constant_bool(condition, 0);
+                let known = self.known_bool(condition, 0)?;
                 if known != Some(false) && !self.stable_code_source(then_branch, path, depth + 1)? {
                     return Ok(false);
                 }
@@ -3590,7 +3690,7 @@ impl<'a> Infer<'a> {
         }
         nir::visit::expression(callee, self.fuel, |expr, fuel| bound_type(&expr.ty, fuel))?;
         let definition = callee
-            .instantiate_types(self.parameters, self.arguments)
+            .instantiate_parameters(&self.declarations, self.arguments)
             .map_err(|e| e.to_string())?;
         let code_inputs = borrow_code_inputs(&prepared_inputs);
         let summary = infer_closure_with_borrowed_in_round(
@@ -4376,6 +4476,7 @@ impl<'a> Infer<'a> {
     ) -> Result<(), String> {
         self.step(depth)?;
         match pattern {
+            Pattern::CodeEvidence { .. } => Err("unresolved pattern-code evidence".into()),
             Pattern::Observe { binding, inner } => {
                 let fresh = bindings.insert(*binding);
                 let result = self.check_guard_pattern(inner, bindings, depth + 1);
@@ -4415,6 +4516,7 @@ impl<'a> Infer<'a> {
             Pattern::Or(fields)
             | Pattern::Tuple(fields)
             | Pattern::TypeTuple(fields)
+            | Pattern::NominalType { fields, .. }
             | Pattern::Record { fields, .. }
             | Pattern::AnonymousRecord { fields, .. }
             | Pattern::Variant { fields, .. }
@@ -4438,13 +4540,14 @@ impl<'a> Infer<'a> {
             return Ok(());
         }
         match &expr.kind {
+            K::ComptimeValue(_) => self.captured_data(expr, depth + 1),
             K::Literal(_) | K::Unit | K::Local(_) | K::Function(_) | K::FunctionInstance { .. } => {
                 Ok(())
             }
             K::RequirePredicate(condition)
             | K::EnsurePredicate(condition)
             | K::CheckPredicate(condition)
-                if constant_bool(condition, 0) == Some(true) =>
+                if self.known_bool(condition, 0)? == Some(true) =>
             {
                 self.check_guard(condition, depth + 1)
             }
@@ -4477,7 +4580,7 @@ impl<'a> Infer<'a> {
             }
             K::And(left, right) | K::Or(left, right) => {
                 self.check_guard(left, depth + 1)?;
-                let skip = constant_bool(left, 0).map(|value| {
+                let skip = self.known_bool(left, 0)?.map(|value| {
                     if matches!(expr.kind, K::And(..)) {
                         !value
                     } else {
@@ -4554,7 +4657,7 @@ impl<'a> Infer<'a> {
                             self.check_guard(value,depth+1)?;
                         }
                         K::RequirePredicate(condition)|K::EnsurePredicate(condition)|K::CheckPredicate(condition)
-                            if constant_bool(condition,0)==Some(true)=>self.check_guard(condition,depth+1)?,
+                            if self.known_bool(condition, 0)?==Some(true)=>self.check_guard(condition,depth+1)?,
                         _ if scalar(&self.ty(&statement.ty)?) || matches!(statement.kind,K::Unit)=>
                             self.check_guard(statement,depth+1)?,
                         _=>return Err("memory guard requires read-only observation semantics: block changes external storage or creates non-scalar bindings".into()),
@@ -4584,7 +4687,7 @@ impl<'a> Infer<'a> {
                     let mut guard_known = Some(true);
                     for guard in guards {
                         self.check_guard(guard, depth + 1)?;
-                        match constant_bool(guard, 0) {
+                        match self.known_bool(guard, 0)? {
                             Some(false) => {
                                 guard_known = Some(false);
                                 break;
@@ -4608,7 +4711,7 @@ impl<'a> Infer<'a> {
                 else_branch,
             } => {
                 self.check_guard(condition, depth + 1)?;
-                let known = constant_bool(condition, 0);
+                let known = self.known_bool(condition, 0)?;
                 if known != Some(false) {
                     self.check_guard(then_branch, depth + 1)?;
                 }
@@ -4697,7 +4800,7 @@ impl<'a> Infer<'a> {
             let mut guard_known = Some(true);
             for guard in guards {
                 self.walk_guard(guard, depth + 1)?;
-                match constant_bool(guard, 0) {
+                match self.known_bool(guard, 0)? {
                     Some(false) => {
                         guard_known = Some(false);
                         break;
@@ -4898,6 +5001,7 @@ impl<'a> Infer<'a> {
                 // that remains a possible rejection at scope exit.
                 self.may_reject |= !captures.is_empty();
             }
+            K::ComptimeValue(_) => self.captured_data(expr, depth + 1)?,
             K::Unit | K::Literal(_) | K::Local(_) | K::Break(_) | K::Continue(_) => (),
             K::NewtypeConvert(inner) => {
                 let package = self
@@ -5975,7 +6079,7 @@ impl<'a> Infer<'a> {
             } => {
                 self.walk(condition, depth + 1)?;
                 let before = self.save_environment()?;
-                let known = constant_bool(condition, 0);
+                let known = self.known_bool(condition, 0)?;
                 let pointer_result = self.local_pointer_value(&expr.ty)?;
                 let callable_result = matches!(
                     self.ty(&expr.ty)?,
@@ -6121,7 +6225,7 @@ impl<'a> Infer<'a> {
                     return Err("invalid runtime predicate check".into());
                 }
                 self.walk_guard(condition, depth + 1)?;
-                self.may_reject |= constant_bool(condition, 0) != Some(true);
+                self.may_reject |= self.known_bool(condition, 0)? != Some(true);
                 // The footprint is conservative over the successful path. No
                 // ownership or memory-state facts are inferred from the check.
             }
@@ -6142,7 +6246,7 @@ impl<'a> Infer<'a> {
             }
             K::And(a, b) | K::Or(a, b) => {
                 self.walk(a, depth + 1)?;
-                let known = constant_bool(a, 0);
+                let known = self.known_bool(a, 0)?;
                 let evaluate_on = matches!(&expr.kind, K::And(..));
                 if self.ty(&expr.ty)? != Term::Primitive(Primitive::Bool)
                     || known == Some(evaluate_on)
@@ -6199,6 +6303,32 @@ struct Round {
     discovered: HashSet<MemoryInstance>,
 }
 
+// Binder sorts come from declarations, never from the supplied values. A
+// package-free monomorphic summary has no extra value-parameter evidence.
+fn memory_binders(
+    package: Option<&Package>,
+    parameters: &[DeclarationId],
+    fuel: &mut usize,
+) -> Result<Vec<nir::DeclarationParameter>, String> {
+    *fuel = fuel
+        .checked_sub(parameters.len())
+        .ok_or("memory binder budget exhausted")?;
+    if parameters.is_empty() {
+        return Ok(vec![]);
+    }
+    let sorts = match package {
+        Some(package) => package.declaration_parameter_sorts(fuel)?,
+        None => BTreeMap::new(),
+    };
+    Ok(parameters
+        .iter()
+        .map(|id| nir::DeclarationParameter {
+            declaration: *id,
+            sort: sorts.get(id).copied().unwrap_or(nir::Sort::Type),
+        })
+        .collect())
+}
+
 pub fn infer(function: &Function, fuel: &mut usize) -> Result<Summary, String> {
     infer_body(
         function,
@@ -6223,6 +6353,7 @@ pub fn infer_in_package(
 }
 
 type MethodKey = (
+    bool,
     Term,
     DeclarationId,
     Vec<Term>,
@@ -6243,6 +6374,27 @@ impl MethodCallees {
         callee: &Expr,
         fuel: &mut usize,
     ) -> Result<Expr, String> {
+        self.select_for(package, callee, fuel, false)
+    }
+
+    /// Select only code identity for behavior analysis. The original interface
+    /// call remains in the program and retains all its predicate obligations.
+    pub(crate) fn select_behavior(
+        &mut self,
+        package: &Package,
+        callee: &Expr,
+        fuel: &mut usize,
+    ) -> Result<Expr, String> {
+        self.select_for(package, callee, fuel, true)
+    }
+
+    fn select_for(
+        &mut self,
+        package: &Package,
+        callee: &Expr,
+        fuel: &mut usize,
+        behavior_only: bool,
+    ) -> Result<Expr, String> {
         let K::TraitMethod {
             interface,
             interface_arguments,
@@ -6261,6 +6413,7 @@ impl MethodCallees {
             bound_type(ty, fuel)?;
         }
         let key = (
+            behavior_only,
             callee.ty.clone(),
             *interface,
             interface_arguments.clone(),
@@ -6279,7 +6432,7 @@ impl MethodCallees {
             selected.source = callee.source;
             return Ok(selected);
         }
-        let selected = method_callee(package, callee, fuel)?;
+        let selected = selected_method_callee(package, callee, fuel, behavior_only)?;
         self.0.insert(key, selected.clone());
         Ok(selected)
     }
@@ -6292,6 +6445,15 @@ pub(crate) fn method_callee(
     package: &Package,
     callee: &Expr,
     fuel: &mut usize,
+) -> Result<Expr, String> {
+    selected_method_callee(package, callee, fuel, false)
+}
+
+fn selected_method_callee(
+    package: &Package,
+    callee: &Expr,
+    fuel: &mut usize,
+    behavior_only: bool,
 ) -> Result<Expr, String> {
     let K::TraitMethod {
         interface, member, ..
@@ -6310,7 +6472,10 @@ pub(crate) fn method_callee(
                 .find(|method| method.declaration == *member)
         })
         .ok_or("memory method selection lacks its interface contract")?;
-    if !contract.program.preconditions.is_empty() || !contract.program.postconditions.is_empty() {
+    if !behavior_only
+        && (!contract.program.preconditions.is_empty()
+            || !contract.program.postconditions.is_empty())
+    {
         return Err("interface predicates require a composed memory contract".into());
     }
     let method = if contract.is_quote {
@@ -6325,9 +6490,10 @@ pub(crate) fn method_callee(
         .find(|function| function.declaration == method.body)
         .ok_or("selected memory method body is unavailable")?;
     bound_type(&body.signature, fuel)?;
+    let binders = memory_binders(Some(package), &body.type_parameters, fuel)?;
     let signature = body
         .signature
-        .instantiate_types(&body.type_parameters, &method.arguments)
+        .instantiate_parameters(&binders, &method.arguments)
         .map_err(|reason| reason.to_string())?;
     Ok(Expr {
         source: callee.source,
@@ -6721,7 +6887,10 @@ fn derive(
     bound_type(&function.signature, fuel)?;
     let signature = function
         .signature
-        .instantiate_types(&function.type_parameters, body_arguments)
+        .instantiate_parameters(
+            &memory_binders(Some(package), &function.type_parameters, fuel)?,
+            body_arguments,
+        )
         .map_err(|error| error.to_string())?;
     bound_type(&signature, fuel)?;
     let Term::Function { result, .. } = signature.callable_signature() else {
@@ -6813,7 +6982,10 @@ fn validate_code_premise(
         bound_type(&function.signature, fuel)?;
         let signature = function
             .signature
-            .instantiate_types(&function.type_parameters, body_arguments)
+            .instantiate_parameters(
+                &memory_binders(Some(package), &function.type_parameters, fuel)?,
+                body_arguments,
+            )
             .map_err(|error| error.to_string())?;
         if &signature != expected {
             return Err("memory callable signature disagrees with parameter".into());
@@ -6838,9 +7010,10 @@ fn infer_body(
     {
         return Err("memory summary needs a concrete runtime body".into());
     }
+    let declarations = memory_binders(package, &function.type_parameters, fuel)?;
     let signature = function
         .signature
-        .instantiate_types(&function.type_parameters, arguments)
+        .instantiate_parameters(&declarations, arguments)
         .map_err(|error| error.to_string())?;
     let Term::Function {
         parameters, result, ..
@@ -6865,14 +7038,6 @@ fn infer_body(
     }
     let frames = vec![parameters.iter().map(|p| p.sort).collect()];
     let mut type_context = crate::ptc::Context::with_scope(frames.clone());
-    let declarations = function
-        .type_parameters
-        .iter()
-        .map(|id| nir::DeclarationParameter {
-            declaration: *id,
-            sort: nir::Sort::Type,
-        })
-        .collect::<Vec<_>>();
     for requirement in &function.requirements {
         let formula = crate::ptc::Formula::from_predicate(requirement);
         if !crate::ptc::within_limits(&formula, 128, fuel) {
@@ -6898,6 +7063,7 @@ fn infer_body(
         fuel,
         package,
         parameters: &function.type_parameters,
+        declarations,
         arguments,
         round,
         effect_row: vec![],
@@ -6991,7 +7157,7 @@ fn infer_body(
             return Err("invalid runtime predicate check".into());
         }
         infer.walk_guard(predicate, 0)?;
-        infer.may_reject |= constant_bool(predicate, 0) != Some(true);
+        infer.may_reject |= infer.known_bool(predicate, 0)? != Some(true);
     }
     infer.walk(&function.body, 0)?;
     let completes = !super::pattern_facts::cannot_complete(&function.body, infer.fuel, 0)?;
@@ -7041,7 +7207,7 @@ fn infer_body(
             return Err("invalid runtime predicate check".into());
         }
         infer.walk_guard(predicate, 0)?;
-        infer.may_reject |= constant_bool(predicate, 0) != Some(true);
+        infer.may_reject |= infer.known_bool(predicate, 0)? != Some(true);
     }
     Ok(Summary {
         declaration: function.declaration,
@@ -7222,6 +7388,7 @@ pub fn infer_argument(
         fuel,
         package: Some(package),
         parameters: &[],
+        declarations: vec![],
         arguments: &[],
         round: &mut round,
         effect_row: vec![],
@@ -7967,9 +8134,10 @@ fn infer_closure_pass(
     for argument in specialization.1 {
         bound_type(argument, fuel)?;
     }
+    let declarations = memory_binders(Some(package), specialization.0, fuel)?;
     let closure_ty = definition
         .ty
-        .instantiate_types(specialization.0, specialization.1)
+        .instantiate_parameters(&declarations, specialization.1)
         .map_err(|error| error.to_string())?;
     let environment = match &closure_ty {
         Term::Closure { environment, .. } => environment.as_slice(),
@@ -7982,7 +8150,7 @@ fn infer_closure_pass(
         bound_type(&capture.ty, fuel)?;
         if capture
             .ty
-            .instantiate_types(specialization.0, specialization.1)
+            .instantiate_parameters(&declarations, specialization.1)
             .map_err(|error| error.to_string())?
             != *ty
         {
@@ -8012,7 +8180,7 @@ fn infer_closure_pass(
             sort: nir::Sort::Runtime,
             ty: capture
                 .ty
-                .instantiate_types(specialization.0, specialization.1)
+                .instantiate_parameters(&declarations, specialization.1)
                 .map_err(|e| e.to_string())?,
         });
     }
@@ -8048,6 +8216,7 @@ fn infer_closure_pass(
         fuel,
         package: Some(package),
         parameters: specialization.0,
+        declarations,
         arguments: specialization.1,
         round,
         effect_row: vec![],
@@ -8144,7 +8313,10 @@ fn infer_closure_pass(
             bound_type(&function.signature, infer.fuel)?;
             let signature = function
                 .signature
-                .instantiate_types(&function.type_parameters, body_arguments)
+                .instantiate_parameters(
+                    &memory_binders(Some(package), &function.type_parameters, infer.fuel)?,
+                    body_arguments,
+                )
                 .map_err(|error| error.to_string())?;
             if signature != expected {
                 return Err("closure memory callable signature disagrees with capture".into());

@@ -61,6 +61,8 @@ comptime 指定阶段；quote、lambda、case、catch 与接收者各有自己�
 
 runtime 默认计算必须达到 **P3 稳定观测，并在合法入口下有限完成**。它可以观察有效的前序输入状态，不能隐含修改入口可观察状态、输出或交付新的可观察资源身份。适配与临时值清理也计入默认计算。
 
+开放函数的 runtime 默认值也使用完整调用图检查 P3，不局限于字面值或局部表达式。例如 `pure fn invert(value: bool) -> bool { not value }` 可以为前序 bool 参数提供 `invert(value)` 默认值。若调用的是已形成的开放实例，保留 comptime 形参本身不构成拒绝理由：阶段检查确认输入可用，P3 则检查实际输入计算和实例主体。 当前 P3 检查还要求调用处的 staged 实参已经完成为规范常量；仍待解析的局部引用不能仅凭类型和有限函数体取得这一依据。未证明有限的递归与无限循环仍拒绝；显式覆盖只跳过该次默认求值，不取消默认定义的合法性要求。
+
 稳定性只在取得依据的范围内成立。同一个指针在两次调用中的内容可能不同，默认值不能只以指针位值为键永久缓存。默认值的纯度也不准许复制非 Copy 责任。
 
 当前实现可检查默认计算中普通指针的 Copy 内容读取，包括字段投影和有限辅助调用。稳定范围是本次默认求值：分析器检查整段计算及已知调用，拒绝指针写入、未知调用和未证明有限的递归／循环；实际读取的位置仍由资源与内存检查确认可用。此依据不把读取辅助函数提升为 `pure fn`，也不授权跨调用复用读取结果。
@@ -141,6 +143,23 @@ fn example() -> bool {
 
 两次调用各自读取当时内容，结果为 `true`。写入发生在两次默认求值之间；若将写入放进默认表达式，就不满足稳定观测要求。
 
+具体 trait 调用可以根据已选实现的主体取得默认计算所需的行为证据，即使接口声明了程序前置／后置条件。选择实现仅用于分析行为，原始接口调用仍承担完整契约。例如：
+
+```flurry
+typealias Byte = .u8'builtin;
+trait Next {
+    fn next(value: Byte) -> Byte where requires value < 255;
+}
+impl Next for Byte {
+    fn next(value: Byte) -> Byte { value + 1 }
+}
+fn take(value: Byte,
+    .next: Byte = if value < 255 { Byte.as(Next).next(value) } else { value }
+) -> Byte { next }
+```
+
+分支提供调用前提，有限的实现主体提供行为证据。去掉分支后，未知 `value` 不能满足调用前提；实现主体有限也不能令调用合法。接口的后置条件及必要的运行检查同样保留。此行为分析不会自动提供指针访问的内存 footprint；带程序谓词的接口仍须另外完成内存契约组合。值参数参与实现选择和行为分析时保留其声明域，不按 Type 参数处理。
+
 运行检查失败是调用准备的失败路径；总性不能作为删除前提检查的依据。comptime 与子句默认值遵守[编译时求值政策](../comptime/purity-and-normal-form.md)，不套用 runtime P3 的限制。
 
 默认值也可以调用满足上述要求的普通辅助函数。供应仍发生在 runtime；显式覆盖会跳过相应默认表达式，后续默认值读取覆盖后的参数。
@@ -177,6 +196,27 @@ test {
 后面的默认表达式可以读取前面已经绑定的值，也可以使用前面显式提供的配置。它不能引用尚未声明的后序参数。将某个可选项改为显式供应，仅关闭该项的缺省路径，后面的默认表达式仍会看到本次实际绑定的值。
 
 默认表达式由定义作用域决定意义，不在调用者局部变量中重新查找同名标识符。其 runtime 读取发生在本次调用准备阶段；“定义处解析”不等于“定义时只计算一次”。
+
+### 父级值参数与普通 comptime 输入
+
+方法可以同时捕获容器的值参数，并在普通参数表中接收 comptime Type 输入。调用约束使用各自声明的参数种类；捕获的布尔值不会因为与 Type 实参一起替换而变成类型。
+
+```flurry
+typealias Type = .Type'builtin;
+struct Tagged where enabled: bool {flag: bool}
+struct Holder where enabled: bool {
+    pub fn keep(comptime T: Type, value: T) -> T
+        where requires T == Tagged<enabled> {
+        value
+    }
+}
+fn check() -> bool {
+    let result = Holder<true>.keep(Tagged<true>, Tagged<true> {flag: true});
+    result.flag
+}
+```
+
+`Holder<false>` 不能接受这里的 `Tagged<true>`。方法转调、trait 默认方法与 staged 调用中的 inline 展开保留同一要求；runtime 实参仍只求值一次。这里的相等约束是类型命题，捕获值只是名义类型的索引，不因此成为程序状态假设。
 
 ## 常见示例
 

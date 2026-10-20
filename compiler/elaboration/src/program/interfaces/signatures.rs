@@ -79,6 +79,13 @@ pub(super) fn equivalent_code(
         }
         match (left, right) {
             (CodeInput::Data(left), CodeInput::Data(right)) => pairs.push((left, right)),
+            (CodeInput::Pattern(left), CodeInput::Pattern(right)) => {
+                if !left.outputs.keys().eq(right.outputs.keys()) {
+                    return false;
+                }
+                pairs.push((&left.subject, &right.subject));
+                pairs.extend(left.outputs.values().zip(right.outputs.values()));
+            }
             (CodeInput::Code(left), CodeInput::Code(right)) => interfaces.push((left, right)),
             _ => return false,
         }

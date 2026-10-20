@@ -2032,6 +2032,21 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             }
         };
         if let Some(parameter) = &parameter {
+            let annotation = match &parameter.ty.kind {
+                TyParamKind::Positional(ty) | TyParamKind::Optional(_, ty, _) => Some(*ty),
+                _ => None,
+            };
+            if let Some(Expr {
+                kind: ExprKind::ContextualPatternType(_, outputs),
+                ..
+            }) = annotation
+            {
+                self.pattern_code_outputs.insert(
+                    parameter.hir_id,
+                    outputs.iter().map(|entry| entry.name).collect(),
+                );
+            }
+
             for expression in attributes.into_iter().rev() {
                 self.package
                     .definition_attributes

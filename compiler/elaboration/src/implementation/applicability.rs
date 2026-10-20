@@ -11,6 +11,34 @@ use std::{
     fmt,
 };
 
+/// Equality is queried only for Type domains, with the caller's shared budget.
+pub(crate) fn equivalent_domains(
+    context: &Context,
+    left: &Term,
+    right: &Term,
+    max_depth: usize,
+    fuel: &mut usize,
+) -> bool {
+    if left.sort() != nir::Sort::Type || right.sort() != nir::Sort::Type {
+        return false;
+    }
+    if nir::type_computations::charge_term(left, fuel).is_err()
+        || nir::type_computations::charge_term(right, fuel).is_err()
+    {
+        return false;
+    }
+    let mut budget = Budget {
+        steps: *fuel,
+        max_depth,
+    };
+    let result = context.prove_metered(
+        crate::ptc::Formula::equal(left.clone(), right.clone()),
+        &mut budget,
+    );
+    *fuel = budget.steps;
+    matches!(result, Outcome::Entailed(_))
+}
+
 #[derive(Clone, Debug)]
 pub struct TypeEvidence {
     pub implementation: DeclarationId,
@@ -60,6 +88,48 @@ impl ImplementationHead {
         context: &Context,
         budget: Budget,
     ) -> Result<(), crate::ptc::ProofError> {
+        self.verify_head_match_with_domains(
+            matched,
+            subject,
+            interface_arguments,
+            context,
+            budget,
+            &BTreeMap::new(),
+        )
+    }
+
+    /// Replay only head matching in the original declaration-domain environment.
+    /// Retained requirements remain obligations, even when they are false.
+    pub fn verify_head_match_with_domains(
+        &self,
+        matched: &HeadMatch,
+        subject: &Term,
+        interface_arguments: &[Term],
+        context: &Context,
+        budget: Budget,
+        domains: &BTreeMap<DeclarationId, Term>,
+    ) -> Result<(), crate::ptc::ProofError> {
+        self.verify_head_match_with_layouts(
+            matched,
+            subject,
+            interface_arguments,
+            context,
+            budget,
+            domains,
+            None,
+        )
+    }
+
+    pub fn verify_head_match_with_layouts(
+        &self,
+        matched: &HeadMatch,
+        subject: &Term,
+        interface_arguments: &[Term],
+        context: &Context,
+        budget: Budget,
+        domains: &BTreeMap<DeclarationId, Term>,
+        layouts: Option<&nir::program::Package>,
+    ) -> Result<(), crate::ptc::ProofError> {
         use crate::ptc::ProofError;
         let remaining = validate(self, subject, interface_arguments, budget)
             .map_err(|_| ProofError::BudgetExhausted)?;
@@ -99,7 +169,7 @@ impl ImplementationHead {
             type_parameters: self.type_parameters.clone(),
             requirements: vec![],
         };
-        head.verify_type_evidence(
+        head.verify_type_evidence_with_layouts(
             &matched.evidence,
             subject,
             interface_arguments,
@@ -108,6 +178,8 @@ impl ImplementationHead {
                 steps: remaining,
                 ..budget
             },
+            domains,
+            layouts,
         )
     }
 }
@@ -323,6 +395,38 @@ impl ImplementationHead {
         }
         self.match_subject_types(subject, interface_arguments, context, budget)
     }
+    pub fn match_types_with_domains(
+        &self,
+        subject: &Term,
+        interface_arguments: &[Term],
+        context: &Context,
+        budget: Budget,
+        domains: &BTreeMap<DeclarationId, Term>,
+    ) -> Result<HeadMatch, TypeAssessment> {
+        self.match_types_with_layouts(subject, interface_arguments, context, budget, domains, None)
+    }
+
+    pub fn match_types_with_layouts(
+        &self,
+        subject: &Term,
+        interface_arguments: &[Term],
+        context: &Context,
+        budget: Budget,
+        domains: &BTreeMap<DeclarationId, Term>,
+        layouts: Option<&nir::program::Package>,
+    ) -> Result<HeadMatch, TypeAssessment> {
+        if self.interface.is_none() {
+            return Err(TypeAssessment::Pending("open trait head".into()));
+        }
+        self.match_subject_types_with_domains(
+            subject,
+            interface_arguments,
+            context,
+            budget,
+            domains,
+            layouts,
+        )
+    }
     pub fn assess_types(
         &self,
         subject: &Term,
@@ -343,6 +447,24 @@ impl ImplementationHead {
         interface_arguments: &[Term],
         context: &Context,
         budget: Budget,
+    ) -> Result<HeadMatch, TypeAssessment> {
+        self.match_subject_types_with_domains(
+            subject,
+            interface_arguments,
+            context,
+            budget,
+            &BTreeMap::new(),
+            None,
+        )
+    }
+    pub(super) fn match_subject_types_with_domains(
+        &self,
+        subject: &Term,
+        interface_arguments: &[Term],
+        context: &Context,
+        budget: Budget,
+        domains: &BTreeMap<DeclarationId, Term>,
+        layouts: Option<&nir::program::Package>,
     ) -> Result<HeadMatch, TypeAssessment> {
         let remaining = match validate(self, subject, interface_arguments, budget) {
             Ok(remaining) => remaining,
@@ -373,7 +495,7 @@ impl ImplementationHead {
             .chain(&self.interface_arguments)
         {
             if term.sort() != Sort::Type
-                && !term.is_structural_index_value()
+                && !term.is_symbolic_index_value()
                 && !matches!(
                     term,
                     Term::Rigid {
@@ -459,13 +581,42 @@ impl ImplementationHead {
         if shape != *subject {
             relations.push((template, I::Stable(shape)));
         }
+        // Fixed value conflicts refute the entire head, even if another input
+        // has an unresolved symbolic relation. Inspect them before inference
+        // can return Pending for the first unknown field or argument.
+        let mut value_fuel = budget.steps;
         for (position, (template, actual)) in self
             .interface_arguments
             .iter()
             .zip(interface_arguments)
             .enumerate()
         {
-            if template.sort() == Sort::ComptimeValue && actual.is_structural_index_value() {
+            if template.sort() != Sort::ComptimeValue || actual.sort() != Sort::ComptimeValue {
+                continue;
+            }
+            if template.index_values_definitely_differ(actual, &mut value_fuel) {
+                return Err(TypeAssessment::ValueIndexMismatch {
+                    position,
+                    expected: template.clone(),
+                    actual: actual.clone(),
+                });
+            }
+            if value_fuel == 0 {
+                return Err(TypeAssessment::Pending(
+                    "value conflict inspection budget exhausted".into(),
+                ));
+            }
+        }
+        for (position, (template, actual)) in self
+            .interface_arguments
+            .iter()
+            .zip(interface_arguments)
+            .enumerate()
+        {
+            if template.sort() == Sort::ComptimeValue
+                && (actual.is_symbolic_index_value()
+                    || matches!(actual, Term::Rigid { declaration, sort: Sort::ComptimeValue } if domains.contains_key(declaration)))
+            {
                 // Value skeletons and binders are matched outside PTC. Only
                 // Type-valued leaves create type obligations; replay extracts
                 // those same leaves after the whole substitution is complete.
@@ -510,7 +661,45 @@ impl ImplementationHead {
                                     actual.clone()
                                 }
                             };
+                            if bound == *actual
+                                && matches!(
+                                    actual,
+                                    Term::Rigid {
+                                        sort: Sort::ComptimeValue,
+                                        ..
+                                    }
+                                )
+                            {
+                                continue;
+                            }
+                            // Either side can be the caller's unknown value:
+                            // repeated binder matching must not depend on input order.
+                            if matches!(
+                                actual,
+                                Term::Rigid {
+                                    sort: Sort::ComptimeValue,
+                                    ..
+                                }
+                            ) || matches!(
+                                bound,
+                                Term::Rigid {
+                                    sort: Sort::ComptimeValue,
+                                    ..
+                                }
+                            ) {
+                                return Err(TypeAssessment::Pending(
+                                    "rigid value index identity is unresolved".into(),
+                                ));
+                            }
                             let Some(type_relations) = bound.index_type_relations(actual) else {
+                                if (!bound.is_structural_index_value()
+                                    || !actual.is_structural_index_value())
+                                    && !bound.index_values_definitely_differ(actual, &mut fuel)
+                                {
+                                    return Err(TypeAssessment::Pending(
+                                        "symbolic record index identity is unresolved".into(),
+                                    ));
+                                }
                                 return Err(TypeAssessment::ValueIndexMismatch {
                                     position,
                                     expected: bound,
@@ -520,6 +709,41 @@ impl ImplementationHead {
                             relations.extend(type_relations.into_iter().map(|(left, right)| {
                                 (I::Stable(left.clone()), I::Stable(right.clone()))
                             }));
+                            continue;
+                        }
+                    }
+                    if let (
+                        Term::NominalValue {
+                            ty: left_ty,
+                            variant: left_variant,
+                            fields: left,
+                        },
+                        Term::NominalValue {
+                            ty: right_ty,
+                            variant: right_variant,
+                            fields: right,
+                        },
+                    ) = (template, actual)
+                    {
+                        if left_variant == right_variant && left.len() == right.len() {
+                            if left.len().saturating_add(1) > fuel.saturating_sub(pending.len()) {
+                                return Err(TypeAssessment::Pending(
+                                    "value index matching budget exhausted".into(),
+                                ));
+                            }
+                            pending.push((left_ty, right_ty));
+                            pending.extend(left.iter().zip(right).rev());
+                            continue;
+                        }
+                    }
+                    if let (Term::TupleValue(left), Term::TupleValue(right)) = (template, actual) {
+                        if left.len() == right.len() {
+                            if left.len() > fuel.saturating_sub(pending.len()) {
+                                return Err(TypeAssessment::Pending(
+                                    "value index matching budget exhausted".into(),
+                                ));
+                            }
+                            pending.extend(left.iter().zip(right).rev());
                             continue;
                         }
                     }
@@ -544,10 +768,24 @@ impl ImplementationHead {
                     }
                     if template.sort() == Sort::ComptimeValue
                         && template.scalar_index_domain().is_none()
-                        && !matches!(template, Term::RecordValue(_))
+                        && !matches!(
+                            template,
+                            Term::RecordValue(_) | Term::TupleValue(_) | Term::NominalValue { .. }
+                        )
                     {
                         return Err(TypeAssessment::Pending(
                             "value index identity is unresolved".into(),
+                        ));
+                    }
+                    if matches!(
+                        actual,
+                        Term::Rigid {
+                            sort: Sort::ComptimeValue,
+                            ..
+                        }
+                    ) {
+                        return Err(TypeAssessment::Pending(
+                            "rigid value index identity is unresolved".into(),
                         ));
                     }
                     return Err(TypeAssessment::ValueIndexMismatch {
@@ -627,13 +865,19 @@ impl ImplementationHead {
             }
         };
         let mut domain_fuel = budget.steps;
-        nir::validate_declaration_arguments(
-            &self.type_parameters,
+        validate_head_arguments_with_domains(
+            &parameters,
             &self.parameter_types,
             &arguments,
+            domains,
+            Some((context, budget.max_depth)),
+            layouts,
             &mut domain_fuel,
         )
-        .map_err(TypeAssessment::Invalid)?;
+        .map_err(|error| match error {
+            nir::NominalAdmissionError::Budget => TypeAssessment::Pending(error.to_string()),
+            nir::NominalAdmissionError::Invalid(message) => TypeAssessment::Invalid(message),
+        })?;
         let requirements = match self
             .requirements
             .iter()
@@ -750,7 +994,17 @@ impl Index {
         mut qualify: impl FnMut(&TypeEvidence, Budget) -> super::Applicability,
     ) -> Result<TypeResolution, Error> {
         self.resolve_assessed_with(interface, arguments, subject, budget, |head, allowance| {
-            let assessment = head.assess_types(subject, arguments, context, allowance);
+            let assessment = match head.match_types_with_layouts(
+                subject,
+                arguments,
+                context,
+                allowance,
+                &self.parameter_domains,
+                Some(&self.nominal_layouts),
+            ) {
+                Ok(matched) => matched.discharge_with(|goal, budget| context.prove(goal, budget)),
+                Err(assessment) => assessment,
+            };
             let state = match &assessment {
                 TypeAssessment::Applicable(evidence) => qualify(evidence, allowance),
                 _ => assessment.applicability(),
@@ -872,6 +1126,50 @@ impl ImplementationHead {
         }
         self.verify_subject_type_evidence(evidence, subject, interface_arguments, context, budget)
     }
+    pub fn verify_type_evidence_with_domains(
+        &self,
+        evidence: &TypeEvidence,
+        subject: &Term,
+        interface_arguments: &[Term],
+        context: &Context,
+        budget: Budget,
+        domains: &BTreeMap<DeclarationId, Term>,
+    ) -> Result<(), crate::ptc::ProofError> {
+        self.verify_type_evidence_with_layouts(
+            evidence,
+            subject,
+            interface_arguments,
+            context,
+            budget,
+            domains,
+            None,
+        )
+    }
+
+    pub fn verify_type_evidence_with_layouts(
+        &self,
+        evidence: &TypeEvidence,
+        subject: &Term,
+        interface_arguments: &[Term],
+        context: &Context,
+        budget: Budget,
+        domains: &BTreeMap<DeclarationId, Term>,
+        layouts: Option<&nir::program::Package>,
+    ) -> Result<(), crate::ptc::ProofError> {
+        if self.interface.is_none() {
+            return Err(crate::ptc::ProofError::Invalid);
+        }
+        self.verify_subject_evidence_with_domains(
+            evidence,
+            subject,
+            interface_arguments,
+            context,
+            budget,
+            domains,
+            layouts,
+            |proof, budget| context.verify_proof(proof, budget),
+        )
+    }
     pub(super) fn verify_subject_type_evidence(
         &self,
         evidence: &TypeEvidence,
@@ -896,6 +1194,28 @@ impl ImplementationHead {
         interface_arguments: &[Term],
         context: &Context,
         budget: Budget,
+        verify_requirement: impl FnMut(&crate::ptc::Proof, Budget) -> Result<(), crate::ptc::ProofError>,
+    ) -> Result<(), crate::ptc::ProofError> {
+        self.verify_subject_evidence_with_domains(
+            evidence,
+            subject,
+            interface_arguments,
+            context,
+            budget,
+            &BTreeMap::new(),
+            None,
+            verify_requirement,
+        )
+    }
+    pub(super) fn verify_subject_evidence_with_domains(
+        &self,
+        evidence: &TypeEvidence,
+        subject: &Term,
+        interface_arguments: &[Term],
+        context: &Context,
+        budget: Budget,
+        domains: &BTreeMap<DeclarationId, Term>,
+        layouts: Option<&nir::program::Package>,
         mut verify_requirement: impl FnMut(
             &crate::ptc::Proof,
             Budget,
@@ -922,10 +1242,13 @@ impl ImplementationHead {
         }
         let parameters = self.parameter_binders().map_err(|_| ProofError::Invalid)?;
         let mut domain_fuel = remaining;
-        nir::validate_declaration_arguments(
-            &self.type_parameters,
+        validate_head_arguments_with_domains(
+            &parameters,
             &self.parameter_types,
             &evidence.type_arguments,
+            domains,
+            Some((context, budget.max_depth)),
+            layouts,
             &mut domain_fuel,
         )
         .map_err(|_| ProofError::Invalid)?;
@@ -979,7 +1302,12 @@ impl ImplementationHead {
         }
         for (template, actual) in self.interface_arguments.iter().zip(interface_arguments) {
             let template = instantiate(template)?;
-            if template.is_structural_index_value() && actual.is_structural_index_value() {
+            if template == *actual
+                && matches!(actual, Term::Rigid { declaration, sort: Sort::ComptimeValue } if domains.contains_key(declaration))
+            {
+                continue;
+            }
+            if template.is_symbolic_index_value() && actual.is_symbolic_index_value() {
                 let type_relations = template
                     .index_type_relations(actual)
                     .ok_or(ProofError::Invalid)?;
@@ -1014,5 +1342,205 @@ impl ImplementationHead {
             verify_requirement(proof, budget)?;
         }
         Ok(())
+    }
+}
+
+// An implementation can be checked inside its own declaration telescope.
+// Reusing that exact immutable binder is domain evidence; an unrelated rigid
+// input, or substitution that changes its dependent domain, is not.
+#[cfg(test)]
+fn validate_head_arguments(
+    binders: &[nir::DeclarationParameter],
+    domains: &[nir::Term],
+    arguments: &[nir::Term],
+    fuel: &mut usize,
+) -> Result<(), nir::NominalAdmissionError> {
+    validate_head_arguments_with_domains(
+        binders,
+        domains,
+        arguments,
+        &BTreeMap::new(),
+        None,
+        None,
+        fuel,
+    )
+}
+fn validate_head_arguments_with_domains(
+    binders: &[nir::DeclarationParameter],
+    domains: &[Term],
+    arguments: &[Term],
+    evidence: &BTreeMap<DeclarationId, Term>,
+    context: Option<(&Context, usize)>,
+    layouts: Option<&nir::program::Package>,
+    fuel: &mut usize,
+) -> Result<(), nir::NominalAdmissionError> {
+    if binders.len() != arguments.len() {
+        return Err("implementation argument count mismatch".into());
+    }
+    for (index, (binder, argument)) in binders.iter().zip(arguments).enumerate() {
+        let declared = domains
+            .get(index)
+            .unwrap_or(&nir::Term::Primitive(nir::Primitive::Type));
+        let domain = nir::type_computations::instantiate_parameters_bounded(
+            declared,
+            &binders[..index],
+            &arguments[..index],
+            &[],
+            fuel,
+        )?;
+        nir::type_computations::charge_term(argument, fuel)?;
+        if binder.sort == nir::Sort::ComptimeValue
+            && *argument
+                == (nir::Term::Rigid {
+                    declaration: binder.declaration,
+                    sort: binder.sort,
+                })
+            && domain == *declared
+        {
+            continue;
+        }
+        if let Term::Rigid {
+            declaration,
+            sort: Sort::ComptimeValue,
+        } = argument
+        {
+            if let Some(actual) = evidence.get(declaration) {
+                nir::type_computations::charge_term(actual, fuel)?;
+                if binder.sort == Sort::ComptimeValue
+                    && (actual == &domain
+                        || context.is_some_and(|(context, max_depth)| {
+                            equivalent_domains(context, actual, &domain, max_depth, fuel)
+                        }))
+                {
+                    continue;
+                }
+                return Err("implementation rigid argument domain mismatch".into());
+            }
+        }
+        if binder.sort == Sort::ComptimeValue && matches!(argument, Term::RecordValue(_)) {
+            nir::validate_record_index_with(argument, &domain, fuel, |value, expected, fuel| {
+                let Term::Rigid {
+                    declaration,
+                    sort: Sort::ComptimeValue,
+                } = value
+                else {
+                    return false;
+                };
+                let Some(actual) = evidence.get(declaration) else {
+                    return false;
+                };
+                if nir::type_computations::charge_term(actual, fuel).is_err() {
+                    return false;
+                }
+                actual == expected
+                    || context.is_some_and(|(context, depth)| {
+                        equivalent_domains(context, actual, expected, depth, fuel)
+                    })
+            })?;
+            continue;
+        }
+        nir::validate_declaration_arguments_with_layouts(
+            &[binder.declaration],
+            &[domain],
+            std::slice::from_ref(argument),
+            fuel,
+            |ty, variant, fuel| {
+                let package = layouts.ok_or_else(|| {
+                    nir::NominalAdmissionError::from(
+                        "nominal value admission requires declaration layout evidence",
+                    )
+                })?;
+                nir::normal_forms::nominal_value_fields_budgeted(package, ty, variant, fuel)
+                    .ok_or_else(|| {
+                        if *fuel == 0 {
+                            nir::NominalAdmissionError::Budget
+                        } else {
+                            nir::NominalAdmissionError::from("invalid nominal value layout")
+                        }
+                    })
+            },
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod captured_head_domains {
+    use super::*;
+
+    #[test]
+    fn symbolic_admission_requires_the_same_binder_and_unchanged_domain() {
+        let t = nir::DeclarationParameter {
+            declaration: DeclarationId {
+                package: 81,
+                local: 1,
+            },
+            sort: Sort::Type,
+        };
+        let v = nir::DeclarationParameter {
+            declaration: DeclarationId {
+                package: 81,
+                local: 2,
+            },
+            sort: Sort::ComptimeValue,
+        };
+        let rigid = |parameter: nir::DeclarationParameter| Term::Rigid {
+            declaration: parameter.declaration,
+            sort: parameter.sort,
+        };
+        let binders = [t, v];
+        let domains = [Term::Primitive(nir::Primitive::Type), rigid(t)];
+        let symbolic = [rigid(t), rigid(v)];
+        assert!(validate_head_arguments(&binders, &domains, &symbolic, &mut 1000).is_ok());
+        assert!(
+            validate_head_arguments(
+                &binders,
+                &domains,
+                &[Term::Primitive(nir::Primitive::Bool), rigid(v)],
+                &mut 1000
+            )
+            .is_err()
+        );
+        assert!(
+            validate_head_arguments(
+                &binders,
+                &domains,
+                &[
+                    rigid(t),
+                    Term::Rigid {
+                        declaration: DeclarationId {
+                            package: 81,
+                            local: 3
+                        },
+                        sort: Sort::ComptimeValue
+                    }
+                ],
+                &mut 1000
+            )
+            .is_err()
+        );
+        assert!(
+            validate_head_arguments(
+                &binders,
+                &domains,
+                &[Term::Primitive(nir::Primitive::Bool), Term::Bool(true)],
+                &mut 1000
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_head_arguments(
+                &binders,
+                &domains,
+                &[Term::Primitive(nir::Primitive::Bool), Term::Char('x')],
+                &mut 1000
+            )
+            .is_err()
+        );
+        assert!(matches!(
+            validate_head_arguments(&binders, &domains, &symbolic, &mut 0),
+            Err(nir::NominalAdmissionError::Budget)
+        ));
+        assert!(validate_head_arguments(&binders, &domains, &symbolic, &mut 1000).is_ok());
     }
 }

@@ -12,6 +12,7 @@ fn generic(index: usize) -> Term {
 }
 fn scheme(parameters: Vec<Term>, result: Term, types: usize) -> Scheme {
     Scheme {
+        parameter_sorts: vec![],
         type_parameters: types,
         signature: Term::Function {
             parameters: parameters
@@ -1450,4 +1451,216 @@ fn sparse_caller_inference_preserves_closed_assumptions() {
         .unwrap()
         .finish()
         .unwrap();
+}
+
+#[test]
+fn partial_nominal_value_indices_keep_identity_scope_and_budget_recovery() {
+    use elaboration::{calls::InputContext as C, ptc::Context};
+    let id = DeclarationId {
+        package: 79,
+        local: 1,
+    };
+    let nominal = |ty, flag| Term::Nominal {
+        declaration: id,
+        arguments: vec![ty, flag],
+    };
+    let mut world = Context::default();
+    world.admit_nominal_constructor(id);
+    let consumer = scheme(vec![nominal(generic(0), Term::Bool(true))], generic(0), 1);
+    let pending = consumer
+        .infer_partial_types_in_context(&[None], None, &world, Budget::default())
+        .unwrap();
+    let shape = pending.parameter_input_context(0).unwrap();
+    assert!(matches!(&shape, C::Nominal { arguments, .. }
+        if matches!(arguments.as_slice(), [C::Unknown, C::Known(Term::Bool(true))])));
+    assert!(pending.finish().is_err());
+    let producer = scheme(vec![generic(0)], generic(0), 1);
+    let complete = nominal(primitive(P::Bool), Term::Bool(true));
+    let mut trial = producer
+        .infer_partial_types_in_context(&[Some(complete.clone())], None, &world, Budget::default())
+        .unwrap();
+    assert!(
+        trial
+            .constrain_result_context(
+                &shape,
+                Budget {
+                    steps: 1,
+                    ..Budget::default()
+                }
+            )
+            .is_err()
+    );
+    trial
+        .constrain_result_context(&shape, Budget::default())
+        .unwrap();
+    assert_eq!(trial.finish().unwrap().result, complete);
+    let mut wrong = producer
+        .infer_partial_types_in_context(
+            &[Some(nominal(primitive(P::Bool), Term::Bool(false)))],
+            None,
+            &world,
+            Budget::default(),
+        )
+        .unwrap();
+    assert!(
+        wrong
+            .constrain_result_context(&shape, Budget::default())
+            .and_then(|_| wrong.finish().map(|_| ()))
+            .is_err()
+    );
+    let unbound = C::Nominal {
+        declaration: id,
+        arguments: vec![
+            C::Unknown,
+            C::Known(Term::Bound {
+                depth: 0,
+                index: 0,
+                sort: Sort::ComptimeValue,
+            }),
+        ],
+    };
+    let mut trial = producer
+        .infer_partial_types_in_context(&[Some(complete.clone())], None, &world, Budget::default())
+        .unwrap();
+    assert!(
+        trial
+            .constrain_result_context(&unbound, Budget::default())
+            .is_err()
+    );
+    trial
+        .constrain_result_context(&shape, Budget::default())
+        .unwrap();
+    assert_eq!(trial.finish().unwrap().result, complete);
+}
+
+#[test]
+fn mixed_clause_sorts_infer_values_without_turning_them_into_types() {
+    let head = DeclarationId {
+        package: 4,
+        local: 1,
+    };
+    let nominal = |arguments| Term::Nominal {
+        declaration: head,
+        arguments,
+    };
+    let mut mixed = scheme(
+        vec![nominal(vec![
+            generic(0),
+            Term::Bound {
+                depth: 1,
+                index: 1,
+                sort: Sort::ComptimeValue,
+            },
+        ])],
+        generic(0),
+        2,
+    );
+    mixed.parameter_sorts = vec![Sort::Type, Sort::ComptimeValue];
+    let mut context = elaboration::ptc::Context::default();
+    context.admit_nominal_constructor(head);
+    for value in [true, false] {
+        let candidate = mixed
+            .infer_sparse_scoped_types(
+                &[Some(nominal(vec![primitive(P::Bool), Term::Bool(value)]))],
+                Some(&primitive(P::Bool)),
+                &context,
+                Budget::default(),
+                &[],
+            )
+            .unwrap()
+            .finish()
+            .unwrap();
+        assert_eq!(
+            candidate.type_arguments,
+            vec![primitive(P::Bool), Term::Bool(value)]
+        );
+        assert_eq!(candidate.result, primitive(P::Bool));
+    }
+    let malformed = nominal(vec![primitive(P::Bool), primitive(P::Char)]);
+    assert!(
+        mixed
+            .infer_sparse_scoped_types(&[Some(malformed)], None, &context, Budget::default(), &[])
+            .and_then(|candidate| candidate.finish())
+            .is_err()
+    );
+    mixed.parameter_sorts = vec![Sort::Type, Sort::Runtime];
+    assert!(
+        mixed
+            .infer_sparse_scoped_types(&[None], None, &context, Budget::default(), &[])
+            .is_err()
+    );
+}
+
+#[test]
+fn unknown_nominal_value_contexts_keep_their_sort_across_calls() {
+    use elaboration::{calls::InputContext as C, ptc::Context};
+    let id = DeclarationId {
+        package: 80,
+        local: 1,
+    };
+    let nominal = |index| Term::Nominal {
+        declaration: id,
+        arguments: vec![index],
+    };
+    let mut context = Context::default();
+    context.admit_nominal_constructor(id);
+    let mut consumer = scheme(
+        vec![nominal(Term::Bound {
+            depth: 1,
+            index: 0,
+            sort: Sort::ComptimeValue,
+        })],
+        primitive(P::Bool),
+        1,
+    );
+    consumer.parameter_sorts = vec![Sort::ComptimeValue];
+    let pending = consumer
+        .infer_partial_types_in_context(&[None], None, &context, Budget::default())
+        .unwrap();
+    let hint = pending.parameter_input_context(0).unwrap();
+    assert!(
+        matches!(&hint, C::Nominal { arguments, .. } if matches!(arguments.as_slice(), [C::UnknownValue]))
+    );
+    assert!(pending.finish().is_err());
+    let producer = scheme(vec![generic(0)], generic(0), 1);
+    for flag in [true, false] {
+        let complete = nominal(Term::Bool(flag));
+        let mut candidate = producer
+            .infer_partial_types_in_context(
+                &[Some(complete.clone())],
+                None,
+                &context,
+                Budget::default(),
+            )
+            .unwrap();
+        assert!(
+            candidate
+                .constrain_result_context(
+                    &hint,
+                    Budget {
+                        steps: 1,
+                        ..Budget::default()
+                    }
+                )
+                .is_err()
+        );
+        candidate
+            .constrain_result_context(&hint, Budget::default())
+            .unwrap();
+        assert_eq!(candidate.finish().unwrap().result, complete);
+    }
+    let mut wrong = producer
+        .infer_partial_types_in_context(
+            &[Some(nominal(primitive(P::Bool)))],
+            None,
+            &context,
+            Budget::default(),
+        )
+        .unwrap();
+    assert!(
+        wrong
+            .constrain_result_context(&hint, Budget::default())
+            .and_then(|_| wrong.finish().map(|_| ()))
+            .is_err()
+    );
 }

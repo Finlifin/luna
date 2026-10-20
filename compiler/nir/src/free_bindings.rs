@@ -111,6 +111,67 @@ fn scan(
                 }
                 return Ok(false);
             }
+            K::NominalType {
+                preparations,
+                arguments,
+                order,
+                bindings,
+                ..
+            }
+            | K::CheckTypeAlias {
+                preparations,
+                arguments,
+                order,
+                bindings,
+                ..
+            } => {
+                charge(fuel, arguments.len())?;
+                if order
+                    .as_ref()
+                    .is_some_and(|order| order.len() != arguments.len())
+                    || bindings.as_ref().is_some_and(|bindings| {
+                        bindings.len() != arguments.len()
+                            || bindings.iter().collect::<BTreeSet<_>>().len() != bindings.len()
+                    })
+                {
+                    return Err("invalid nominal input plan".into());
+                }
+                if node.kind.nominal_local_bindings().is_none() {
+                    return Err("invalid nominal input bindings".into());
+                }
+                let mut preparations = preparations.iter().peekable();
+                let mut inner = fork(scope, fuel)?;
+                let mut seen = BTreeSet::new();
+                for position in 0..arguments.len() {
+                    while preparations.peek().is_some_and(|p| p.before == position) {
+                        statement(
+                            &preparations.next().unwrap().expression,
+                            &mut inner,
+                            free,
+                            fuel,
+                            depth + 1,
+                        )?;
+                    }
+                    let slot = order.as_ref().map_or(position, |order| order[position]);
+                    if slot >= arguments.len() || !seen.insert(slot) {
+                        return Err("invalid nominal input order".into());
+                    }
+                    normal(&arguments[slot], &inner, free, fuel, depth + 1)?;
+                    if let Some(bindings) = bindings {
+                        inner.insert(bindings[slot]);
+                    }
+                }
+                for preparation in preparations {
+                    statement(&preparation.expression, &mut inner, free, fuel, depth + 1)?;
+                }
+                if let K::CheckTypeAlias {
+                    body: Some(body), ..
+                } = &node.kind
+                {
+                    scan(body, &inner, free, fuel, depth + 1)?;
+                }
+                return Ok(false);
+            }
             K::NormalFormType {
                 arguments, plan, ..
             } => {
@@ -217,6 +278,11 @@ fn pattern_scan(
     }
     charge(fuel, 1)?;
     match pattern {
+        P::CodeEvidence { outputs } => {
+            charge(fuel, outputs.len())?;
+            scope.extend(outputs.iter().map(|(id, _)| *id));
+        }
+
         P::Observe { binding, inner } => {
             let inserted = scope.insert(*binding);
             pattern_scan(inner, scope, free, fuel, depth + 1)?;
@@ -269,7 +335,8 @@ fn pattern_scan(
                 *scope = common;
             }
         }
-        P::Record { fields, .. }
+        P::NominalType { fields, .. }
+        | P::Record { fields, .. }
         | P::AnonymousRecord { fields, .. }
         | P::Variant { fields, .. }
         | P::NormalForm {

@@ -49,6 +49,123 @@ read、write 等 memory effect 描述操作涉及的位置。结果是否继续�
 
 程序 predicate 可以用于 safe 的规格，不需要 comptime 前缀。用于计算真值的可执行规格和描述 memory effect 的规格构造也各有语义；写出 read 不等于立即读取被描述的地址。
 
+值依赖可以位于条件分支或局部块内部，不能只检查 `requires` 的最外层运算符。例如：
+
+~~~flurry
+fn checked(flag: bool) -> bool
+    where requires do { let selected = flag; selected } {
+    true
+}
+~~~
+
+这个前置条件属于程序验证；输入 false 时，入口检查拒绝执行主体。调用表达式中的值实参也参与分类，但被归为程序谓词不代表任意函数调用已经具有合法判定器。另一方面，normal-form 类型的 comptime 值索引不使包围它的 trait 约束变成程序谓词：类型形成仍单独检查，类型身份保持原头。
+
+两个关联标量的 `==` 或 `!=` 也是程序条件，即使表达式没有引用普通函数参数。编译器依据成员声明的类型区分它与关联 Type 的相等；前者进入程序验证，后者仍是类型命题，不以证明失败后的回退来决定含义。
+
+程序谓词也可以读取已检查的关联常量。其初始化仍属于 comptime invocation，读取常量不等于允许在谓词里调用任意函数：
+
+~~~flurry
+comptime fn invert(value: bool) -> bool { not value }
+trait Flags where enabled: bool { assoc flag: bool = invert(enabled); }
+struct Holder where enabled: bool {}
+impl Flags<enabled> for Holder<enabled> where enabled: bool {}
+
+comptime fn checked(value: bool) -> bool
+    where requires value or Holder<false>.as(Flags<false>).flag {
+    true
+}
+fn decide(comptime value: bool) -> bool { value }
+fn example() -> bool { decide(checked(true)) }
+~~~
+
+构建必需 invocation 时，前置和后置条件引用的关联初始化及其辅助函数也进入依赖闭包。程序分析对尚未完成的关联值只保留类型范围，不猜测初始化结果。短路分支合流后，若某个局部观察的身份已经失效，保留布尔结果范围而丢弃旧关系，不能继续利用失效证明。
+
+程序条件不必引用普通形参；使用上例声明，也可以写：
+
+~~~flurry
+comptime fn guarded() -> bool
+    where requires Holder<false>.as(Flags<false>).flag {
+    true
+}
+~~~
+
+该条件及其 `not`、与布尔字面量比较、局部块或条件分支形式均保留为程序前置条件。条件的真假由程序验证与调用检查处理，不加入 PTC 的类型假设。分类发生在证明之前，失败的类型相等或 trait 证明不会因此改为另一种程序解释。
+
+如果调用点还不能静态证明关联条件，可先用受检查的 `assumes` 建立事实：
+
+~~~flurry
+fn staged() -> bool {
+    decide(do {
+        assumes Holder<false>.as(Flags<false>).flag;
+        guarded()
+    })
+}
+~~~
+
+程序验证以接口实例、成员和 Self 共同标识关联标量，向被调用者传递同一常量的事实。换成另一组接口参数、另一个成员或另一种 Self 不能复用该事实。这里的 `assumes` 仍须实际检查；关联条件为假时 invocation 失败，而不是建立无条件的类型假设。
+
+同一规则也用于关联整数上界。下面是独立例子，生产者的后置条件可直接用于后续调用：
+
+~~~flurry
+typealias Byte = .u8'builtin;
+comptime fn keep(value: Byte) -> Byte { value }
+trait Limits where maximum: Byte { assoc bound: Byte = keep(maximum); }
+struct Holder where maximum: Byte {}
+impl Limits<maximum> for Holder<maximum> where maximum: Byte {}
+
+comptime fn produce() -> result: Byte
+    where ensures result < Holder<9>.as(Limits<9>).bound {
+    let value: Byte = 8;
+    assumes value < Holder<9>.as(Limits<9>).bound;
+    value
+}
+comptime fn checked(value: Byte) -> Byte
+    where requires value < Holder<9>.as(Limits<9>).bound { value }
+fn decide(comptime value: Byte) -> Byte { value }
+fn example() -> Byte { decide(checked(produce())) }
+~~~
+
+关联常量的观察身份不会因普通调用而失效，但可修改的局部值仍有版本：修改实参后不能继续使用修改前的范围证明。后置条件传递的是已经证明的关系，不会在程序分析中重新执行关联初始化，也不会推断另一关联实例具有相同上界。
+
+泛型成员的程序契约也可以引用由实现提供的关联值，不必重复声明编译器已能从实现证明的 trait 约束。例如：
+
+```flurry
+typealias Byte = .u8'builtin;
+trait Bounds where limit: Byte { assoc bound: Byte = limit; }
+struct Holder where limit: Byte {
+    pub comptime fn checked(value: Byte) -> result: Byte
+        where requires value < Self.as(Bounds<limit>).bound,
+              ensures result < Self.as(Bounds<limit>).bound {
+        value
+    }
+}
+impl Bounds<limit> for Holder<limit> where limit: Byte {}
+```
+
+成员契约中的关联读取先保留其接口实例、成员和 Self 身份；实现检查完成后，再在该成员的声明上下文中证明接口成立。实现放在成员之前或之后不影响结果。trait 默认方法与显式实现方法也使用这一规则。调用处的关联标量读取保留相同观察身份，即使初始化器只是字面量，受检查的 `assumes` 仍可向方法契约传递事实。这个延后检查不会增加隐式的公开约束，也不会在检查契约时假定实现成立：即使成员从未被调用，缺少所需实现仍会拒绝整个声明。经由子接口读取继承成员时，必须证明请求的子接口，只有父接口的实现不够。
+
+
+容器的不可变值参数也可以出现在普通方法契约中。定义检查为每个已声明的标量捕获保留独立的符号身份；这不把未知值猜成常量。调用时按参数的 Type／值种类替换契约，并将仍有效的捕获事实和实参事实一起传递。
+
+```flurry
+struct Limit where maximum: u8 {
+    pub fn keep(value: u8) -> result: u8
+        where requires value <= maximum,
+              ensures result <= maximum {
+        value
+    }
+
+    pub fn forward(value: u8) -> result: u8
+        where requires value <= maximum,
+              ensures result <= maximum {
+        Self.keep(value)
+    }
+}
+```
+
+`Limit<10>.forward(9)` 满足契约，传入 11 则不能通过调用检查。不同的上界参数保持不同身份；只有 `value <= left`，不能据此证明 `value <= right`。短路条件两侧使用同一捕获的身份，条件分支与调用返回继续保留已证明的关系。复用声明自身的值绑定时，其依赖域必须保持不变；替换前面的 Type 输入后，不能把旧域的符号值冒充新域中的值。
+
+
 ### 受检前提与证明
 
 safe 在 normalized IR 上完成相应检查。超出自动证明能力且具有合法判定器的条件，可以用 assumes 在依赖动作之前建立受检事实。运行检查只能证明它实际检查的条件，不能复活已移出的责任或已失效的指针。
@@ -111,6 +228,45 @@ fn checked_keep() -> result: bool where ensures result {
 checked_keep 返回 true。result 绑定 computation 完成后交付的 bool；poll 的响应是另一个值，不替代 keep 的返回值。函数的私有按值参数不会因外部 handler 执行而自行改变；可被 handler 写入的词法变量、已暴露地址及相关内存观测则不能继续沿用旧事实。
 
 相同规则适用于 quote fn 的确定性展开。若 handler 执行词法 return，检查的是它所属函数的返回契约；尚未正常完成的 computation 不提供其 ensures。后置条件仍需逐条返回路径证明，无法证明时须按已有受检前提规则处理。
+
+开放函数的结果声明已经给出完整效应行时，定义检查也在该行内检查主体。comptime 参数只决定之后的实例化选择，不能让未选分支绕过效应资格检查：
+
+~~~flurry
+effect read() -> bool;
+
+fn selected(comptime enabled: bool) -> #read bool {
+    inline if enabled { read()# } else { false }
+}
+
+fn forward(comptime enabled: bool) -> #read bool {
+    let value = selected(enabled);
+    if value { true } else { false }
+}
+
+fn run() -> bool {
+    forward(true)# { read() => true, }
+}
+~~~
+
+这里 value 是行内完成调用后取得的 bool；效应行保留在 forward 的接口上。声明的行只覆盖函数主体，不自动授权参数默认值或 comptime 选择条件发出请求。返回闭包的开放工厂遵守同一规则：工厂效应、handler 安装及后续闭包调用各自保持原来的执行边界，拥有型捕获仍沿实际完成或提前退出路径清理一次。
+
+泛型调用在已声明的行内执行时，结果上下文约束的是调用交付的值，而不是把整个 computation 与普通值类型判为相等：
+
+~~~flurry
+effect obtain() -> T where T;
+
+fn fetch(comptime enabled: bool) -> #obtain<T> T where T {
+    inline if enabled { obtain<T>()# } else { obtain<T>()# }
+}
+
+fn fetch_flag(comptime enabled: bool) -> #obtain<bool> bool {
+    fetch(enabled)
+}
+~~~
+
+fetch_flag 的 bool 结果域足以为该次 fetch 推导 T；若还有普通实参或计算型 tuple 包，它们也共同提供依据。之后仍检查具体操作与类型实参是否属于允许的行，不能用 `obtain<char>` 或另一个同结果类型的操作替代 `obtain<bool>`。显式要求完整 computation 类型时保留完整类型，不套用行内结果交付的推断规则。这不表示已支持一等 computation 存储；当前将 computation 保存为局部值再恢复的解释／IIR 路径尚未完整接通。
+
+
 
 ### 通过普通结果表达可恢复失败
 

@@ -207,6 +207,7 @@ impl Context {
             .iter()
             .map(|s| s.declaration)
             .chain(package.enums.iter().map(|e| e.declaration))
+            .chain(package.newtypes.iter().map(|n| n.declaration))
         {
             context.admit_nominal_constructor(declaration);
         }

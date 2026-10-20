@@ -67,7 +67,7 @@ var { name, age } = student;
 
 ### 基本模式
 
-- **字面量**：与值相等则匹配。
+- **字面量**：与值相等则匹配。 数值字面量可带负号，例如 `-3`、`-3.5`；`(-3) or -4` 与 `-3..= -1` 分别使用普通的替代模式和范围模式规则。负号只接数值字面量，不引入任意表达式模式。字面量扩展仍遵循对应协议。
 - **标识符**：绑定到该值。
 - **`_`**：匹配且不绑定。
 - **符号**：`.ok` 等，见字面量章。
@@ -79,6 +79,81 @@ var { name, age } = student;
 - **`and is`**：`pat and expr is pat`（可连锁）；先完整匹配左侧，再对 `expr` 继续匹配。
 - **`as`**：`pat as name`，匹配 `pat` 同时把整体绑到 `name`。
 - **守卫**：`pat if cond`；`cond` 为真才成功（模式层用 `if`，与语句守卫 `while` 不同）。
+
+范围模式支持 f32 和 f64，并使用与普通比较表达式一致的有序比较。`lower..upper` 要求 `lower <= value and value < upper`，`lower..=upper` 的上界改为 `value <= upper`；单侧范围只检查所写的一侧。主语或被检查的端点为 NaN 时，相应比较失败。右开上界不能实现为 `not (upper <= value)`，因为 NaN 下两者不同。正负零按比较规则相等，无穷值仍受开闭边界约束。
+
+~~~flurry
+typealias Float = .f64'builtin;
+
+fn in_unit_interval(value: Float) -> bool {
+    value match {
+        0.0..1.0 => true,
+        _ => false,
+    }
+}
+~~~
+
+`0.0` 与 `-0.0` 匹配，`1.0` 与 `Float.NaN` 不匹配。计算型端点按源码顺序各求值一次；端点中的提前返回仍遵循普通控制流，不执行其后的端点。取反反转完整匹配结果，因此 `not (0.0..1.0)` 会接纳 NaN；嵌套取反逐层执行。仅用 `..0.0` 与 `0.0..` 不能覆盖浮点域，NaN 仍未匹配。NaN 常量的相等模式也不能补上这一缺口，因为 NaN 不等于自身；可使用 `_` 明确覆盖剩余值。对常量端点、纯比较和其布尔组合（包括有完整 else 分支的布尔 if），穷尽性分析保留 NaN 类别，可以证明范围与其取反共同覆盖整个域，也保留元组字段之间的对应关系。函数调用或其他尚不能符号分析的计算不会作为覆盖证据；运行时能够匹配不代表任意计算型端点均能被静态证明。
+
+也可以用纯比较区分有序数值和 NaN，不需要用 NaN 常量做相等匹配：
+
+~~~flurry
+fn is_ordered(value: Float) -> bool {
+    value match {
+        _ as number if number == number => true,
+        _ as number if number != number => false,
+    }
+}
+~~~
+
+分析只利用比较行为，不把正负零的表示位或不同 NaN 的载荷当作相等；这些表示差异仍可由其他合法操作观察。这里的覆盖证明不执行用户代码，也不交给 PTC。整数、字符、精确 comptime Float 及 f32/f64 的覆盖分析也保留纯守卫中局部布尔 let 的真值证据：别名读取、not、布尔结果之间的 == / != 和条件分支继续使用绑定初始化时的证据，再与当前分支相交；同名遮蔽不会改变先前绑定的含义。未知函数计算仍不能通过先保存到局部变量来变成覆盖证据。整数、字符、精确 Float 和 f32/f64 的纯守卫还可按布尔结果继续 match：每个 arm 只分析此前未匹配的情况，模式绑定保留这个布尔结果的证据；arm 的守卫失败时，相应情况继续交给后续 arm。精确 Float 还可对原数值主语进行这种嵌套决策。数值常量也可作为嵌套 match 的主语；其中的模式绑定代表该常量，不能与外层匹配值混同。f32/f64 的分析也允许短路、if 和顺序 match 跳过未执行的普通布尔函数调用，但可达调用仍保持未知；`x < 0.0 or x >= 0.0` 不能据此跳过 NaN 路径上的调用。这些未知调用的实参还可包含 tuple、结构体、枚举、匿名记录、newtype 和函数声明身份；构造字段递归保留，不能因实参是聚合值就提前否定已经由短路排除的路径。分析不执行或推导被调用函数的正文，NaN 等仍能到达调用的路径保持 Unknown；复制输入结构同样消耗分析预算，其他未支持的调用结构仍保守拒绝。这是覆盖分析的能力；guard 实参的资源交付和失败路径仍须另行检查。临时构造的无指针聚合实参已接入观察区域检查；消费候选主语、外部所有者或可能拒绝的清理仍不因此获得许可。精确 Float 分析允许短路、if 或顺序 match 跳过未执行分支中的未知条件；一旦分析路径实际到达未知条件，就不能据此证明真或假，也不能借取反或自相等绕过。分支按顺序选择，后面的匹配不能覆盖前面已选中的结果；若分析发现嵌套决策没有匹配的 arm，则无法给出证明，不能当作 false 再取反。
+
+整数和字符的区间分析也支持顺序计算模式：左侧匹配产生的绑定可用于纯比较，计算得到的布尔值可继续匹配或交给守卫。例如：
+
+```flurry
+typealias i32 = .i32'builtin;
+
+fn nonnegative(input: i32) -> bool {
+    input match {
+        value and (value < 0) is true => false,
+        value and (value >= 0) is true => true,
+    }
+}
+```
+
+两个分支分别覆盖负数与非负数；把第二个比较改成 `value > 0` 会留下零的缺口。分析中的计算结果始终受左侧已匹配范围约束，不能通过取反扩大到当前候选之外。只使用可分析的主语、常量和纯布尔计算；未知调用不能充当覆盖证据，编译器不会为了证明覆盖而调用它。
+
+comptime Float、f32 和 f64 也支持这种顺序计算。机器浮点的比较仍然保留 NaN 路径，不能把“小于零或大于等于零”当作整个浮点域：
+
+```flurry
+typealias Number = .f64'builtin;
+
+fn nonnegative_float(input: Number) -> bool {
+    input match {
+        value and (value < 0.0) is true => false,
+        value and (value >= 0.0) is true => true,
+        value and (not (value == value)) is true => false,
+    }
+}
+```
+
+第三分支覆盖 NaN；正负零进入第二分支。计算结果也可绑定后用于守卫，或把浮点主语继续交给后续数值模式。继续利用先前的数值绑定推导守卫时，即使计算后的模式是 `_`，可达的未知布尔计算也不能被当作无影响的步骤跳过；短路确实跳过的未知分支则不妨碍证明。 同样，守卫中的局部 let 初始化和嵌套 match 主语必须保留求值顺序：`do {let unused=false or decide(x);true}` 与 `(false or decide(x)) match {_=>true}` 都不能通过丢弃结果来隐藏可达的未知调用。将其中的 `false or` 改为 `true or` 才会实际跳过调用。
+
+精确 Float 的 or-pattern 还可由不同候选计算同名布尔绑定，再交给外层守卫：
+
+```flurry
+typealias Float = .Float'builtin;
+
+comptime fn nonnegative_exact(input: Float) -> bool {
+    input match {
+        (((value if value < 0.0) and false is selected) or
+         ((value if value >= 0.0) and true is selected))
+            if selected == (value >= 0.0) => selected,
+    }
+}
+```
+
+分析保留首次成功候选与导出值的对应关系，也支持嵌套 or-pattern。外层守卫失败不会重试下一个候选；若把第一候选的范围条件移除，正数会先得到 `selected=false`，守卫失败后整个匹配并不穷尽。
 
 ### 观察模式与整体绑定的所有权
 
@@ -193,7 +268,7 @@ fn inspect(packet: Packet<T>) -> bool where T {
 }
 ```
 
-这里沿用前文具有 `ready: bool` 字段的 Packet。`accept` 的实参只复制字段，返回 false 时原 Packet 仍由后续候选接收；调用不会重放，短路表达式仍保持短路。callee 自己创建的资源按正常调用规则清理。当前实现支持直接函数及已实例化函数、标量和具备 Copy 证据的代码实参与结果、合法默认实参、已知代码指针调用及嵌套调用；调用仍经过普通调用检查。传递仿射值或指针、未知回调、带环境闭包以及可能发生契约拒绝的调用尚需完整的候选失败路径资源事务，当前明确拒绝。这是实现范围，不是语言对守卫表达式的永久限制。
+这里沿用前文具有 `ready: bool` 字段的 Packet。`accept` 的实参只复制字段，返回 false 时原 Packet 仍由后续候选接收；调用不会重放，短路表达式仍保持短路。callee 自己创建的资源按正常调用规则清理。当前实现支持直接函数及已实例化函数、标量和具备 Copy 证据的代码实参与结果、合法默认实参、已知代码指针调用及嵌套调用；调用仍经过普通调用检查。指针实参还可用于具有已知来源的只读调用：先检查实参表达式本身，再检查选定 callee 的内存摘要，拒绝写入调用者内存、未验证清理和可能发生规格拒绝的路径。借条件表达式选取地址也不能隐藏写操作。消费外部仿射值、未知回调、带环境闭包以及一般可拒绝调用仍需完整的候选失败路径资源事务，当前明确拒绝。这是实现范围，不是语言对守卫表达式的永久限制。
 
 只观察绑定的守卫也可位于 `or` 的内部或单个字段上。括号明确划定候选范围：
 
@@ -208,6 +283,37 @@ fn inspect_packets(value: Tuple<Packet<T>, Packet<T>>) -> bool where T {
 ```
 
 第一候选的守卫失败后，撤销它的绑定及来源，再按第二候选自己的名字环境求值。这里第二次 `first` 来自原 tuple 的第二个位置；统一候选绑定名字不能改变该读取。成功后仍按实际绑定取得次序逆序清理。字段守卫、`as whole` 内部的 Copy 观察和 `let-else` 复用此规则；守卫中的仿射消费仍不能绕过失败路径检查。
+
+tuple 模式按字段顺序建立候选绑定，后续字段中的守卫和顺序计算可以读取前面字段的绑定。嵌套 tuple 继承外层此前的绑定；前向引用不成立，同一完整模式也不能重复声明同名绑定。
+
+枚举的位置载荷模式遵循相同规则：`.pair(first, (second if first == second))` 的第二个字段可以观察 first。嵌套 tuple 与嵌套变体继续使用此前已建立的候选绑定；整段模式失败后，这些名字不会进入下一候选或 let-else 的 else 分支。or-pattern 的每个候选独立建立字段绑定，成功后才统一导出名字。该作用域规则也适用于 comptime 生成器的匹配，不因阶段不同而改用外层同名绑定。
+
+```flurry
+fn same_pair(value: (bool, bool)) -> bool {
+    value match {
+        (first, (second if first == second)) => true,
+        _ => false,
+    }
+}
+```
+
+这些名称仍属于当前候选。匹配失败时不泄露到下一 arm 或 let-else 的 else 分支；它们也不遮蔽初始化表达式中的旧绑定。候选观察和仿射资源限制保持不变。
+
+结构体、匿名记录和枚举命名载荷也可以在后续字段中观察此前绑定：
+
+```flurry
+struct Pair { first: bool, second: bool }
+
+fn same_record(value: Pair) -> bool {
+    value match {
+        { first: a, second: (b if a == b) } => true,
+        _ => false,
+    }
+}
+```
+
+当前实现先按名字定位字段，再按类型的字段顺序检查和执行模式。名字在源码中从前向后可见，因此字段 guard 所引用的绑定还必须在实际匹配顺序中已经建立。仅将字段写到前面不会提前执行它；例如 `{ second: b, first: (a if b) }` 会被拒绝。省略字段相当于通配符，不建立绑定。此处仍保留候选失败时的资源观察约束，不能借字段 guard 提前消费原值。
+
 
 顺序匹配可以使用前一步的绑定计算新的标量，并继续解构或检验该结果：
 
@@ -242,7 +348,30 @@ fn inspect_block(packet: Packet<T>) -> bool where T {
 }
 ```
 
-块中的标量绑定只在块内有效；块结束后，中间值由后续模式接收。局部声明、嵌套块、分支、标量调用和当前块局部变量的赋值已接通。失败候选不会留下这些局部变量；后续候选执行自己的计算，不会为了构造清理计划而重放前一候选的步骤。当前不允许这种观察块写入外部变量、创建资源或指针绑定、消费候选所有者或向外层 return；这些操作需要一般候选事务承担失败路径责任。
+块中的标量绑定只在块内有效；块结束后，中间值由后续模式接收。局部声明、嵌套块、分支、标量调用和当前块局部变量的赋值已接通。失败候选不会留下这些局部变量；后续候选执行自己的计算，不会为了构造清理计划而重放前一候选的步骤。当前不允许这种观察块写入外部变量、建立活动数据指针绑定、消费候选所有者或向外层 return；这些操作需要一般候选事务承担失败路径责任。块内私有的无指针资源可建立并交付，前提是调用与清理均有不拒绝依据。
+
+guard 内的构造和属性调用按普通表达式解析，例如 `_ if Probe { flag: value }.flag`，无需为避免被当作模式而额外加括号。这也适用于 let-else、if-is 的 guard 和 inline for 的过滤条件。解析仍保留外层语句的大括号边界及 if-is 的 `do` 分隔符；确有边界歧义时可用括号明确表达式范围。
+
+guard 的直接调用也可交付本次表达式构造的拥有型实参，不要求额外包一层 `do`：
+
+~~~flurry
+struct Probe { flag: bool }
+
+fn inspect(probe: Probe) -> bool { probe.flag }
+
+fn choose(value: bool) -> bool {
+    value match {
+        _ if inspect(Probe { flag: value }) => true,
+        _ => false,
+    }
+}
+~~~
+
+临时聚合结果的字段也可以直接用于观察，例如 `make_probe().flag` 或 `inspect_bool(make_probe().flag)`。工厂结果仍有完整的 owner 和清理责任，取出标量字段不会删掉 owner。复合条件 `left().flag and right().flag` 按一个完整表达式保留临时责任：左侧为 false 时不调用 right；两侧均求值时，先完成两次观察，再按逆构造顺序清理，最后进入选定分支。直接写法与包在 `do` 中的写法、内联展开前后均保持这个顺序。
+
+相同的临时观察规则也覆盖 `make_flag().as(bool)` 和 `make_choice()'tag_name`。newtype 按既定转换规则交付表示值；读取枚举名称只取得名称，枚举载荷仍按临时 owner 的责任清理。它们嵌入 `and`／`or` 条件时继续保留完整表达式边界。临时包装不会授予外部绑定 Copy：对已有非 Copy 值先包装、再解包，仍不能绕过候选失败后必须保留该值的要求。
+
+实参可以是构造值、工厂结果、默认实参或其 tuple 包装。调用前完成普通实参准备，调用结束后按责任清理；guard 成功与失败都不会重放这些步骤。观察检查保护进入候选时已有的资源，因此不能将候选主语或外部拥有者移动进实参，即使 guard 最终返回 true。工厂、被调用目标及析构若可能拒绝，仍需一般失败路径契约，当前明确拒绝；内联展开前后遵守同一规则。
 
 这些标量调用和局部计算块也可用于 guard 的内存摘要。调用仍取得普通函数契约，参数中的指针读取计入足迹；块内赋值只允许修改该块声明的标量变量。摘要保留调用可能拒绝的事实，是否允许它出现在可回退候选中仍由资源检查决定，不能用摘要成功绕过失败路径检查。
 
@@ -631,3 +760,62 @@ test {
 
 - **纯度**：分级存在；细则见内存管理相关章节。
 - **可分析性**：分级存在；定义待定。
+
+### ListPatternView 的当前实现入口
+
+有限列表模式 `[p0, p1, ...]` 已接入显式绑定的 ListPatternView。编译器先调用长度方法，长度相等才从索引 0 开始逐项调用元素方法并匹配；前一步失败就跳过余下步骤。下一候选重新进行自己的观察，不缓存前一候选的方法结果。后一个元素模式可以使用前面元素的候选绑定。
+
+以下是用于当前编译器入口的完整协议及实现示例；`Size` 在本例中明确使用 u64：
+
+```flurry
+typealias Type = .Type'builtin;
+typealias Size = .u64'builtin;
+
+trait ListView {
+    assoc Element: Type;
+    fn list_pattern_view_get_len(*self) -> Size;
+    fn list_pattern_view_get_element(*self, comptime index: Size) -> Element;
+}
+
+struct Repeated { length: Size, value: bool }
+
+impl ListView for Repeated {
+    assoc Element: Type = bool;
+    fn list_pattern_view_get_len(*self) -> Size { self.length.* }
+    fn list_pattern_view_get_element(*self, comptime index: Size) -> bool {
+        self.value.*
+    }
+}
+
+fn same_pair(value: Repeated) -> bool {
+    value match {
+        [a, (b if a == b)] => true,
+        _ => false,
+    }
+}
+```
+
+驱动通过 `Protocols.list_pattern` 或包限定的 `Selectors.list_pattern` 绑定 trait 身份；sysroot 配置键为 `list-pattern-protocol`。仅将 trait 命名为 ListPatternView 不会自动注册。检查器验证 `Element`、两个方法的引用接收者以及编译期索引参数。当前驱动入口允许长度与索引使用同一个固定宽度无符号类型，生成索引和长度常量时按该类型检查范围。这是当前实现入口的适配能力；原设计使用 `usize`，原生 `.usize'builtin` 的字面量转换仍等待目标指针宽度接线。
+
+这些方法仍是普通受检调用。资源检查要求候选中的指针输入具有已知来源，调用的内存摘要不能写入调用者内存，也不能包含尚未验证的清理；规格拒绝不能被吞成“模式不匹配”。主体在候选失败后保持可用，成功或退出后按正常规则清理。覆盖检查不会执行用户方法，使用该协议的值匹配通常仍需 `_` 后备臂。
+
+列表模式的内部主体观察名只在本次候选匹配中可见，不是成功分支导出的变量。or-pattern 可以据此独立尝试各分支；成功后只统一导出用户绑定。该规则也适用于嵌套 tuple、`as whole` 和 inline／quote 展开。内部主体地址不得通过提取绑定逃逸，候选失败不清理原主体。
+
+泛型函数可以通过协议约束确定元素类型，并把关联结果交付给调用者；不同实现的 `Element` 分别实例化，不要求所有列表使用同一种元素类型：
+
+```flurry
+fn first_of_pair(value: T, fallback: T.as(ListView).Element)
+    -> T.as(ListView).Element
+where T :- ListView {
+    value match {
+        [first, _] => first,
+        _ => fallback,
+    }
+}
+```
+
+这里借用上一例的 `ListView` 协议名。匹配仍要求元素具有相应的 Copy 依据。
+
+`pure` 不会跳过模式中的隐式调用。纯度分析检查长度与提取器的行为，并只在内部候选作用域安装观察绑定。当前可接受已有独立 P4 依据的提取器；只读指针访问本身并不构成 P4，跨函数传播私有目标来源仍有保守限制。
+
+当前尚未完成 comptime trait 相、endless/rest 模式和拥有资源的提取结果。未经过资源检查的解释结果仍不能当成可执行承诺。

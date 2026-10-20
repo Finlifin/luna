@@ -4,6 +4,7 @@
 //! separate obligations: type selection alone is not trait satisfaction.
 use crate::ptc::Budget;
 mod applicability;
+pub(crate) use applicability::equivalent_domains;
 mod coherence;
 mod inherent;
 pub use coherence::{CoherenceReport, PairAssessment};
@@ -343,6 +344,8 @@ struct Entry {
     precision: usize,
 }
 pub struct Index {
+    pub(crate) parameter_domains: BTreeMap<DeclarationId, Term>,
+    pub(crate) nominal_layouts: nir::program::Package,
     identity: u64,
     entries: BTreeMap<DeclarationId, Entry>,
     buckets: BTreeMap<Option<DeclarationId>, BTreeSet<DeclarationId>>,
@@ -351,6 +354,8 @@ pub struct Index {
 impl Default for Index {
     fn default() -> Self {
         Self {
+            parameter_domains: BTreeMap::new(),
+            nominal_layouts: Default::default(),
             identity: crate::unique(),
             entries: BTreeMap::new(),
             buckets: BTreeMap::new(),
@@ -359,6 +364,104 @@ impl Default for Index {
     }
 }
 impl Index {
+    /// Replace the immutable declaration layout world. Any change invalidates
+    /// selection evidence, including changes to phantom or payload domains.
+    pub fn set_nominal_layouts(
+        &mut self,
+        mut structs: Vec<nir::program::Struct>,
+        mut enums: Vec<nir::program::Enum>,
+        mut newtypes: Vec<nir::newtypes::Newtype>,
+    ) {
+        structs.sort_by_key(|d| d.declaration);
+        enums.sort_by_key(|d| d.declaration);
+        newtypes.sort_by_key(|d| d.declaration);
+        if self.nominal_layouts.structs == structs
+            && self.nominal_layouts.enums == enums
+            && self.nominal_layouts.newtypes == newtypes
+        {
+            return;
+        }
+        self.nominal_layouts = nir::program::Package {
+            structs,
+            enums,
+            newtypes,
+            ..Default::default()
+        };
+        self.revision += 1;
+    }
+
+    /// Avoid copying complete layouts on repeated method lookup in an unchanged
+    /// declaration world. Metadata order is canonical before comparison.
+    pub(crate) fn sync_nominal_layouts<'a>(
+        &mut self,
+        structs: impl IntoIterator<Item = &'a nir::program::Struct>,
+        enums: impl IntoIterator<Item = &'a nir::program::Enum>,
+        newtypes: impl IntoIterator<Item = &'a nir::newtypes::Newtype>,
+    ) {
+        let mut structs = structs.into_iter().collect::<Vec<_>>();
+        let mut enums = enums.into_iter().collect::<Vec<_>>();
+        let mut newtypes = newtypes.into_iter().collect::<Vec<_>>();
+        structs.sort_by_key(|d| d.declaration);
+        enums.sort_by_key(|d| d.declaration);
+        newtypes.sort_by_key(|d| d.declaration);
+        if self
+            .nominal_layouts
+            .structs
+            .iter()
+            .eq(structs.iter().copied())
+            && self.nominal_layouts.enums.iter().eq(enums.iter().copied())
+            && self
+                .nominal_layouts
+                .newtypes
+                .iter()
+                .eq(newtypes.iter().copied())
+        {
+            return;
+        }
+        self.set_nominal_layouts(
+            structs.into_iter().cloned().collect(),
+            enums.into_iter().cloned().collect(),
+            newtypes.into_iter().cloned().collect(),
+        );
+    }
+
+    pub fn register_parameter_domain(
+        &mut self,
+        declaration: DeclarationId,
+        domain: Term,
+    ) -> Result<(), String> {
+        nir::type_computations::charge_term(&domain, &mut 100_000)
+            .map_err(|error| error.to_string())?;
+        if domain.sort() != nir::Sort::Type {
+            return Err("declaration parameter domain must be a Type".into());
+        }
+        domain.check_scope(&[]).map_err(|error| error.to_string())?;
+        if let Some(previous) = self.parameter_domains.get(&declaration) {
+            return if previous == &domain {
+                Ok(())
+            } else {
+                Err("conflicting declaration parameter domains".into())
+            };
+        }
+        self.parameter_domains.insert(declaration, domain);
+        self.revision += 1;
+        Ok(())
+    }
+
+    pub(crate) fn fmt_nominal_layouts(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(" (nominal-layouts")?;
+        for definition in &self.nominal_layouts.structs {
+            write!(f, " {definition}")?;
+        }
+        for definition in &self.nominal_layouts.enums {
+            write!(f, " {definition}")?;
+        }
+        for definition in &self.nominal_layouts.newtypes {
+            write!(f, " {definition}")?;
+        }
+        f.write_str(")")
+    }
+
     pub fn revision(&self) -> u64 {
         self.revision
     }
@@ -563,6 +666,10 @@ impl fmt::Display for Key {
 impl fmt::Display for Index {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(implementation-index (revision {})", self.revision)?;
+        self.fmt_nominal_layouts(f)?;
+        for (id, domain) in &self.parameter_domains {
+            write!(f, " (parameter-domain {id} {domain})")?;
+        }
         for (id, entry) in &self.entries {
             write!(f, " (implementation (id {id}) (interface ")?;
             match entry.head.interface {

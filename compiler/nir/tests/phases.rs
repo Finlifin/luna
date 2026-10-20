@@ -575,3 +575,169 @@ fn diverging_preparation_checks_patterns_without_requiring_tuple_layouts() {
             .contains("distinct")
     );
 }
+
+#[test]
+fn nominal_contextual_match_patterns_cannot_hide_invalid_function_references() {
+    use nir::program::{NormalFormArgument as A, NormalMatchArm, Pattern};
+    let mut root = function(80, Phase::Comptime, &[]);
+    root.body = Expr {
+        source: root.body.source,
+        ty: Term::Primitive(Primitive::Type),
+        kind: K::NominalType {
+            declaration: DeclarationId {
+                package: 1,
+                local: 81,
+            },
+            bindings: None,
+            order: None,
+            preparations: vec![],
+            arguments: vec![A::Match {
+                source: root.body.source,
+                value: flag(K::Literal(Literal::Bool(true))),
+                arms: vec![NormalMatchArm {
+                    pattern: Pattern::Guard {
+                        pattern: Box::new(Pattern::Wild),
+                        condition: Box::new(flag(K::Function(DeclarationId {
+                            package: 1,
+                            local: 999,
+                        }))),
+                    },
+                    guard: None,
+                    body: A::Value(flag(K::Literal(Literal::Bool(true)))),
+                }],
+            }],
+        },
+    };
+    let package = Package {
+        functions: vec![root],
+        ..Default::default()
+    };
+    assert!(
+        nir::phases::validate(&package)
+            .unwrap_err()
+            .message
+            .contains("function phase declaration is missing")
+    );
+}
+
+#[test]
+fn alias_body_cannot_hide_missing_function_references_or_runtime_execution() {
+    let declaration = DeclarationId {
+        package: 1,
+        local: 20,
+    };
+    let mut entry = function(1, Phase::Comptime, &[]);
+    entry.signature = Term::Function {
+        parameters: vec![],
+        result: Box::new(Term::Primitive(Primitive::Type)),
+    };
+    let mut alias_body = flag(K::TypeValue(Term::Primitive(Primitive::Bool)));
+    alias_body.ty = Term::Primitive(Primitive::Type);
+    entry.body = flag(K::CheckTypeAlias {
+        preparations: vec![],
+        bindings: None,
+        order: None,
+        declaration,
+        arguments: vec![]
+            .into_iter()
+            .map(nir::program::NormalFormArgument::Value)
+            .collect(),
+        body: Some(Box::new(alias_body)),
+    });
+    entry.body.ty = Term::Primitive(Primitive::Type);
+    let mut package = Package {
+        alias_contracts: vec![nir::type_aliases::Contract {
+            declaration,
+            parameters: vec![],
+            parameter_types: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+        }],
+        functions: vec![entry],
+        ..Default::default()
+    };
+    assert!(nir::phases::validate(&package).is_ok());
+    package.functions[0].phase = Phase::Runtime;
+    assert!(nir::phases::validate(&package).is_err());
+    package.functions[0].phase = Phase::Comptime;
+    let K::CheckTypeAlias {
+        body: Some(body), ..
+    } = &mut package.functions[0].body.kind
+    else {
+        panic!()
+    };
+    body.kind = K::Function(DeclarationId {
+        package: 1,
+        local: 999,
+    });
+    assert!(nir::phases::validate(&package).is_err());
+}
+
+#[test]
+fn captured_comptime_value_nodes_cannot_encode_types_or_runtime_slots() {
+    let mut owner = function(70, Phase::Comptime, &[]);
+    let mut package = Package::default();
+    for (domain, value) in [
+        (
+            Term::Primitive(Primitive::Type),
+            Term::Primitive(Primitive::Bool),
+        ),
+        (
+            Term::Primitive(Primitive::Bool),
+            Term::Primitive(Primitive::Bool),
+        ),
+        (Term::Primitive(Primitive::Bool), Term::Char('x')),
+        (
+            Term::Primitive(Primitive::U8),
+            Term::Integer(comptime_runtime::Integer::from_i128(256)),
+        ),
+        (
+            Term::Primitive(Primitive::Bool),
+            Term::Bound {
+                depth: 0,
+                index: 0,
+                sort: Sort::ComptimeValue,
+            },
+        ),
+    ] {
+        owner.body = Expr {
+            source: owner.body.source,
+            ty: domain.clone(),
+            kind: K::ComptimeValue(value),
+        };
+        owner.signature = Term::Function {
+            parameters: vec![],
+            result: Box::new(domain),
+        };
+        package.functions = vec![owner.clone()];
+        assert!(nir::phases::validate(&package).is_err(), "{}", owner.body);
+    }
+    owner.body = flag(K::ComptimeValue(Term::Bool(true)));
+    owner.signature = Term::Function {
+        parameters: vec![],
+        result: Box::new(owner.body.ty.clone()),
+    };
+    package.functions = vec![owner];
+    nir::phases::validate(&package).unwrap();
+}
+
+#[test]
+fn unresolved_pattern_code_evidence_never_enters_executable_packages() {
+    for phase in [Phase::Runtime, Phase::Comptime] {
+        let mut root = function(1, phase, &[]);
+        root.body = flag(K::Match {
+            value: Box::new(flag(K::Literal(Literal::Bool(true)))),
+            arms: vec![nir::program::MatchArm {
+                pattern: nir::program::Pattern::CodeEvidence { outputs: vec![] },
+                guard: None,
+                body: flag(K::Literal(Literal::Bool(true))),
+            }],
+        });
+        let package = Package {
+            functions: vec![root],
+            ..Default::default()
+        };
+        let error = nir::phases::validate(&package).unwrap_err();
+        assert_eq!(error.message, "unresolved pattern-code evidence");
+    }
+}

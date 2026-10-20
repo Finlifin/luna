@@ -361,3 +361,110 @@ fn exact_float_normal_inputs_do_not_accept_rounded_runtime_values() {
             .is_err()
     );
 }
+
+#[test]
+fn nominal_contextual_inputs_rewrite_nested_types_and_keep_literal_spelling() {
+    use nir::program::{Expr, ExprKind as K, NormalFormArgument as A, SourceRange};
+    let source = SourceRange { start: 7, end: 9 };
+    let body = Expr {
+        source,
+        ty: primitive(P::Type),
+        kind: K::NominalType {
+            preparations: vec![],
+            bindings: None,
+            order: Some(vec![0]),
+            declaration: id(20),
+            arguments: vec![A::Block {
+                source,
+                statements: vec![Expr {
+                    source,
+                    ty: primitive(P::Type),
+                    kind: K::TypeValue(Term::Rigid {
+                        declaration: id(1),
+                        sort: Sort::Type,
+                    }),
+                }],
+                result: Some(Box::new(A::Integer {
+                    source,
+                    spelling: "0xff".into(),
+                    negative: false,
+                })),
+            }],
+        },
+    };
+    let rewritten = body
+        .instantiate_types(&[id(1)], &[primitive(P::U8)])
+        .unwrap();
+    let K::NominalType { arguments, .. } = &rewritten.kind else {
+        panic!("nominal constructor")
+    };
+    let A::Block {
+        statements, result, ..
+    } = &arguments[0]
+    else {
+        panic!("contextual block")
+    };
+    assert_eq!(statements[0].kind, K::TypeValue(primitive(P::U8)));
+    assert!(matches!(result.as_deref(),Some(A::Integer {spelling,..}) if spelling=="0xff"));
+    assert_ne!(body, rewritten);
+    assert!(rewritten.to_string().contains("(order 0)"));
+    assert!(rewritten.to_string().contains("(contextual-integer-input"));
+}
+
+#[test]
+fn nominal_domains_preserve_value_prefix_sorts_and_instances() {
+    let domain = Term::Nominal {
+        declaration: id(7),
+        arguments: vec![Term::Rigid {
+            declaration: id(1),
+            sort: Sort::ComptimeValue,
+        }],
+    };
+    let scoped = |prior: &[nir::DeclarationParameter]| {
+        nir::normal_forms::supported_input_type_in_scope(
+            &domain,
+            prior,
+            |_| false,
+            |id_| id_ == id(7),
+        )
+    };
+    assert!(!scoped(&[]));
+    assert!(!scoped(&[nir::DeclarationParameter {
+        declaration: id(1),
+        sort: Sort::Type
+    }]));
+    assert!(scoped(&[nir::DeclarationParameter {
+        declaration: id(1),
+        sort: Sort::ComptimeValue
+    }]));
+    let descriptor = Head {
+        role: nir::normal_forms::Role::Opaque,
+        declaration: id(0),
+        requirements: vec![],
+        parameters: vec![
+            parameter(1, Kind::Value, primitive(P::Bool)),
+            parameter(2, Kind::Value, domain),
+        ],
+    };
+    let object = |flag| Term::NominalValue {
+        ty: Box::new(Term::Nominal {
+            declaration: id(7),
+            arguments: vec![Term::Bool(flag)],
+        }),
+        variant: None,
+        fields: vec![Term::Bool(true)],
+    };
+    for (index, value, expected) in [
+        (true, true, true),
+        (false, false, true),
+        (true, false, false),
+        (false, true, false),
+    ] {
+        let result = descriptor.check_closed_arguments_with_layouts(
+            &[Term::Bool(index), object(value)],
+            |_| false,
+            |_, variant| variant.is_none().then(|| vec![primitive(P::Bool)]),
+        );
+        assert_eq!(result.is_ok(), expected);
+    }
+}

@@ -60,7 +60,7 @@ impl Checker<'_, '_> {
 
     // Use only established caller-local layouts or closed declaration results.
     // A packet is still evaluated and checked at its source position later.
-    pub(super) fn generator_expression_type_hint(
+    pub(in crate::program::cmtt) fn generator_expression_type_hint(
         &mut self,
         value: &Expr<'_>,
         depth: usize,
@@ -737,26 +737,32 @@ impl Checker<'_, '_> {
         if declaration.clause_params.len() != all_parameters.len() {
             return Ok(None);
         }
+        let binders = self.input_binders(&all_parameters);
         let mut parameters = Vec::new();
         let mut assigned = Vec::new();
         for (index, clause) in declaration.clause_params.iter().enumerate() {
             let ty = match clause.kind {
                 hir::clause::ClauseParamKind::Optional(_, _, default) => {
-                    let Some(ty) = self.generator_static_type_hint(
-                        default,
-                        depth + 1,
-                        Some((&all_parameters, &assigned)),
-                    )?
-                    else {
-                        return Ok(None);
+                    let bindings = Some((all_parameters.as_slice(), assigned.as_slice()));
+                    let hint = if binders[index].sort == Sort::Type {
+                        self.generator_static_type_hint(default, depth + 1, bindings)?
+                    } else {
+                        let Some(domain) = self.trait_input_domain(all_parameters[index]) else {
+                            return Ok(None);
+                        };
+                        let domain = domain
+                            .instantiate_parameters(&binders[..index], &assigned)
+                            .map_err(|e| error(default.span, e.to_string()))?;
+                        self.generator_static_value_hint(default, &domain, bindings)?
                     };
+                    let Some(ty) = hint else { return Ok(None) };
                     ty
                 }
                 _ => {
                     parameters.push(all_parameters[index]);
                     Term::Rigid {
                         declaration: all_parameters[index],
-                        sort: Sort::Type,
+                        sort: binders[index].sort,
                     }
                 }
             };
@@ -765,7 +771,7 @@ impl Checker<'_, '_> {
         // Fix static defaults before inference. A dependent default can retain
         // an earlier mandatory parameter, but never becomes a fresh variable.
         let signature = signature
-            .instantiate_types(&all_parameters, &assigned)
+            .instantiate_parameters(&binders, &assigned)
             .map_err(|e| error(site.span, e.to_string()))?;
         let Term::Function {
             parameters: inputs, ..
@@ -816,9 +822,14 @@ impl Checker<'_, '_> {
             };
         }
         let scheme = crate::calls::Scheme {
+            parameter_sorts: self
+                .input_binders(&parameters)
+                .iter()
+                .map(|p| p.sort)
+                .collect(),
             type_parameters: parameters.len(),
             signature: signature
-                .abstract_types(&parameters)
+                .abstract_parameters(&self.input_binders(&parameters))
                 .map_err(|e| error(site.span, e.to_string()))?,
         };
         // Incomplete or conflicting provisional evidence must not replace the
@@ -950,39 +961,98 @@ impl Checker<'_, '_> {
             if cell.is_some() {
                 return Ok(None);
             }
-            let Some(ty) = self.generator_static_type_hint(value, depth + 1, None)? else {
-                return Ok(None);
-            };
-            *cell = Some(ty);
+            *cell = Some(value);
         }
-        // Complete only static defaults in declaration order. An explicit
-        // override must never inspect or invoke the discarded computation.
+        // Route first, then complete the declaration telescope. Later value
+        // domains and defaults can depend on earlier Type or value clauses.
+        let binders = self.input_binders(&parameters);
         let mut completed = Vec::with_capacity(supplied.len());
         for (index, supplied) in supplied.into_iter().enumerate() {
-            let ty = match supplied {
-                Some(ty) => ty,
+            let (value, bindings) = match supplied {
+                Some(value) => (value, None),
                 None => {
                     let hir::clause::ClauseParamKind::Optional(_, _, default) = clauses[index].kind
                     else {
                         return Ok(None);
                     };
-                    let Some(ty) = self.generator_static_type_hint(
-                        default,
-                        depth + 1,
-                        Some((&parameters, &completed)),
-                    )?
-                    else {
-                        return Ok(None);
-                    };
-                    ty
+                    (default, Some((parameters.as_slice(), completed.as_slice())))
                 }
             };
-            completed.push(ty);
+            let hint = if binders[index].sort == Sort::Type {
+                self.generator_static_type_hint(value, depth + 1, bindings)?
+            } else {
+                let Some(domain) = self.trait_input_domain(parameters[index]) else {
+                    return Ok(None);
+                };
+                let domain = domain
+                    .instantiate_parameters(&binders[..index], &completed)
+                    .map_err(|e| error(value.span, e.to_string()))?;
+                self.generator_static_value_hint(value, &domain, bindings)?
+            };
+            let Some(hint) = hint else { return Ok(None) };
+            completed.push(hint);
         }
         result
-            .instantiate_types(&parameters, &completed)
+            .instantiate_parameters(&self.input_binders(&parameters), &completed)
             .map(Some)
             .map_err(|e| error(head.span, e.to_string()))
+    }
+
+    /// Read stable value evidence without invoking a producer or guessing an
+    /// unresolved clause. Call checking still validates the full input domain.
+    fn generator_static_value_hint(
+        &mut self,
+        argument: &Expr<'_>,
+        domain: &Term,
+        bindings: Option<(&[DeclarationId], &[Term])>,
+    ) -> Result<Option<Term>, Error> {
+        if let H::ResolvedClauseParam(_, id) = argument.kind {
+            let id = DeclarationId {
+                package: semantic_package(&self.package_identities, id.pkg),
+                local: id.index,
+            };
+            let supplied = bindings.and_then(|(parameters, values)| {
+                parameters
+                    .iter()
+                    .position(|parameter| *parameter == id)
+                    .and_then(|slot| values.get(slot))
+            });
+            let value = if let Some(value) = supplied {
+                self.copy_alias_type(value, argument.span)?
+            } else if bindings.is_some_and(|(parameters, _)| parameters.contains(&id)) {
+                // A later default cannot borrow evidence from an unrelated
+                // surrounding instantiation of the same declaration.
+                return Ok(None);
+            } else if let Some(value) = self.alias_substitution.get(&id).cloned() {
+                self.copy_alias_type(&value, argument.span)?
+            } else {
+                if self.input_binders(&[id])[0].sort != Sort::ComptimeValue {
+                    return Ok(None);
+                }
+                self.copy_alias_type(
+                    &Term::Rigid {
+                        declaration: id,
+                        sort: Sort::ComptimeValue,
+                    },
+                    argument.span,
+                )?
+            };
+            return Ok((value.sort() == Sort::ComptimeValue).then_some(value));
+        }
+        if !matches!(argument.kind, H::Lit(_)) {
+            return Ok(None);
+        }
+        let checked =
+            self.checking_attempt(false, false, |this| this.expr(argument, Some(domain)))?;
+        let mut budget = comptime_runtime::Budget {
+            steps: self.required_steps as usize,
+            max_limbs: 4096,
+        };
+        let value = checked
+            .as_ref()
+            .and_then(|checked| self.known_normal_input(checked, 0, &mut budget));
+        self.required_steps = budget.steps as u64;
+        Ok(value)
     }
 
     pub(super) fn generator_static_type_hint(
@@ -1012,25 +1082,28 @@ impl Checker<'_, '_> {
                 if self.package.item(owner).is_some_and(|item| {
                     matches!(item.kind, ItemKind::Struct(_) | ItemKind::Enum(_))
                 }) {
-                    if self.type_parameters[&owner].len() != arguments.len()
-                        || self
-                            .input_binders(&self.type_parameters[&owner])
-                            .iter()
-                            .any(|binder| binder.sort != Sort::Type)
-                    {
+                    if self.type_parameters[&owner].len() != arguments.len() {
                         return Ok(None);
                     }
+                    let binders = self.input_binders(&self.type_parameters[&owner]);
                     let mut types = Vec::new();
-                    for argument in *arguments {
+                    for (argument, binder) in arguments.iter().zip(&binders) {
                         let Arg::Positional(argument) = argument else {
                             return Ok(None);
                         };
-                        let Some(ty) =
+                        let value = if binder.sort == Sort::Type {
                             self.generator_static_type_hint(argument, depth + 1, bindings)?
-                        else {
-                            return Ok(None);
+                        } else {
+                            let Some(domain) = self.trait_input_domain(binder.declaration) else {
+                                return Ok(None);
+                            };
+                            let domain = domain
+                                .instantiate_parameters(&binders[..types.len()], &types)
+                                .map_err(|e| error(argument.span, e.to_string()))?;
+                            self.generator_static_value_hint(argument, &domain, bindings)?
                         };
-                        types.push(ty);
+                        let Some(value) = value else { return Ok(None) };
+                        types.push(value);
                     }
                     return Ok(Some(Term::Nominal {
                         declaration: declaration(self.package, &self.package_identities, owner),
@@ -1048,15 +1121,10 @@ impl Checker<'_, '_> {
                 self.ensure_signature(owner, value.span)?;
                 let id = declaration(self.package, &self.package_identities, owner);
                 let tuple = Some(id) == self.protocols.tuple;
-                let parameters = &self.normal_parameters[&owner];
-                if !tuple
-                    && (parameters.len() != arguments.len()
-                        || parameters.iter().any(|(_, _, ty)| *ty != p(P::Type))
-                        || signature.clause_params.iter().any(|param| {
-                            matches!(param.kind, hir::clause::ClauseParamKind::Optional(..))
-                        }))
-                {
-                    return Ok(None);
+                if !tuple {
+                    return self.generator_static_normal_form_hint(
+                        owner, arguments, depth, bindings, value.span,
+                    );
                 }
                 let mut types = Vec::with_capacity(arguments.len());
                 for argument in *arguments {
@@ -1149,6 +1217,82 @@ impl Checker<'_, '_> {
             H::TyPtr(inner) => Ok(self
                 .generator_static_type_hint(inner, depth + 1, bindings)?
                 .map(|ty| Term::Pointer(Box::new(ty)))),
+            H::TyFn(inputs) | H::TyComptimeFn(inputs) => {
+                let mut parameters = Vec::with_capacity(inputs.len());
+                for input in *inputs {
+                    if input.flags != 0 {
+                        return Ok(None);
+                    }
+                    let TyParamKind::Positional(ty) = input.kind else {
+                        return Ok(None);
+                    };
+                    let Some(ty) = self.generator_static_type_hint(ty, depth + 1, bindings)? else {
+                        return Ok(None);
+                    };
+                    parameters.push(Parameter {
+                        sort: Sort::Runtime,
+                        ty: ty
+                            .abstract_parameters(&[])
+                            .map_err(|e| error(input.span, e.to_string()))?,
+                    });
+                }
+                Ok(Some(
+                    Term::Function {
+                        parameters,
+                        result: Box::new(p(P::Void)),
+                    }
+                    .with_comptime_phase(matches!(value.kind, H::TyComptimeFn(_))),
+                ))
+            }
+            H::TyFnArrow(input, output) => {
+                let Some(input) = self.generator_static_type_hint(input, depth + 1, bindings)?
+                else {
+                    return Ok(None);
+                };
+                if !matches!(input.callable_signature(), Term::Function { .. }) {
+                    return Ok(None);
+                }
+                let Some(result) = self.generator_static_type_hint(output, depth + 1, bindings)?
+                else {
+                    return Ok(None);
+                };
+                let result = result
+                    .abstract_parameters(&[])
+                    .map_err(|e| error(output.span, e.to_string()))?;
+                Ok(input.with_callable_result(result))
+            }
+            H::TyClosure(context, body) => {
+                let H::TyClosureEnvironment(inputs) = context.kind else {
+                    return Ok(None);
+                };
+                let mut names = std::collections::HashSet::new();
+                let mut environment = Vec::with_capacity(inputs.len());
+                for input in inputs {
+                    if input.value.is_some() || !names.insert(input.name.name) {
+                        return Ok(None);
+                    }
+                    let Some(ty) =
+                        self.generator_static_type_hint(input.ty, depth + 1, bindings)?
+                    else {
+                        return Ok(None);
+                    };
+                    environment.push(ty);
+                }
+                let Some(signature) = self.generator_static_type_hint(body, depth + 1, bindings)?
+                else {
+                    return Ok(None);
+                };
+                if environment.is_empty() {
+                    return Ok(Some(signature));
+                }
+                if !matches!(signature, Term::Function { .. } | Term::ComptimeFunction(_)) {
+                    return Ok(None);
+                }
+                Ok(Some(Term::Closure {
+                    environment,
+                    signature: Box::new(signature),
+                }))
+            }
             H::Tuple(fields) => {
                 let mut types = Vec::with_capacity(fields.len());
                 for field in *fields {
@@ -1178,6 +1322,83 @@ impl Checker<'_, '_> {
             }
             _ => Ok(None),
         }
+    }
+
+    fn generator_static_normal_form_hint(
+        &mut self,
+        owner: OwnerId,
+        arguments: &[Arg<'_>],
+        depth: usize,
+        outer_bindings: Option<(&[DeclarationId], &[Term])>,
+        span: Span,
+    ) -> Result<Option<Term>, Error> {
+        self.required_steps = self
+            .required_steps
+            .checked_sub(
+                arguments
+                    .len()
+                    .saturating_add(self.normal_parameters[&owner].len()) as u64,
+            )
+            .ok_or_else(|| error(span, "generator normal-form evidence budget exhausted"))?;
+        let clauses = self.type_clause_params(owner);
+        let parameters: Vec<_> = self.normal_parameters[&owner]
+            .iter()
+            .map(|(id, _, _)| *id)
+            .collect();
+        if clauses.len() != parameters.len() {
+            return Ok(None);
+        }
+        let mut supplied = vec![None; parameters.len()];
+        let mut positional = 0;
+        for argument in arguments {
+            let (name, value) = match argument {
+                Arg::Positional(value) => (None, *value),
+                Arg::Named(name, value) => (Some(*name), *value),
+                _ => return Ok(None),
+            };
+            let slot = Self::type_input_slot(&clauses, name, &mut positional, value.span)?;
+            let Some(cell) = supplied.get_mut(slot) else {
+                return Ok(None);
+            };
+            if cell.replace(value).is_some() {
+                return Ok(None);
+            }
+        }
+        let binders = self.input_binders(&parameters);
+        let mut completed = Vec::with_capacity(parameters.len());
+        for (index, supplied) in supplied.into_iter().enumerate() {
+            let (value, bindings) = match supplied {
+                Some(value) => (value, outer_bindings),
+                None => {
+                    let hir::clause::ClauseParamKind::Optional(_, _, default) = clauses[index].kind
+                    else {
+                        return Ok(None);
+                    };
+                    (default, Some((parameters.as_slice(), completed.as_slice())))
+                }
+            };
+            let declared = &self.normal_parameters[&owner][index].2;
+            let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+            let bounded = nir::type_computations::charge_term(declared, &mut fuel);
+            self.required_steps = fuel as u64;
+            bounded.map_err(|e| error(value.span, e.to_string()))?;
+            let domain = declared
+                .instantiate_parameters(&binders[..index], &completed)
+                .map_err(|e| error(value.span, e.to_string()))?;
+            let hint = if domain == p(P::Type) {
+                self.generator_static_type_hint(value, depth + 1, bindings)?
+            } else {
+                self.generator_static_value_hint(value, &domain, bindings)?
+            };
+            let Some(hint) = hint else { return Ok(None) };
+            completed.push(hint);
+        }
+        // Form identity only. Never evaluate the head to obtain its body type.
+        Ok(Some(Term::NormalForm {
+            head: declaration(self.package, &self.package_identities, owner),
+            sort: Sort::Type,
+            arguments: completed,
+        }))
     }
 
     fn generator_static_type_list_hint(

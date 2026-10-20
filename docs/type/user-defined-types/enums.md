@@ -44,6 +44,40 @@ width 约束整个 enum 表示，包括载荷。设置 base type 时，以 base 
 
 ## 常见示例
 
+### 从载荷补全类型，保留值索引
+
+```flurry
+enum Choice where T, enabled: bool {
+    none,
+    some(T),
+}
+
+fn keep(value: Choice<T, true>) -> Choice<T, true> where T {
+    value
+}
+
+fn run() -> bool {
+    let stored = keep(.some(true));
+    let .some(value) = stored else { return false; };
+    value
+}
+```
+
+`keep` 的参数上下文已经固定 enabled 为 true；`.some(true)` 的载荷再提供 T 为 bool 的信息。因此 stored 的类型是 `Choice<bool, true>`，不需要另一个实参先补全类型。推断不会把值索引当作 Type 参数，也不能把 `Choice<bool, false>` 当作同一个类型。
+
+位置载荷的展开和命名载荷的默认值沿用同一规则：保留上下文中已知的输入，再从载荷类型取得剩余证据，最后检查完整参数域和变体字段。值索引也可以由载荷的类型身份确定：
+
+```flurry
+struct Flag where enabled: bool {}
+enum Wrapped where flag: bool { Item(Flag<flag>) }
+fn read(value: Wrapped<flag>) -> bool where flag: bool { flag }
+fn run() -> bool {
+    read(.Item(Flag<true>{})) and not read(.Item(Flag<false>{}))
+}
+```
+
+这里推导依据是 `Flag<true>` 与 `Flag<false>` 的类型身份，不读取 runtime 载荷值。计算得到的参数包展开也能提供这类证据。没有载荷证据、没有完整上下文的值索引不能猜定；同一索引从多个字段得到冲突值时拒绝构造。默认值只能使用已确定的输入。
+
 用一个小型绘图消息协议展示无载荷、位置载荷与命名载荷。处理函数必须把每个变体解释成相应动作：
 
 ~~~flurry

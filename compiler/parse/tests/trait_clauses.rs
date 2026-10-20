@@ -62,3 +62,24 @@ fn requires_is_not_a_bound_declaration_operator() {
         assert!(declaration(source).is_err(), "accepted: {source}");
     }
 }
+
+#[test]
+fn delimited_defaults_accept_constructors_without_consuming_definition_bodies() {
+    for source in [
+        "fn run(.config:Config=Config {flag:true}) {}",
+        "fn run(.config:Config=Config {flag:true},.next:bool=false) {}",
+        "pure comptime fn Packet<.enabled:bool=true,.config:Config<enabled> = Config<enabled>{flag:true}>->Type {bool}",
+        "pure comptime fn Packet<.config:Config=Config {flag:true}>->Type = bool",
+        "fn run() where .flag:bool=true {}",
+        "pure comptime fn Packet<.flag:bool=true>->Type where .other:bool=false {bool}",
+    ] {
+        declaration(source).unwrap_or_else(|error| panic!("{source}: {error}"));
+    }
+    for source in [
+        "fn run(.config:Config=Config {flag:}) {}",
+        "pure comptime fn Packet<.config:Config=Config {flag:}>->Type {bool}",
+        "pure comptime fn Packet<.config:Config=>->Type {bool}",
+    ] {
+        assert!(declaration(source).is_err(), "accepted: {source}");
+    }
+}

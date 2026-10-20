@@ -275,6 +275,7 @@ fn scan<'a>(
                 work.push(Work::Expr(&function.body, context.clone()));
             }
             Work::Pattern(pattern, context) => match pattern {
+                Pattern::CodeEvidence { .. } => return Err("unresolved pattern-code evidence"),
                 Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => (),
                 Pattern::Observe { inner: pattern, .. }
                 | Pattern::Binding { inner: pattern, .. }
@@ -293,6 +294,7 @@ fn scan<'a>(
                 Pattern::Tuple(fields)
                 | Pattern::TypeTuple(fields)
                 | Pattern::Or(fields)
+                | Pattern::NominalType { fields, .. }
                 | Pattern::Record { fields, .. }
                 | Pattern::AnonymousRecord { fields, .. }
                 | Pattern::Variant { fields, .. }
@@ -311,6 +313,7 @@ fn scan<'a>(
                 | K::Function(_)
                 | K::FunctionInstance { .. }
                 | K::TraitMethod { .. }
+                | K::ComptimeValue(_)
                 | K::TypeValue(_)
                 | K::TypeListValue(_)
                 | K::Break(_)

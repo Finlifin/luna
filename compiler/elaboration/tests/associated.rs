@@ -64,6 +64,7 @@ fn contract() -> Trait {
 }
 fn implementation(subject: Term, result: Term) -> Implementation {
     Implementation {
+        associated_initializers: vec![],
         parameter_types: vec![],
         declaration: id(4),
         subject,

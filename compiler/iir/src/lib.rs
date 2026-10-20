@@ -109,6 +109,13 @@ impl Package {
     /// reference, including references embedded in defaults and patterns.
     pub fn validate(&self, fuel: &mut usize) -> Result<(), String> {
         self.validate_index()?;
+        if self
+            .dispatch
+            .iter()
+            .any(|instance| !instance.associated_initializers.is_empty())
+        {
+            return Err("IIR requires associated initializers to be invoked".into());
+        }
         for nominal in &self.nominals {
             self.validate_type(&nominal.ty, fuel)?;
             match &nominal.definition {
@@ -214,6 +221,9 @@ impl Package {
                         })
                     }
 
+                    K::ComptimeValue(_) => {
+                        return Err("IIR requires captured comptime value materialization".into());
+                    }
                     K::AssociatedValue { .. } => {
                         return Err("IIR requires associated value selection".into());
                     }

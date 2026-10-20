@@ -631,6 +631,40 @@ impl super::Interpreter<'_> {
         )
     }
 
+    /// Observe a currently readable, fixed-size scalar without copying ownership
+    /// or retaining the pointer target. This is optional verifier evidence:
+    /// unreadable pointers and other payloads provide no fact. Actual pointer
+    /// operations still perform their ordinary lifetime/responsibility checks.
+    pub fn observe_pointer_scalar(
+        &mut self,
+        pointer: &PointerValue,
+    ) -> Result<Option<Value>, super::Error> {
+        let work = pointer
+            .copy_metadata_work()
+            .and_then(|n| n.checked_mul(2))
+            .and_then(|n| n.checked_add(1))
+            .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, None))?;
+        self.budget.steps = self
+            .budget
+            .steps
+            .checked_sub(work as u64)
+            .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, None))?;
+        if !pointer.is_constructed().unwrap_or(false) {
+            return Ok(None);
+        }
+        Ok(pointer
+            .inspect(|value| match value {
+                Value::SignedInteger(_)
+                | Value::UnsignedInteger(_)
+                | Value::Float32(_)
+                | Value::Float64(_)
+                | Value::Bool(_)
+                | Value::Char(_) => Some(value.clone()),
+                _ => None,
+            })
+            .unwrap_or(None))
+    }
+
     /// Copy a live owner's current value under the invocation budget. Pointer
     /// targets remain borrowed; copying does not retain or snapshot their owners.
     pub fn copy_owned_value(&mut self, storage: &Storage) -> Result<Value, super::Error> {
@@ -733,6 +767,41 @@ mod record_storage_tests {
             };
             assert_eq!(alias.read().unwrap(), Value::Bool(true));
         }
+    }
+
+    #[test]
+    fn pointer_scalar_observations_are_fresh_bounded_and_non_owning() {
+        let package = nir::program::Package::default();
+        let mut vm = super::super::Interpreter::for_comptime(&package, Default::default()).unwrap();
+        let owner = Storage::new(Value::Bool(false));
+        let pointer = owner.pointer(boolean(), vec![]);
+        assert_eq!(
+            vm.observe_pointer_scalar(&pointer).unwrap(),
+            Some(Value::Bool(false))
+        );
+        pointer.write(Value::Bool(true), |_| true).unwrap();
+        assert_eq!(
+            vm.observe_pointer_scalar(&pointer).unwrap(),
+            Some(Value::Bool(true))
+        );
+        vm.budget.steps = 0;
+        assert_eq!(
+            vm.observe_pointer_scalar(&pointer).unwrap_err().kind,
+            ErrorKind::StepsExhausted
+        );
+        vm.budget.steps = 100;
+        assert_eq!(pointer.read().unwrap(), Value::Bool(true));
+        pointer.transfer().unwrap();
+        assert_eq!(vm.observe_pointer_scalar(&pointer).unwrap(), None);
+        drop(owner);
+        assert_eq!(vm.observe_pointer_scalar(&pointer).unwrap(), None);
+        let aggregate = Storage::new(Value::Tuple(vec![Value::Bool(true)]));
+        let aggregate_pointer = aggregate.pointer(Term::Tuple(vec![boolean()]), vec![]);
+        assert_eq!(vm.observe_pointer_scalar(&aggregate_pointer).unwrap(), None);
+        assert_eq!(
+            aggregate.read().unwrap(),
+            Value::Tuple(vec![Value::Bool(true)])
+        );
     }
 
     #[test]

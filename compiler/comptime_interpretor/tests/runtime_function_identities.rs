@@ -74,6 +74,59 @@ fn runtime_identity_is_typed_transport_without_a_body() {
 }
 
 #[test]
+fn runtime_identity_snapshots_validate_scope_and_recover_after_budget_failure() {
+    let value = Value::RuntimeFunction {
+        declaration: id(2),
+        arguments: vec![Term::Rigid {
+            declaration: id(3),
+            sort: Sort::Type,
+        }],
+    };
+    let scope = std::collections::BTreeSet::from([id(3)]);
+    let original = value.clone();
+    assert_eq!(
+        value.validate_runtime_identity_snapshot(
+            &mut comptime_runtime::Budget::default(),
+            &Default::default()
+        ),
+        Err(ErrorKind::Type)
+    );
+    assert_eq!(
+        value.validate_runtime_identity_snapshot(
+            &mut comptime_runtime::Budget {
+                steps: 0,
+                max_limbs: 4096
+            },
+            &scope
+        ),
+        Err(ErrorKind::StepsExhausted)
+    );
+    value
+        .validate_runtime_identity_snapshot(&mut comptime_runtime::Budget::default(), &scope)
+        .unwrap();
+    assert_eq!(value, original);
+    for argument in [
+        Term::Rigid {
+            declaration: id(3),
+            sort: Sort::ComptimeValue,
+        },
+        Term::TypeListConcat(vec![Term::TypeListValue(vec![])]),
+    ] {
+        let unresolved = Value::RuntimeFunction {
+            declaration: id(2),
+            arguments: vec![argument],
+        };
+        assert_eq!(
+            unresolved.validate_runtime_identity_snapshot(
+                &mut comptime_runtime::Budget::default(),
+                &scope
+            ),
+            Err(ErrorKind::Type)
+        );
+    }
+}
+
+#[test]
 fn malformed_identity_catalogs_and_instances_are_rejected() {
     let mut duplicate = package();
     duplicate
@@ -147,6 +200,7 @@ fn trait_package() -> Package {
         }],
     });
     package.implementations.push(nir::program::Implementation {
+        associated_initializers: vec![],
         parameter_types: vec![],
         associated: vec![],
         interface_arguments: vec![],
@@ -270,4 +324,319 @@ fn generator_method_contract_cannot_enter_ordinary_interpreter_dispatch() {
     );
     package.traits.clear();
     Interpreter::new(&package, Budget::default()).unwrap();
+}
+
+#[test]
+fn body_free_runtime_identity_checks_unused_value_parameter_domains() {
+    let mut package = package();
+    package.structs.push(nir::program::Struct {
+        declaration: id(90),
+        name: "Holder".into(),
+        type_parameters: vec![id(3)],
+        parameter_types: vec![Term::Primitive(Primitive::Bool)],
+        fields: vec![],
+        requirements: vec![],
+        capabilities: vec![],
+    });
+    package.runtime_function_identities[0].signature = signature(Term::Primitive(Primitive::Bool));
+    for value in [Term::Char('x'), Term::Bool(true), Term::Bool(false)] {
+        let K::FunctionInstance { arguments, .. } = &mut package.functions[0].body.kind else {
+            unreachable!()
+        };
+        *arguments = vec![value.clone()];
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let result = vm.invoke(id(1), vec![]);
+        if matches!(value, Term::Bool(_)) {
+            assert_eq!(
+                result.unwrap(),
+                Value::RuntimeFunction {
+                    declaration: id(2),
+                    arguments: vec![value]
+                }
+            );
+        } else {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+        }
+    }
+}
+
+#[test]
+fn runtime_identity_admission_checks_structured_value_layouts() {
+    let mut package = package();
+    let config = Term::Nominal {
+        declaration: id(90),
+        arguments: vec![],
+    };
+    package.structs.push(nir::program::Struct {
+        declaration: id(90),
+        name: "Config".into(),
+        type_parameters: vec![],
+        parameter_types: vec![],
+        fields: vec![("enabled".into(), Term::Primitive(Primitive::Bool))],
+        requirements: vec![],
+        capabilities: vec![],
+    });
+    package
+        .function_parameters
+        .push(nir::function_parameters::Declaration {
+            declaration: id(2),
+            parameters: vec![id(3)],
+            domains: vec![config.clone()],
+        });
+    package.runtime_function_identities[0].signature = signature(Term::Primitive(Primitive::Bool));
+    for fields in [
+        vec![Term::Bool(true)],
+        vec![Term::Char('x')],
+        vec![],
+        vec![Term::Bool(true), Term::Bool(false)],
+        vec![Term::Bool(false)],
+    ] {
+        let valid = matches!(fields.as_slice(), [Term::Bool(_)]);
+        let argument = Term::NominalValue {
+            ty: Box::new(config.clone()),
+            variant: None,
+            fields,
+        };
+        let K::FunctionInstance { arguments, .. } = &mut package.functions[0].body.kind else {
+            unreachable!()
+        };
+        *arguments = vec![argument.clone()];
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let result = vm.invoke(id(1), vec![]);
+        if valid {
+            assert_eq!(
+                result.unwrap(),
+                Value::RuntimeFunction {
+                    declaration: id(2),
+                    arguments: vec![argument],
+                }
+            );
+        } else {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+        }
+    }
+}
+
+#[test]
+fn host_runtime_identity_cannot_hide_an_invalid_unused_value_argument() {
+    let mut package = package();
+    package.runtime_function_identities[0].signature = signature(Term::Primitive(Primitive::Bool));
+    package
+        .function_parameters
+        .push(nir::function_parameters::Declaration {
+            declaration: id(2),
+            parameters: vec![id(3)],
+            domains: vec![Term::Primitive(Primitive::Bool)],
+        });
+    package.functions[0].signature = Term::Function {
+        parameters: vec![nir::Parameter {
+            sort: Sort::Runtime,
+            ty: signature(Term::Primitive(Primitive::Bool)),
+        }],
+        result: Box::new(Term::Primitive(Primitive::Bool)),
+    };
+    package.functions[0].parameters = vec![nir::program::LocalId { owner: 1, index: 0 }];
+    package.functions[0].body = Expr {
+        ty: Term::Primitive(Primitive::Bool),
+        source: SourceRange { start: 1, end: 2 },
+        kind: K::Literal(nir::program::Literal::Bool(true)),
+    };
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    for argument in [Term::Char('x'), Term::Bool(true), Term::Bool(false)] {
+        let valid = matches!(argument, Term::Bool(_));
+        let result = vm.invoke(
+            id(1),
+            vec![Value::RuntimeFunction {
+                declaration: id(2),
+                arguments: vec![argument],
+            }],
+        );
+        if valid {
+            assert_eq!(result.unwrap(), Value::Bool(true));
+        } else {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+        }
+    }
+    drop(vm);
+    package.function_parameters.clear();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let opaque = Value::RuntimeFunction {
+        declaration: id(2),
+        arguments: vec![Term::Rigid {
+            declaration: id(99),
+            sort: Sort::Type,
+        }],
+    };
+    assert!(vm.invoke(id(1), vec![opaque.clone()]).is_err());
+    vm.authorize_abstract_type_parameters(&[id(99)]).unwrap();
+    assert_eq!(vm.invoke(id(1), vec![opaque]).unwrap(), Value::Bool(true));
+}
+
+#[test]
+fn host_trait_method_identity_checks_unused_value_parameters() {
+    let mut package = trait_package();
+    let callable = signature(Term::Primitive(Primitive::Bool));
+    package.runtime_function_identities[0].signature = callable.clone();
+    package.traits[0].methods[0].signature = callable.clone().into();
+    package
+        .function_parameters
+        .push(nir::function_parameters::Declaration {
+            declaration: id(2),
+            parameters: vec![id(3)],
+            domains: vec![Term::Primitive(Primitive::Bool)],
+        });
+    package.functions[0].signature = Term::Function {
+        parameters: vec![nir::Parameter {
+            sort: Sort::Runtime,
+            ty: callable,
+        }],
+        result: Box::new(Term::Primitive(Primitive::Bool)),
+    };
+    package.functions[0].parameters = vec![nir::program::LocalId { owner: 1, index: 0 }];
+    package.functions[0].body = Expr {
+        ty: Term::Primitive(Primitive::Bool),
+        source: SourceRange { start: 1, end: 2 },
+        kind: K::Literal(nir::program::Literal::Bool(true)),
+    };
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    for arguments in [vec![Term::Char('x')], vec![], vec![Term::Bool(true)]] {
+        let valid = matches!(arguments.as_slice(), [Term::Bool(_)]);
+        let identity =
+            Value::RuntimeTraitMethod(Box::new(comptime_interpretor::TraitMethodIdentity {
+                interface: id(4).into(),
+                subject: Term::Primitive(Primitive::Bool),
+                member: id(5),
+                method_arguments: arguments,
+            }));
+        let result = vm.invoke(id(1), vec![identity]);
+        if valid {
+            assert_eq!(result.unwrap(), Value::Bool(true));
+        } else {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+        }
+    }
+}
+
+#[test]
+fn host_runtime_identity_checks_dependent_domains_inside_aggregates() {
+    let mut package = package();
+    let callable = signature(Term::Primitive(Primitive::Bool));
+    package.runtime_function_identities[0].signature = callable.clone();
+    package.runtime_function_identities[0].type_parameters = vec![id(3), id(7)];
+    package
+        .function_parameters
+        .push(nir::function_parameters::Declaration {
+            declaration: id(2),
+            parameters: vec![id(3), id(7)],
+            domains: vec![
+                Term::Primitive(Primitive::Type),
+                Term::Rigid {
+                    declaration: id(3),
+                    sort: Sort::Type,
+                },
+            ],
+        });
+    package.functions[0].signature = Term::Function {
+        parameters: vec![nir::Parameter {
+            sort: Sort::Runtime,
+            ty: Term::Tuple(vec![callable]),
+        }],
+        result: Box::new(Term::Primitive(Primitive::Bool)),
+    };
+    package.functions[0].parameters = vec![nir::program::LocalId { owner: 1, index: 0 }];
+    package.functions[0].body = Expr {
+        ty: Term::Primitive(Primitive::Bool),
+        source: SourceRange { start: 1, end: 2 },
+        kind: K::Literal(nir::program::Literal::Bool(true)),
+    };
+    let config = Term::Nominal {
+        declaration: id(90),
+        arguments: vec![],
+    };
+    package.structs.push(nir::program::Struct {
+        declaration: id(90),
+        name: "Config".into(),
+        type_parameters: vec![],
+        parameter_types: vec![],
+        fields: vec![("enabled".into(), Term::Primitive(Primitive::Bool))],
+        requirements: vec![],
+        capabilities: vec![],
+    });
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    for (domain, value, valid) in [
+        (Term::Primitive(Primitive::Bool), Term::Char('x'), false),
+        (Term::Primitive(Primitive::Bool), Term::Bool(true), true),
+        (
+            config.clone(),
+            Term::NominalValue {
+                ty: Box::new(config.clone()),
+                variant: None,
+                fields: vec![Term::Char('x')],
+            },
+            false,
+        ),
+        (
+            config.clone(),
+            Term::NominalValue {
+                ty: Box::new(config),
+                variant: None,
+                fields: vec![Term::Bool(false)],
+            },
+            true,
+        ),
+    ] {
+        let identity = Value::RuntimeFunction {
+            declaration: id(2),
+            arguments: vec![domain, value],
+        };
+        let result = vm.invoke(id(1), vec![Value::Tuple(vec![identity])]);
+        if valid {
+            assert_eq!(result.unwrap(), Value::Bool(true));
+        } else {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+        }
+    }
+}
+
+#[test]
+fn available_runtime_body_does_not_erase_transported_trait_origin() {
+    let mut package = trait_package();
+    package.runtime_function_identities.clear();
+    let method = &mut package.traits[0].methods[0];
+    method.type_parameters.clear();
+    method.signature = signature(Term::Primitive(Primitive::Bool)).into();
+    let K::TraitMethod {
+        method_arguments, ..
+    } = &mut package.functions[0].body.kind
+    else {
+        unreachable!()
+    };
+    method_arguments.clear();
+    let mut body = package.functions[0].clone();
+    body.declaration = id(2);
+    body.name = "runtime_body".into();
+    body.phase = FunctionPhase::Runtime;
+    body.signature = signature(Term::Primitive(Primitive::Bool));
+    body.body = Expr {
+        ty: Term::Primitive(Primitive::Bool),
+        source: SourceRange { start: 3, end: 4 },
+        kind: K::Literal(nir::program::Literal::Bool(true)),
+    };
+    package.functions.push(body);
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(1), vec![]).unwrap(),
+        Value::RuntimeTraitMethod(Box::new(comptime_interpretor::TraitMethodIdentity {
+            interface: id(4).into(),
+            subject: Term::Primitive(Primitive::Bool),
+            member: id(5),
+            method_arguments: vec![],
+        }))
+    );
+    let predicate = package.functions[1].body.clone();
+    package.traits[0].methods[0]
+        .program
+        .preconditions
+        .push(predicate);
+    assert!(Interpreter::for_comptime(&package, Budget::default()).is_err());
 }

@@ -60,6 +60,23 @@ impl Drop for Project {
 }
 
 #[test]
+fn pattern_output_names_follow_forward_cross_file_imports() {
+    let project = Project::new(&[
+        (
+            "main.fl",
+            "use facade.binding;
+            fn run()->bool {const p=binding<bool>();let ~<p> = true;value}",
+        ),
+        ("facade.fl", "pub use origin.binding;"),
+        (
+            "origin.fl",
+            "pub comptime fn binding()-><T -| value:T> where T {'<value>}",
+        ),
+    ]);
+    assert_eq!(project.run(), Value::Bool(true));
+}
+
+#[test]
 fn files_directories_and_mod_bodies_share_one_declaration_collection() {
     let project = Project::new(&[
         (

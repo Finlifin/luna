@@ -79,14 +79,14 @@ impl World<'_> {
             .iter()
             .find(|m| m.declaration == origin.member)
             .ok_or("associated Type query member does not belong to its interface")?;
-        let parameters = contract.parameters_with_self();
+        let parameters = contract.binders_with_self(&mut fuel)?;
         let inputs: Vec<_> = std::iter::once(subject.as_ref().clone())
             .chain(arguments.iter().cloned())
             .collect();
         charge_projection_copy(&member.ty, &mut fuel)?;
         let member_type = member
             .ty
-            .instantiate_types(&parameters, &inputs)
+            .instantiate_parameters(&parameters, &inputs)
             .map_err(|e| e.to_string())?;
         if member_type != Term::Primitive(Primitive::Type) {
             return Err("associated projection member is not Type-valued".into());
@@ -141,7 +141,7 @@ impl World<'_> {
                 }
             }
             let requirement = requirement
-                .instantiate_types(&parameters, &inputs)
+                .instantiate_parameters(&parameters, &inputs)
                 .map_err(|e| e.to_string())?;
             if !matches!(
                 self.context
@@ -157,7 +157,7 @@ impl World<'_> {
                 charge_projection_copy(argument, &mut fuel)?;
             }
             let capability = capability
-                .instantiate_types(&parameters, &inputs)
+                .instantiate_parameters(&parameters, &inputs)
                 .map_err(|e| e.to_string())?;
             if self.given(&capability, query_budget).is_some() {
                 continue;
@@ -510,8 +510,8 @@ impl Normalizer<'_, '_, '_> {
                         .collect::<Vec<_>>();
                     let ty = member
                         .ty
-                        .instantiate_types_in_scope(
-                            &contract.parameters_with_self(),
+                        .instantiate_parameters_in_scope(
+                            &contract.binders_with_self(&mut self.remaining)?,
                             &inputs,
                             &self.frames,
                         )
@@ -586,7 +586,10 @@ impl Normalizer<'_, '_, '_> {
                             .collect();
                         let ty = member
                             .ty
-                            .instantiate_types(&contract.parameters_with_self(), &inputs)
+                            .instantiate_parameters(
+                                &contract.binders_with_self(&mut self.remaining)?,
+                                &inputs,
+                            )
                             .map_err(|e| e.to_string())?;
                         if ty != Term::Primitive(Primitive::Type) {
                             return Err("associated projection member is not Type-valued".into());
@@ -1080,6 +1083,7 @@ mod shared_cache_tests {
             }],
         }];
         let implementations = vec![Implementation {
+            associated_initializers: vec![],
             parameter_types: vec![],
             declaration: id(3),
             subject: Term::Primitive(Primitive::Bool),
@@ -1181,6 +1185,8 @@ mod shared_cache_tests {
 /// An admitted associated value and the exact selection evidence supporting it.
 #[derive(Clone, Debug)]
 pub struct AssociatedValueResolution {
+    /// True only for the explicit staging query; ordinary value queries reject it.
+    pub requires_invocation: bool,
     pub value: nir::program::Expr,
     pub evidence: TypeEvidence,
     pub qualification: Qualification,
@@ -1189,8 +1195,8 @@ impl fmt::Display for AssociatedValueResolution {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "(associated-value-resolution (value {}) (implementation {}) (arguments",
-            self.value, self.evidence.implementation
+            "(associated-value-resolution (requires-invocation {}) (value {}) (implementation {}) (arguments",
+            self.requires_invocation, self.value, self.evidence.implementation
         )?;
         for argument in &self.evidence.type_arguments {
             write!(f, " {argument}")?;
@@ -1210,6 +1216,20 @@ impl World<'_> {
             .map(|(value, _)| value)
     }
     pub(crate) fn resolve_associated_value_budgeted(
+        &self,
+        interface: &InterfaceInstance,
+        member_id: nir::DeclarationId,
+        subject: &Term,
+        budget: Budget,
+    ) -> Result<(AssociatedValueResolution, usize), String> {
+        let (value, remaining) =
+            self.resolve_associated_value_plan_budgeted(interface, member_id, subject, budget)?;
+        if value.requires_invocation {
+            return Err("associated initializer requires comptime invocation".into());
+        }
+        Ok((value, remaining))
+    }
+    pub(crate) fn resolve_associated_value_plan_budgeted(
         &self,
         interface: &InterfaceInstance,
         member_id: nir::DeclarationId,
@@ -1236,14 +1256,14 @@ impl World<'_> {
             .iter()
             .find(|member| member.declaration == member_id)
             .ok_or("associated value member does not belong to its interface")?;
-        let parameters = contract.parameters_with_self();
+        let parameters = contract.binders_with_self(&mut fuel)?;
         let inputs: Vec<_> = std::iter::once(subject.clone())
             .chain(interface.arguments.iter().cloned())
             .collect();
         charge_projection_copy(&member.ty, &mut fuel)?;
         let member_type = member
             .ty
-            .instantiate_types(&parameters, &inputs)
+            .instantiate_parameters(&parameters, &inputs)
             .map_err(|e| e.to_string())?;
         // Reserve a disjoint allowance for each proof/search rather than
         // resetting the full caller budget at every formation obligation.
@@ -1295,7 +1315,7 @@ impl World<'_> {
                 }
             }
             let requirement = requirement
-                .instantiate_types(&parameters, &inputs)
+                .instantiate_parameters(&parameters, &inputs)
                 .map_err(|e| e.to_string())?;
             if !matches!(
                 self.context
@@ -1311,7 +1331,7 @@ impl World<'_> {
                 charge_projection_copy(argument, &mut fuel)?;
             }
             let capability = capability
-                .instantiate_types(&parameters, &inputs)
+                .instantiate_parameters(&parameters, &inputs)
                 .map_err(|e| e.to_string())?;
             if self.given(&capability, query_budget).is_some() {
                 continue;
@@ -1350,15 +1370,28 @@ impl World<'_> {
         let mut values = implementation
             .associated
             .iter()
-            .filter(|(id, _)| *id == member_id);
-        let (_, value) = values
+            .map(|(id, value)| (*id, value, false))
+            .chain(
+                implementation
+                    .associated_initializers
+                    .iter()
+                    .map(|(id, value)| (*id, value.expression(), true)),
+            )
+            .filter(|(id, _, _)| *id == member_id);
+        let (_, value, requires_invocation) = values
             .next()
             .ok_or("selected implementation has no associated value")?;
         if values.next().is_some() {
             return Err("selected implementation has duplicate associated values".into());
         }
-
-        charge_completed_value(value, &mut fuel)?;
+        if requires_invocation {
+            let mut steps = fuel as u64;
+            let copied = nir::copy_budget::charge_type_rewrite(value, &mut steps);
+            fuel = steps as usize;
+            copied.map_err(|_| "associated initializer copy budget exhausted")?;
+        } else {
+            charge_completed_value(value, &mut fuel)?;
+        }
         let mut value = value
             .instantiate_parameters(
                 &implementation
@@ -1393,9 +1426,15 @@ impl World<'_> {
         value.ty = actual.value;
         // Only completed constant representations can be published as values.
         // Function identities remain values; their bodies are not invoked here.
-        charge_completed_value(&value, &mut fuel)?;
+        if requires_invocation {
+            value = nir::associated_initializers::AssociatedInitializer::new(value, &mut fuel)?
+                .into_expression();
+        } else {
+            charge_completed_value(&value, &mut fuel)?;
+        }
         Ok((
             AssociatedValueResolution {
+                requires_invocation,
                 value,
                 evidence: evidence.clone(),
                 qualification: qualification.clone(),

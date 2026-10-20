@@ -250,12 +250,17 @@ impl<'w> World<'w> {
         if contract.type_parameters.len() != query.arguments.len() {
             return Err("trait proposition interface argument count mismatch".into());
         }
-        contract.validate_arguments_for_subject(
+        contract.validate_arguments_with_layouts(
             &query.subject,
             &query.arguments,
             self.context.scope(),
             self.traits,
+            &self.index.parameter_domains,
             &mut fuel,
+            |left, right, fuel| {
+                super::equivalent_domains(self.context, left, right, budget.max_depth, fuel)
+            },
+            Some(&self.index.nominal_layouts),
         )?;
         let parameter_binders = contract.parameter_binders(&mut fuel)?;
         // Reserve separate bounded allowances for every proof/selection query.

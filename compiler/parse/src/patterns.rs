@@ -311,6 +311,7 @@ impl Parser<'_> {
                     )
                 }
 
+                TokenKind::Tilde => p.try_pattern_splice(),
                 _ => Ok(0),
             }
         })

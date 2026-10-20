@@ -159,6 +159,10 @@ pub fn remap_predicate(
         }
         remaining -= 1;
         match &mut expr.kind {
+            K::ComptimeValue(value) => {
+                crate::comptime_values::validate(value, &expr.ty, &mut remaining)
+                    .map_err(|error| error.message())?;
+            }
             K::Local(id) => {
                 if let Some(to) = bindings.get(id) {
                     *id = *to;
@@ -179,7 +183,9 @@ pub fn remap_predicate(
                 remap_predicate_pattern(pattern, bindings, &mut pending, &mut remaining)?;
                 pending.push(value);
             }
-            K::Literal(_) | K::Unit => {}
+            // Associated identities contain declaration inputs, not local
+            // bindings. Type/input substitution is handled before this remap.
+            K::AssociatedValue { .. } | K::Literal(_) | K::Unit => {}
             K::ReadPointer(v)
             | K::AddressOf(v)
             | K::PointerField { pointer: v, .. }

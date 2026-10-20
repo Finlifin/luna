@@ -195,14 +195,17 @@ pub enum NodeKind {
     Wildcard, // _
 
     // exprs
-    LiteralExtension,   // a, b
-    Defer,              // a: expression retained for instantiation
-    RefinedType,        // a: requirement, b: base type
-    QuoteExpr,          // a: runtime body, N: context substitutions
-    SpliceExpr,         // a: comptime operand, N: context substitutions
-    CodeSubstitution,   // a: interface name, b: source binding name
-    ContextualExprType, // a: result type, N: ordered runtime bindings
-    CodeContextBinding, // a: name, b: type
+    LiteralExtension,      // a, b
+    Defer,                 // a: expression retained for instantiation
+    RefinedType,           // a: requirement, b: base type
+    QuoteExpr,             // a: runtime body, N: context substitutions
+    QuotePattern,          // a: runtime pattern, N: output substitutions
+    SpliceExpr,            // a: comptime operand, N: context substitutions
+    SplicePattern,         // a: comptime operand, N: output substitutions
+    CodeSubstitution,      // a: interface name, b: source binding name
+    ContextualExprType,    // a: result type, N: ordered runtime bindings
+    ContextualPatternType, // a: subject type, N: ordered success bindings
+    CodeContextBinding,    // a: name, b: type
 
     ListOf,
     Tuple,
@@ -849,9 +852,13 @@ impl NodeKind {
             TypealiasDef | NewtypeDef => NodeType::TypeAliasChildren, // a, N, b
             AssocDecl => NodeType::AssocDeclChildren,  // a, N, b, c, N
             FnType => NodeType::FnTypeChildren,        // flags_u32, N
-            ProjectionMultiPath | QuoteExpr | SpliceExpr | ContextualExprType => {
-                NodeType::SingleWithMultiChildren
-            } // a, N
+            ProjectionMultiPath
+            | QuoteExpr
+            | QuotePattern
+            | SpliceExpr
+            | SplicePattern
+            | ContextualExprType
+            | ContextualPatternType => NodeType::SingleWithMultiChildren, // a, N
 
             // TODO items
             FieldMethodBound | DeclarationBound | Outcomes => NodeType::SingleChild,

@@ -75,6 +75,7 @@ fn pure(pattern: &Pattern, fuel: &mut usize, depth: usize) -> Result<bool, Strin
         Pattern::Tuple(fields)
         | Pattern::TypeTuple(fields)
         | Pattern::Or(fields)
+        | Pattern::NominalType { fields, .. }
         | Pattern::Record { fields, .. }
         | Pattern::AnonymousRecord { fields, .. }
         | Pattern::Variant { fields, .. }
@@ -239,6 +240,7 @@ impl Analyzer<'_, '_, '_, '_> {
             }
             Pattern::Tuple(fields)
             | Pattern::TypeTuple(fields)
+            | Pattern::NominalType { fields, .. }
             | Pattern::Record { fields, .. }
             | Pattern::AnonymousRecord { fields, .. }
             | Pattern::Variant { fields, .. }

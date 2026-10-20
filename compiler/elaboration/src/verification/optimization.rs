@@ -196,6 +196,23 @@ fn visit(
                 }
             }
         }
+        K::NominalType {
+            arguments,
+            preparations,
+            ..
+        } => {
+            for preparation in preparations {
+                visit(&mut preparation.expression, limits, depth, action)?;
+            }
+            for argument in arguments {
+                for pattern in argument.patterns_mut() {
+                    visit_pattern(pattern, limits, depth, action)?;
+                }
+                for value in argument.expressions_mut() {
+                    visit(value, limits, depth, action)?;
+                }
+            }
+        }
         K::ClosureType {
             environment,
             signature,
@@ -206,12 +223,27 @@ fn visit(
             visit(signature, limits, depth, action)?;
         }
         K::CheckTypeAlias {
-            arguments: fields, ..
+            arguments,
+            body,
+            preparations,
+            ..
+        } => {
+            for preparation in preparations {
+                visit(&mut preparation.expression, limits, depth, action)?;
+            }
+            for argument in arguments {
+                for pattern in argument.patterns_mut() {
+                    visit_pattern(pattern, limits, depth, action)?;
+                }
+                for expression in argument.expressions_mut() {
+                    visit(expression, limits, depth, action)?;
+                }
+            }
+            if let Some(body) = body {
+                visit(body, limits, depth, action)?;
+            }
         }
-        | K::NominalType {
-            arguments: fields, ..
-        }
-        | K::FunctionType {
+        K::FunctionType {
             parameters: fields, ..
         }
         | K::TypeList(fields)
@@ -367,6 +399,7 @@ fn visit(
             }
         }
         K::AssociatedValue { .. }
+        | K::ComptimeValue(_)
         | K::TypeValue(_)
         | K::TypeListValue(_)
         | K::TraitMethod { .. }
@@ -392,6 +425,7 @@ fn visit_pattern(
     }
     let depth = depth + 1;
     match pattern {
+        Pattern::CodeEvidence { .. } => return Err(Unknown::UnrelatedFacts),
         Pattern::Then { first, value, next } => {
             visit_pattern(first, limits, depth, action)?;
             visit(value, limits, depth, action)?;
@@ -404,7 +438,8 @@ fn visit_pattern(
         Pattern::Observe { inner: pattern, .. }
         | Pattern::Remap { pattern, .. }
         | Pattern::Binding { inner: pattern, .. } => visit_pattern(pattern, limits, depth, action)?,
-        Pattern::Record { fields, .. }
+        Pattern::NominalType { fields, .. }
+        | Pattern::Record { fields, .. }
         | Pattern::AnonymousRecord { fields, .. }
         | Pattern::Variant { fields, .. }
         | Pattern::NormalForm {

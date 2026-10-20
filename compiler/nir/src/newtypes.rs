@@ -32,18 +32,36 @@ impl Newtype {
         &self,
         arguments: &[Term],
         fuel: &mut usize,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::nominal_parameters::AdmissionError> {
+        self.validate_completed_arguments_with_layouts(arguments, fuel, |_, _, _| {
+            Err("nominal value admission requires declaration layout evidence".into())
+        })
+    }
+
+    /// Preserve capture-first domain admission when payload layout evidence is
+    /// available. Stored argument order and type identity stay unchanged.
+    pub fn validate_completed_arguments_with_layouts(
+        &self,
+        arguments: &[Term],
+        fuel: &mut usize,
+        layout: impl FnMut(
+            &Term,
+            Option<u32>,
+            &mut usize,
+        ) -> Result<Vec<Term>, crate::NominalAdmissionError>,
+    ) -> Result<(), crate::NominalAdmissionError> {
         let own = self
             .type_parameters
             .len()
             .checked_sub(self.capture_count)
             .ok_or("invalid newtype capture count")?;
         if self.capture_count == 0 {
-            return crate::nominal_parameters::validate_completed(
+            return crate::nominal_parameters::validate_completed_with_layouts(
                 &self.type_parameters,
                 &self.parameter_types,
                 arguments,
                 fuel,
+                layout,
             );
         }
         if arguments.len() != self.type_parameters.len()
@@ -53,12 +71,14 @@ impl Newtype {
         }
         *fuel = fuel
             .checked_sub(arguments.len())
-            .ok_or("newtype capture ordering budget exhausted")?;
+            .ok_or(crate::nominal_parameters::AdmissionError::Budget)?;
         for domain in &self.parameter_types {
-            crate::type_computations::charge_term(domain, fuel).map_err(|e| e.to_string())?;
+            crate::type_computations::charge_term(domain, fuel)
+                .map_err(crate::nominal_parameters::AdmissionError::from)?;
         }
         for argument in arguments {
-            crate::type_computations::charge_term(argument, fuel).map_err(|e| e.to_string())?;
+            crate::type_computations::charge_term(argument, fuel)
+                .map_err(crate::nominal_parameters::AdmissionError::from)?;
         }
         let order = (own..arguments.len()).chain(0..own).collect::<Vec<_>>();
         let parameters = order
@@ -77,7 +97,13 @@ impl Newtype {
             .iter()
             .map(|&i| arguments[i].clone())
             .collect::<Vec<_>>();
-        crate::nominal_parameters::validate_completed(&parameters, &domains, &arguments, fuel)
+        crate::nominal_parameters::validate_completed_with_layouts(
+            &parameters,
+            &domains,
+            &arguments,
+            fuel,
+            layout,
+        )
     }
 
     pub fn instantiate_representation(&self, arguments: &[Term]) -> Result<Term, TypeError> {

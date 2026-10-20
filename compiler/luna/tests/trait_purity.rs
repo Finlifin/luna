@@ -218,3 +218,82 @@ fn body_evidence_does_not_erase_the_interface_call_precondition() {
     let error = compile_with_protocols(&format!("{prefix} fn take(.next:Byte=Byte.as(Next).next(255))->Byte {{next}} fn run()->Byte {{take()}}"), &Default::default()).unwrap_err();
     assert!(error.contains("precondition"), "{error}");
 }
+
+#[test]
+fn default_behavior_selection_preserves_runtime_interface_rejection() {
+    let mut package = compile("typealias Byte=.u8'builtin;
+        trait Next {fn next(value:Byte)->Byte where requires value < 255;}
+        impl Next for Byte {fn next(value:Byte)->Byte {value + 1}}
+        fn take(value:Byte,.next:Byte=if value < 255 {Byte.as(Next).next(value)} else {value})->Byte {next}
+        fn run()->Byte {take(255)}");
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::UnsignedInteger(255)
+    );
+    // Fault injection bypasses the proven branch, but must not remove the
+    // original interface precondition at invocation.
+    let run = package
+        .functions
+        .iter_mut()
+        .find(|f| f.name == "run")
+        .unwrap();
+    let mut changed = 0;
+    nir::visit::expression_mut(&mut run.body, &mut 100_000, |expr, _| {
+        if let nir::program::ExprKind::If { condition, .. } = &mut expr.kind {
+            condition.kind = nir::program::ExprKind::Literal(nir::program::Literal::Bool(true));
+            changed += 1;
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(changed, 1);
+    let failure = luna::execution::interpret(&package, "run", 100_000).unwrap_err();
+    assert!(failure.contains("ProgramContractRejected"), "{failure}");
+}
+
+#[test]
+fn value_indexed_trait_body_supplies_finite_default_evidence() {
+    let source = "trait Read where tag:bool {fn read()->bool;}
+        impl Read<tag> for bool where tag:bool {fn read()->bool {tag}}
+        fn take(.yes:bool=bool.as(Read<true>).read(),.no:bool=bool.as(Read<false>).read())->bool {yes and not no}
+        fn run()->bool {take()}";
+    let package = compile(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn predicate_bearing_trait_body_can_supply_finite_default_evidence() {
+    let source = "trait Keep {fn keep(value:bool)->result:bool where ensures result == value'old;}
+        impl Keep for bool {fn keep(value:bool)->bool {value}}
+        fn take(.value:bool=bool.as(Keep).keep(true))->bool {value}
+        fn run()->bool {take()}";
+    let mut package = compile(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    // The behavior certificate does not replace the method's result promise.
+    let keep = package
+        .functions
+        .iter_mut()
+        .find(|f| f.name == "keep")
+        .unwrap();
+    keep.body.kind = nir::program::ExprKind::Literal(nir::program::Literal::Bool(false));
+    let failure = luna::execution::interpret(&package, "run", 100_000).unwrap_err();
+    assert!(failure.contains("ProgramContractRejected"), "{failure}");
+}
+
+#[test]
+fn interface_predicates_do_not_hide_effects_or_nontermination_in_defaults() {
+    for source in [
+        "trait Flag {fn flag(self)->bool where requires true;} impl Flag for bool {fn flag(self)->bool {self.as(Flag).flag()}} fn take(value:bool,.flag:bool=value.as(Flag).flag())->bool {flag}",
+        "trait Flag {fn flag(self)->bool where requires true;} impl Flag for bool {fn flag(self)->bool {while true {} true}} fn take(value:bool,.flag:bool=value.as(Flag).flag())->bool {flag}",
+        "trait Read {fn read(self)->bool where requires true;} impl Read for *bool {fn read(self)->bool {self.* = false;self.*}} fn take(value:*bool,.flag:bool=value.as(Read).read())->bool {flag}",
+    ] {
+        let error = compile_with_protocols(source, &Default::default()).unwrap_err();
+        assert!(error.contains("P3 stability/termination"), "{error}");
+    }
+}

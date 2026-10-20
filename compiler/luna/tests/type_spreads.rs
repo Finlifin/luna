@@ -2164,3 +2164,165 @@ fn fixed_packet_type_evidence_reaches_defaults_and_requirements() {
         );
     }
 }
+
+#[test]
+fn trailing_empty_normal_input_packet_preserves_bottom_type() {
+    let package = compile(&format!(
+        "{TYPE}typealias Integer=.Integer'builtin;
+        comptime fn empty(...items:T)->T where T {{items}}
+        pure comptime fn Sized<n:Integer>->Type {{bool}}
+        comptime fn Run()->bool {{Sized<7,...do {{return true;empty()}}>}}"
+    ));
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(&package, "Run"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(calls(&package, &vm), vec!["Run"]);
+}
+
+#[test]
+fn returning_normal_input_packets_skip_defaults_and_accept_unambiguous_empty_shape() {
+    for packet in ["do {return true;empty()}", "do {return true;}"] {
+        let package = compile(&format!(
+            "{TYPE}typealias Integer=.Integer'builtin;
+            comptime fn empty(...items:T)->T where T {{items}}
+            comptime fn later()->bool {{false}}
+            pure comptime fn Sized<n:Integer,.flag:bool=later()>->Type {{bool}}
+            comptime fn Run()->bool {{Sized<7,...{packet}>}}"
+        ));
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        assert_eq!(
+            vm.invoke(id(&package, "Run"), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(calls(&package, &vm), vec!["Run"]);
+    }
+}
+
+#[test]
+fn returning_normal_input_packets_check_unreachable_tail_shapes() {
+    for tail in ["false", "(7,8)"] {
+        let source = format!(
+            "{TYPE}typealias Integer=.Integer'builtin;
+            pure comptime fn Sized<n:Integer>->Type {{bool}}
+            comptime fn Run()->bool {{Sized<...do {{return true;{tail}}}>}}"
+        );
+        assert!(
+            compile_with_protocols(&source, &Default::default()).is_err(),
+            "{tail}"
+        );
+    }
+}
+
+#[test]
+fn returning_nonempty_normal_input_packet_preserves_result_and_order() {
+    let package = compile(&format!(
+        "{TYPE}typealias Integer=.Integer'builtin;
+        comptime fn first()->bool {{true}}
+        comptime fn later()->bool {{false}}
+        pure comptime fn Sized<n:Integer,.flag:bool=false>->Type {{bool}}
+        comptime fn Run()->bool {{Sized<...do {{let value=first();return value;(7,)}},.flag=later()>}}"
+    ));
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(&package, "Run"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(calls(&package, &vm), vec!["Run", "first"]);
+}
+
+#[test]
+fn returning_type_list_inputs_keep_preparation_nodes_diverging() {
+    for bound_tuple in [false, true] {
+        for input in ["do {return true;bool}", "...do {return true;[bool]}"] {
+            let source = format!(
+                "{TYPE}pure comptime fn List<T>->Type {{T}}
+                pure comptime fn Tuple<...Es:List<Type>>->Type {{bool}}
+                comptime fn Default()->bool {{true}}
+                pure comptime fn Product<.flag:bool=Default(),...Es:List<Type>>->Type {{bool}}
+                comptime fn Later()->Type {{bool}}
+                comptime fn Run()->bool {{Product<{input},Later()>}}"
+            );
+            let package = execution_support::compile_with_source_bindings(
+                &source,
+                &Default::default(),
+                luna::protocols::type_constructors::Selectors {
+                    meta_list: Some("input::List"),
+                    tuple: bound_tuple.then_some("input::Tuple"),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let run = id(&package, "Run");
+            let body = &package
+                .functions
+                .iter()
+                .find(|f| f.declaration == run)
+                .unwrap()
+                .body;
+            let mut found = false;
+            nir::visit::expression(body, &mut 10_000, |expression, _| {
+                if let nir::program::ExprKind::Tuple(fields) = &expression.kind {
+                    if fields
+                        .iter()
+                        .any(|field| field.ty == nir::Term::Primitive(nir::Primitive::Never))
+                    {
+                        found = true;
+                        assert_eq!(expression.ty, nir::Term::Primitive(nir::Primitive::Never));
+                    }
+                }
+                if let nir::program::ExprKind::LetPattern { value, .. } = &expression.kind {
+                    if value.ty == nir::Term::Primitive(nir::Primitive::Never) {
+                        assert_eq!(expression.ty, nir::Term::Primitive(nir::Primitive::Never));
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+            assert!(found);
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            assert_eq!(vm.invoke(run, vec![]).unwrap(), Value::Bool(true));
+            assert_eq!(calls(&package, &vm), vec!["Run"]);
+        }
+    }
+}
+
+#[test]
+fn normal_form_type_list_requirements_keep_the_collected_input_kind() {
+    let prefix = format!("{TYPE} pure comptime fn List<T>->Type {{T}}");
+    let baseline = compile(&prefix);
+    let protocols = elaboration::program::Protocols {
+        meta_list: Some(baseline.normal_forms[0].declaration),
+        ..Default::default()
+    };
+    for suffix in ["", ",bool,.u8'builtin"] {
+        let source = format!(
+            "{prefix}
+            pure comptime fn Indexed<T,...Es:List<Type>>->Type where requires T == bool {{T}}
+            fn accept(value:*Indexed<bool{suffix}>)->bool {{true}}
+            fn run()->fn(*Indexed<bool{suffix}>)->bool {{accept}}"
+        );
+        let package = compile_with_protocols(&source, &protocols).unwrap();
+        let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
+        let accept = graph
+            .functions
+            .iter()
+            .find(|item| item.function.name == "accept")
+            .unwrap();
+        let nir::Term::Function { parameters, .. } = &accept.function.signature else {
+            panic!("expected callable")
+        };
+        let nir::Term::Pointer(inner) = &parameters[0].ty else {
+            panic!("expected pointer")
+        };
+        let nir::Term::NormalForm { arguments, .. } = inner.as_ref() else {
+            panic!("head was erased")
+        };
+        assert!(
+            matches!(&arguments[1],nir::Term::TypeListValue(types) if types.len()==if suffix.is_empty(){0}else{2})
+        );
+        let invalid = source.replace("Indexed<bool", "Indexed<'x''type");
+        assert!(compile_with_protocols(&invalid, &protocols).is_err());
+    }
+}

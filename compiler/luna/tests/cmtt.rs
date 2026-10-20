@@ -5,6 +5,1844 @@ use comptime_interpretor::{Interpreter, Value};
 use support::run_iir as run;
 
 #[test]
+fn pattern_value_defaults_wait_for_type_evidence_and_feed_later_type_defaults() {
+    let source = "typealias Type=.Type'builtin;
+        comptime fn is_bool(kind:Type)->bool {kind == bool}
+        comptime fn Width(flag:bool)->Type {if flag {.u8'builtin} else {.u16'builtin}}
+        comptime fn select(input:T)-><U -| value:U>
+            where T,.flag:bool=is_bool(T),.U:Type=Width(flag) {'<value>}
+        fn run()->bool {
+            const first=select(true);const second=select('a');
+            let byte:.u8'builtin=17;let word:.u16'builtin=300;
+            let ~<first> = byte;let a=value;let ~<second> = word;
+            a == 17 and value == 300
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn pattern_value_clauses_select_patterns_and_forward_completed_values() {
+    let source="comptime fn select()-><bool -| value:bool> where flag:bool {
+            if flag {'<true as value>} else {'<false as value>}
+        }
+        comptime fn forward()-><bool -| value:bool> where flag:bool {select<flag>()}
+        fn run()->bool {
+            const yes=forward<true>();const no=forward<false>();
+            (true match {~<yes> => value,_ => false}) and (false match {~<no> => not value,_ => false})
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn pattern_value_clause_defaults_mix_type_inference_contracts_and_overrides() {
+    let source = "comptime fn invert(flag:bool)->bool {not flag}
+        comptime fn select(input:T)-><bool -| value:bool>
+            where T,.flag:bool=true,.opposite:bool=invert(flag),ensures opposite != flag {
+                '<value if value == opposite>
+            }
+        fn run()->bool {
+            const p=select('a');const q=select<bool,.flag=false>(true);
+            (false match {~<p> => not value,_ => false}) and (true match {~<q> => value,_ => false})
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("ensures opposite != flag", "ensures opposite == flag");
+    let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(
+        failure.contains("postcondition") || failure.contains("contract"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn pattern_value_clauses_reconstruct_nominal_data_and_dependent_domains() {
+    let source="struct Config {enabled:bool}
+        comptime fn select()-><bool -| value:bool> where config:Config {'<value if value == config.enabled>}
+        comptime fn generic()-><T -| value:T> where T,sample:T {let saved=sample;'<value>}
+        fn run()->bool {
+            const p=select<Config {enabled:true}>();
+            const q=generic<.u8'builtin,200>();let input:.u8'builtin=200;
+            let ~<q> = input;let byte=value;
+            (true match {~<p> => value,_ => false}) and byte == 200
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace(".u8'builtin,200", ".u8'builtin,256");
+    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+}
+
+#[test]
+fn pattern_value_clauses_infer_nominal_indices_without_inverting_opaque_heads() {
+    let source = "struct Choice where flag:bool {}
+        comptime fn select()-><Choice<flag> -| value:Choice<flag>> where flag:bool {'<value>}
+        fn keep(input:Choice<true>)->Choice<true> {let ~<select()> = input;value}";
+    support::compile(source);
+    let invalid = source.replace("select()>", "select<false>()>");
+    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    let opaque = source.replace(
+        "struct Choice where flag:bool {}",
+        "pure comptime fn Choice<flag:bool>->.Type'builtin {bool}",
+    );
+    assert!(support::compile_with_protocols(&opaque, &Default::default()).is_err());
+    support::compile(&opaque.replace("select()>", "select<true>()>"));
+}
+
+#[test]
+fn pattern_value_clause_defaults_skip_overrides_and_check_unused_definitions() {
+    let source="comptime fn never()->bool {never()}
+        comptime fn select()-><bool -| value:bool> where .flag:bool=never() {'<value if value == flag>}
+        fn run()->bool {const p=select<.flag=true>();true match {~<p> => value,_ => false}}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    for source in [
+        "comptime fn select()-><bool -| value:bool> where .flag:bool='x' {'<value>}",
+        "comptime fn select()-><bool -| value:bool> where flag:bool {'<value>} fn run(flag:bool)->bool {let ~<select<flag>()> = true;value}",
+        "comptime fn select()-><bool -| value:bool> where pointer:*bool {'<value>}",
+    ] {
+        assert!(
+            support::compile_with_protocols(source, &Default::default()).is_err(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn pattern_sibling_input_types_contextualize_earlier_numeric_literals() {
+    for (parameters, call) in [
+        ("first:T,second:T", "select(17,number())"),
+        ("...items:(T,T)", "select(17,number())"),
+        ("first:T,implicit second:T", "select(17,.second=number())"),
+    ] {
+        let source = format!(
+            "comptime fn number()->.u8'builtin {{42}}
+            comptime fn select({parameters})-><bool -| value:bool> where T {{'<value>}}
+            fn run()->bool {{const p={call};let ~<p> = true;value}}"
+        );
+        assert_eq!(run(&source, "run", vec![]), Value::Bool(true));
+        let invalid = source.replace("select(17", "select(256");
+        assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn pattern_type_probes_do_not_invoke_later_arguments_or_reorder_effects() {
+    let source = "typealias Count=.Integer'builtin;
+        comptime fn number(count:*Count)->.u8'builtin {assumes count.* == 1;count.*+=1;42}
+        comptime fn select(first:T,second:T)-><bool -| value:bool> where T {'<value>}
+        comptime fn emit()-><|-bool> {
+            var count:Count=0;
+            const p=select(do {count+=1;17},number(count.ref));
+            let complete=count == 2;'(complete and (true match {~<p> => value}))
+        }
+        fn run()->bool {~<emit()>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn pattern_code_inputs_supply_generic_evidence_before_data_arguments() {
+    let source =
+        "comptime fn select(input:T,p:<T -| value:T>)-><bool -| flag:bool> where T {'<flag>}
+        comptime fn emit()-><|-bool> {
+            const known:<.u8'builtin -| value:.u8'builtin> = '<value>;
+            const p=select(17,known);'(true match {~<p> => flag})
+        }
+        fn run()->bool {~<emit()>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn pattern_subject_context_reaches_property_fields_and_dependent_defaults() {
+    let source = "pure comptime fn schema(...fields:T)->T where T {fields}
+        pure comptime fn number()->.u8'builtin {17}
+        const SAMPLE=schema {size:number(),enabled:true};typealias Options=SAMPLE'type;
+        comptime fn select(...props:T)-><U -| value:U> where T,.U:.Type'builtin=T {'<value>}
+        comptime fn data(...props:Options)-><|-Options> {'(props)}
+        fn run()->bool {
+            const p:<Options -| value:Options> = select {size:17,enabled:true};
+            let ~<p> = ~<data {size:17,enabled:true}>;
+            value.size == 17 and value.enabled
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("select {size:17", "select {size:256");
+    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+}
+
+#[test]
+fn pattern_subject_context_types_data_literals_before_invocation() {
+    let source = "comptime fn binding(input:T)-><T -| value:T> where T {'<value>}
+        fn run()->bool {
+            let input:.u8'builtin=17;
+            let ~<binding(17)> = input;value == 17
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let annotated = source.replace(
+        "let ~<binding(17)> = input;",
+        "const p:<.u8'builtin -| value:.u8'builtin> = binding(17);let ~<p> = input;",
+    );
+    assert_eq!(run(&annotated, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("binding(17)", "binding(256)");
+    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+}
+
+#[test]
+fn pattern_subject_context_reaches_collections_packets_and_nested_generators() {
+    for call in [
+        "binding(17,42)",
+        "binding(...do {(17,42)})",
+        "binding(.items=(17,42))",
+    ] {
+        let source = format!(
+            "comptime fn binding(...items:(T,T))-><T -| value:T> where T {{'<value>}}
+            fn run()->bool {{let input:.u8'builtin=17;let ~<{call}> = input;value == 17}}"
+        );
+        assert_eq!(run(&source, "run", vec![]), Value::Bool(true));
+    }
+    let source = "comptime fn binding(input:T)-><T -| value:T> where T {'<value>}
+        comptime fn forward()-><.u8'builtin -| value:.u8'builtin> {binding(17)}
+        fn run()->bool {let input:.u8'builtin=17;let ~<forward()> = input;value == 17}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn pattern_subject_context_preserves_bounds_and_explicit_type_arguments() {
+    let source = "trait Allowed {} impl Allowed for .u8'builtin {}
+        comptime fn binding(input:T)-><T -| value:T> where T :- Allowed {'<value>}
+        fn run()->bool {let input:.u8'builtin=17;let ~<binding(17)> = input;value == 17}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    for invalid in [
+        source.replace(
+            "impl Allowed for .u8'builtin {}",
+            "impl Allowed for bool {}",
+        ),
+        source.replace("binding(17)", "binding<.u16'builtin>(17)"),
+    ] {
+        assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn pattern_property_calls_infer_record_interfaces_and_forward_output_names() {
+    let source = "pure comptime fn schema(...fields:T)->T where T {fields}
+        comptime fn data(...props:T)-><|-T> where T {'(props)}
+        fn run()->bool {
+            const p=select {enabled:true,letter:'a'};
+            let data=~<data {enabled:true,letter:'a'}>;
+            let ~<p> = data;value.enabled and value.letter == 'a'
+        }
+        comptime fn select(...properties:T)-><T -| value:T> where T {'<value>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let defaults = source.replace("...properties:T)", "...properties:T,.copy:T=properties)");
+    assert_eq!(run(&defaults, "run", vec![]), Value::Bool(true));
+    let direct = source
+        .replace("const p=select {enabled:true,letter:'a'};", "")
+        .replace("~<p>", "~<select {enabled:true,letter:'a'}>");
+    assert_eq!(run(&direct, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn pattern_property_calls_use_explicit_collector_types_and_field_context() {
+    let source = "pure comptime fn schema(...fields:T)->T where T {fields}
+        pure comptime fn number()->.u8'builtin {17}
+        const SAMPLE=schema {size:number(),enabled:true};typealias Options=SAMPLE'type;
+        comptime fn select(...first:A,...props:B)-><B -| value:B> where A,B {'<value>}
+        comptime fn data(...props:T)-><|-T> where T {'(props)}
+        fn run()->bool {
+            const p=select<(bool,bool),Options> {true,false,size:17,enabled:true};
+            let ~<p> = ~<data<Options> {size:17,enabled:true}>;value.size == 17 and value.enabled
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let expanded = source.replace("{true,false,size:17", "{...do {(true,false)},size:17");
+    assert_eq!(run(&expanded, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("size:17,enabled:true", "missing:17,enabled:true");
+    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+}
+
+#[test]
+fn pattern_property_fields_remain_interleaved_with_code_arguments() {
+    let source = "pure comptime fn schema(...fields:T)->T where T {fields}
+        const SAMPLE=schema {before:false,after:true};typealias Options=SAMPLE'type;
+        comptime fn select(p:<bool -| value:bool>,...props:Options)-><bool -| value:bool>
+            where requires not props.before and props.after {p}
+        comptime fn emit()-><|-bool> {
+            var state=false;
+            const p=select {before:state,do {state=true;'<value>},after:state};
+            '(true match {~<p> => value})
+        }
+        fn run()->bool {~<emit()>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn pattern_property_calls_reject_duplicates_and_ambiguous_collectors() {
+    for source in [
+        "comptime fn select(...props:T)-><bool -| value:bool> where T {'<value>}
+         fn run()->bool {let ~<select {flag:true,flag:false}> = true;value}",
+        "comptime fn select(...first:T,...second:U)-><bool -| value:bool> where T,U {'<value>}
+         fn run()->bool {let ~<select {flag:true}> = true;value}",
+        "comptime fn select(.flag:bool=true)-><bool -| value:bool> {'<value>}
+         fn run()->bool {let ~<select {flag:true}> = true;value}",
+    ] {
+        let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+        assert!(!failure.contains("parsing failed"), "{failure}");
+    }
+}
+
+#[test]
+fn pattern_variadic_defaults_and_forwarding_use_the_completed_collection() {
+    let source =
+        "comptime fn select(...items:(bool,bool),.copy:(bool,bool)=items)-><bool -| value:bool> {
+            let (first,second)=copy;let wanted=first and not second;'<value if value == wanted>
+        }
+        comptime fn forward(items:(bool,bool))-><bool -| value:bool> {select(...items)}
+        fn run()->bool {const p=forward((true,false));true match {~<p> => value,_ => false}}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let overridden = source
+        .replace("select(...items)", "select(...items,.copy=(false,true))")
+        .replace(
+            "true match {~<p> => value",
+            "false match {~<p> => not value",
+        );
+    assert_eq!(run(&overridden, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn pattern_variadic_collections_preserve_the_registered_tuple_head() {
+    let source = "typealias Type=.Type'builtin;pure comptime fn List<T>->Type {T}
+        pure comptime fn Tuple<...Es:List<Type>>->Type {bool}
+        comptime fn select(...items:T)-><T -| value:T> where T {'<value>}
+        fn run()->bool {const p=select(true,'a');let ~<p> = (true,'a');let (flag,letter)=value;flag and letter == 'a'}";
+    let package = support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            meta_list: Some("input::List"),
+            tuple: Some("input::Tuple"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn pattern_variadic_inputs_collect_generic_fixed_and_empty_tuples() {
+    let source = "comptime fn select(...items:(bool,.u8'builtin))-><bool -| value:bool> {
+            let (flag,count)=items;let wanted=flag and count == 17;'<value if value == wanted>
+        }
+        fn run()->bool {const p=select(true,17);true match {~<p> => value,_ => false}}";
+    for call in [
+        "select(true,17)",
+        "select(...(true,17))",
+        "select(.items=(true,17))",
+        "select(...do {(true,17)})",
+    ] {
+        assert_eq!(
+            run(&source.replace("select(true,17)", call), "run", vec![]),
+            Value::Bool(true)
+        );
+    }
+    let source = "comptime fn select(...items:T)-><T -| value:T> where T {'<value>}
+        fn run()->bool {const p=select(true,'a');let ~<p> = (true,'a');let (flag,letter)=value;flag and letter == 'a'}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let empty = "comptime fn select(...items:T)-><bool -| value:bool> where T {'<value>}
+        fn run()->bool {let ~<select()> = true;value}";
+    assert_eq!(run(empty, "run", vec![]), Value::Bool(true));
+    let partial = "comptime fn select(...items:(T,.u8'builtin))-><T -| value:T> where T {'<value>}
+        fn run()->bool {let ~<select(true,17)> = true;value}";
+    assert_eq!(run(partial, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn pattern_variadic_inputs_preserve_source_order_defaults_and_live_aliases() {
+    let source = "typealias Count=.Integer'builtin;
+        comptime fn bump(count:*Count)->bool {count.*+=1;count.* == 2}
+        comptime fn select(...items:(*Count,bool,bool),.before:bool=false,.after:bool=false)-><bool -| value:bool> {
+            let (count,first,second)=items;let wanted=not before and first and not second and not after and count.* == 4;
+            count.*+=1;'<value if value == wanted>
+        }
+        comptime fn emit()-><|-bool> {
+            var count:Count=0;
+            const p=select(.before=bump(count.ref),count.ref,bump(count.ref),...do {(bump(count.ref),)},.after=bump(count.ref));
+            let complete=count == 5;'(complete and (true match {~<p> => value,_ => false}))
+        }
+        fn run()->bool {~<emit()>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn pattern_variadic_inputs_reject_wrong_shapes_and_code_collections() {
+    for call in [
+        "select(true)",
+        "select(true,false,true)",
+        "select(true,'a')",
+        "select(true,false,.items=(true,false))",
+    ] {
+        let source = format!(
+            "comptime fn select(...items:(bool,bool))-><bool -| value:bool> {{'<value>}}
+            fn run()->bool {{let ~<{call}> = true;value}}"
+        );
+        assert!(
+            support::compile_with_protocols(&source, &Default::default()).is_err(),
+            "{source}"
+        );
+    }
+    let invalid = "comptime fn select(...items:<bool -| value:bool>)-><bool -| value:bool> {items}";
+    assert!(support::compile_with_protocols(invalid, &Default::default()).is_err());
+}
+
+#[test]
+fn generator_pointer_range_snapshots_refresh_after_alias_writes() {
+    let source = "comptime fn build(count:*.u8'builtin,alias:*.u8'builtin)-><|-bool> {
+            assumes count.* < 255;count.*+=1;
+            alias.* = 254;
+            assumes count.* < 255;count.*+=1;
+            let correct=count.* == 255;'(correct)
+        }
+        comptime fn emit()-><|-bool> {var count:.u8'builtin=0;build(count.ref,count.ref)}
+        fn run()->bool {~<emit()>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("alias.* = 254", "alias.* = 255");
+    let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(!failure.contains("parsing failed"), "{failure}");
+    let invalid = source.replace(
+        "alias.* = 254;
+            assumes count.* < 255;count.*+=1;",
+        "do {alias.* = 255;count.*+=1;};",
+    );
+    let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(
+        failure.contains("range is not proven") || failure.contains("overflow"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn pattern_generator_live_aggregates_keep_comptime_callbacks_and_pointer_identity() {
+    let source = "typealias Count=.Integer'builtin;
+        comptime fn bump(count:*Count)->bool {count.*+=1;count.* == 1}
+        comptime fn select(input:(*Count,comptime fn(*Count)->bool))-><bool -| value:bool> {
+            let (count,action)=input;let wanted=action(count);'<value if value == wanted>
+        }
+        comptime fn emit()-><|-bool> {
+            var count:Count=0;const p=select(...do {((count.ref,bump),)});
+            let complete=count == 1;'(complete and (true match {~<p> => value,_ => false}))
+        }
+        fn run()->bool {~<emit()>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let invalid = source
+        .replace("comptime fn bump", "fn bump")
+        .replace("comptime fn(*Count)->bool", "fn(*Count)->bool");
+    let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(!failure.contains("parsing failed"), "{failure}");
+}
+
+#[test]
+fn pattern_generator_live_pointer_inputs_preserve_aliases_defaults_and_spreads() {
+    let source =
+        "comptime fn select(count:*.u8'builtin,.alias:*.u8'builtin=count)-><bool -| value:bool> {
+            assumes count.* < 250;count.*+=1;
+            assumes alias.* < 250;alias.*+=1;
+            let wanted=count.* == 2;
+            '<value if value == wanted>
+        }
+        comptime fn forward(count:*.u8'builtin)-><bool -| value:bool> {select(count)}
+        comptime fn emit(flag:bool)-><|-bool> {
+            var count:.u8'builtin=0;
+            const p=forward(count.ref);
+            const q=select(...do {(count.ref,)});
+            let total=count == 4;
+            const selected:<bool -| value:bool> = if flag {p} else {q};
+            '(total and (flag match {~<selected> => value == flag,_ => false}))
+        }
+        fn run()->bool {~<emit(true)> and ~<emit(false)>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let explicit = source.replace("select(count)}", "select(count,.alias=count)}");
+    assert_eq!(run(&explicit, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn pattern_generator_live_inputs_support_entry_and_exit_contracts() {
+    let source = "comptime fn select(count:*.u8'builtin)-><bool -| value:bool>
+        where requires count.* == 0, ensures count.* == 1 {
+            assumes count.* < 255;count.*+=1;'<value>
+        }
+        comptime fn emit()-><|-bool> {
+            var count:.u8'builtin=0;const p=select(count.ref);
+            '(true match {~<p> => value})
+        }
+        fn run()->bool {~<emit()>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    for (invalid, message) in [
+        (
+            source.replace("requires count.* == 0", "requires count.* == 1"),
+            "precondition rejected",
+        ),
+        (
+            source.replace("ensures count.* == 1", "ensures count.* == 0"),
+            "postcondition rejected",
+        ),
+    ] {
+        let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+        assert!(failure.contains(message), "{failure}");
+    }
+}
+
+#[test]
+fn pattern_generator_live_inputs_cannot_escape_into_runtime_guards() {
+    let source = "comptime fn select(count:*.u8'builtin)-><bool -| value:bool> {
+            '<value if count.* == 0>
+        }
+        comptime fn emit()-><|-bool> {
+            var count:.u8'builtin=0;const p=select(count.ref);
+            '(true match {~<p> => value,_=>false})
+        }
+        fn run()->bool {~<emit()>}";
+    let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(!failure.contains("parsing failed"), "{failure}");
+    assert!(
+        failure.contains("pointer") || failure.contains("storage") || failure.contains("capture"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn pattern_spreads_preserve_phase_and_code_evidence_boundaries() {
+    for source in [
+        "fn packet()->(bool,bool) {(true,false)}
+         comptime fn select(first:bool,second:bool)-><bool -| value:bool> {'<value>}
+         fn run()->bool {let ~<select(...packet())> = true;value}",
+        "comptime fn packet()->(bool,bool) {(true,false)}
+         comptime fn select(first:<bool -| value:bool>,second:bool)-><bool -| value:bool> {first}
+         fn run()->bool {let ~<select(...packet())> = true;value}",
+    ] {
+        assert!(
+            support::compile_with_protocols(source, &Default::default()).is_err(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn pattern_generator_spreads_accept_literal_code_and_completed_data_packets() {
+    for packet in ["(true,false)", "packet()", "do {let p=packet();p}"] {
+        let source = format!(
+            "comptime fn packet()->(bool,bool) {{(true,false)}}
+            comptime fn select(first:T,second:T,.copy:T=first)-><T -| value:T> where T {{'<value>}}
+            fn run()->bool {{const p=select(...{packet});let ~<p> = true;value}}"
+        );
+        assert_eq!(run(&source, "run", vec![]), Value::Bool(true));
+    }
+    let source = "comptime fn choose(p:<bool -| value:bool>,flag:bool)-><bool -| value:bool> {p}
+        fn run()->bool {const p=choose(...('<value>,true));let ~<p> = true;value}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn pattern_generator_spread_packets_execute_once_in_source_order_including_empty() {
+    let source = "comptime fn bump(count:*.u8'builtin)->bool {
+            assumes count.* < 255;count.*+=1;count.* == 2
+        }
+        comptime fn packet(count:*.u8'builtin)->(bool,bool) {(bump(count),bump(count))}
+        pure comptime fn collect(...items:T)->T where T {items}
+        comptime fn select(first:bool,second:bool,.before:bool=false,.after:bool=false)-><bool -| value:bool>
+            where requires not before and not first and not second and not after {'<value>}
+        comptime fn emit()-><|-bool> {
+            var count:.u8'builtin=0;
+            let empty=collect();
+            const p=select(.before=bump(count.ref),...do {bump(count.ref);empty},...packet(count.ref),.after=bump(count.ref));
+            let total=count == 5;
+            '(total and (true match {~<p> => value}))
+        }
+        fn run()->bool {~<emit()>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn pattern_generator_spread_packets_receive_destination_type_context() {
+    let source = "comptime fn select(first:.u8'builtin,second:.u8'builtin)-><bool -| value:bool>
+        where requires first == 1 and second == 2 {'<value>}
+        fn run()->bool {let ~<select(...do {(1,2)})> = true;value}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn pattern_generator_spreads_reject_wrong_shapes_and_duplicate_supply() {
+    for call in [
+        "select(...true)",
+        "select(...(true,))",
+        "select(...(true,false,true))",
+        "select(...(true,false),.first=true)",
+    ] {
+        let source = format!(
+            "comptime fn select(first:bool,second:bool)-><bool -| value:bool> {{'<value>}}
+            fn run()->bool {{let ~<{call}> = true;value}}"
+        );
+        assert!(
+            support::compile_with_protocols(&source, &Default::default()).is_err(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn pattern_type_defaults_preserve_normal_form_heads_and_default_chains() {
+    let source = "pure comptime fn Identity<T>->.Type'builtin {T}
+        comptime fn binding(input:T)-><V -| value:V>
+            where T,.U:.Type'builtin=Identity<T>,.V:.Type'builtin=U {'<value>}
+        fn keep(input:Identity<bool>)->Identity<bool> {
+            const p=binding(true);let ~<p> = input;value
+        }";
+    support::compile(source);
+    let invalid = source.replace("let ~<p> = input", "let ~<p> = true");
+    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    let source = "comptime fn binding(input:T)-><V -| value:V>
+        where T,.U:.Type'builtin=T,.V:.Type'builtin=U {'<value>}
+        fn run()->bool {let ~<binding(true)> = true;value}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn pattern_generator_type_defaults_support_named_overrides_and_dependencies() {
+    let source = "comptime fn binding()-><T -| value:T> where .T:.Type'builtin=bool {'<value>}
+        fn run()->bool {
+            const p=binding();let ~<p> = true;let first=value;
+            const q=binding<.T=.char'builtin>();let ~<q> = 'a';
+            first and value == 'a'
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let dependent = "comptime fn binding(input:T)-><U -| value:U>
+        where T,.U:.Type'builtin=T {'<value>}
+        fn run()->bool {const p=binding(true);let ~<p> = false;not value}";
+    assert_eq!(run(dependent, "run", vec![]), Value::Bool(true));
+    let forwarding = "comptime fn forward(input:T)-><T -| value:T> where T {binding(input)}
+        comptime fn binding(input:T)-><U -| value:U> where T,.U:.Type'builtin=T {'<value>}
+        fn run()->bool {let ~<forward(true)> = true;value}";
+    assert_eq!(run(forwarding, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace(
+        "const p=binding();let ~<p> = true;let first=value;",
+        "const p=binding();let ~<p> = 'a';let first=true;",
+    );
+    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+}
+
+#[test]
+fn pattern_generator_type_defaults_are_checked_and_constrained() {
+    for source in [
+        "comptime fn binding()-><T -| value:T> where .T:.Type'builtin=T {'<value>}",
+        "comptime fn binding()-><T -| value:T> where .T:.Type'builtin=U,.U:.Type'builtin=bool {'<value>}",
+        "comptime fn binding()-><T -| value:T> where .T:.Type'builtin=true {'<value>}",
+    ] {
+        assert!(
+            support::compile_with_protocols(source, &Default::default()).is_err(),
+            "{source}"
+        );
+    }
+    let source = "trait Allowed {} impl Allowed for bool {}
+        comptime fn binding()-><T -| value:T> where .T:.Type'builtin=bool, requires T :- Allowed {'<value>}
+        fn run()->bool {let ~<binding()> = true;value}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("binding()>", "binding<.T=.char'builtin>()>");
+    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+}
+
+#[test]
+fn pattern_generator_output_names_do_not_depend_on_declaration_order() {
+    for source in [
+        "fn run()->bool {let ~<binding()> = true;value}
+         comptime fn binding()-><bool -| value:bool> {'<value>}",
+        "fn run()->bool {const p=binding<bool>();const alias=p;let ~<alias> = true;value}
+         comptime fn binding()-><T -| value:T> where T {'<value>}",
+        "fn run()->bool {let ~[left=first]<pair()> = (true,false);first and not right}
+         comptime fn pair()-><(bool,bool) -| left:bool,right:bool> {'<(left,right)>}",
+        "fn run()->bool {let ~<forward()> = true;value}
+         comptime fn forward()-><bool -| value:bool> {'<~<binding()>>}
+         comptime fn binding()-><bool -| value:bool> {'<value>}",
+        "fn run()->bool {let ~<later.binding()> = true;value}
+         mod later {pub comptime fn binding()-><bool -| value:bool> {'<value>}}",
+        "use later.binding;
+         fn run()->bool {let ~<binding()> = true;value}
+         mod later {pub comptime fn binding()-><bool -| value:bool> {'<value>}}",
+    ] {
+        assert_eq!(run(source, "run", vec![]), Value::Bool(true), "{source}");
+    }
+}
+
+#[test]
+fn forward_pattern_output_metadata_does_not_bypass_interface_checks() {
+    for source in [
+        "fn run()->bool {let ~<binding()> = true;value}
+         comptime fn binding()-><bool -| value:bool> {'<_>}",
+        "fn run()->bool {let ~<binding()> = true;value}
+         comptime fn binding()-><bool -| value:char> {'<value>}",
+        "fn run()->bool {let ~[left=right]<pair()> = (true,false);right}
+         comptime fn pair()-><(bool,bool) -| left:bool,right:bool> {'<(left,right)>}",
+    ] {
+        assert!(
+            support::compile_with_protocols(source, &Default::default()).is_err(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn pattern_generator_contracts_guard_defaults_forwarding_and_all_returns() {
+    for body in [
+        "'<value>",
+        "return '<value>;",
+        "if allowed {return '<value>;} else {return '<value>;}",
+        "while true {return '<value>;}",
+    ] {
+        let source = format!(
+            "comptime fn binding(allowed:bool,.copy:bool=allowed)-><T -| value:T>
+            where T, requires allowed, ensures copy and allowed == allowed'old {{{body}}}
+            comptime fn forward(allowed:bool)-><bool -| value:bool> {{binding(allowed)}}
+            fn run()->bool {{let ~<forward(true)> = true;value}}"
+        );
+        assert_eq!(run(&source, "run", vec![]), Value::Bool(true));
+        for (invalid, diagnostic) in [
+            (
+                source.replace("forward(true)", "forward(false)"),
+                "precondition rejected",
+            ),
+            (
+                source.replace("binding(allowed)", "binding(allowed,.copy=false)"),
+                "postcondition rejected",
+            ),
+        ] {
+            let failure =
+                support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+            assert!(failure.contains(diagnostic), "{failure}");
+        }
+    }
+}
+
+#[test]
+fn pattern_generator_contracts_check_unused_definitions_and_phase_boundaries() {
+    let source = "comptime fn binding(allowed:bool)-><bool -| value:bool>
+        where ensures not allowed {while true {}}
+        fn run()->bool {true}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    for invalid in [
+        source.replace("ensures not allowed", "ensures 'x'"),
+        source.replace("ensures not allowed", "requires value"),
+        format!(
+            "fn runtime(x:bool)->bool {{x}} {}",
+            source.replace("ensures not allowed", "requires runtime(allowed)")
+        ),
+    ] {
+        assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+    let invalid = source.replace("{true}", "{let ~<binding(true)> = true;value}");
+    let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(failure.contains("budget"), "{failure}");
+    assert!(!failure.contains("postcondition rejected"), "{failure}");
+}
+
+#[test]
+fn pattern_generator_preconditions_precede_body_and_preserve_type_constraints() {
+    let source = "comptime fn binding(allowed:bool)-><T -| value:T>
+        where T, requires T == bool, requires allowed {while true {}}
+        fn run()->bool {let ~<binding(false)> = true;value}";
+    let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(failure.contains("precondition rejected"), "{failure}");
+    assert!(!failure.contains("budget"), "{failure}");
+    let source = source
+        .replace("while true {}", "'<value>")
+        .replace("binding(false)", "binding(true)");
+    assert_eq!(run(&source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("binding(true)", "binding<.char'builtin>(true)");
+    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+}
+
+#[test]
+fn inferred_pattern_subjects_still_check_bounds_and_opaque_heads() {
+    let source = "trait Allowed {} impl Allowed for bool {}
+        comptime fn binding()-><T -| value:T> where T :- Allowed {'<value>}
+        fn run()->bool {let ~<binding()> = true;value}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("= true;value", "= 'a';true");
+    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    let opaque = "pure comptime fn Identity<T>->.Type'builtin {T}
+        comptime fn binding()-><T -| value:T> where T {'<value>}
+        fn keep(input:Identity<bool>)->Identity<bool> {let ~<binding()> = input;value}";
+    support::compile(opaque);
+    let invalid = opaque.replace("~<binding()>", "~<binding<bool>()>");
+    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+}
+
+#[test]
+fn pattern_generator_subject_context_infers_missing_type_arguments() {
+    let source = "comptime fn binding()-><T -| value:T> where T {'<value>}
+        comptime fn forwarded()-><T -| value:T> where T {binding()}
+        fn run()->bool {
+            let ~<binding()> = true;
+            const p:<bool -| value:bool> = forwarded();
+            let a=value;
+            let ~<p> = false;
+            a and not value
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let tuple = "comptime fn pair()-><(T,bool) -| value:T,flag:bool> where T {'<(value,flag)>}
+        fn run()->bool {let ~<pair()> = (true,false);value and not flag}";
+    assert_eq!(run(tuple, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("~<binding()>", "~<binding<.char'builtin>()>");
+    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+}
+
+#[test]
+fn generic_pattern_generators_enforce_bounds_and_opaque_heads() {
+    let source = "trait Allowed {} impl Allowed for bool {}
+        comptime fn binding()-><T -| value:T> where T :- Allowed {'<value>}
+        fn run()->bool {const p=binding<bool>();let ~<p> = true;value}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("binding<bool>()", "binding<.char'builtin>()");
+    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    let opaque = "pure comptime fn Identity<T>->.Type'builtin {T}
+        comptime fn binding()-><T -| value:T> where T {'<value>}
+        comptime fn keep(p:<T -| value:T>)-><T -| value:T> where T {p}
+        fn run()->bool {const p=binding<Identity<bool>>();const q=keep(p);true}";
+    assert_eq!(run(opaque, "run", vec![]), Value::Bool(true));
+    let invalid = opaque.replace("keep(p)", "keep<bool>(p)");
+    let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(!failure.contains("parsing failed"), "{failure}");
+    let data = "comptime fn binding(input:T)-><T -| value:T> where T {'<value>}
+        fn run()->bool {const p=binding(true);let ~<p> = false;not value}";
+    assert_eq!(run(data, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn generic_pattern_generators_infer_subject_and_preserve_type_identity() {
+    let source = "comptime fn binding()-><T -| value:T> where T {'<value>}
+        comptime fn keep(p:<T -| value:T>)-><T -| value:T> where T {p}
+        comptime fn pair(p:<T -| value:T>)-><(T,bool) -| value:T,flag:bool> where T {'<(~<p>,flag)>}
+        fn run()->bool {
+            const base=binding<bool>();const copied=keep(base);const pair=pair(copied);
+            let ~<pair> = (true,false);
+            value and not flag
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let explicit = source
+        .replace("keep(base)", "keep<bool>(base)")
+        .replace("pair(copied)", "pair<bool>(copied)");
+    assert_eq!(run(&explicit, "run", vec![]), Value::Bool(true));
+    let nested = source
+        .replace(
+            "fn run()",
+            "comptime fn forward(p:<T -| value:T>)-><T -| value:T> where T {keep(p)} fn run()",
+        )
+        .replace("const copied=keep(base)", "const copied=forward(base)");
+    assert_eq!(run(&nested, "run", vec![]), Value::Bool(true));
+    for invalid in [
+        source.replace("keep(base)", "keep<.char'builtin>(base)"),
+        source.replace("binding<bool>()", "binding<bool,bool>()"),
+        source.replace("binding<bool>()", "binding()"),
+    ] {
+        let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+        assert!(!failure.contains("parsing failed"), "{failure}");
+    }
+}
+
+#[test]
+fn pattern_generators_default_data_and_code_from_previous_parameters() {
+    let source="comptime fn choose(first:bool,.second:bool=first,.p:<bool -| value:bool> = '<value if value == second>)-><bool -| value:bool> {p}
+        fn run()->bool {
+            const yes=choose(true);const no=choose(true,.second=false);
+            const overridden=choose(false,.p='<true as value>);
+            let a=true match {~<yes> => value,_ => false};
+            let b=false match {~<no> => not value,_ => false};
+            let c=true match {~<overridden> => value,_ => false};
+            a and b and c
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let implicit = source
+        .replace("first:bool,", "implicit first:bool,")
+        .replace("choose(true", "choose(.first=true")
+        .replace("choose(false", "choose(.first=false");
+    assert_eq!(run(&implicit, "run", vec![]), Value::Bool(true));
+    for invalid in [
+        source.replace("choose(true);", "choose();"),
+        source.replace("choose(true);", "choose(true,.second=false,.second=true);"),
+        source.replace("choose(true);", "choose(true,.missing=true);"),
+        source.replace(".second:bool=first", ".second:bool='x'"),
+    ] {
+        let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+        assert!(!failure.contains("parsing failed"), "{failure}");
+    }
+}
+
+#[test]
+fn pattern_generator_named_inputs_evaluate_in_source_order() {
+    let source = "comptime fn bump(count:*.u8'builtin)->bool {
+            assumes count.* < 255;count.*+=1;count.* == 2
+        }
+        comptime fn choose(.first:bool=false,.second:bool=true)-><bool -| value:bool> {
+            '<value if value == (first and not second)>
+        }
+        comptime fn emit()-><|-bool> {
+            var count:.u8'builtin=0;
+            const pattern=choose(.second=bump(count.ref),.first=bump(count.ref));
+            '(true match {~<pattern> => value,_ => false})
+        }
+        fn run()->bool {~<emit()>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn pattern_generator_explicit_override_skips_divergent_defaults() {
+    let source="comptime fn never()->bool {while true {} false}
+        comptime fn choose(.flag:bool=never(),.p:<bool -| value:bool> = '<value if value == flag>)-><bool -| value:bool> {p}
+        fn run()->bool {const p=choose(.flag=true);true match {~<p> => value,_ => false}}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("comptime fn never()", "fn never()");
+    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+}
+
+#[test]
+fn expression_generators_accept_pattern_arguments_and_infer_their_subject() {
+    let source = "comptime fn matcher(p:<bool -| value:bool>)-><input:bool|-bool> {
+        '(input match {~<p> => value,_ => not input})
+    }
+    comptime fn forward(p:<bool -| value:bool>)-><input:bool|-bool> {matcher(p)}
+    fn run()->bool {
+        const yes=forward('<true as value>);const no=forward('<false as value>);
+        let t=true;let f=false;
+        ~[input=t]<yes> and not ~[input=f]<no> and ~[input=f]<yes> and not ~[input=t]<no>
+    }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let generic = "comptime fn accepts(p:<T -| value:T>)-><input:T|-bool> where T {
+            '(input match {~<p> => true,_ => false})
+        }
+        fn run()->bool {
+            const p:<bool -| value:bool> = '<true as value>;
+            const code=accepts(p);let t=true;let f=false;
+            ~[input=t]<code> and not ~[input=f]<code>
+        }";
+    assert_eq!(run(generic, "run", vec![]), Value::Bool(true));
+    for invalid in [
+        source.replace("forward('<true as value>)", "forward(true)"),
+        source.replace("'<true as value>", "'<true as missing>"),
+        source.replace("p:<bool -| value:bool>", "p:<bool -| value:.char'builtin>"),
+    ] {
+        let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+        assert!(!failure.contains("parsing failed"), "{failure}");
+    }
+}
+
+#[test]
+fn pattern_arguments_support_defaults_and_explicit_override() {
+    let source =
+        "comptime fn matcher(.p:<bool -| value:bool> = '<true as value>)-><input:bool|-bool> {
+        '(input match {~<p> => true,_ => false})
+    }
+    fn run()->bool {
+        const yes=matcher();const no=matcher(.p='<false as value>);
+        let t=true;let f=false;
+        ~[input=t]<yes> and ~[input=f]<no> and not ~[input=f]<yes>
+    }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let prior = source
+        .replace(
+            ".p:<bool -| value:bool> = '<true as value>",
+            ".p:<bool -| value:bool> = '<true as value>,.q:<bool -| value:bool> = p",
+        )
+        .replace("~<p>", "~<q>");
+    assert_eq!(run(&prior, "run", vec![]), Value::Bool(true));
+    let overridden="comptime fn never()-><bool -| value:bool> {while true {}}
+        comptime fn matcher(.p:<bool -| value:bool> = never())-><input:bool|-bool> {
+            '(input match {~<p> => true,_ => false})
+        }
+        fn run()->bool {const code=matcher(.p='<true as value>);let value=true;~[input=value]<code>}";
+    assert_eq!(run(overridden, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn pattern_parameter_output_names_enter_scope_only_after_splice() {
+    let source = "comptime fn guarded(p:<bool -| p:bool>)-><bool -| p:bool> {'<~<p> if p>}
+        fn run()->bool {const pattern=guarded('<p>);true match {~<pattern> => p,_ => false}}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let invalid = "comptime fn bad(p:<bool -| value:bool>)-><bool -|> {'<true if value>}";
+    let failure = support::compile_with_protocols(invalid, &Default::default()).unwrap_err();
+    assert!(
+        failure.contains("Unresolved identifier `value`"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn pattern_parameter_default_outputs_survive_aliases_and_partial_connections() {
+    let source="comptime fn guarded(p:<(bool,bool) -| left:bool,right:bool>)-><(bool,bool) -| left:bool,right:bool> {
+        const alias=p;
+        '<~<alias> if left != right>
+    }
+    comptime fn renamed(p:<(bool,bool) -| left:bool,right:bool>)-><(bool,bool) -| first:bool,right:bool> {
+        '<~[left=first]<p>>
+    }
+    fn run()->bool {
+        const base:<(bool,bool) -| left:bool,right:bool> = '<(left,right)>;
+        const p=guarded(base);const q=renamed(base);
+        let left=false;let right=true;
+        let a=(true,false) match {~<p> => left and not right,_ => false};
+        let b=(false,true) match {~<p> => not left and right,_ => false};
+        let c=(true,true) match {~<p> => true,_ => false};
+        let ~<q> = (true,false);
+        a and b and not c and first and not right and not left
+    }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let direct = source.replace("~<alias>", "~<p>");
+    assert_eq!(run(&direct, "run", vec![]), Value::Bool(true));
+    let duplicate = source.replace("~[left=first]<p>", "~[left=right]<p>");
+    let failure = support::compile_with_protocols(&duplicate, &Default::default()).unwrap_err();
+    assert!(failure.contains("duplicate pattern binding"), "{failure}");
+}
+
+#[test]
+fn expression_quotes_match_abstract_pattern_code_with_failure_paths() {
+    let source =
+        "comptime fn matching(expected:bool)-><bool -| value:bool> {'<value if value == expected>}
+        comptime fn emit(expected:bool)-><input:bool|-bool> {
+            const p=matching(expected);
+            '(input match {~<p> => value,_ => not input})
+        }
+        fn run()->bool {
+            const yes=emit(true);const no=emit(false);let t=true;let f=false;
+            let a=~[input=t]<yes>;
+            let b=~[input=f]<no>;
+            let c=~[input=f]<yes>;
+            let d=~[input=t]<no>;
+            a and not b and c and not d
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let direct = source.replace("~<p>", "~[value=value]<matching(expected)>");
+    assert_eq!(run(&direct, "run", vec![]), Value::Bool(true));
+    let otherwise=source.replace("'(input match {~<p> => value,_ => not input})",
+        "'(do {var result=false;while true {let ~<p> = input else {result=not input;break;};result=value;break;}result})");
+    assert_eq!(run(&otherwise, "run", vec![]), Value::Bool(true));
+    let closure = source.replace(
+        "'(input match {~<p> => value,_ => not input})",
+        "'((|| {let ~<p> = input else {return not input;};value})())",
+    );
+    assert_eq!(run(&closure, "run", vec![]), Value::Bool(true));
+    for invalid in [
+        source.replace(",_ => not input", ""),
+        source.replace("~<p> => value", "~<p> => 'x'"),
+    ] {
+        let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+        assert!(!failure.contains("parsing failed"), "{failure}");
+    }
+}
+
+#[test]
+fn pattern_code_composition_preserves_nested_nominal_matching() {
+    let source = "enum Boxed {item(bool),empty}
+        comptime fn matching(expected:bool)-><bool -| value:bool> {'<value if value == expected>}
+        comptime fn boxed(p:<bool -| value:bool>)-><Boxed -| value:bool> {
+            '<.item(~[value=value]<p>)>
+        }
+        comptime fn build(expected:bool)-><Boxed -| value:bool> {boxed(matching(expected))}
+        fn run()->bool {
+            const yes=build(true);const no=build(false);
+            let a=Boxed.item(true) match {~<yes> => value,_ => false};
+            let b=Boxed.item(false) match {~<no> => not value,_ => false};
+            let c=Boxed.empty match {~<yes> => true,_ => false};
+            a and b and not c
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let missing = source.replace("~<yes> => value,_ => false", "~<yes> => value");
+    assert!(support::compile_with_protocols(&missing, &Default::default()).is_err());
+}
+
+#[test]
+fn abstract_pattern_arguments_compose_inside_pattern_quotes() {
+    let source =
+        "comptime fn matching(expected:bool)-><bool -| value:bool> {'<value if value == expected>}
+        comptime fn pair(p:<bool -| value:bool>)-><(bool,bool) -| left:bool,right:bool> {
+            '<(~[value=left]<p>,right)>
+        }
+        comptime fn choose(expected:bool)-><(bool,bool) -| left:bool,right:bool> {
+            pair(matching(expected))
+        }
+        fn run()->bool {
+            const yes=choose(true);const no=choose(false);
+            let a=(true,false) match {~<yes> => left and not right,_ => false};
+            let b=(false,true) match {~<no> => not left and right,_ => false};
+            let c=(false,true) match {~<yes> => true,_ => false};
+            a and b and not c
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let guarded = source.replace(
+        "'<(~[value=left]<p>,right)>",
+        "'<(~[value=left]<p>,right) if left != right>",
+    );
+    assert_eq!(run(&guarded, "run", vec![]), Value::Bool(true));
+    let renamed = source.replace(
+        "'<(~[value=left]<p>,right)>",
+        "'[left=first,right=second]<(~[value=first]<p>,second)>",
+    );
+    assert_eq!(run(&renamed, "run", vec![]), Value::Bool(true));
+    let two = source.replace(
+        "'<(~[value=left]<p>,right)>",
+        "'<(~[value=left]<p>,~[value=right]<p>)>",
+    );
+    let failure = support::compile_with_protocols(&two, &Default::default()).unwrap_err();
+    assert!(failure.contains("at most one splice"), "{failure}");
+    for invalid in [
+        source.replace("~[value=left]<p>", "~[missing=left]<p>"),
+        source.replace("left:bool,right:bool", "left:.char'builtin,right:bool"),
+    ] {
+        let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+        assert!(!failure.contains("parsing failed"), "{failure}");
+    }
+}
+
+#[test]
+fn conditional_pattern_code_bindings_select_success_and_failure_witnesses() {
+    let source="comptime fn choose(flag:bool)-><bool -| value:bool> {
+        const input:<bool -| value:bool> = '<true as value>;let chosen if flag = input else {return '<false as value>;};
+        chosen
+    }
+    fn run()->bool {
+        const yes=choose(true);const no=choose(false);
+        let a=true match {~<yes> => value,_ => false};
+        let b=false match {~<no> => not value,_ => false};
+        a and b
+    }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let shadow = source
+        .replace(
+            "let chosen if flag",
+            "const chosen:<bool -| value:bool> = '<false as value>;let chosen if flag",
+        )
+        .replace("else {return '<false as value>;}", "else {return chosen;}");
+    assert_eq!(run(&shadow, "run", vec![]), Value::Bool(true));
+    for invalid in [
+        source.replace("else {return '<false as value>;}", "else {}"),
+        source.replace(
+            "else {return '<false as value>;}",
+            "else {return '<(true,false) as value>;}",
+        ),
+        source.replace("else {return '<false as value>;}", "else {return chosen;}"),
+    ] {
+        let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+        assert!(!failure.contains("parsing failed"), "{failure}");
+    }
+}
+
+#[test]
+fn conditional_pattern_code_initializers_and_guards_run_once_in_order() {
+    let source="comptime fn bump(count:*.u8'builtin)->bool {assumes count.* < 255;count.* += 1;count.* == 1}
+        comptime fn produce(expected:bool)-><bool -| value:bool> {'<value if value == expected>}
+        comptime fn choose()-><bool -| value:bool> {
+            var count:.u8'builtin=0;
+            let chosen if bump(count.ref) = produce(bump(count.ref)) else {
+                return produce(count == 2);
+            };
+            produce(false)
+        }
+        fn run()->bool {true match {~<choose()> => value,_ => false}}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn pattern_code_initializers_arguments_and_assignments_accept_control_values() {
+    let source="comptime fn keep(p:<bool -| value:bool>)-><bool -| value:bool> {p}
+        comptime fn choose(flag:bool)-><bool -| value:bool> {
+            var p:<bool -| value:bool> = if flag {'<true as value>} else {'<false as value>};
+            p=when {flag => '<true as value>,else => '<false as value>};
+            keep(if flag {p} else {'<false as value>})
+        }
+        fn run()->bool {
+            const yes=choose(true);const no=choose(false);
+            const direct:<bool -| value:bool> = true match {true => '<true as value>,false => '<false as value>};
+            let a=true match {~<yes> => value,_ => false};
+            let b=false match {~<no> => not value,_ => false};
+            let c=true match {~<direct> => value,_ => false};
+            a and b and c
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let inline = source
+        .replace("p=when", "p=inline when")
+        .replace("keep(if flag", "keep(inline if flag");
+    assert_eq!(run(&inline, "run", vec![]), Value::Bool(true));
+    let nested=source.replace("= if flag {'<true as value>} else {'<false as value>};",
+        "= do {const first:<bool -| value:bool> = '<true as value>;if flag {first} else {'<false as value>}};");
+    assert_eq!(run(&nested, "run", vec![]), Value::Bool(true));
+    for invalid in [
+        source.replace("else => '<false as value>", "else => '<false as missing>"),
+        source.replace(",else => '<false as value>", ""),
+        source
+            .replace(
+                "const direct:<bool -| value:bool> = true match",
+                "const direct:<bool -| value:bool> = runtime_flag() match",
+            )
+            .replace("fn run()", "fn runtime_flag()->bool {true} fn run()"),
+    ] {
+        let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+        assert!(!failure.contains("parsing failed"), "{failure}");
+    }
+}
+
+#[test]
+fn pattern_when_checks_candidates_without_executing_unused_construction() {
+    let source = "comptime fn never()->bool {while true {} false}
+        comptime fn choose(flag:bool)-><bool -| value:bool> {
+            when {flag => '<true as value>,never() => '<false as value>,else => '<false as value>}
+        }
+        fn run()->bool {true match {~<choose(true)> => value,_ => false}}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace(
+        "else => '<false as value>",
+        "else => '<(true,false) as value>",
+    );
+    let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(!failure.contains("parsing failed"), "{failure}");
+}
+
+#[test]
+fn mutable_pattern_code_tracks_selected_writes_and_preserves_aliases() {
+    let source = "comptime fn choose(flag:bool,count:.u8'builtin)-><bool -| value:bool> {
+        var pattern:<bool -| value:bool> = '<false as value>;
+        const original=pattern;
+        var remaining=count;
+        while remaining > 0 {
+            remaining -= 1;
+            if flag {pattern='<true as value>;} else {pattern=original;}
+        }
+        pattern
+    }
+    fn run()->bool {
+        const zero=choose(true,0);const yes=choose(true,2);const no=choose(false,3);
+        let a=false match {~<zero> => not value,_ => false};
+        let b=true match {~<yes> => value,_ => false};
+        let c=false match {~<no> => not value,_ => false};
+        a and b and c
+    }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let captured = source.replace(
+        "pattern='<true as value>;",
+        "pattern='<value if value == flag>;",
+    );
+    assert_eq!(run(&captured, "run", vec![]), Value::Bool(true));
+    let alias = source
+        .replace(
+            "        pattern
+",
+            "        original
+",
+        )
+        .replace("let b=true match", "let b=false match")
+        .replace("~<yes> => value", "~<yes> => not value");
+    assert_eq!(run(&alias, "run", vec![]), Value::Bool(true));
+    for invalid in [
+        source.replace("var pattern:", "const pattern:"),
+        source.replace("pattern='<true as value>;", "pattern='<true as missing>;"),
+        source.replace("pattern='<true as value>;", "pattern=true;"),
+    ] {
+        let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+        assert!(!failure.contains("parsing failed"), "{failure}");
+    }
+}
+
+#[test]
+fn abstract_pattern_writes_do_not_prove_irrefutability() {
+    let source = "comptime fn emit(flag:bool)-><|-bool> {
+        var pattern:<bool -| value:bool> = '<value>;
+        if flag {pattern='<true as value>;}
+        '(do {let ~<pattern> = false;value})
+    }";
+    let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(
+        failure.contains("refutable let pattern requires a diverging else branch"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn pattern_generators_share_range_and_conditional_binding_control() {
+    let source = "comptime fn build()-><bool -| value:bool> {
+        var expected=false;
+        inline for index in 0..4 {
+            when {index == 0 => continue,index == 2 => break,else => {expected=true;}}
+        }
+        '<value if value == expected>
+    }
+    fn run()->bool {true match {~<build()> => value,_ => false}}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let early = source.replace(
+        "when {index == 0 => continue,index == 2 => break,else => {expected=true;}}",
+        "if index == 1 {return '<true as value>;} ",
+    );
+    assert_eq!(run(&early, "run", vec![]), Value::Bool(true));
+    let conditional = "enum Mode {enabled(bool),disabled}
+        comptime fn choose(mode:Mode)-><bool -| value:bool> {
+            let .enabled(expected)=mode else {return '<false as value>;};
+            '<value if value == expected>
+        }
+        fn run()->bool {
+            const yes=choose(Mode.enabled(true));const no=choose(Mode.disabled);
+            let a=true match {~<yes> => value,_ => false};
+            let b=false match {~<no> => not value,_ => false};
+            a and b
+        }";
+    assert_eq!(run(conditional, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn pattern_generators_run_stateful_loops_and_early_returns() {
+    let source = "comptime fn parity(count:.u8'builtin)-><bool -| value:bool> {
+        var remaining=count;var expected=true;
+        while remaining > 0 {
+            remaining -= 1;
+            expected = not expected;
+            if remaining > 0 {continue;}
+            break;
+        }
+        '<value if value == expected>
+    }
+    comptime fn choose(flag:bool)-><bool -| value:bool> {
+        while:outer true {
+            while true {
+                if flag {break outer;}
+                return '<false as value>;
+            }
+        }
+        return '<true as value>;
+    }
+    fn run()->bool {
+        const zero=parity(0);const odd=parity(3);const even=parity(4);
+        const yes=choose(true);const no=choose(false);
+        let a=true match {~<zero> => value,_ => false};
+        let b=false match {~<odd> => not value,_ => false};
+        let c=true match {~<even> => value,_ => false};
+        let d=true match {~<yes> => value,_ => false};
+        let e=false match {~<no> => not value,_ => false};
+        a and b and c and d and e
+    }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let records = source
+        .replace(
+            "var remaining=count;var expected=true;",
+            "let state=State{remaining:count,expected:true};",
+        )
+        .replace("remaining >", "state.remaining >")
+        .replace("remaining -=", "state.remaining -=")
+        .replace(
+            "expected = not expected",
+            "state.expected = not state.expected",
+        )
+        .replace("value == expected", "value == state.expected");
+    assert_eq!(
+        run(
+            &format!("struct State {{remaining:.u8'builtin,expected:bool}} {records}"),
+            "run",
+            vec![]
+        ),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn pattern_generator_flow_requires_results_on_all_finite_exits() {
+    for source in [
+        "comptime fn bad(flag:bool)-><bool -|> {if flag {return '<true>;};}",
+        "comptime fn bad(flag:bool)-><bool -|> {while flag {return '<true>;}}",
+        "comptime fn bad(flag:bool)-><bool -|> {while true {if flag {break;}return '<true>;}}",
+        "comptime fn bad()-><bool -|> {while false {return '<(true,false)>;}return '<true>;}",
+        "comptime fn bad()-><bool -|> {while true {} return '<(true,false)>;}",
+    ] {
+        let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+        assert!(!failure.contains("parsing failed"), "{source}: {failure}");
+    }
+    let source = "comptime fn forever()-><bool -|> {while true {}}
+        comptime fn choose(flag:bool)-><bool -|> {
+            while true {if flag {return '<true>;}return '<false>;}
+        }
+        fn run()->bool {true match {~<choose(true)> => true,_ => false}}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn abstract_pattern_parameters_preserve_interfaces_and_phase_boundaries() {
+    for source in [
+        "comptime fn wrong(p:<bool -| value:bool>)-><.char'builtin -| value:bool> {p}",
+        "comptime fn wrong(p:<bool -| value:bool>)-><bool -| other:bool> {p}",
+        "comptime fn wrong(p:<bool -| value:bool>)-><bool -| value:bool> {let ~[value=value]<p> = true;p}",
+        "comptime fn wrong(p:<bool -| value:bool>)-><bool -| value:bool> {const code='(do {let ~[value=value]<p> = false;value});p}",
+    ] {
+        let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+        assert!(!failure.contains("parsing failed"), "{source}: {failure}");
+    }
+    let source = "comptime fn keep(p:<bool -| value:bool>)-><bool -| value:bool> {p}
+        fn run(flag:bool)->bool {const p=keep('<value if value == flag>);true}";
+    let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(failure.contains("capture runtime inputs"), "{failure}");
+}
+
+#[test]
+fn pattern_generators_accept_and_forward_pattern_code_arguments() {
+    let source = "comptime fn select(flag:bool, yes:<bool -| value:bool>, no:<bool -| value:bool>)-><bool -| value:bool> {
+        if flag {yes} else {const alias=no;alias}
+    }
+    comptime fn forward(flag:bool, yes:<bool -| value:bool>, no:<bool -| value:bool>)-><bool -| value:bool> {
+        select(flag,yes,no)
+    }
+    comptime fn matching(expected:bool)-><bool -| value:bool> {'<value if value == expected>}
+    fn run()->bool {
+        const yes=forward(true,matching(true),matching(false));
+        const no=forward(false,'<true as value>,'<false as value>);
+        let a=true match {~<yes> => value,_ => false};
+        let b=false match {~<no> => not value,_ => false};
+        let c=false match {~<yes> => true,_ => false};
+        a and b and not c
+    }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let alias = source.replace(
+        "const yes=forward(true,matching(true),matching(false));",
+        "const p=matching(true);const q=matching(false);const yes=forward(true,p,q);",
+    );
+    assert_eq!(run(&alias, "run", vec![]), Value::Bool(true));
+    for invalid in [
+        source.replace(
+            "forward(true,matching(true),matching(false))",
+            "forward(true,true,matching(false))",
+        ),
+        source.replace("'<false as value>", "'<false as other>"),
+        source.replace(
+            "no:<bool -| value:bool>",
+            "no:<bool -| value:.char'builtin>",
+        ),
+    ] {
+        let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+        assert!(!failure.contains("parsing failed"), "{failure}");
+    }
+}
+
+#[test]
+fn expression_generators_can_bind_and_splice_local_pattern_code() {
+    let source = "comptime fn emit()-><|-bool> {
+        const pattern:<bool -| value:bool> = '<value>;
+        const alias=pattern;
+        '(do {let ~<alias> = true;value})
+    }
+    fn run()->bool {~<emit()>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let generator = source.replace(
+        "comptime fn emit()",
+        "comptime fn binding()-><bool -| value:bool> {const p:<bool -| value:bool> = '<value>;p} comptime fn emit()",
+    ).replace("const pattern:<bool -| value:bool> = '<value>;", "const pattern=binding();");
+    assert_eq!(run(&generator, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn pattern_generators_store_alias_and_return_local_code() {
+    let source = "comptime fn matching(expected:bool)-><bool -| value:bool> {
+            const pattern:<bool -| value:bool> = '<value if value == expected>;
+            const alias=pattern;
+            alias
+        }
+        comptime fn forward(expected:bool)-><bool -| value:bool> {
+            const pattern=matching(expected);
+            if expected {const alias=pattern;return alias;} else {pattern}
+        }
+        fn run()->bool {
+            const yes=forward(true);const no=forward(false);
+            let a=true match {~<yes> => value,_ => false};
+            let b=false match {~<no> => not value,_ => false};
+            let c=false match {~<yes> => true,_ => false};
+            a and b and not c
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let shadow = "comptime fn choose(flag:bool)-><bool -| value:bool> {
+        const pattern:<bool -| value:bool> = '<true as value>;
+        if flag {const pattern:<bool -| value:bool> = '<false as value>;pattern}
+        else {pattern}
+    }
+    fn run()->bool {
+        const yes=choose(true);const no=choose(false);
+        let a=false match {~<yes> => not value,_ => false};
+        let b=true match {~<no> => value,_ => false};
+        a and b
+    }";
+    assert_eq!(run(shadow, "run", vec![]), Value::Bool(true));
+    for invalid in [
+        source.replace(
+            "const alias=pattern;",
+            "const alias:<bool -| missing:bool> = pattern;",
+        ),
+        source.replace("const alias=pattern;", "const alias=expected;"),
+    ] {
+        assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn pattern_generators_match_data_and_lift_selected_bindings() {
+    let source = "enum Mode {equal(bool),different(bool),all}
+        comptime fn choose(mode:Mode)-><bool -| value:bool> {
+            mode match {
+                .equal(expected) => '<value if value == expected>,
+                .different(expected) => '<value if value != expected>,
+                .all => '<value>,
+            }
+        }
+        fn run()->bool {
+            const equal=choose(Mode.equal(true));
+            const different=choose(Mode.different(true));
+            const all=choose(Mode.all);
+            let a=true match {~<equal> => value,_ => false};
+            let b=false match {~<different> => not value,_ => false};
+            let c=true match {~<different> => true,_ => false};
+            let ~<all> = true;
+            a and b and not c and value
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let skipped = "enum Mode {unused(bool),chosen}
+        comptime fn never()->bool {while true {} false}
+        comptime fn choose(mode:Mode)-><bool -|> {
+            mode match {
+                .unused(flag) if never() => '<false>,
+                .unused(_) => '<false>,
+                .chosen => '<true>,
+            }
+        }
+        fn run()->bool {true match {~<choose(Mode.chosen)> => true,_ => false}}";
+    assert_eq!(run(skipped, "run", vec![]), Value::Bool(true));
+    for invalid in [
+        source.replace(".all => '<value>,", ""),
+        source.replace(".all => '<value>,", ".all => '<missing>,"),
+        skipped.replace("comptime fn never()", "fn never()"),
+    ] {
+        assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn abstract_pattern_selection_does_not_publish_first_branch_behavior() {
+    let source = "comptime fn choose(flag:bool)-><bool -| value:bool> {
+            if flag {'<value>} else {'<true as value>}
+        }
+        comptime fn emit(flag:bool)-><|-bool> {
+            '(do {let ~<choose(flag)> = false;value})
+        }";
+    let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(
+        failure.contains("refutable let pattern requires a diverging else branch"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn pattern_quotes_do_not_capture_outer_control_exits() {
+    for source in [
+        "fn run()->bool {const p:<bool -| flag:bool> = '<flag if do {return true;}>;true}",
+        "fn run()->bool {while true {const p:<bool -| flag:bool> = '<flag if do {break;}>;break;}true}",
+        "fn run()->bool {while true {const p:<bool -| flag:bool> = '<flag if do {continue;}>;break;}true}",
+        "fn run()->bool {let action=|| {const p:<bool -| flag:bool> = '<flag if do {return true;}>;true};action()}",
+        "fn run()->bool {let action=|| {const code='(do {return true;});true};action()}",
+    ] {
+        let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+        assert!(!failure.contains("parsing failed"), "{source}: {failure}");
+    }
+    let inner = "fn run()->bool {
+        const pattern:<bool -| flag:bool> = '<flag if do {
+            let accept=|| {return true;};
+            while true {break;}
+            accept()
+        }>;
+        let result=true match {~<pattern> => flag,_ => false};
+        return result;
+    }";
+    assert_eq!(run(inner, "run", vec![]), Value::Bool(true));
+    let outer = "fn run()->bool {
+        while true {
+            const pattern:<bool -| flag:bool> = '<flag>;
+            let ~<pattern> = true;
+            if flag {break;}
+        }
+        true
+    }";
+    assert_eq!(run(outer, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn pattern_generators_lift_data_into_guards_and_discriminants() {
+    let source = "comptime fn matching(expected:bool)-><bool -| value:bool> {
+            '<value if value == expected>
+        }
+        fn run()->bool {
+            const yes=matching(true);const no=matching(false);
+            let a=true match {~<yes> => value,_ => false};
+            let b=false match {~<no> => not value,_ => false};
+            let c=false match {~<yes> => true,_ => false};
+            a and b and not c
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let forwarded = source.replace(
+        "fn run()", "comptime fn forward(expected:bool)-><bool -| value:bool> {matching(expected)} fn run()"
+    ).replace("const yes=matching(true)", "const yes=forward(true)")
+        .replace("const no=matching(false)", "const no=forward(false)");
+    assert_eq!(run(&forwarded, "run", vec![]), Value::Bool(true));
+    let literal = "comptime fn literal(expected:.char'builtin)-><.char'builtin -|> {
+            '< < expected > >
+        }
+        fn run()->bool {
+            const a=literal('a');const b=literal('b');
+            let first='a' match {~<a> => true,_ => false};
+            let second='a' match {~<b> => true,_ => false};
+            first and not second
+        }";
+    assert_eq!(run(literal, "run", vec![]), Value::Bool(true));
+    let structured = source
+        .replace(
+            "comptime fn matching(expected:bool)",
+            "struct Config {enabled:bool} comptime fn matching(config:Config)",
+        )
+        .replace("value == expected", "value == config.enabled")
+        .replace("matching(true)", "matching(Config{enabled:true})")
+        .replace("matching(false)", "matching(Config{enabled:false})");
+    assert_eq!(run(&structured, "run", vec![]), Value::Bool(true));
+    let callback = "fn invert(value:bool)->bool {not value}
+        comptime fn matching(action:fn(bool)->bool)-><bool -| value:bool> {
+            '<value if action(value)>
+        }
+        fn run()->bool {
+            const pattern=matching(invert);
+            let accepted=false match {~<pattern> => not value,_ => false};
+            let rejected=true match {~<pattern> => true,_ => false};
+            accepted and not rejected
+        }";
+    assert_eq!(run(callback, "run", vec![]), Value::Bool(true));
+    for invalid in [
+        source.replace("expected:bool", "expected:.char'builtin"),
+        source.replace("const yes=matching(true)", "const yes=matching('x')"),
+        callback.replace("action:fn(bool)->bool", "action:comptime fn(bool)->bool"),
+    ] {
+        assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn pattern_generators_select_and_forward_checked_patterns() {
+    let source = "comptime fn choose(enabled:bool)-><bool -| flag:bool> {
+            if enabled {'<true as flag>} else {'<false as flag>}
+        }
+        comptime fn forward(enabled:bool)-><bool -| flag:bool> {choose(enabled)}
+        fn run()->bool {
+            const yes:<bool -| flag:bool> = forward(true);
+            const no:<bool -| flag:bool> = forward(false);
+            let first=true match {~<yes> => flag,_ => false};
+            let second=false match {~<no> => not flag,_ => false};
+            first and second
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let explicit = source.replace("~<yes>", "~[flag=flag]<forward(true)>");
+    assert_eq!(run(&explicit, "run", vec![]), Value::Bool(true));
+    let data = source.replace("if enabled", "let selected=not enabled;if not selected");
+    assert_eq!(run(&data, "run", vec![]), Value::Bool(true));
+    let inferred = source
+        .replace("const yes:<bool -| flag:bool>", "const yes")
+        .replace("const no:<bool -| flag:bool>", "const no")
+        .replace("~<yes>", "~<forward(true)>");
+    assert_eq!(run(&inferred, "run", vec![]), Value::Bool(true));
+    let skipped = "comptime fn never()->bool {while true {} false}
+        comptime fn choose(enabled:bool)-><bool -|> {
+            if enabled {'<true>} else {let unused=never();'<false>}
+        }
+        fn run()->bool {true match {~<choose(true)> => true,_ => false}}";
+    assert_eq!(run(skipped, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn pattern_generators_check_unused_definitions_and_reject_phase_leaks() {
+    for source in [
+        "comptime fn bad(enabled:bool)-><bool -| flag:bool> {if enabled {'<flag>} else {'<other>}}",
+        "fn bad()-><bool -| flag:bool> {'<flag>}",
+        "fn runtime()->bool {true} comptime fn bad()-><bool -|> {if runtime() {'<true>} else {'<false>}}",
+        "comptime fn make()-><bool -|> {'<true>} fn bad() {make();}",
+        "comptime fn make()-><bool -|> {'<true>} comptime fn bad()->bool {true match {~<make()> => true,_ => false}}",
+    ] {
+        assert!(
+            support::compile_with_protocols(source, &Default::default()).is_err(),
+            "{source}"
+        );
+    }
+    let unresolved = "comptime fn matching(expected:bool)-><bool -|> {
+            '<value if value == expected>
+        }
+        comptime fn emit(expected:bool)-><|-bool> {
+            '(true match {~<matching(expected)> => true,_ => false})
+        }";
+    let completed = format!("{unresolved} fn run()->bool {{~<emit(true)> and not ~<emit(false)>}}");
+    assert_eq!(run(&completed, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn direct_pattern_quotes_infer_the_matching_subject_interface() {
+    for source in [
+        "fn run()->bool {let ~<'<(left,right)>> = (true,false);left and not right}",
+        "fn run()->bool {let ~[left=a]<'<(left,right)>> = (true,false);a and not right}",
+        "fn run()->bool {let ~<'[flag=value]<value>> = true;flag}",
+        "fn run()->bool {let ~<'<~<'<flag>>>> = true;flag}",
+        "fn run()->bool {false match {~<'<true>> => false,_ => true}}",
+        "fn run()->bool {let ~<'<(true,flag) or (flag,true)>> = (false,true) else {return false;};not flag}",
+        "fn run()->bool {const code='(do {let ~<'<flag>> = true;flag});~<code>}",
+    ] {
+        assert_eq!(run(source, "run", vec![]), Value::Bool(true), "{source}");
+    }
+    for source in [
+        "fn run()->bool {let ~<'<(left,right)>> = true;left}",
+        "fn run(value:bool)->bool {let ~<'<flag if value>> = true else {return false;};flag}",
+        "comptime fn bad()->bool {let ~<'<flag>> = true;flag}",
+    ] {
+        assert!(
+            support::compile_with_protocols(source, &Default::default()).is_err(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn pattern_splice_cannot_execute_runtime_code_in_comptime() {
+    for source in [
+        "comptime fn bad()->bool {let ~<'<flag>> = true;flag}",
+        "comptime fn bad(value:bool)->bool {value match {~<'<true>> => true,_ => false}}",
+        "fn run()->bool {const result=do {let ~<'<flag>> = true;flag};result}",
+        "comptime fn call(action:comptime fn()->bool)->bool {action()} fn run()->bool {const result=call(|| {let ~<'<flag>> = true;flag});result}",
+    ] {
+        let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+        assert!(failure.contains("runtime position"), "{failure}");
+    }
+}
+
+#[test]
+fn local_pattern_code_default_outputs_preserve_binding_identity() {
+    let source = "fn run()->bool {
+        const pattern:<(bool,bool) -| left:bool,right:bool> = '<(left,right)>;
+        let ~<pattern> = (true,false);
+        const original='(left and not right);
+        let inner=do {let ~<pattern> = (false,true);not left and right};
+        let ~[left=other]<pattern> = (false,true);
+        ~<original> and inner and left and not other and right
+    }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let aliases = "fn run()->bool {
+        const original:<bool -| flag:bool> = '[flag=value]<value>;
+        const alias=original;
+        const wrapped:<bool -| flag:bool> = '<~<alias>>;
+        let ~<wrapped> = true;
+        const read:<flag:bool |-bool> = '(flag);
+        ~<read>
+    }";
+    assert_eq!(run(aliases, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn local_pattern_code_default_outputs_follow_match_success_scopes() {
+    let source = "enum Choice {no,yes(bool)}
+        fn choose(value:Choice)->bool {
+            const pattern:<Choice -| flag:bool> = '<.yes(flag)>;
+            value match {~<pattern> if flag => flag,_ => false}
+        }
+        fn run()->bool {choose(Choice.yes(true)) and not choose(Choice.yes(false)) and not choose(Choice.no)}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let alternative = "fn run()->bool {
+        const pattern:<bool -| flag:bool> = '<flag>;
+        true match {~<pattern> or flag => flag}
+    }";
+    assert_eq!(run(alternative, "run", vec![]), Value::Bool(true));
+    let let_else = "fn run()->bool {
+        const pattern:<bool -| flag:bool> = '<true as flag>;
+        let flag=false;
+        let ~<pattern> = false else {return not flag;};
+        flag
+    }";
+    assert_eq!(run(let_else, "run", vec![]), Value::Bool(true));
+    for invalid in [
+        source.replace("_ => false", "_ => flag"),
+        "fn run()->bool {const p:<bool -| flag:bool> = '<flag>;do {let ~<p> = true;};flag}".into(),
+        "fn run() {const p:<(bool,bool) -| a:bool,b:bool> = '<(a,b)>;let ~[a=b]<p> = (true,true);}"
+            .into(),
+    ] {
+        assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn local_pattern_code_splices_fresh_success_bindings() {
+    let source = "fn run()->bool {
+        const pattern:<(bool,bool) -| left:bool,right:bool> = '<(left,right)>;
+        let ~[left=a,right=b]<pattern> = (true,false);
+        let ~[left=c,right=d]<pattern> = (false,true);
+        a and not b and not c and d
+    }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let aliases = "fn run()->bool {
+        const first:<bool -| flag:bool> = '[flag=value]<value>;
+        const second=first;
+        const nested:<bool -| result:bool> = '<~[flag=result]<second>>;
+        let ~[result=answer]<nested> = true;
+        answer
+    }";
+    assert_eq!(run(aliases, "run", vec![]), Value::Bool(true));
+    let generated = "fn run()->bool {
+        const pattern:<bool -| flag:bool> = '<flag>;
+        const code='(do {let ~[flag=found]<pattern> = true;found});
+        ~<code> and ~<code>
+    }";
+    assert_eq!(run(generated, "run", vec![]), Value::Bool(true));
+    let quoted_function = "quote fn choose(value:bool)->bool {
+        const pattern:<bool -| flag:bool> = '<flag>;
+        let ~[flag=found]<pattern> = value;found
+    }
+    fn run()->bool {choose(true) and not choose(false)}";
+    assert_eq!(run(quoted_function, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn local_pattern_code_preserves_matching_guards_and_coverage() {
+    let source = "enum Choice {no,yes(bool)}
+        fn accept(value:bool)->bool {value}
+        fn choose(value:Choice)->bool {
+            const pattern:<Choice -| flag:bool> = '<.yes(flag) if accept(flag)>;
+            value match {~[flag=found]<pattern> => found,_ => false}
+        }
+        fn run()->bool {choose(Choice.yes(true)) and not choose(Choice.yes(false)) and not choose(Choice.no)}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let or = "fn run()->bool {
+        const pattern:<(bool,bool) -| flag:bool> = '<(true,flag) or (flag,true)>;
+        (false,true) match {~[flag=found]<pattern> => not found,_ => false}
+    }";
+    assert_eq!(run(or, "run", vec![]), Value::Bool(true));
+    let guarded = "fn mark(counter:*bool)->bool {counter.* = not counter.*;counter.*}
+        fn run()->bool {
+            const pattern:<(bool,*bool) -| flag:bool> = '<(flag,counter) if mark(counter)>;
+            let counter=false;
+            let first=(true,counter.ref) match {~[flag=found]<pattern> => found,_ => false};
+            let second=(true,counter.ref) match {~[flag=found]<pattern> => found,_ => false};
+            first and not second and not counter
+        }";
+    assert_eq!(run(guarded, "run", vec![]), Value::Bool(true));
+    let unused = "fn never()->bool {while true {} false}
+        fn run()->bool {const pattern:<bool -| flag:bool> = '<flag if never()>;true}";
+    assert_eq!(run(unused, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn local_pattern_code_rejects_interface_capture_and_coverage_errors() {
+    for source in [
+        "fn run() {const p:<bool -| flag:bool> = '<other>;}",
+        "fn run() {const p:<bool -| flag:.char'builtin> = '<flag>;}",
+        "fn run(value:bool) {const p:<bool -| flag:bool> = '<flag if value>;}",
+        "fn run() {const p:<bool -| flag:bool> = '<flag>;let ~[bad=x]<p> = true;}",
+        "fn run() {const p:<bool -|> = '<true>;let ~<p> = false;}",
+        "fn run(value:bool)->bool {const p:<bool -|> = '<true>;value match {~<p> => true}}",
+        "fn run() {const p:<bool -| a:bool,b:bool> = '[a=x,b=x]<x>;}",
+    ] {
+        let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+        assert!(!failure.contains("parsing failed"), "{source}: {failure}");
+    }
+}
+
+#[test]
 fn generator_match_selects_code_and_lifts_selected_pattern_bindings() {
     let source="enum Mode {off,on(bool),}
         pure comptime fn build(mode:Mode)-><x:bool |- bool> {
@@ -641,16 +2479,20 @@ fn generator_data_uses_the_bound_tuple_head_and_anonymous_record_schema() {
 }
 
 #[test]
-fn nominal_generator_data_cannot_hide_callable_identity() {
+fn nominal_generator_data_transports_runtime_callable_identity() {
     let prefix = "enum Data {plain(bool),callback(fn()->bool),}
-        pure comptime fn build(data:Data)->< |- bool> {'(true)}
+        pure comptime fn build(data:Data)->< |- bool> {
+            '(data match {.plain(value)=>value,.callback(action)=>action()})
+        }
         fn action()->bool {true}";
-    let failure = support::compile_with_protocols(
-        &format!("{prefix} fn run()->bool {{~<build(Data.callback(action))>}}"),
-        &Default::default(),
-    )
-    .unwrap_err();
-    assert!(failure.contains("cannot be frozen"), "{failure}");
+    assert_eq!(
+        run(
+            &format!("{prefix} fn run()->bool {{~<build(Data.callback(action))>}}"),
+            "run",
+            vec![]
+        ),
+        Value::Bool(true)
+    );
     assert_eq!(
         run(
             &format!("{prefix} fn run()->bool {{~<build(Data.plain(true))>}}"),
@@ -3573,7 +5415,7 @@ fn generator_callback_defaults_and_implicit_supply_use_comptime_phase() {
 fn generator_callbacks_keep_stage_and_freezing_boundaries() {
     for source in [
         "fn runtime(value:bool)->bool {value} comptime fn build(action:comptime fn(bool)->bool)-><|-bool> {let result=action(true);'(result)} fn run()->bool {~<build(runtime)>}",
-        "comptime fn unused(action:fn(bool)->bool)-><|-bool> {'(true)}",
+        "comptime fn invalid(action:fn(bool)->bool)-><|-bool> {let result=action(true);'(result)}",
     ] {
         assert!(
             support::compile_with_protocols(source, &Default::default()).is_err(),
@@ -4322,6 +6164,61 @@ fn static_normal_form_producer_evidence_never_unfolds_the_head() {
         failure.contains("normal") && failure.contains("bool"),
         "{failure}"
     );
+}
+
+#[test]
+fn generator_producer_evidence_preserves_normal_form_value_indices() {
+    let source = "typealias Type=.Type'builtin;
+        pure comptime fn Indexed<flag:bool>->Type {while true {} bool}
+        struct Holder where T {}
+        comptime fn identity(value:Holder<T>)->Holder<T> where .T:Type=Indexed<true> {value}
+        comptime fn build(lambda action:comptime fn(T)->bool,value:T)-><|-bool> where T {
+            let result=action(value);'(result)
+        }
+        fn run()->bool {
+            const yes=build(do {_0;true},identity(Holder<Indexed<true>>{}));
+            const no=build(do {_0;false},identity<.T=Indexed<false>>(Holder<Indexed<false>>{}));
+            ~<yes> and not ~<no>
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    for wrong in [
+        source.replace("Holder<Indexed<true>>{}", "Holder<bool>{}"),
+        source.replace("Holder<Indexed<false>>{}", "Holder<Indexed<true>>{}"),
+    ] {
+        assert!(support::compile_with_protocols(&wrong, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn normal_form_producer_evidence_routes_dependent_defaults() {
+    let source = "typealias Type=.Type'builtin;
+        pure comptime fn Indexed<.T:Type=bool,tag:T,.mirror:T=tag>->Type {while true {} bool}
+        struct Holder where T {}
+        comptime fn identity(value:Holder<T>)->Holder<T> where T {value}
+        comptime fn build(lambda action:comptime fn(T)->bool,value:T)-><|-bool> where T {
+            let result=action(value);'(result)
+        }
+        comptime fn outer()-><|-bool> where bit:bool {
+            build(do {_0;true},identity<Indexed<bit>>(Holder<Indexed<bit>>{}))
+        }
+        fn run()->bool {
+            const yes=outer<true>();const no=outer<false>();
+            const byte=build(do {_0;true},
+                identity<Indexed<7,.mirror=3,.T=.u8'builtin>>(
+                    Holder<Indexed<7,.T=.u8'builtin,.mirror=3>>{}));
+            ~<yes> and ~<no> and ~<byte>
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    for wrong in [
+        source.replace(".mirror=3", ".mirror=256"),
+        source.replace("Holder<Indexed<bit>>{}", "Holder<Indexed<not bit>>{}"),
+        source.replace(
+            "Holder<Indexed<7,.T=.u8'builtin,.mirror=3>>{}",
+            "Holder<Indexed<7,.T=.u8'builtin>>{}",
+        ),
+    ] {
+        assert!(support::compile_with_protocols(&wrong, &Default::default()).is_err());
+    }
 }
 
 #[test]
@@ -5365,7 +7262,9 @@ fn generator_nominal_callback_data_keeps_capture_and_pointer_boundaries() {
             comptime fn outer()-><|-Data> {let flag=true;build(Data {pointer:flag.ref})}
             fn run()->Data {~<outer()>}",
         "typealias Callback=fn(bool)->bool;newtype Wrapped=Callback;
-            comptime fn build(callback:Wrapped)-><|-bool> {'(true)}
+            comptime fn build(callback:Wrapped)-><|-bool> {
+                let action=callback.as(Callback);let result=action(true);'(result)
+            }
             fn runtime(value:bool)->bool {value}
             fn run()->bool {~<build(runtime.as(Wrapped))>}",
     ] {
@@ -6091,4 +7990,642 @@ fn generator_owned_float_frames_preserve_nan_and_finite_snapshots() {
             assert_eq!(run(&source, "run", vec![]), Value::Bool(true));
         }
     }
+}
+
+#[test]
+fn conditional_code_bindings_select_guarded_witnesses() {
+    let source = "comptime fn choose(flag:bool)-><|-bool> {
+        let selected if flag = '(true) else {return '(false);};
+        selected
+    }
+    fn yes()->bool {~<choose(true)>}
+    fn no()->bool {~<choose(false)>}";
+    assert_eq!(run(source, "yes", vec![]), Value::Bool(true));
+    assert_eq!(run(source, "no", vec![]), Value::Bool(false));
+}
+
+#[test]
+fn conditional_code_bindings_evaluate_initializer_then_guard_once() {
+    let source = "typealias Count=.Integer'builtin;
+        comptime fn produce(count:*Count)-><|-bool> {assumes count.* == 0;count.*+=1;'(true)}
+        comptime fn guard(count:*Count,flag:bool)->bool {assumes count.* == 1;count.*+=1;flag}
+        comptime fn choose(flag:bool)-><|-bool> {
+            var count:Count=0;
+            let selected if guard(count.ref,flag) = produce(count.ref) else {let complete=count == 2;return '(complete);};
+            let complete=count == 2;
+            '(complete)
+        }
+        fn yes()->bool {~<choose(true)>}
+        fn no()->bool {~<choose(false)>}";
+    assert_eq!(run(source, "yes", vec![]), Value::Bool(true));
+    assert_eq!(run(source, "no", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn conditional_code_bindings_preserve_ports_aliases_and_failure_scope() {
+    let source = "comptime fn choose(flag:bool,code:<x:bool|-bool>)-><x:bool|-bool> {
+            let selected:<x:bool|-bool> = '(not x);
+            let _ as selected if flag = code else {return selected;};
+            selected
+        }
+        fn yes(value:bool)->bool {
+            const input:<x:bool|-bool> = '(x);
+            const output=choose(true,input);
+            ~[x=value]<output>
+        }
+        fn no(value:bool)->bool {
+            const input:<x:bool|-bool> = '(x);
+            const output=choose(false,input);
+            ~[x=value]<output>
+        }";
+    assert_eq!(
+        run(source, "yes", vec![Value::Bool(true)]),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        run(source, "no", vec![Value::Bool(true)]),
+        Value::Bool(false)
+    );
+}
+
+#[test]
+fn conditional_code_binding_failures_check_divergence_and_all_branches() {
+    for source in [
+        "comptime fn bad(flag:bool)-><|-bool> {let code if flag = '(true) else {};code}",
+        "comptime fn bad()-><|-bool> {let code if true = '(true) else {return '( 'x');};code}",
+        "fn runtime()->bool {true} comptime fn bad()-><|-bool> {let code if runtime() = '(true) else {return '(false);};code}",
+        "comptime fn bad()-><x:bool|-bool> {let code if x = '(true) else {return '(false);};code}",
+        "comptime fn bad()-><|-bool> {let (code,) if true = '(true) else {return '(false);};code}",
+    ] {
+        assert!(
+            support::compile_with_protocols(source, &Default::default()).is_err(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn conditional_code_bindings_propagate_loop_transfers_and_mutability() {
+    let source = "comptime fn build()-><|-bool> {
+        var flag=false;
+        var output='(false);
+        while true {
+            var selected if flag = '(false) else {flag=true;continue;};
+            selected='(true);
+            output=selected;
+            break;
+        }
+        output
+    }
+    fn run()->bool {~<build()>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let breaking = source.replace("flag=true;continue;", "break;");
+    assert_eq!(run(&breaking, "run", vec![]), Value::Bool(false));
+    let immutable = source.replace("var selected if", "let selected if");
+    let error = support::compile_with_protocols(&immutable, &Default::default()).unwrap_err();
+    assert!(error.contains("immutable generator binding"), "{error}");
+}
+
+#[test]
+fn guarded_code_construction_does_not_execute_runtime_payloads() {
+    let source = "typealias Byte=.u8'builtin;
+        comptime fn choose(flag:bool,code:<p:*Byte|-bool>)-><p:*Byte|-bool> {
+            let selected if flag = code else {return '(false);};
+            selected
+        }
+        fn run()->Byte {
+            var count:Byte=0;
+            const candidate:<p:*Byte|-bool> = '(do {p.* = 7;true});
+            const selected=choose(false,candidate);
+            let pointer=count.ref;
+            ~[p=pointer]<selected>;
+            count
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::UnsignedInteger(0));
+    let selected = source.replace("choose(false,candidate)", "choose(true,candidate)");
+    assert_eq!(run(&selected, "run", vec![]), Value::UnsignedInteger(7));
+}
+
+#[test]
+fn guarded_code_definition_checks_purity_and_unreachable_success() {
+    for source in [
+        "comptime fn effect()->bool {true} pure comptime fn bad()-><|-bool> {let selected if effect() = '(true) else {return '(false);};selected}",
+        "comptime fn bad()-><|-bool> {let selected if false = '( 'x') else {return '(false);};selected}",
+    ] {
+        assert!(
+            support::compile_with_protocols(source, &Default::default()).is_err(),
+            "{source}"
+        );
+    }
+    support::compile_with_protocols(
+        "comptime fn diverge()-><|-bool> {let selected if false = '(true) else {while true {}};selected}",
+        &Default::default(),
+    ).unwrap();
+}
+
+#[test]
+fn code_generators_infer_value_clauses_from_quoted_domains() {
+    let source = "struct Flag where enabled:bool {}
+        comptime fn identity(code:<|-Flag<flag>>)-><|-Flag<flag>> where flag:bool {code}
+        fn read(value:Flag<flag>)->bool where flag:bool {flag}
+        fn run()->bool {const yes=identity('(Flag<true>{}));
+            const no=identity('(Flag<false>{}));read(~<yes>) and not read(~<no>)}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn inferred_generator_value_clauses_settle_dependent_defaults() {
+    let source = "struct Flag where enabled:bool {}
+        comptime fn enabled(code:<|-Flag<flag>>)-><|-bool>
+        where flag:bool,.fallback:bool=flag {if fallback {'(true)} else {'(false)}}
+        fn run()->bool {const yes=enabled('(Flag<true>{}));
+            const no=enabled('(Flag<false>{}));~<yes> and not ~<no>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn inferred_generator_value_clauses_reject_conflicting_code_inputs() {
+    let source = "struct Flag where enabled:bool {}
+        comptime fn choose(a:<|-Flag<flag>>,b:<|-Flag<flag>>)-><|-Flag<flag>> where flag:bool {a}
+        fn run()->bool {const code=choose('(Flag<true>{}),'(Flag<false>{}));true}";
+    assert!(support::compile_with_protocols(source, &Default::default()).is_err());
+}
+
+#[test]
+fn generator_value_clauses_infer_from_generic_data_producers() {
+    let source = "struct Flag where enabled:bool {}
+        comptime fn make(value:Flag<flag>)->Flag<flag> where flag:bool {value}
+        comptime fn enabled(value:Flag<flag>)-><|-bool> where flag:bool {if flag {'(true)} else {'(false)}}
+        fn run()->bool {const yes=enabled(make(Flag<true>{}));
+            const no=enabled(make(Flag<false>{}));~<yes> and not ~<no>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let spread = source
+        .replace(
+            "->Flag<flag> where flag:bool {value}",
+            "->(Flag<flag>,) where flag:bool {(value,)}",
+        )
+        .replace("enabled(make(", "enabled(...make(");
+    assert_eq!(run(&spread, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn generator_data_producer_hints_check_fixed_width_value_domains() {
+    let source = "typealias Byte=.u8'builtin;
+        struct Indexed where index:Byte {}
+        comptime fn make(value:Indexed<n>)->Indexed<n> where n:Byte {value}
+        comptime fn enabled(value:Indexed<n>)-><|-bool> where n:Byte {'(true)}
+        fn run()->bool {const code=enabled(make(Indexed<3>{}));~<code>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    assert!(
+        support::compile_with_protocols(
+            &source.replace("Indexed<3>", "Indexed<256>"),
+            &Default::default()
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn generator_value_indices_forward_through_generic_wrappers() {
+    let source = "struct Flag where enabled:bool {}
+        comptime fn make(value:Flag<flag>)->Flag<flag> where flag:bool {value}
+        comptime fn enabled(value:Flag<flag>)-><|-bool> where flag:bool {if flag {'(true)} else {'(false)}}
+        comptime fn wrapped()-><|-bool> where flag:bool {enabled(make(Flag<flag>{}))}
+        fn run()->bool {const yes=wrapped<true>();const no=wrapped<false>();~<yes> and not ~<no>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let nested = source
+        .replace(
+            "fn run()",
+            "comptime fn outer()-><|-bool> where bit:bool {wrapped<bit>()} fn run()",
+        )
+        .replace("const yes=wrapped<true>()", "const yes=outer<true>()")
+        .replace("const no=wrapped<false>()", "const no=outer<false>()");
+    assert_eq!(run(&nested, "run", vec![]), Value::Bool(true));
+    let wrong = source.replace(
+        "wrapped()-><|-bool> where flag:bool",
+        "wrapped()-><|-bool> where flag:'x''type",
+    );
+    assert!(support::compile_with_protocols(&wrong, &Default::default()).is_err());
+}
+
+#[test]
+fn generator_lambda_evidence_uses_explicit_and_default_value_clauses() {
+    let source = "struct Flag where enabled:bool {}
+        comptime fn identity(value:Flag<flag>)->Flag<flag> where .flag:bool=true {value}
+        comptime fn build(lambda action:comptime fn(T)->bool,value:T)-><|-bool> where T {
+            let result=action(value);'(result)
+        }
+        fn run()->bool {
+            const yes=build(do {_0;true},identity<.flag=true>(Flag<true>{}));
+            const no=build(do {_0;false},identity<>(Flag<true>{}));
+            ~<yes> and not ~<no>
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let inferred = source
+        .replace("identity<.flag=true>", "identity")
+        .replace("identity<>", "identity");
+    assert_eq!(run(&inferred, "run", vec![]), Value::Bool(true));
+    assert!(
+        support::compile_with_protocols(
+            &inferred.replace("Flag<true>{}", "Flag<false>{}"),
+            &Default::default()
+        )
+        .is_err()
+    );
+    let mismatch = source.replace(
+        "identity<.flag=true>(Flag<true>",
+        "identity<.flag=false>(Flag<true>",
+    );
+    assert!(support::compile_with_protocols(&mismatch, &Default::default()).is_err());
+}
+
+#[test]
+fn generator_lambda_evidence_completes_dependent_value_defaults_in_order() {
+    let source = "struct Key where T,tag:T {value:T}
+        comptime fn identity(value:Key<T,fallback>)->Key<T,fallback>
+        where .T:.Type'builtin=bool,tag:T,.fallback:T=tag {value}
+        comptime fn build(lambda action:comptime fn(T)->bool,value:T)-><|-bool> where T {
+            let result=action(value);'(result)
+        }
+        comptime fn outer()-><|-bool> where flag:bool {
+            build(_0.value,identity<flag>(Key<bool,flag>{value:flag}))
+        }
+        fn run()->bool {
+            const yes=outer<true>();const no=outer<false>();
+            const byte=build(_0.value == 7,
+                identity<3,.fallback=7,.T=.u8'builtin>(Key<.u8'builtin,7>{value:7}));
+            ~<yes> and not ~<no> and ~<byte>
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    for wrong in [
+        source.replace("identity<3", "identity<256"),
+        source.replace(".fallback=7", ".fallback='x'"),
+        source.replace("Key<.u8'builtin,7>{value:7}", "Key<.u8'builtin,3>{value:7}"),
+    ] {
+        assert!(support::compile_with_protocols(&wrong, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn inferred_producer_value_defaults_preserve_prior_inference_variables() {
+    let source = "struct Key where T,tag:T {value:T}
+        comptime fn identity(value:Key<T,tag>)->Key<T,tag>
+        where T,tag:T,.mirror:T=tag {value}
+        comptime fn build(lambda action:comptime fn(T)->bool,value:T)-><|-bool> where T {
+            let result=action(value);'(result)
+        }
+        fn run()->bool {
+            const yes=build(_0.value,identity(Key<bool,true>{value:true}));
+            const no=build(_0.value,identity(Key<bool,false>{value:false}));
+            const byte=build(_0.value == 7,identity(Key<.u8'builtin,7>{value:7}));
+            ~<yes> and not ~<no> and ~<byte>
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let spread = source
+        .replace("->Key<T,tag>", "->(Key<T,tag>,)")
+        .replace(".mirror:T=tag {value}", ".mirror:T=tag {(value,)}")
+        .replace(",identity(", ",...identity(");
+    assert_eq!(run(&spread, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn generator_lambda_evidence_accepts_callable_type_arguments() {
+    let source = "typealias Type=.Type'builtin;
+        comptime fn invert(value:bool)->bool {not value}
+        comptime fn identity(value:T)->T where .T:Type=comptime fn(bool)->bool {value}
+        comptime fn build(lambda action:comptime fn(T)->bool,value:T)-><|-bool> where T {
+            let result=action(value);'(result)
+        }
+        fn run()->bool {
+            const yes=build(_0(false),identity(invert));
+            const no=build(_0(true),identity<.T=comptime fn(bool)->bool>(invert));
+            ~<yes> and not ~<no>
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let runtime = source
+        .replace("comptime fn invert", "fn invert")
+        .replace("comptime fn(bool)", "fn(bool)")
+        .replace("build(_0(false)", "build(do {_0;true}")
+        .replace("build(_0(true)", "build(do {_0;false}");
+    assert_eq!(run(&runtime, "run", vec![]), Value::Bool(true));
+    let empty_environment = runtime.replace("fn(bool)", "%{} fn(bool)");
+    assert_eq!(run(&empty_environment, "run", vec![]), Value::Bool(true));
+    for wrong in [
+        source.replace(".T=comptime fn(bool)->bool", ".T=fn(bool)->bool"),
+        source.replace(
+            ".T=comptime fn(bool)->bool",
+            ".T=comptime fn(.char'builtin)->bool",
+        ),
+    ] {
+        assert!(support::compile_with_protocols(&wrong, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn generator_lambda_evidence_preserves_closure_environments() {
+    let source = "typealias Type=.Type'builtin;
+        typealias Reader=%{flag:bool} comptime fn()->bool;
+        comptime fn make(flag:bool)->Reader {|| flag}
+        comptime fn identity(value:T)->T where .T:Type=Reader {value}
+        comptime fn build(lambda action:comptime fn(T)->bool,value:T)-><|-bool> where T {
+            let result=action(value);'(result)
+        }
+        fn run()->bool {
+            const yes=build(_0(),identity(make(true)));
+            const no=build(_0(),identity<.T=%{renamed:bool} comptime fn()->bool>(make(false)));
+            ~<yes> and not ~<no>
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    for wrong in [
+        source.replace("%{renamed:bool}", "%{renamed:.char'builtin}"),
+        source.replace("%{renamed:bool}", "%{}"),
+        source.replace("%{renamed:bool}", "%{first:bool,second:bool}"),
+    ] {
+        assert!(support::compile_with_protocols(&wrong, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn generator_callable_evidence_substitutes_nested_value_indices() {
+    let source = "typealias Type=.Type'builtin;
+        struct Flag where enabled:bool {}
+        comptime fn read(value:Flag<flag>)->bool where flag:bool {flag}
+        comptime fn identity(value:T)->T where T {value}
+        comptime fn build(lambda action:comptime fn(T)->bool,value:T)-><|-bool> where T {
+            let result=action(value);'(result)
+        }
+        comptime fn outer()-><|-bool> where flag:bool {
+            build(_0(Flag<flag>{}),identity<comptime fn(Flag<flag>)->bool>(read<flag>))
+        }
+        fn run()->bool {const yes=outer<true>();const no=outer<false>();~<yes> and not ~<no>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let wrong = source.replace("(read<flag>)", "(read<true>)");
+    assert!(support::compile_with_protocols(&wrong, &Default::default()).is_err());
+}
+
+#[test]
+fn generator_runtime_function_data_is_called_only_by_generated_code() {
+    let source = "fn identity(value:T)->T where T {value}
+        fn invert(value:bool)->bool {not value}
+        comptime fn emit(action:fn(bool)->bool)-><|-bool> {'(action(false))}
+        fn run()->bool {const yes=emit(invert);const no=emit(identity<bool>);~<yes> and not ~<no>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let methods = source
+        .replace(
+            "fn run()",
+            "trait Strategy where inverted:bool {fn apply(value:bool)->bool;}
+            struct Worker {}
+            impl Strategy<true> for Worker {fn apply(value:bool)->bool {not value}}
+            impl Strategy<false> for Worker {fn apply(value:bool)->bool {value}}
+            fn run()",
+        )
+        .replace("emit(invert)", "emit(Worker.as(Strategy<true>).apply)")
+        .replace(
+            "emit(identity<bool>)",
+            "emit(Worker.as(Strategy<false>).apply)",
+        );
+    assert_eq!(run(&methods, "run", vec![]), Value::Bool(true));
+    let premature = source.replace(
+        "'(action(false))",
+        "do {let result=action(false);'(result)}",
+    );
+    assert!(support::compile_with_protocols(&premature, &Default::default()).is_err());
+    let contracted = methods.replace(
+        "{fn apply(value:bool)->bool;}",
+        "{fn apply(value:bool)->bool where requires value;}",
+    );
+    assert!(support::compile_with_protocols(&contracted, &Default::default()).is_err());
+}
+
+#[test]
+fn generator_runtime_closures_cannot_cross_lambda_execution_phase() {
+    let source = "typealias Reader=%{flag:bool} fn()->bool;
+        comptime fn make(flag:bool)->Reader {|| flag}
+        comptime fn emit(action:Reader)-><|-bool> {'(action())}
+        fn run()->bool {const yes=emit(make(true));const no=emit(make(false));~<yes> and not ~<no>}";
+    assert!(support::compile_with_protocols(source, &Default::default()).is_err());
+}
+
+#[test]
+fn generator_comptime_closures_can_capture_runtime_function_identity() {
+    let source = "typealias Selector=%{action:fn(bool)->bool} comptime fn()->fn(bool)->bool;
+        fn invert(value:bool)->bool {not value}
+        fn identity(value:T)->T where T {value}
+        comptime fn make(action:fn(bool)->bool)->Selector {|| action}
+        comptime fn emit(select:Selector)-><|-bool> {let action=select();'(action(false))}
+        fn run()->bool {const code=emit(make(invert));const no=emit(make(identity<bool>));~<code> and not ~<no>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let nested = source
+        .replace(
+            "fn run()",
+            "typealias Forward=%{select:Selector} comptime fn()->fn(bool)->bool;
+            comptime fn wrap(select:Selector)->Forward {|| select()}
+            comptime fn emit_nested(select:Forward)-><|-bool> {let action=select();'(action(false))}
+            fn run()",
+        )
+        .replace("emit(make(invert))", "emit_nested(wrap(make(invert)))")
+        .replace(
+            "emit(make(identity<bool>))",
+            "emit_nested(wrap(make(identity<bool>)))",
+        );
+    assert_eq!(run(&nested, "run", vec![]), Value::Bool(true));
+    let method = source
+        .replace(
+            "fn run()",
+            "trait Strategy where inverted:bool {fn apply(value:bool)->bool;}
+            struct Worker {}
+            impl Strategy<true> for Worker {fn apply(value:bool)->bool {not value}}
+            fn run()",
+        )
+        .replace("make(invert)", "make(Worker.as(Strategy<true>).apply)");
+    assert_eq!(run(&method, "run", vec![]), Value::Bool(true));
+    let generic_method = method
+        .replace("struct Worker {}", "struct Worker where flag:bool {}")
+        .replace(
+            "impl Strategy<true> for Worker {fn apply(value:bool)->bool {not value}}",
+            "impl Strategy<flag> for Worker<flag> where flag:bool {
+                fn apply(value:bool)->bool {if flag {not value} else {value}}
+            }",
+        )
+        .replace("Worker.as(", "Worker<true>.as(");
+    assert_eq!(run(&generic_method, "run", vec![]), Value::Bool(true));
+    let contracted = method.replace(
+        "{fn apply(value:bool)->bool;}",
+        "{fn apply(value:bool)->bool where requires value;}",
+    );
+    assert!(support::compile_with_protocols(&contracted, &Default::default()).is_err());
+    let premature = source.replace("{|| action}", "{|| {action(false);action}}");
+    assert!(support::compile_with_protocols(&premature, &Default::default()).is_err());
+}
+
+#[test]
+fn generator_closure_snapshots_preserve_nominal_value_indices() {
+    let source = "struct Flag where enabled:bool {value:bool}
+        typealias Reader=%{data:Flag<true>} comptime fn()->bool;
+        comptime fn make()->Reader {let data=Flag<true>{value:true};|| data.value}
+        comptime fn emit(read:Reader)-><|-bool> {let value=read();'(value)}
+        fn run()->bool {~<emit(make())>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let mixed = source
+        .replace(
+            "where enabled:bool {value:bool}",
+            "where T,enabled:T {value:bool}",
+        )
+        .replace("Flag<true>", "Flag<.u8'builtin,7>");
+    assert_eq!(run(&mixed, "run", vec![]), Value::Bool(true));
+    let structured = source
+        .replace(
+            "struct Flag where enabled:bool",
+            "struct Config {enabled:bool}
+            struct Flag where config:Config",
+        )
+        .replace("Flag<true>", "Flag<Config{enabled:true}>");
+    assert_eq!(run(&structured, "run", vec![]), Value::Bool(true));
+    let variant = source
+        .replace(
+            "struct Flag where enabled:bool {value:bool}",
+            "enum Flag where enabled:bool {item(bool)}",
+        )
+        .replace("Flag<true>{value:true}", "Flag<true>.item(true)")
+        .replace("|| data.value", "|| {let .item(value)=data;value}");
+    assert_eq!(run(&variant, "run", vec![]), Value::Bool(true));
+    for wrong in [
+        mixed.replace("Flag<.u8'builtin,7>", "Flag<.u8'builtin,256>"),
+        source.replace("let data=Flag<true>", "let data=Flag<false>"),
+        structured.replace("Config{enabled:true}", "Config{enabled:'x'}"),
+    ] {
+        assert!(support::compile_with_protocols(&wrong, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn generator_callable_snapshots_keep_abstract_type_arguments() {
+    let source = "fn identity(value:T)->T where T {value}
+        comptime fn make()->%{action:fn(T)->T} comptime fn()->fn(T)->T where T {
+            let action=identity<T>;|| action
+        }
+        comptime fn emit()-><x:T|-T> where T {
+            let select=make<T>();let action=select();'(action(x))
+        }
+        fn run()->bool {
+            const boolean=emit<bool>();const character=emit<.char'builtin>();
+            let flag=true;let letter='a';
+            ~[x=flag]<boolean> and (~[x=letter]<character> == 'a')
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn generator_callable_snapshots_keep_structured_instance_arguments() {
+    let source = "struct Config {enabled:bool}
+        typealias Selector=%{action:fn(bool)->bool} comptime fn()->fn(bool)->bool;
+        fn apply(value:bool)->bool where config:Config {if config.enabled {not value} else {value}}
+        comptime fn make(action:fn(bool)->bool)->Selector {|| action}
+        comptime fn emit(select:Selector)-><|-bool> {let action=select();'(action(false))}
+        fn run()->bool {
+            const yes=emit(make(apply<Config{enabled:true}>));
+            const no=emit(make(apply<Config{enabled:false}>));~<yes> and not ~<no>
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let forwarded = source
+        .replace(
+            "fn run()->bool",
+            "comptime fn forward()-><|-bool> where enabled:bool {
+            emit(make(apply<Config{enabled:enabled}>))
+        }
+        fn run()->bool",
+        )
+        .replace("emit(make(apply<Config{enabled:true}>))", "forward<true>()")
+        .replace(
+            "emit(make(apply<Config{enabled:false}>))",
+            "forward<false>()",
+        );
+    assert_eq!(run(&forwarded, "run", vec![]), Value::Bool(true));
+    let produced = forwarded
+        .replace(
+            "comptime fn forward()",
+            "comptime fn config(enabled:bool)->Config {Config{enabled:enabled}}
+        comptime fn forward()",
+        )
+        .replace("apply<Config{enabled:enabled}>", "apply<config(enabled)>");
+    assert_eq!(run(&produced, "run", vec![]), Value::Bool(true));
+    let nested = forwarded
+        .replace(
+            "struct Config {enabled:bool}",
+            "struct Switch {value:bool} struct Config {enabled:Switch}",
+        )
+        .replace("if config.enabled", "if config.enabled.value")
+        .replace(
+            "Config{enabled:enabled}",
+            "Config{enabled:Switch{value:enabled}}",
+        );
+    assert_eq!(run(&nested, "run", vec![]), Value::Bool(true));
+    let variant = forwarded
+        .replace(
+            "struct Config {enabled:bool}",
+            "enum Config {setting(bool)}",
+        )
+        .replace(
+            "if config.enabled {not value} else {value}",
+            "config match {.setting(enabled)=>if enabled {not value} else {value}}",
+        )
+        .replace("Config{enabled:enabled}", "Config.setting(enabled)");
+    assert_eq!(run(&variant, "run", vec![]), Value::Bool(true));
+    for invalid in [
+        produced.replace("comptime fn config(", "fn config("),
+        produced.replace(
+            "->Config {Config",
+            "->result:Config where ensures false {Config",
+        ),
+        forwarded.replace("Config{enabled:enabled}", "Config{enabled:'x'}"),
+    ] {
+        assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+    let wrong = source.replace("Config{enabled:true}", "Config{enabled:'x'}");
+    assert!(support::compile_with_protocols(&wrong, &Default::default()).is_err());
+}
+
+#[test]
+fn generator_value_clauses_infer_from_context_ports() {
+    let source = "struct Flag where enabled:bool {}
+        comptime fn keep(code:<x:Flag<flag>|-bool>)-><x:Flag<flag>|-bool> where flag:bool {code}
+        fn run()->bool {let x=Flag<true>{};const code=keep('[x=x](do {x;true}));~<code>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let fixed = source.replace("'[x=x](", "'(");
+    assert!(support::compile_with_protocols(&fixed, &Default::default()).is_err());
+    let shadowed = source.replace(";~<code>", ";let x=Flag<false>{};~<code>");
+    assert_eq!(run(&shadowed, "run", vec![]), Value::Bool(true));
+    let mismatch = source.replace(";~<code>", ";let other=Flag<false>{};~[x=other]<code>");
+    assert!(support::compile_with_protocols(&mismatch, &Default::default()).is_err());
+}
+
+#[test]
+fn generator_clause_domains_depend_on_prior_value_indices() {
+    let source = "struct Flag where enabled:bool {}
+        comptime fn enabled()-><|-bool> where flag:bool,witness:Flag<flag> {
+            if flag {'(true)} else {'(false)}
+        }
+        fn run()->bool {const yes=enabled<true,Flag<true>{}>();
+            const no=enabled<false,Flag<false>{}>();~<yes> and not ~<no>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let defaulted = source
+        .replace(
+            "flag:bool,witness:Flag<flag>",
+            "flag:bool,.witness:Flag<flag> = (Flag<flag>{})",
+        )
+        .replace("enabled<true,Flag<true>{}>", "enabled<true>")
+        .replace("enabled<false,Flag<false>{}>", "enabled<false>");
+    assert_eq!(run(&defaulted, "run", vec![]), Value::Bool(true));
+    let forward = source.replace(
+        "flag:bool,witness:Flag<flag>",
+        "witness:Flag<flag>,flag:bool",
+    );
+    assert!(support::compile_with_protocols(&forward, &Default::default()).is_err());
+    assert!(
+        support::compile_with_protocols(
+            &source.replace("enabled<true,Flag<true>{}>", "enabled<true,Flag<false>{}>"),
+            &Default::default()
+        )
+        .is_err()
+    );
 }

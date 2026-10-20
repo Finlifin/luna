@@ -104,7 +104,7 @@ impl Checker<'_, '_> {
             parameters: ordinary.to_vec(),
             result: Box::new(result.clone()),
         }
-        .abstract_types(generics)
+        .abstract_parameters(&self.input_binders(generics))
         .map_err(|e| error(expr.span, e.to_string()))?;
         let Term::Function {
             parameters: abstract_parameters,
@@ -144,6 +144,12 @@ impl Checker<'_, '_> {
             Err(e) => return Err(error(expr.span, e.to_string())),
         };
         let scheme = crate::calls::Scheme {
+            parameter_sorts: self
+                .input_binders(generics)
+                .iter()
+                .map(|p| p.sort)
+                .chain(std::iter::repeat_n(Sort::Type, count - generics.len()))
+                .collect(),
             type_parameters: count,
             signature: Term::Function {
                 parameters,
@@ -875,21 +881,16 @@ impl Checker<'_, '_> {
             .or_else(|| self.interface_signatures.get(&owner))
             .ok_or_else(|| error(span, "ordinary type requirement needs a function signature"))?;
         let mut frames = self.call_input_frames();
+        let declarations = self.declaration_binders(owner);
         let signature = signature
-            .instantiate_types_in_scope(&self.type_parameters[&owner], arguments, &frames)
+            .instantiate_parameters_in_scope(&declarations, arguments, &frames)
             .map_err(|e| error(span, e.to_string()))?;
         let Term::Function { parameters, .. } = signature.callable_signature() else {
             return Err(error(span, "expected a function signature"));
         };
         let binding = self.prepare_call_binding(parameters, inputs, span)?;
         frames.push(parameters.iter().map(|p| p.sort).collect());
-        let declarations = self.type_parameters[&owner]
-            .iter()
-            .map(|id| nir::DeclarationParameter {
-                declaration: *id,
-                sort: Sort::Type,
-            })
-            .collect::<Vec<_>>();
+
         let arguments = arguments
             .iter()
             .map(|ty| ty.abstract_parameters(&[]))

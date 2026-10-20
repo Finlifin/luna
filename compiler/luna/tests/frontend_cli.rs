@@ -16,6 +16,49 @@ const VALID: &str = "fn requested_entry() {}\n";
 const OLD_OUTPUT: &[u8] = b"previous output: preserve these bytes\n\0";
 
 #[test]
+fn pattern_code_hir_preserves_interface_quote_and_fresh_success_outputs() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        "fn run(value:bool)->bool {
+        const pattern:<bool -| flag:bool> = '[flag=bound]<bound>;
+        let ~[flag=first]<pattern> = value;
+        let ~[flag=second]<pattern> = value;
+        first and second
+    }",
+    );
+    let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+    let dump = hir_dump(&output);
+    assert!(dump.contains("(contextual-pattern-type "), "{dump}");
+    assert!(dump.contains("(code-pattern-quote "), "{dump}");
+    assert_eq!(dump.matches("(code-pattern-splice ").count(), 2, "{dump}");
+    assert!(dump.contains("(resolved-local (name \"first\")"), "{dump}");
+    assert!(dump.contains("(resolved-local (name \"second\")"), "{dump}");
+    let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+    success(&output);
+}
+
+#[test]
+fn pattern_code_bindings_are_scoped_to_quote_or_match_success() {
+    for source in [
+        "fn run() {const pattern='[flag=missing]<bound>;}",
+        "fn run()->bool {const pattern='<bound>;bound}",
+        "fn run(value:bool)->bool {const pattern='<bound>;value match {~[flag=found]<pattern> => found,_ => found}}",
+        "fn run(value:bool) {const pattern='<bound>;let (~[flag=same]<pattern>,same)=(value,value);}",
+        "fn run(value:bool) {const pattern:<missing -| missing:bool> = '<bound>;}",
+    ] {
+        let sandbox = Sandbox::new();
+        sandbox.write("input.fl", source);
+        let output = sandbox.run(&["input.fl", "--emit", "hir"]);
+        failure(&output, 1);
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("panicked"),
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn inline_control_flow_keeps_its_expansion_requirement_in_hir() {
     let sandbox = Sandbox::new();
     for (body, control) in [

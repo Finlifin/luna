@@ -157,6 +157,15 @@ impl Checker<'_, '_> {
                         Argument::Data(value.clone())
                     }
                 }
+                (Input::Pattern(_), Input::Pattern(expected)) => {
+                    let code = self
+                        .pattern_codes
+                        .get(binding)
+                        .cloned()
+                        .ok_or_else(|| error(span, "missing trait pattern code input"))?;
+                    self.ascribe_pattern_input(&code, expected, span)?;
+                    Argument::Pattern(code)
+                }
                 (Input::Code(_), Input::Code(expected)) => {
                     let code = self
                         .code_values

@@ -534,6 +534,31 @@ impl Display for ExprKind<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Lit(lit) => form!(f, "literal", "value" => lit),
+            Self::ContextualPatternType(subject, bindings) => {
+                write!(f, "(contextual-pattern-type (subject {subject}) (outputs")?;
+                for entry in bindings {
+                    write!(
+                        f,
+                        " (binding (name {}) (id {}) (type {}))",
+                        Name(entry.name),
+                        Id(entry.hir_id),
+                        entry.ty
+                    )?;
+                }
+                f.write_str("))")
+            }
+            Self::CodePatternQuote(pattern, substitutions) => {
+                write!(f, "(code-pattern-quote (pattern {pattern}) (substitutions")?;
+                for entry in substitutions {
+                    write!(
+                        f,
+                        " (substitute (port {}) (binding {}))",
+                        Name(entry.port),
+                        entry.binding
+                    )?;
+                }
+                f.write_str("))")
+            }
             Self::ContextualExprType(bindings, result) => {
                 f.write_str("(contextual-expr-type (context")?;
                 for entry in bindings {
@@ -801,6 +826,19 @@ impl Display for Pattern<'_> {
 impl Display for PatternKind<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::CodeSplice(operand, outputs) => {
+                write!(f, "(code-pattern-splice (operand {operand}) (outputs")?;
+                for output in outputs {
+                    write!(
+                        f,
+                        " (output (port {}) (name {}) (id {}))",
+                        Name(output.port),
+                        Name(output.name),
+                        Id(output.hir_id)
+                    )?;
+                }
+                f.write_str("))")
+            }
             Self::Then(first, value, next) => {
                 form!(f, "and-is", "first" => first, "value" => value, "next" => next)
             }

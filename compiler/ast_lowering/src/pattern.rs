@@ -10,6 +10,66 @@ use rustc_span::Span;
 use crate::{LoweringContext, expr::ExprContext};
 
 impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
+    pub(crate) fn pattern_expression_outputs(
+        &self,
+        value: &hir::Expr<'_>,
+    ) -> Option<Vec<hir::common::Ident>> {
+        match &value.kind {
+            hir::ExprKind::ResolvedLocal(_, id) | hir::ExprKind::ResolvedFnParam(_, id) => {
+                self.pattern_code_outputs.get(id).cloned()
+            }
+            hir::ExprKind::CodePatternQuote(pattern, substitutions) => {
+                Some(if substitutions.is_empty() {
+                    pattern_output_names(pattern)
+                } else {
+                    substitutions.iter().map(|entry| entry.port).collect()
+                })
+            }
+            hir::ExprKind::Application(callee, _)
+            | hir::ExprKind::ExtendedApplication(callee, _) => {
+                let callee = match callee.kind {
+                    hir::ExprKind::NFApplication(head, _) => head,
+                    _ => callee,
+                };
+                let hir::ExprKind::ResolvedDef { def_id, .. } = callee.kind else {
+                    return None;
+                };
+                // The declaration scan precedes all body lowering, including
+                // bodies in other files. Use its names even when the callee's
+                // HIR signature does not exist yet; elaboration checks types.
+                if let Some(scope) = self.resolver.find_scope_for_def(def_id)
+                    && let Some(outputs) = self
+                        .resolver
+                        .scope_tree()
+                        .get(scope)
+                        .and_then(|scope| scope.pattern_result_outputs.as_ref())
+                {
+                    return Some(
+                        outputs
+                            .iter()
+                            .map(|(name, span)| hir::common::Ident {
+                                name: *name,
+                                span: *span,
+                            })
+                            .collect(),
+                    );
+                }
+                let owner = self.package.definition_owner(def_id)?;
+                let (hir::ItemKind::Fn(signature, _) | hir::ItemKind::FnDeclaration(signature)) =
+                    &self.package.item(owner)?.kind
+                else {
+                    return None;
+                };
+                let hir::ExprKind::ContextualPatternType(_, outputs) = &signature.return_ty?.kind
+                else {
+                    return None;
+                };
+                Some(outputs.iter().map(|output| output.name).collect())
+            }
+            _ => None,
+        }
+    }
+
     /// Lower an AST node in pattern position into an HIR [`Pattern`].
     pub fn lower_pattern(&mut self, node: NodeIndex) -> Pattern<'hir> {
         let Some((kind, span, children)) = self.ast.get_node(node) else {
@@ -17,6 +77,44 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         };
 
         match kind {
+            NodeKind::SplicePattern => {
+                let operand = self.lower_expr(ExprContext::QuoteArgument, children[0]);
+                let mut outputs: Vec<_> = self
+                    .ast
+                    .get_multi_child_slice(children[1])
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(|&entry| {
+                        let parts = self.ast.get_children(entry);
+                        hir::pattern::CodePatternOutput {
+                            port: self.node_to_ident(parts[0]),
+                            name: self.node_to_ident(parts[1]),
+                            hir_id: self.next_hir_id(),
+                        }
+                    })
+                    .collect();
+                let declared = self
+                    .pattern_expression_outputs(&operand)
+                    .unwrap_or_default();
+                for port in declared {
+                    if !outputs.iter().any(|output| output.port.name == port.name) {
+                        let name = hir::common::Ident {
+                            name: port.name,
+                            span,
+                        };
+                        outputs.push(hir::pattern::CodePatternOutput {
+                            port: name,
+                            name,
+                            hir_id: self.next_hir_id(),
+                        });
+                    }
+                }
+                Pattern {
+                    hir_id: self.next_hir_id(),
+                    span,
+                    kind: PatternKind::CodeSplice(self.arena.alloc_expr(operand), outputs),
+                }
+            }
             NodeKind::OptionSomePattern => {
                 let inner = self.lower_pattern(children[0]);
                 Pattern {
@@ -474,4 +572,45 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             span,
         }
     }
+}
+
+// Only lexical success names are supplied here. Type checking, alternative
+// consistency and the actual code interface remain elaboration obligations.
+fn pattern_output_names(pattern: &Pattern<'_>) -> Vec<hir::common::Ident> {
+    let mut pending = vec![pattern];
+    let mut names = std::collections::BTreeMap::new();
+    while let Some(pattern) = pending.pop() {
+        match &pattern.kind {
+            PatternKind::Binding(_, name, inner) => {
+                names.insert(name.name.to_string(), *name);
+                pending.extend(*inner);
+            }
+            PatternKind::Then(first, _, next) => pending.extend([*first, *next]),
+            PatternKind::Guard(inner, _) | PatternKind::OptionSome(inner) => pending.push(inner),
+            PatternKind::Tuple(fields)
+            | PatternKind::List(fields, _)
+            | PatternKind::AppTuple(_, fields) => pending.extend(*fields),
+            PatternKind::Struct(_, fields, _) => {
+                pending.extend(fields.iter().map(|field| &field.pat))
+            }
+            PatternKind::NormalForm(_, inputs) => {
+                pending.extend(inputs.iter().map(|input| &input.pattern))
+            }
+            PatternKind::Or(arms) => pending.extend(arms.first()),
+            PatternKind::CodeSplice(_, outputs) => {
+                for output in outputs {
+                    names.insert(output.name.name.to_string(), output.name);
+                }
+            }
+            PatternKind::BitVec { segments, .. } => {
+                for segment in segments {
+                    if let hir::pattern::BitSegment::Typed { pattern, .. } = segment {
+                        pending.push(pattern);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    names.into_values().collect()
 }

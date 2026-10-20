@@ -654,3 +654,86 @@ fn captured_domains_precede_own_domains_without_reordering_identity() {
     );
     assert!(nir::newtypes::validate(&package).is_err());
 }
+
+#[test]
+fn capture_reordering_reports_budget_without_requiring_zero_balance() {
+    let mut definition = generic();
+    definition.type_parameters.push(id(3));
+    definition.capture_count = 1;
+    let arguments = [
+        Term::Primitive(Primitive::Bool),
+        Term::Primitive(Primitive::Char),
+    ];
+    let mut fuel = 1;
+    assert_eq!(
+        definition.validate_completed_arguments(&arguments, &mut fuel),
+        Err(nir::NominalAdmissionError::Budget)
+    );
+    assert_eq!(fuel, 1);
+    definition
+        .validate_completed_arguments(&arguments, &mut 1000)
+        .unwrap();
+}
+
+#[test]
+fn captured_nominal_payload_domains_use_layout_evidence() {
+    let mut definition = generic();
+    definition.type_parameters = vec![id(3), id(2)];
+    definition.capture_count = 1;
+    definition.parameter_types = vec![
+        Term::Rigid {
+            declaration: id(2),
+            sort: Sort::Type,
+        },
+        Term::Primitive(Primitive::Type),
+    ];
+    let ty = Term::Nominal {
+        declaration: id(77),
+        arguments: vec![],
+    };
+    let value = Term::NominalValue {
+        ty: Box::new(ty.clone()),
+        variant: None,
+        fields: vec![Term::Bool(true)],
+    };
+    let args = [value, ty.clone()];
+    let check = |args: &[Term], budget| {
+        definition.validate_completed_arguments_with_layouts(
+            args,
+            &mut { budget },
+            |actual, variant, fuel| {
+                *fuel = fuel
+                    .checked_sub(1)
+                    .ok_or(nir::NominalAdmissionError::Budget)?;
+                if actual != &ty || variant.is_some() {
+                    return Err("unknown nominal layout".into());
+                }
+                Ok(vec![Term::Primitive(Primitive::Bool)])
+            },
+        )
+    };
+    assert!(check(&args, 1000).is_ok());
+    assert!(
+        definition
+            .validate_completed_arguments(&args, &mut 1000)
+            .is_err()
+    );
+    assert!(check(&[args[1].clone(), args[0].clone()], 1000).is_err());
+    let mut bad = args.clone();
+    if let Term::NominalValue { fields, .. } = &mut bad[0] {
+        fields[0] = Term::Char('x');
+    }
+    assert!(check(&bad, 1000).is_err());
+    let mut completed = false;
+    for fuel in 0..1000 {
+        match check(&args, fuel) {
+            Ok(()) => {
+                completed = true;
+                break;
+            }
+            Err(nir::NominalAdmissionError::Budget) => {}
+            Err(error) => panic!("{fuel}: {error}"),
+        }
+    }
+    assert!(completed);
+}

@@ -42,7 +42,7 @@ impl Parser<'_> {
     }
 
     /// Parse `.id : type = default` and build a node of `kind` (a, b, c).
-    fn parse_optional_decl(&mut self, kind: NodeKind) -> ParseResult {
+    fn parse_optional_decl(&mut self, kind: NodeKind, delimited: bool) -> ParseResult {
         self.scoped_with_expected_prefix(&[TokenKind::Dot, TokenKind::Id, TokenKind::Colon], |p| {
             p.eat_tokens(1); // eat '.'
             let id = p.try_id()?;
@@ -62,7 +62,14 @@ impl Parser<'_> {
                     p.current_span(),
                 ));
             }
-            let default_value = p.try_expr_without_extended_call()?;
+            // Delimited parameter lists own their closing token, so braces
+            // here belong to the default expression. A where clause instead
+            // leaves the following definition body to its caller.
+            let default_value = if delimited {
+                p.try_expr()?
+            } else {
+                p.try_expr_without_extended_call()?
+            };
             if default_value == 0 {
                 return Err(ParseError::invalid_syntax(
                     "Expected a default value after `=`".to_string(),
@@ -202,7 +209,7 @@ impl Parser<'_> {
             }
 
             // .id : type = default (optional parameter)
-            let optional = p.parse_optional_decl(NodeKind::OptionalParam)?;
+            let optional = p.parse_optional_decl(NodeKind::OptionalParam, true)?;
             if optional != 0 {
                 return Ok(optional);
             }
@@ -315,7 +322,7 @@ impl Parser<'_> {
             }
 
             // .id : type = default
-            let optional = p.parse_optional_decl(NodeKind::OptionalParam)?;
+            let optional = p.parse_optional_decl(NodeKind::OptionalParam, true)?;
             if optional != 0 {
                 return Ok(optional);
             }
@@ -528,6 +535,10 @@ impl Parser<'_> {
     /// Parse a single clause in a `where` block.
     /// clause -> decl_clause | verification_clause | outcome_clause
     pub fn try_clause(&mut self) -> ParseResult {
+        self.try_clause_with_delimiter(false)
+    }
+
+    fn try_clause_with_delimiter(&mut self, delimited: bool) -> ParseResult {
         self.scoped(|p| {
             // Verification clauses
             match p.peek_next_token().kind {
@@ -539,7 +550,9 @@ impl Parser<'_> {
 
             // quote decl_clause
             if p.peek(TokenKind::KwQuote.as_ref()) {
-                return p.parse_wrapper_param(NodeKind::QuoteDeclClause, |p| p.try_clause());
+                return p.parse_wrapper_param(NodeKind::QuoteDeclClause, |p| {
+                    p.try_clause_with_delimiter(delimited)
+                });
             }
 
             // ...id : type (vararg declaration clause)
@@ -549,7 +562,7 @@ impl Parser<'_> {
             }
 
             // .id : type = default (optional declaration clause)
-            let optional = p.parse_optional_decl(NodeKind::OptionalDeclClause)?;
+            let optional = p.parse_optional_decl(NodeKind::OptionalDeclClause, delimited)?;
             if optional != 0 {
                 return Ok(optional);
             }
@@ -1002,7 +1015,9 @@ impl Parser<'_> {
             p.eat_tokens(3);
             let id = p.try_id()?;
             let parameters = p.try_multi_with_bracket(
-                &[Rule::comma("normal-form parameter", |p| p.try_clause())],
+                &[Rule::comma("normal-form parameter", |p| {
+                    p.try_clause_with_delimiter(true)
+                })],
                 (TokenKind::Lt, TokenKind::Gt),
             )?;
             let result = p.try_return_type()?;

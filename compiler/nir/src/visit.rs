@@ -65,6 +65,7 @@ pub fn into_pattern_observations(pattern: P, fuel: &mut usize) -> Result<Vec<Exp
             P::Tuple(fields)
             | P::TypeTuple(fields)
             | P::Or(fields)
+            | P::NominalType { fields, .. }
             | P::Record { fields, .. }
             | P::AnonymousRecord { fields, .. }
             | P::Variant { fields, .. }
@@ -76,6 +77,7 @@ pub fn into_pattern_observations(pattern: P, fuel: &mut usize) -> Result<Vec<Exp
                     .ok_or("pattern observation field budget exhausted")?;
                 pending.extend(fields.into_iter().rev());
             }
+            P::CodeEvidence { .. } => return Err("unresolved pattern-code evidence".into()),
             P::Wild | P::Unit | P::Literal(_) => (),
         }
     }
@@ -117,6 +119,7 @@ pub fn pattern_observations<'a>(pattern: &'a P, fuel: &mut usize) -> Result<Vec<
             P::Tuple(fields)
             | P::TypeTuple(fields)
             | P::Or(fields)
+            | P::NominalType { fields, .. }
             | P::Record { fields, .. }
             | P::AnonymousRecord { fields, .. }
             | P::Variant { fields, .. }
@@ -128,6 +131,7 @@ pub fn pattern_observations<'a>(pattern: &'a P, fuel: &mut usize) -> Result<Vec<
                     .ok_or("pattern observation field budget exhausted")?;
                 pending.extend(fields.iter().rev().map(Node::Pattern));
             }
+            P::CodeEvidence { .. } => return Err("unresolved pattern-code evidence".into()),
             P::Wild | P::Unit | P::Literal(_) => (),
         }
     }
@@ -246,7 +250,8 @@ fn walk_roots<'a>(
                     validate_record_pattern(names, fields.len(), fuel)?;
                     work.extend(fields.iter().map(Node::Pattern));
                 }
-                P::Record { fields, .. }
+                P::NominalType { fields, .. }
+                | P::Record { fields, .. }
                 | P::Variant { fields, .. }
                 | P::NormalForm {
                     arguments: fields, ..
@@ -254,6 +259,7 @@ fn walk_roots<'a>(
                 | P::Tuple(fields)
                 | P::TypeTuple(fields)
                 | P::Or(fields) => work.extend(fields.iter().map(Node::Pattern)),
+                P::CodeEvidence { .. } => return Err("unresolved pattern-code evidence".into()),
                 P::Wild | P::Unit | P::Literal(_) => {}
             },
             Node::Expr(expr) => {
@@ -319,6 +325,25 @@ fn walk_roots<'a>(
                                 .map(Node::Expr),
                         );
                     }
+                    K::NominalType {
+                        arguments,
+                        preparations,
+                        ..
+                    } => {
+                        work.extend(preparations.iter().map(|p| Node::Expr(&p.expression)));
+                        work.extend(
+                            arguments
+                                .iter()
+                                .flat_map(|a| a.patterns())
+                                .map(Node::Pattern),
+                        );
+                        work.extend(
+                            arguments
+                                .iter()
+                                .flat_map(|a| a.expressions())
+                                .map(Node::Expr),
+                        );
+                    }
                     K::ClosureType {
                         environment,
                         signature,
@@ -326,15 +351,32 @@ fn walk_roots<'a>(
                         work.extend(environment.iter().map(Node::Expr));
                         work.push(Node::Expr(signature));
                     }
+                    K::CheckTypeAlias {
+                        arguments,
+                        body,
+                        preparations,
+                        ..
+                    } => {
+                        work.extend(preparations.iter().map(|p| Node::Expr(&p.expression)));
+                        work.extend(
+                            arguments
+                                .iter()
+                                .flat_map(|a| a.patterns())
+                                .map(Node::Pattern),
+                        );
+                        work.extend(
+                            arguments
+                                .iter()
+                                .flat_map(|a| a.expressions())
+                                .map(Node::Expr),
+                        );
+                        if let Some(body) = body {
+                            work.push(Node::Expr(body));
+                        }
+                    }
                     K::Variant { fields, .. }
                     | K::AnonymousRecord { fields }
                     | K::Record { fields, .. }
-                    | K::CheckTypeAlias {
-                        arguments: fields, ..
-                    }
-                    | K::NominalType {
-                        arguments: fields, ..
-                    }
                     | K::FunctionType {
                         parameters: fields, ..
                     }
@@ -477,6 +519,7 @@ fn walk_roots<'a>(
                         work.push(Node::Expr(b));
                     }
                     K::AssociatedValue { .. }
+                    | K::ComptimeValue(_)
                     | K::TypeValue(_)
                     | K::TypeListValue(_)
                     | K::Literal(_)
@@ -578,7 +621,8 @@ pub fn expression_mut_pruned(
                     validate_record_pattern(names, fields.len(), fuel)?;
                     work.extend(fields.iter_mut().map(Node::Pattern));
                 }
-                P::Record { fields, .. }
+                P::NominalType { fields, .. }
+                | P::Record { fields, .. }
                 | P::Variant { fields, .. }
                 | P::NormalForm {
                     arguments: fields, ..
@@ -586,6 +630,7 @@ pub fn expression_mut_pruned(
                 | P::Tuple(fields)
                 | P::TypeTuple(fields)
                 | P::Or(fields) => work.extend(fields.iter_mut().map(Node::Pattern)),
+                P::CodeEvidence { .. } => return Err("unresolved pattern-code evidence".into()),
                 P::Wild | P::Unit | P::Literal(_) => {}
             },
             Node::Expr(expr) => {
@@ -636,6 +681,18 @@ pub fn expression_mut_pruned(
                         );
                         work.extend(arguments.iter_mut().map(Node::Argument));
                     }
+                    K::NominalType {
+                        arguments,
+                        preparations,
+                        ..
+                    } => {
+                        work.extend(
+                            preparations
+                                .iter_mut()
+                                .map(|p| Node::Expr(&mut p.expression)),
+                        );
+                        work.extend(arguments.iter_mut().map(Node::Argument));
+                    }
                     K::ClosureType {
                         environment,
                         signature,
@@ -643,15 +700,25 @@ pub fn expression_mut_pruned(
                         work.extend(environment.iter_mut().map(Node::Expr));
                         work.push(Node::Expr(signature));
                     }
+                    K::CheckTypeAlias {
+                        arguments,
+                        body,
+                        preparations,
+                        ..
+                    } => {
+                        work.extend(
+                            preparations
+                                .iter_mut()
+                                .map(|p| Node::Expr(&mut p.expression)),
+                        );
+                        work.extend(arguments.iter_mut().map(Node::Argument));
+                        if let Some(body) = body {
+                            work.push(Node::Expr(body));
+                        }
+                    }
                     K::Variant { fields, .. }
                     | K::AnonymousRecord { fields }
                     | K::Record { fields, .. }
-                    | K::CheckTypeAlias {
-                        arguments: fields, ..
-                    }
-                    | K::NominalType {
-                        arguments: fields, ..
-                    }
                     | K::FunctionType {
                         parameters: fields, ..
                     }
@@ -789,6 +856,7 @@ pub fn expression_mut_pruned(
                         work.push(Node::Expr(b));
                     }
                     K::AssociatedValue { .. }
+                    | K::ComptimeValue(_)
                     | K::TypeValue(_)
                     | K::TypeListValue(_)
                     | K::Literal(_)

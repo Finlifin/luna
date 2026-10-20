@@ -1,12 +1,21 @@
 //! Declaration domains for trait indices. Identity and domain formation do not
 //! establish an implementation, a runtime environment, or a program contract.
 use crate::{DeclarationParameter, Primitive, Sort, Term, program::Trait};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 impl Term {
     /// Structural index values have scalar or Type leaves. Only Type leaves
     /// participate in type equality; the enclosing record is a program value.
     pub fn is_structural_index_value(&self) -> bool {
+        self.index_value_shape(false)
+    }
+
+    /// Shape only: symbolic leaves still require declaration-domain admission.
+    pub fn is_symbolic_index_value(&self) -> bool {
+        self.index_value_shape(true)
+    }
+
+    fn index_value_shape(&self, symbolic: bool) -> bool {
         let mut pending = vec![(self, 0usize)];
         let mut remaining = 100_000usize;
         while let Some((value, depth)) = pending.pop() {
@@ -14,16 +23,35 @@ impl Term {
                 return false;
             }
             remaining -= 1;
+            if symbolic
+                && matches!(
+                    value,
+                    Self::Rigid {
+                        sort: Sort::ComptimeValue,
+                        ..
+                    }
+                )
+            {
+                continue;
+            }
             if value.scalar_index_domain().is_some() || (depth > 0 && value.sort() == Sort::Type) {
                 continue;
             }
-            let Self::RecordValue(fields) = value else {
-                return false;
-            };
-            if fields.len() > remaining.saturating_sub(pending.len()) {
-                return false;
+            match value {
+                Self::RecordValue(fields) => {
+                    if fields.len() > remaining.saturating_sub(pending.len()) {
+                        return false;
+                    }
+                    pending.extend(fields.iter().map(|(_, value)| (value, depth + 1)));
+                }
+                Self::TupleValue(fields) | Self::NominalValue { fields, .. } => {
+                    if fields.len() > remaining.saturating_sub(pending.len()) {
+                        return false;
+                    }
+                    pending.extend(fields.iter().map(|value| (value, depth + 1)));
+                }
+                _ => return false,
             }
-            pending.extend(fields.iter().map(|(_, value)| (value, depth + 1)));
         }
         true
     }
@@ -45,6 +73,32 @@ impl Term {
             remaining -= 1;
             if depth > 0 && left.sort() == Sort::Type && right.sort() == Sort::Type {
                 relations.push((left, right));
+            } else if let (
+                Self::NominalValue {
+                    ty: a,
+                    variant: av,
+                    fields: af,
+                },
+                Self::NominalValue {
+                    ty: b,
+                    variant: bv,
+                    fields: bf,
+                },
+            ) = (left, right)
+            {
+                if av != bv
+                    || af.len() != bf.len()
+                    || af.len().saturating_add(1) > remaining.saturating_sub(pending.len())
+                {
+                    return None;
+                }
+                pending.push((a, b, depth + 1));
+                pending.extend(af.iter().zip(bf).rev().map(|(a, b)| (a, b, depth + 1)));
+            } else if let (Self::TupleValue(a), Self::TupleValue(b)) = (left, right) {
+                if a.len() != b.len() || a.len() > remaining.saturating_sub(pending.len()) {
+                    return None;
+                }
+                pending.extend(a.iter().zip(b).rev().map(|(a, b)| (a, b, depth + 1)));
             } else if let (Self::RecordValue(a), Self::RecordValue(b)) = (left, right) {
                 if a.len() != b.len() || a.len() > remaining.saturating_sub(pending.len()) {
                     return None;
@@ -55,11 +109,100 @@ impl Term {
                     }
                     pending.push((a, b, depth + 1));
                 }
+            } else if left == right
+                && matches!(
+                    left,
+                    Self::Rigid {
+                        sort: Sort::ComptimeValue,
+                        ..
+                    }
+                )
+            {
+                continue;
             } else if left.scalar_index_domain().is_none() || left != right {
                 return None;
             }
         }
         Some(relations)
+    }
+
+    /// Refute value identity using only known scalar or record-shape differences.
+    /// Unknown value leaves and Type relations cannot establish a mismatch.
+    pub fn index_values_definitely_differ(&self, other: &Self, fuel: &mut usize) -> bool {
+        if crate::type_computations::charge_term(self, fuel).is_err()
+            || crate::type_computations::charge_term(other, fuel).is_err()
+        {
+            return false;
+        }
+        let mut pending = vec![(self, other)];
+        while let Some((left, right)) = pending.pop() {
+            let Some(remaining) = fuel.checked_sub(1) else {
+                return false;
+            };
+            *fuel = remaining;
+            if left.sort() == Sort::Type || right.sort() == Sort::Type {
+                continue;
+            }
+            match (left, right) {
+                (
+                    Self::NominalValue {
+                        variant: av,
+                        fields: a,
+                        ..
+                    },
+                    Self::NominalValue {
+                        variant: bv,
+                        fields: b,
+                        ..
+                    },
+                ) => {
+                    if av != bv || a.len() != b.len() {
+                        return true;
+                    }
+                    if a.len() > fuel.saturating_sub(pending.len()) {
+                        return false;
+                    }
+                    pending.extend(a.iter().zip(b));
+                }
+                (Self::TupleValue(a), Self::TupleValue(b)) => {
+                    if a.len() != b.len() {
+                        return true;
+                    }
+                    if a.len() > fuel.saturating_sub(pending.len()) {
+                        return false;
+                    }
+                    pending.extend(a.iter().zip(b));
+                }
+                (Self::RecordValue(a), Self::RecordValue(b)) => {
+                    if a.len() != b.len() {
+                        return true;
+                    }
+                    if a.len() > fuel.saturating_sub(pending.len()) {
+                        return false;
+                    }
+                    for ((name, a), (other_name, b)) in a.iter().zip(b) {
+                        if name != other_name {
+                            return true;
+                        }
+                        pending.push((a, b));
+                    }
+                }
+                (Self::RecordValue(_), value) | (value, Self::RecordValue(_))
+                    if value.scalar_index_domain().is_some() =>
+                {
+                    return true;
+                }
+                (a, b)
+                    if a.scalar_index_domain().is_some() && b.scalar_index_domain().is_some() =>
+                {
+                    if a != b {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     /// Intrinsic domain evidence for closed scalar interface indices. Equality
@@ -147,7 +290,16 @@ impl Trait {
         declarations: &[Trait],
         fuel: &mut usize,
     ) -> Result<(), String> {
-        self.validate_argument_domains(None, arguments, scope, declarations, fuel)
+        self.validate_argument_domains(
+            None,
+            arguments,
+            scope,
+            declarations,
+            &BTreeMap::new(),
+            fuel,
+            &mut |_, _, _| false,
+            None,
+        )
     }
 
     /// Validate an interface instance with its actual Self type. The subject is
@@ -165,7 +317,92 @@ impl Trait {
         if subject.sort() != Sort::Type {
             return Err("trait subject must be a Type".into());
         }
-        self.validate_argument_domains(Some(subject), arguments, scope, declarations, fuel)
+        self.validate_argument_domains(
+            Some(subject),
+            arguments,
+            scope,
+            declarations,
+            &BTreeMap::new(),
+            fuel,
+            &mut |_, _, _| false,
+            None,
+        )
+    }
+
+    /// Validate rigid value indices using the caller's declaration-domain table.
+    /// Evidence is keyed by declaration identity, never inferred from this slot.
+    pub fn validate_arguments_with_domains(
+        &self,
+        subject: &Term,
+        arguments: &[Term],
+        scope: &[Vec<Sort>],
+        declarations: &[Trait],
+        domains: &BTreeMap<crate::DeclarationId, Term>,
+        fuel: &mut usize,
+    ) -> Result<(), String> {
+        self.validate_arguments_with_domain_relations(
+            subject,
+            arguments,
+            scope,
+            declarations,
+            domains,
+            fuel,
+            |_, _, _| false,
+        )
+    }
+
+    /// The caller may discharge equality of Type domains using its checked context.
+    /// This callback never establishes equality of value indices.
+    pub fn validate_arguments_with_domain_relations(
+        &self,
+        subject: &Term,
+        arguments: &[Term],
+        scope: &[Vec<Sort>],
+        declarations: &[Trait],
+        domains: &BTreeMap<crate::DeclarationId, Term>,
+        fuel: &mut usize,
+        mut equivalent: impl FnMut(&Term, &Term, &mut usize) -> bool,
+    ) -> Result<(), String> {
+        self.validate_arguments_with_layouts(
+            subject,
+            arguments,
+            scope,
+            declarations,
+            domains,
+            fuel,
+            &mut equivalent,
+            None,
+        )
+    }
+
+    /// Validate immutable nominal payloads against the supplied declaration world.
+    /// Domain relations apply only to Types; payload identity remains structural.
+    pub fn validate_arguments_with_layouts(
+        &self,
+        subject: &Term,
+        arguments: &[Term],
+        scope: &[Vec<Sort>],
+        declarations: &[Trait],
+        domains: &BTreeMap<crate::DeclarationId, Term>,
+        fuel: &mut usize,
+        mut equivalent: impl FnMut(&Term, &Term, &mut usize) -> bool,
+        layouts: Option<&crate::program::Package>,
+    ) -> Result<(), String> {
+        crate::type_computations::charge_term(subject, fuel).map_err(|e| e.to_string())?;
+        subject.check_scope(scope).map_err(|e| e.to_string())?;
+        if subject.sort() != Sort::Type {
+            return Err("trait subject must be a Type".into());
+        }
+        self.validate_argument_domains(
+            Some(subject),
+            arguments,
+            scope,
+            declarations,
+            domains,
+            fuel,
+            &mut equivalent,
+            layouts,
+        )
     }
 
     fn validate_argument_domains(
@@ -174,7 +411,10 @@ impl Trait {
         arguments: &[Term],
         scope: &[Vec<Sort>],
         declarations: &[Trait],
+        domains: &BTreeMap<crate::DeclarationId, Term>,
         fuel: &mut usize,
+        equivalent: &mut impl FnMut(&Term, &Term, &mut usize) -> bool,
+        layouts: Option<&crate::program::Package>,
     ) -> Result<(), String> {
         let binders = self.parameter_binders(fuel)?;
         if arguments.len() != binders.len() {
@@ -212,8 +452,59 @@ impl Trait {
             } else {
                 domain
             };
-            if matches!(argument, Term::RecordValue(_)) && argument.is_structural_index_value() {
-                validate_record_index(argument, &domain, fuel)?;
+            if matches!(argument, Term::NominalValue { .. } | Term::TupleValue(_)) {
+                crate::nominal_parameters::validate_symbolic_value(
+                    argument,
+                    &domain,
+                    fuel,
+                    |ty, variant, fuel| {
+                        let package = layouts.ok_or_else(|| {
+                            crate::NominalAdmissionError::from(
+                                "nominal value admission requires declaration layout evidence",
+                            )
+                        })?;
+                        crate::normal_forms::nominal_value_fields_budgeted(
+                            package, ty, variant, fuel,
+                        )
+                        .ok_or_else(|| {
+                            if *fuel == 0 {
+                                crate::NominalAdmissionError::Budget
+                            } else {
+                                crate::NominalAdmissionError::from("invalid nominal value layout")
+                            }
+                        })
+                    },
+                    |value, expected, fuel| {
+                        let Term::Rigid {
+                            declaration,
+                            sort: Sort::ComptimeValue,
+                        } = value
+                        else {
+                            return false;
+                        };
+                        declared_value_domain(*declaration, declarations, domains, scope, fuel)
+                            .is_ok_and(|actual| {
+                                actual == *expected || equivalent(&actual, expected, fuel)
+                            })
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+                continue;
+            }
+            if matches!(argument, Term::RecordValue(_)) && argument.is_symbolic_index_value() {
+                validate_record_index_with(argument, &domain, fuel, |value, expected, fuel| {
+                    let Term::Rigid {
+                        declaration,
+                        sort: Sort::ComptimeValue,
+                    } = value
+                    else {
+                        return false;
+                    };
+                    declared_value_domain(*declaration, declarations, domains, scope, fuel)
+                        .is_ok_and(|actual| {
+                            actual == *expected || equivalent(&actual, expected, fuel)
+                        })
+                })?;
                 continue;
             }
             // Fixed-width proxies freeze to the same exact integer payload as
@@ -239,31 +530,10 @@ impl Trait {
                 Term::Rigid {
                     declaration,
                     sort: Sort::ComptimeValue,
-                } => {
-                    let mut found = None;
-                    for owner in declarations {
-                        let binders = owner.parameter_binders(fuel)?;
-                        for (slot, binder) in binders.iter().enumerate() {
-                            if binder.declaration == *declaration {
-                                if found.is_some() || binder.sort != Sort::ComptimeValue {
-                                    return Err(
-                                        "ambiguous or mismatched trait value declaration".into()
-                                    );
-                                }
-                                crate::type_computations::charge_term(
-                                    &owner.parameter_types[slot],
-                                    fuel,
-                                )
-                                .map_err(|e| e.to_string())?;
-                                found = Some(owner.parameter_types[slot].clone());
-                            }
-                        }
-                    }
-                    found.ok_or("trait value argument requires declared domain evidence")?
-                }
+                } => declared_value_domain(*declaration, declarations, domains, scope, fuel)?,
                 _ => return Err("trait value argument requires declared domain evidence".into()),
             };
-            if domain != actual {
+            if domain != actual && !equivalent(&domain, &actual, fuel) {
                 return Err("trait value argument domain mismatch".into());
             }
         }
@@ -271,27 +541,69 @@ impl Trait {
     }
 }
 
+fn declared_value_domain(
+    declaration: crate::DeclarationId,
+    declarations: &[Trait],
+    domains: &BTreeMap<crate::DeclarationId, Term>,
+    scope: &[Vec<Sort>],
+    fuel: &mut usize,
+) -> Result<Term, String> {
+    let mut found = None;
+    for owner in declarations {
+        let binders = owner.parameter_binders(fuel)?;
+        for (slot, binder) in binders.iter().enumerate() {
+            if binder.declaration == declaration {
+                if found.is_some() || binder.sort != Sort::ComptimeValue {
+                    return Err("ambiguous or mismatched trait value declaration".into());
+                }
+                crate::type_computations::charge_term(&owner.parameter_types[slot], fuel)
+                    .map_err(|e| e.to_string())?;
+                found = Some(owner.parameter_types[slot].clone());
+            }
+        }
+    }
+    if let Some(domain) = domains.get(&declaration) {
+        crate::type_computations::charge_term(domain, fuel).map_err(|e| e.to_string())?;
+        if domain.sort() != Sort::Type || found.as_ref().is_some_and(|old| old != domain) {
+            return Err("conflicting trait value declaration domain".into());
+        }
+        domain.check_scope(scope).map_err(|e| e.to_string())?;
+        found = Some(domain.clone());
+    }
+    found.ok_or_else(|| "trait value argument requires declared domain evidence".into())
+}
+
 pub(crate) fn validate_record_index(
     value: &Term,
     domain: &Term,
     fuel: &mut usize,
-) -> Result<(), String> {
+) -> Result<(), crate::nominal_parameters::AdmissionError> {
+    validate_record_index_with(value, domain, fuel, |_, _, _| false)
+}
+/// Check record shape and concrete leaves; the callback admits only symbolic
+/// leaves whose declaration domain is established by the caller.
+pub fn validate_record_index_with(
+    value: &Term,
+    domain: &Term,
+    fuel: &mut usize,
+    mut symbolic: impl FnMut(&Term, &Term, &mut usize) -> bool,
+) -> Result<(), crate::nominal_parameters::AdmissionError> {
     let mut pending = vec![(value, domain)];
     while let Some((value, domain)) = pending.pop() {
         *fuel = fuel
             .checked_sub(1)
-            .ok_or("trait record index budget exhausted")?;
+            .ok_or(crate::nominal_parameters::AdmissionError::Budget)?;
         if let (Term::RecordValue(values), Term::Record(types)) = (value, domain) {
             if values.len() != types.len() {
                 return Err("trait record index field count mismatch".into());
             }
             *fuel = fuel
                 .checked_sub(values.len())
-                .ok_or("trait record index budget exhausted")?;
+                .ok_or(crate::nominal_parameters::AdmissionError::Budget)?;
             for ((name, value), (expected, ty)) in values.iter().zip(types) {
                 *fuel = fuel
                     .checked_sub(name.len().saturating_add(expected.len()))
-                    .ok_or("trait record index budget exhausted")?;
+                    .ok_or(crate::nominal_parameters::AdmissionError::Budget)?;
                 if name != expected {
                     return Err("trait record index field mismatch".into());
                 }
@@ -314,6 +626,9 @@ pub(crate) fn validate_record_index(
                 return Err("trait integer argument is outside its declared domain".into());
             }
         }
+        if symbolic(value, domain, fuel) {
+            continue;
+        }
         if value.scalar_index_domain().map(Term::Primitive).as_ref() != Some(domain) {
             return Err("trait record index field domain mismatch".into());
         }
@@ -328,13 +643,52 @@ impl crate::program::Package {
         &self,
         fuel: &mut usize,
     ) -> Result<std::collections::BTreeMap<crate::DeclarationId, Sort>, String> {
-        let mut sorts = std::collections::BTreeMap::new();
+        Ok(self
+            .declaration_parameter_domains(fuel)?
+            .into_iter()
+            .map(|(id, domain)| {
+                (
+                    id,
+                    if domain == Term::Primitive(Primitive::Type) {
+                        Sort::Type
+                    } else {
+                        Sort::ComptimeValue
+                    },
+                )
+            })
+            .collect())
+    }
+
+    /// Domains retain the declaration telescope, including value dependencies.
+    pub fn declaration_parameter_domains(
+        &self,
+        fuel: &mut usize,
+    ) -> Result<std::collections::BTreeMap<crate::DeclarationId, Term>, String> {
+        let mut result = std::collections::BTreeMap::new();
         for declaration in &self.traits {
-            for binder in declaration.binders_with_self(fuel)? {
-                if sorts.insert(binder.declaration, binder.sort).is_some() {
+            for (index, binder) in declaration.binders_with_self(fuel)?.into_iter().enumerate() {
+                let domain = index
+                    .checked_sub(1)
+                    .and_then(|i| declaration.parameter_types.get(i))
+                    .unwrap_or(&Term::Primitive(Primitive::Type));
+                crate::type_computations::charge_term(domain, fuel).map_err(|e| e.to_string())?;
+                if result.insert(binder.declaration, domain.clone()).is_some() {
                     return Err("duplicate trait parameter identity across declarations".into());
                 }
             }
+        }
+        let mut callable_ids = BTreeSet::new();
+        for declaration in &self.function_parameters {
+            *fuel = fuel
+                .checked_sub(declaration.parameters.len().saturating_add(1))
+                .ok_or("function parameter budget exhausted")?;
+            if !callable_ids.insert(declaration.declaration) {
+                return Err("duplicate function parameter declaration".into());
+            }
+            for domain in &declaration.domains {
+                crate::type_computations::charge_term(domain, fuel).map_err(|e| e.to_string())?;
+            }
+            declaration.binders().map_err(|e| e.to_string())?;
         }
         let mut inherited_domains = std::collections::BTreeMap::new();
         for (ids, domains) in self
@@ -375,12 +729,54 @@ impl crate::program::Package {
                     }
                     continue;
                 }
-                if sorts.insert(binder.declaration, binder.sort).is_some() {
+                if result.insert(binder.declaration, domain.clone()).is_some() {
                     return Err("duplicate declaration parameter identity".into());
                 }
                 inherited_domains.insert(binder.declaration, domain);
             }
         }
-        Ok(sorts)
+        // Newtypes and transparent alias guards can repeat lexical captures
+        // from traits or nominal containers. Reuse requires the same domain;
+        // their own inputs also provide declaration evidence to generated code.
+        for (ids, domains) in self
+            .newtypes
+            .iter()
+            .map(|d| (&d.type_parameters, &d.parameter_types))
+            .chain(
+                self.alias_contracts
+                    .iter()
+                    .map(|d| (&d.parameters, &d.parameter_types)),
+            )
+            .chain(
+                self.function_parameters
+                    .iter()
+                    .map(|d| (&d.parameters, &d.domains)),
+            )
+        {
+            *fuel = fuel
+                .checked_sub(ids.len())
+                .ok_or("captured declaration parameter budget exhausted")?;
+            for domain in domains {
+                crate::type_computations::charge_term(domain, fuel).map_err(|e| e.to_string())?;
+            }
+            for (index, binder) in crate::declaration_parameters(ids, domains)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .enumerate()
+            {
+                let domain = domains
+                    .get(index)
+                    .cloned()
+                    .unwrap_or(Term::Primitive(Primitive::Type));
+                if let Some(previous) = result.get(&binder.declaration) {
+                    if previous != &domain {
+                        return Err("conflicting captured declaration parameter domain".into());
+                    }
+                } else {
+                    result.insert(binder.declaration, domain);
+                }
+            }
+        }
+        Ok(result)
     }
 }

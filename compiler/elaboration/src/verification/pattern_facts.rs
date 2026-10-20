@@ -76,6 +76,7 @@ pub(super) fn pattern_observes(pattern: &Pattern, depth: usize) -> bool {
         return true;
     }
     match pattern {
+        Pattern::CodeEvidence { .. } => true,
         Pattern::Observe { .. } | Pattern::Then { .. } | Pattern::Guard { .. } => true,
         Pattern::Binding { inner, .. } | Pattern::Remap { pattern: inner, .. } => {
             pattern_observes(inner, depth + 1)
@@ -83,6 +84,7 @@ pub(super) fn pattern_observes(pattern: &Pattern, depth: usize) -> bool {
         Pattern::Tuple(fields)
         | Pattern::TypeTuple(fields)
         | Pattern::Or(fields)
+        | Pattern::NominalType { fields, .. }
         | Pattern::Record { fields, .. }
         | Pattern::AnonymousRecord { fields, .. }
         | Pattern::Variant { fields, .. }

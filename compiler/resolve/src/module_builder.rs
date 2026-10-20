@@ -912,6 +912,9 @@ fn dump_binding(kind: BindingKind) -> String {
         }
         BindingKind::FnParam(reference) => format!("(fn-parameter {})", node(reference)),
         BindingKind::Local(reference) => format!("(local {})", node(reference)),
+        BindingKind::ExpandedLocal(reference, output) => {
+            format!("(expanded-local {} (output {output}))", node(reference))
+        }
         BindingKind::LoopLabel(reference) => format!("(loop-label {})", node(reference)),
     }
 }

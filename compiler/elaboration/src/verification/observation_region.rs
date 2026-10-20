@@ -131,6 +131,7 @@ fn pattern_locals(
             .checked_sub(1)
             .ok_or("observation pattern binding budget exhausted")?;
         match pattern {
+            Pattern::CodeEvidence { .. } => return Err("unresolved pattern-code evidence".into()),
             Pattern::Observe { binding, inner } | Pattern::Binding { binding, inner } => {
                 locals.insert(*binding);
                 pending.push(inner);
@@ -150,6 +151,7 @@ fn pattern_locals(
             Pattern::Tuple(fields)
             | Pattern::TypeTuple(fields)
             | Pattern::Or(fields)
+            | Pattern::NominalType { fields, .. }
             | Pattern::Record { fields, .. }
             | Pattern::AnonymousRecord { fields, .. }
             | Pattern::Variant { fields, .. }
@@ -222,6 +224,7 @@ pub(super) fn check(
             | K::If { .. }
             | K::Match { .. }
             | K::Loop { .. }
+            | K::ComptimeValue(_)
             | K::Literal(_)
             | K::Unit
             | K::Local(_)

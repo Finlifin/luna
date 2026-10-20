@@ -370,3 +370,47 @@ fn clause_domains_participate_in_mapping_budget_and_dump() {
         "{dump}"
     );
 }
+
+#[test]
+fn pattern_input_interfaces_preserve_category_names_and_type_dependencies() {
+    use nir::code_interfaces::{CodeFunctionSignature, CodeInput, PatternCodeInterface};
+    let original = interface();
+    let ty = original.context[&LocalId { owner: 2, index: 1 }].clone();
+    let input = PatternCodeInterface {
+        subject: ty.clone(),
+        outputs: BTreeMap::from([("value\"\n".into(), ty)]),
+    };
+    let signature = CodeFunctionSignature {
+        clause_domains: vec![],
+        inputs: vec![(
+            LocalId { owner: 1, index: 1 },
+            CodeInput::Pattern(input.clone()),
+        )],
+        output: original,
+    };
+    let mapped = signature
+        .try_map_types(|ty| {
+            ty.instantiate_types(
+                &[DeclarationId {
+                    package: 1,
+                    local: 3,
+                }],
+                &[Term::Primitive(Primitive::Bool)],
+            )
+        })
+        .unwrap();
+    let CodeInput::Pattern(result) = &mapped.inputs[0].1 else {
+        panic!("lost pattern input category")
+    };
+    assert_eq!(result.subject, Term::Primitive(Primitive::Bool));
+    assert!(result.outputs.keys().eq(input.outputs.keys()));
+    assert_eq!(
+        mapped.inputs[0].1.type_terms().collect::<Vec<_>>(),
+        vec![&result.subject, result.outputs.values().next().unwrap()]
+    );
+    assert!(signature.charge(&mut 0).is_err());
+    signature.charge(&mut 10000).unwrap();
+    let dump = mapped.to_string();
+    assert!(dump.contains("(pattern (pattern-interface"), "{dump}");
+    assert!(dump.contains("value\\\"\\n"), "{dump}");
+}

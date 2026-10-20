@@ -331,6 +331,15 @@ fn capture_value(
             bounded(&value.value, fuel)?;
             value.value.clone()
         }
+        K::ComptimeValue(value) => {
+            crate::comptime_values::validate(value, &expr.ty, fuel).map_err(
+                |error| match error {
+                    crate::comptime_values::Error::Budget => Error::Budget,
+                    crate::comptime_values::Error::Invalid(_) => Error::InvalidCall(expr.source),
+                },
+            )?;
+            value.clone()
+        }
         K::TypeValue(ty) => {
             bounded(ty, fuel)?;
             ty.clone()
@@ -452,6 +461,25 @@ fn charge_expanded_term(
     max_depth: usize,
     replacements: &BTreeMap<DeclarationId, &Term>,
 ) -> Result<(), Error> {
+    visit_expanded_term(root, fuel, max_depth, replacements, &mut |_| {})
+}
+
+/// Inspect open declaration inputs without cloning the type or unfolding heads.
+pub fn has_rigid_parameters_bounded(root: &Term, fuel: &mut usize) -> Result<bool, Error> {
+    let mut found = false;
+    visit_expanded_term(root, fuel, 128, &BTreeMap::new(), &mut |term| {
+        found |= matches!(term, Term::Rigid { .. });
+    })?;
+    Ok(found)
+}
+
+fn visit_expanded_term(
+    root: &Term,
+    fuel: &mut usize,
+    max_depth: usize,
+    replacements: &BTreeMap<DeclarationId, &Term>,
+    visit: &mut impl FnMut(&Term),
+) -> Result<(), Error> {
     let mut work = vec![(root, 0usize, true)];
     while let Some((term, depth, substitute)) = work.pop() {
         *fuel = fuel.checked_sub(1).ok_or(Error::Budget)?;
@@ -466,6 +494,7 @@ fn charge_expanded_term(
                 }
             }
         }
+        visit(term);
         // Scalar payloads and empty effect occurrences cost space even when
         // they add no child term. Charge them before cloning or substitution.
         let payload = match term {

@@ -41,7 +41,12 @@ impl Builder<'_> {
     fn new_invocation_snapshot(&mut self) -> Result<Snapshot, String> {
         // The source package is already checked. Preserve its implementation
         // world in this private snapshot; publish only the frozen result.
-        for function in &self.package.functions {
+        for function in self
+            .package
+            .functions
+            .iter()
+            .chain(&self.package.quote_templates)
+        {
             self.fuel = self
                 .fuel
                 .checked_sub(1)
@@ -51,6 +56,11 @@ impl Builder<'_> {
                 .map_err(|_| "staged snapshot type budget exhausted")?;
         }
         let mut snapshot = self.package.clone();
+        // Retained quote bodies still implement trait members in this private
+        // world. Preserve their full contracts for interpreter validation;
+        // their runtime phase prevents invocation during comptime evaluation.
+        // No signature-only identity may erase a quote method precondition.
+        snapshot.functions.append(&mut snapshot.quote_templates);
         let mut entry = Id {
             package: u64::MAX,
             local: u32::MAX,
@@ -171,10 +181,56 @@ impl Builder<'_> {
     ) -> Result<n::Expr, String> {
         self.tick(depth)?;
         let kind = match value {
-            Value::Function(declaration) if ty.is_comptime_callable() => K::Function(declaration),
+            Value::RuntimeFunction {
+                declaration,
+                arguments,
+            } if !ty.is_comptime_callable()
+                && matches!(ty.callable_signature(), Term::Function { .. }) =>
+            {
+                for argument in &arguments {
+                    nir::type_computations::charge_term(argument, &mut self.fuel)
+                        .map_err(|error| error.to_string())?;
+                    iir::completed_type(argument, &BTreeSet::new(), &mut self.fuel)?;
+                }
+                K::FunctionInstance {
+                    declaration,
+                    arguments,
+                }
+            }
+            Value::RuntimeTraitMethod(identity)
+                if !ty.is_comptime_callable()
+                    && matches!(ty.callable_signature(), Term::Function { .. }) =>
+            {
+                let comptime_interpretor::TraitMethodIdentity {
+                    interface,
+                    subject,
+                    member,
+                    method_arguments,
+                } = *identity;
+                for argument in std::iter::once(&subject)
+                    .chain(&interface.arguments)
+                    .chain(&method_arguments)
+                {
+                    nir::type_computations::charge_term(argument, &mut self.fuel)
+                        .map_err(|error| error.to_string())?;
+                    iir::completed_type(argument, &BTreeSet::new(), &mut self.fuel)?;
+                }
+                K::TraitMethod {
+                    interface: interface.declaration,
+                    interface_arguments: interface.arguments,
+                    subject,
+                    member,
+                    method_arguments,
+                }
+            }
+            Value::Function(declaration)
+                if matches!(ty.callable_signature(), Term::Function { .. }) =>
+            {
+                K::Function(declaration)
+            }
             Value::Closure(closure)
-                if ty.is_comptime_callable()
-                    && closure.ty().is_comptime_callable()
+                if matches!(ty.callable_signature(), Term::Function { .. })
+                    && ty.is_comptime_callable() == closure.ty().is_comptime_callable()
                     && closure.captured_values().len() == 0
                     && closure.declaration_instance().is_some() =>
             {
@@ -187,6 +243,25 @@ impl Builder<'_> {
                 K::FunctionInstance {
                     declaration,
                     arguments: arguments.to_vec(),
+                }
+            }
+            Value::Closure(closure)
+                if matches!(ty.callable_signature(), Term::Function { .. })
+                    && ty.is_comptime_callable() == closure.ty().is_comptime_callable()
+                    && closure.captured_values().len() == 0 =>
+            {
+                // Retain the checked anonymous body; freezing creates a callable
+                // and must not execute it or manufacture a declaration identity.
+                let mut steps = self.fuel as u64;
+                let checked = nir::copy_budget::charge_type_rewrite(closure.body(), &mut steps);
+                self.fuel = usize::try_from(steps).unwrap_or(usize::MAX);
+                checked.map_err(|error| {
+                    format!("staged closure body exceeds copy limits: {error:?}")
+                })?;
+                K::Closure {
+                    parameters: closure.parameters().to_vec(),
+                    captures: Vec::new(),
+                    body: closure.body().clone(),
                 }
             }
             Value::Newtype { ty: actual, value } => {

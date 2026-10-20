@@ -19,6 +19,7 @@ pub struct Pattern<'hir> {
 /// must produce diagnostics rather than dropping their matching conditions.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PatternKind<'hir> {
+    CodeSplice(&'hir Expr<'hir>, Vec<CodePatternOutput>),
     Then(
         &'hir Pattern<'hir>,
         &'hir super::expr::Expr<'hir>,
@@ -78,6 +79,15 @@ pub enum PatternKind<'hir> {
     },
 
     Invalid,
+}
+
+/// Explicit success outputs introduce fresh bindings; they do not read
+/// same-named bindings from the surrounding runtime scope.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodePatternOutput {
+    pub port: Ident,
+    pub name: Ident,
+    pub hir_id: HirId,
 }
 
 #[derive(Debug, Clone, PartialEq)]

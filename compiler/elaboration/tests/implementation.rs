@@ -2170,3 +2170,631 @@ fn disjoint_open_record_impls_select_and_infer_their_value_arguments() {
         }
     }
 }
+
+#[test]
+fn external_domain_head_replay_preserves_pending_requirements() {
+    use elaboration::ptc::Context;
+    use nir::program::TypePredicate;
+    let value = |n| Term::Rigid {
+        declaration: id(n),
+        sort: Sort::ComptimeValue,
+    };
+    let mut h = head(200, node(10, vec![value(1)]));
+    h.type_parameters = vec![id(1)];
+    h.parameter_types = vec![ty(P::Bool)];
+    h.interface_arguments = vec![value(1)];
+    h.requirements = vec![TypePredicate::Bool(false)];
+    let subject = node(10, vec![value(2)]);
+    let args = [value(2)];
+    let domains = std::collections::BTreeMap::from([(id(2), ty(P::Bool))]);
+    let context = Context::default();
+    let matched = h
+        .match_types_with_domains(&subject, &args, &context, Budget::default(), &domains)
+        .unwrap();
+    assert_eq!(matched.requirements(), &[TypePredicate::Bool(false)]);
+    h.verify_head_match_with_domains(
+        &matched,
+        &subject,
+        &args,
+        &context,
+        Budget::default(),
+        &domains,
+    )
+    .unwrap();
+    assert!(
+        h.verify_head_match(&matched, &subject, &args, &context, Budget::default())
+            .is_err()
+    );
+    let wrong = std::collections::BTreeMap::from([(id(2), ty(P::Char))]);
+    assert!(
+        h.verify_head_match_with_domains(
+            &matched,
+            &subject,
+            &args,
+            &context,
+            Budget::default(),
+            &wrong
+        )
+        .is_err()
+    );
+    assert!(
+        h.verify_head_match_with_domains(
+            &matched,
+            &subject,
+            &args,
+            &context,
+            Budget {
+                steps: 0,
+                ..Default::default()
+            },
+            &domains
+        )
+        .is_err()
+    );
+    let mut changed = h.clone();
+    changed.requirements.clear();
+    assert!(
+        changed
+            .verify_head_match_with_domains(
+                &matched,
+                &subject,
+                &args,
+                &context,
+                Budget::default(),
+                &domains
+            )
+            .is_err()
+    );
+    let mut index = Index::default();
+    index.insert(h.clone(), Budget::default()).unwrap();
+    index.register_parameter_domain(id(2), ty(P::Bool)).unwrap();
+    assert!(!matches!(
+        index
+            .resolve_types(id(100), &args, &subject, &context, Budget::default())
+            .unwrap()
+            .selection,
+        Selection::Selected(_)
+    ));
+    h.verify_head_match_with_domains(
+        &matched,
+        &subject,
+        &args,
+        &context,
+        Budget::default(),
+        &domains,
+    )
+    .unwrap();
+}
+
+#[test]
+fn dependent_domain_equality_is_rechecked_during_proof_replay() {
+    use elaboration::ptc::{Context, Formula};
+    let value = |n| Term::Rigid {
+        declaration: id(n),
+        sort: Sort::ComptimeValue,
+    };
+    let mut h = head(200, ty(P::Bool));
+    h.type_parameters = vec![id(1), id(2)];
+    h.parameter_types = vec![ty(P::Type), var(1)];
+    h.interface_arguments = vec![var(1), value(2)];
+    let args = [var(3), value(5)];
+    let domains = std::collections::BTreeMap::from([(id(5), var(4))]);
+    let mut context = Context::default();
+    assert!(
+        h.match_types_with_domains(&ty(P::Bool), &args, &context, Budget::default(), &domains)
+            .is_err()
+    );
+    context.assume(Formula::equal(var(3), var(4)));
+    let matched = h
+        .match_types_with_domains(&ty(P::Bool), &args, &context, Budget::default(), &domains)
+        .unwrap();
+    h.verify_head_match_with_domains(
+        &matched,
+        &ty(P::Bool),
+        &args,
+        &context,
+        Budget::default(),
+        &domains,
+    )
+    .unwrap();
+    assert!(
+        h.verify_head_match_with_domains(
+            &matched,
+            &ty(P::Bool),
+            &args,
+            &Context::default(),
+            Budget::default(),
+            &domains
+        )
+        .is_err()
+    );
+    let mut index = Index::default();
+    index.insert(h.clone(), Budget::default()).unwrap();
+    index.register_parameter_domain(id(5), var(4)).unwrap();
+    let selected = index
+        .resolve_types(id(100), &args, &ty(P::Bool), &context, Budget::default())
+        .unwrap();
+    let elaboration::implementation::TypeAssessment::Applicable(evidence) =
+        &selected.assessments[&id(200)]
+    else {
+        panic!("{selected}")
+    };
+    h.verify_type_evidence_with_domains(
+        evidence,
+        &ty(P::Bool),
+        &args,
+        &context,
+        Budget::default(),
+        &domains,
+    )
+    .unwrap();
+    assert!(
+        h.verify_type_evidence_with_domains(
+            evidence,
+            &ty(P::Bool),
+            &args,
+            &Context::default(),
+            Budget::default(),
+            &domains
+        )
+        .is_err()
+    );
+    assert!(
+        h.verify_type_evidence_with_domains(
+            evidence,
+            &ty(P::Bool),
+            &args,
+            &context,
+            Budget {
+                steps: 0,
+                ..Default::default()
+            },
+            &domains
+        )
+        .is_err()
+    );
+    h.verify_type_evidence_with_domains(
+        evidence,
+        &ty(P::Bool),
+        &args,
+        &context,
+        Budget::default(),
+        &domains,
+    )
+    .unwrap();
+}
+
+#[test]
+fn repeated_symbolic_value_inputs_remain_pending_in_both_orders() {
+    use elaboration::{implementation::TypeAssessment, ptc::Context};
+    let value = |n| Term::Rigid {
+        declaration: id(n),
+        sort: Sort::ComptimeValue,
+    };
+    let mut h = head(200, ty(P::Bool));
+    h.type_parameters = vec![id(1)];
+    h.parameter_types = vec![ty(P::Bool)];
+    h.interface_arguments = vec![value(1), value(1)];
+    let domains = std::collections::BTreeMap::from([(id(2), ty(P::Bool))]);
+    for args in [[value(2), Term::Bool(true)], [Term::Bool(true), value(2)]] {
+        assert!(
+            matches!(
+                h.match_types_with_domains(
+                    &ty(P::Bool),
+                    &args,
+                    &Context::default(),
+                    Budget::default(),
+                    &domains
+                ),
+                Err(TypeAssessment::Pending(_))
+            ),
+            "{args:?}"
+        );
+    }
+    assert!(matches!(
+        h.match_types_with_domains(
+            &ty(P::Bool),
+            &[Term::Bool(true), Term::Bool(false)],
+            &Context::default(),
+            Budget::default(),
+            &domains
+        ),
+        Err(TypeAssessment::ValueIndexMismatch { .. })
+    ));
+    let matched = h
+        .match_types_with_domains(
+            &ty(P::Bool),
+            &[value(2), value(2)],
+            &Context::default(),
+            Budget::default(),
+            &domains,
+        )
+        .unwrap();
+    h.verify_head_match_with_domains(
+        &matched,
+        &ty(P::Bool),
+        &[value(2), value(2)],
+        &Context::default(),
+        Budget::default(),
+        &domains,
+    )
+    .unwrap();
+}
+
+#[test]
+fn symbolic_value_shared_by_subject_and_interface_is_not_refuted() {
+    use elaboration::{implementation::TypeAssessment, ptc::Context};
+    let value = |n| Term::Rigid {
+        declaration: id(n),
+        sort: Sort::ComptimeValue,
+    };
+    let mut h = head(200, node(10, vec![value(1)]));
+    h.type_parameters = vec![id(1)];
+    h.parameter_types = vec![ty(P::Bool)];
+    h.interface_arguments = vec![value(1)];
+    let domains = std::collections::BTreeMap::from([(id(2), ty(P::Bool))]);
+    let context = Context::default();
+    for (subject, args) in [
+        (node(10, vec![value(2)]), vec![Term::Bool(true)]),
+        (node(10, vec![Term::Bool(true)]), vec![value(2)]),
+    ] {
+        assert!(matches!(
+            h.match_types_with_domains(&subject, &args, &context, Budget::default(), &domains),
+            Err(TypeAssessment::Pending(_))
+        ));
+    }
+    let subject = node(10, vec![value(2)]);
+    let args = [value(2)];
+    let matched = h
+        .match_types_with_domains(&subject, &args, &context, Budget::default(), &domains)
+        .unwrap();
+    h.verify_head_match_with_domains(
+        &matched,
+        &subject,
+        &args,
+        &context,
+        Budget::default(),
+        &domains,
+    )
+    .unwrap();
+}
+
+#[test]
+fn whole_symbolic_record_indices_replay_and_keep_unknown_relations_pending() {
+    use elaboration::{implementation::TypeAssessment, ptc::Context};
+    let value = |n| Term::Rigid {
+        declaration: id(n),
+        sort: Sort::ComptimeValue,
+    };
+    let record = |flag| Term::RecordValue(vec![("flag".into(), flag)]);
+    let mut h = head(200, ty(P::Bool));
+    h.type_parameters = vec![id(1)];
+    h.parameter_types = vec![Term::Record(vec![("flag".into(), ty(P::Bool))])];
+    h.interface_arguments = vec![value(1), value(1)];
+    let domains = std::collections::BTreeMap::from([(id(2), ty(P::Bool))]);
+    let context = Context::default();
+    let args = [record(value(2)), record(value(2))];
+    let matched = h
+        .match_types_with_domains(&ty(P::Bool), &args, &context, Budget::default(), &domains)
+        .unwrap();
+    h.verify_head_match_with_domains(
+        &matched,
+        &ty(P::Bool),
+        &args,
+        &context,
+        Budget::default(),
+        &domains,
+    )
+    .unwrap();
+    assert!(
+        h.verify_head_match(&matched, &ty(P::Bool), &args, &context, Budget::default())
+            .is_err()
+    );
+    for args in [
+        [record(value(2)), record(Term::Bool(true))],
+        [record(Term::Bool(true)), record(value(2))],
+    ] {
+        assert!(matches!(
+            h.match_types_with_domains(&ty(P::Bool), &args, &context, Budget::default(), &domains),
+            Err(TypeAssessment::Pending(_))
+        ));
+    }
+}
+
+#[test]
+fn known_record_tags_refute_repeated_inputs_despite_other_unknown_fields() {
+    use elaboration::{implementation::TypeAssessment, ptc::Context};
+    let value = |n| Term::Rigid {
+        declaration: id(n),
+        sort: Sort::ComptimeValue,
+    };
+    let record =
+        |flag, tag| Term::RecordValue(vec![("flag".into(), flag), ("tag".into(), Term::Bool(tag))]);
+    let mut h = head(200, ty(P::Bool));
+    h.type_parameters = vec![id(1)];
+    h.parameter_types = vec![Term::Record(vec![
+        ("flag".into(), ty(P::Bool)),
+        ("tag".into(), ty(P::Bool)),
+    ])];
+    h.interface_arguments = vec![value(1), value(1)];
+    let domains = std::collections::BTreeMap::from([(id(2), ty(P::Bool))]);
+    for args in [
+        [record(value(2), true), record(Term::Bool(true), false)],
+        [record(Term::Bool(true), false), record(value(2), true)],
+    ] {
+        assert!(matches!(
+            h.match_types_with_domains(
+                &ty(P::Bool),
+                &args,
+                &Context::default(),
+                Budget::default(),
+                &domains
+            ),
+            Err(TypeAssessment::ValueIndexMismatch { .. })
+        ));
+    }
+}
+
+#[test]
+fn known_value_conflicts_are_not_hidden_by_earlier_unknown_inputs() {
+    use elaboration::{implementation::TypeAssessment, ptc::Context};
+    let value = Term::Rigid {
+        declaration: id(2),
+        sort: Sort::ComptimeValue,
+    };
+    let record = |a, z| Term::RecordValue(vec![("a".into(), a), ("z".into(), z)]);
+    let domains = std::collections::BTreeMap::from([(id(2), ty(P::Bool))]);
+    for (templates, arguments) in [
+        (
+            vec![record(Term::Bool(true), Term::Bool(false))],
+            vec![record(value.clone(), Term::Bool(true))],
+        ),
+        (
+            vec![Term::Bool(true), Term::Bool(false)],
+            vec![value.clone(), Term::Bool(true)],
+        ),
+        (
+            vec![Term::Bool(false), Term::Bool(true)],
+            vec![Term::Bool(true), value.clone()],
+        ),
+    ] {
+        let mut h = head(200, ty(P::Bool));
+        h.type_parameters.clear();
+        h.interface_arguments = templates;
+        assert!(matches!(
+            h.match_types_with_domains(
+                &ty(P::Bool),
+                &arguments,
+                &Context::default(),
+                Budget::default(),
+                &domains
+            ),
+            Err(TypeAssessment::ValueIndexMismatch { .. })
+        ));
+    }
+}
+
+#[test]
+fn nominal_value_subjects_require_layouts_for_selection_and_replay() {
+    use elaboration::implementation::TypeAssessment;
+    use elaboration::ptc::Context;
+    let config = node(30, vec![]);
+    let mut h = head(
+        200,
+        node(
+            40,
+            vec![Term::Rigid {
+                declaration: id(1),
+                sort: Sort::ComptimeValue,
+            }],
+        ),
+    );
+    h.type_parameters = vec![id(1)];
+    h.parameter_types = vec![config.clone()];
+    let value = Term::NominalValue {
+        ty: Box::new(config),
+        variant: None,
+        fields: vec![Term::Bool(true)],
+    };
+    let subject = node(40, vec![value.clone()]);
+    let mut context = Context::default();
+    context.admit_nominal_constructor(id(40));
+    let domains = Default::default();
+    let mut package = nir::program::Package::default();
+    package.structs.push(nir::program::Struct {
+        declaration: id(30),
+        name: "Config".into(),
+        type_parameters: vec![],
+        parameter_types: vec![],
+        fields: vec![("flag".into(), ty(P::Bool))],
+        requirements: vec![],
+        capabilities: vec![],
+    });
+    assert!(
+        h.match_types(&subject, &[], &context, Budget::default())
+            .is_err()
+    );
+    let matched = h
+        .match_types_with_layouts(
+            &subject,
+            &[],
+            &context,
+            Budget::default(),
+            &domains,
+            Some(&package),
+        )
+        .unwrap();
+    h.verify_head_match_with_layouts(
+        &matched,
+        &subject,
+        &[],
+        &context,
+        Budget::default(),
+        &domains,
+        Some(&package),
+    )
+    .unwrap();
+    assert!(
+        h.verify_head_match(&matched, &subject, &[], &context, Budget::default())
+            .is_err()
+    );
+    let mut index = Index::default();
+    index.insert(h.clone(), Budget::default()).unwrap();
+    index.set_nominal_layouts(package.structs.clone(), vec![], vec![]);
+    let selected = index
+        .resolve_types(id(100), &[], &subject, &context, Budget::default())
+        .unwrap();
+    assert_eq!(selected.selection, Selection::Selected(id(200)));
+    let TypeAssessment::Applicable(evidence) = &selected.assessments[&id(200)] else {
+        panic!("{selected}")
+    };
+    h.verify_type_evidence_with_layouts(
+        evidence,
+        &subject,
+        &[],
+        &context,
+        Budget::default(),
+        &domains,
+        Some(&package),
+    )
+    .unwrap();
+    for fields in [vec![], vec![Term::Char('x')]] {
+        let Term::NominalValue { ty, .. } = &value else {
+            unreachable!()
+        };
+        let forged = node(
+            40,
+            vec![Term::NominalValue {
+                ty: ty.clone(),
+                variant: None,
+                fields,
+            }],
+        );
+        let result = index
+            .resolve_types(id(100), &[], &forged, &context, Budget::default())
+            .unwrap();
+        assert!(!matches!(result.selection, Selection::Selected(_)));
+    }
+    index.set_nominal_layouts(package.structs.clone(), vec![], vec![]);
+    assert!(index.type_resolution_is_current(&selected));
+    package.structs[0].fields[0].1 = ty(P::Char);
+    index.set_nominal_layouts(package.structs.clone(), vec![], vec![]);
+    assert!(!index.type_resolution_is_current(&selected));
+    assert!(
+        h.verify_type_evidence_with_layouts(
+            evidence,
+            &subject,
+            &[],
+            &context,
+            Budget::default(),
+            &domains,
+            Some(&package)
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn partially_symbolic_nominal_indices_prove_and_replay_disjointness() {
+    use elaboration::implementation::PairAssessment;
+    use elaboration::ptc::Context;
+    let context = Context::default();
+    let record = |tag, leaf| Term::NominalValue {
+        ty: Box::new(node(900, vec![])),
+        variant: Some(0),
+        fields: vec![Term::TupleValue(vec![Term::Bool(tag), leaf])],
+    };
+    let mut left = head(801, ty(P::Bool));
+    left.type_parameters = vec![id(1)];
+    left.parameter_types = vec![ty(P::Bool)];
+    let value = Term::Rigid {
+        declaration: id(1),
+        sort: Sort::ComptimeValue,
+    };
+    left.interface_arguments = vec![record(true, value.clone())];
+    let mut right = left.clone();
+    right.declaration = id(802);
+    right.interface_arguments = vec![record(false, value.clone())];
+    let PairAssessment::Disjoint(proof) =
+        left.assess_type_overlap(&right, &context, Budget::default())
+    else {
+        panic!("known tag must separate open records")
+    };
+    assert!(left.verify_disjointness(&right, &proof, &context, Budget::default()));
+    right.interface_arguments = vec![record(true, value)];
+    assert!(!left.verify_disjointness(&right, &proof, &context, Budget::default()));
+    assert!(
+        !left
+            .assess_type_overlap(&right, &context, Budget::default())
+            .is_proved()
+    );
+    right.interface_arguments = vec![Term::Rigid {
+        declaration: id(1),
+        sort: Sort::ComptimeValue,
+    }];
+    assert!(
+        !left
+            .assess_type_overlap(&right, &context, Budget::default())
+            .is_proved()
+    );
+    assert!(
+        !left
+            .assess_type_overlap(
+                &right,
+                &context,
+                Budget {
+                    steps: 0,
+                    ..Budget::default()
+                }
+            )
+            .is_proved()
+    );
+}
+
+#[test]
+fn disjoint_open_nominal_impls_select_and_infer_their_value_arguments() {
+    use elaboration::implementation::TypeAssessment;
+    use elaboration::ptc::Context;
+    let mut context = Context::default();
+    context.admit_nominal_constructor(id(900));
+    let record = |tag, value| Term::NominalValue {
+        ty: Box::new(node(900, vec![])),
+        variant: None,
+        fields: vec![Term::Bool(tag), value],
+    };
+    let mut index = Index::default();
+    for (declaration, tag) in [(801, true), (802, false)] {
+        let mut h = head(declaration, ty(P::Bool));
+        h.type_parameters = vec![id(1)];
+        h.parameter_types = vec![ty(P::Bool)];
+        h.interface_arguments = vec![record(
+            tag,
+            Term::Rigid {
+                declaration: id(1),
+                sort: Sort::ComptimeValue,
+            },
+        )];
+        index.insert(h, Budget::default()).unwrap();
+    }
+    let coherence = index.check_type_coherence(&context, Budget::default());
+    assert!(index.verify_type_coherence(&coherence, &context, Budget::default()));
+    for (declaration, tag) in [(801, true), (802, false)] {
+        for value in [true, false] {
+            let resolution = index
+                .resolve_types(
+                    id(100),
+                    &[record(tag, Term::Bool(value))],
+                    &ty(P::Bool),
+                    &context,
+                    Budget::default(),
+                )
+                .unwrap();
+            assert_eq!(resolution.selection, Selection::Selected(id(declaration)));
+            let TypeAssessment::Applicable(evidence) = &resolution.assessments[&id(declaration)]
+            else {
+                panic!("missing selected evidence")
+            };
+            assert_eq!(evidence.type_arguments, vec![Term::Bool(value)]);
+        }
+    }
+}

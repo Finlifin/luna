@@ -408,11 +408,13 @@ impl Checker<'_, '_> {
             vec![scope.iter().map(|p| p.0).collect()]
         };
         let mut choices = Vec::new();
-        for capability in crate::capabilities::capability_sources_in_scope(
+        for capability in crate::capabilities::capability_sources_with_layouts(
             &self.checked_traits,
             &self.capability_assumptions(),
             Budget::default(),
             &frames,
+            &self.implementation_index.parameter_domains,
+            Some(&self.implementation_index.nominal_layouts),
         )
         .map_err(|reason| error(span, reason))?
         {
@@ -504,6 +506,7 @@ impl Checker<'_, '_> {
             .abstract_types(&implementation.type_parameters)
             .map_err(|e| error(span, e.to_string()))?;
             let scheme = crate::calls::Scheme {
+                parameter_sorts: vec![],
                 type_parameters: implementation.type_parameters.len(),
                 signature,
             };

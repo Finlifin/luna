@@ -194,3 +194,49 @@ fn wide_graph_bindings_are_ordered_and_scoped() {
     );
     assert!(nir::completed_values::validate(&escaped, &mut 50000).is_err());
 }
+
+#[test]
+fn captured_data_values_preserve_domains_scope_and_budget_recovery() {
+    let parameter = nir::DeclarationId {
+        package: 71,
+        local: 2,
+    };
+    let symbolic = expr(
+        boolean(),
+        K::ComptimeValue(Term::Rigid {
+            declaration: parameter,
+            sort: nir::Sort::ComptimeValue,
+        }),
+    );
+    validate(&symbolic).unwrap();
+    let specialized = symbolic
+        .instantiate_parameters(
+            &[nir::DeclarationParameter {
+                declaration: parameter,
+                sort: nir::Sort::ComptimeValue,
+            }],
+            &[Term::Bool(true)],
+        )
+        .unwrap();
+    validate(&specialized).unwrap();
+    assert!(nir::completed_values::validate(&specialized, &mut 1).is_err());
+    validate(&specialized).unwrap();
+    for invalid in [
+        expr(boolean(), K::ComptimeValue(Term::Char('x'))),
+        expr(
+            boolean(),
+            K::ComptimeValue(Term::Bound {
+                depth: 0,
+                index: 0,
+                sort: nir::Sort::ComptimeValue,
+            }),
+        ),
+        expr(
+            Term::Primitive(Primitive::Type),
+            K::ComptimeValue(Term::Bool(true)),
+        ),
+        expr(boolean(), K::ComptimeValue(boolean())),
+    ] {
+        assert!(validate(&invalid).is_err());
+    }
+}

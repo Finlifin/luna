@@ -91,6 +91,47 @@ impl ExpressionCodeInterface {
     }
 }
 
+/// Pattern-code subject and named success outputs, independent of local binder IDs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PatternCodeInterface {
+    pub subject: Term,
+    pub outputs: BTreeMap<String, Term>,
+}
+impl fmt::Display for PatternCodeInterface {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(pattern-interface (subject {}) (outputs", self.subject)?;
+        for (name, ty) in &self.outputs {
+            write!(f, " (output {name:?} {ty})")?;
+        }
+        f.write_str("))")
+    }
+}
+impl PatternCodeInterface {
+    pub fn charge(&self, fuel: &mut usize) -> Result<(), type_computations::Error> {
+        type_computations::charge_term(&self.subject, fuel)?;
+        for (name, ty) in &self.outputs {
+            *fuel = fuel
+                .checked_sub(name.len().saturating_add(1))
+                .ok_or(type_computations::Error::Budget)?;
+            type_computations::charge_term(ty, fuel)?;
+        }
+        Ok(())
+    }
+    pub fn try_map_types<E>(
+        &self,
+        mut transform: impl FnMut(&Term) -> Result<Term, E>,
+    ) -> Result<Self, E> {
+        Ok(Self {
+            subject: transform(&self.subject)?,
+            outputs: self
+                .outputs
+                .iter()
+                .map(|(name, ty)| Ok((name.clone(), transform(ty)?)))
+                .collect::<Result<_, E>>()?,
+        })
+    }
+}
+
 /// A generator argument is either completed comptime data or contextual code.
 /// In particular, code arguments must not be represented by their runtime
 /// result types when comparing method contracts.
@@ -98,6 +139,7 @@ impl ExpressionCodeInterface {
 pub enum CodeInput {
     Data(Term),
     Code(ExpressionCodeInterface),
+    Pattern(PatternCodeInterface),
 }
 
 /// Signature shared by code-producing definitions and method contracts.
@@ -116,6 +158,7 @@ impl fmt::Display for CodeInput {
         match self {
             Self::Data(ty) => write!(f, "(data {ty})"),
             Self::Code(interface) => write!(f, "(code {interface})"),
+            Self::Pattern(interface) => write!(f, "(pattern {interface})"),
         }
     }
 }
@@ -146,6 +189,7 @@ impl CodeFunctionSignature {
             match input {
                 CodeInput::Data(ty) => type_computations::charge_term(ty, fuel)?,
                 CodeInput::Code(interface) => interface.charge(fuel)?,
+                CodeInput::Pattern(interface) => interface.charge(fuel)?,
             }
         }
         self.output.charge(fuel)
@@ -163,6 +207,9 @@ impl CodeFunctionSignature {
             .map(|(binding, input)| {
                 let input = match input {
                     CodeInput::Data(ty) => CodeInput::Data(transform(ty)?),
+                    CodeInput::Pattern(interface) => {
+                        CodeInput::Pattern(interface.try_map_types(&mut transform)?)
+                    }
                     CodeInput::Code(interface) => {
                         CodeInput::Code(interface.try_map_types(&mut transform)?)
                     }
@@ -258,9 +305,10 @@ impl MethodSignature {
 
 impl CodeInput {
     pub fn type_terms(&self) -> impl Iterator<Item = &Term> {
-        let (data, code) = match self {
-            Self::Data(ty) => (Some(ty), None),
-            Self::Code(interface) => (None, Some(interface)),
+        let (data, code, pattern) = match self {
+            Self::Data(ty) => (Some(ty), None, None),
+            Self::Code(interface) => (None, Some(interface), None),
+            Self::Pattern(interface) => (None, None, Some(interface)),
         };
         data.into_iter()
             .chain(code.into_iter().flat_map(|interface| {
@@ -268,6 +316,9 @@ impl CodeInput {
                     .context
                     .values()
                     .chain(std::iter::once(&interface.result))
+            }))
+            .chain(pattern.into_iter().flat_map(|interface| {
+                std::iter::once(&interface.subject).chain(interface.outputs.values())
             }))
     }
 }

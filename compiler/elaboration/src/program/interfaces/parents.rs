@@ -297,11 +297,13 @@ impl Checker<'_, '_> {
     ) -> Result<Option<n::InterfaceInstance>, Error> {
         let mut sources = Vec::new();
         let frames = self.call_input_frames();
-        for capability in crate::capabilities::capability_sources_in_scope(
+        for capability in crate::capabilities::capability_sources_with_layouts(
             &self.checked_traits,
             &self.capability_assumptions(),
             Budget::default(),
             &frames,
+            &self.implementation_index.parameter_domains,
+            Some(&self.implementation_index.nominal_layouts),
         )
         .map_err(|message| error(span, message))?
         {

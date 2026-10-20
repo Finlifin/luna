@@ -10,7 +10,9 @@ use crate::{
 use nir::{DeclarationId, Sort, Term, TypeError};
 
 pub struct Scheme {
-    /// One surrounding frame of Type parameters; fn introduces its own frame.
+    /// Empty preserves Type-only callers; otherwise one sort per clause input.
+    pub parameter_sorts: Vec<Sort>,
+    /// One surrounding frame of clause parameters; fn introduces its own frame.
     pub type_parameters: usize,
     pub signature: Term,
 }
@@ -38,7 +40,7 @@ pub enum InputContext {
         head: DeclarationId,
         fields: Vec<InputContext>,
     },
-    /// A generative nominal type with partially known Type arguments.
+    /// A generative nominal type with partially known Type and value arguments.
     Nominal {
         declaration: DeclarationId,
         arguments: Vec<InputContext>,
@@ -46,8 +48,11 @@ pub enum InputContext {
     Record(Vec<(String, InputContext)>),
     Callable(CallableContext),
     Unknown,
+    /// An unresolved comptime value index, not an unresolved Type.
+    UnknownValue,
 }
 pub struct CallCandidate {
+    parameter_sorts: Vec<Sort>,
     engine: Engine,
     types: Vec<I>,
     signature: I,
@@ -80,6 +85,20 @@ pub struct Instance {
     pub result: Term,
 }
 impl Scheme {
+    fn input_sorts(&self) -> Result<Vec<Sort>, Error> {
+        if self.parameter_sorts.is_empty() {
+            return Ok(vec![Sort::Type; self.type_parameters]);
+        }
+        if self.parameter_sorts.len() != self.type_parameters
+            || self
+                .parameter_sorts
+                .iter()
+                .any(|sort| !matches!(sort, Sort::Type | Sort::ComptimeValue))
+        {
+            return Err(Error::InvalidSignature);
+        }
+        Ok(self.parameter_sorts.clone())
+    }
     /// Type-only call inference when the signature has no runtime dependencies.
     /// Removing the runtime frame with no arguments deliberately rejects such
     /// dependencies instead of inventing runtime object identities.
@@ -262,10 +281,12 @@ impl Scheme {
             return Err(Error::ArgumentCount);
         }
         let mut frames = caller_frames.clone();
-        frames.push(vec![Sort::Type; self.type_parameters]);
+        let parameter_sorts = self.input_sorts()?;
+        frames.push(parameter_sorts.clone());
         self.signature.check_scope(&frames)?;
-        let types: Vec<_> = (0..self.type_parameters)
-            .map(|_| I::Meta(root.fresh(Sort::Type)))
+        let types: Vec<_> = parameter_sorts
+            .iter()
+            .map(|sort| I::Meta(root.fresh(*sort)))
             .collect();
         let mut relations = Vec::new();
         for (param, actual) in parameters.iter().zip(actual) {
@@ -386,6 +407,7 @@ impl Scheme {
         let (mut engine, _) = root.match_many(&relations, budget).map_err(Error::Match)?;
         engine.advance(relations.len(), budget);
         let mut candidate = CallCandidate {
+            parameter_sorts,
             views: Default::default(),
             engine,
             types: types.clone(),
@@ -416,8 +438,8 @@ impl Scheme {
         if parameters.iter().any(|p| p.sort != Sort::Runtime) {
             return Err(Error::InvalidSignature);
         }
-        self.signature
-            .check_scope(&[vec![Sort::Type; self.type_parameters]])?;
+        let parameter_sorts = self.input_sorts()?;
+        self.signature.check_scope(&[parameter_sorts.clone()])?;
         if arguments.len() != parameters.len() {
             return Err(Error::ArgumentCount);
         }
@@ -426,8 +448,8 @@ impl Scheme {
         }
         let mut root = Engine::default();
         let mut types = Vec::new();
-        for supplied in explicit {
-            let meta = root.fresh(Sort::Type);
+        for (supplied, sort) in explicit.iter().zip(&parameter_sorts) {
+            let meta = root.fresh(*sort);
             if let Some(ty) = supplied {
                 ty.check_scope(&[])?;
                 root.assign(meta, I::Stable(ty.clone()))
@@ -466,6 +488,7 @@ impl Scheme {
         let (mut engine, _) = root.match_many(&relations, budget).map_err(Error::Match)?;
         engine.advance(relations.len(), budget);
         Ok(CallCandidate {
+            parameter_sorts,
             views: Default::default(),
             engine,
             types: types.clone(),
@@ -549,6 +572,15 @@ impl CallCandidate {
             match context {
                 InputContext::Known(ty) => leaf(Some(ty), engine, components, nesting, fuel),
                 InputContext::Unknown => leaf(None, engine, components, nesting, fuel),
+                InputContext::UnknownValue => {
+                    let index = components.len();
+                    components.push(I::Meta(engine.fresh(Sort::ComptimeValue)));
+                    Ok(Term::Bound {
+                        depth: nesting,
+                        index,
+                        sort: Sort::ComptimeValue,
+                    })
+                }
                 InputContext::Nominal {
                     declaration,
                     arguments,
@@ -563,6 +595,22 @@ impl CallCandidate {
                         arguments: arguments
                             .iter()
                             .map(|argument| {
+                                if let InputContext::Known(value) = argument {
+                                    if value.sort() == Sort::ComptimeValue {
+                                        crate::associated::charge_projection_copy(value, fuel)
+                                            .map_err(Error::TypeView)?;
+                                        engine
+                                            .check_context_type(value)
+                                            .map_err(Error::Obligations)?;
+                                        let index = components.len();
+                                        components.push(I::Stable(value.clone()));
+                                        return Ok(Term::Bound {
+                                            depth: nesting,
+                                            index,
+                                            sort: Sort::ComptimeValue,
+                                        });
+                                    }
+                                }
                                 build(argument, engine, components, nesting, depth + 1, fuel)
                             })
                             .collect::<Result<_, _>>()?,
@@ -750,6 +798,56 @@ impl CallCandidate {
             .get(index)
             .ok_or(Error::TypeArgumentCount)?
             .clone();
+        if self.parameter_sorts.get(index) == Some(&Sort::ComptimeValue) {
+            let mut fuel = budget.steps;
+            nir::type_computations::charge_term(value, &mut fuel)
+                .map_err(|_| Error::Match(MatchError::BudgetExhausted))?;
+            if value.sort() != Sort::ComptimeValue {
+                return Err(Error::InvalidSignature);
+            }
+            let mut engine = self.engine.trial();
+            engine
+                .check_context_type(value)
+                .map_err(Error::Obligations)?;
+            match engine.inspect(&input).map_err(Error::Obligations)? {
+                I::Meta(variable) => engine
+                    .assign(variable, I::Stable(value.clone()))
+                    .map_err(Error::Obligations)?,
+                retained => {
+                    let retained = engine.inspect_type(&retained).map_err(Error::Obligations)?;
+                    nir::type_computations::charge_term(&retained, &mut fuel)
+                        .map_err(|_| Error::Match(MatchError::BudgetExhausted))?;
+                    if retained != *value {
+                        let relations = retained
+                            .index_type_relations(value)
+                            .ok_or(Error::InvalidSignature)?;
+                        let relations: Vec<_> = relations
+                            .into_iter()
+                            .map(|(a, b)| (I::Stable(a.clone()), I::Stable(b.clone())))
+                            .collect();
+                        engine = engine
+                            .match_many(
+                                &relations,
+                                Budget {
+                                    steps: fuel,
+                                    ..budget
+                                },
+                            )
+                            .map_err(Error::Match)?
+                            .0;
+                    }
+                }
+            }
+            engine.advance(
+                fuel,
+                Budget {
+                    steps: fuel,
+                    ..budget
+                },
+            );
+            self.engine = engine;
+            return Ok(());
+        }
         let (mut engine, _) = self
             .engine
             .match_many(&[(input, I::Stable(value.clone()))], budget)
@@ -768,7 +866,7 @@ impl CallCandidate {
         budget: Budget,
     ) -> Result<(), Error> {
         let mut fuel = budget.steps;
-        let frames = [vec![Sort::Type; self.types.len()]];
+        let frames = [self.parameter_sorts.clone()];
         for (left, right) in equations {
             for term in [left, right] {
                 nir::type_computations::charge_term(term, &mut fuel)
@@ -865,7 +963,8 @@ impl CallCandidate {
             I::Stable(template) => (template, None),
             I::Meta(_) => return Ok(InputContext::Unknown),
         };
-        let mut field_context = |field| {
+        let mut field_context = |field: Term| -> Result<InputContext, Error> {
+            let sort = field.sort();
             let field = match &arguments {
                 Some(arguments) => I::Instantiate {
                     template: field,
@@ -873,25 +972,26 @@ impl CallCandidate {
                 },
                 None => I::Stable(field),
             };
-            self.input_context(field, fuel, depth + 1)
+            let context = self.input_context(field, fuel, depth + 1)?;
+            Ok(
+                if sort == Sort::ComptimeValue && matches!(context, InputContext::Unknown) {
+                    InputContext::UnknownValue
+                } else {
+                    context
+                },
+            )
         };
         match template {
             Term::Nominal {
                 declaration,
                 arguments,
-            } if self.engine.is_nominal_constructor(declaration)
-                && arguments
-                    .iter()
-                    .all(|argument| argument.sort() == Sort::Type) =>
-            {
-                Ok(InputContext::Nominal {
-                    declaration,
-                    arguments: arguments
-                        .into_iter()
-                        .map(&mut field_context)
-                        .collect::<Result<_, _>>()?,
-                })
-            }
+            } if self.engine.is_nominal_constructor(declaration) => Ok(InputContext::Nominal {
+                declaration,
+                arguments: arguments
+                    .into_iter()
+                    .map(&mut field_context)
+                    .collect::<Result<_, _>>()?,
+            }),
             Term::NormalForm {
                 head,
                 sort: Sort::Type,

@@ -4,6 +4,63 @@ use super::*;
 use std::collections::HashSet;
 
 impl Checker<'_, '_> {
+    /// Read a projected member's declared domain without selecting an
+    /// implementation or evaluating its initializer. Contract classification
+    /// must distinguish Type equality from equality of program values first.
+    pub(in crate::program) fn contract_projection_domain(
+        &mut self,
+        value: &Expr<'_>,
+    ) -> Result<Option<Term>, Error> {
+        let H::Projection(view, field) = &value.kind else {
+            return Ok(None);
+        };
+        let H::Cast(base, interface) = &view.kind else {
+            return Ok(None);
+        };
+        if !self.is_type_head(base) {
+            return Ok(None);
+        }
+        let subject = self.type_expr(base)?;
+        let requested = self.interface_expr_for(interface, &subject)?;
+        let mut sources = self.declaration_interface_sources(
+            &subject,
+            requested,
+            Some(field.name.as_str()),
+            value.span,
+        )?;
+        if sources.len() > 1 {
+            return Err(error(
+                value.span,
+                "ambiguous inherited member; specify its interface source",
+            ));
+        }
+        let Some((origin, member)) = sources.pop() else {
+            return Ok(None);
+        };
+        if !matches!(
+            self.package.item(member).unwrap().kind,
+            ItemKind::Associated(_)
+        ) {
+            return Ok(None);
+        }
+        if !self.active_associated_signatures.insert(member) {
+            return Err(error(value.span, "cyclic associated signature dependency"));
+        }
+        let contract = self.associated_contract(member, false);
+        self.active_associated_signatures.remove(&member);
+        let contract = contract?;
+        let owner = self.associated_owner(origin.declaration).unwrap();
+        let parameters: Vec<_> = std::iter::once(origin.declaration)
+            .chain(self.type_parameters[&owner].iter().copied())
+            .collect();
+        let inputs: Vec<_> = std::iter::once(subject).chain(origin.arguments).collect();
+        contract
+            .ty
+            .instantiate_parameters(&self.input_binders(&parameters), &inputs)
+            .map(Some)
+            .map_err(|e| error(value.span, e.to_string()))
+    }
+
     fn declaration_interface_sources(
         &mut self,
         subject: &Term,
@@ -71,7 +128,7 @@ impl Checker<'_, '_> {
                 .collect();
             for parent in parents?.unwrap_or_default() {
                 let parent = parent
-                    .instantiate_types(&parameters, &inputs)
+                    .instantiate_parameters(&self.input_binders(&parameters), &inputs)
                     .map_err(|e| error(span, e.to_string()))?;
                 for argument in &parent.arguments {
                     crate::associated::charge_projection_copy(argument, &mut fuel)
@@ -143,11 +200,12 @@ impl Checker<'_, '_> {
                                 sort: Sort::Type,
                             },
                             interface,
-                            interface_arguments: self.type_parameters[&owner]
+                            interface_arguments: self
+                                .declaration_binders(owner)
                                 .iter()
-                                .map(|id| Term::Rigid {
-                                    declaration: *id,
-                                    sort: Sort::Type,
+                                .map(|binder| Term::Rigid {
+                                    declaration: binder.declaration,
+                                    sort: binder.sort,
                                 })
                                 .collect(),
                         });
@@ -197,15 +255,6 @@ impl Checker<'_, '_> {
                 break;
             }
         }
-        if !established {
-            return Err(Error {
-                needs_capability: true,
-                ..error(
-                    span,
-                    "declaration associated projection requires a given interface constraint",
-                )
-            });
-        }
         if !self.active_associated_signatures.insert(member) {
             return Err(error(span, "cyclic associated signature dependency"));
         }
@@ -221,8 +270,27 @@ impl Checker<'_, '_> {
             .collect();
         let ty = contract
             .ty
-            .instantiate_types(&parameters, &inputs)
+            .instantiate_parameters(&self.input_binders(&parameters), &inputs)
             .map_err(|e| error(span, e.to_string()))?;
+        let deferred = !established
+            && ty != p(P::Type)
+            && self.defer_contract_projection(
+                n::TraitRequirement {
+                    subject: subject.clone(),
+                    interface: requested.declaration,
+                    interface_arguments: requested.arguments,
+                },
+                span,
+            )?;
+        if !established && !deferred {
+            return Err(Error {
+                needs_capability: true,
+                ..error(
+                    span,
+                    "declaration associated projection requires a given interface constraint",
+                )
+            });
+        }
         if ty != p(P::Type) {
             return Ok(Some(n::Expr {
                 ty,

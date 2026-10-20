@@ -2,9 +2,9 @@
 use super::*;
 
 #[derive(Default)]
-pub(super) struct CompletedDefaults {
-    pub(super) types: BTreeMap<usize, Term>,
-    pub(super) clauses: BTreeMap<usize, Term>,
+pub(in crate::program::cmtt) struct CompletedDefaults {
+    pub(in crate::program::cmtt) types: BTreeMap<usize, Term>,
+    pub(in crate::program::cmtt) clauses: BTreeMap<usize, Term>,
 }
 
 impl fmt::Display for CompletedDefaults {
@@ -22,7 +22,7 @@ impl fmt::Display for CompletedDefaults {
 }
 
 impl Checker<'_, '_> {
-    pub(super) fn generator_call_candidate(
+    pub(in crate::program::cmtt) fn generator_call_candidate(
         &mut self,
         owner: OwnerId,
         parameters: &[DeclarationId],
@@ -88,6 +88,7 @@ impl Checker<'_, '_> {
             let expected =
                 expected.filter(|_| !unavailable.iter().any(|id| result.mentions_rigid(*id)));
             let scheme = crate::calls::Scheme {
+                parameter_sorts: base.parameter_sorts.clone(),
                 type_parameters: base.type_parameters,
                 signature,
             };
@@ -149,7 +150,7 @@ impl Checker<'_, '_> {
                                     unknown.insert(*id);
                                     Term::Rigid {
                                         declaration: *id,
-                                        sort: Sort::Type,
+                                        sort: self.input_binders(&[*id])[0].sort,
                                     }
                                 })
                             })
@@ -159,7 +160,7 @@ impl Checker<'_, '_> {
                 let prefix = plan[..*slot]
                     .iter()
                     .map(|ty| {
-                        ty.instantiate_types(parameters, &hints)
+                        ty.instantiate_parameters(&self.input_binders(parameters), &hints)
                             .map_err(|e| error(span, e.to_string()))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -170,6 +171,17 @@ impl Checker<'_, '_> {
                         &prefix,
                         true,
                         |this, expression, domain| {
+                            if *domain != p(P::Type)
+                                && !super::super::super::required::signature_inputs_ready_with_clauses(
+                                    expression, 0, &|_| true, &|id| {
+                                        !unknown.contains(&DeclarationId {
+                                            package: semantic_package(&this.package_identities, id.pkg),
+                                            local: id.index,
+                                        })
+                                    },
+                                )? {
+                                return Ok(false);
+                            }
                             let mut checked = this.expr(expression, Some(domain))?;
                             let mut dependent = false;
                             checked.rewrite_types(&mut |ty| {
@@ -198,13 +210,20 @@ impl Checker<'_, '_> {
         }
     }
 
-    pub(super) fn check_generator_clause_defaults(
+    pub(in crate::program::cmtt) fn check_generator_clause_defaults(
         &mut self,
         owner: OwnerId,
         definition: &Generator,
     ) -> Result<(), Error> {
-        let values = definition
-            .types
+        self.check_generator_clause_value_defaults(owner, &definition.types)
+    }
+
+    pub(in crate::program::cmtt) fn check_generator_clause_value_defaults(
+        &mut self,
+        owner: OwnerId,
+        types: &[(DeclarationId, Term)],
+    ) -> Result<(), Error> {
+        let values = types
             .iter()
             .map(|(_, value)| value.clone())
             .collect::<Vec<_>>();
@@ -225,7 +244,7 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
-    pub(super) fn generator_clause_plan(
+    pub(in crate::program::cmtt) fn generator_clause_plan(
         &mut self,
         owner: OwnerId,
         span: Span,
@@ -242,8 +261,21 @@ impl Checker<'_, '_> {
         let mut waiting = BTreeSet::new();
         let mut deferred = Vec::new();
         for (index, (clause, domain)) in clauses.iter().zip(&domains).enumerate() {
-            if matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..)) {
-                let must_wait = !deferred.is_empty()
+            if let hir::clause::ClauseParamKind::Optional(_, _, default) = clause.kind {
+                let value_dependency = *domain != p(P::Type)
+                    && !super::super::super::required::signature_inputs_ready_with_clauses(
+                        default,
+                        0,
+                        &|_| true,
+                        &|id| {
+                            !waiting.contains(&DeclarationId {
+                                package: semantic_package(&self.package_identities, id.pkg),
+                                local: id.index,
+                            })
+                        },
+                    )?;
+                let must_wait = value_dependency
+                    || !deferred.is_empty()
                     || (!waiting.is_empty()
                         && self.with_generator_clause_default(
                             owner,
@@ -299,24 +331,23 @@ impl Checker<'_, '_> {
                 } else {
                     values.push(self.generator_clause_default(owner, index, &values)?);
                 }
-            } else if *domain == p(P::Type) {
+            } else {
                 inferred.push(parameters[index]);
                 waiting.insert(parameters[index]);
                 values.push(Term::Rigid {
                     declaration: parameters[index],
-                    sort: Sort::Type,
+                    sort: if *domain == p(P::Type) {
+                        Sort::Type
+                    } else {
+                        Sort::ComptimeValue
+                    },
                 });
-            } else {
-                return Err(error(
-                    span,
-                    "code generator value clauses require explicit arguments",
-                ));
             }
         }
         Ok((inferred, values, vec![], deferred))
     }
 
-    pub(super) fn generator_clause_default(
+    pub(in crate::program::cmtt) fn generator_clause_default(
         &mut self,
         owner: OwnerId,
         slot: usize,

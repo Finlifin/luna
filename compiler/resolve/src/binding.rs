@@ -21,6 +21,9 @@ pub enum BindingKind {
     FnParam(AstNodeRef),
     ClauseParam(DefId, AstNodeRef),
     Local(AstNodeRef),
+    /// A local introduced by a contextual construct rather than an identifier
+    /// AST node. The output ordinal distinguishes bindings at the same site.
+    ExpandedLocal(AstNodeRef, u32),
     LoopLabel(AstNodeRef),
 }
 

@@ -102,6 +102,24 @@ pub fn supported_input_type_with_layouts(
     is_tuple: impl Fn(DeclarationId) -> bool,
     is_nominal: impl Fn(DeclarationId) -> bool,
 ) -> bool {
+    let prior = prior_types
+        .iter()
+        .map(|declaration| crate::DeclarationParameter {
+            declaration: *declaration,
+            sort: Sort::Type,
+        })
+        .collect::<Vec<_>>();
+    supported_input_type_in_scope(ty, &prior, is_tuple, is_nominal)
+}
+
+/// Ordered declaration inputs retain their sorts, including value indices in
+/// nominal domains. This admits a representation, not a formation obligation.
+pub fn supported_input_type_in_scope(
+    ty: &Term,
+    prior: &[crate::DeclarationParameter],
+    is_tuple: impl Fn(DeclarationId) -> bool,
+    is_nominal: impl Fn(DeclarationId) -> bool,
+) -> bool {
     let mut work = vec![(ty, 0usize)];
     let mut remaining = 100_000usize;
     while let Some((ty, depth)) = work.pop() {
@@ -127,9 +145,11 @@ pub fn supported_input_type_with_layouts(
             Term::Rigid {
                 declaration,
                 sort: Sort::Type,
-            } if prior_types.contains(declaration) => {}
+            } if prior
+                .iter()
+                .any(|p| p.declaration == *declaration && p.sort == Sort::Type) => {}
             Term::Nominal { declaration, .. } if is_nominal(*declaration) => {
-                if !nominal_domain_scope(ty, prior_types, &mut remaining) {
+                if !nominal_domain_scope(ty, prior, &mut remaining) {
                     return false;
                 }
             }
@@ -225,6 +245,7 @@ pub fn validate(package: &Package) -> Result<(), &'static str> {
         let mut bindings = BTreeSet::new();
         let mut types = Vec::new();
         let mut values = Vec::new();
+        let mut prior = Vec::new();
         for parameter in &head.parameters {
             if !declarations.insert(parameter.declaration) || !bindings.insert(parameter.binding) {
                 return Err("duplicate normal-form input identity");
@@ -245,9 +266,9 @@ pub fn validate(package: &Package) -> Result<(), &'static str> {
                     values.push(parameter);
                 }
                 Kind::Value => {
-                    let supported = supported_input_type_with_layouts(
+                    let supported = supported_input_type_in_scope(
                         &parameter.ty,
-                        &types,
+                        &prior,
                         |id| {
                             package
                                 .normal_forms
@@ -268,6 +289,14 @@ pub fn validate(package: &Package) -> Result<(), &'static str> {
                     values.push(parameter);
                 }
             }
+            prior.push(crate::DeclarationParameter {
+                declaration: parameter.declaration,
+                sort: if parameter.kind == Kind::Type {
+                    Sort::Type
+                } else {
+                    Sort::ComptimeValue
+                },
+            });
         }
         // Head declarations can accompany a required-computation package
         // without transporting their non-invocable definition bodies.
@@ -411,7 +440,7 @@ impl Head {
                     actual: arguments.len(),
                 });
             }
-            let mut types: BTreeMap<DeclarationId, &Term> = BTreeMap::new();
+            let mut types: BTreeMap<DeclarationId, (Sort, &Term)> = BTreeMap::new();
             for (index, (parameter, argument)) in self.parameters.iter().zip(arguments).enumerate()
             {
                 crate::type_computations::charge_term(argument, &mut remaining)
@@ -428,28 +457,50 @@ impl Head {
                     {
                         return Err(ApplicationError::InputType { index });
                     }
+                    types.insert(parameter.declaration, (Sort::ComptimeValue, argument));
                     continue;
                 }
                 let before_template = remaining;
                 crate::type_computations::charge_term(&parameter.ty, &mut remaining)
                     .map_err(|_| ApplicationError::InputType { index })?;
                 let template_work = before_template - remaining;
+                let dependencies = parameter
+                    .ty
+                    .rigid_parameters()
+                    .map_err(|_| ApplicationError::InputDependency { index })?;
+                let prior = dependencies
+                    .keys()
+                    .filter_map(|id| {
+                        types.get(id).map(|(sort, value)| {
+                            (
+                                crate::DeclarationParameter {
+                                    declaration: *id,
+                                    sort: *sort,
+                                },
+                                *value,
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>();
                 let before_inputs = remaining;
-                for ty in types.values() {
+                for (_, ty) in &prior {
                     crate::type_computations::charge_term(ty, &mut remaining)
                         .map_err(|_| ApplicationError::InputType { index })?;
                 }
-                // Bound substitution expansion before cloning prior Type inputs at
+                // Bound substitution expansion before cloning prior inputs at
                 // each occurrence in the parameter's domain.
                 let input_work = before_inputs - remaining;
                 remaining = remaining
                     .checked_sub(template_work.saturating_mul(input_work))
                     .ok_or(ApplicationError::InputType { index })?;
-                let parameters: Vec<_> = types.keys().copied().collect();
-                let inputs: Vec<_> = types.values().map(|ty| (*ty).clone()).collect();
+                let parameters: Vec<_> = prior
+                    .iter()
+                    .map(|(parameter, _)| parameter.clone())
+                    .collect();
+                let inputs: Vec<_> = prior.iter().map(|(_, value)| (*value).clone()).collect();
                 let expected = parameter
                     .ty
-                    .instantiate_types(&parameters, &inputs)
+                    .instantiate_parameters(&parameters, &inputs)
                     .map_err(|_| ApplicationError::InputDependency { index })?;
                 let mut work = vec![(expected, argument, 0usize)];
                 while let Some((expected, argument, depth)) = work.pop() {
@@ -555,9 +606,17 @@ impl Head {
                         return Err(ApplicationError::InputType { index });
                     }
                 }
-                if parameter.kind == Kind::Type {
-                    types.insert(parameter.declaration, argument);
-                }
+                types.insert(
+                    parameter.declaration,
+                    (
+                        if parameter.kind == Kind::Type {
+                            Sort::Type
+                        } else {
+                            Sort::ComptimeValue
+                        },
+                        argument,
+                    ),
+                );
             }
             Ok(())
         })();
@@ -595,6 +654,28 @@ pub fn nominal_value_fields_budgeted(
     variant: Option<u32>,
     fuel: &mut usize,
 ) -> Option<Vec<Term>> {
+    nominal_value_fields_at(package, ty, variant, fuel, 0)
+}
+
+fn nominal_value_fields_at(
+    package: &Package,
+    ty: &Term,
+    variant: Option<u32>,
+    fuel: &mut usize,
+    depth: usize,
+) -> Option<Vec<Term>> {
+    if depth >= 128 {
+        return None;
+    }
+    let layout = |ty: &Term, variant, fuel: &mut usize| {
+        nominal_value_fields_at(package, ty, variant, fuel, depth + 1).ok_or_else(|| {
+            if *fuel == 0 {
+                crate::NominalAdmissionError::Budget
+            } else {
+                crate::NominalAdmissionError::Invalid("nominal payload layout unavailable".into())
+            }
+        })
+    };
     let Term::Nominal {
         declaration,
         arguments,
@@ -606,9 +687,14 @@ pub fn nominal_value_fields_budgeted(
         for definition in &package.enums {
             spend_layout(fuel, 1)?;
             if definition.declaration == *declaration {
-                definition
-                    .validate_completed_arguments(arguments, fuel)
-                    .ok()?;
+                let admitted = crate::validate_declaration_arguments_with_layouts(
+                    &definition.type_parameters,
+                    &definition.parameter_types,
+                    arguments,
+                    fuel,
+                    layout,
+                );
+                layout_admission(admitted, fuel)?;
                 return instantiate_value_fields(
                     &definition.type_parameters,
                     &definition.parameter_types,
@@ -622,6 +708,9 @@ pub fn nominal_value_fields_budgeted(
         for definition in &package.newtypes {
             spend_layout(fuel, 1)?;
             if definition.declaration == *declaration {
+                let admitted =
+                    definition.validate_completed_arguments_with_layouts(arguments, fuel, layout);
+                layout_admission(admitted, fuel)?;
                 return Some(vec![
                     definition
                         .representation_budgeted(arguments, &[], fuel)
@@ -632,9 +721,14 @@ pub fn nominal_value_fields_budgeted(
         for definition in &package.structs {
             spend_layout(fuel, 1)?;
             if definition.declaration == *declaration {
-                definition
-                    .validate_completed_arguments(arguments, fuel)
-                    .ok()?;
+                let admitted = crate::validate_declaration_arguments_with_layouts(
+                    &definition.type_parameters,
+                    &definition.parameter_types,
+                    arguments,
+                    fuel,
+                    layout,
+                );
+                layout_admission(admitted, fuel)?;
                 return instantiate_value_fields(
                     &definition.type_parameters,
                     &definition.parameter_types,
@@ -646,6 +740,22 @@ pub fn nominal_value_fields_budgeted(
         }
     }
     None
+}
+// Legacy layout callers use None plus exhausted fuel to distinguish resource
+// failure from invalid metadata. Admission can fail a multi-step charge while
+// leaving positive fuel, so preserve its typed error before erasing it here.
+fn layout_admission<T>(
+    result: Result<T, crate::NominalAdmissionError>,
+    fuel: &mut usize,
+) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(crate::NominalAdmissionError::Budget) => {
+            *fuel = 0;
+            None
+        }
+        Err(crate::NominalAdmissionError::Invalid(_)) => None,
+    }
 }
 fn spend_layout(fuel: &mut usize, work: usize) -> Option<()> {
     match fuel.checked_sub(work) {
@@ -676,12 +786,12 @@ pub fn instantiate_value_fields<'a>(
             .saturating_add(arguments.len()),
     )?;
     for domain in domains {
-        crate::type_computations::charge_term(domain, fuel).ok()?;
+        charge_layout_term(domain, fuel)?;
     }
     let parameters = crate::declaration_parameters(parameters, domains).ok()?;
     let before = *fuel;
     for argument in arguments {
-        crate::type_computations::charge_term(argument, fuel).ok()?;
+        charge_layout_term(argument, fuel)?;
     }
     let input_work = before - *fuel;
     Term::Tuple(vec![])
@@ -690,24 +800,34 @@ pub fn instantiate_value_fields<'a>(
     let mut output = Vec::with_capacity(fields.len());
     for field in fields {
         let before = *fuel;
-        crate::type_computations::charge_term(field, fuel).ok()?;
+        charge_layout_term(field, fuel)?;
         spend_layout(fuel, (before - *fuel).saturating_mul(input_work))?;
         output.push(field.instantiate_parameters(&parameters, arguments).ok()?);
     }
     Some(output)
 }
 
-fn nominal_domain_scope(ty: &Term, prior: &[DeclarationId], fuel: &mut usize) -> bool {
+fn charge_layout_term(term: &Term, fuel: &mut usize) -> Option<()> {
+    let charged = crate::type_computations::charge_term(term, fuel)
+        .map_err(crate::NominalAdmissionError::from);
+    layout_admission(charged, fuel)
+}
+
+fn nominal_domain_scope(
+    ty: &Term,
+    prior: &[crate::DeclarationParameter],
+    fuel: &mut usize,
+) -> bool {
     if crate::type_computations::charge_term(ty, fuel).is_err() {
         return false;
     }
     let mut pending = vec![ty];
     while let Some(term) = pending.pop() {
         match term {
-            Term::Rigid {
-                declaration,
-                sort: Sort::Type,
-            } if prior.contains(declaration) => {}
+            Term::Rigid { declaration, sort }
+                if prior
+                    .iter()
+                    .any(|p| p.declaration == *declaration && p.sort == *sort) => {}
             Term::Rigid { .. } | Term::Hole { .. } | Term::Runtime(_) | Term::Value { .. } => {
                 return false;
             }

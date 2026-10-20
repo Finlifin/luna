@@ -145,18 +145,23 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         };
 
         match kind {
-            NodeKind::ContextualExprType => {
+            NodeKind::ContextualExprType | NodeKind::ContextualPatternType => {
+                let subject = (kind == NodeKind::ContextualPatternType)
+                    .then(|| self.lower_expr(ExprContext::Type, children[0]));
                 let scope = self.local_enter(resolve::RibKind::MatchBody);
                 let mut bindings = Vec::new();
                 for &entry in self.ast.get_multi_child_slice(children[1]).unwrap_or(&[]) {
                     let parts = self.ast.get_children(entry);
                     let name = self.node_to_ident(parts[0]);
-                    let default = if self.resolve(name).is_ok_and(|resolved| {
-                        matches!(
-                            resolved.kind,
-                            BindingKind::Local(_) | BindingKind::FnParam(_)
-                        )
-                    }) {
+                    let default = if kind == NodeKind::ContextualExprType
+                        && self.resolve(name).is_ok_and(|resolved| {
+                            matches!(
+                                resolved.kind,
+                                BindingKind::Local(_)
+                                    | BindingKind::ExpandedLocal(..)
+                                    | BindingKind::FnParam(_)
+                            )
+                        }) {
                         let value = self.lower_expr(ctx, parts[0]);
                         Some(&*self.arena.alloc_expr(value))
                     } else {
@@ -172,12 +177,46 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                         default,
                     });
                 }
-                let result = self.lower_expr(ExprContext::Type, children[0]);
+                let result =
+                    subject.unwrap_or_else(|| self.lower_expr(ExprContext::Type, children[0]));
                 self.local_exit(scope);
                 Expr {
                     hir_id: self.next_hir_id(),
                     span,
-                    kind: ExprKind::ContextualExprType(bindings, self.arena.alloc_expr(result)),
+                    kind: if kind == NodeKind::ContextualPatternType {
+                        ExprKind::ContextualPatternType(self.arena.alloc_expr(result), bindings)
+                    } else {
+                        ExprKind::ContextualExprType(bindings, self.arena.alloc_expr(result))
+                    },
+                }
+            }
+            NodeKind::QuotePattern => {
+                let scope = self.local_enter(resolve::RibKind::MatchBody);
+                let pattern = self.lower_pattern(children[0]);
+                self.bind_arm_pattern(children[0], &pattern);
+                let substitutions = self
+                    .ast
+                    .get_multi_child_slice(children[1])
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(|&entry| {
+                        let parts = self.ast.get_children(entry);
+                        let port = self.node_to_ident(parts[0]);
+                        let binding = self.lower_expr(ctx, parts[1]);
+                        hir::expr::CodeSubstitution {
+                            port,
+                            binding: self.arena.alloc_expr(binding),
+                        }
+                    })
+                    .collect();
+                self.local_exit(scope);
+                Expr {
+                    hir_id: self.next_hir_id(),
+                    span,
+                    kind: ExprKind::CodePatternQuote(
+                        self.arena.alloc_pattern(pattern),
+                        substitutions,
+                    ),
                 }
             }
             NodeKind::QuoteExpr | NodeKind::SpliceExpr => {
@@ -961,6 +1000,14 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                         hir_id: next_hir_id,
                         kind: ExprKind::ResolvedLocal(identifier.name, *hir_id),
                         span,
+                    }
+                }
+                BindingKind::ExpandedLocal(site, output) => {
+                    let hir_id = self.expanded_locals[&(site, output)];
+                    Expr {
+                        hir_id: next_hir_id,
+                        span,
+                        kind: ExprKind::ResolvedLocal(identifier.name, hir_id),
                     }
                 }
                 BindingKind::ClauseParam(def_id, _) => Expr {
@@ -2030,7 +2077,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         } else {
             None
         };
-        let init = if children[2] != 0 {
+        let init: Option<&'hir Expr<'hir>> = if children[2] != 0 {
             let init_expr = self.lower_expr(ctx, children[2]);
             Some(self.arena.alloc_expr(init_expr) as &_)
         } else {
@@ -2053,6 +2100,27 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         };
         self.local_enter(RibKind::MatchBody);
         let (pattern, guard) = self.lower_arm_head(ctx, children[0]);
+        // Code interfaces also describe generator-local let/var bindings.
+        // Stage legality remains the elaborator's responsibility.
+        {
+            let outputs = match ty.map(|ty| &ty.kind) {
+                Some(ExprKind::ContextualPatternType(_, entries)) => {
+                    Some(entries.iter().map(|entry| entry.name).collect::<Vec<_>>())
+                }
+                _ => init.and_then(|value| self.pattern_expression_outputs(value)),
+            };
+            if let Some(outputs) = outputs {
+                let mut target = &pattern;
+                while let PatternKind::Binding(_, _, inner) = &target.kind {
+                    self.pattern_code_outputs
+                        .insert(target.hir_id, outputs.clone());
+                    match inner {
+                        Some(inner) => target = inner,
+                        None => break,
+                    }
+                }
+            }
+        }
         LetDecl {
             mutable: kind == NodeKind::VarDecl,
             comptime: kind == NodeKind::ConstDecl,
@@ -2166,6 +2234,18 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         use hir::pattern::PatternKind;
         let children = self.ast.get_children(node);
         match &pat.kind {
+            PatternKind::CodeSplice(_, outputs) => {
+                for (index, output) in outputs.iter().enumerate() {
+                    if !seen.insert(output.name.name) {
+                        self.emit_malformed("duplicate pattern binding", output.name.span);
+                    }
+                    let site = self.ast_node_ref(node);
+                    let index =
+                        u32::try_from(index).expect("pattern output count exceeds AST capacity");
+                    self.expanded_locals.insert((site, index), output.hir_id);
+                    self.define_symbol(output.name, BindingKind::ExpandedLocal(site, index));
+                }
+            }
             PatternKind::BitVec { segments, .. } => {
                 let nodes = self
                     .ast

@@ -203,6 +203,20 @@ fn capture_rejects_ambiguous_routes_unknown_bindings_and_effectful_operands() {
     let plan = Invocation::from_call(&call, &captures, &mut 100).unwrap();
     assert_eq!(plan.inputs()[0].value, slot(0, Sort::ComptimeValue));
     assert_eq!(plan.inputs()[1].value, Term::Bool(false));
+    for value in [
+        Term::Bool(true),
+        Term::Char('x'),
+        Term::Primitive(Primitive::Bool),
+        slot(0, Sort::ComptimeValue),
+    ] {
+        let mut captured = call.clone();
+        let K::Call { arguments, .. } = &mut captured.kind else {
+            unreachable!()
+        };
+        arguments[0].value.kind = K::ComptimeValue(value.clone());
+        let result = Invocation::from_call(&captured, &captures, &mut 1000);
+        assert_eq!(result.is_ok(), value == Term::Bool(true), "{value}");
+    }
     for mode in 0..4 {
         let mut invalid = call.clone();
         let K::Call { arguments, .. } = &mut invalid.kind else {
@@ -779,4 +793,40 @@ fn bounded_parameter_substitution_is_simultaneous_and_checks_result_depth() {
         )
         .is_ok()
     );
+}
+
+#[test]
+fn rigid_dependency_inspection_is_bounded_and_keeps_opaque_heads() {
+    use nir::type_computations::has_rigid_parameters_bounded;
+    let open = Term::NormalForm {
+        head: target(),
+        sort: Sort::Type,
+        arguments: vec![Term::Tuple(vec![Term::Rigid {
+            declaration: DeclarationId {
+                package: 1,
+                local: 3,
+            },
+            sort: Sort::Type,
+        }])],
+    };
+    assert!(has_rigid_parameters_bounded(&open, &mut 32).unwrap());
+    assert!(matches!(
+        has_rigid_parameters_bounded(&open, &mut 1),
+        Err(Error::Budget)
+    ));
+    let closed = Term::NormalForm {
+        head: target(),
+        sort: Sort::Type,
+        arguments: vec![Term::Primitive(Primitive::U8)],
+    };
+    assert!(!has_rigid_parameters_bounded(&closed, &mut 32).unwrap());
+    let mut deep = open.clone();
+    for _ in 0..129 {
+        deep = Term::Tuple(vec![deep]);
+    }
+    assert!(matches!(
+        has_rigid_parameters_bounded(&deep, &mut 10_000),
+        Err(Error::Budget)
+    ));
+    assert!(has_rigid_parameters_bounded(&open, &mut 32).unwrap());
 }

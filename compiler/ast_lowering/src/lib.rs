@@ -109,6 +109,10 @@ pub struct LoweringContext<'hir, 'ast, 'resolver> {
     /// Early name resolver – performs module-level name lookup.
     pub(crate) resolver: &'resolver mut Resolver<'resolver>,
     pub(crate) ast_ref_to_hir_id: HashMap<AstNodeRef, HirId>,
+    pub(crate) expanded_locals: HashMap<(AstNodeRef, u32), HirId>,
+    /// Lexically declared output names only; elaboration still verifies the
+    /// code's category, subject and successful output types.
+    pub(crate) pattern_code_outputs: HashMap<HirId, Vec<hir::common::Ident>>,
     /// The scope that owns the top-level names of the file being lowered.
     pub(crate) file_scope: ScopeId,
 
@@ -139,6 +143,8 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             resolver,
             file_scope,
             ast_ref_to_hir_id: HashMap::default(),
+            expanded_locals: HashMap::new(),
+            pattern_code_outputs: HashMap::new(),
             surrouding_ctx: Vec::new(),
             refinement_depth: 0,
         }

@@ -408,7 +408,7 @@ impl<'a> Interpreter<'a> {
         }
         let work = self
             .type_description_work(ty)
-            .ok_or_else(|| self.failure(ErrorKind::RepresentationSizeLimit, Some(source)))?;
+            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
         self.copy_work(work, source)
     }
 
@@ -419,8 +419,13 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Vec<Term>, Error> {
         self.copy_work(arguments.len(), source)?;
         for argument in arguments {
-            let work = instance_argument_work(argument, &self.normal_forms)
-                .ok_or_else(|| self.failure(ErrorKind::RepresentationSizeLimit, Some(source)))?;
+            let work = scoped_term_value_work_with_layouts(
+                argument,
+                &self.normal_forms,
+                &self.abstract_type_parameters,
+                |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
+            )
+            .ok_or_else(|| self.failure(ErrorKind::RepresentationSizeLimit, Some(source)))?;
             self.copy_work(work, source)?;
         }
         Ok(arguments.to_vec())
@@ -613,7 +618,7 @@ impl<'a> Interpreter<'a> {
                 arguments: self.copy_instance_arguments(arguments, source)?,
             },
             Value::RuntimeTraitMethod(method) => {
-                self.copy_type_work(&method.subject, source)?;
+                self.copy_invocation_type_work(&method.subject, source, true)?;
                 let interface_arguments =
                     self.copy_instance_arguments(&method.interface.arguments, source)?;
                 let method_arguments =

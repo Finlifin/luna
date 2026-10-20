@@ -59,6 +59,7 @@ impl Checker<'_, '_> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let scheme = crate::calls::Scheme {
+            parameter_sorts: vec![],
             type_parameters: binders.len(),
             signature: signature
                 .abstract_types(&binders)

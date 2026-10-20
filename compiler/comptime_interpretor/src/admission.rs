@@ -3,6 +3,21 @@
 use super::*;
 
 impl Interpreter<'_> {
+    pub(super) fn admitted_nominal_layout(
+        &self,
+        ty: &Term,
+        variant: Option<u32>,
+        fuel: &mut usize,
+    ) -> Result<Vec<Term>, nir::NominalAdmissionError> {
+        self.normal_value_fields(ty, variant, fuel).ok_or_else(|| {
+            if *fuel == 0 {
+                nir::NominalAdmissionError::Budget
+            } else {
+                nir::NominalAdmissionError::Invalid("nominal value layout unavailable".into())
+            }
+        })
+    }
+
     /// Validate immutable data against a closed domain, including nominal
     /// formation predicates. In a comptime normalization scope, Type descriptions
     /// may mention only that scope's authorized declaration inputs. This does not
@@ -93,28 +108,69 @@ impl Interpreter<'_> {
                 declaration,
                 arguments,
             } => {
-                let (parameters, requirements, capabilities) =
+                let (parameters, domains, requirements, capabilities) =
                     if let Some(s) = self.structs.get(declaration) {
-                        (&s.type_parameters, &s.requirements, &s.capabilities)
+                        (
+                            &s.type_parameters,
+                            &s.parameter_types,
+                            &s.requirements,
+                            &s.capabilities,
+                        )
                     } else if let Some(e) = self.enums.get(declaration) {
-                        (&e.type_parameters, &e.requirements, &e.capabilities)
+                        (
+                            &e.type_parameters,
+                            &e.parameter_types,
+                            &e.requirements,
+                            &e.capabilities,
+                        )
                     } else if let Some(n) = self.newtypes.get(declaration) {
-                        (&n.type_parameters, &n.requirements, &n.capabilities)
+                        (
+                            &n.type_parameters,
+                            &n.parameter_types,
+                            &n.requirements,
+                            &n.capabilities,
+                        )
                     } else {
                         return Err(self.failure(ErrorKind::Type, None));
                     };
                 // Prove formation even for phantom arguments with no fields.
-                Term::Tuple(vec![])
-                    .instantiate_types(parameters, arguments)
+                let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+                let mut remaining = before;
+                let valid = if let Some(definition) = self.newtypes.get(declaration) {
+                    definition.validate_completed_arguments_with_layouts(
+                        arguments,
+                        &mut remaining,
+                        |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
+                    )
+                } else {
+                    nir::validate_declaration_arguments_with_layouts(
+                        parameters,
+                        domains,
+                        arguments,
+                        &mut remaining,
+                        |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
+                    )
+                };
+                self.budget.steps -= (before - remaining) as u64;
+                valid.map_err(|error| {
+                    self.failure(
+                        match error {
+                            nir::NominalAdmissionError::Budget => ErrorKind::StepsExhausted,
+                            nir::NominalAdmissionError::Invalid(_) => ErrorKind::Type,
+                        },
+                        None,
+                    )
+                })?;
+                let parameters = nir::declaration_parameters(parameters, domains)
                     .map_err(|_| self.failure(ErrorKind::Type, None))?;
                 let requirements = requirements
                     .iter()
-                    .map(|p| p.instantiate_types(parameters, arguments))
+                    .map(|p| p.instantiate_parameters(&parameters, arguments))
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|_| self.failure(ErrorKind::Type, None))?;
                 let capabilities = capabilities
                     .iter()
-                    .map(|p| p.instantiate_types(parameters, arguments))
+                    .map(|p| p.instantiate_parameters(&parameters, arguments))
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|_| self.failure(ErrorKind::Type, None))?;
                 for p in requirements {

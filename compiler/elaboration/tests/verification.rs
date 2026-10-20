@@ -1980,3 +1980,123 @@ fn unbounded_polynomial_cancellation_detects_impossible_premises() {
         assert!(!facts.is_reachable());
     }
 }
+
+#[test]
+fn captured_integer_facts_check_domains_budgets_and_symbolic_inputs() {
+    use elaboration::verification::flow;
+    use nir::program::{
+        Expr, ExprKind as K, Function, FunctionPhase, IntegerOp, Literal, SourceRange,
+    };
+    use nir::{DeclarationId, Primitive, Sort, Term};
+    let function = |primitive, value| {
+        let ty = Term::Primitive(primitive);
+        let expression = |kind| Expr {
+            ty: ty.clone(),
+            source: SourceRange { start: 0, end: 1 },
+            kind,
+        };
+        Function {
+            declaration: DeclarationId {
+                package: 1,
+                local: 1,
+            },
+            name: "increment".into(),
+            phase: FunctionPhase::Runtime,
+            inline: false,
+            pure: false,
+            signature: Term::Function {
+                parameters: vec![],
+                result: Box::new(ty.clone()),
+            },
+            parameters: vec![],
+            type_parameters: vec![],
+            defaults: vec![],
+            preconditions: vec![],
+            postconditions: vec![],
+            result_binding: None,
+            entry_snapshots: vec![],
+            capabilities: vec![],
+            requirements: vec![],
+            body: expression(K::IntegerBinary {
+                op: IntegerOp::Add,
+                left: Box::new(expression(K::ComptimeValue(value))),
+                right: Box::new(expression(K::Literal(match primitive {
+                    Primitive::I8 => Literal::SignedInteger(1),
+                    Primitive::Integer => Literal::Integer("1".into()),
+                    _ => Literal::UnsignedInteger(1),
+                }))),
+            }),
+        }
+    };
+    for (primitive, value, accepted) in [
+        (Primitive::U8, 254, true),
+        (Primitive::U8, 255, false),
+        (Primitive::U8, 256, false),
+        (Primitive::U8, -1, false),
+        (Primitive::I8, -128, true),
+        (Primitive::I8, -129, false),
+        (Primitive::I8, 127, false),
+    ] {
+        let input = function(primitive, Term::Integer(Integer::from_i128(value)));
+        assert_eq!(
+            flow::analyze(&input, &mut Limits::default()).is_ok(),
+            accepted,
+            "{primitive:?}/{value}"
+        );
+    }
+    let symbolic = function(
+        Primitive::U8,
+        Term::Rigid {
+            declaration: DeclarationId {
+                package: 1,
+                local: 2,
+            },
+            sort: Sort::ComptimeValue,
+        },
+    );
+    assert!(flow::analyze(&symbolic, &mut Limits::default()).is_err());
+    let huge = Integer::parse_literal(&"9".repeat(200), &mut Default::default()).unwrap();
+    let input = function(Primitive::Integer, Term::Integer(huge));
+    let mut limited = Limits::default();
+    limited.arithmetic.max_limbs = 1;
+    assert!(flow::analyze(&input, &mut limited).is_err());
+    assert!(flow::analyze(&input, &mut Limits::default()).is_ok());
+    let mut exhausted = Limits::default();
+    exhausted.arithmetic.steps = 2;
+    assert!(flow::analyze(&input, &mut exhausted).is_err());
+    assert!(flow::analyze(&input, &mut Limits::default()).is_ok());
+
+    // A checked associated value contributes its domain, never its initializer
+    // or a fabricated constant. Reading u8 is valid; incrementing an unknown
+    // u8 still needs an overflow proof.
+    let mut associated = function(Primitive::U8, Term::Integer(Integer::from_u128(0)));
+    let K::IntegerBinary { left, .. } = &mut associated.body.kind else {
+        unreachable!()
+    };
+    left.kind = K::AssociatedValue {
+        interface: nir::program::InterfaceInstance {
+            declaration: DeclarationId {
+                package: 1,
+                local: 10,
+            },
+            arguments: vec![],
+        },
+        member: DeclarationId {
+            package: 1,
+            local: 11,
+        },
+        subject: Term::Primitive(Primitive::Bool),
+    };
+    let read = Function {
+        body: *left.clone(),
+        ..associated.clone()
+    };
+    assert!(flow::analyze(&read, &mut Limits::default()).is_ok());
+    assert_eq!(
+        flow::analyze(&associated, &mut Limits::default())
+            .err()
+            .unwrap()
+            .reason,
+        flow::Reason::MissingMachineProof,
+    );
+}

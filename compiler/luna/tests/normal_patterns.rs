@@ -293,3 +293,166 @@ fn normal_value_arguments_and_nested_heads_preserve_candidate_order() {
         );
     }
 }
+
+#[test]
+fn normal_value_prefixes_form_later_indexed_domains() {
+    let source = "typealias Type=.Type'builtin;
+        struct Config where enabled:bool {flag:bool}
+        pure comptime fn Packet<enabled:bool,value:Config<enabled>>->Type {bool}
+        comptime fn Inspect(value:Type)->bool {value match {
+            Packet<true,item> => item.flag,
+            _ => false
+        }}
+        comptime fn Run()->bool {Inspect(Packet<true,Config<true>{flag:true}>)}";
+    let package = compile(source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "Run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    for pattern in ["(true as selected)", "(true if true)", "(true or true)"] {
+        let wrapped = source.replace("Packet<true,item>", &format!("Packet<{pattern},item>"));
+        let package = compile(&wrapped);
+        assert_eq!(
+            luna::invocation::invoke(&package, "Run", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+    let integer = source
+        .replace("enabled:bool", "enabled:.u8'builtin")
+        .replace("Packet<true,item>", "Packet<7,item>")
+        .replace("Packet<true,Config<true>", "Packet<7,Config<7>");
+    assert_eq!(
+        luna::invocation::invoke(&compile(&integer), "Run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let observed = source.replace("comptime fn Run()->bool {Inspect(Packet<true,Config<true>{flag:true}>)}", "comptime fn Run()->bool {Packet<true,Config<true>{flag:true}> match {Packet<enabled,item> => enabled and item.flag,_ => false}}");
+    assert_eq!(
+        luna::invocation::invoke(&compile(&observed), "Run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let miss = source.replace(
+        "Packet<true,Config<true>{flag:true}>",
+        "Packet<false,Config<false>{flag:true}>",
+    );
+    assert_eq!(
+        luna::invocation::invoke(&compile(&miss), "Run", 100_000).unwrap(),
+        Value::Bool(false)
+    );
+    let named = source
+        .replace(
+            "Packet<enabled:bool,value:Config<enabled>>",
+            "Packet<.enabled:bool=true,value:Config<enabled>>",
+        )
+        .replace(
+            "Packet<true,Config<true>{flag:true}>",
+            "Packet<Config<true>{flag:true},.enabled=true>",
+        );
+    assert_eq!(
+        luna::invocation::invoke(
+            &compile_with_protocols(&named, &Default::default())
+                .unwrap_or_else(|e| panic!("{named}\n{e}")),
+            "Run",
+            100_000
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+    let defaulted = named.replace(",.enabled=true>", ">");
+    assert_eq!(
+        luna::invocation::invoke(&compile(&defaulted), "Run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let dynamic = source
+        .replace(
+            "comptime fn Run()",
+            "comptime fn enabled()->bool {true} comptime fn Run()",
+        )
+        .replace(
+            "Packet<true,Config<true>{flag:true}>",
+            "Packet<enabled(),Config<true>{flag:true}>",
+        );
+    let package = compile(&dynamic);
+    let mut vm =
+        comptime_interpretor::Interpreter::for_comptime(&package, Default::default()).unwrap();
+    let entry = package
+        .functions
+        .iter()
+        .find(|f| f.name == "Run")
+        .unwrap()
+        .declaration;
+    assert_eq!(vm.invoke(entry, vec![]).unwrap(), Value::Bool(true));
+    assert_eq!(
+        execution_support::calls(&package, &vm),
+        vec!["Run", "enabled", "Inspect"]
+    );
+    let ambiguous = source.replace("Packet<true,item>", "Packet<(true or false),item>");
+    assert!(compile_with_protocols(&ambiguous, &Default::default()).is_err());
+    let wrong = source.replace(
+        "Packet<true,Config<true>{flag:true}>",
+        "Packet<true,Config<false>{flag:true}>",
+    );
+    assert!(compile_with_protocols(&wrong, &Default::default()).is_err());
+}
+
+#[test]
+fn normal_optional_record_defaults_preserve_dependent_instances() {
+    let source = "typealias Type=.Type'builtin;
+        struct Config where enabled:bool {flag:bool}
+        pure comptime fn Packet<.enabled:bool=true,.value:Config<enabled> = defer Config<enabled>{flag:enabled}>->Type {bool}
+        comptime fn Run()->bool {Packet<> match {Packet<true,item> => item.flag,_=>false}}
+        comptime fn Disabled()->bool {Packet<.enabled=false> match {Packet<false,item> => not item.flag,_=>false}}
+        comptime fn Override()->bool {Packet<.value=Config<true>{flag:false}> match {Packet<true,item> => not item.flag,_=>false}}";
+    let package = compile(source);
+    for entry in ["Run", "Disabled", "Override"] {
+        assert_eq!(
+            luna::invocation::invoke(&package, entry, 100_000).unwrap(),
+            Value::Bool(true),
+            "{entry}"
+        );
+    }
+    let wrong = source.replace(
+        ".value=Config<true>{flag:false}",
+        ".value=Config<false>{flag:false}",
+    );
+    let package = compile(&wrong);
+    assert!(luna::invocation::invoke(&package, "Override", 100_000).is_err());
+    assert_eq!(
+        luna::invocation::invoke(&package, "Run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn ordinary_optional_defaults_construct_records_and_respect_overrides() {
+    let package = compile(
+        "struct Config {flag:bool}
+        comptime fn read(.config:Config=Config {flag:true})->bool {config.flag}
+        comptime fn Run()->bool {read() and not read(.config=Config {flag:false})}",
+    );
+    assert_eq!(
+        luna::invocation::invoke(&package, "Run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn normal_record_defaults_follow_evaluated_value_prefixes_once() {
+    let package = compile("typealias Type=.Type'builtin;
+        struct Config where enabled:bool {flag:bool}
+        comptime fn enabled()->bool {true}
+        pure comptime fn Packet<.enabled:bool=true,.value:Config<enabled> = defer Config<enabled>{flag:enabled}>->Type {bool}
+        comptime fn Run()->bool {Packet<.enabled=enabled()> match {Packet<true,item> => item.flag,_=>false}}");
+    let mut vm =
+        comptime_interpretor::Interpreter::for_comptime(&package, Default::default()).unwrap();
+    let entry = package
+        .functions
+        .iter()
+        .find(|f| f.name == "Run")
+        .unwrap()
+        .declaration;
+    assert_eq!(vm.invoke(entry, vec![]).unwrap(), Value::Bool(true));
+    assert_eq!(
+        execution_support::calls(&package, &vm),
+        vec!["Run", "enabled"]
+    );
+}

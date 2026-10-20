@@ -228,3 +228,152 @@ fn inherent_matching_does_not_resolve_an_open_trait_head() {
 fn super_head() -> InherentHead {
     head(20, boxed(var(1)), vec![id(1)], &["quote\"newline\n"])
 }
+
+#[test]
+fn external_value_domains_control_inherent_matching_and_replay() {
+    let value = |n| Term::Rigid {
+        declaration: id(n),
+        sort: Sort::ComptimeValue,
+    };
+    let mut h = head(20, boxed(value(1)), vec![id(1)], &["read"]);
+    h.parameter_types = vec![Term::Primitive(P::Bool)];
+    let mut index = InherentIndex::default();
+    index.insert(h.clone(), Budget::default()).unwrap();
+    let subject = boxed(value(2));
+    let before = index
+        .resolve_types("read", &subject, &context(), Budget::default())
+        .unwrap();
+    assert!(!matches!(before.selection, Selection::Selected(_)));
+    index
+        .register_parameter_domain(id(2), Term::Primitive(P::Bool))
+        .unwrap();
+    assert!(!index.resolution_is_current(&before));
+    let result = index
+        .resolve_types("read", &subject, &context(), Budget::default())
+        .unwrap();
+    assert!(matches!(result.selection, Selection::Selected(_)));
+    let TypeAssessment::Applicable(evidence) = &result.assessments[&id(20)] else {
+        panic!("{result}")
+    };
+    index
+        .verify_evidence("read", evidence, &subject, &context(), Budget::default())
+        .unwrap();
+    assert!(
+        index
+            .verify_evidence("other", evidence, &subject, &context(), Budget::default())
+            .is_err()
+    );
+    assert!(
+        index
+            .verify_evidence(
+                "read",
+                evidence,
+                &subject,
+                &context(),
+                Budget {
+                    steps: 0,
+                    ..Default::default()
+                }
+            )
+            .is_err()
+    );
+    assert!(
+        index
+            .register_parameter_domain(id(2), Term::Primitive(P::Char))
+            .is_err()
+    );
+    assert!(index.resolution_is_current(&result));
+    let mut wrong = InherentIndex::default();
+    wrong.insert(h, Budget::default()).unwrap();
+    wrong
+        .register_parameter_domain(id(2), Term::Primitive(P::Char))
+        .unwrap();
+    assert!(
+        wrong
+            .verify_evidence("read", evidence, &subject, &context(), Budget::default())
+            .is_err()
+    );
+    assert!(!matches!(
+        wrong
+            .resolve_types("read", &subject, &context(), Budget::default())
+            .unwrap()
+            .selection,
+        Selection::Selected(_)
+    ));
+    assert!(index.to_string().contains("(parameter-domain"));
+}
+
+#[test]
+fn nominal_payload_layouts_govern_selection_replay_and_revision() {
+    let config = Term::Nominal {
+        declaration: id(30),
+        arguments: vec![],
+    };
+    let mut h = head(
+        20,
+        boxed(Term::Rigid {
+            declaration: id(1),
+            sort: Sort::ComptimeValue,
+        }),
+        vec![id(1)],
+        &["read"],
+    );
+    h.parameter_types = vec![config.clone()];
+    let mut index = InherentIndex::default();
+    index.insert(h, Budget::default()).unwrap();
+    let value = Term::NominalValue {
+        ty: Box::new(config),
+        variant: None,
+        fields: vec![Term::Bool(true)],
+    };
+    let subject = boxed(value.clone());
+    let before = index
+        .resolve_types("read", &subject, &context(), Budget::default())
+        .unwrap();
+    assert!(!matches!(before.selection, Selection::Selected(_)));
+    let mut layout = nir::program::Struct {
+        declaration: id(30),
+        name: "Config".into(),
+        type_parameters: vec![],
+        parameter_types: vec![],
+        fields: vec![("flag".into(), Term::Primitive(P::Bool))],
+        requirements: vec![],
+        capabilities: vec![],
+    };
+    index.set_nominal_layouts(vec![layout.clone()], vec![], vec![]);
+    assert!(!index.resolution_is_current(&before));
+    let selected = index
+        .resolve_types("read", &subject, &context(), Budget::default())
+        .unwrap();
+    assert_eq!(selected.selection, Selection::Selected(id(20)));
+    let TypeAssessment::Applicable(evidence) = &selected.assessments[&id(20)] else {
+        panic!("{selected}")
+    };
+    index
+        .verify_evidence("read", evidence, &subject, &context(), Budget::default())
+        .unwrap();
+    index.set_nominal_layouts(vec![layout.clone()], vec![], vec![]);
+    assert!(index.resolution_is_current(&selected));
+    assert!(index.to_string().contains("(nominal-layouts (struct"));
+    for fields in [vec![], vec![Term::Char('x')]] {
+        let mut forged = value.clone();
+        if let Term::NominalValue {
+            fields: payload, ..
+        } = &mut forged
+        {
+            *payload = fields;
+        }
+        let invalid = index
+            .resolve_types("read", &boxed(forged), &context(), Budget::default())
+            .unwrap();
+        assert!(!matches!(invalid.selection, Selection::Selected(_)));
+    }
+    layout.fields[0].1 = Term::Primitive(P::Char);
+    index.set_nominal_layouts(vec![layout], vec![], vec![]);
+    assert!(!index.resolution_is_current(&selected));
+    assert!(
+        index
+            .verify_evidence("read", evidence, &subject, &context(), Budget::default())
+            .is_err()
+    );
+}

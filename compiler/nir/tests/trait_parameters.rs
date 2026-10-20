@@ -496,3 +496,461 @@ fn self_dependent_domains_require_an_explicit_valid_subject() {
         .validate_arguments_for_subject(&subject, &arguments, &[], &[], &mut 1000)
         .unwrap();
 }
+
+#[test]
+fn captured_newtype_and_alias_inputs_reuse_trait_domains_without_erasing_them() {
+    let contract = declaration();
+    let mut parameters = vec![contract.self_parameter];
+    parameters.extend(&contract.type_parameters);
+    let mut domains = vec![Term::Primitive(Primitive::Type)];
+    domains.extend(contract.parameter_types.clone());
+    let mut package = nir::program::Package {
+        traits: vec![contract],
+        newtypes: vec![nir::newtypes::Newtype {
+            declaration: DeclarationId {
+                package: 92,
+                local: 100,
+            },
+            name: "Captured".into(),
+            capture_count: parameters.len(),
+            type_parameters: parameters.clone(),
+            parameter_types: domains.clone(),
+            representation: Term::Primitive(Primitive::Bool),
+            requirements: vec![],
+            capabilities: vec![],
+        }],
+        alias_contracts: vec![nir::type_aliases::Contract {
+            declaration: DeclarationId {
+                package: 92,
+                local: 101,
+            },
+            parameters: parameters.clone(),
+            parameter_types: domains.clone(),
+            requirements: vec![],
+            capabilities: vec![],
+        }],
+        ..Default::default()
+    };
+    let evidence = package.declaration_parameter_domains(&mut 10000).unwrap();
+    for (id, domain) in parameters.iter().zip(&domains) {
+        assert_eq!(&evidence[id], domain);
+    }
+    let last = domains.len() - 1;
+    package.newtypes[0].parameter_types[last] = Term::Primitive(Primitive::Char);
+    assert!(
+        package
+            .declaration_parameter_domains(&mut 10000)
+            .unwrap_err()
+            .contains("conflicting")
+    );
+    package.newtypes[0].parameter_types[last] = domains[last].clone();
+    package.alias_contracts[0].parameter_types[last] = Term::Primitive(Primitive::Char);
+    assert!(
+        package
+            .declaration_parameter_domains(&mut 10000)
+            .unwrap_err()
+            .contains("conflicting")
+    );
+    package.alias_contracts[0].parameter_types[last] = domains[last].clone();
+    assert_eq!(
+        package.declaration_parameter_domains(&mut 10000).unwrap(),
+        evidence
+    );
+}
+
+#[test]
+fn external_rigid_domains_are_checked_without_guessing_the_interface_slot() {
+    let mut contract = declaration();
+    contract.parameter_types[1] = Term::Primitive(Primitive::Symbol);
+    let id = DeclarationId {
+        package: 9,
+        local: 42,
+    };
+    let arguments = [
+        Term::Primitive(Primitive::Bool),
+        Term::Rigid {
+            declaration: id,
+            sort: Sort::ComptimeValue,
+        },
+    ];
+    let subject = Term::Primitive(Primitive::Bool);
+    let mut domains = std::collections::BTreeMap::new();
+    for domain in [
+        None,
+        Some(Term::Primitive(Primitive::Bool)),
+        Some(Term::Bool(true)),
+    ] {
+        domains.clear();
+        if let Some(domain) = domain {
+            domains.insert(id, domain);
+        }
+        assert!(
+            contract
+                .validate_arguments_with_domains(
+                    &subject,
+                    &arguments,
+                    &[],
+                    &[],
+                    &domains,
+                    &mut 1000
+                )
+                .is_err()
+        );
+    }
+    domains.insert(id, Term::Primitive(Primitive::Symbol));
+    assert!(
+        contract
+            .validate_arguments_with_domains(&subject, &arguments, &[], &[], &domains, &mut 0)
+            .is_err()
+    );
+    contract
+        .validate_arguments_with_domains(&subject, &arguments, &[], &[], &domains, &mut 1000)
+        .unwrap();
+    let mut conflicting = contract.clone();
+    conflicting.type_parameters[1] = id;
+    conflicting.parameter_types[1] = Term::Primitive(Primitive::Bool);
+    assert!(
+        contract
+            .validate_arguments_with_domains(
+                &subject,
+                &arguments,
+                &[],
+                &[conflicting],
+                &domains,
+                &mut 1000
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn symbolic_record_leaves_require_domains_without_becoming_closed_values() {
+    let mut contract = declaration();
+    contract.type_parameters.truncate(1);
+    contract.parameter_types = vec![Term::Record(vec![(
+        "nested".into(),
+        Term::Record(vec![("flag".into(), Term::Primitive(Primitive::Bool))]),
+    )])];
+    let id = DeclarationId {
+        package: 9,
+        local: 77,
+    };
+    let value = Term::RecordValue(vec![(
+        "nested".into(),
+        Term::RecordValue(vec![(
+            "flag".into(),
+            Term::Rigid {
+                declaration: id,
+                sort: Sort::ComptimeValue,
+            },
+        )]),
+    )]);
+    assert!(value.is_symbolic_index_value());
+    assert!(!value.is_structural_index_value());
+    let mut domains = std::collections::BTreeMap::new();
+    for domain in [None, Some(Term::Primitive(Primitive::Char))] {
+        domains.clear();
+        if let Some(domain) = domain {
+            domains.insert(id, domain);
+        }
+        assert!(
+            contract
+                .validate_arguments_with_domains(
+                    &Term::Primitive(Primitive::Bool),
+                    std::slice::from_ref(&value),
+                    &[],
+                    &[],
+                    &domains,
+                    &mut 10000
+                )
+                .is_err()
+        );
+    }
+    domains.insert(id, Term::Primitive(Primitive::Bool));
+    assert!(
+        contract
+            .validate_arguments_with_domains(
+                &Term::Primitive(Primitive::Bool),
+                std::slice::from_ref(&value),
+                &[],
+                &[],
+                &domains,
+                &mut 0
+            )
+            .is_err()
+    );
+    contract
+        .validate_arguments_with_domains(
+            &Term::Primitive(Primitive::Bool),
+            &[value],
+            &[],
+            &[],
+            &domains,
+            &mut 10000,
+        )
+        .unwrap();
+}
+
+#[test]
+fn record_index_refutation_uses_known_leaves_and_respects_limits() {
+    let unknown = Term::Rigid {
+        declaration: DeclarationId {
+            package: 9,
+            local: 90,
+        },
+        sort: Sort::ComptimeValue,
+    };
+    let record = |tag, flag, ty| {
+        Term::RecordValue(vec![
+            (
+                "nested".into(),
+                Term::RecordValue(vec![("tag".into(), Term::Bool(tag))]),
+            ),
+            ("unknown".into(), flag),
+            ("type".into(), ty),
+        ])
+    };
+    let left = record(true, unknown.clone(), Term::Primitive(Primitive::Bool));
+    let right = record(false, Term::Bool(true), Term::Primitive(Primitive::Char));
+    for (a, b) in [(&left, &right), (&right, &left)] {
+        assert!(!a.index_values_definitely_differ(b, &mut 0));
+        assert!(a.index_values_definitely_differ(b, &mut 1000));
+    }
+    let uncertain = record(true, Term::Bool(true), Term::Primitive(Primitive::Char));
+    assert!(!left.index_values_definitely_differ(&uncertain, &mut 1000));
+    assert!(
+        !Term::Primitive(Primitive::Bool)
+            .index_values_definitely_differ(&Term::Primitive(Primitive::Char), &mut 1000)
+    );
+    assert!(!unknown.index_values_definitely_differ(&Term::Bool(true), &mut 1000));
+    assert!(Term::Bool(true).index_values_definitely_differ(&Term::Bool(false), &mut 1000));
+    assert!(!left.index_values_definitely_differ(&left, &mut 1000));
+}
+
+#[test]
+fn nominal_trait_indices_require_full_payload_layout_evidence() {
+    let mut contract = declaration();
+    contract.type_parameters.truncate(1);
+    let config_id = DeclarationId {
+        package: 7,
+        local: 90,
+    };
+    let config = Term::Nominal {
+        declaration: config_id,
+        arguments: vec![],
+    };
+    contract.parameter_types = vec![config.clone()];
+    let value = Term::NominalValue {
+        ty: Box::new(config),
+        variant: None,
+        fields: vec![Term::Bool(true)],
+    };
+    let mut package = nir::program::Package::default();
+    package.structs.push(nir::program::Struct {
+        declaration: config_id,
+        name: "Config".into(),
+        type_parameters: vec![],
+        parameter_types: vec![],
+        fields: vec![("flag".into(), Term::Primitive(Primitive::Bool))],
+        requirements: vec![],
+        capabilities: vec![],
+    });
+    let subject = Term::Primitive(Primitive::Bool);
+    let domains = Default::default();
+    assert!(
+        contract
+            .validate_arguments(std::slice::from_ref(&value), &[], &mut 10000)
+            .is_err()
+    );
+    let validate = |value: &Term, package: &nir::program::Package, fuel: &mut usize| {
+        contract.validate_arguments_with_layouts(
+            &subject,
+            std::slice::from_ref(value),
+            &[],
+            &[],
+            &domains,
+            fuel,
+            |_, _, _| false,
+            Some(package),
+        )
+    };
+    validate(&value, &package, &mut 10000).unwrap();
+    assert!(validate(&value, &package, &mut 0).is_err());
+    for fields in [
+        vec![],
+        vec![Term::Char('x')],
+        vec![Term::Bool(true), Term::Bool(false)],
+    ] {
+        let mut forged = value.clone();
+        let Term::NominalValue {
+            fields: payload, ..
+        } = &mut forged
+        else {
+            unreachable!()
+        };
+        *payload = fields;
+        assert!(validate(&forged, &package, &mut 10000).is_err());
+    }
+    let mut forged = value.clone();
+    let Term::NominalValue { variant, .. } = &mut forged else {
+        unreachable!()
+    };
+    *variant = Some(0);
+    assert!(validate(&forged, &package, &mut 10000).is_err());
+    package.structs[0].fields[0].1 = Term::Primitive(Primitive::Char);
+    assert!(validate(&value, &package, &mut 10000).is_err());
+}
+
+#[test]
+fn nominal_index_relations_preserve_variants_and_type_leaves() {
+    let domain = Term::Nominal {
+        declaration: DeclarationId {
+            package: 1,
+            local: 20,
+        },
+        arguments: vec![],
+    };
+    let value = |variant, leaf| Term::NominalValue {
+        ty: Box::new(domain.clone()),
+        variant,
+        fields: vec![Term::TupleValue(vec![Term::Bool(true), leaf])],
+    };
+    let left = value(Some(0), Term::Primitive(Primitive::Bool));
+    let right = value(Some(0), Term::Primitive(Primitive::Char));
+    assert!(left.is_structural_index_value());
+    let relations = left.index_type_relations(&right).unwrap();
+    assert_eq!(relations.len(), 2);
+    assert!(relations.contains(&(
+        &Term::Primitive(Primitive::Bool),
+        &Term::Primitive(Primitive::Char)
+    )));
+    assert!(
+        left.index_type_relations(&value(Some(1), Term::Primitive(Primitive::Bool)))
+            .is_none()
+    );
+    assert!(
+        left.index_type_relations(&value(Some(0), Term::Bool(true)))
+            .is_none()
+    );
+    let symbolic = value(
+        None,
+        Term::Rigid {
+            declaration: DeclarationId {
+                package: 1,
+                local: 21,
+            },
+            sort: Sort::ComptimeValue,
+        },
+    );
+    assert!(symbolic.is_symbolic_index_value());
+    assert!(!symbolic.is_structural_index_value());
+}
+
+#[test]
+fn nominal_index_refutation_uses_known_leaves_and_respects_limits() {
+    let unknown = Term::Rigid {
+        declaration: DeclarationId {
+            package: 9,
+            local: 90,
+        },
+        sort: Sort::ComptimeValue,
+    };
+    let record = |tag, flag, ty| Term::NominalValue {
+        ty: Box::new(Term::Nominal {
+            declaration: DeclarationId {
+                package: 9,
+                local: 91,
+            },
+            arguments: vec![],
+        }),
+        variant: Some(0),
+        fields: vec![Term::TupleValue(vec![Term::Bool(tag), flag, ty])],
+    };
+    let left = record(true, unknown.clone(), Term::Primitive(Primitive::Bool));
+    let right = record(false, Term::Bool(true), Term::Primitive(Primitive::Char));
+    for (a, b) in [(&left, &right), (&right, &left)] {
+        assert!(!a.index_values_definitely_differ(b, &mut 0));
+        assert!(a.index_values_definitely_differ(b, &mut 1000));
+    }
+    let uncertain = record(true, Term::Bool(true), Term::Primitive(Primitive::Char));
+    assert!(!left.index_values_definitely_differ(&uncertain, &mut 1000));
+    assert!(
+        !Term::Primitive(Primitive::Bool)
+            .index_values_definitely_differ(&Term::Primitive(Primitive::Char), &mut 1000)
+    );
+    assert!(!unknown.index_values_definitely_differ(&Term::Bool(true), &mut 1000));
+    assert!(Term::Bool(true).index_values_definitely_differ(&Term::Bool(false), &mut 1000));
+    assert!(!left.index_values_definitely_differ(&left, &mut 1000));
+}
+
+#[test]
+fn symbolic_nominal_payloads_require_independent_field_domains() {
+    let mut contract = declaration();
+    contract.type_parameters.truncate(1);
+    let config_id = DeclarationId {
+        package: 8,
+        local: 1,
+    };
+    let field_id = DeclarationId {
+        package: 8,
+        local: 2,
+    };
+    let config = Term::Nominal {
+        declaration: config_id,
+        arguments: vec![],
+    };
+    contract.parameter_types = vec![config.clone()];
+    let value = Term::NominalValue {
+        ty: Box::new(config.clone()),
+        variant: None,
+        fields: vec![Term::Rigid {
+            declaration: field_id,
+            sort: Sort::ComptimeValue,
+        }],
+    };
+    let mut package = nir::program::Package::default();
+    package.structs.push(nir::program::Struct {
+        declaration: config_id,
+        name: "Config".into(),
+        type_parameters: vec![],
+        parameter_types: vec![],
+        fields: vec![("flag".into(), Term::Primitive(Primitive::Bool))],
+        requirements: vec![],
+        capabilities: vec![],
+    });
+    for (domain, accepted) in [
+        (None, false),
+        (Some(Term::Primitive(Primitive::Char)), false),
+        (Some(Term::Primitive(Primitive::Bool)), true),
+    ] {
+        let domains = domain
+            .map(|domain| (field_id, domain))
+            .into_iter()
+            .collect();
+        let result = contract.validate_arguments_with_layouts(
+            &Term::Primitive(Primitive::Bool),
+            std::slice::from_ref(&value),
+            &[],
+            &[],
+            &domains,
+            &mut 10000,
+            |_, _, _| false,
+            Some(&package),
+        );
+        assert_eq!(result.is_ok(), accepted, "{result:?}");
+    }
+    // The completed-value entry point must not inherit symbolic admission.
+    assert!(
+        nir::validate_declaration_arguments_with_layouts(
+            &contract.type_parameters,
+            &[config],
+            &[value],
+            &mut 10000,
+            |ty, variant, fuel| {
+                nir::normal_forms::nominal_value_fields_budgeted(&package, ty, variant, fuel)
+                    .ok_or_else(|| nir::NominalAdmissionError::from("invalid layout"))
+            }
+        )
+        .is_err()
+    );
+}

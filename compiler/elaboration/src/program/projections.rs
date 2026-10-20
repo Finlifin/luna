@@ -261,8 +261,13 @@ impl Checker<'_, '_> {
                 .package
                 .definition_owner(def_id)
                 .ok_or_else(|| error(base.span, "type member container declaration is missing"))?;
-            let (instance, arguments) =
-                self.prepared_type_instance(parent, inputs, base.span, Some(&p(P::Type)))?;
+            let (instance, arguments) = if let Some(value) =
+                self.contextual_nominal_expression(parent, inputs, base.span, Some(&p(P::Type)))?
+            {
+                self.expose_nominal_inputs(parent, value, base.span)?
+            } else {
+                self.prepared_type_instance(parent, inputs, base.span, Some(&p(P::Type)))?
+            };
             (parent, instance, arguments)
         };
         if constant && self.runtime_value_context() {
@@ -324,14 +329,70 @@ impl Checker<'_, '_> {
                 .iter()
                 .filter(|clause| !matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..)))
                 .count();
+            let binders = self.declaration_binders(parent);
+            // Prepared parent values live in locals. Recover only structural
+            // evidence from their initializers, without invoking input code.
+            let mut known_parent = BTreeMap::new();
+            let mut budget = comptime_runtime::Budget {
+                steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
+                max_limbs: 4096,
+            };
+            let before = budget.steps;
+            if let K::Block { statements, .. } = &instance.kind {
+                for statement in statements {
+                    if let K::Let { binding, value } = &statement.kind {
+                        if let Some(value) =
+                            self.known_normal_input_in(value, 0, &mut budget, &known_parent)
+                        {
+                            known_parent.insert(*binding, std::sync::Arc::new(value));
+                        }
+                    }
+                }
+            }
+            let parent_terms = arguments
+                .iter()
+                .zip(&binders)
+                .map(|(argument, binder)| {
+                    self.known_normal_input_in(argument, 0, &mut budget, &known_parent)
+                        .unwrap_or(Term::Rigid {
+                            declaration: binder.declaration,
+                            sort: binder.sort,
+                        })
+                })
+                .collect::<Vec<_>>();
+            self.required_steps -= (before - budget.steps) as u64;
+            let domains = self
+                .trait_domains(owner)?
+                .iter()
+                .map(|domain| {
+                    self.instantiate_trait_domain(domain, &binders, &parent_terms, expr.span)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let member_captures = self.nominal_captures(owner, expr.span)?;
+            let contextual_alias = matches!(
+                self.package.item(owner).map(|item| &item.kind),
+                Some(ItemKind::TypeAlias(..))
+            ) && self
+                .trait_domains(owner)?
+                .iter()
+                .any(|domain| *domain != p(P::Type))
+                || self
+                    .trait_domains(owner)?
+                    .iter()
+                    .any(|domain| member_captures.iter().any(|id| domain.mentions_rigid(*id)));
             let mut member_statements = Vec::new();
-            let member_inputs = self.prepared_nominal_inputs(
-                owner,
-                supplied,
-                count,
-                &mut member_statements,
-                expr.span,
-            )?;
+            let member_inputs = if contextual_alias {
+                Vec::new()
+            } else {
+                self.prepared_nominal_inputs_in_domains(
+                    owner,
+                    supplied,
+                    count,
+                    &mut member_statements,
+                    expr.span,
+                    &domains,
+                )?
+            };
 
             let (mut statements, instance_body) = match instance.kind {
                 K::Block {
@@ -346,6 +407,7 @@ impl Checker<'_, '_> {
                         self.alias_substitution
                             .insert(parameter, std::sync::Arc::new(ty));
                         self.alias_value_bindings.remove(&parameter);
+                        self.normal_default_bindings.remove(&parameter);
                     }
                     K::Local(binding) => {
                         if argument.ty == p(P::Type) {
@@ -356,7 +418,13 @@ impl Checker<'_, '_> {
                                 .insert(parameter, (binding, argument.ty.clone()));
                             self.alias_value_bindings.remove(&parameter);
                         }
-                        self.alias_substitution.remove(&parameter);
+                        if let Some(value) = known_parent.get(&binding) {
+                            let value = self.copy_alias_type(value, base.span)?;
+                            self.alias_substitution
+                                .insert(parameter, std::sync::Arc::new(value));
+                        } else {
+                            self.alias_substitution.remove(&parameter);
+                        }
                         self.locals.insert(binding, argument.ty);
                     }
                     _ => return Err(error(base.span, "unprepared type member input")),
@@ -411,6 +479,21 @@ impl Checker<'_, '_> {
                     ..expr.clone()
                 };
                 self.expr(&definition, expected)?
+            } else if contextual_alias {
+                let caller = nominal::InputEnvironment {
+                    substitution: &saved_substitution,
+                    bindings: &saved_bindings,
+                    normal_bindings: &saved_normal_bindings,
+                    context: &saved_context,
+                };
+                self.contextual_nominal_expression_in(
+                    owner,
+                    supplied,
+                    expr.span,
+                    Some(&p(P::Type)),
+                    Some(&caller),
+                )?
+                .ok_or_else(|| error(expr.span, "missing contextual alias input domain"))?
             } else {
                 self.prepared_type_member_expression(
                     owner,
@@ -445,6 +528,121 @@ impl Checker<'_, '_> {
         result.map(Some)
     }
 
+    fn expose_nominal_inputs(
+        &mut self,
+        owner: OwnerId,
+        value: n::Expr,
+        span: Span,
+    ) -> Result<(n::Expr, Vec<n::Expr>), Error> {
+        let parent = declaration(self.package, &self.package_identities, owner);
+        let domains = self.nominal_parameter_types(owner, span)?;
+        // Preserve already completed Type inputs while still evaluating and
+        // checking the entire parent constructor exactly once.
+        let mut known = BTreeMap::new();
+        let mut root = &value;
+        loop {
+            root = match &root.kind {
+                K::Block {
+                    result: Some(result),
+                    ..
+                } => result,
+                K::CheckTypeAlias {
+                    body: Some(body), ..
+                } => body,
+                _ => break,
+            };
+        }
+        if let K::NominalType {
+            arguments: inputs, ..
+        } = &root.kind
+        {
+            for (index, input) in inputs.iter().enumerate() {
+                if let n::NormalFormArgument::Value(n::Expr {
+                    kind: K::TypeValue(ty),
+                    ..
+                }) = input
+                {
+                    known.insert(index, self.copy_alias_type(ty, span)?);
+                }
+            }
+        }
+        let mut parameter_ids = self.type_parameters[&owner].clone();
+        parameter_ids.extend(self.nominal_captures(owner, span)?);
+        let binders = self.input_binders(&parameter_ids);
+        let known_binders = known
+            .keys()
+            .map(|index| binders[*index])
+            .collect::<Vec<_>>();
+        let known_types = known
+            .values()
+            .map(|ty| self.copy_alias_type(ty, span))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut arguments = Vec::new();
+        let mut fields = Vec::new();
+        for (index, domain) in domains.into_iter().enumerate() {
+            let domain =
+                self.instantiate_trait_domain(&domain, &known_binders, &known_types, span)?;
+            let binding = self.spread_binding(span)?;
+            self.locals.insert(binding, domain.clone());
+            arguments.push(n::Expr {
+                source: source(span),
+                ty: domain,
+                kind: known
+                    .remove(&index)
+                    .map(K::TypeValue)
+                    .unwrap_or(K::Local(binding)),
+            });
+            fields.push(n::Pattern::Binding {
+                binding,
+                inner: Box::new(n::Pattern::Wild),
+            });
+        }
+        let binding = self.spread_binding(span)?;
+        self.locals.insert(binding, p(P::Type));
+        let ty = value.ty.clone();
+        let local = n::Expr {
+            source: source(span),
+            ty: p(P::Type),
+            kind: K::Local(binding),
+        };
+        let instance = n::Expr {
+            source: source(span),
+            ty,
+            kind: K::Block {
+                statements: vec![
+                    n::Expr {
+                        source: source(span),
+                        ty: if is_never(&value.ty) {
+                            p(P::Never)
+                        } else {
+                            p(P::Void)
+                        },
+                        kind: K::Let {
+                            binding,
+                            value: Box::new(value),
+                        },
+                    },
+                    n::Expr {
+                        source: source(span),
+                        ty: p(P::Void),
+                        kind: K::LetPattern {
+                            pattern: n::Pattern::NominalType {
+                                declaration: parent,
+                                fields,
+                            },
+                            value: Box::new(local.clone()),
+                            guard: None,
+                            otherwise: None,
+                        },
+                    },
+                ],
+                result: Some(Box::new(local)),
+            },
+        };
+        arguments.truncate(self.type_parameters[&owner].len());
+        Ok((instance, arguments))
+    }
+
     /// Preserve an alias's evaluation prefix and expose the arguments of its
     /// final nominal constructor. This inspects generated code, never unfolds a
     /// normal-form head or re-invokes a Type computation to recover its inputs.
@@ -475,83 +673,66 @@ impl Checker<'_, '_> {
                 _ => break,
             }
         }
-        let (parent, inputs, constant) = match value.kind {
-            K::NominalType {
-                declaration,
-                arguments,
-            } => (declaration, arguments, false),
-            K::TypeValue(Term::Nominal {
-                declaration,
-                arguments,
-            }) => (
-                declaration,
-                arguments
-                    .into_iter()
-                    .map(|argument| n::Expr {
-                        source: value.source,
-                        ty: p(P::Type),
-                        kind: K::TypeValue(argument),
-                    })
-                    .collect(),
-                true,
-            ),
-            _ => return Ok(None),
-        };
-        let mut arguments = Vec::with_capacity(inputs.len());
-        for input in inputs {
-            if matches!(input.kind, K::TypeValue(_) | K::Local(_)) {
-                arguments.push(input);
-            } else {
-                let binding = self.spread_binding(base.span)?;
-                arguments.push(n::Expr {
-                    source: input.source,
-                    ty: p(P::Type),
-                    kind: K::Local(binding),
-                });
-                statements.push(n::Expr {
-                    source: input.source,
-                    ty: if is_never(&input.ty) {
-                        p(P::Never)
-                    } else {
-                        p(P::Void)
-                    },
-                    kind: K::Let {
-                        binding,
-                        value: Box::new(input),
-                    },
-                });
-            }
+        let mut terminal = &value;
+        loop {
+            terminal = match &terminal.kind {
+                K::Block {
+                    result: Some(result),
+                    ..
+                } => result,
+                K::CheckTypeAlias {
+                    body: Some(body), ..
+                } => body,
+                _ => break,
+            };
         }
-        let kind = if constant {
-            K::TypeValue(Term::Nominal {
-                declaration: parent,
-                arguments: arguments
-                    .iter()
-                    .map(|argument| {
-                        let K::TypeValue(ty) = &argument.kind else {
-                            unreachable!()
-                        };
-                        ty.clone()
-                    })
-                    .collect(),
+        if let K::NominalType {
+            declaration: parent,
+            ..
+        } = &terminal.kind
+        {
+            let parent = *parent;
+            let owner = self
+                .package
+                .owners()
+                .find_map(|(owner, _)| {
+                    (declaration(self.package, &self.package_identities, owner) == parent)
+                        .then_some(owner)
+                })
+                .ok_or_else(|| error(base.span, "nominal container declaration is missing"))?;
+            let value = n::Expr {
+                source: source(base.span),
+                ty,
+                kind: K::Block {
+                    statements,
+                    result: Some(Box::new(value)),
+                },
+            };
+            let (instance, arguments) = self.expose_nominal_inputs(owner, value, base.span)?;
+            return Ok(Some((parent, instance, arguments)));
+        }
+        let K::TypeValue(Term::Nominal {
+            declaration: parent,
+            arguments,
+        }) = &value.kind
+        else {
+            return Ok(None);
+        };
+        let parent = *parent;
+        let arguments = arguments
+            .iter()
+            .map(|argument| n::Expr {
+                source: value.source,
+                ty: p(P::Type),
+                kind: K::TypeValue(argument.clone()),
             })
-        } else {
-            K::NominalType {
-                declaration: parent,
-                arguments: arguments.clone(),
-            }
-        };
-        let result = n::Expr {
-            source: value.source,
-            ty: value.ty,
-            kind,
-        };
+            .collect();
         let instance = n::Expr {
             source: source(base.span),
             ty,
             kind: K::Block {
                 statements,
-                result: Some(Box::new(result)),
+                result: Some(Box::new(value)),
             },
         };
         Ok(Some((parent, instance, arguments)))
@@ -683,6 +864,12 @@ impl Checker<'_, '_> {
             )
         };
         let saved = self.alias_substitution.clone();
+        let saved_bindings = self.alias_value_bindings.clone();
+        let saved_normal_bindings = self.normal_default_bindings.clone();
+        for parameter in environment.keys() {
+            self.alias_value_bindings.remove(parameter);
+            self.normal_default_bindings.remove(parameter);
+        }
         self.alias_substitution.extend(environment);
         let result = (|| {
             let arguments = match arguments {
@@ -694,6 +881,8 @@ impl Checker<'_, '_> {
             expand(self, owner, arguments)
         })();
         self.alias_substitution = saved;
+        self.alias_value_bindings = saved_bindings;
+        self.normal_default_bindings = saved_normal_bindings;
         result.map(Some)
     }
 

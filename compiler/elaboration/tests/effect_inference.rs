@@ -23,6 +23,7 @@ fn comp(effects: Vec<Operation>, result: Term) -> Term {
 }
 fn scheme(types: usize, input: Term, output: Term) -> Scheme {
     Scheme {
+        parameter_sorts: vec![],
         type_parameters: types,
         signature: Term::Function {
             parameters: vec![Parameter {

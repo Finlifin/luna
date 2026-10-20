@@ -260,6 +260,15 @@ impl Walker<'_> {
             return Ok(());
         }
         match &expr.kind {
+            K::ComptimeValue(Term::Rigid {
+                sort: nir::Sort::ComptimeValue,
+                ..
+            })
+            | K::AssociatedValue { .. } => {
+                // Immutable declaration inputs need the same symbolic identity
+                // on both sides of a short-circuit join, just like local reads.
+                self.child(expr, state, depth + 1)?;
+            }
             K::ReadPointer(pointer) if self.fixed_pointer_observation(pointer)? => {
                 // Establish an unconstrained memory observation identity before
                 // short-circuit forks. Only fixed load chains reach this branch;

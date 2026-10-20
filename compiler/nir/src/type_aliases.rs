@@ -1,15 +1,22 @@
 //! Formation contracts for transparent aliases. These declarations create no
 //! nominal type identity; a check merely guards evaluation of an alias body.
 use crate::program::{TraitRequirement, TypePredicate};
-use crate::{DeclarationId, Sort, Term};
+use crate::{DeclarationId, DeclarationParameter, Term, TypeError};
 use std::{collections::BTreeSet, fmt};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Contract {
     pub declaration: DeclarationId,
     pub parameters: Vec<DeclarationId>,
+    /// Empty preserves the all-Type telescope; otherwise one domain per binder.
+    pub parameter_types: Vec<Term>,
     pub requirements: Vec<TypePredicate>,
     pub capabilities: Vec<TraitRequirement>,
+}
+impl Contract {
+    pub fn parameter_binders(&self) -> Result<Vec<DeclarationParameter>, TypeError> {
+        crate::nominal_parameters::binders(&self.parameters, &self.parameter_types)
+    }
 }
 impl fmt::Display for Contract {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -20,6 +27,10 @@ impl fmt::Display for Contract {
         )?;
         for parameter in &self.parameters {
             write!(f, " {parameter}")?;
+        }
+        f.write_str(") (domains")?;
+        for domain in &self.parameter_types {
+            write!(f, " {domain}")?;
         }
         f.write_str(") (requires")?;
         for requirement in &self.requirements {
@@ -47,6 +58,28 @@ pub fn validate(contracts: &[Contract]) -> Result<(), &'static str> {
         if parameters.len() != contract.parameters.len() {
             return Err("duplicate alias contract parameter");
         }
+        for domain in &contract.parameter_types {
+            crate::type_computations::charge_term(domain, &mut fuel)
+                .map_err(|_| "alias contract validation budget exhausted")?;
+        }
+        let binders = contract
+            .parameter_binders()
+            .map_err(|_| "invalid alias contract parameter domains")?;
+        // Domains form a telescope: only earlier binders are in scope.
+        for (index, domain) in contract.parameter_types.iter().enumerate() {
+            if domain
+                .rigid_parameters()
+                .map_err(|_| "invalid alias contract parameter sorts")?
+                .into_iter()
+                .any(|(id, sort)| {
+                    !binders[..index]
+                        .iter()
+                        .any(|binder| binder.declaration == id && binder.sort == sort)
+                })
+            {
+                return Err("alias contract domain has an unavailable parameter");
+            }
+        }
         let mut check = |term: &Term| -> Result<(), &'static str> {
             crate::type_computations::charge_term(term, &mut fuel)
                 .map_err(|_| "alias contract validation budget exhausted")?;
@@ -56,7 +89,11 @@ pub fn validate(contracts: &[Contract]) -> Result<(), &'static str> {
                 .rigid_parameters()
                 .map_err(|_| "invalid alias contract parameter sorts")?
                 .into_iter()
-                .any(|(id, sort)| sort != Sort::Type || !parameters.contains(&id))
+                .any(|(id, sort)| {
+                    !binders
+                        .iter()
+                        .any(|binder| binder.declaration == id && binder.sort == sort)
+                })
             {
                 return Err("alias contract has an undeclared parameter");
             }
@@ -104,7 +141,11 @@ pub fn validate(contracts: &[Contract]) -> Result<(), &'static str> {
                     .rigid_parameters()
                     .map_err(|_| "invalid alias contract parameter sorts")?
                     .into_iter()
-                    .any(|(id, sort)| sort != Sort::Type || !parameters.contains(&id))
+                    .any(|(id, sort)| {
+                        !binders
+                            .iter()
+                            .any(|binder| binder.declaration == id && binder.sort == sort)
+                    })
                 {
                     return Err("alias contract has an undeclared parameter");
                 }

@@ -14,6 +14,7 @@ impl Checker<'_, '_> {
                     | ItemKind::Enum(_)
                     | ItemKind::Impl(_)
                     | ItemKind::Newtype(..)
+                    | ItemKind::TypeAlias(..)
             )
         ) {
             return Ok(Vec::new());
@@ -26,7 +27,30 @@ impl Checker<'_, '_> {
                 _ => p(P::Type),
             });
         }
+        for (id, domain) in self.type_parameters[&owner].iter().zip(&domains) {
+            self.implementation_index
+                .register_parameter_domain(*id, domain.clone())
+                .map_err(|message| error(self.package.item(owner).unwrap().span, message))?;
+            self.inherent_index
+                .register_parameter_domain(*id, domain.clone())
+                .map_err(|message| error(self.package.item(owner).unwrap().span, message))?;
+        }
         self.trait_parameter_types.insert(owner, domains.clone());
+        // Self skeletons may be registered before explicit value domains are
+        // known. Refresh all nominal members when their telescope is complete.
+        if matches!(
+            self.package.item(owner).map(|item| &item.kind),
+            Some(ItemKind::Struct(_) | ItemKind::Enum(_))
+        ) {
+            let ty = self.nominal_self_type(owner);
+            self.self_types.insert(owner, ty.clone());
+            for (member, container) in &self.self_containers {
+                if *container == owner {
+                    self.self_types.insert(*member, ty.clone());
+                }
+            }
+        }
+
         Ok(domains)
     }
 
@@ -55,13 +79,23 @@ impl Checker<'_, '_> {
     }
 
     pub(super) fn trait_input_domain(&self, id: DeclarationId) -> Option<Term> {
+        if let Some(domain) = self.nominal_input_prefixes.get(&id) {
+            return Some(domain.clone());
+        }
         self.trait_parameter_types
             .iter()
             .find_map(|(owner, types)| {
                 self.type_parameters[owner]
                     .iter()
                     .position(|input| *input == id)
-                    .map(|index| types[index].clone())
+                    .and_then(|index| types.get(index).cloned())
+            })
+            .or_else(|| {
+                self.normal_parameters
+                    .values()
+                    .flatten()
+                    .find(|(parameter, _, _)| *parameter == id)
+                    .map(|(_, _, domain)| domain.clone())
             })
     }
 
@@ -119,6 +153,7 @@ impl Checker<'_, '_> {
         owner: OwnerId,
         domain: &Term,
         supplied: &[Option<Term>],
+        prefix: &[Term],
         subject: Option<&Term>,
         span: Span,
     ) -> Result<Term, Error> {
@@ -132,7 +167,12 @@ impl Checker<'_, '_> {
             });
             values.push(self.copy_alias_type(subject, span)?);
         }
-        for (binder, supplied) in binders.iter().zip(supplied) {
+        for (binder, supplied) in binders.iter().zip(
+            prefix
+                .iter()
+                .map(Some)
+                .chain(supplied.iter().map(Option::as_ref)),
+        ) {
             if let Some(value) = supplied {
                 substitutions.push(*binder);
                 values.push(self.copy_alias_type(value, span)?);
@@ -147,7 +187,10 @@ impl Checker<'_, '_> {
         domains: &[Term],
     ) -> Result<(), Error> {
         let clauses = self.type_clause_params(owner);
-        let parameters = self.type_parameters[&owner].clone();
+        let all_parameters = self.type_parameters[&owner].clone();
+        let inherited = all_parameters.len().saturating_sub(clauses.len());
+        let parameters = all_parameters[inherited..].to_vec();
+        let domains = &domains[inherited..];
         let saved_owner = self.signature_owner.replace(owner);
         let saved_context = self.context.clone();
         let saved_locals = std::mem::take(&mut self.locals);
@@ -174,7 +217,36 @@ impl Checker<'_, '_> {
                 if let hir::clause::ClauseParamKind::Optional(_, _, value) = clause.kind {
                     self.forbidden_default_inputs
                         .extend(parameters[slot..].iter().copied());
-                    self.expr(value, Some(&domains[slot]))?;
+                    let contextual = if matches!(
+                        self.package.item(owner).map(|item| &item.kind),
+                        Some(
+                            ItemKind::Struct(_)
+                                | ItemKind::Enum(_)
+                                | ItemKind::Newtype(..)
+                                | ItemKind::TypeAlias(..)
+                        )
+                    ) {
+                        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                        let before = fuel;
+                        let result = nir::type_computations::has_rigid_parameters_bounded(
+                            &domains[slot],
+                            &mut fuel,
+                        );
+                        self.required_steps -= (before - fuel) as u64;
+                        result.map_err(|error| {
+                            super::error(
+                                value.span,
+                                format!("default input domain inspection failed: {error}"),
+                            )
+                        })?
+                    } else {
+                        false
+                    };
+                    if contextual {
+                        self.dependent_normal_argument(value, 0)?;
+                    } else {
+                        self.expr(value, Some(&domains[slot]))?;
+                    }
                     self.forbidden_default_inputs = saved_forbidden.clone();
                 }
                 if domains[slot] != p(P::Type) {
@@ -216,8 +288,36 @@ impl Checker<'_, '_> {
         domains: &[Term],
         defaults: Option<&BTreeMap<DeclarationId, std::sync::Arc<Term>>>,
     ) -> Result<Vec<Term>, Error> {
+        self.trait_clause_arguments_with_prefix(
+            owner,
+            args,
+            subject,
+            span,
+            domains,
+            defaults,
+            Vec::new(),
+        )
+    }
+
+    pub(super) fn trait_clause_arguments_with_prefix(
+        &mut self,
+        owner: OwnerId,
+        args: &[Arg<'_>],
+        subject: Option<&Term>,
+        span: Span,
+        domains: &[Term],
+        defaults: Option<&BTreeMap<DeclarationId, std::sync::Arc<Term>>>,
+        prefix: Vec<Term>,
+    ) -> Result<Vec<Term>, Error> {
         let clauses = self.type_clause_params(owner);
-        let parameters = self.type_parameters[&owner].clone();
+        let all_parameters = self.type_parameters[&owner].clone();
+        if all_parameters.len() != prefix.len() + clauses.len()
+            || domains.len() != all_parameters.len()
+        {
+            return Err(error(span, "clause input prefix arity mismatch"));
+        }
+        let parameters = all_parameters[prefix.len()..].to_vec();
+        let domains = &domains[prefix.len()..];
         let mut supplied: Vec<Option<Term>> = vec![None; clauses.len()];
         let mut pending_domains = vec![None; clauses.len()];
         let mut pending_literals = vec![None; clauses.len()];
@@ -281,6 +381,7 @@ impl Checker<'_, '_> {
                                 owner,
                                 &domains[*slot],
                                 &supplied,
+                                &prefix,
                                 subject,
                                 value.span,
                             )?;
@@ -375,7 +476,7 @@ impl Checker<'_, '_> {
             // the domain instantiated by inputs already evaluated in source
             // order. Do not reorder effectful argument computations.
             let domain =
-                self.supplied_trait_domain(owner, domain, &supplied, subject, value.span)?;
+                self.supplied_trait_domain(owner, domain, &supplied, &prefix, subject, value.span)?;
             let unresolved_domain = parameters.iter().enumerate().any(|(index, parameter)| {
                 supplied[index].is_none() && domain.mentions_rigid(*parameter)
             });
@@ -392,9 +493,27 @@ impl Checker<'_, '_> {
                 // Preserve source-order invocation when an earlier declaration
                 // slot is supplied later (or by a default). The expression's
                 // own checked type is retained for the final domain check.
-                let (computed, actual) = self.required_typed_expression(value, None)?;
-                pending_domains[slot] = Some((actual, value.span));
-                self.required_normal_term(computed, value.span)?
+                let symbolic_domain = if let H::ResolvedClauseParam(_, id) = value.kind {
+                    self.trait_input_domain(DeclarationId {
+                        package: semantic_package(&self.package_identities, id.pkg),
+                        local: id.index,
+                    })
+                } else {
+                    None
+                };
+                if let Some(actual) = symbolic_domain {
+                    // A caller clause is already a stable symbolic input.
+                    // Keep it symbolic while the callee's domain awaits an
+                    // earlier default; no invocation can supply its local yet.
+                    let actual = self.substituted_trait_domain(&actual, value.span)?;
+                    let input = self.normal_value_argument(value, &actual)?;
+                    pending_domains[slot] = Some((actual, value.span));
+                    input
+                } else {
+                    let (computed, actual) = self.required_typed_expression(value, None)?;
+                    pending_domains[slot] = Some((actual, value.span));
+                    self.required_normal_term(computed, value.span)?
+                }
             } else {
                 self.normal_value_argument(value, &domain)?
             });
@@ -407,6 +526,13 @@ impl Checker<'_, '_> {
         }
         let saved_forbidden = self.forbidden_default_inputs.clone();
         let saved_bindings = self.normal_default_bindings.clone();
+        let saved_value_bindings = self.alias_value_bindings.clone();
+        if let Some(environment) = defaults {
+            for parameter in environment.keys() {
+                self.normal_default_bindings.remove(parameter);
+                self.alias_value_bindings.remove(parameter);
+            }
+        }
         // Explicit inputs were evaluated in the caller. Defaults now belong to
         // this application, even when a recursive generator reuses binder IDs.
         for parameter in &parameters {
@@ -420,7 +546,13 @@ impl Checker<'_, '_> {
             );
         }
         let result = (|| {
-            let mut arguments = Vec::new();
+            for (parameter, value) in all_parameters.iter().zip(&prefix) {
+                self.alias_substitution
+                    .insert(*parameter, std::sync::Arc::new(value.clone()));
+                self.normal_default_bindings.remove(parameter);
+                self.alias_value_bindings.remove(parameter);
+            }
+            let mut arguments = prefix;
             for (slot, supplied) in supplied.into_iter().enumerate() {
                 let value = if let Some(value) = supplied {
                     if let Some((actual, value_span)) = &pending_domains[slot] {
@@ -472,6 +604,7 @@ impl Checker<'_, '_> {
         self.alias_substitution = saved_aliases;
         self.forbidden_default_inputs = saved_forbidden;
         self.normal_default_bindings = saved_bindings;
+        self.alias_value_bindings = saved_value_bindings;
         result
     }
 }

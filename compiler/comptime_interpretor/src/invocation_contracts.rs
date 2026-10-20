@@ -12,8 +12,10 @@ impl Interpreter<'_> {
         source: SourceRange,
     ) -> Result<(), Error> {
         for capability in &definition.capabilities {
+            // Enclosing nominal parameters can be values as well as Types.
+            // Keep their declared sorts when closing invocation obligations.
             let capability = capability
-                .instantiate_types(&definition.type_parameters, arguments)
+                .instantiate_parameters(&self.input_binders(&definition.type_parameters), arguments)
                 .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
             let predicate = P::Trait(capability);
             // Closed capabilities already use the executable/assumed dispatch

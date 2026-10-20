@@ -34,6 +34,35 @@ pub struct InherentIndex {
     heads: BTreeMap<DeclarationId, InherentHead>,
 }
 impl InherentIndex {
+    pub fn set_nominal_layouts(
+        &mut self,
+        structs: Vec<nir::program::Struct>,
+        enums: Vec<nir::program::Enum>,
+        newtypes: Vec<nir::newtypes::Newtype>,
+    ) {
+        self.index.set_nominal_layouts(structs, enums, newtypes);
+    }
+
+    /// Avoid copying complete layouts on repeated method lookup in an unchanged
+    /// declaration world. Metadata order is canonical before comparison.
+    pub(crate) fn sync_nominal_layouts<'a>(
+        &mut self,
+        structs: impl IntoIterator<Item = &'a nir::program::Struct>,
+        enums: impl IntoIterator<Item = &'a nir::program::Enum>,
+        newtypes: impl IntoIterator<Item = &'a nir::newtypes::Newtype>,
+    ) {
+        self.index.sync_nominal_layouts(structs, enums, newtypes);
+    }
+
+    /// Register immutable caller input domains without granting a member or trait.
+    pub fn register_parameter_domain(
+        &mut self,
+        declaration: DeclarationId,
+        domain: Term,
+    ) -> Result<(), String> {
+        self.index.register_parameter_domain(declaration, domain)
+    }
+
     pub fn insert(&mut self, head: InherentHead, budget: Budget) -> Result<(), Error> {
         inherent_ownership(&head.subject, head.declaration.package)?;
         if head.members.len() > budget.steps {
@@ -115,7 +144,14 @@ impl InherentIndex {
         };
         let mut assessments = BTreeMap::new();
         let selection = self.index.select(&candidates, |head| {
-            let matched = head.match_subject_types(subject, &[], context, allowance);
+            let matched = head.match_subject_types_with_domains(
+                subject,
+                &[],
+                context,
+                allowance,
+                &self.index.parameter_domains,
+                Some(&self.index.nominal_layouts),
+            );
             let (assessment, state) = assess(head.declaration, matched, allowance);
             assessments.insert(head.declaration, assessment);
             state
@@ -157,12 +193,14 @@ impl InherentIndex {
         }
         self.index.entries[&head.declaration]
             .head
-            .verify_subject_evidence_with(
+            .verify_subject_evidence_with_domains(
                 evidence,
                 subject,
                 &[],
                 context,
                 budget,
+                &self.index.parameter_domains,
+                Some(&self.index.nominal_layouts),
                 verify_requirement,
             )
     }
@@ -243,6 +281,11 @@ impl fmt::Display for InherentIndex {
         for head in self.heads.values() {
             write!(f, " {head}")?;
         }
-        write!(f, "))")
+        f.write_str(")")?;
+        self.index.fmt_nominal_layouts(f)?;
+        for (id, domain) in &self.index.parameter_domains {
+            write!(f, " (parameter-domain {id} {domain})")?;
+        }
+        f.write_str(")")
     }
 }

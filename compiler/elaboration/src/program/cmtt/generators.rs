@@ -2,13 +2,13 @@
 //! evidence without inventing a runnable program; invocation supplies actual
 //! code witnesses before anything can enter the runtime package.
 use super::*;
-mod clauses;
+pub(in crate::program::cmtt) mod clauses;
 mod inference;
 mod matches;
 mod methods;
 mod places;
-mod spreads;
-mod statements;
+pub(in crate::program::cmtt) mod spreads;
+pub(in crate::program::cmtt) mod statements;
 use statements::Control;
 
 use nir::code_interfaces::{CodeFunctionSignature, CodeInput as Input};
@@ -34,14 +34,15 @@ impl std::ops::DerefMut for Generator {
     }
 }
 
-enum Argument {
+pub(in crate::program::cmtt) enum Argument {
     Data(Option<n::Expr>),
     LiveData(comptime_interpretor::Value),
     Code(Arc<ExpressionCode>),
+    Pattern(Arc<patterns::PatternCode>),
 }
 // Entry snapshots copy parameter values, not the objects reached through pointers.
 type GeneratorEntryData = BTreeMap<n::LocalId, (n::Expr, Option<comptime_interpretor::Storage>)>;
-type GeneratorTypePlan = (
+pub(in crate::program::cmtt) type GeneratorTypePlan = (
     Vec<DeclarationId>,
     Vec<Term>,
     Vec<(usize, Vec<DeclarationId>)>,
@@ -63,6 +64,7 @@ impl fmt::Display for Generator {
             match input {
                 Input::Data(ty) => write!(f, " (data {binding} {ty})")?,
                 Input::Code(interface) => write!(f, " (code {binding} {interface})")?,
+                Input::Pattern(interface) => write!(f, " (pattern {binding} {interface})")?,
             }
         }
         f.write_str(") (variadics")?;
@@ -156,6 +158,9 @@ impl Checker<'_, '_> {
             }
             let mut domains = Vec::new();
             for parameter in sig.clause_params {
+                // Later domains can refer to already formed value inputs.
+                // The prefix is incomplete until every clause has been checked.
+                self.trait_parameter_types.insert(owner, domains.clone());
                 let domain = match parameter.kind {
                     hir::clause::ClauseParamKind::Type(_)
                     | hir::clause::ClauseParamKind::TraitBound(..) => p(P::Type),
@@ -168,9 +173,9 @@ impl Checker<'_, '_> {
                         ));
                     }
                 };
-                if !nir::normal_forms::supported_input_type_with_layouts(
+                if !nir::normal_forms::supported_input_type_in_scope(
                     &domain,
-                    &visible_parameters,
+                    &self.input_binders(&visible_parameters),
                     |head| Some(head) == self.protocols.tuple,
                     |id| {
                         self.structs.contains_key(&id)
@@ -185,6 +190,14 @@ impl Checker<'_, '_> {
                     ));
                 }
                 domains.push(domain);
+            }
+            for (id, domain) in self.type_parameters[&owner].iter().zip(&domains) {
+                self.implementation_index
+                    .register_parameter_domain(*id, domain.clone())
+                    .map_err(|message| error(span, message))?;
+                self.inherent_index
+                    .register_parameter_domain(*id, domain.clone())
+                    .map_err(|message| error(span, message))?;
             }
             self.trait_parameter_types.insert(owner, domains.clone());
             self.capabilities.entry(owner).or_default();
@@ -221,7 +234,17 @@ impl Checker<'_, '_> {
                         "code generator parameter protocols are not yet implemented",
                     ));
                 }
-                let input = if annotation
+                let input = if annotation.is_some_and(|annotation| {
+                    matches!(annotation.kind, H::ContextualPatternType(..))
+                }) {
+                    if matches!(parameter.ty.kind, TyParamKind::Varadic(..)) {
+                        return Err(error(
+                            parameter.span,
+                            "pattern code collections are not yet implemented",
+                        ));
+                    }
+                    Input::Pattern(self.pattern_input_interface(annotation.unwrap())?)
+                } else if annotation
                     .is_some_and(|annotation| matches!(annotation.kind, H::ContextualExprType(..)))
                 {
                     if matches!(parameter.ty.kind, TyParamKind::Varadic(..)) {
@@ -334,7 +357,7 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
-    fn generator_frame<R>(
+    pub(in crate::program::cmtt) fn generator_frame<R>(
         &mut self,
         owner: OwnerId,
         check: impl FnOnce(&mut Self) -> Result<R, Error>,
@@ -361,6 +384,8 @@ impl Checker<'_, '_> {
         let clause_bindings = std::mem::take(&mut self.normal_default_bindings);
         self.context = self.definition_context(owner);
         let saved_cells = std::mem::take(&mut self.generator_cells);
+        let saved_patterns = std::mem::take(&mut self.pattern_codes);
+        let saved_pattern_quote = self.pattern_quote_pending.take();
         let saved = (
             std::mem::take(&mut self.locals),
             std::mem::take(&mut self.code_values),
@@ -381,6 +406,8 @@ impl Checker<'_, '_> {
         self.in_staged_input = false;
         let mut result = check(self);
         self.generator_cells = saved_cells;
+        self.pattern_codes = saved_patterns;
+        self.pattern_quote_pending = saved_pattern_quote;
         (
             self.locals,
             self.code_values,
@@ -443,7 +470,7 @@ impl Checker<'_, '_> {
             .iter()
             .filter_map(|(_, input)| match input {
                 Input::Code(interface) => Some(interface),
-                Input::Data(_) => None,
+                Input::Data(_) | Input::Pattern(_) => None,
             })
             .chain(std::iter::once(&definition.output))
         {
@@ -460,21 +487,29 @@ impl Checker<'_, '_> {
                 })?;
             }
         }
-        let checking = std::mem::replace(&mut self.checking_code_generator, true);
         let arguments = definition
             .inputs
             .iter()
-            .map(|(_, input)| match input {
-                Input::Data(_) => Some(Argument::Data(None)),
-                Input::Code(interface) => Some(Argument::Code(Arc::new(ExpressionCode {
-                    body: None,
-                    result: interface.result.clone(),
-                    context: interface.context.clone(),
-                    ports: interface.ports.clone(),
-                    defaults: BTreeMap::new(),
-                }))),
+            .map(|(_, input)| {
+                Ok(match input {
+                    Input::Pattern(interface) => {
+                        Some(Argument::Pattern(self.abstract_pattern_input(
+                            interface,
+                            self.package.item(owner).unwrap().span,
+                        )?))
+                    }
+                    Input::Data(_) => Some(Argument::Data(None)),
+                    Input::Code(interface) => Some(Argument::Code(Arc::new(ExpressionCode {
+                        body: None,
+                        result: interface.result.clone(),
+                        context: interface.context.clone(),
+                        ports: interface.ports.clone(),
+                        defaults: BTreeMap::new(),
+                    }))),
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, Error>>()?;
+        let checking = std::mem::replace(&mut self.checking_code_generator, true);
         let result = self.generator_frame(owner, |this| {
             this.install_generator_captures(&definition, this.package.item(owner).unwrap().span)?;
             this.check_generator_clause_defaults(owner, &definition)?;
@@ -515,6 +550,10 @@ impl Checker<'_, '_> {
                     Input::Data(ty) => {
                         this.locals.insert(*binding,ty.clone());
                         this.generator_data.insert(*binding,None);
+                    }
+                    Input::Pattern(interface) => {
+                        let code=this.abstract_pattern_input(interface,span)?;
+                        this.pattern_codes.insert(*binding,code);
                     }
                     Input::Code(interface) => {
                         this.code_values.insert(*binding,Arc::new(ExpressionCode {
@@ -649,7 +688,7 @@ impl Checker<'_, '_> {
                     .map(|value| {
                         value.unwrap_or(Term::Rigid {
                             declaration: *id,
-                            sort: Sort::Type,
+                            sort: self.input_binders(&[*id])[0].sort,
                         })
                     })
                     .map_err(|e| call_inference_error(span, e))
@@ -658,7 +697,7 @@ impl Checker<'_, '_> {
         let types = type_plan
             .iter()
             .map(|ty| {
-                ty.instantiate_types(parameters, &hints)
+                ty.instantiate_parameters(&self.input_binders(parameters), &hints)
                     .map_err(|e| error(span, e.to_string()))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -712,12 +751,17 @@ impl Checker<'_, '_> {
             && let Some(expected) = expected
         {
             let scheme = crate::calls::Scheme {
+                parameter_sorts: self
+                    .input_binders(&type_plan.0)
+                    .iter()
+                    .map(|p| p.sort)
+                    .collect(),
                 type_parameters: type_plan.0.len(),
                 signature: Term::Function {
                     parameters: vec![],
                     result: Box::new(definition.output.result.clone()),
                 }
-                .abstract_types(&type_plan.0)
+                .abstract_parameters(&self.input_binders(&type_plan.0))
                 .map_err(|e| error(site.span, e.to_string()))?,
             };
             let candidate = scheme
@@ -768,6 +812,18 @@ impl Checker<'_, '_> {
                 "generator property collection requires one eligible variadic record entrance",
             ));
         };
+        self.with_generator_properties(site, arguments, *collector, |this, inputs| {
+            this.invoke_generator_with_plan(site, callee, inputs, expected, Some(type_plan))
+        })
+    }
+
+    pub(in crate::program::cmtt) fn with_generator_properties<R>(
+        &mut self,
+        site: &Expr<'_>,
+        arguments: &[Arg<'_>],
+        collector: hir::common::Ident,
+        action: impl FnOnce(&mut Self, &[Arg<'_>]) -> Result<R, Error>,
+    ) -> Result<R, Error> {
         let mut fields = Vec::new();
         let mut seen = BTreeSet::new();
         for arg in arguments {
@@ -791,14 +847,14 @@ impl Checker<'_, '_> {
         for arg in arguments {
             match arg {
                 Arg::Named(..) if !inserted => {
-                    inputs.push(Arg::Named(*collector, &packet));
+                    inputs.push(Arg::Named(collector, &packet));
                     inserted = true;
                 }
                 Arg::Named(..) => {}
                 other => inputs.push(other.clone()),
             }
         }
-        self.invoke_generator_with_plan(site, callee, &inputs, expected, Some(type_plan))
+        action(self, &inputs)
     }
 
     pub(super) fn invoke_code_generator(
@@ -931,6 +987,15 @@ impl Checker<'_, '_> {
                                 .collect()
                         })
                         .unwrap_or_default(),
+                    Input::Pattern(_) => self
+                        .pattern_codes
+                        .get(&id)
+                        .map(|code| {
+                            std::iter::once(&code.subject)
+                                .chain(code.outputs.values().map(|(_, ty)| ty))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                     Input::Data(_) => self
                         .locals
                         .get(&id)
@@ -946,7 +1011,9 @@ impl Checker<'_, '_> {
                 checked.map_err(|e| error(site.span, e.to_string()))?;
                 if !terms.is_empty() {
                     evidence[route.parameter] = Some(match &planned.inputs[route.parameter].1 {
-                        Input::Code(_) => Term::Tuple(terms.into_iter().cloned().collect()),
+                        Input::Code(_) | Input::Pattern(_) => {
+                            Term::Tuple(terms.into_iter().cloned().collect())
+                        }
                         Input::Data(_) => terms[0].clone(),
                     });
                 }
@@ -973,6 +1040,11 @@ impl Checker<'_, '_> {
                     sort: Sort::Runtime,
                     ty: match input {
                         Input::Data(ty) => ty.clone(),
+                        Input::Pattern(interface) => Term::Tuple(
+                            std::iter::once(interface.subject.clone())
+                                .chain(interface.outputs.values().cloned())
+                                .collect(),
+                        ),
                         Input::Code(interface) => Term::Tuple(
                             std::iter::once(interface.result.clone())
                                 .chain(interface.context.values().cloned())
@@ -984,9 +1056,14 @@ impl Checker<'_, '_> {
             result: Box::new(output_shape(&planned.output)),
         };
         let scheme = crate::calls::Scheme {
+            parameter_sorts: self
+                .input_binders(&parameters)
+                .iter()
+                .map(|p| p.sort)
+                .collect(),
             type_parameters: parameters.len(),
             signature: inference_signature
-                .abstract_types(&parameters)
+                .abstract_parameters(&self.input_binders(&parameters))
                 .map_err(|e| error(site.span, e.to_string()))?,
         };
         let mut partial = vec![crate::calls::InputContext::Unknown; planned.inputs.len()];
@@ -1204,6 +1281,21 @@ impl Checker<'_, '_> {
                 }
             }
             let (value, ty) = match input {
+                Input::Pattern(interface) => {
+                    if packets.fields.contains_key(&local(argument.hir_id)) {
+                        return Err(error(
+                            argument.span,
+                            "data packet cannot supply pattern code evidence",
+                        ));
+                    }
+                    let code = self.pattern_input_value(argument, interface)?;
+                    let ty = Term::Tuple(
+                        std::iter::once(code.subject.clone())
+                            .chain(code.outputs.values().map(|(_, ty)| ty.clone()))
+                            .collect(),
+                    );
+                    (Argument::Pattern(code), ty)
+                }
                 Input::Code(interface) => {
                     if packets.fields.contains_key(&local(argument.hir_id)) {
                         return Err(error(
@@ -1527,8 +1619,11 @@ impl Checker<'_, '_> {
             let mut types = type_plan
                 .iter()
                 .map(|ty| {
-                    ty.instantiate_types(&parameters, &instance.type_arguments)
-                        .map_err(|e| error(site.span, e.to_string()))
+                    ty.instantiate_parameters(
+                        &self.input_binders(&parameters),
+                        &instance.type_arguments,
+                    )
+                    .map_err(|e| error(site.span, e.to_string()))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             for (slot, value) in completed.clauses {
@@ -1564,6 +1659,9 @@ impl Checker<'_, '_> {
         for ((value, actual), (_, input)) in values.iter_mut().zip(&actual).zip(&definition.inputs)
         {
             match (value, input) {
+                (Some(Argument::Pattern(code)), Input::Pattern(interface)) => {
+                    self.ascribe_pattern_input(code, interface, site.span)?;
+                }
                 (Some(Argument::Code(code)), Input::Code(interface)) => {
                     *code = self.ascribe_code(code.clone(), Some(interface), site.span)?
                 }
@@ -1588,6 +1686,11 @@ impl Checker<'_, '_> {
 
     fn generator_default(&mut self, value: &Expr<'_>, input: &Input) -> Result<Argument, Error> {
         match input {
+            Input::Pattern(interface) => {
+                let code = self.pattern_input_value(value, interface)?;
+                self.ascribe_pattern_input(&code, interface, value.span)?;
+                Ok(Argument::Pattern(code))
+            }
             Input::Data(ty) => {
                 if self.checking_code_generator {
                     let checked = self.expr(value, Some(ty))?;
@@ -1614,36 +1717,14 @@ impl Checker<'_, '_> {
         }
     }
 
-    fn run_code_generator(
+    pub(in crate::program::cmtt) fn install_generator_clause_values(
         &mut self,
-        definition: &Generator,
-        arguments: Vec<Option<Argument>>,
-    ) -> Result<Arc<ExpressionCode>, Error> {
-        self.install_generator_captures(
-            definition,
-            self.package
-                .item(self.signature_owner.unwrap())
-                .unwrap()
-                .span,
-        )?;
-        self.alias_substitution.extend(
-            definition
-                .types
-                .iter()
-                .map(|(id, ty)| (*id, Arc::new(ty.clone()))),
-        );
-        let owner = self.signature_owner.expect("generator frame");
-        let (ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
-            &self.package.item(owner).unwrap().kind
-        else {
-            unreachable!()
-        };
-        for (((id, value), domain), clause) in definition
-            .types
-            .iter()
-            .zip(&definition.clause_domains)
-            .zip(signature.clause_params)
-        {
+        owner: OwnerId,
+        types: &[(DeclarationId, Term)],
+        domains: &[Term],
+    ) -> Result<(), Error> {
+        let clauses = self.type_clause_params(owner);
+        for (((id, value), domain), clause) in types.iter().zip(domains).zip(clauses.iter()) {
             if *domain == p(P::Type) {
                 self.context.assume(crate::ptc::Formula::equal(
                     Term::Rigid {
@@ -1681,6 +1762,34 @@ impl Checker<'_, '_> {
             };
             self.generator_data.insert(binding, data);
         }
+        Ok(())
+    }
+
+    fn run_code_generator(
+        &mut self,
+        definition: &Generator,
+        arguments: Vec<Option<Argument>>,
+    ) -> Result<Arc<ExpressionCode>, Error> {
+        self.install_generator_captures(
+            definition,
+            self.package
+                .item(self.signature_owner.unwrap())
+                .unwrap()
+                .span,
+        )?;
+        self.alias_substitution.extend(
+            definition
+                .types
+                .iter()
+                .map(|(id, ty)| (*id, Arc::new(ty.clone()))),
+        );
+        let owner = self.signature_owner.expect("generator frame");
+        let (ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
+            &self.package.item(owner).unwrap().kind
+        else {
+            unreachable!()
+        };
+        self.install_generator_clause_values(owner, &definition.types, &definition.clause_domains)?;
         self.locals.extend(definition.output.context.clone());
         let mut inherited: BTreeMap<n::LocalId, Option<n::LocalId>> = BTreeMap::new();
         for (index, ((id, input), argument)) in definition.inputs.iter().zip(arguments).enumerate()
@@ -1707,20 +1816,16 @@ impl Checker<'_, '_> {
             })?;
             self.immutable.insert(*id);
             match (input, argument) {
+                (Input::Pattern(interface), Argument::Pattern(code)) => {
+                    self.ascribe_pattern_input(&code, interface, signature.span)?;
+                    self.pattern_codes.insert(*id, code);
+                }
                 (Input::Data(ty), Argument::Data(value)) => {
                     self.locals.insert(*id, ty.clone());
                     self.generator_data.insert(*id, value);
                 }
                 (Input::Data(ty), Argument::LiveData(value)) => {
-                    self.locals.insert(*id, ty.clone());
-                    let marker = n::Expr {
-                        source: source(signature.params[index].span),
-                        ty: ty.clone(),
-                        kind: K::Local(*id),
-                    };
-                    self.generator_data.insert(*id, Some(marker.clone()));
-                    self.generator_cells
-                        .insert(*id, (marker, comptime_interpretor::Storage::new(value)));
+                    self.install_live_generator_input(*id, ty, value, signature.params[index].span);
                 }
                 (Input::Code(interface), Argument::Code(code)) => {
                     let mut defaults = code.defaults.clone();
@@ -1833,7 +1938,25 @@ impl Checker<'_, '_> {
         Ok(Arc::new(result))
     }
 
-    fn capture_generator_entry_data(
+    pub(in crate::program::cmtt) fn install_live_generator_input(
+        &mut self,
+        id: n::LocalId,
+        ty: &Term,
+        value: comptime_interpretor::Value,
+        span: Span,
+    ) {
+        self.locals.insert(id, ty.clone());
+        let marker = n::Expr {
+            source: source(span),
+            ty: ty.clone(),
+            kind: K::Local(id),
+        };
+        self.generator_data.insert(id, Some(marker.clone()));
+        self.generator_cells
+            .insert(id, (marker, comptime_interpretor::Storage::new(value)));
+    }
+
+    pub(in crate::program::cmtt) fn capture_generator_entry_data(
         &mut self,
         owner: OwnerId,
         span: Span,
@@ -1878,7 +2001,7 @@ impl Checker<'_, '_> {
         Ok(entry)
     }
 
-    fn generator_contracts(
+    pub(in crate::program::cmtt) fn generator_contracts(
         &mut self,
         owner: OwnerId,
         post: bool,
@@ -2309,6 +2432,7 @@ impl Checker<'_, '_> {
             .locals
             .len()
             .saturating_add(self.code_values.len())
+            .saturating_add(self.pattern_codes.len())
             .saturating_add(self.generator_data.len())
             .saturating_add(self.immutable.len());
         self.required_steps = self
@@ -2332,11 +2456,17 @@ impl Checker<'_, '_> {
             self.code_values.clone(),
             self.generator_data.clone(),
             self.immutable.clone(),
+            self.pattern_codes.clone(),
         );
         let result = action(self);
         if result.is_ok() {
             for (id, value) in &mut saved.1 {
                 if let Some(current) = self.code_values.get(id) {
+                    *value = current.clone();
+                }
+            }
+            for (id, value) in &mut saved.4 {
+                if let Some(current) = self.pattern_codes.get(id) {
                     *value = current.clone();
                 }
             }
@@ -2364,6 +2494,7 @@ impl Checker<'_, '_> {
             self.code_values,
             self.generator_data,
             self.immutable,
+            self.pattern_codes,
         ) = saved;
         restoration?;
         result
@@ -2394,7 +2525,9 @@ impl Checker<'_, '_> {
         let value = decl
             .init
             .ok_or_else(|| error(decl.span, "generator binding needs an initializer"))?;
-        if self.code_producer(value)
+        if self.pattern_code_producer(value, decl.ty) {
+            self.pattern_code_binding_mode(decl, None, !local_const)?;
+        } else if self.code_producer(value)
             || decl
                 .ty
                 .is_some_and(|ty| matches!(ty.kind, H::ContextualExprType(..)))
@@ -2442,6 +2575,18 @@ impl Checker<'_, '_> {
                 target.span,
                 "cannot assign an immutable generator binding",
             ));
+        }
+        if let Some(previous) = self.pattern_codes.get(&id).cloned() {
+            let code = self.pattern_argument(value, &previous)?;
+            // Abstract control may visit several possible writes. Preserve the
+            // interface until invocation selects and executes the actual path.
+            let code = if self.checking_code_generator {
+                self.pattern_interface_evidence(code, value.span)?
+            } else {
+                code
+            };
+            self.pattern_codes.insert(id, code);
+            return Ok(());
         }
         if let Some(previous) = self.code_values.get(&id).cloned() {
             let expected = Interface {
@@ -2570,7 +2715,11 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
-    fn generator_data_domain(&self, ty: &Term, parameters: &[DeclarationId]) -> bool {
+    pub(in crate::program::cmtt) fn generator_data_domain(
+        &self,
+        ty: &Term,
+        parameters: &[DeclarationId],
+    ) -> bool {
         let mut pending = vec![(ty, 0usize)];
         let mut remaining = 100_000usize;
         while let Some((ty, depth)) = pending.pop() {
@@ -2580,7 +2729,7 @@ impl Checker<'_, '_> {
             remaining -= 1;
             match ty {
                 Term::Pointer(inner) => pending.push((inner, depth + 1)),
-                Term::ComptimeFunction(_) => {}
+                Term::Function { .. } | Term::ComptimeFunction(_) => {}
                 Term::Closure {
                     environment,
                     signature,
@@ -2602,9 +2751,9 @@ impl Checker<'_, '_> {
                     };
                     pending.extend(fields.iter().map(|ty| (ty, depth + 1)));
                 }
-                _ if nir::normal_forms::supported_input_type_with_layouts(
+                _ if nir::normal_forms::supported_input_type_in_scope(
                     ty,
-                    parameters,
+                    &self.input_binders(parameters),
                     |head| Some(head) == self.protocols.tuple,
                     |declaration| {
                         self.structs.contains_key(&declaration)

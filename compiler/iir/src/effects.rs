@@ -173,6 +173,7 @@ fn pattern(
         Pattern::Tuple(items)
         | Pattern::TypeTuple(items)
         | Pattern::Or(items)
+        | Pattern::NominalType { fields: items, .. }
         | Pattern::Record { fields: items, .. }
         | Pattern::AnonymousRecord { fields: items, .. }
         | Pattern::Variant { fields: items, .. }

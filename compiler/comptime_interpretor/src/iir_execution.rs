@@ -58,6 +58,7 @@ impl<'a> Interpreter<'a> {
             type_solver: None,
             pointer_copy: None,
             declaration_parameter_sorts: BTreeMap::new(),
+            declaration_parameter_domains: BTreeMap::new(),
             method_parameters: HashMap::new(),
             method_contracts: HashMap::new(),
             assumed_interfaces: HashSet::new(),
@@ -73,6 +74,8 @@ impl<'a> Interpreter<'a> {
                 .collect(),
             method_bodies: HashMap::new(),
             associated_values: HashMap::new(),
+            associated_initializers: HashMap::new(),
+            active_associated_initializers: HashSet::new(),
             instances: HashMap::new(),
             functions: BTreeMap::new(),
             normal_forms: graph

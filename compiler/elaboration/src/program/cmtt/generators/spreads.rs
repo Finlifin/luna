@@ -3,10 +3,10 @@
 use super::*;
 
 #[derive(Default)]
-pub(super) struct SpreadPlan<'h> {
+pub(in crate::program::cmtt) struct SpreadPlan<'h> {
     packets: Vec<Packet<'h>>,
-    pub(super) fields: BTreeMap<n::LocalId, (usize, usize)>,
-    pub(super) empty: Vec<(usize, usize)>,
+    pub(in crate::program::cmtt) fields: BTreeMap<n::LocalId, (usize, usize)>,
+    pub(in crate::program::cmtt) empty: Vec<(usize, usize)>,
 }
 struct Packet<'h> {
     source: Expr<'h>,
@@ -18,11 +18,15 @@ struct Packet<'h> {
     values: Option<Vec<Option<(Argument, Term)>>>,
 }
 impl SpreadPlan<'_> {
-    pub(super) fn field_type(&self, id: n::LocalId) -> Option<&Term> {
+    pub(in crate::program::cmtt) fn width(&self, packet: usize) -> usize {
+        self.packets[packet].width
+    }
+
+    pub(in crate::program::cmtt) fn field_type(&self, id: n::LocalId) -> Option<&Term> {
         let (packet, element) = self.fields.get(&id)?;
         self.packets.get(*packet)?.types.as_ref()?.get(*element)
     }
-    pub(super) fn source_start(&self, packet: usize) -> u32 {
+    pub(in crate::program::cmtt) fn source_start(&self, packet: usize) -> u32 {
         self.packets[packet].source.span.lo().0
     }
 }
@@ -59,7 +63,7 @@ impl fmt::Display for SpreadPlan<'_> {
     }
 }
 impl Checker<'_, '_> {
-    pub(super) fn invoke_spread_generator(
+    pub(in crate::program::cmtt) fn invoke_spread_generator(
         &mut self,
         site: &Expr<'_>,
         callee: &Expr<'_>,
@@ -67,6 +71,22 @@ impl Checker<'_, '_> {
         expected: Option<&Interface>,
         type_plan: Option<GeneratorTypePlan>,
     ) -> Result<Arc<ExpressionCode>, Error> {
+        let owner = self
+            .generator_owner(callee)
+            .ok_or_else(|| error(site.span, "expected a code generator"))?;
+        self.ensure_code_generator(owner, site.span)?;
+        self.with_generator_spreads(owner, site.span, arguments, |this, inputs, plan| {
+            this.invoke_code_generator_inputs(site, callee, inputs, expected, plan, type_plan)
+        })
+    }
+
+    pub(in crate::program::cmtt) fn with_generator_spreads<R>(
+        &mut self,
+        owner: OwnerId,
+        span: Span,
+        arguments: &[Arg<'_>],
+        action: impl FnOnce(&mut Self, &[Arg<'_>], &mut SpreadPlan<'_>) -> Result<R, Error>,
+    ) -> Result<R, Error> {
         let mut widths = Vec::new();
         for argument in arguments {
             let width = match argument {
@@ -87,13 +107,6 @@ impl Checker<'_, '_> {
             .filter_map(|(index, width)| width.is_none().then_some(index))
             .collect::<Vec<_>>();
         if let [index] = unknown.as_slice() {
-            let owner = self.generator_owner(callee).ok_or_else(|| {
-                error(
-                    callee.span,
-                    "code position requires a typed comptime code generator",
-                )
-            })?;
-            self.ensure_code_generator(owner, site.span)?;
             let (ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
                 &self.package.item(owner).unwrap().kind
             else {
@@ -110,7 +123,7 @@ impl Checker<'_, '_> {
                     arguments,
                     Some(signature.params),
                     signature.params.len(),
-                    site.span,
+                    span,
                 )?;
                 let anchored = signature
                     .params
@@ -126,7 +139,7 @@ impl Checker<'_, '_> {
                     .iter()
                     .flatten()
                     .try_fold(0usize, |sum, width| sum.checked_add(*width))
-                    .ok_or_else(|| error(site.span, "generator spread width overflow"))?;
+                    .ok_or_else(|| error(span, "generator spread width overflow"))?;
                 widths[*index] = anchored.checked_sub(known);
             }
         }
@@ -190,7 +203,7 @@ impl Checker<'_, '_> {
                 Arg::Named(name, value) => flat.push((Some(*name), (**value).clone(), false)),
                 _ => {
                     return Err(error(
-                        site.span,
+                        span,
                         "unsupported generator argument supply protocol",
                     ));
                 }
@@ -209,10 +222,10 @@ impl Checker<'_, '_> {
                 }
             })
             .collect::<Vec<_>>();
-        self.invoke_code_generator_inputs(site, callee, &inputs, expected, &mut plan, type_plan)
+        action(self, &inputs, &mut plan)
     }
 
-    pub(super) fn generator_packet_type_hint(
+    pub(in crate::program::cmtt) fn generator_packet_type_hint(
         &mut self,
         value: &Expr<'_>,
         depth: usize,
@@ -226,7 +239,7 @@ impl Checker<'_, '_> {
         })
     }
 
-    pub(super) fn generator_packet_context(
+    pub(in crate::program::cmtt) fn generator_packet_context(
         &mut self,
         plan: &SpreadPlan<'_>,
         packet: usize,
@@ -284,7 +297,7 @@ impl Checker<'_, '_> {
             .transpose()
     }
 
-    pub(super) fn prepare_generator_packet(
+    pub(in crate::program::cmtt) fn prepare_generator_packet(
         &mut self,
         plan: &mut SpreadPlan<'_>,
         index: usize,
@@ -350,7 +363,7 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
-    pub(super) fn generator_packet_field(
+    pub(in crate::program::cmtt) fn generator_packet_field(
         &mut self,
         plan: &mut SpreadPlan<'_>,
         packet: usize,

@@ -471,6 +471,7 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
     contract_package
         .dispatch
         .push(nir::program::DispatchInstance {
+            associated_initializers: vec![],
             interface: id(4),
             interface_arguments: vec![],
             subject: primitive(Primitive::Bool),
@@ -485,6 +486,25 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
             }],
         });
     contract_package.validate(&mut 10_000).unwrap();
+    let mut pending = contract_package.clone();
+    let initializer = nir::associated_initializers::AssociatedInitializer::new(
+        Expr {
+            source: list_value.source,
+            ty: primitive(Primitive::Bool),
+            kind: K::Literal(nir::program::Literal::Bool(true)),
+        },
+        &mut 1000,
+    )
+    .unwrap();
+    pending.dispatch[0]
+        .associated_initializers
+        .push((id(8), initializer));
+    assert!(
+        pending
+            .validate(&mut 10_000)
+            .unwrap_err()
+            .contains("associated initializers")
+    );
     let mut forged = contract_package.clone();
     forged.interfaces[0].methods[0].signature = nir::code_interfaces::MethodSignature::Generator(
         nir::code_interfaces::CodeFunctionSignature {
@@ -617,4 +637,57 @@ fn staged_callable_keys_cannot_hide_unfinished_inputs() {
         )
         .unwrap();
     }
+}
+
+#[test]
+fn captured_comptime_values_must_materialize_before_iir_validation() {
+    use nir::program::{Expr, ExprKind as K, Function, FunctionPhase, SourceRange};
+    let id = DeclarationId {
+        package: 1,
+        local: 900,
+    };
+    let key = iir::InstanceKey {
+        declaration: id,
+        arguments: vec![],
+    };
+    let boolean = Term::Primitive(Primitive::Bool);
+    let mut package = iir::Package {
+        roots: vec![key.clone()],
+        functions: vec![iir::FunctionInstance {
+            key,
+            function: Function {
+                declaration: id,
+                name: "read".into(),
+                phase: FunctionPhase::Runtime,
+                inline: false,
+                pure: true,
+                signature: Term::Function {
+                    parameters: vec![],
+                    result: Box::new(boolean.clone()),
+                },
+                parameters: vec![],
+                type_parameters: vec![],
+                defaults: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+                body: Expr {
+                    source: SourceRange { start: 1, end: 2 },
+                    ty: boolean,
+                    kind: K::ComptimeValue(Term::Bool(true)),
+                },
+            },
+        }],
+        ..Default::default()
+    };
+    let error = package.validate(&mut 10000).unwrap_err();
+    assert!(
+        error.contains("captured comptime value materialization"),
+        "{error}"
+    );
+    package.functions[0].function.body.kind = K::Literal(nir::program::Literal::Bool(true));
+    package.validate(&mut 10000).unwrap();
 }

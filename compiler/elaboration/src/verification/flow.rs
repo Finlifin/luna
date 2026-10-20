@@ -794,6 +794,8 @@ fn analyze_impl(
         closure_context: vec![],
         single_pass_exits: BTreeMap::new(),
         next_field: 0,
+        captured_scalars: BTreeMap::new(),
+        associated_scalars: Vec::new(),
         assuming_postcondition: false,
         memory_summaries: std::collections::HashMap::new(),
         exit_contract: Some(ExitContract {
@@ -879,6 +881,12 @@ struct Walker<'a> {
     exit_contract: Option<ExitContract<'a>>,
     assuming_postcondition: bool,
     next_field: u32,
+    captured_scalars: BTreeMap<nir::DeclarationId, (Term, PlaceId)>,
+    associated_scalars: Vec<(
+        (nir::program::InterfaceInstance, nir::DeclarationId, Term),
+        Term,
+        PlaceId,
+    )>,
     limits: &'a mut Limits,
     package: Option<&'a nir::program::Package>,
     points: Vec<Point>,
@@ -2978,6 +2986,7 @@ impl Walker<'_> {
             K::Literal(_)
             | K::Local(_)
             | K::Unit
+            | K::ComptimeValue(_)
             | K::TypeValue(_)
             | K::TypeListValue(_)
             | K::Function(_)
@@ -3126,19 +3135,37 @@ impl Walker<'_> {
         let needs_arguments =
             target.is_some_and(|f| !f.preconditions.is_empty() || !f.entry_snapshots.is_empty());
         if let Some(target) = target {
+            let sorts = if !target.type_parameters.is_empty()
+                && (!target.preconditions.is_empty() || !target.postconditions.is_empty())
+            {
+                self.package
+                    .ok_or(Reason::InvalidSignature)?
+                    .declaration_parameter_sorts(&mut self.limits.arithmetic.steps)
+                    .map_err(|_| Reason::InvalidSignature)?
+            } else {
+                BTreeMap::new()
+            };
+            let binders = target
+                .type_parameters
+                .iter()
+                .map(|id| nir::DeclarationParameter {
+                    declaration: *id,
+                    sort: sorts.get(id).copied().unwrap_or(nir::Sort::Type),
+                })
+                .collect::<Vec<_>>();
             if needs_arguments && parameter_bindings != &target.parameters {
                 return Err(Reason::InvalidSignature);
             }
             for condition in &target.preconditions {
                 let condition = if let K::FunctionInstance { arguments, .. } = &callee.kind {
                     if arguments.iter().any(|ty| ty.check_scope(&[]).is_err()) {
-                        condition.instantiate_types_in_scope(
-                            &target.type_parameters,
+                        condition.instantiate_parameters_in_scope(
+                            &binders,
                             arguments,
                             &self.input_frames,
                         )
                     } else {
-                        condition.instantiate_types(&target.type_parameters, arguments)
+                        condition.instantiate_parameters(&binders, arguments)
                     }
                     .map_err(|_| Reason::InvalidSignature)?
                 } else {
@@ -3149,13 +3176,13 @@ impl Walker<'_> {
             for condition in &target.postconditions {
                 let condition = if let K::FunctionInstance { arguments, .. } = &callee.kind {
                     if arguments.iter().any(|ty| ty.check_scope(&[]).is_err()) {
-                        condition.instantiate_types_in_scope(
-                            &target.type_parameters,
+                        condition.instantiate_parameters_in_scope(
+                            &binders,
                             arguments,
                             &self.input_frames,
                         )
                     } else {
-                        condition.instantiate_types(&target.type_parameters, arguments)
+                        condition.instantiate_parameters(&binders, arguments)
                     }
                     .map_err(|_| Reason::InvalidSignature)?
                 } else {
@@ -3163,6 +3190,23 @@ impl Walker<'_> {
                 };
                 postconditions.push(condition);
             }
+        }
+        // Reserve immutable contract observations in the caller before making
+        // the invocation frame. A constant first mentioned by a postcondition
+        // still needs a caller identity for exporting result/bound relations.
+        // This introduces only its unknown domain, not its initializer value.
+        let mut associated_inputs = Vec::new();
+        for predicate in preconditions.iter().chain(&postconditions) {
+            iir::visit::expression(predicate, &mut self.limits.arithmetic.steps, |expr, _| {
+                if matches!(expr.kind, K::AssociatedValue { .. }) {
+                    associated_inputs.push(expr);
+                }
+                Ok(())
+            })
+            .map_err(|_| Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into()))?;
+        }
+        for input in associated_inputs {
+            self.child(input, state, depth)?;
         }
         let mut transfers = Vec::new();
         let mut pointer_postconditions = false;
@@ -3313,6 +3357,31 @@ impl Walker<'_> {
         };
         if !postconditions.is_empty() {
             transfers = self.copy_frozen_frame(state, &mut defaults)?;
+        }
+        // Declaration captures are immutable across the call. Transport their
+        // symbolic facts alongside evaluated arguments, using the same copy
+        // evidence so relations such as value <= maximum survive the frame.
+        self.limits
+            .step(self.captured_scalars.len() + self.associated_scalars.len())?;
+        let captures = self
+            .captured_scalars
+            .values()
+            .cloned()
+            .chain(
+                self.associated_scalars
+                    .iter()
+                    .map(|(_, ty, root)| (ty.clone(), *root)),
+            )
+            .collect::<Vec<_>>();
+        for (ty, root) in captures {
+            if state.facts.value(root).is_some() {
+                let value = self.local_value_at(state, root)?;
+                let transfer = self.prepare_copy(&value, state)?;
+                bind_value_place(&mut defaults, root, &ty, value, self.limits)?;
+                if let Some(transfer) = transfer {
+                    transfers.extend(self.install_copy_at(&mut defaults, root, &[], transfer)?);
+                }
+            }
         }
         self.limits.step(arguments.len())?;
         let has_defaults = arguments.iter().any(|argument| argument.is_default);
@@ -4258,6 +4327,74 @@ impl Walker<'_> {
     ) -> Result<Value, Reason> {
         let mut result = Value::default();
         match &expr.kind {
+            K::ComptimeValue(Term::Rigid {
+                declaration,
+                sort: nir::Sort::ComptimeValue,
+            }) => {
+                self.limits.step(1)?;
+                let view = self.scalar_type_view(&expr.ty)?;
+                if !matches!(view, Term::Primitive(p) if p.fixed_integer_layout().is_some() || matches!(p, nir::Primitive::Bool | nir::Primitive::Integer))
+                {
+                    return Ok(result);
+                }
+                let root = if let Some((domain, root)) = self.captured_scalars.get(declaration) {
+                    if domain != &view {
+                        return Err(Reason::InvalidSignature);
+                    }
+                    *root
+                } else {
+                    let Some(package) = self.package else {
+                        return Ok(result);
+                    };
+                    let domains = package
+                        .declaration_parameter_domains(&mut self.limits.arithmetic.steps)
+                        .map_err(|_| Reason::InvalidSignature)?;
+                    let domain = domains.get(declaration).ok_or(Reason::InvalidSignature)?;
+                    if self.scalar_type_view(domain)? != view {
+                        return Err(Reason::InvalidSignature);
+                    }
+                    let root = self.result_root(&view)?.ok_or(Reason::Unsupported)?;
+                    self.captured_scalars
+                        .insert(*declaration, (view.clone(), root));
+                    root
+                };
+                if state.facts.value(root).is_none() {
+                    let unknown = self.unknown_value(&view)?;
+                    bind_value_place(state, root, &view, unknown, self.limits)?;
+                }
+                return self.local_value_at(state, root);
+            }
+            K::ComptimeValue(Term::Bool(value))
+                if expr.ty == Term::Primitive(nir::Primitive::Bool) =>
+            {
+                // Completed immutable Boolean data uses the same program fact
+                // as a literal; symbolic captures remain unknown below.
+                let literal = Expr {
+                    source: expr.source,
+                    ty: expr.ty.clone(),
+                    kind: K::Literal(Literal::Bool(*value)),
+                };
+                return self.binding_expression(&literal, state, depth);
+            }
+            K::ComptimeValue(Term::Integer(value)) => {
+                // Capture identity is not a type proposition. Only a completed
+                // integer with checked domain evidence supplies a program fact.
+                let number = self.limits.integer(value)?;
+                let Term::Primitive(primitive) = &expr.ty else {
+                    return Err(Reason::InvalidSignature);
+                };
+                if let Some((signed, width)) = primitive.fixed_integer_layout() {
+                    if signed {
+                        number.to_signed(width).map_err(Unknown::from)?;
+                    } else {
+                        number.to_unsigned(width).map_err(Unknown::from)?;
+                    }
+                } else if *primitive != nir::Primitive::Integer {
+                    return Err(Reason::InvalidSignature);
+                }
+                result.range = Some(Interval::singleton(&number, self.limits)?);
+                result.scalar = Some(Scalar::Constant(number));
+            }
             K::Literal(literal) => {
                 let number = match literal {
                     Literal::SignedInteger(n) => Some(Integer::from_i128(*n)),
@@ -4288,6 +4425,7 @@ impl Walker<'_> {
             | K::Function(_)
             | K::FunctionInstance { .. }
             | K::TraitMethod { .. }
+            | K::ComptimeValue(_)
             | K::TypeValue(_)
             | K::TypeListValue(_) => {}
             K::Block {
@@ -4668,6 +4806,7 @@ impl Walker<'_> {
             K::Literal(_)
             | K::Local(_)
             | K::Unit
+            | K::ComptimeValue(_)
             | K::TypeValue(_)
             | K::TypeListValue(_)
             | K::Function(_)
@@ -5047,9 +5186,73 @@ impl Walker<'_> {
                     }
                 }
             }
-            K::NominalType { arguments, .. }
-            | K::CheckTypeAlias { arguments, .. }
-            | K::TypeList(arguments)
+            K::NominalType {
+                preparations,
+                arguments,
+                order,
+                bindings,
+                ..
+            }
+            | K::CheckTypeAlias {
+                preparations,
+                arguments,
+                order,
+                bindings,
+                ..
+            } => {
+                self.limits
+                    .step(arguments.len().saturating_add(preparations.len()))?;
+                if expr.kind.nominal_local_bindings().is_none() {
+                    return Err(Reason::Unsupported);
+                }
+                if bindings
+                    .as_ref()
+                    .is_some_and(|bindings| bindings.len() != arguments.len())
+                {
+                    return Err(Reason::Unsupported);
+                }
+                let mut seen = vec![false; arguments.len()];
+                if order
+                    .as_ref()
+                    .is_some_and(|order| order.len() != arguments.len())
+                {
+                    return Err(Reason::Unsupported);
+                }
+                for position in 0..arguments.len() {
+                    let slot = order.as_ref().map_or(position, |order| order[position]);
+                    if slot >= arguments.len() || seen[slot] {
+                        return Err(Reason::Unsupported);
+                    }
+                    seen[slot] = true;
+                }
+                let mut preparations = preparations.iter().peekable();
+                for position in 0..arguments.len() {
+                    while preparations.peek().is_some_and(|p| p.before == position) {
+                        self.child(&preparations.next().unwrap().expression, state, depth)?;
+                    }
+                    if !state.facts.is_reachable() {
+                        break;
+                    }
+                    let slot = order.as_ref().map_or(position, |order| order[position]);
+                    let (value, ty) =
+                        self.normal_input_value(&arguments[slot], None, state, depth)?;
+                    if state.facts.is_reachable() {
+                        if let Some(bindings) = bindings {
+                            self.bind_related_value(state, bindings[slot], &ty, value)?;
+                        }
+                    }
+                }
+                for preparation in preparations {
+                    self.child(&preparation.expression, state, depth)?;
+                }
+                if let K::CheckTypeAlias {
+                    body: Some(body), ..
+                } = &expr.kind
+                {
+                    self.child(body, state, depth)?;
+                }
+            }
+            K::TypeList(arguments)
             | K::TupleType(arguments)
             | K::FunctionType {
                 parameters: arguments,
@@ -5123,6 +5326,61 @@ impl Walker<'_> {
             K::AnonymousField { value, index, .. } => {
                 let base = self.child(value, state, depth)?;
                 result = self.read_anonymous_field(base, &value.ty, *index, state)?;
+            }
+            K::AssociatedValue {
+                interface,
+                member,
+                subject,
+            } => {
+                // Selection and required initialization belong to elaboration
+                // and comptime invocation. Until completed, the program layer
+                // knows only the checked value domain, not a predicate or the
+                // implementation body's result.
+                result = self.unknown_value(&expr.ty)?;
+                let view = self.scalar_type_view(&expr.ty)?;
+                self.limits.step(self.associated_scalars.len())?;
+                let existing = self.associated_scalars.iter().find(
+                    |((stored_interface, stored_member, stored_subject), _, _)| {
+                        stored_interface == interface
+                            && stored_member == member
+                            && stored_subject == subject
+                    },
+                );
+                let root = if let Some((_, domain, root)) = existing {
+                    if domain != &view {
+                        return Err(Reason::InvalidSignature);
+                    }
+                    Some(*root)
+                } else if let Some(root) = self.result_root(&view)? {
+                    for ty in std::iter::once(subject)
+                        .chain(&interface.arguments)
+                        .chain(std::iter::once(&view))
+                    {
+                        nir::type_computations::charge_term(ty, &mut self.limits.arithmetic.steps)
+                            .map_err(|_| {
+                                Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into())
+                            })?;
+                    }
+                    self.associated_scalars.push((
+                        (interface.clone(), *member, subject.clone()),
+                        view.clone(),
+                        root,
+                    ));
+                    Some(root)
+                } else {
+                    None
+                };
+                if let Some(root) = root {
+                    // Associated constants retain identity across observations
+                    // and call frames, without assuming an initializer result.
+                    if state.facts.value(root).is_none() {
+                        bind_value_place(state, root, &view, result, self.limits)?;
+                    }
+                    // This is an immutable declaration value, not caller
+                    // storage that an opaque call may overwrite.
+                    state.frozen.insert(root, view.clone());
+                    result = self.local_value_at(state, root)?;
+                }
             }
             K::Field {
                 value,
@@ -5892,6 +6150,17 @@ fn exportable_postcondition(
             }
             K::Local(id) if Some(*id) == binding || snapshots.iter().any(|s| s.binding == *id) => {}
             K::Literal(_) | K::Unit => {}
+            // The selected associated constant has the same identity in the
+            // callee's result contract and the caller's observation frame.
+            // Its initializer is not executed by proof export.
+            K::AssociatedValue { .. } => {}
+            K::ComptimeValue(value) => {
+                if nir::comptime_values::validate(value, &expr.ty, &mut limits.arithmetic.steps)
+                    .is_err()
+                {
+                    return Ok(false);
+                }
+            }
             K::Not(a)
             | K::IntegerNegate(a)
             | K::FloatNegate(a)
@@ -6078,6 +6347,8 @@ mod memory_summary_cache_tests {
             exit_contract: None,
             assuming_postcondition: false,
             next_field: 0,
+            captured_scalars: BTreeMap::new(),
+            associated_scalars: Vec::new(),
             limits: &mut limits,
             package: Some(&package),
             points: vec![],

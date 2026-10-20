@@ -27,9 +27,11 @@ pub enum ExprKind<'hir> {
     Lit(Lit),
     /// A comptime code value; its body is checked as runtime code.
     CodeQuote(&'hir Expr<'hir>, Vec<CodeSubstitution<'hir>>),
+    CodePatternQuote(&'hir Pattern<'hir>, Vec<CodeSubstitution<'hir>>),
     /// Obtain a comptime code value and connect its runtime interface here.
     CodeSplice(&'hir Expr<'hir>, Vec<CodeSubstitution<'hir>>),
     ContextualExprType(Vec<CodeContextBinding<'hir>>, &'hir Expr<'hir>),
+    ContextualPatternType(&'hir Expr<'hir>, Vec<CodeContextBinding<'hir>>),
     /// A request for the literal-conversion protocol, selected in elaboration.
     /// The suffix identifies the protocol request, not a resolved value name.
     LiteralConversion {

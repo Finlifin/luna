@@ -79,6 +79,48 @@ fn entry() -> bool {
 
 当前可选优化入口已支持封闭的 direct inline effect：先展开普通 inline callee，再将请求替换为卫生重命名的局部 pattern match。每次请求保留一次参数求值，分支可读写安装位置的外层绑定；显式 resume 通过请求私有的结果边界提前交付，只结束当前分支，后续请求仍可继续；return、break 和 continue 另行保持原函数或词法循环目标，不被 resume 的结果边界捕获；handler 自身的循环与其中已经展开的 inline/quote 调用同样保留局部退出和清理边界；不含效应的闭包保留独立调用边界及捕获责任；转换后重新检查资源并发布析构计划。命令行通过 `--interpret entry --inline-functions --copy-protocol Copy --drop-protocol Drop` 显式启用，协议名按实际源定义填写。
 
+对于带 comptime 参数的 quote 调用，早期 NIR 尚未完成主体展开。物化阶段在 staged 输入、quote 主体和具体类型完成后，会再次尝试封闭 direct inline handler 的消除；这一步不要求提前运行普通函数内联入口。请求和 handler 一起替换为局部控制流，生成的返回存储进入实例图，再进行资源检查与清理规划。不能完整展开的安装保留原有执行路径。嵌套 staged quote 中的部分 handler 可以继续转发到外层安装；完成展开后，提前 return 仍按 Sink、载荷、Producer、转发层、调用者的顺序离开资源作用域。若计算仍调用一个未展开的普通效应函数，物化阶段保留完整安装及该函数调用。失败候选新增的返回存储、源码标记和身份分配均回滚，生成图不会夹带这些候选产物。验收同时检查物化 IR 中不再存在安装／请求节点，以及优化前后的析构事件顺序；只检查执行结果不足以证明调度已消除。
+
+带 comptime 参数的普通 `inline fn` 也会在输入绑定后重试展开，随后由同一物化过程消除封闭的 inline handler。例如：
+
+```flurry
+inline effect deliver(value: bool) -> bool;
+
+inline fn produce(comptime enabled: bool, value: bool) -> #deliver bool {
+    if enabled { return deliver(value)#; }
+    false
+}
+
+fn entry() -> bool {
+    produce(true, true)# {
+        deliver(value) => do { resume value; },
+    }
+}
+```
+
+这里先完成 `enabled` 的绑定，再把 `produce` 的主体接入调用位置，最后展开 `deliver` 的请求和处理分支。普通 runtime 实参仍按调用规则求值一次，并先于前置条件检查；展开后仍保留前后置条件、trait 接口契约及拥有型参数的清理责任。嵌套的 staged inline 调用，以及其主体中的普通 inline 直接调用、泛型调用和具体 trait 方法调用，都可继续展开。方法展开仍合并接口与实现的程序契约，并保持接收者及载荷的清理次序。这一物化补全限定于 staged inline 展开链；其它普通调用仍由前述可选优化入口处理。普通 `inline fn` 保持普通函数身份：直接递归、相互递归或达到展开深度界限时，保留已完成输入绑定的 runtime 调用；这与 quote 函数要求展开的语义不同。上述递归调用若仍包含效应，也会使相应 handler 保留合法执行路径。
+
+在 staged inline 主体中，普通 inline 目标也可以由 runtime `if`、`when`、`match` 或代码块选择。选择条件仍在 runtime 执行；物化阶段只展开各个已知候选，然后尝试消除外层 handler。例如，沿用前面的 `deliver`：
+
+```flurry
+inline fn positive(value: bool) -> #deliver bool { deliver(value)# }
+inline fn negative(value: bool) -> #deliver bool { deliver(not value)# }
+
+inline fn choose(comptime enabled: bool, flag: bool, value: bool) -> #deliver bool {
+    if not enabled { return false; }
+    let action = if flag { positive } else { negative };
+    action(value)
+}
+
+fn run(flag: bool) -> bool {
+    choose(true, flag, true)# {
+        deliver(value) => do { resume value; },
+    }
+}
+```
+
+`run(true)` 返回 true，`run(false)` 返回 false。两个候选都可展开时，生成图可以同时消除函数调用和 handler 调度；只执行 runtime 选中的分支。选择作用域的资源先于实参求值清理，实参仅求值一次；handler 的 resume 与提前 return 保留各自退出目标和析构顺序。若某个候选仍是普通非 inline 效应函数，则保留完整 handler 和必要的调用，不能只根据某次运行选中了可展开候选，就删掉另一条路径需要的处理能力。
+
 可独立封闭的嵌套安装先展开内部，再处理外部。例如内部安装虽然允许使用词法环境中的 `poll`，实际只请求自己处理的 `read`，两层都可展开：
 
 ```flurry

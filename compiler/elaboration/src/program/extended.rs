@@ -480,9 +480,14 @@ impl Checker<'_, '_> {
         let remaining = &self.type_parameters[&owner][fixed..];
         let inferred = if !remaining.is_empty() {
             let scheme = crate::calls::Scheme {
+                parameter_sorts: self
+                    .input_binders(remaining)
+                    .iter()
+                    .map(|input| input.sort)
+                    .collect(),
                 type_parameters: remaining.len(),
                 signature: signature
-                    .abstract_types(remaining)
+                    .abstract_parameters(&self.input_binders(remaining))
                     .map_err(|cause| error(span, cause.to_string()))?,
             };
             Some(

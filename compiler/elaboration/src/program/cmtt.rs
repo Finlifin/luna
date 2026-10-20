@@ -4,6 +4,7 @@
 use super::*;
 mod functions;
 mod generators;
+pub(super) mod patterns;
 pub(super) use functions::expand_quote_functions;
 pub(crate) use functions::{expand_bound_quote, expand_materialized_quotes, inline_template};
 pub(super) use generators::Generator;
@@ -72,6 +73,21 @@ impl Checker<'_, '_> {
         )
     }
 
+    fn pattern_generator_callee(&self, callee: &Expr<'_>) -> bool {
+        let head = match callee.kind {
+            H::NFApplication(head, _) => head,
+            _ => callee,
+        };
+        matches!(head.kind,H::ResolvedDef {def_id,..} if self.package.definition_owner(def_id).is_some_and(|owner|self.is_pattern_generator(owner)))
+    }
+
+    fn pattern_code_producer(&self, value: &Expr<'_>, annotation: Option<&Expr<'_>>) -> bool {
+        matches!(value.kind, H::CodePatternQuote(..))
+            || annotation.is_some_and(|ty| matches!(ty.kind, H::ContextualPatternType(..)))
+            || matches!(value.kind, H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) if self.pattern_codes.contains_key(&local(id)))
+            || matches!(value.kind, H::Application(callee, _) | H::ExtendedApplication(callee, _) if self.pattern_generator_callee(callee))
+    }
+
     pub(super) fn code_declaration(
         &mut self,
         decl: &hir::decl::LetDecl<'_>,
@@ -80,6 +96,9 @@ impl Checker<'_, '_> {
         let initializer = decl
             .init
             .ok_or_else(|| error(decl.span, "local const requires an initializer"))?;
+        if self.pattern_code_producer(initializer, decl.ty) {
+            return self.pattern_code_binding(decl, expected);
+        }
         if self.code_producer(initializer)
             || decl
                 .ty
@@ -329,25 +348,14 @@ impl Checker<'_, '_> {
             H::CodeQuote(body, substitutions) => {
                 // A quote owns a runtime boundary. Outer return/loop/resumption
                 // targets are not captured or reinterpreted at a splice site.
-                let result = self.result.take();
-                let loops = std::mem::take(&mut self.loops);
-                let captures = std::mem::take(&mut self.captures);
-                let resume = self.effect_resume_result.take();
-                let required = std::mem::replace(&mut self.in_required_comptime, false);
-                let staged = std::mem::replace(&mut self.in_staged_input, false);
-                let in_code = std::mem::replace(&mut self.in_code_body, true);
-                let holes = std::mem::take(&mut self.quote_holes);
-                let checked = self.checking_attempt(true, false, |checker| {
-                    checker.expr(body, interface.map(|interface| &interface.result))
+                let checked = self.quoted_runtime_boundary(|checker| {
+                    // Definition checking admits pattern interface evidence;
+                    // the quoted body is retained only after actual invocation.
+                    checker.pattern_quote_pending = Some(false);
+                    checker.checking_attempt(true, false, |checker| {
+                        checker.expr(body, interface.map(|interface| &interface.result))
+                    })
                 });
-                self.result = result;
-                self.loops = loops;
-                self.captures = captures;
-                self.effect_resume_result = resume;
-                self.in_required_comptime = required;
-                self.in_staged_input = staged;
-                self.in_code_body = in_code;
-                self.quote_holes = holes;
                 let body = checked?.ok_or_else(|| {
                     error(
                         value.span,
@@ -446,13 +454,39 @@ impl Checker<'_, '_> {
         }
     }
 
-    pub(super) fn connect_code(
+    fn quoted_runtime_boundary<R>(
         &mut self,
-        site: &Expr<'_>,
-        operand: &Expr<'_>,
-        substitutions: &[hir::expr::CodeSubstitution<'_>],
-        expected: Option<&Term>,
-    ) -> Result<n::Expr, Error> {
+        check: impl FnOnce(&mut Self) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        let result = self.result.take();
+        let returns = self.return_observations.take();
+        let partial = self.partial_return_context.take();
+        let optional = std::mem::take(&mut self.pending_optional_returns);
+        let loops = std::mem::take(&mut self.loops);
+        let captures = std::mem::take(&mut self.captures);
+        let resume = self.effect_resume_result.take();
+        let required = std::mem::replace(&mut self.in_required_comptime, false);
+        let staged = std::mem::replace(&mut self.in_staged_input, false);
+        let in_code = std::mem::replace(&mut self.in_code_body, true);
+        let holes = std::mem::take(&mut self.quote_holes);
+        let pattern_pending = self.pattern_quote_pending.take();
+        let checked = check(self);
+        self.pattern_quote_pending = pattern_pending;
+        self.result = result;
+        self.return_observations = returns;
+        self.partial_return_context = partial;
+        self.pending_optional_returns = optional;
+        self.loops = loops;
+        self.captures = captures;
+        self.effect_resume_result = resume;
+        self.in_required_comptime = required;
+        self.in_staged_input = staged;
+        self.in_code_body = in_code;
+        self.quote_holes = holes;
+        checked
+    }
+
+    fn require_runtime_code_position(&self, span: Span) -> Result<(), Error> {
         let comptime = self.in_required_comptime
             || self.in_staged_input
             || self
@@ -469,10 +503,21 @@ impl Checker<'_, '_> {
                 });
         if comptime && !self.in_code_body {
             return Err(error(
-                site.span,
+                span,
                 "code splice requires a runtime position; quoted runtime code cannot execute in comptime",
             ));
         }
+        Ok(())
+    }
+
+    pub(super) fn connect_code(
+        &mut self,
+        site: &Expr<'_>,
+        operand: &Expr<'_>,
+        substitutions: &[hir::expr::CodeSubstitution<'_>],
+        expected: Option<&Term>,
+    ) -> Result<n::Expr, Error> {
+        self.require_runtime_code_position(site.span)?;
         let in_code = std::mem::replace(&mut self.in_code_body, false);
         let code = self.code_value(operand, None, 0);
         self.in_code_body = in_code;
@@ -751,6 +796,18 @@ impl n::Rewriter for Renamer<'_> {
                 }
                 return Ok(false);
             }
+            K::NominalType {
+                bindings: Some(bindings),
+                ..
+            }
+            | K::CheckTypeAlias {
+                bindings: Some(bindings),
+                ..
+            } => {
+                for id in bindings {
+                    self.rename(id)?;
+                }
+            }
             K::NormalFormType {
                 plan: Some(plan), ..
             } => {
@@ -764,6 +821,12 @@ impl n::Rewriter for Renamer<'_> {
     }
     fn pattern(&mut self, pattern: &mut n::Pattern) -> Result<(), Error> {
         match pattern {
+            n::Pattern::CodeEvidence { outputs } => {
+                for (id, _) in outputs {
+                    self.rename(id)?;
+                }
+            }
+
             n::Pattern::Observe { binding, .. } | n::Pattern::Binding { binding, .. } => {
                 self.rename(binding)?
             }
