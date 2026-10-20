@@ -1,0 +1,19 @@
+typealias Type = .Type'builtin;
+
+struct Pair where A, .B: Type = A {
+    first: A,
+    second: B,
+}
+
+comptime fn packet(T: Type) -> (Type,) { (T,) }
+
+comptime fn Build(T: Type) -> Type {
+    Pair<...packet(T)>
+}
+
+typealias Flags = Build(bool);
+
+fn run() -> bool {
+    let pair: Flags = Pair<...(bool,)> { first: true, second: false };
+    pair.first and not pair.second
+}

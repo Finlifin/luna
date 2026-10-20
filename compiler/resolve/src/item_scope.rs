@@ -1,7 +1,7 @@
 //! Item scope – the per-scope "namespace manager".
 //!
-//! An [`ItemScope`] stores all the names visible in a single scope, grouped
-//! by [`Namespace`]. It also records the resolved imports that feed names
+//! An [`ItemScope`] stores all the names visible in a single scope.
+//!  It also records the resolved imports that feed names
 //! into the scope.
 
 use std::collections::HashMap;
@@ -19,6 +19,8 @@ use crate::import::ResolvedImport;
 pub struct ItemScope {
     /// Locally defined names (direct definitions in this scope).
     declarations: HashMap<Symbol, Binding>,
+    pub(crate) glob_entries: Vec<(crate::ids::ScopeId, crate::binding::Visibility)>,
+    pub(crate) glob_candidates: HashMap<Symbol, Vec<Binding>>,
     /// Private imports (`use …`): bring names into this scope but are not
     /// visible to the outside world.
     imports: Vec<ResolvedImport>,
@@ -40,10 +42,33 @@ impl ItemScope {
     pub fn new() -> Self {
         Self {
             declarations: HashMap::new(),
+            glob_candidates: HashMap::new(),
+            glob_entries: Vec::new(),
             imports: Vec::new(),
             reexports: Vec::new(),
             clauses: Vec::new(),
         }
+    }
+
+    pub fn ambiguous_glob(&self, name: Symbol) -> bool {
+        self.get_local(name).is_none()
+            && self
+                .glob_candidates
+                .get(&name)
+                .is_some_and(|xs| xs.len() > 1)
+    }
+    pub fn unique_glob(&self, name: Symbol) -> Option<&Binding> {
+        self.glob_candidates
+            .get(&name)
+            .filter(|xs| xs.len() == 1)
+            .map(|xs| &xs[0])
+    }
+    pub(crate) fn selected_candidates(&self) -> HashMap<Symbol, Vec<Binding>> {
+        let mut names = self.glob_candidates.clone();
+        for (name, binding) in &self.declarations {
+            names.insert(*name, vec![binding.clone()]);
+        }
+        names
     }
 
     /// Define a name in this scope. Returns `Err` with the old binding if the
@@ -62,12 +87,12 @@ impl ItemScope {
     }
 
     /// Look up a name among **direct** declarations only (no imports).
-    pub fn get_direct(&self, name: &str) -> Option<&Binding> {
-        self.declarations.get(&Symbol::intern(name))
+    pub fn get_direct(&self, name: Symbol) -> Option<&Binding> {
+        self.declarations.get(&name)
     }
 
     /// Look up a name including both direct declarations and clauses.
-    pub fn get_local(&self, name: &str) -> Option<&Binding> {
+    pub fn get_local(&self, name: Symbol) -> Option<&Binding> {
         // Direct declarations first
         if let Some(b) = self.get_direct(name) {
             return Some(b);

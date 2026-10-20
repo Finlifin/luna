@@ -1,0 +1,40 @@
+-- Run with --interpret entry --copy-protocol CopyForExecution
+--          --drop-protocol DropForExecution.
+-- The driver binds these declarations explicitly as the resource protocols.
+trait CopyForExecution {}
+trait DropForExecution {
+    fn drop(*self);
+}
+
+struct Ticket {
+    accepted: bool,
+}
+
+impl DropForExecution for Ticket {
+    fn drop(*self) {
+        let accepted = self.accepted.*;
+        assumes accepted;
+    }
+}
+
+typealias Callback = %{ticket: Ticket} fn() -> bool;
+
+fn make() -> Callback {
+    let ticket = Ticket { accepted: true };
+    || ticket.accepted
+}
+
+fn apply(callback: Callback) -> bool {
+    callback()
+}
+
+fn default_ticket(.ticket: Ticket = do { Ticket { accepted: true } }) -> bool {
+    ticket.accepted
+}
+
+fn entry(.enabled: bool = true) -> bool {
+    let first = apply(make());
+    let second = make()();
+    let third = default_ticket();
+    enabled and first and second and third
+}

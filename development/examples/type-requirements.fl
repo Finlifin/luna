@@ -1,0 +1,21 @@
+typealias Flag = true'type;
+typealias Character = 'x''type;
+
+fn convert(value: T) -> Flag
+where T, requires:representation T == Flag {
+    value
+}
+
+fn forward(value: U) -> Flag
+where U, requires U == Flag {
+    convert(value)
+}
+
+fn keep(value: T) -> T
+where T, requires T == Flag or T == Character {
+    value
+}
+
+fn run() -> (Flag, Character) {
+    (forward(true), keep('x'))
+}

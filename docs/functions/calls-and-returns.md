@@ -99,6 +99,8 @@ fn identity(value: u32) -> u32 {
 
 ABI 属性附着在 identity 的函数定义上。
 
+当前实现只完成该属性形式的解析；通用属性的名称解析、comptime Object 求值，以及函数 ABI 信息进入类型与调用检查尚未接通。因此带此属性的函数会在生成已检查 NIR 前被拒绝，包括直接调用、取函数值、inline 函数和 trait 成员；不会退回默认 ABI 来接受程序。此限制不改变上述语言契约。
+
 ### 名字绑定与源码次序
 
 ~~~flurry
@@ -142,6 +144,48 @@ test {
 ~~~
 
 输出顺序是 `callee`、`value 3`、`value 4`、`result 34`。
+
+花括号中的普通输入与展开输入也遵循这一顺序，callee 不限于函数名：
+
+~~~flurry
+test {
+    let result = select() { ...do { (produce(3), produce(4)) } };
+    println("result {}", result);
+}
+~~~
+
+这里仍先执行 select，再执行两个 produce，最后调用取得的函数。代码块和条件表达式也可以交付 callee；捕获闭包保留真实环境。callee 提前退出时不执行输入，输入提前退出时不执行后续输入和函数主体。函数值不会因为实现中可见其来源，就重新获得声明的参数名、默认值或属性收集协议；这些协议的函数值载体尚未接通。
+
+带 comptime 参数的 runtime 函数也可由 runtime 条件选择：当前物化器支持 `if`、`when`、`match` 和代码块交付的具体目标，物化时先按源码顺序完成需要计算的 staged 实参，每个生产者调用一次，再以冻结的数据构造各候选实例；支持现有调用准备能够冻结的标量、Type、元组、结构体和枚举等输入。这里不调用 runtime 选择条件或普通实参；runtime 仍先确定 callee，再只执行所选路径的普通实参。实参块中的局部资源、拥有型闭包捕获及指向外层循环的退出仍按普通调用规则处理。复制出的候选路径使用独立的局部绑定与清理边界，引用调用者已有变量的连接保持不变；未选路径不会构造或析构资源。候选复制失败不发布部分代码、源码标记或身份分配。
+
+```flurry
+fn same(comptime enabled: bool, value: bool) -> bool {
+    enabled and value
+}
+
+fn opposite(comptime enabled: bool, value: bool) -> bool {
+    not (enabled and value)
+}
+
+fn choose(flag: bool, value: bool) -> bool {
+    let action = flag match {
+        true => same,
+        false => opposite,
+    };
+    action(true, value)
+}
+```
+
+这里 `flag` 仍在 runtime 选择目标，`true` 在物化时绑定到相应实例。staged 输入也可写成 `prepare(config)` 这样的 comptime 计算，其中 `config` 来自外层已完成的 comptime 参数；同一个输入不会因为选择树具有多个候选而重复计算。所需输入计算失败时，不发布部分参数替换；普通 runtime 值仍不能越阶段进入该计算。`match` 的 guard 保留候选顺序；arm 中还可用 `if` 或 `match` 进一步选择具体目标，或先执行普通语句再交付目标。`if` / `when` 的分支和 `do` 代码块也可取得局部资源、执行普通语句，再返回具体函数。主语和 arm 局部资源在开始求值调用实参之前清理，不会被延长到被调函数执行期间。选择阶段的 `return`、`break` 等退出不执行实参。闭包实参捕获其它调用者变量不会阻止紧邻的局部 callee 别名解析；若捕获、读取或改写该别名本身，则仍保留它的可观察绑定。
+
+相同的花括号语法也用于构造对象，必须按 callee 的实际类型区分：comptime 计算交付的 Type 作为构造类型消费，不先转换成 runtime 数据；普通函数值则进入调用准备。这不会取消普通常量跨阶段进入 runtime 时所需的 Splice 检查。
+
+立即调用的 comptime 函数值也可以由 if、when、match 的分支交付。分支尾值保留调用阶段，只有最终调用结果经过 Splice；这一上下文不扩散到选择条件、模式 guard 或分支中的普通语句。若选择依赖尚不可用于 comptime 的 runtime 值，则拒绝调用，不能通过外层括号或花括号把该依赖提前求值。
+
+开放函数中的 inline if、inline when 和 inline 模式选择同样保留这一边界。定义检查验证所有分支的可调用域及选择条件的阶段；实例化取得 comptime 输入后才选择分支，并交付该分支的真实闭包环境。即使本次实例不选择某个分支，也不能隐藏其中的类型或阶段错误。圆括号调用与花括号调用使用相同规则。
+
+
+
 
 ### 方法通过指针修改已有对象
 

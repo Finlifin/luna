@@ -2,76 +2,76 @@
 -- builtin/ops – operator traits
 -- ==========================================================================
 --
--- These traits are used by the compiler to desugar binary and unary
--- operators into method calls.
+-- Operator protocol declarations. Compiler language-item binding is explicit;
+-- these names alone do not enable operator elaboration.
 
-trait Add where Rhs = Self {
-    type Output
-    fn add(self, rhs: Rhs) -> Output
+pub trait Add where .Rhs: Type = Self {
+    assoc Output: Type;
+    fn add(self, rhs: Rhs) -> Output;
 }
 
-trait Sub where Rhs = Self {
-    type Output
-    fn sub(self, rhs: Rhs) -> Output
+pub trait Sub where .Rhs: Type = Self {
+    assoc Output: Type;
+    fn sub(self, rhs: Rhs) -> Output;
 }
 
-trait Mul where Rhs = Self {
-    type Output
-    fn mul(self, rhs: Rhs) -> Output
+pub trait Mul where .Rhs: Type = Self {
+    assoc Output: Type;
+    fn mul(self, rhs: Rhs) -> Output;
 }
 
-trait Div where Rhs = Self {
-    type Output
-    fn div(self, rhs: Rhs) -> Output
+pub trait Div where .Rhs: Type = Self {
+    assoc Output: Type;
+    fn div(self, rhs: Rhs) -> Output;
 }
 
-trait Rem where Rhs = Self {
-    type Output
-    fn rem(self, rhs: Rhs) -> Output
+pub trait Rem where .Rhs: Type = Self {
+    assoc Output: Type;
+    fn rem(self, rhs: Rhs) -> Output;
 }
 
-trait Neg {
-    type Output
-    fn neg(self) -> Output
+pub trait Neg {
+    assoc Output: Type;
+    fn neg(self) -> Output;
 }
 
-trait Not {
-    type Output
-    fn not(self) -> Output
+pub trait Not {
+    assoc Output: Type;
+    fn invert(self) -> Output;
 }
 
-trait BitAnd where Rhs = Self {
-    type Output
-    fn bit_and(self, rhs: Rhs) -> Output
+pub trait BitAnd where .Rhs: Type = Self {
+    assoc Output: Type;
+    fn bit_and(self, rhs: Rhs) -> Output;
 }
 
-trait BitOr where Rhs = Self {
-    type Output
-    fn bit_or(self, rhs: Rhs) -> Output
+pub trait BitOr where .Rhs: Type = Self {
+    assoc Output: Type;
+    fn bit_or(self, rhs: Rhs) -> Output;
 }
 
-trait BitXor where Rhs = Self {
-    type Output
-    fn bit_xor(self, rhs: Rhs) -> Output
+pub trait BitXor where .Rhs: Type = Self {
+    assoc Output: Type;
+    fn bit_xor(self, rhs: Rhs) -> Output;
 }
 
-trait Shl where Rhs = Self {
-    type Output
-    fn shl(self, rhs: Rhs) -> Output
+pub trait Shl where .Rhs: Type = Self {
+    assoc Output: Type;
+    fn shl(self, rhs: Rhs) -> Output;
 }
 
-trait Shr where Rhs = Self {
-    type Output
-    fn shr(self, rhs: Rhs) -> Output
+pub trait Shr where .Rhs: Type = Self {
+    assoc Output: Type;
+    fn shr(self, rhs: Rhs) -> Output;
 }
 
 -- ── Index ──────────────────────────────────────────────────────────────────
 
-trait Index where Idx {
-    type Output
-    fn index(self, idx: Idx) -> *Output
+pub trait Index where Idx {
+    assoc Output: Type;
+    fn index(self, idx: Idx) -> *Output;
 }
 
-trait IndexMut where Idx requires Index<Idx> {
-    fn index_mut(*self, idx: Idx) -> *Output
+pub trait IndexMut :- Index<Idx> where Idx {
+    fn index_mut(*self, idx: Idx) -> *Self.as(Index<Idx>).Output;
 }

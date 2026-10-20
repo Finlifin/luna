@@ -1,0 +1,103 @@
+{
+  "criteria": [
+    {
+      "id": "C1",
+      "verdict": "pass",
+      "class": "record",
+      "severity": "none",
+      "evidence": "graph.json: independent units, concrete artifact edges, rejected fake edges and repair test input dependency (attested)"
+    },
+    {
+      "id": "C2",
+      "verdict": "pass",
+      "class": "record",
+      "severity": "none",
+      "evidence": "graph.json: explicit bounded node contracts and selected skills (attested)"
+    },
+    {
+      "id": "C3",
+      "verdict": "pass",
+      "class": "artifact",
+      "severity": "none",
+      "evidence": "/tmp/luna-dev-001/grader2-isolation.json: isolated writers, refreshed inputs match round1.patch, test-only repair delta"
+    },
+    {
+      "id": "C4",
+      "verdict": "not_applicable",
+      "class": "artifact",
+      "severity": "none",
+      "evidence": "No external research node or claim"
+    },
+    {
+      "id": "C5",
+      "verdict": "pass",
+      "class": "artifact",
+      "severity": "none",
+      "evidence": "All verification output pointers retrieved, including red/green tests, probes and editor checks"
+    },
+    {
+      "id": "C6",
+      "verdict": "pass",
+      "class": "rerun",
+      "severity": "none",
+      "evidence": "/tmp/luna-dev-001/grader2-tests.log: 47 passed, 3 existing doctests ignored; grader2-check.log, grader2-format.log, grader2-emacs.log pass"
+    },
+    {
+      "id": "C7",
+      "verdict": "pass",
+      "class": "record",
+      "severity": "none",
+      "evidence": "graph.json: C10/C11 routed to root; independent tests and affected checks recorded (attested)"
+    },
+    {
+      "id": "C8",
+      "verdict": "pass",
+      "class": "record",
+      "severity": "none",
+      "evidence": "graph.json observed/limits: workers5/5, concurrency4/4, waves4/4, retries0/1, depth1/1, worker turns6/12, grader rounds2/2, time within5400 seconds (attested)"
+    },
+    {
+      "id": "C9",
+      "verdict": "pass",
+      "class": "artifact",
+      "severity": "none",
+      "evidence": "dev HEAD remains 4f5e3733ca88121b086b3a9e4389923abb9d837c; no gated external action"
+    },
+    {
+      "id": "C10",
+      "verdict": "pass",
+      "class": "artifact",
+      "severity": "none",
+      "evidence": "report.md now documents baseline failures, actual repair, test results, formatting scope and frontend limitations; independent reruns support claims"
+    },
+    {
+      "id": "C11",
+      "verdict": "pass",
+      "class": "rerun",
+      "severity": "none",
+      "evidence": "/tmp/luna-dev-001/grader2-extra.json: 35/35 probes plus 32 CLI tests; prior panic cases diagnose exit1 and preserve outputs, recognized view operands retained"
+    },
+    {
+      "id": "C12",
+      "verdict": "pass",
+      "class": "rerun",
+      "severity": "none",
+      "evidence": "8 HIR tests, exhaustive payload formatting, dump_to_lisp delegation and actual Emacs reader/formatter pass"
+    },
+    {
+      "id": "C13",
+      "verdict": "pass",
+      "class": "rerun",
+      "severity": "none",
+      "evidence": "47 targeted tests without LLVM; six independent lowering regressions were actually red before repair"
+    },
+    {
+      "id": "C14",
+      "verdict": "pass",
+      "class": "rerun",
+      "severity": "none",
+      "evidence": "/tmp/luna-dev-001/grader2-workspace.json: 1766 protected paths unchanged, dev and HEAD unchanged; final.patch independently matches 12 paths"
+    }
+  ],
+  "unreachable": []
+}

@@ -1,4 +1,4 @@
-use super::{fn_mod_flags_to_string, Ast, NodeIndex, NodeKind, NodeType};
+use super::{Ast, NodeIndex, NodeKind, NodeType, fn_mod_flags_to_string};
 use rustc_span::SourceMap;
 
 /// AST visitor trait，用于遍历 AST 并对每个节点执行操作
@@ -106,7 +106,7 @@ pub trait AstVisitor {
         source_map: &SourceMap,
     ) -> Self::Output;
 
-    /// 访问函数定义节点 (id, params, return_type, handles_effect, clauses, body)
+    /// 访问函数定义节点 (id, params, return_type, clauses, body)
     fn visit_function_def(
         &mut self,
         ast: &Ast,
@@ -115,7 +115,6 @@ pub trait AstVisitor {
         id: NodeIndex,
         params: &[NodeIndex],
         return_type: NodeIndex,
-        handles_effect: NodeIndex,
         clauses: &[NodeIndex],
         body: NodeIndex,
         source_map: &SourceMap,
@@ -213,14 +212,13 @@ pub trait AstVisitor {
         source_map: &SourceMap,
     ) -> Self::Output;
 
-    /// 访问 FnType 节点 (flags, abi_node, parameter_types)
+    /// 访问 FnType 节点 (flags, parameter_types)
     fn visit_fn_type(
         &mut self,
         ast: &Ast,
         node_index: NodeIndex,
         kind: NodeKind,
         flags: u32,
-        abi_node: NodeIndex,
         params: &[NodeIndex],
         source_map: &SourceMap,
     ) -> Self::Output;
@@ -332,9 +330,8 @@ pub trait AstVisitor {
                     let id = children[0];
                     let params_node = children[1];
                     let return_type = children[2];
-                    let handles_effect = children[3];
-                    let clauses_node = children[4];
-                    let body = children[5];
+                    let clauses_node = children[3];
+                    let body = children[4];
 
                     let params = ast.get_multi_child_slice(params_node).unwrap();
                     let clauses = ast.get_multi_child_slice(clauses_node).unwrap();
@@ -346,14 +343,13 @@ pub trait AstVisitor {
                         id,
                         params,
                         return_type,
-                        handles_effect,
                         clauses,
                         body,
                         source_map,
                     )
                 }
 
-                NodeType::NormalFormDefChildren => {
+                NodeType::NormalFormHeadDefChildren => {
                     let children = ast.get_children(node_index);
                     let id = children[0];
                     let type_params_node = children[1];
@@ -491,23 +487,14 @@ pub trait AstVisitor {
                 }
 
                 NodeType::FnTypeChildren => {
-                    // flags_u32 (raw bitmask), abi_node, N(parameter_types)
+                    // flags_u32 (raw bitmask), N(parameter_types)
                     let children = ast.get_children(node_index);
                     let _flags = children[0]; // raw u32, not a real node
-                    let abi_node = children[1];
-                    let params_node = children[2];
+                    let params_node = children[1];
 
                     let params = ast.get_multi_child_slice(params_node).unwrap();
 
-                    self.visit_fn_type(
-                        ast,
-                        node_index,
-                        kind,
-                        _flags,
-                        abi_node,
-                        params,
-                        source_map,
-                    )
+                    self.visit_fn_type(ast, node_index, kind, _flags, params, source_map)
                 }
             }
         } else {
@@ -723,7 +710,6 @@ impl AstVisitor for SExpressionVisitor {
         id: NodeIndex,
         params: &[NodeIndex],
         return_type: NodeIndex,
-        handles_effect: NodeIndex,
         clauses: &[NodeIndex],
         body: NodeIndex,
         source_map: &SourceMap,
@@ -740,12 +726,11 @@ impl AstVisitor for SExpressionVisitor {
             .join(" ");
 
         format!(
-            "({} {} [{}] {} {} [{}] {})",
+            "({} {} [{}] {} [{}] {})",
             kind,
             self.visit_node(ast, id, source_map),
             params_str,
             self.visit_node(ast, return_type, source_map),
-            self.visit_node(ast, handles_effect, source_map),
             clauses_str,
             self.visit_node(ast, body, source_map)
         )
@@ -963,7 +948,6 @@ impl AstVisitor for SExpressionVisitor {
         _node_index: NodeIndex,
         _kind: NodeKind,
         flags: u32,
-        abi_node: NodeIndex,
         params: &[NodeIndex],
         source_map: &SourceMap,
     ) -> Self::Output {
@@ -974,10 +958,7 @@ impl AstVisitor for SExpressionVisitor {
             .collect::<Vec<_>>()
             .join(" ");
 
-        if abi_node != 0 {
-            let abi = self.visit_node(ast, abi_node, source_map);
-            format!("(FnType [{}] {} [{}])", mods_str, abi, params_str)
-        } else if !mods_str.is_empty() {
+        if !mods_str.is_empty() {
             format!("(FnType [{}] [{}])", mods_str, params_str)
         } else {
             format!("(FnType [{}])", params_str)
@@ -1155,7 +1136,6 @@ impl AstVisitor for NodeCountVisitor {
         id: NodeIndex,
         params: &[NodeIndex],
         return_type: NodeIndex,
-        handles_effect: NodeIndex,
         clauses: &[NodeIndex],
         body: NodeIndex,
         source_map: &SourceMap,
@@ -1165,7 +1145,6 @@ impl AstVisitor for NodeCountVisitor {
             self.visit_node(ast, param, source_map);
         }
         self.visit_node(ast, return_type, source_map);
-        self.visit_node(ast, handles_effect, source_map);
         for &clause in clauses {
             self.visit_node(ast, clause, source_map);
         }
@@ -1319,13 +1298,9 @@ impl AstVisitor for NodeCountVisitor {
         _node_index: NodeIndex,
         _kind: NodeKind,
         _flags: u32,
-        abi_node: NodeIndex,
         params: &[NodeIndex],
         source_map: &SourceMap,
     ) -> Self::Output {
-        if abi_node != 0 {
-            self.visit_node(ast, abi_node, source_map);
-        }
         for &param in params {
             self.visit_node(ast, param, source_map);
         }

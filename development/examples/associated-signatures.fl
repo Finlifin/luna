@@ -1,0 +1,32 @@
+-- Implementation-local Type definitions participate in signature formation.
+-- The resulting signature must still satisfy the selected trait contract.
+trait Source where T {
+    assoc Element: .Type'builtin;
+    assoc Item: .Type'builtin;
+    fn keep(value: T) -> T;
+}
+
+struct Holder where T {}
+impl Source<T> for Holder<T> where T {
+    assoc Element: .Type'builtin = Item;
+    assoc Item: .Type'builtin = T;
+
+    fn keep(value: Element) -> Element { value }
+}
+
+comptime fn Selected() -> .Type'builtin { bool }
+
+trait FlagSource {
+    assoc Flag: .Type'builtin;
+    fn keep(value: bool) -> bool;
+}
+struct Flags {}
+impl FlagSource for Flags {
+    assoc Flag: .Type'builtin = Selected();
+    fn keep(value: Flag) -> Flag { value }
+}
+
+fn entry() -> bool {
+    Holder<bool>.as(Source<bool>).keep(true)
+        and Flags.as(FlagSource).keep(true)
+}

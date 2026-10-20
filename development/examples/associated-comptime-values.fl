@@ -1,0 +1,24 @@
+-- Comptime selects a code identity; its runtime body is called only by entry.
+fn invert(value: bool) -> bool {
+    not value
+}
+
+trait Action {
+    assoc callback: fn(bool) -> bool = invert;
+}
+
+impl Action for bool {}
+
+comptime fn choose(value: T) -> fn(bool) -> bool where T :- Action {
+    T.as(Action).callback
+}
+
+trait Selected {
+    assoc callback: fn(bool) -> bool = choose(true);
+}
+
+impl Selected for bool {}
+
+fn entry() -> bool {
+    bool.as(Selected).callback(false)
+}

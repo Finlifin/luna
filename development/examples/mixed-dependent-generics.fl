@@ -1,0 +1,31 @@
+typealias Type = .Type'builtin;
+typealias Char = 'x''type;
+
+-- T is an ordinary comptime input; G is inferred from the other argument.
+fn pair(comptime T: Type, value: T, other: G) -> (T, G) where G {
+    (value, other)
+}
+
+-- Clause parameters can supply ordinary Type inputs to another function.
+fn forward(value: A, other: B) -> (A, B) where A, B {
+    pair(A, value, other)
+}
+
+trait Mapper {
+    fn pair(self, comptime T: Type, value: T, comptime other: G,
+            comptime .copy: G = other) -> (T, G) where G;
+}
+
+struct Host {}
+impl Mapper for Host {
+    fn pair(self, comptime A: Type, left: A, comptime right: B,
+            comptime .copy: B = right) -> (A, B) where B {
+        (left, copy)
+    }
+}
+
+fn run() -> ((bool, Char), (Char, bool), (bool, Char)) {
+    (pair(bool, true, 'x'),
+     forward('y', false),
+     Host {}.as(Mapper).pair(bool, false, 'z'))
+}

@@ -1,0 +1,41 @@
+trait Source {
+    assoc Item: .Type'builtin = bool;
+}
+impl Source for bool {}
+
+trait Read {
+    comptime fn read() -> bool;
+}
+impl Read for bool {
+    comptime fn read() -> bool { true }
+}
+
+-- The selected Item itself must implement Read.
+comptime fn forward() -> bool where T :- Source,
+    requires T.as(Source).Item :- Read
+{
+    T.as(Source).Item.as(Read).read()
+}
+
+trait Result {
+    assoc value: bool = forward<bool>();
+}
+impl Result for bool {}
+
+trait Keep where A {
+    fn keep(value: A) -> A;
+}
+impl Keep<bool> for bool {
+    fn keep(value: bool) -> bool { value }
+}
+
+-- The later bound can use evidence established by the preceding parameter.
+fn preserve(value: T.as(Source).Item) -> T.as(Source).Item
+    where T :- Source, U :- Keep<T.as(Source).Item>
+{
+    U.as(Keep<T.as(Source).Item>).keep(value)
+}
+
+fn entry() -> bool {
+    preserve<bool, bool>(bool.as(Result).value)
+}

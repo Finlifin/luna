@@ -20,6 +20,8 @@ Trait 内的方法可以只有签名，末尾使用分号；带默认主体的�
 
 父接口和 trait bound 中 `:-` 右侧的 expr 可以组合多个约束，例如 `trait Report :- Reading + Named`、`where T :- Reading + Named`。这里复用表达式的 `+` 形式；否定约束写在子句中，例如 `requires not (T :- Disabled)`。
 
+声明类型变量与约束该变量有两种写法：`where T, requires T :- Reading + Named` 先声明 T，再用 requires 子句中的类型命题约束它；`where T :- Reading + Named` 则是声明并约束 T 的语法糖。`requires` 本身不声明变量，也不是放在变量名与 trait 表达式之间的运算符，因此 `where T requires Reading` 非法。例如，迭代器适配器的子句可以写成 `where I :- Iterator, U`，也可以写成 `where I, U, requires I :- Iterator`。
+
 ## 正式定义
 
 ### 身份与参数
@@ -39,6 +41,29 @@ Reachability 等嵌入层类型、CMTT 类型和闭包类型不作为用户 impl
 关联项通过选定的完整接口实例取得。两个接口都声明 Element，不意味着两个 Element 相等。依赖其他关联项的成员在替换后重新检查要求；关联项的循环定义不能作为自身成立的证明。
 
 有默认值的关联项可由实现替换。没有默认的必需项必须提供；不能以另一 phase 或另一 trait 的同名成员补齐。
+
+泛型关联值的初始化可以依赖接口值参数，并调用 comptime 函数。此时先检查初始化程序，待选择具体实现并完成参数替换后再执行；不能在泛型定义处把尚未确定的参数当作闭合常量求值。
+
+```flurry
+comptime fn invert(value: bool) -> bool { not value }
+
+trait Flags where enabled: bool {
+    assoc inverted: bool = invert(enabled);
+}
+
+struct Switch where enabled: bool {}
+impl Flags<enabled> for Switch<enabled> where enabled: bool {}
+
+fn check() -> bool {
+    not Switch<true>.as(Flags<true>).inverted
+        and Switch<false>.as(Flags<false>).inverted
+}
+```
+
+这里两个完整接口实例得到不同的关联值。初始化遵守 comptime 调用的前置条件、阶段限制和求值预算；初始化程序不会作为运行时代码遗留在具体实例中。关联项之间可以引用，但循环初始化不能借由延迟求值获得合法性。
+
+初始化也可以选择并返回运行时函数值。冻结结果保留函数声明及泛型实参；trait 方法值还保留接口来源、Self 与接口／方法实参。选择函数在 comptime 执行，所选运行时函数体只在实际调用时执行。当前普通 callable 尚不能承载程序契约时，带程序契约的 trait 方法值明确拒绝转换，不能退化为实现函数来绕过接口要求。
+
 
 ### 默认方法
 
@@ -185,3 +210,92 @@ Zig 可用 comptime 检查类型上的声明；C 可将相关常量和函数表�
 子句中的否定交给 PTC 的否定查询处理，保留实现世界及其排除依据；不能把正向候选检索的失败直接翻转为否定证据。
 
 依赖图处理在固定图上为 O(V+E)；具体关联项计算和 PTC 查询的成本另计。求值超限与循环是诊断，不是任选默认值的理由。
+
+### 初始化返回匿名编译时函数
+
+关联值初始化也可以返回匿名 comptime callable。无捕获 lambda 保留其已检查的主体和参数绑定；冻结本身不调用主体，也不将 lambda 伪装成具名函数。以下代码在具体实现选定后取得回调，在编译时调用它，再把结果交给 runtime 实例：
+
+~~~flurry
+comptime fn select(enabled: bool) -> comptime fn(bool) -> bool {
+    if enabled { |value| not value } else { |value| value }
+}
+fn decide(comptime flag: bool) -> bool { flag }
+trait Flags where enabled: bool {
+    assoc callback: comptime fn(bool) -> bool = select(enabled);
+    fn get() -> bool { decide(Self.as(Flags<enabled>).callback(true)) }
+}
+struct Holder where enabled: bool {}
+impl Flags<enabled> for Holder<enabled> where enabled: bool {}
+fn run() -> bool {
+    not Holder<true>.as(Flags<true>).get()
+        and Holder<false>.as(Flags<false>).get()
+}
+~~~
+
+当前这条分阶段关联值冻结路径支持无捕获匿名函数；带捕获环境的函数还需要环境图传递，不能通过丢弃捕获或提前执行主体来替代。
+
+### 名义类型参数提供的域证据
+
+名义类型的值参数可传给 trait 的值参数。定义检查使用其声明域，随后才匹配实现；不会因为目标 trait 要求 `bool` 就将未知参数认作 `bool`。例如，接续上面的 `Flags`、`select` 和 `decide`：
+
+~~~flurry
+struct Switch where enabled: bool {
+    pub fn get() -> bool {
+        decide(Switch<enabled>.as(Flags<enabled>).callback(true))
+    }
+}
+impl Flags<enabled> for Switch<enabled> where enabled: bool {}
+~~~
+
+泛型定义内的 `enabled` 尚未取具体值，但它的声明身份和 `bool` 域已经确定。实例化后按实际参数执行关联初始化。不同参数即使域相同，也不能因此判为同一个值；值域证据不替代类型要求或程序规格。
+
+名义类型的 trait bound 也保留接口提供的类型保证，包括经父 trait 继承的保证。下面的 `convert` 在泛型定义处即可使用 `S == T`，不需要等到 `bool` 实例出现：
+
+~~~flurry
+trait Same where T, enabled: bool, requires Self == T {}
+impl Same<T, enabled> for T where T, enabled: bool {}
+struct Conversion where enabled: bool, T, S :- Same<T, enabled> {
+    pub fn convert(value: S) -> T { value }
+}
+fn example() -> bool { Conversion<true, bool, bool>.convert(true) }
+~~~
+
+去掉 `S` 的接口约束后，函数体不再有 `S == T` 的依据。传入不满足保证的实例也会拒绝。接口中只约束参数、而不涉及 Self 的形成条件仍须独立建立，不能从“假定该接口成立”反向证明该接口可以形成。
+
+### 调用带捕获的关联 comptime 回调
+
+当一次关联 comptime 回调调用的输入已经确定、表达式不再依赖调用者局部绑定时，实例化可以把关联初始化与调用放在同一次编译时执行中，只冻结最终结果。环境在调用结束前保持活跃，不必先将闭包本身冻结成独立的跨阶段值：
+
+~~~flurry
+typealias Callback = %{flag: bool} comptime fn() -> bool;
+comptime fn make(flag: bool) -> Callback { || flag }
+trait Flags where enabled: bool {
+    assoc callback: Callback = make(enabled);
+}
+fn decide(comptime value: bool) -> bool { value }
+struct Holder where enabled: bool {
+    pub fn get() -> bool {
+        decide(Holder<enabled>.as(Flags<enabled>).callback())
+    }
+}
+impl Flags<enabled> for Holder<enabled> where enabled: bool {}
+fn example() -> bool { Holder<true>.get() and not Holder<false>.get() }
+~~~
+
+一次调用中的嵌套闭包与可变捕获保留其状态，程序条件仍检查。该路径不代表带捕获闭包已能任意跨阶段传递；闭包作为返回值或独立实例输入离开这次调用时，仍需要相应的环境传递支持。runtime 回调不因此获得编译时执行权限。
+
+必需实参可以先建立局部绑定，再调用关联回调。例如，将上例的回调改成接收一个布尔实参：
+
+~~~flurry
+typealias Callback = %{flag: bool} comptime fn(bool) -> bool;
+comptime fn make(flag: bool) -> Callback { |value| flag and value }
+comptime fn identity(value: bool) -> bool where requires value { value }
+
+// Holder.get 的主体：
+decide(do {
+    let value = if enabled { identity(true) } else { false };
+    Holder<enabled>.as(Flags<enabled>).callback(value)
+})
+~~~
+
+`enabled` 尚未确定时，整个实参保留到实例化；局部绑定、分支和回调在同一次 invocation 中求值。`identity` 的前置条件仍须成立。程序验证在关联值尚未完成时只知道它的类型范围，不会根据其初始化函数猜测值，也不会将程序条件交给 PTC。

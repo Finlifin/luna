@@ -1,0 +1,67 @@
+typealias Type = .Type'builtin;
+typealias Bool = true'type;
+typealias Int = .Integer'builtin;
+pure comptime fn Array<T, N: Int> -> Type { T }
+pure comptime fn Other<T, N: Int> -> Type { T }
+comptime fn Length(value: Type) -> Int {
+    value match { Array<'Bool, length> => length, _ => 0 }
+}
+comptime fn NamedLength(value: Type) -> Int {
+    value match { Array<N: length, T: 'Bool> => length, _ => 0 }
+}
+comptime fn ElementType(value: Type) -> Type {
+    value match { Array<Element, _> => Element, _ => value }
+}
+comptime fn run() -> (Int, Int, Int, Bool) {
+    (Length(Array<Bool, 4>), NamedLength(Array<Bool, 7>),
+     Length(Other<Bool, 9>), ElementType(Array<Bool, 4>) == Bool)
+}
+comptime fn InnerLength(value: Type) -> Int {
+    value match { Array<Array<'Bool, inner>, _> => inner, _ => 0 }
+}
+comptime fn nested() -> Int { InnerLength(Array<Array<Bool, 5>, 8>) }
+pure comptime fn Tagged<value: (Int, Bool)> -> Type { Bool }
+comptime fn TagNumber(value: Type) -> Int {
+    value match { Tagged<(number, true)> => number, _ => 0 }
+}
+comptime fn tuple_value() -> Int { TagNumber(Tagged<(11, true)>) }
+pure comptime fn Small<value: .u8'builtin> -> Type { Bool }
+comptime fn SmallNumber(value: Type) -> .u8'builtin {
+    value match { Small<number> => number, _ => 0 }
+}
+comptime fn fixed_value() -> .u8'builtin { SmallNumber(Small<9>) }
+
+comptime fn ErasedType() -> Type { Bool }
+comptime fn erased() -> Int { Length(ErasedType()) }
+pure comptime fn Box<T, value: T> -> Type { T }
+comptime fn BoxElement(value: Type) -> Type {
+    value match { Box<Element, _> => Element, _ => value }
+}
+comptime fn dependent_wildcard() -> Bool { BoxElement(Box<Bool, true>) == Bool }
+comptime fn Rollback(value: Type) -> Int {
+    value match {
+        Tagged<(number, false)> or Tagged<(number, true)> => number,
+        _ => 0,
+    }
+}
+comptime fn rollback() -> Int { Rollback(Tagged<(17, true)>) }
+comptime fn BoolContents(value: Type) -> Bool {
+    value match { Box<'Bool, contents> => contents, _ => false }
+}
+comptime fn NamedContents(value: Type) -> Bool {
+    value match { Box<value: contents, T: 'Bool> => contents, _ => false }
+}
+comptime fn TupleContents(value: Type) -> Int {
+    value match { Box< < (Int, Bool) > , (number, true)> => number, _ => 0 }
+}
+comptime fn dependent_values() -> (Bool, Bool, Int, Bool) {
+    (BoolContents(Box<Bool, true>), NamedContents(Box<Bool, true>),
+     TupleContents(Box<(Int, Bool), (23, true)>), BoolContents(Box<Int, 1>))
+}
+
+comptime fn Contents(value: Type, fallback: T) -> T where T {
+    value match { Box<'T, contents> => contents, _ => fallback }
+}
+comptime fn generic_contents() -> (Bool, Int) {
+    (Contents<Bool>(Box<Bool, true>, false), Contents<Int>(Box<Int, 29>, 0))
+}

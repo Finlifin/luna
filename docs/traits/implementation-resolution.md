@@ -206,3 +206,64 @@ Tuple<Vec<Tuple<i32, i32>>, i32>
 预计算结构键可使用共享子树和哈希，避免每层重新复制整棵树。具体查询访问 O(h) 个深度层及 k 个候选，真实匹配和求解成本另计。未知查询可能访问大量兼容后代，最坏仍可退化为全候选检查。
 
 候选缓存依赖实现世界和归一形态；选择缓存还依赖接口实参、phase、约束与替换。候选新增、关联项变化或推断变量得到新值时，受影响查询必须失效。不得用基于 Eq/Hash 的缓存相等替代逻辑等式。
+
+### 泛型调用者的值参数与 inherent 方法
+
+inherent 方法选择同样使用调用者值参数的声明域。调用者的参数与实现头的参数具有各自的声明身份；匹配建立本次替换，并检查替换后的域，而不是要求两者来自同一声明。依赖域也按这个规则处理：
+
+~~~flurry
+struct Tagged where T, tag: T {}
+impl Tagged<T, tag> where T, tag: T {
+    fn read() -> T { tag }
+}
+struct Caller where U, value: U {
+    pub fn forward() -> U { Tagged<U, value>.read() }
+}
+fn example() -> bool { Caller<bool, true>.forward() }
+~~~
+
+`Tagged` 的值域在本次匹配中是 `U`，与调用者 `value: U` 的声明一致。缺少域证据或域不匹配时不能选择实现。成员名仍先限定候选集合；取得方法作为函数值与直接调用保留同样的参数实例身份。域证据不赋予额外成员，也不把 inherent 方法变成 trait 实现。
+
+### 由类型等式建立值域相容性
+
+值参数的域可以依赖类型参数。如果当前定义的类型上下文已经证明 `T == U`，声明为 `value: U` 的输入可以用于要求 `tag: T` 的 trait 查询：
+
+~~~flurry
+trait Read where T, tag: T { fn read() -> T; }
+struct Tagged where T, tag: T {}
+impl Read<T, tag> for Tagged<T, tag> where T, tag: T {
+    fn read() -> T { tag }
+}
+struct Caller where T, U, value: U, requires T == U {
+    pub fn forward() -> T { Tagged<U, value>.as(Read<T, value>).read() }
+}
+fn example() -> bool { Caller<bool, bool, true>.forward() }
+~~~
+
+这里证明的是 Type 域的相等性，值仍保留原声明身份。没有等式证据、求解结果未确定或预算不足时，不得把两个域当成相同。匹配证据回放时也必须在相应上下文中重新建立域等式；域相等不证明两个不同的值索引相等。
+
+### 带符号字段的记录索引
+
+记录索引在泛型定义中可以包含尚未取具体值的字段，只要字段各自的声明域已经确定：
+
+~~~flurry
+comptime fn settings(...properties: T) -> T where T { properties }
+typealias Settings = (settings {enabled: true})'type;
+trait Read where mode: Settings { fn read() -> bool; }
+struct Host {}
+impl Read<(settings {enabled: flag})> for Host where flag: bool {
+    fn read() -> bool { flag }
+}
+struct Caller where enabled: bool {
+    pub fn forward() -> bool {
+        Host.as(Read<(settings {enabled: enabled})>).read()
+    }
+}
+fn example() -> bool {
+    Caller<true>.forward() and not Caller<false>.forward()
+}
+~~~
+
+实现也可以把整个记录绑定为 `mode: Settings`，再在主体中读取 `mode.enabled`。两种写法都检查记录形状、字段名及字段域；不能仅凭形状相同就认为符号字段已有具体值。涉及未知字段的重复索引关系仍可能保持待决，同一字段声明的重复引用则保留同一身份。
+
+部分未知不妨碍使用已经确定的冲突。例如，两份记录的 `enabled` 尚未知，但已知标签分别为 `true` 与 `false`，它们就不能满足“重复使用同一个记录索引”的实现头。若只有未知字段或 Type 关系尚未证明，则保留待决；检查预算不足也不能当作不相等的证据。

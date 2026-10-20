@@ -1,0 +1,23 @@
+-- Concrete static methods through explicit trait views.
+-- Runtime receivers, Self substitution and generic interfaces are pending.
+trait Flag {
+    fn read() -> true'type;
+    fn invert(value: true'type) -> true'type { not value }
+}
+
+struct Yes {}
+struct No {}
+
+impl Flag for Yes {
+    fn read() -> true'type { true }
+}
+
+impl Flag for No {
+    fn read() -> true'type { false }
+    fn invert(value: true'type) -> true'type { value }
+}
+
+fn run() -> (true'type, true'type, true'type) {
+    let invert = Yes.as(Flag).invert;
+    (Yes.as(Flag).read(), No.as(Flag).read(), invert(false))
+}

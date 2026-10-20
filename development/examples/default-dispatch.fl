@@ -1,0 +1,18 @@
+trait Read {
+    fn read(self) -> true'type;
+    fn invert(self) -> true'type { not self.as(Read).read() }
+}
+
+struct Yes {}
+struct No {}
+
+impl Read for Yes {
+    fn read(self) -> true'type { true }
+}
+impl Read for No {
+    fn read(self) -> true'type { false }
+}
+
+fn run() -> (true'type, true'type) {
+    (Yes {}.as(Read).invert(), No {}.as(Read).invert())
+}

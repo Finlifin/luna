@@ -1,0 +1,22 @@
+-- Each counter owns its capture; calls update that stored value.
+trait Duplicate {}
+trait Retire {
+    fn drop(*self);
+}
+
+typealias Counter = %{value: .u32'builtin} fn() -> .u32'builtin;
+
+fn counter() -> Counter {
+    var value: .u32'builtin = 0;
+    || {
+        assumes value < 4294967295;
+        value = value + 1;
+        value
+    }
+}
+
+fn entry() -> bool {
+    let left = counter();
+    let right = counter();
+    left() == 1 and left() == 2 and right() == 1 and left() == 3
+}

@@ -1,0 +1,25 @@
+typealias Bool = true'type;
+typealias F32 = .f32'builtin;
+typealias F64 = .f64'builtin;
+comptime fn single(a: F32, b: F32) -> (Bool, Bool, Bool, Bool, Bool, Bool) {
+    (a == b, a != b, a < b, a <= b, a > b, a >= b)
+}
+comptime fn double(a: F64, b: F64) -> (Bool, Bool, Bool, Bool, Bool, Bool) {
+    (a == b, a != b, a < b, a <= b, a > b, a >= b)
+}
+comptime fn contextual(value: F32) -> (Bool, Bool, Bool, Bool) {
+    (1.5 == value, -1.5 != value, 1.5 < value, value >= 1.5)
+}
+comptime fn generic(a: T, b: T) -> Bool where T, requires T == F32 { a >= b }
+comptime fn specialized() -> Bool { generic<F32>(2.0, 1.0) }
+comptime fn pattern(value: F32, expected: F32) -> Bool {
+    value match { 'expected => true, _ => false }
+}
+comptime fn ordered() -> Bool {
+    var seen = false;
+    (do { seen = true; 1.0 }) > (do { if seen { 0.0 } else { 2.0 } })
+}
+comptime fn early() -> Bool { (do { return true; }) >= 1.0 }
+comptime fn run() -> (Bool, Bool, Bool, Bool) {
+    (specialized(), pattern(-0.0, 0.0), ordered(), early())
+}

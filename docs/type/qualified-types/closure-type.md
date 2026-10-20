@@ -15,7 +15,7 @@ environment_binding -> id : expr (= expr)?
 fn_type -> pure? comptime? inline? (unsafe | spec | verified)? fn(parameter_type*) (-> expr)?
 ~~~
 
-%C T 中 C 表示环境上下文，T 表示主体类型。环境绑定可写成 `%{name: U = value} T`，说明绑定的类型及来源；开放环境参数使用 `C: Type.vars.Closure`。例如 `%{space: Space = space} dyn Drop` 保留动态主体需要的环境。
+%c T 中 c 表示环境上下文，T 表示主体类型。环境绑定可写成 `%{name: U = value} T`，说明绑定的类型及来源；开放环境参数使用 `c: Type.vars.Closure`。例如 `%{space: Space = space} dyn Drop` 保留动态主体需要的环境。
 
 ## 正式定义
 
@@ -23,7 +23,7 @@ fn_type -> pure? comptime? inline? (unsafe | spec | verified)? fn(parameter_type
 
 环境限定可用于一般主体类型。一个归一主体最多有一个 Closure 上下文；需要多个环境时先显式合成上下文，不把重复限定当作行并集。
 
-空环境限定等于主体类型。对函数，这意味着没有所需环境的闭包与相应函数类型接合；非函数主体也适用空环境消去。普通 fn 目标不隐式容纳非空捕获；需要环境时在完整接口中保留 `%C`。
+空环境限定等于主体类型。对函数，这意味着没有所需环境的闭包与相应函数类型接合；非函数主体也适用空环境消去。普通 fn 目标不隐式容纳非空捕获；需要环境时在完整接口中保留 `%c`。
 
 闭包默认按值捕获，Copy 复制、非 Copy 移动；独立字段、调用后状态和清理规则见[Lambda](../../functions/lambdas.md)及[闭包环境](../../functions/closure-environments.md)。闭包类型不作为用户 impl 的主体，泛型实现也不能绕过这一资格限制；调用及其他语言能力按相应内建规则取得。
 

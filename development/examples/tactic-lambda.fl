@@ -1,0 +1,30 @@
+-- The marked parameter is first, but post do reserves its slot before routing
+-- the two positional inputs. The implicit input is supplied explicitly.
+fn check_pair(
+    lambda compare: fn(bool, bool) -> bool,
+    first: bool,
+    second: bool,
+    implicit enabled: bool,
+) -> bool {
+    enabled and compare(first, second)
+}
+
+comptime fn options(...properties: T) -> T where T { properties }
+const SAMPLE = options {enabled: true};
+typealias CheckOptions = SAMPLE'type;
+
+fn configured_pair(lambda compare: fn(bool, bool) -> bool,
+                   first: bool, ...config: CheckOptions, second: bool) -> bool {
+    config.enabled and compare(first, second)
+}
+
+fn run() -> bool {
+    let direct = check_pair(_0 and not _1, true, false, .enabled = true);
+    let explicit = check_pair(true, false, .enabled = true) do |first, second| {
+        first and not second
+    };
+    -- Still a two-parameter closure, although only the first is referenced.
+    let repeated = check_pair(true, false, .enabled = true) do {_0 == _0};
+    let extended = configured_pair {true, enabled: true, false} do {_0 and not _1};
+    direct and explicit and repeated and extended
+}

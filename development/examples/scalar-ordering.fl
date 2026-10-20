@@ -1,0 +1,28 @@
+typealias Bool = true'type;
+typealias Byte = .u8'builtin;
+typealias Signed = .i128'builtin;
+typealias Char = 'a''type;
+comptime fn byte(a: Byte, b: Byte) -> (Bool, Bool, Bool, Bool) {
+    (a < b, a <= b, a > b, a >= b)
+}
+comptime fn signed(a: Signed, b: Signed) -> (Bool, Bool, Bool, Bool) {
+    (a < b, a <= b, a > b, a >= b)
+}
+comptime fn character(a: Char, b: Char) -> (Bool, Bool, Bool, Bool) {
+    (a < b, a <= b, a > b, a >= b)
+}
+comptime fn left() -> Byte { 255 }
+comptime fn right() -> Byte { 0 }
+comptime fn less() -> Bool { left() < right() }
+comptime fn less_equal() -> Bool { left() <= right() }
+comptime fn greater() -> Bool { left() > right() }
+comptime fn greater_equal() -> Bool { left() >= right() }
+comptime fn run() -> (Bool, Bool, Bool, Bool) {
+    let value: Byte = 255;
+    (0 < value, value >= 255, 'a' <= 'z',
+     1000000000000000000000000000000000000000000000 > 999999999999999999999999999999999999999999999)
+}
+comptime fn early() -> Bool { (do { return true; }) < right() }
+comptime fn early_right() -> Bool { 0 < (do { return true; }) }
+comptime fn generic(a: T, b: T) -> Bool where T, requires T == Byte { a < b }
+comptime fn specialized() -> Bool { generic<Byte>(0, 255) }

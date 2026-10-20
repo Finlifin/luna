@@ -1,0 +1,27 @@
+-- Match chooses the instance input; no matching remains in the runtime body.
+fn selected(comptime value: bool) -> bool {
+    value
+}
+
+fn opposite(comptime flag: bool) -> bool {
+    selected(flag match {
+        true => false,
+        false => true,
+    })
+}
+
+-- A normal-form head is observed without invoking its body.
+typealias Type = .Type'builtin;
+pure comptime fn Identity<T> -> Type { T }
+
+fn has_identity_head() -> bool where T {
+    selected(T match {
+        Identity<Element> => true,
+        _ => false,
+    })
+}
+
+fn run() -> (bool, bool, bool, bool) {
+    (opposite(false), opposite(true),
+     has_identity_head<Identity<bool>>(), has_identity_head<bool>())
+}

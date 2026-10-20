@@ -1,0 +1,27 @@
+-- Run with --interpret run --splice-protocol Splice.
+-- The driver binds this trait explicitly; its spelling is not magical.
+typealias Type = .Type'builtin;
+
+trait Splice {
+    assoc RuntimeTarget: Type;
+    fn splice(comptime data: Self) -> RuntimeTarget;
+}
+
+impl Splice for bool {
+    assoc RuntimeTarget: Type = (bool, bool);
+    fn splice(comptime data: bool) -> (bool, bool) {
+        construct(data)
+    }
+}
+
+-- An ordinary runtime call must survive specialization of the staged input.
+fn construct(value: bool) -> (bool, bool) {
+    (value, not value)
+}
+
+const FLAG = true;
+const OTHER = false;
+
+fn run() -> ((bool, bool), (bool, bool)) {
+    (FLAG, OTHER)
+}

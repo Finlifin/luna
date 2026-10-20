@@ -8,10 +8,10 @@ use std::sync::Arc;
 
 use ast::Ast;
 use diagnostic::{DiagnosticContext, FlurryError};
-use symbol::Symbol;
 use lex::lex;
 use parse::parser::Parser;
 use rustc_span::{SourceFile, SourceMap};
+use symbol::Symbol;
 
 use crate::binding::{BindingKind, Visibility};
 use crate::error::{ResolveError, ResolveResult};
@@ -24,6 +24,7 @@ use super::ast_scanner::AstScanner;
 
 /// Walks the VFS, parses source files, and builds the package scope tree.
 pub struct VfsScanner<'a> {
+    pub file_offset: u32,
     /// Source map for span resolution.
     pub source_map: &'a SourceMap,
     /// Diagnostic context for reporting errors.
@@ -56,6 +57,7 @@ impl<'a> VfsScanner<'a> {
         scope_gen: &'a mut ScopeIdGen,
     ) -> Self {
         Self {
+            file_offset: 0,
             source_map,
             diag_ctx,
             vfs,
@@ -91,10 +93,8 @@ impl<'a> VfsScanner<'a> {
         // Register package name in root scope
         {
             let binding = crate::binding::Binding {
-                kind: BindingKind::Module,
-                def_id: package_def,
-                defined_in: root_scope,
-                ast_ref: None,
+                entry: None,
+                kind: BindingKind::Definition(package_def, root_scope),
                 vis: Visibility::Public,
             };
             if let Some(root) = self.scope_tree.get_mut(root_scope) {
@@ -104,11 +104,45 @@ impl<'a> VfsScanner<'a> {
 
         self.def_names.push((package_def, package_name));
 
-        // Scan all source files
+        // Reserve directory module slots before attaching any source bodies.
+        let mut paths = std::collections::BTreeSet::new();
+        for directory in &self.vfs.source_directories {
+            paths.insert(directory.clone());
+        }
+        for (_, entry) in self.vfs.files() {
+            let mut parent = entry.rel_path.parent();
+            while let Some(path) = parent.filter(|p| !p.as_os_str().is_empty() && !p.is_absolute())
+            {
+                paths.insert(path.to_path_buf());
+                parent = path.parent();
+            }
+        }
+        let mut directories = std::collections::BTreeMap::new();
+        directories.insert(std::path::PathBuf::new(), package_scope_id);
+        for path in paths {
+            let parent = directories[path.parent().unwrap_or(std::path::Path::new(""))];
+            let name = Symbol::intern(&path.file_name().unwrap().to_string_lossy());
+            let scope = self.reserve_module(parent, name)?;
+            directories.insert(path, scope);
+        }
+        let mut bodies = std::collections::HashSet::new();
         let file_count = self.vfs.file_count();
         for i in 0..file_count {
             let file_id = vfs::FileId::from_raw(i as u32);
-            self.scan_source_file(file_id, package_scope_id, package_def)?;
+            let path = &self.vfs.file(file_id).rel_path;
+            let directory = path
+                .parent()
+                .filter(|p| !p.is_absolute())
+                .unwrap_or(std::path::Path::new(""));
+            let parent = *directories.get(directory).unwrap_or(&package_scope_id);
+            self.scan_source_file(file_id, parent, package_def)?;
+            let scope = self.file_scopes[&file_id];
+            if !bodies.insert(scope) {
+                return Err(ResolveError::ScopeCreationFailed {
+                    message: "multiple source bodies for one module".into(),
+                    span: rustc_span::DUMMY_SP,
+                });
+            }
         }
 
         Ok(())
@@ -131,7 +165,10 @@ impl<'a> VfsScanner<'a> {
             .and_then(|n| n.to_str())
             .unwrap_or("unknown");
 
-        let is_entry = file_name == "main.fl" || file_name == "lib.fl";
+        let is_entry = self.vfs.selected_root.map_or(
+            file_name == "main.fl" || file_name == "lib.fl",
+            |selected| selected == file_id,
+        ) || file_name == "mod.fl";
         let module_name: Option<Symbol> = if is_entry {
             None // Entry files merge into parent scope
         } else if file_name.ends_with(".fl") {
@@ -147,34 +184,7 @@ impl<'a> VfsScanner<'a> {
 
         // Determine the scope to scan into
         let scan_scope = if let Some(mod_name) = module_name {
-            let mod_def = self.def_gen.next();
-            let mod_scope_id = self.scope_gen.next();
-
-            let scope = Scope::new(
-                mod_scope_id,
-                ScopeKind::Module,
-                Some(parent_scope),
-                Some(mod_name),
-                mod_def,
-                false,
-            );
-            self.scope_tree.add_scope(scope);
-            self.scope_tree.add_child(parent_scope, mod_scope_id);
-
-            // Register the file module in the parent scope
-            let binding = crate::binding::Binding {
-                kind: BindingKind::Module,
-                def_id: mod_def,
-                defined_in: parent_scope,
-                ast_ref: None,
-                vis: Visibility::Public,
-            };
-            if let Some(ps) = self.scope_tree.get_mut(parent_scope) {
-                let _ = ps.items.define(mod_name, binding);
-            }
-            self.def_names.push((mod_def, mod_name));
-
-            mod_scope_id
+            self.reserve_module(parent_scope, mod_name)?
         } else {
             parent_scope
         };
@@ -190,7 +200,11 @@ impl<'a> VfsScanner<'a> {
         let mut scanner = AstScanner {
             ast: unsafe { &*ast_ptr },
             source_map: self.source_map,
-            file_id,
+            file_id: vfs::FileId::from_raw(
+                file_id.raw().checked_add(self.file_offset).ok_or_else(|| {
+                    ResolveError::InternalError("combined file identity space exhausted".into())
+                })?,
+            ),
             scope_tree: self.scope_tree,
             def_gen: self.def_gen,
             scope_gen: self.scope_gen,
@@ -205,6 +219,37 @@ impl<'a> VfsScanner<'a> {
         self.file_scopes.insert(file_id, scan_scope);
 
         Ok(())
+    }
+
+    fn reserve_module(&mut self, parent: ScopeId, name: Symbol) -> ResolveResult<ScopeId> {
+        let definition = self.def_gen.next();
+        let id = self.scope_gen.next();
+        let binding = crate::binding::Binding {
+            entry: None,
+            kind: BindingKind::Definition(definition, parent),
+            vis: Visibility::Package,
+        };
+        self.scope_tree
+            .get_mut(parent)
+            .unwrap()
+            .items
+            .define(name, binding)
+            .map_err(|_| ResolveError::DuplicateDefinition {
+                name: name.to_string(),
+                first_span: rustc_span::DUMMY_SP,
+                second_span: rustc_span::DUMMY_SP,
+            })?;
+        self.scope_tree.add_scope(Scope::new(
+            id,
+            ScopeKind::Module,
+            Some(parent),
+            Some(name),
+            definition,
+            false,
+        ));
+        self.scope_tree.add_child(parent, id);
+        self.def_names.push((definition, name));
+        Ok(id)
     }
 
     /// Parse a source file and store its AST in the VFS.
@@ -229,6 +274,12 @@ impl<'a> VfsScanner<'a> {
 
         let mut parser = Parser::new(self.source_map, tokens, symbols, source_file.start_pos);
         parser.parse(self.diag_ctx);
+        if self.diag_ctx.has_errors() {
+            return Err(ResolveError::FileParsingFailed {
+                message: "source file contains lexical or syntax errors".into(),
+                span: rustc_span::Span::new(source_file.start_pos, source_file.start_pos),
+            });
+        }
         let ast = parser.finalize();
         self.vfs.set_ast(file_id, ast);
 

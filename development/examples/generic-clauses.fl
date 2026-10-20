@@ -1,0 +1,15 @@
+-- Frontend/HIR example. Generic normalization and invocation are not yet wired
+-- into runtime NIR emission.
+trait Readable {}
+trait Named {}
+trait Described :- Readable + Named {}
+
+fn keep(value: T) -> T where T { value }
+fn constrained(value: T) -> T where T:- Readable + Named { value }
+fn configured(value: T) -> T
+where T, .enabled: true'type = true, quote ...code: T {
+    value
+}
+
+struct Box where T { value: T, }
+enum Maybe where T { none, some(T), }

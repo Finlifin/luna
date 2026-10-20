@@ -1,0 +1,13 @@
+typealias Type = .Type'builtin;
+pure comptime fn Mask<value: .BitVec'builtin<8>> -> Type { .u8'builtin }
+pure comptime fn Tagged<T: Type, value: T> -> Type { T }
+pure comptime fn Checked<T: Type, value: .BitVec'builtin<8>> -> Type where requires T == Mask<value> { T }
+comptime fn Build(value: .BitVec'builtin<8>) -> Type { Mask<not value> }
+comptime fn Verified(value: .BitVec'builtin<8>) -> Type { Checked<Mask<value>, value> }
+comptime fn Typed(ty: Type) -> Type { Tagged<ty, 255> }
+comptime fn Empty(ty: Type) -> Type { Tagged<ty, 0> }
+typealias First = Mask<0xAF>;
+typealias Second = Build(0x50);
+fn same(value: First) -> Second { value }
+typealias Byte = Typed(.BitVec'builtin<8>);
+typealias Zero = Empty(.BitVec'builtin<0>);

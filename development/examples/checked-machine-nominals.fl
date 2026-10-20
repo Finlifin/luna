@@ -1,0 +1,73 @@
+typealias Byte = .u8'builtin;
+typealias Bool = true'type;
+struct Pair { left: Byte, right: Byte }
+struct Box where T { value: T }
+enum Choice { none, byte(Byte), pair(Byte, Byte) }
+struct Wrap { item: Choice }
+fn literal() -> Byte {
+    let pair = Pair { left: 4, right: 5 };
+    pair.left + pair.right
+}
+fn parameter(pair: Pair) -> Byte {
+    let { left, right } = pair;
+    assumes left <= 100 and right <= 100;
+    left + right
+}
+fn generic(value: Box<Byte>) -> Byte {
+    let { value: n } = value;
+    assumes n < 255;
+    n + 1
+}
+fn field_write() -> Byte {
+    var pair = Pair { left: 4, right: 5 };
+    pair.left = 100;
+    let { left, right } = pair;
+    assumes left <= 100 and right <= 100;
+    left + right
+}
+fn known_variant() -> Byte {
+    let value = Choice.byte(4);
+    value match {
+        .none => 255,
+        .byte(n) => n + 1,
+        .pair(a, b) => { assumes a <= 100 and b <= 100; a + b },
+    }
+}
+fn variant_parameter(value: Choice) -> Byte {
+    value match {
+        .none => 0,
+        .byte(n) if n < 255 => n + 1,
+        .pair(a, b) if a <= 100 and b <= 100 => a + b,
+        _ => 0,
+    }
+}
+fn nested() -> Byte {
+    let wrap = Wrap { item: Choice.byte(4) };
+    let { item } = wrap;
+    item match { .byte(n) => n + 1, _ => 0 }
+}
+fn capture() -> Byte {
+    var pair = Pair { left: 4, right: 5 };
+    let callback = || pair.left + pair.right;
+    pair = Pair { left: 255, right: 255 };
+    callback()
+}
+comptime fn run() -> Byte {
+    let pair = Pair { left: 100, right: 155 };
+    pair.left + pair.right
+}
+enum Maybe where T { none, some(T) }
+fn generic_variant(value: Maybe<Byte>) -> Byte {
+    value match { .some(n) if n < 255 => n + 1, _ => 0 }
+}
+fn generic_variant_result() -> Byte { generic_variant(Maybe<Byte>.some(254)) }
+fn captured_variant() -> Byte {
+    var value = Choice.byte(4);
+    let callback = || value match { .byte(n) => n + 1, _ => 0 };
+    value = Choice.pair(255, 255);
+    callback()
+}
+const SAVED = Choice.byte(4);
+comptime fn restored() -> Byte {
+    SAVED match { .byte(n) => n + 1, _ => 0 }
+}

@@ -5,15 +5,15 @@
 -- print and println are compiler built-in functions, but we wrap them
 -- here so they can be extended with Display-based formatting.
 
-pub fn print(value: T) where T requires Display {
+pub fn print(value: T) where T :- Display {
     __builtin_print(value.fmt())
 }
 
-pub fn println(value: T) where T requires Display {
+pub fn println(value: T) where T :- Display {
     __builtin_println(value.fmt())
 }
 
-pub fn eprintln(value: T) where T requires Display {
+pub fn eprintln(value: T) where T :- Display {
     __builtin_eprintln(value.fmt())
 }
 

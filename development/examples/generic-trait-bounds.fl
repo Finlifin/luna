@@ -1,0 +1,25 @@
+trait Read {
+    fn read(self) -> true'type;
+}
+trait Child :- Read {}
+trait Marker {}
+
+struct Yes {}
+struct No {}
+impl Read for Yes { fn read(self) -> true'type { true } }
+impl Read for No { fn read(self) -> true'type { false } }
+impl Child for Yes {}
+impl Marker for Yes {}
+
+fn read(value: T) -> true'type where T :- Read {
+    value.read()
+}
+
+fn forward(value: U) -> true'type where U :- Child + Marker {
+    read(value)
+}
+
+fn run() -> (true'type, true'type) {
+    let first: fn(Yes) -> true'type = forward;
+    (first(Yes {}), read(No {}))
+}

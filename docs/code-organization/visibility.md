@@ -99,7 +99,7 @@ service.worker 可以通过父级查找使用 secret_limit。另一个兄弟模�
 
 ~~~flurry
 mod client {
-    use @service.secret_limit;
+    use .service.secret_limit;
 }
 ~~~
 

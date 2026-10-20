@@ -1,0 +1,19 @@
+-- Property collection produces a named structural value at comptime.
+comptime fn schema(...properties: T) -> T where T {
+    properties
+}
+
+const DEFAULT = schema {enabled: true, nested: schema {disabled: false}};
+typealias Options = DEFAULT'type;
+
+fn enabled(comptime options: Options) -> bool {
+    options.enabled and not options.nested.disabled
+}
+
+fn configure(comptime flag: bool) -> bool {
+    enabled(schema {enabled: flag, nested: schema {disabled: false}})
+}
+
+fn run() -> (bool, bool) {
+    (enabled(DEFAULT), configure(false))
+}

@@ -1,38 +1,34 @@
--- ==========================================================================
--- builtin – the foundational Flurry package
--- ==========================================================================
---
--- This package is the Flurry equivalent of Rust's `core` crate. It provides
--- the most fundamental types and traits that every program needs. The
--- compiler knows about these definitions through lang-item annotations.
---
--- Everything here is automatically available in every Flurry source file
--- (implicit prelude).
--- ==========================================================================
+-- Primitive names are ordinary public aliases. Importing this module or
+-- reexporting it through builtin.prelude supplies the non-keyword names.
+-- bool is a reserved type expression; Bool is an ordinary alias for it.
 
--- ── Primitive type aliases ─────────────────────────────────────────────────
---
--- These re-export the compiler-intrinsic primitive types so that user code
--- can refer to them by name.  The actual representation is handled by the
--- compiler; these declarations merely give them a Flurry-level identity.
+pub typealias Type = .Type'builtin;
+pub typealias Integer = .Integer'builtin;
+pub typealias Float = .Float'builtin;
+pub typealias Bool = bool;
+pub typealias char = .char'builtin;
+pub typealias str = .str'builtin;
+pub typealias Symbol = .Symbol'builtin;
+pub typealias void = .void'builtin;
+pub typealias noreturn = .noreturn'builtin;
 
--- #[lang = "int"]
-type Int = __intrinsic_int
+pub typealias u8 = .u8'builtin;
+pub typealias u16 = .u16'builtin;
+pub typealias u32 = .u32'builtin;
+pub typealias u64 = .u64'builtin;
+pub typealias u128 = .u128'builtin;
+pub typealias usize = .usize'builtin;
+pub typealias i8 = .i8'builtin;
+pub typealias i16 = .i16'builtin;
+pub typealias i32 = .i32'builtin;
+pub typealias i64 = .i64'builtin;
+pub typealias i128 = .i128'builtin;
+pub typealias isize = .isize'builtin;
+pub typealias f32 = .f32'builtin;
+pub typealias f64 = .f64'builtin;
 
--- #[lang = "float"]
-type Float = __intrinsic_float
-
--- #[lang = "bool"]
-type Bool = __intrinsic_bool
-
--- #[lang = "char"]
-type Char = __intrinsic_char
-
--- #[lang = "str"]
-type String = __intrinsic_string
-
--- #[lang = "unit"]
-type Unit = ()
-
--- #[lang = "never"]
-type Never = !
+-- Existing library spelling aliases retain the same primitive identity.
+pub typealias Int = Integer;
+pub typealias Char = char;
+pub typealias Unit = void;
+pub typealias Never = noreturn;

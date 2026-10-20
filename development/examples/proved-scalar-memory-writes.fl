@@ -1,0 +1,4 @@
+typealias Type=.Type'builtin;
+struct Box where T {value:T,flag:bool,}
+fn replace(comptime T:Type,box:*Box<T>,value:T) where requires T == bool {box.*.value=value;}
+fn run()->result:bool where ensures result {var box=Box<bool>{value:false,flag:true};replace(bool,box.ref,true);box.flag}

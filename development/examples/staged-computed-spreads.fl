@@ -1,0 +1,15 @@
+comptime fn packet(flag: bool) -> (bool, bool) {
+    (flag, not flag)
+}
+
+fn selected(comptime first: bool, second: bool) -> (bool, bool) {
+    (first, second)
+}
+
+fn configured(comptime flag: bool) -> (bool, bool) {
+    selected(...packet(flag))
+}
+
+fn run() -> ((bool, bool), (bool, bool)) {
+    (configured(false), configured(true))
+}

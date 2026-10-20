@@ -101,7 +101,7 @@ test {
 
 | 想实际写出的程序 | 示例入口 |
 |---|---|
-| 用编译时输入生成字段类型，再构造运行时值 | [pair_of 类型工厂](2-level-type.md#常见示例) |
+| 用编译时输入生成字段类型，再构造运行时值 | [PairOf 类型工厂](2-level-type.md#常见示例) |
 | 查询数组头参数并取得长度 | [类型模式](type-patterns.md#常见示例) |
 | 为索引调用建立可证明的边界 | [PTC 契约链](propositional-constraints/index.md#常见示例) |
 | 从原始指令字绑定寄存器编号 | [ADD/SUB 解码](user-defined-types/fixed-width-enum-example.md#常见示例) |

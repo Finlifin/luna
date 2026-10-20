@@ -1,0 +1,10 @@
+fn literal_foundations() {
+    -- Numerals keep their source spelling until semantic evaluation.
+    let large = 1234567890123456789012345678901234567890;
+    let mask = 0xFFFF_FFFF_FFFF_FFFF_FFFF;
+    let precise = 1.2345678901234567890123456789e10000;
+    let label = "Unicode: \x{3A3}\n" "literal dollar: \$name";
+    let scalar = '\x{10FFFF}';
+    23custom_unit;
+    large matches 1234567890123456789012345678901234567890;
+}

@@ -7,7 +7,7 @@
 //! (`TyFn`, `TyPtr`, `TyOptional`, …).
 
 use rustc_span::Span;
-use symbol::Symbol;
+use symbol::{DefId, Symbol};
 
 use crate::body::BodyId;
 use crate::common::{Arg, BinOp, Ident, Lit, Path, TyParam, UnOp};
@@ -25,14 +25,52 @@ pub struct Expr<'hir> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind<'hir> {
     Lit(Lit),
+    /// A comptime code value; its body is checked as runtime code.
+    CodeQuote(&'hir Expr<'hir>, Vec<CodeSubstitution<'hir>>),
+    CodePatternQuote(&'hir Pattern<'hir>, Vec<CodeSubstitution<'hir>>),
+    /// Obtain a comptime code value and connect its runtime interface here.
+    CodeSplice(&'hir Expr<'hir>, Vec<CodeSubstitution<'hir>>),
+    ContextualExprType(Vec<CodeContextBinding<'hir>>, &'hir Expr<'hir>),
+    ContextualPatternType(&'hir Expr<'hir>, Vec<CodeContextBinding<'hir>>),
+    /// A request for the literal-conversion protocol, selected in elaboration.
+    /// The suffix identifies the protocol request, not a resolved value name.
+    LiteralConversion {
+        literal: &'hir Expr<'hir>,
+        suffix: Ident,
+    },
     Path(Path<'hir>),
 
-    Ident(Symbol),
+    UnresolvedIdent(Symbol),
+    /// A contextual tactic-lambda parameter, bound during elaboration.
+    TacticParameter(usize),
+    /// Declaration-routed argument with its own tactic-lambda boundary.
+    TacticArgument(&'hir Expr<'hir>),
+    /// A trailing-do body whose closure arity is determined at its input slot.
+    PostLambdaBody(BodyId),
+    ResolvedLocal(Symbol, HirId),
+    ResolvedFnParam(Symbol, HirId),
+    ResolvedClauseParam(Symbol, DefId),
+    ResolvedDef {
+        name: Symbol,
+        has_clause_param: bool,
+        def_id: DefId,
+        // scope_id: ..
+    },
+    ResolvedLoopLabel(Symbol, HirId),
+
     SelfValue,
 
     Index(&'hir Expr<'hir>, &'hir Expr<'hir>),
+    Range {
+        start: Option<&'hir Expr<'hir>>,
+        end: Option<&'hir Expr<'hir>>,
+        inclusive: bool,
+    },
     Application(&'hir Expr<'hir>, &'hir [Arg<'hir>]),
     ExtendedApplication(&'hir Expr<'hir>, &'hir [Arg<'hir>]),
+    /// Elaboration-generated packet for a selected property collection entry.
+    /// Retains source fields so ordinary argument inference can defer/retry it.
+    CollectedProperties(&'hir [FieldExpr<'hir>]),
     NFApplication(&'hir Expr<'hir>, &'hir [Arg<'hir>]),
 
     Binary(BinOp, &'hir Expr<'hir>, &'hir Expr<'hir>),
@@ -47,18 +85,39 @@ pub enum ExprKind<'hir> {
     Block(&'hir Block<'hir>),
     Loop(&'hir Block<'hir>),
     Match(&'hir Expr<'hir>, &'hir [PatternArm<'hir>]),
+    /// Request/propagate the effects of a computation (`value#`).
+    EffectRequest(&'hir Expr<'hir>),
+    /// Install branches around a computation. Branches execute in the outer
+    /// effect environment; the computation retains this handler on resumption.
+    EffectHandle(&'hir Expr<'hir>, &'hir [PatternArm<'hir>]),
     Assign(&'hir Expr<'hir>, &'hir Expr<'hir>),
     AssignOp(BinOp, &'hir Expr<'hir>, &'hir Expr<'hir>),
+    Assumes(&'hir Expr<'hir>),
+    /// Explicit permission to retain the computation for instantiation.
+    /// Does not relax ordinary definition-side operation checks.
+    Defer(&'hir Expr<'hir>),
+    /// A source-level requirement to select/unroll control flow at comptime.
+    /// The wrapped control retains its bindings, labels and branch structure.
+    InlineControl(&'hir Expr<'hir>),
+    RefinedType {
+        requirement: &'hir Expr<'hir>,
+        base: &'hir Expr<'hir>,
+    },
+    RefinementSubject,
     Return(Option<&'hir Expr<'hir>>),
+    OptionPropagate(&'hir Expr<'hir>),
     Resume(Option<&'hir Expr<'hir>>),
     Break(Ident),
+    BreakTo(HirId),
     Continue(Ident),
+    ContinueTo(HirId),
 
     Projection(&'hir Expr<'hir>, Ident),
 
     Tuple(&'hir [Expr<'hir>]),
     List(&'hir [Expr<'hir>]),
-    Object(&'hir [Expr<'hir>], &'hir [FieldExpr<'hir>]),
+    /// Preserve source order across positional values and named properties.
+    Object(Vec<ObjectEntry<'hir>>),
 
     Ref(&'hir Expr<'hir>),
     Deref(&'hir Expr<'hir>),
@@ -77,6 +136,16 @@ pub enum ExprKind<'hir> {
     Null,
     Unit,
 
+    /// Protocol-directed iteration. Keep the source construct until elaboration
+    /// selects iteration evidence; AST lowering must not invent method names.
+    For {
+        label: Option<Ident>,
+        pat: &'hir Pattern<'hir>,
+        guard: Option<&'hir Expr<'hir>>,
+        iter: &'hir Expr<'hir>,
+        body: &'hir super::Block<'hir>,
+    },
+
     /// TODO: inline control flow expressions
     InlineIf {
         cond: &'hir Expr<'hir>,
@@ -93,17 +162,20 @@ pub enum ExprKind<'hir> {
 
     /// Pointer type `*T`.
     TyPtr(&'hir Expr<'hir>),
+    TyClosure(&'hir Expr<'hir>, &'hir Expr<'hir>),
+    TyClosureEnvironment(&'hir [ClosureEnvironmentBinding<'hir>]),
     /// Optional type `??`.
     TyOptional(&'hir Expr<'hir>),
     /// Function types are constructed using `TyFn` and `TyFnArrow`.
     TyFn(&'hir [TyParam<'hir>]),
+    TyComptimeFn(&'hir [TyParam<'hir>]),
     TyNFFn(&'hir [TyParam<'hir>]),
     TyFnArrow(&'hir Expr<'hir>, &'hir Expr<'hir>),
 
     /// TODO
     ReachabilityType,
     ErrorQualifiedType,
-    EffectQualifiedType,
+    EffectQualifiedType(&'hir Expr<'hir>, &'hir Expr<'hir>),
 
     /// Type inference placeholder `_`.
     TyPlaceholder,
@@ -117,7 +189,7 @@ pub enum ExprKind<'hir> {
     /// `t: T`
     TermTypedWith,
     /// `T:- U`
-    TraitBound,
+    TraitBound(&'hir Expr<'hir>, &'hir Expr<'hir>),
     /// `F:+ G`
     LambdaBound,
     /// `t:- U`
@@ -131,7 +203,31 @@ pub enum ExprKind<'hir> {
     Forall,
     Exist,
 
+    Builtin(Symbol),
+    TakeOld(&'hir Expr<'hir>),
+    TakeBitVec(&'hir Expr<'hir>),
+    TakeTagName(&'hir Expr<'hir>),
+    /// Structural enumeration keeps runtime elements distinct from comptime shape.
+    TakeTupleEnumerate(&'hir Expr<'hir>),
+    TypeOf(&'hir Expr<'hir>),
+    MultiDeref(&'hir Expr<'hir>),
+
     Invalid,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodeSubstitution<'hir> {
+    pub port: Ident,
+    pub binding: &'hir Expr<'hir>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodeContextBinding<'hir> {
+    pub hir_id: HirId,
+    pub name: Ident,
+    pub ty: &'hir Expr<'hir>,
+    /// Original lexical association, never resolved again at the splice site.
+    pub default: Option<&'hir Expr<'hir>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -145,9 +241,16 @@ pub struct Block<'hir> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CondictionArm<'hir> {
     pub hir_id: HirId,
-    pub cond: &'hir Expr<'hir>,
+    /// None denotes the explicit fallback arm, not a synthetic true expression.
+    pub cond: Option<&'hir Expr<'hir>>,
     pub body: &'hir Expr<'hir>,
     pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ObjectEntry<'hir> {
+    Value(&'hir Expr<'hir>),
+    Property(FieldExpr<'hir>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -163,4 +266,11 @@ pub struct ClosureParam<'hir> {
     pub pat: Pattern<'hir>,
     pub ty: Option<&'hir Expr<'hir>>,
     pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClosureEnvironmentBinding<'hir> {
+    pub name: Ident,
+    pub ty: &'hir Expr<'hir>,
+    pub value: Option<&'hir Expr<'hir>>,
 }

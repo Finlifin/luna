@@ -1,0 +1,55 @@
+typealias Byte = .u8'builtin;
+typealias Signed = .i8'builtin;
+typealias Bool = true'type;
+
+fn increment(value: Byte) -> Byte {
+    assumes value < 255;
+    value + 1
+}
+fn product(a: Byte, b: Byte) -> Byte {
+    assumes a <= 15 and b <= 17;
+    a * b
+}
+fn difference(value: Byte) -> Byte {
+    assumes value >= 10;
+    value - 10
+}
+fn negative(value: Signed) -> Signed {
+    assumes value > -128;
+    -value
+}
+fn guarded(value: Byte) -> Byte {
+    if value < 255 { value + 1 } else { value }
+}
+comptime fn folded() -> Byte { (10 + 2) * 3 }
+comptime fn Select() -> .Type'builtin {
+    let value: Byte = 10 + 2;
+    if value == 12 { Bool } else { Byte }
+}
+typealias Chosen = Select();
+comptime fn run() -> Chosen { folded() == 36 }
+fn with_default(.value: Byte = 10 + 2) -> Byte { value }
+fn default_result() -> Byte { with_default() }
+fn left_returns() -> Byte { (do { return 7; }) + 255 }
+fn right_returns() -> Byte { 250 + (do { return 9; }) }
+fn operand_snapshots() -> Byte {
+    var value: Byte = 250;
+    value + (do { value = 0; value })
+}
+fn checked_iteration(flag: Bool) -> Byte {
+    var value: Byte = 0;
+    while flag {
+        assumes value < 255;
+        value = value + 1;
+        break;
+    }
+    value
+}
+comptime fn signed_edge() -> .i128'builtin {
+    let value: .i128'builtin = -170141183460469231731687303715884105728;
+    value + 1
+}
+comptime fn unsigned_edge() -> .u128'builtin {
+    let value: .u128'builtin = 340282366920938463463374607431768211455;
+    value - 1
+}

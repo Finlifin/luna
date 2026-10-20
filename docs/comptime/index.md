@@ -8,6 +8,101 @@ Flurry 程序中的一部分计算由编译器执行，其余计算留给生成�
 
 输入尚未确定时，编译器仍能利用操作的契约检查代码。知道一个结果满足什么条件，往往已经足以检查后面的操作，而不必先把这个结果完整算出来。
 
+## 当前局部 const 实现
+
+runtime 正文中的局部 `const` 已支持编译时求值的标量、Type、元组及名义聚合数据，并可作不可反驳的解构绑定。后续使用取得完成的数据，不留下 runtime initializer；编译时初始化不能读取 runtime 参数或局部状态，也不能调用 runtime 函数。
+
+~~~flurry
+pure comptime fn invert(value: bool) -> bool {
+    const result = not value;
+    result
+}
+
+fn configured() -> bool {
+    const Flag = bool;
+    const (enabled, disabled): Tuple<Flag, Flag> = (invert(false), invert(true));
+    const code = '(enabled and not disabled);
+    ~<code>
+}
+~~~
+
+comptime 函数中的数据 const 按每次 invocation 的输入建立绑定，不要求在检查函数定义时提前知道实参。runtime 函数中的 Type 常量可以保留当前泛型参数；normal-form 的头保持不透明，局部别名不会使 Identity<T> 等于 T。quoted code 仍走独立的代码值路径，普通数据与代码别名可组合使用。
+
+局部 const 也可保存 runtime 函数声明身份、固定的泛型函数实例，以及包含函数值的元组／记录；保存身份本身不调用该函数。闭包拥有的捕获环境可按当前值重建，包含调用后已更新的环境字段。图内同一闭包的多个引用及嵌套共享引用保持共享；分别构造的按值捕获闭包仍有独立环境。每次常量物化重新分配内部局部身份，并建立独立的环境快照。const initializer 中创建的闭包仍属于 comptime，后续 const 可调用它，但不能直接在 runtime 调用。外部活跃指针捕获与循环闭包对象图仍被拒绝。runtime 正文中的 const guard／else 仍未接通。这些是实现边界，不缩减后文的完整阶段契约。
+
+~~~flurry
+fn invert_runtime(value: bool) -> bool { not value }
+
+fn selected_callback() -> bool {
+    const action = invert_runtime;
+    action(false)
+}
+
+fn computed_with_closure() -> bool {
+    const action = do { let enabled = true; |value: bool| enabled and value };
+    const result = action(true);
+    result
+}
+~~~
+
+同一快照内的闭包状态更新可观察，而不会串到另一份快照：
+
+~~~flurry
+fn toggled_twice() -> bool {
+    const actions = do {
+        var flag = false;
+        let toggle = || { flag = not flag; flag };
+        (toggle, toggle)
+    };
+    const result = do {
+        let (first, second) = actions;
+        first() and not second()
+    };
+    result
+}
+~~~
+
+两次调用操作同一闭包环境，所以结果为 true。若分别写两个 lambda，各自按值捕获 flag，它们不会因此共享 flag 的存储。通过外部指针建立共享状态属于另一种依赖，不能用上述快照替代。
+
+当前实现支持 comptime 内部的临时标量指针：局部取址、字段指针投影、读写，以及同阶段函数和闭包间的指针传递。例如：
+
+```flurry
+comptime fn set(target: *bool, value: bool) {
+    target.* = value;
+}
+
+comptime fn compute() -> bool {
+    let cell = false;
+    let pointer = cell.ref;
+    set(pointer, true);
+    cell
+}
+```
+
+这里的 intrinsic 标量也包括仅编译时的任意精度 Integer 和精确 Float。它们可以在 comptime 局部存储中取址、读取和更新，不需要因为解释器使用大数表示就额外声明 Copy：
+
+```flurry
+typealias Integer = .Integer'builtin;
+comptime fn increment(value: *Integer) { value.* = value.* + 1; }
+comptime fn count() -> Integer {
+    var value: Integer = 1000000000000000000000000000000000000000000;
+    increment(value.ref);
+    value
+}
+```
+
+大数复制与运算继续消耗执行预算；这不允许 Integer、Float 或指向它们的指针作为 runtime 存储，也不允许临时存储指针逃逸到物化结果。
+
+指针使用解释器的存储身份，不暴露宿主地址，也不持有存储所有权。离开作用域后访问该存储会在 comptime invocation 中报告失效指针；失败后的下一次 invocation 仍可正常执行。结果物化继续拒绝存储指针，包括闭包捕获中的指针，因此不能把临时存储带入 runtime 常量。intrinsic 标量及指针值可直接传送。聚合值的指针读取与替换要求同时绑定 Copy 和 Drop 协议，并取得具体的 Copy 能力、表示及清理合法性证据；不能仅凭字段都是标量便默认可复制。更一般的存储提升和非 Copy 传送仍未完成。这些支持不取消 pure、阶段边界或现有资源契约的检查。
+
+聚合传送的资源证据使用独立、不可变的声明与布局快照，不把 Drop 等 runtime 方法体引入 comptime 执行包。嵌套字段逐项检查：外层声明 Copy 不能掩盖缺少 Copy 的子对象或非平凡清理责任。普通常量结果与 Type 结果的 invocation 都使用该证据，证明开销计入求值预算。未绑定协议或证据不成立时，受需的 invocation 拒绝执行传送；原始解释器也不会自行猜测协议身份。
+
+泛型 comptime 函数可以先形成 `p.*` 读取和写回，在 invocation 中使用实例化后的类型检查资源证据。例如 `comptime fn read(p:*T)->T where T :- Copy {p.*}` 不要求定义时就知道 T 的字段布局。类型约束不能替代具体的表示与清理检查；即使泛型外层满足 Copy，内部字段承担 Drop 责任时也不能复制。诊断保留证据失败原因，以区分协议未绑定、具体类型缺少 Copy 和清理责任不满足等情况。
+
+证据查询直接消耗当前 invocation 的剩余预算，扣除后才执行传送和后续表达式。读取还需支付实际复制表示的开销。复制包含指针字段的聚合值保留这些指针的目标身份，不会复制目标存储或延长它的寿命；目标失效后仍不可访问，含指针的聚合值也不能借助 Copy 逃逸到物化常量中。
+
+指针上的 BitVec 写回也可以在 comptime 执行。求值先固定目标指针，再按顺序计算选择范围和右值，最后读取仍需保留的位并写回；因此范围表达式重新绑定指针变量不会改变已选定目标，右值对原存储其它位的更新也不会丢失。空范围仍求值右值。宽度、边界、表示合法性和目标寿命继续检查，提前 return 不执行后续右值或写入。
+
 ## 语法
 
 本节列出阅读入口；`expr`、`parameter`、`result`、`clauses`、`statement` 和 `block` 复用[全局语法](../grammar/syntax)。
@@ -107,6 +202,8 @@ fn select_value(comptime first: bool, left: i32, right: i32) -> i32 {
 3. 需要普通值跨界转换时，执行对应 `Splice` 方法的 runtime 实例，或执行保持其行为的优化结果。
 
 不变量：运行时不承担“重新猜测编译时类型”的工作；必需的编译时检查失败时，不得交付依赖该失败结果的实例。运行时代价由保留的操作决定，不能仅凭源码含 comptime 就断言为零。
+
+验证 runtime 实例时，函数体与实例键必须一起取得。普通 `comptime` 输入可能已经从残余签名中消失，但仍属于实例身份；不能把这些输入重新当作原始模板的子句参数代入。当前 cleanup 验证视图保留按声明及完整实例参数索引的残余函数体，内存摘要和回调结果分析使用同一查找规则。实例身份不会因为参数已擦除就合并，也不会因此展开 normal-form 类型头。
 
 ## 编译器实现引导
 

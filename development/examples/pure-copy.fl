@@ -1,0 +1,13 @@
+trait Copy {}
+trait Drop { fn drop(*self); }
+
+struct Flag { value: bool }
+impl Copy for Flag {}
+
+pure fn duplicate(value: Flag) -> (Flag, Flag) {
+    (value, value)
+}
+fn run() -> bool {
+    let (first, second) = duplicate(Flag { value: true });
+    first.value and second.value
+}

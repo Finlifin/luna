@@ -5,7 +5,7 @@
 //! table, which is the primary way to look up a node by [`HirId`].
 
 use crate::ClauseParam;
-use crate::body::Param;
+use crate::body::BodyParam;
 use crate::clause::ClauseConstraint;
 use crate::decl::LetDecl;
 use crate::expr::{Block, Expr};
@@ -22,7 +22,7 @@ pub enum Node<'hir> {
     FieldDef(&'hir FieldDef<'hir>),
     Variant(&'hir Variant<'hir>),
     ClauseConstraint(&'hir ClauseConstraint<'hir>),
-    Param(&'hir Param<'hir>),
+    Param(&'hir BodyParam<'hir>),
     ClauseParam(&'hir ClauseParam<'hir>),
     LetDecl(&'hir LetDecl<'hir>),
 }

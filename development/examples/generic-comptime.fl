@@ -1,0 +1,18 @@
+typealias Type = .Type'builtin;
+comptime fn identity(value: T) -> T where T { value }
+comptime fn Forward(value: T) -> Type where T { value'type }
+comptime fn Pair(value: T) -> Type where T { (T, T) }
+typealias Byte = identity(.u8'builtin);
+typealias Word = identity(.u16'builtin);
+typealias Inferred = Forward(true);
+typealias PairOfFlags = Pair(false);
+fn byte() -> Byte { 255 }
+fn word() -> Word { 65535 }
+fn flag() -> Inferred { true }
+fn pair() -> PairOfFlags { (true, false) }
+comptime fn nested() -> .Integer'builtin { identity(identity(12345678901234567890)) }
+comptime fn relay(value: T) -> T where T { identity(value) }
+comptime fn Mixed() -> (Type, Type) {
+    (relay(.u8'builtin), relay(.u16'builtin))
+}
+comptime fn ConcretePair() -> Type { Pair(false) }

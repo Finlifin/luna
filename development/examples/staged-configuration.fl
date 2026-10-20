@@ -1,0 +1,35 @@
+typealias Byte = .u8'builtin;
+typealias F32 = .f32'builtin;
+
+fn keep(comptime value: T) -> T where T {
+    value
+}
+
+-- The default observes this call's tuple, using the declared type equality.
+fn enabled(options: (T, bool), .value: bool = do {
+    let (primary, fallback) = options;
+    primary or fallback
+}) -> bool where T, requires T == bool {
+    value
+}
+
+fn configure(comptime input: Byte, comptime scale: F32) -> (Byte, F32, bool) {
+    let bits = input'bitvec;
+    let inverted = not bits;
+    let packet = inverted[0..4] ++ bits[0..4];
+    let encoded = packet.as(Byte);
+    let weight = do {
+        let doubled = scale * 2.0;
+        doubled + 1.0
+    };
+    let changed = encoded != input;
+    let ready = keep(do {
+        let read: %{changed: bool} comptime fn() -> bool = || changed;
+        read()
+    });
+    (keep(encoded), keep(weight), enabled((ready, false)))
+}
+
+fn run() -> ((Byte, F32, bool), (Byte, F32, bool)) {
+    (configure(175, 1.5), configure(60, 0.0))
+}

@@ -1,0 +1,28 @@
+-- Explicit development analysis; this does not execute Drop.
+-- Select CopyForAnalysis through --copy-protocol, rather than by its spelling.
+trait CopyForAnalysis {}
+
+struct Cell {
+    value: bool,
+}
+
+struct View {
+    pointer: *bool,
+}
+
+fn choose(first: *bool, second: *bool, flag: bool) -> *bool {
+    flag match {
+        true => first,
+        false => second,
+    }
+}
+
+fn entry() {
+    let first = Cell { value: true };
+    let second = Cell { value: false };
+    let view = View {
+        pointer: choose(first.value.ref, second.value.ref, true),
+    };
+    let { pointer: selected } = view;
+    let observed = selected.*;
+}

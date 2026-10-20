@@ -1,0 +1,28 @@
+trait Source {
+    assoc Item: .Type'builtin;
+    comptime fn initial() -> Item;
+}
+
+impl Source for bool {
+    assoc Item: .Type'builtin = bool;
+    comptime fn initial() -> bool { true }
+}
+
+impl Source for 'x''type {
+    assoc Item: .Type'builtin = 'x''type;
+    comptime fn initial() -> 'x''type { 'x' }
+}
+
+comptime fn read() -> T.as(Source).Item where T :- Source {
+    T.as(Source).initial()
+}
+
+trait Defaults {
+    assoc flag: bool = read<bool>();
+    assoc letter: 'x''type = read<'x''type>();
+}
+impl Defaults for bool {}
+
+fn entry() -> bool {
+    bool.as(Defaults).flag and bool.as(Defaults).letter == 'x'
+}

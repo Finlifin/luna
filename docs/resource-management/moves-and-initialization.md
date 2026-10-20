@@ -34,6 +34,25 @@ application -> expr(argument*)
 
 存在用户 Drop 本身不构成一律禁止部分移出的规则。决定接受性的，是实际 Drop 和剩余清理的前提。
 
+解构中的字段绑定也按 Copy 能力区分：复制字段不使父对象中的原字段变成已移出。下面取得 `ready` 的副本后，Packet 的析构仍可读取原来的 bool：
+
+~~~flurry
+struct Packet { ready: bool }
+
+impl Drop for Packet {
+    fn drop(*self) {
+        assumes self.ready.*;
+    }
+}
+
+fn read_ready() -> bool {
+    let {ready} = Packet {ready: true};
+    ready
+}
+~~~
+
+同一次解构可以复制 bool 字段、同时移动另一个仿射字段；剩余父对象的 Drop 可以读取前者，不能无条件读取后者。名义字段需要它自身的 Copy 依据，不能因内部只有 bool 就自动按复制处理。嵌套解构对各层父对象应用相同规则。
+
 向已移出位置安装新值可以恢复该位置，但不能通过重置一个"已初始化"标记来代替构造。覆盖仍持有的值时，须先兑现其旧责任。
 
 ### 移动不修复指针

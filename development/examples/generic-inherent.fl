@@ -1,0 +1,25 @@
+-- Member names restrict the implementation domain before precision selection.
+typealias Flag = true'type;
+
+struct Box where T {
+    value: T,
+}
+
+impl Box<T> where T {
+    fn make(value: T) -> Self { Box<T> { value: value } }
+    fn get(self) -> T { self.value }
+    fn describe(self) -> Flag { false }
+}
+
+impl Box<Flag> {
+    fn describe(self) -> Flag { self.value }
+}
+
+fn roundtrip(value: U) -> U where U {
+    let make = Box<U>.make;
+    make(value).get()
+}
+
+fn run() -> Flag {
+    Box<Flag>.make(roundtrip(true)).describe()
+}

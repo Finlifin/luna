@@ -59,6 +59,24 @@ typealias 只为目标提供另一个名字。目标为范式应用时，别名�
 
 调用点元数据通过独立的 implicit 参数机制传入，不用可选子句默认值代替。默认表达式的合法名称仍由参数与作用域规则决定；defer 不创造可见性。
 
+有括号边界的参数列表中，默认值可以直接使用结构构造表达式。前面的值参数也能决定后续默认值的类型；依赖未知输入的计算需要显式 `defer`：
+
+```flurry
+struct Config where enabled: bool { flag: bool }
+
+pure comptime fn Packet<
+    .enabled: bool = true,
+    .value: Config<enabled> = defer Config<enabled> { flag: enabled }
+> -> Type { bool }
+
+typealias DefaultPacket = Packet<>;
+typealias DisabledPacket = Packet<.enabled = false>;
+typealias OverridePacket = Packet<.value = Config<true> { flag: false }>;
+```
+
+默认值读取本次应用中前面参数的实际值；显式提供 `value` 时不执行它的默认构造。默认路径与显式路径都必须满足对应的 `Config<enabled>` 实例身份。`Packet` 本身仍保留范式头，不执行函数体来取得 `bool`。
+
+
 ### 资源失败
 
 允许一般编译时计算，不意味着保证其终止。工具链可以对 interpretation 和 invocation 使用不同预算；必需求值因预算耗尽而失败时，编译不能依靠尚未得到的结果继续生成实例。

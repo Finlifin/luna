@@ -1,0 +1,15 @@
+typealias Type = .Type'builtin;
+typealias Bool = true'type;
+typealias Char = 'a''type;
+typealias Reader = %{flag: Bool} comptime fn(Bool) -> Bool;
+typealias ChangedReader = Reader -> Char;
+comptime fn ResultType(input: Type) -> Type { input -> Char }
+typealias ComputedReader = ResultType(Reader);
+comptime fn run() -> Char {
+    let flag = true;
+    let callback: ChangedReader = |argument| {
+        if flag and argument { 'a' } else { 'b' }
+    };
+    let same: ComputedReader = callback;
+    same(true)
+}

@@ -12,6 +12,7 @@ pub const LEX_INVALID_ESCAPE: u32 = LEX_ERROR_BASE + 5;
 pub const LEX_INVALID_NUMBER: u32 = LEX_ERROR_BASE + 6;
 pub const LEX_UNEXPECTED_CHAR: u32 = LEX_ERROR_BASE + 7;
 pub const LEX_EMPTY_CHAR: u32 = LEX_ERROR_BASE + 8;
+pub const LEX_INVALID_CHAR: u32 = LEX_ERROR_BASE + 9;
 
 /// Lexer error types
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +41,8 @@ pub enum LexError {
     },
     /// Empty character literal
     EmptyChar { start: u32, message: String },
+    /// Character literal containing more than one Unicode scalar
+    InvalidChar { start: u32, message: String },
 }
 
 impl LexError {
@@ -53,6 +56,7 @@ impl LexError {
             LexError::InvalidNumber { message, .. } => message,
             LexError::UnexpectedChar { message, .. } => message,
             LexError::EmptyChar { message, .. } => message,
+            LexError::InvalidChar { message, .. } => message,
         }
     }
 
@@ -66,6 +70,7 @@ impl LexError {
             LexError::InvalidNumber { start, .. } => *start,
             LexError::UnexpectedChar { position, .. } => *position,
             LexError::EmptyChar { start, .. } => *start,
+            LexError::InvalidChar { start, .. } => *start,
         }
     }
 
@@ -78,12 +83,15 @@ impl LexError {
             LexError::UnterminatedChar { .. } => start + 1,
             // 对于空字符，高亮整个 ''
             LexError::EmptyChar { .. } => start + 2,
+            LexError::InvalidChar { .. } => start + 1,
             // 对于无效转义，高亮转义序列 (如 \q 为 2 个字符)
-            LexError::InvalidEscape { .. } => start + 2,
+            LexError::InvalidEscape { escape_char, .. } => {
+                start + 1 + escape_char.len_utf8() as u32
+            }
             // 对于无效数字，只高亮开始位置
             LexError::InvalidNumber { .. } => start + 1,
             // 对于意外字符，高亮整个字符（考虑Unicode）
-            LexError::UnexpectedChar { .. } => start + 1,
+            LexError::UnexpectedChar { char, .. } => start + char.len_utf8() as u32,
             // 对于未终止的注释，高亮注释开始
             LexError::UnterminatedComment { .. } => start + 2,
             // 对于未终止的宏，高亮宏开始 '{
@@ -112,6 +120,7 @@ impl FlurryError for LexError {
             LexError::InvalidNumber { .. } => LEX_INVALID_NUMBER,
             LexError::UnexpectedChar { .. } => LEX_UNEXPECTED_CHAR,
             LexError::EmptyChar { .. } => LEX_EMPTY_CHAR,
+            LexError::InvalidChar { .. } => LEX_INVALID_CHAR,
         }
     }
 
@@ -125,6 +134,7 @@ impl FlurryError for LexError {
             LexError::InvalidNumber { .. } => "invalid_number",
             LexError::UnexpectedChar { .. } => "unexpected_char",
             LexError::EmptyChar { .. } => "empty_char",
+            LexError::InvalidChar { .. } => "invalid_char",
         }
     }
 
@@ -167,12 +177,26 @@ impl FlurryError for LexError {
                     )
                     .emit(diag_ctx);
             }
+            LexError::InvalidChar { .. } => {
+                diag_ctx
+                    .error(self.message().to_string())
+                    .with_code(error_code)
+                    .with_primary_span(span)
+                    .with_error_label(
+                        span,
+                        "Character literal must contain one Unicode scalar".to_string(),
+                    )
+                    .with_help(
+                        "Use double quotes for a string containing multiple characters".to_string(),
+                    )
+                    .emit(diag_ctx);
+            }
             LexError::InvalidEscape { escape_char, .. } => {
                 diag_ctx.error(self.message().to_string())
                     .with_code(error_code)
                     .with_primary_span(span)
                     .with_error_label(span, format!("Invalid escape sequence '\\{}'", escape_char))
-                    .with_help("Valid escape sequences are: \\n, \\t, \\r, \\\\, \\', \\\", \\0, \\a, \\b, \\f, \\v, \\x{...}, \\u{...}".to_string())
+                    .with_help("Valid escape sequences are: \\n, \\t, \\r, \\\\, \\', \\\", \\0, \\$, \\x{...} (1–6 hexadecimal digits encoding a Unicode scalar)".to_string())
                     .emit(diag_ctx);
             }
             LexError::InvalidNumber { .. } => {

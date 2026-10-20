@@ -1,0 +1,19 @@
+typealias Type = .Type'builtin;
+typealias Int = .Integer'builtin;
+pure comptime fn Tagged<T: Type, value: T> -> Type { T }
+comptime fn UnitInput(ty: Type) -> Type { Tagged<ty, ()> }
+comptime fn TupleInput(ty: Type) -> Type { Tagged<ty, (.u8'builtin, ())> }
+comptime fn NestedInput(ty: Type) -> Type { Tagged<ty, ((.u8'builtin, ()), .u16'builtin)> }
+comptime fn BranchInput(ty: Type, flag: true'type) -> Type {
+    Tagged<ty, if flag { (.u8'builtin, ()) } else { (.u16'builtin, ()) }>
+}
+comptime fn Pick(index: Int) -> Type { if index == 1 { .u8'builtin } else { .u16'builtin } }
+comptime fn Ordered(ty: Type) -> Type {
+    var count: Int = 0;
+    Tagged<ty, (do { count = count + 1; Pick(count) }, do { count = count + 1; Pick(count) })>
+}
+typealias VoidType = UnitInput(Type);
+typealias PairType = TupleInput(Type);
+typealias PairValue = TupleInput((Type, ()));
+typealias NestedType = NestedInput(Type);
+typealias BranchType = BranchInput(Type, false);

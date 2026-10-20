@@ -1,0 +1,52 @@
+typealias Byte = .u8'builtin;
+fn saturated(value: Byte) -> Byte {
+    value match {
+        255 => value,
+        _ => value + 1,
+    }
+}
+fn guarded(value: Byte) -> Byte {
+    value match {
+        n if n < 255 => n + 1,
+        _ => value,
+    }
+}
+fn alternatives(value: Byte) -> Byte {
+    value match {
+        254 or 255 => value,
+        n => { assumes n < 254; n + 2 },
+    }
+}
+fn failure_effect(value: Byte) -> Byte {
+    var current: Byte = 250;
+    value match {
+        n if (do { current = 4; false }) => n,
+        _ => current + 1,
+    }
+}
+fn captured(value: Byte) -> Byte {
+    value match {
+        n if n < 255 => { let increment = || n + 1; increment() },
+        _ => value,
+    }
+}
+comptime fn run() -> Byte {
+    let value: Byte = 254;
+    value match { 255 => value, _ => value + 1 }
+}
+fn remapped(value: Byte) -> Byte {
+    value match {
+        ((n if n < 10) or (n if n >= 245)) if n < 255 => n + 1,
+        _ => value,
+    }
+}
+fn transformed(value: Byte) -> Byte {
+    value match {
+        ((n if n < 255) and n + 1 is next) => next,
+        _ => value,
+    }
+}
+fn binding(value: Byte) -> Byte {
+    let n if n < 255 = value else { return value; }
+    n + 1
+}

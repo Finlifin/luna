@@ -1,0 +1,27 @@
+typealias Type = .Type'builtin;
+typealias Int = .Integer'builtin;
+pure comptime fn Bits<N: Int> -> Type { .BitVec'builtin<N> }
+pure comptime fn Identity<T: Type> -> Type { T }
+pure comptime fn Tagged<T: Type, value: T> -> Type { T }
+-- Formation must not run this body.
+comptime fn Diverge() -> Type { Diverge() }
+comptime fn diverge() -> Int { diverge() }
+pure comptime fn Pair<A: Int, B: Int> -> Type { Diverge() }
+comptime fn Build(width: Int) -> Type { Bits<width> }
+comptime fn Wrap(ty: Type) -> Type { Identity<ty> }
+comptime fn Tag(value: Int) -> Type { Tagged<Int, value> }
+comptime fn Ordered() -> Type {
+    var count: Int = 0;
+    Pair<do { count = count + 1; count }, do { count = count + 1; count }>
+}
+comptime fn Early() -> Type {
+    Pair<do { return .u8'builtin; }, diverge()>
+}
+typealias Byte = Build(8);
+typealias SameByte = Build(4 * 2);
+fn same(value: Byte) -> SameByte { value }
+
+pure comptime fn Mixed<A: Type, B: Type, value: B, C: Type> -> Type { B }
+comptime fn Interleaved(first: Type, last: Type, value: Int) -> Type {
+    Mixed<first, Int, value, last>
+}

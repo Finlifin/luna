@@ -1,0 +1,82 @@
+typealias Type = .Type'builtin;
+typealias Char = 'x''type;
+
+fn pair(comptime T: Type, value: T, other: G) -> (T, G) where G {
+    (value, other)
+}
+
+-- The caller's T remains a local Type input during checking. Both the
+-- ordinary input and the inferred clause argument refer to that same binding.
+fn repeat(comptime T: Type, value: T) -> (T, T) {
+    pair(T, value, value)
+}
+
+trait Mapper {
+    fn pair(self, comptime T: Type, value: T, other: G) -> (T, G) where G;
+}
+struct Host {}
+impl Mapper for Host {
+    fn pair(self, comptime T: Type, value: T, other: G) -> (T, G) where G {
+        (value, other)
+    }
+}
+
+fn via_trait(comptime T: Type, value: T) -> (T, T) {
+    Host {}.as(Mapper).pair(T, value, value)
+}
+
+fn run() -> ((Char, Char), (bool, bool)) {
+    (repeat(Char, 'x'), via_trait(bool, true))
+}
+
+fn pair_default(comptime .T: Type = G, value: T, other: G) -> (T, G) where G {
+    (value, other)
+}
+
+fn forwarded_default(comptime A: Type, value: A) -> (A, A) {
+    -- G is inferred as the caller's A. The default's T binding belongs to
+    -- pair_default, so it must not capture the same-numbered caller binding.
+    pair_default(value, value)
+}
+
+fn defaults() -> (bool, bool) {
+    forwarded_default(bool, true)
+}
+
+fn identity(value: G) -> G where G {
+    value
+}
+
+fn apply(action: fn(G) -> G, value: G) -> G where G {
+    action(value)
+}
+
+fn forwarded_callback(comptime A: Type, value: A) -> A {
+    let action: fn(A) -> A = identity;
+    let higher: fn(fn(A) -> A) -> (fn(A) -> A) = identity;
+    -- The later value also supplies the context for an uninstantiated callback.
+    higher(action)(apply(identity, value))
+}
+
+fn callbacks() -> (bool, Char) {
+    (forwarded_callback(bool, true), forwarded_callback(Char, 'x'))
+}
+
+comptime fn Choose(T: Type) -> Type {
+    if T == bool { bool } else { Char }
+}
+
+fn configured(value: G, tag: H, result: K) -> K
+where G, H, .K: Type = (G, Choose(H)) {
+    result
+}
+
+fn forwarded_configuration(comptime A: Type, value: A) -> (A, bool) {
+    -- Choose receives the known bool Type; A remains an outer binding.
+    let action: fn(A, bool, (A, bool)) -> (A, bool) = configured;
+    action(value, true, (value, true))
+}
+
+fn computed_defaults() -> (Char, bool) {
+    forwarded_configuration(Char, 'x')
+}

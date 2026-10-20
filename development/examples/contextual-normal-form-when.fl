@@ -1,0 +1,27 @@
+typealias Type = .Type'builtin;
+typealias Int = .Integer'builtin;
+pure comptime fn Tagged<T: Type, value: T> -> Type { T }
+pure comptime fn Pair<T: Type, value: T, count: Int> -> Type { T }
+comptime fn Choose(ty: Type, first: true'type, second: true'type) -> Type {
+    Tagged<ty, when { first => 1, second => 2, else => 3 }>
+}
+comptime fn Ordered(ty: Type) -> Type {
+    var count: Int = 0;
+    Pair<ty, when {
+        do { count = count + 1; false } => 4,
+        do { count = count + 1; true } => do { count = count + 10; 5 },
+        do { count = count + 100; true } => 6,
+        else => 7,
+    }, count>
+}
+comptime fn Early(ty: Type, first: true'type) -> Type {
+    Tagged<ty, when { first => do { return .u16'builtin; }, else => 8 }>
+}
+comptime fn Fallback(ty: Type) -> Type { Tagged<ty, when { else => 9 }> }
+comptime fn Mixed(ty: Type, flag: true'type) -> Type {
+    Tagged<ty, when { flag => flag match { true => 10, false => 11 }, else => if flag { 12 } else { 13 } }>
+}
+comptime fn UnselectedOverflow(ty: Type) -> Type { Tagged<ty, when { true => 1, else => 256 }> }
+typealias First = Choose(.u8'builtin, true, true);
+typealias Second = Choose(.u8'builtin, false, true);
+typealias Last = Choose(.u8'builtin, false, false);

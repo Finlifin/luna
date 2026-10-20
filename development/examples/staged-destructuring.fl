@@ -1,0 +1,23 @@
+enum Input {
+    missing,
+    present(bool),
+}
+
+fn selected(comptime value: bool) -> bool { value }
+
+fn enabled(comptime supplied: bool, comptime flag: bool) -> bool {
+    selected(do {
+        var result = false;
+        while true {
+            let input = if supplied { Input.present(flag) } else { Input.missing };
+            let .present(value) if value = input else { break; };
+            result = value;
+            break;
+        }
+        result
+    })
+}
+
+fn run() -> (bool, bool, bool) {
+    (enabled(false, true), enabled(true, false), enabled(true, true))
+}

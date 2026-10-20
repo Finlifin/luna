@@ -1,0 +1,23 @@
+typealias Type = .Type'builtin;
+typealias Bool = true'type;
+typealias Chosen = Choose(.kind = Bool);
+comptime fn Choose(.kind: Type = Chosen, .copy: Type = kind) -> Type { copy }
+fn run() -> Chosen { true }
+
+typealias Nested = Compose();
+comptime fn Compose(.first: Type = Compose(.first = Bool), .second: Type = Bool) -> Type { first }
+fn nested() -> Nested { false }
+
+trait Shape {
+    comptime fn Output(self, .kind: Type = Method, .copy: Type = kind) -> Type;
+}
+struct Selector {}
+impl Shape for Selector {
+    comptime fn Output(self, .kind: Type = Method, .copy: Type = kind) -> Type { copy }
+}
+typealias Method = (Selector {}).as(Shape).Output(.kind = 'x''type);
+fn method() -> Method { 'z' }
+
+comptime fn Select(value: T, .kind: Type = Generic, .copy: Type = kind) -> Type where T { copy }
+typealias Generic = Select(true, .kind = 'x''type);
+fn generic() -> Generic { 'y' }

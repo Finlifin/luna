@@ -1,0 +1,35 @@
+typealias Type = .Type'builtin;
+typealias Bool = true'type;
+typealias Char = 'a''type;
+comptime fn SwapType(value: Type) -> Type {
+    value match { (Left, Right) => (Right, Left), _ => value }
+}
+comptime fn NestedType(value: Type) -> Type {
+    value match { ((First, Second), 'Bool) => (Second, First), _ => value }
+}
+comptime fn HasBool(value: Type) -> Bool {
+    value match { (_, 'Bool) or ('Bool, _) => true, _ => false }
+}
+comptime fn run() -> (Bool, Bool, Bool, Bool) {
+    (SwapType((Bool, Char)) == (Char, Bool),
+     SwapType(Bool) == Bool,
+     NestedType(((Bool, Char), Bool)) == (Char, Bool),
+     HasBool((Bool, Char)))
+}
+typealias Swapped = SwapType((Bool, Char));
+fn keep(value: Swapped) -> (Char, Bool) { value }
+pure comptime fn Opaque<T> -> Type { (T, T) }
+comptime fn unresolved() -> Type { SwapType(Opaque<Bool>) }
+
+comptime fn Pick(value: Type) -> Type where T {
+    value match { (Item, 'T) => Item, _ => T }
+}
+comptime fn specialized() -> Bool { Pick<Bool>((Char, Bool)) == Char }
+comptime fn OtherType(value: Type) -> Type {
+    value match { (Item, 'Bool) or ('Bool, Item) => Item, _ => value }
+}
+comptime fn boundaries() -> (Bool, Bool, Bool) {
+    (SwapType((Bool, Char, Bool)) == (Bool, Char, Bool),
+     OtherType((Bool, Char)) == Char,
+     OtherType((Char, Bool)) == Char)
+}

@@ -1,0 +1,19 @@
+-- Compile the producer, then invoke the conversion at runtime.
+-- Run with --interpret run --splice-protocol Splice.
+typealias Type = .Type'builtin;
+trait Splice {
+    assoc RuntimeTarget: Type;
+    fn splice(comptime data: Self) -> RuntimeTarget;
+}
+impl Splice for bool {
+    assoc RuntimeTarget: Type = (bool, bool);
+    fn splice(comptime data: bool) -> (bool, bool) { construct(data) }
+}
+fn construct(value: bool) -> (bool, bool) { (value, not value) }
+comptime fn invert(value: bool) -> bool { not value }
+comptime fn identity(value: T) -> T where T { value }
+const FLAG = true;
+fn forward(comptime flag: bool) -> (bool, bool) { invert(flag) }
+fn run() -> ((bool, bool), (bool, bool), (bool, bool)) {
+    (invert(FLAG), identity(false), forward(true))
+}

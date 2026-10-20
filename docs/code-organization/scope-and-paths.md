@@ -14,18 +14,16 @@ path -> id
     | projection_multi_path
     | projection_all_path
     | super_path
-    | package_path
     | path_as_bind
 projection_path -> path . id
 projection_multi_path -> path . { path* }
 projection_all_path -> path . *
 super_path -> . path
-package_path -> @ path
 path_as_bind -> path as id
 label -> : id
 ~~~
 
-这些 path 形式用于 use。普通表达式投影仍用 `expr.id`；宏导入 `@use` 见[构造宏](../macro/construction-macro.md)。
+这些 path 形式用于 use。普通表达式投影仍用 `expr.id`；`@` 仅用于宏相关语法，宏导入 `@use` 见[构造宏](../macro/construction-macro.md)。
 
 ## 正式定义
 
@@ -57,8 +55,7 @@ let／var 的新绑定在初始化完成后进入后续环境。初始化表达�
 | 形式 | 查找起点 |
 |---|---|
 | 普通首名 | 当前合法词法环境，逐层向外 |
-| 前导点 | 所属静态容器的父静态容器 |
-| @ | 当前 package 根 |
+| 前导点 `.` | 所属静态容器的父静态容器（连续前导点逐级向上） |
 
 运行时块和函数体不增加前导点所计的静态容器层级。满足无子句限制的类型容器参与该包含关系。越过 package 根是静态错误，umbrella 不提供更外层语言作用域。
 
@@ -86,7 +83,7 @@ fn main() {
 
 show 可以通过父级作用域找到 println；这不使 report.println 成为 report 自己的成员。
 
-### 父静态容器与包根
+### 父静态容器逐级定位
 
 ~~~flurry
 struct RootToken {}
@@ -96,7 +93,7 @@ mod codec {
 
     mod decoder {
         use .LocalToken;
-        use @RootToken;
+        use ..RootToken;
 
         fn local_token() -> LocalToken {
             LocalToken {}
@@ -109,7 +106,7 @@ mod codec {
 }
 ~~~
 
-第一条 use 从 codec 取 LocalToken，第二条直接从包根取 RootToken。
+第一条 use 从父容器 codec 取 LocalToken，第二条向上两级从包根取 RootToken。
 
 ### 类型容器也是相对起点
 

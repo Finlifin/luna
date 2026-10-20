@@ -35,6 +35,8 @@ for_type -> for<parameter*> expr
 
 范式应用不因函数体返回某个参数，就与该参数建立类型关系。别名指向该应用时也遵守这一规则；alias 的透明性只消除别名本身。
 
+元组也遵循这条规则。`Tuple` 的签名是 `pure comptime fn Tuple<...Es: meta.List<Type>> -> Type`：例如 `Tuple<u32, bool>` 将两个元素类型收集为一个 `meta.List<Type>` 输入，并保留 `Tuple` 的范式头。用于字段访问、解构和布局的元素结构视图不能替代这个类型身份，也不能通过展开 `Tuple` 的函数体建立类型相等关系。
+
 普通类型工厂按执行结果比较：不同工厂或不同输入可能得到同一个类型。因此不能仅凭普通调用的函数名不同断言结果不等，也不能从结果相等反推输入相等。普通执行的这些性质不构成展开范式应用的依据。
 
 for<parameter*> expr 是纯编译时函数的简写。它描述参数到结果的计算，调用和类型关系仍遵循相应纯函数与范式规则；不能由这个简写引入另一套运行时多态交付机制。
@@ -85,7 +87,7 @@ test {
 纯工厂的结果还可以用编译时检查直接比较：
 
 ~~~flurry
-pure comptime fn pair_of(T: Type) -> Type {
+pure comptime fn PairOf(T: Type) -> Type {
     struct Pair {
         first: T,
         second: T,
@@ -94,9 +96,9 @@ pure comptime fn pair_of(T: Type) -> Type {
     Pair
 }
 
-typealias FirstPair = pair_of(u32);
-typealias SecondPair = pair_of(u32);
-typealias FloatPair = pair_of(f32);
+typealias FirstPair = PairOf(u32);
+typealias SecondPair = PairOf(u32);
+typealias FloatPair = PairOf(f32);
 
 comptime {
     assumes FirstPair == SecondPair;
@@ -111,17 +113,17 @@ test {
 }
 ~~~
 
-相同纯调用复用同一结果，因而跨两个 alias 的赋值成立。`pair_of(f32)` 使用不同字段类型，不能复用该实例。
+相同纯调用复用同一结果，因而跨两个 alias 的赋值成立。`PairOf(f32)` 使用不同字段类型，不能复用该实例。
 
 并非所有类型工厂都对输入保持单射：
 
 ~~~flurry
-pure comptime fn storage_for(T: Type) -> Type {
+pure comptime fn StorageFor(T: Type) -> Type {
     u32
 }
 
 comptime {
-    assumes storage_for(i32) == storage_for(f32);
+    assumes StorageFor(i32) == StorageFor(f32);
 }
 ~~~
 

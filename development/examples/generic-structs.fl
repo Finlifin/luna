@@ -1,0 +1,27 @@
+typealias Flag = true'type;
+typealias Character = 'x''type;
+
+struct Box where T {
+    value: T,
+    ready: Flag = true,
+}
+
+fn change(value: Box<Flag>) -> Flag {
+    value.value = not value.value;
+    value.value
+}
+
+fn build(value: T) -> Box<T> where T {
+    Box<T> { value: value }
+}
+
+fn read(value: Box<T>) -> T where T {
+    value.value
+}
+
+fn run() -> (Flag, Character) {
+    let flag = build(true);
+    let character = Box<Character> { value: 'y' };
+    let result = read(character);
+    (change(flag), result)
+}

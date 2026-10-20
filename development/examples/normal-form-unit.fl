@@ -1,0 +1,20 @@
+typealias Unit = ();
+typealias Type = .Type'builtin;
+typealias Int = .Integer'builtin;
+pure comptime fn Token<value: Unit> -> Type { .u8'builtin }
+pure comptime fn Tagged<T: Type, value: T> -> Type { T }
+pure comptime fn Checked<T: Type, value: Unit> -> Type where requires T == Token<value> { T }
+comptime fn Build(value: Unit) -> Type { Checked<Token<value>, value> }
+comptime fn Typed(ty: Type) -> Type { Tagged<ty, ()> }
+comptime fn EmptyBlock(ty: Type) -> Type { Tagged<ty, do {}> }
+comptime fn Ordered() -> Int {
+    var count: Int = 0;
+    let first = Token<do { count = count + 1; }>;
+    let second = Token<if true { count = count + 2; }>;
+    count
+}
+typealias First = Token<()>;
+typealias Second = Token<do {}>;
+fn same(value: First) -> Second { value }
+typealias Concrete = Typed(Unit);
+typealias Block = EmptyBlock(Unit);

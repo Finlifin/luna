@@ -1,0 +1,16 @@
+-- Runtime defaults can call helpers whose finite, stable behavior is checked.
+-- Run with: luna default-suppliers.fl --interpret run
+fn opposite(value: bool) -> bool { not value }
+
+fn choose(
+    first: bool,
+    .second: bool = opposite(first),
+    .third: bool = opposite(second),
+) -> (bool, bool) {
+    (second, third)
+}
+
+fn run() -> bool {
+    let (second, third) = choose(true, .second = true);
+    second and not third
+}

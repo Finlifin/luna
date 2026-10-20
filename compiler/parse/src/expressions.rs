@@ -5,28 +5,35 @@ use super::parser::*;
 use ast::*;
 use lex::TokenKind;
 
-/// 表达式选项，包含是否记录调用和优先级
+/// Expression boundary options shared by nested Pratt parsing.
 #[derive(Debug, Clone, Copy)]
 pub struct ExprOption {
     pub no_extended_call: bool,
-    pub precedence: i32,
+    pub stop_at_pipe: bool,
+    pub stop_at_do: bool,
+    pub stop_at_pattern_gt: bool,
+    pub stop_at_pattern_context: bool,
+    pub stop_at_type_qualifier: bool,
+    pub stop_at_call: bool,
+    pub stop_at_named_parameter: bool,
 }
 
 impl ExprOption {
     pub fn new() -> Self {
         Self {
             no_extended_call: false,
-            precedence: 0,
+            stop_at_pipe: false,
+            stop_at_do: false,
+            stop_at_pattern_gt: false,
+            stop_at_pattern_context: false,
+            stop_at_type_qualifier: false,
+            stop_at_call: false,
+            stop_at_named_parameter: false,
         }
     }
 
     pub fn with_no_extended_call(mut self, no_extended_call: bool) -> Self {
         self.no_extended_call = no_extended_call;
-        self
-    }
-
-    pub fn with_precedence(mut self, precedence: i32) -> Self {
-        self.precedence = precedence;
         self
     }
 }
@@ -72,6 +79,54 @@ impl Parser<'_> {
             // 循环处理操作符和右操作数
             loop {
                 let token = p.peek_next_token();
+                if option.stop_at_named_parameter
+                    && p.peek(&[TokenKind::Dot, TokenKind::Id, TokenKind::Colon])
+                {
+                    break;
+                }
+                if option.stop_at_call && token.kind == TokenKind::LParen {
+                    break;
+                }
+                if option.stop_at_type_qualifier
+                    && matches!(
+                        token.kind,
+                        TokenKind::Hash
+                            | TokenKind::Bang
+                            | TokenKind::Ampersand
+                            | TokenKind::Percent
+                            | TokenKind::SeparatedPercent
+                    )
+                {
+                    break;
+                }
+                if option.stop_at_pattern_gt && token.kind == TokenKind::SeparatedGt {
+                    break;
+                }
+                if option.stop_at_pattern_context
+                    && (p.peek(&[TokenKind::Minus, TokenKind::Pipe])
+                        || p.peek(&[TokenKind::SeparatedMinus, TokenKind::Pipe])
+                        || p.peek(&[TokenKind::Minus, TokenKind::PipeGt])
+                        || p.peek(&[TokenKind::SeparatedMinus, TokenKind::PipeGt]))
+                {
+                    break;
+                }
+                if option.stop_at_do && token.kind == TokenKind::Do {
+                    break;
+                }
+                if option.stop_at_pipe && token.kind == TokenKind::Pipe {
+                    break;
+                }
+                // A closed one-scalar character after `}` is lexically
+                // ambiguous with two apostrophes in a take-view chain. Only
+                // expression continuation can choose the latter; statement
+                // parsing must still accept `if condition {} 'a';`.
+                if token.kind == TokenKind::Char && min_prec <= 110 {
+                    let views = p.try_compact_take_views(current_left)?;
+                    if views != 0 {
+                        current_left = views;
+                        continue;
+                    }
+                }
                 let op_info = get_expr_op_info(token.kind);
 
                 // 如果操作符无效或优先级太低，则退出循环
@@ -97,8 +152,15 @@ impl Parser<'_> {
                         // 消耗操作符标记
                         p.eat_tokens(1);
 
-                        // 解析右操作数（递归调用，使用更高优先级）
-                        let right = match p.try_expr_pratt(op_info.prec + 1, option)? {
+                        // A function's result is itself a complete type:
+                        // fn() -> fn() -> T nests on the right. Other binary
+                        // operators retain their existing left association.
+                        let right_prec = if token.kind == TokenKind::Arrow {
+                            op_info.prec
+                        } else {
+                            op_info.prec + 1
+                        };
+                        let right = match p.try_expr_pratt(right_prec, option)? {
                             0 => {
                                 return Err(ParseError::invalid_syntax(
                                     format!(
@@ -127,24 +189,81 @@ impl Parser<'_> {
         })
     }
 
+    fn try_compact_take_views(&mut self, left: NodeIndex) -> ParseResult {
+        let token = self.peek_next_token();
+        if token.kind != TokenKind::Char || self.get_token(self.cursor + 2).kind != TokenKind::Id {
+            return Ok(0);
+        }
+        let spelling = self.token_text(&token);
+        let Some(name) = spelling
+            .strip_prefix('\'')
+            .and_then(|s| s.strip_suffix('\''))
+        else {
+            return Ok(0);
+        };
+        // A decoded escape, whitespace or punctuation cannot spell a view
+        // identifier. Ask the lexer about the raw spelling, not its value.
+        let (tokens, _, errors) = lex::lex(name, rustc_span::BytePos(0));
+        if !errors.is_empty() || tokens.len() != 3 || tokens[1].kind != TokenKind::Id {
+            return Ok(0);
+        }
+        let first_span = rustc_span::Span::new(
+            self.start_pos + rustc_span::BytePos((token.from + 1) as u32),
+            self.start_pos + rustc_span::BytePos((token.to - 1) as u32),
+        );
+        let (hi, lo) = lex::Symbol::intern(name).to_raw_parts();
+        let first_name = NodeBuilder::new(NodeKind::Id, first_span)
+            .add_single_child(hi)
+            .add_single_child(lo)
+            .build(&mut self.ast);
+        let base_start = self.ast.get_span(left).unwrap().lo();
+        let first = NodeBuilder::new(
+            NodeKind::TakeView,
+            rustc_span::Span::new(base_start, first_span.hi()),
+        )
+        .add_single_child(left)
+        .add_single_child(first_name)
+        .build(&mut self.ast);
+        self.eat_tokens(1);
+        let second_name = self.try_id()?;
+        let second_span = self.ast.get_span(second_name).unwrap();
+        Ok(NodeBuilder::new(
+            NodeKind::TakeView,
+            rustc_span::Span::new(base_start, second_span.hi()),
+        )
+        .add_single_child(first)
+        .add_single_child(second_name)
+        .build(&mut self.ast))
+    }
+
     pub fn try_prefix_expr(&mut self, option: ExprOption) -> ParseResult {
         self.scoped(|p| {
             let token = p.peek_next_token();
             match token.kind {
                 // for those atomic expressions
                 TokenKind::Int
+                | TokenKind::IntBin
+                | TokenKind::IntOct
+                | TokenKind::IntHex
                 | TokenKind::Real
+                | TokenKind::RealSci
                 | TokenKind::Str
                 | TokenKind::Char
                 | TokenKind::Id
                 | TokenKind::False
                 | TokenKind::True
+                | TokenKind::Bool
                 | TokenKind::SelfCap
                 | TokenKind::SelfLower
                 | TokenKind::Underscore
                 | TokenKind::Null
                 | TokenKind::Undefined => p.try_atomic(),
 
+                TokenKind::If => p.try_if_statement(),
+                TokenKind::Quote => p.try_code_quote(),
+                TokenKind::Tilde => p.try_code_splice(),
+                TokenKind::Lt | TokenKind::SeparatedLt => p.try_contextual_expr_type(),
+                TokenKind::When => p.try_when_statement(),
                 TokenKind::LParen => p.try_unit_or_parenthesis_or_tuple(),
                 TokenKind::LBracket => p.try_list(),
                 TokenKind::LBrace => p.try_object(),
@@ -152,28 +271,67 @@ impl Parser<'_> {
                 TokenKind::Pipe => p.try_lambda(option),
                 TokenKind::Forall => p.try_forall_prefix(option),
                 TokenKind::Exists => p.try_bool_exists(option),
-                TokenKind::Hash => p.try_effect_qualified_type(),
-                TokenKind::Bang => p.try_error_qualified_type(),
-                TokenKind::Ampersand => p.try_reachability_type(),
-                TokenKind::Caret => p.try_closure_qualified_type(),
-                TokenKind::Minus | TokenKind::SeparatedMinus => {
-                    p.try_prefix_unary_expr(token.kind, NodeKind::Negative, 90)
+                TokenKind::Hash => p.try_effect_qualified_type(option),
+                TokenKind::Bang => p.try_error_qualified_type(option),
+                TokenKind::Ampersand => p.try_reachability_type(option),
+                TokenKind::Percent | TokenKind::SeparatedPercent => {
+                    p.try_closure_qualified_type(option)
                 }
-                TokenKind::Not => p.try_prefix_unary_expr(TokenKind::Not, NodeKind::BoolNot, 90),
+                TokenKind::Minus | TokenKind::SeparatedMinus => {
+                    p.try_prefix_unary_expr(token.kind, NodeKind::Negative, 90, option)
+                }
+                TokenKind::Not => {
+                    p.try_prefix_unary_expr(TokenKind::Not, NodeKind::BoolNot, 90, option)
+                }
                 TokenKind::Error => {
-                    p.try_prefix_unary_expr(TokenKind::Error, NodeKind::ErrorNew, 90)
+                    p.try_prefix_unary_expr(TokenKind::Error, NodeKind::ErrorNew, 90, option)
                 }
                 TokenKind::Dyn => {
-                    p.try_prefix_unary_expr(TokenKind::Dyn, NodeKind::TraitObjectType, 90)
+                    p.try_prefix_unary_expr(TokenKind::Dyn, NodeKind::TraitObjectType, 90, option)
                 }
                 TokenKind::Star => {
-                    p.try_prefix_unary_expr(TokenKind::Star, NodeKind::PointerType, 90)
+                    p.try_prefix_unary_expr(TokenKind::Star, NodeKind::PointerType, 90, option)
                 }
                 TokenKind::Question => {
-                    p.try_prefix_unary_expr(TokenKind::Question, NodeKind::OptionalType, 90)
+                    p.try_prefix_unary_expr(TokenKind::Question, NodeKind::OptionalType, 90, option)
                 }
-                TokenKind::Lift => p.try_prefix_unary_expr(TokenKind::Lift, NodeKind::LiftType, 90),
+                TokenKind::Lift => {
+                    p.try_prefix_unary_expr(TokenKind::Lift, NodeKind::LiftType, 90, option)
+                }
                 TokenKind::Do => p.try_do_block_expr(),
+                TokenKind::Refines => {
+                    p.eat_tokens(1);
+                    if !p.eat_token(TokenKind::LBrace) {
+                        return Err(ParseError::invalid_syntax(
+                            "Expected `{` after refines".into(),
+                            p.peek_next_token().kind,
+                            p.next_token_span(),
+                        ));
+                    }
+                    let requirement = p.try_expr()?;
+                    if requirement == 0 || !p.eat_token(TokenKind::RBrace) {
+                        return Err(ParseError::invalid_syntax(
+                            "Expected refinement expression and `}`".into(),
+                            p.peek_next_token().kind,
+                            p.next_token_span(),
+                        ));
+                    }
+                    let base = p.try_expr_pratt(0, option)?;
+                    if base == 0 {
+                        return Err(ParseError::invalid_syntax(
+                            "Expected base type after refinement".into(),
+                            p.peek_next_token().kind,
+                            p.next_token_span(),
+                        ));
+                    }
+                    Ok(NodeBuilder::new(NodeKind::RefinedType, p.current_span())
+                        .add_single_child(requirement)
+                        .add_single_child(base)
+                        .build(&mut p.ast))
+                }
+                TokenKind::Defer => {
+                    p.try_prefix_unary_expr(TokenKind::Defer, NodeKind::Defer, 0, option)
+                }
                 TokenKind::Async => {
                     // async { ... } = AsyncBlock; async fn(...) = fn_type modifier
                     if p.peek(&[TokenKind::Async, TokenKind::LBrace]) {
@@ -201,13 +359,18 @@ impl Parser<'_> {
                 }
                 TokenKind::Atomic => p.try_atomic_block_expr(),
 
-                // fn_type -> pure? comptime? inline? (unsafe|spec|verified)? (extern "ABI")? fn(parameter_type*)
+                // fn_type -> pure? comptime? inline? (unsafe|spec|verified)? fn(parameter_type*)
                 TokenKind::Fn => p.try_fn_type(),
-                TokenKind::Pure
-                | TokenKind::Inline
-                | TokenKind::Spec
-                | TokenKind::Verified
-                | TokenKind::Extern => p.try_fn_type(),
+                TokenKind::Inline
+                    if [TokenKind::If, TokenKind::When, TokenKind::For]
+                        .iter()
+                        .any(|next| p.peek(&[TokenKind::Inline, *next])) =>
+                {
+                    p.try_inline_statement()
+                }
+                TokenKind::Pure | TokenKind::Inline | TokenKind::Spec | TokenKind::Verified => {
+                    p.try_fn_type()
+                }
 
                 _ => Ok(0),
             }
@@ -342,13 +505,37 @@ impl Parser<'_> {
         self.scoped_with_expected_prefix(&[TokenKind::Pipe], |p| {
             // 解析参数列表
             let params = p.try_multi_with_bracket(
-                &[Rule::comma("lambda parameter", |p| p.try_param())],
+                &[Rule::comma("lambda parameter", |p| {
+                    p.scoped(|p| {
+                        let id = p.try_id()?;
+                        if id == 0 {
+                            return Ok(0);
+                        }
+                        if !p.eat_token(TokenKind::Colon) {
+                            return Ok(id);
+                        }
+                        let mut option = ExprOption::new().with_no_extended_call(true);
+                        option.stop_at_pipe = true;
+                        let ty = p.try_expr_with_option(option)?;
+                        if ty == 0 {
+                            return Err(ParseError::invalid_syntax(
+                                "Expected lambda parameter type".into(),
+                                p.peek_next_token().kind,
+                                p.current_span(),
+                            ));
+                        }
+                        Ok(NodeBuilder::new(NodeKind::TypeBoundParam, p.current_span())
+                            .add_single_child(id)
+                            .add_single_child(ty)
+                            .build(&mut p.ast))
+                    })
+                })],
                 (TokenKind::Pipe, TokenKind::Pipe),
             )?;
 
             // 解析可选的返回类型
             let return_type = if p.eat_token(TokenKind::Arrow) {
-                let rt = p.try_expr()?;
+                let rt = p.try_expr_without_extended_call()?;
                 if rt == 0 {
                     return Err(ParseError::invalid_syntax(
                         "Expected return type after '->' in lambda".to_string(),
@@ -489,14 +676,75 @@ impl Parser<'_> {
         })
     }
 
+    /// Operation labels are expressions; only their runtime arguments are
+    /// patterns. In particular `op<T>(x)` observes T rather than binding it.
+    fn try_effect_arm(&mut self) -> ParseResult {
+        self.scoped(|p| {
+            let mut option = ExprOption::new().with_no_extended_call(true);
+            option.stop_at_call = true;
+            let head = p.try_expr_pratt(100, option)?;
+            if head == 0 {
+                return Ok(0);
+            }
+            let head = NodeBuilder::new(NodeKind::ExprAsPattern, p.current_span())
+                .add_single_child(head)
+                .build(&mut p.ast);
+            let fields = p.try_multi_with_bracket(
+                &[Rule::comma("effect parameter pattern", |p| p.try_pattern())],
+                (TokenKind::LParen, TokenKind::RParen),
+            )?;
+            let mut pattern = NodeBuilder::new(NodeKind::ApplicationPattern, p.current_span())
+                .add_single_child(head)
+                .add_multiple_children(fields)
+                .build(&mut p.ast);
+            if p.eat_token(TokenKind::If) {
+                let condition = p.try_expr_without_extended_call()?;
+                if condition == 0 {
+                    return Err(ParseError::invalid_syntax(
+                        "Expected effect arm guard".into(),
+                        p.peek_next_token().kind,
+                        p.next_token_span(),
+                    ));
+                }
+                pattern = NodeBuilder::new(NodeKind::IfGuardPattern, p.current_span())
+                    .add_single_child(pattern)
+                    .add_single_child(condition)
+                    .build(&mut p.ast);
+            }
+            if !p.eat_token(TokenKind::FatArrow) {
+                return Err(ParseError::unexpected_token(
+                    TokenKind::FatArrow,
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+            let body = p.try_block_or_statement()?;
+            if body == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected effect arm body".into(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+            Ok(NodeBuilder::new(NodeKind::CaseArm, p.current_span())
+                .add_single_child(pattern)
+                .add_single_child(body)
+                .build(&mut p.ast))
+        })
+    }
+
     /// 解析效果限定类型
     /// effect_qualified_type -> #expr expr
-    fn try_effect_qualified_type(&mut self) -> ParseResult {
+    fn try_effect_qualified_type(&mut self, option: ExprOption) -> ParseResult {
         self.scoped_with_expected_prefix(&[TokenKind::Hash], |p| {
             p.eat_tokens(1); // 消耗 '#'
 
             // 解析效果列表
-            let effect_list = p.try_expr_without_extended_call()?;
+            // Another type qualifier begins the result, not a postfix
+            // operation on this row. Parentheses provide an inner scope.
+            let mut row_option = option.with_no_extended_call(true);
+            row_option.stop_at_type_qualifier = true;
+            let effect_list = p.try_expr_with_option(row_option)?;
             if effect_list == 0 {
                 return Err(ParseError::invalid_syntax(
                     "Expected effect list after '#'".to_string(),
@@ -506,7 +754,7 @@ impl Parser<'_> {
             }
 
             // 解析类型表达式
-            let type_expr = p.try_expr_without_extended_call()?;
+            let type_expr = p.try_expr_pratt(50, option.with_no_extended_call(true))?;
             if type_expr == 0 {
                 return Err(ParseError::invalid_syntax(
                     "Expected type expression in effect qualified type".to_string(),
@@ -526,12 +774,14 @@ impl Parser<'_> {
 
     /// 解析错误限定类型
     /// error_qualified_type -> !expr expr
-    fn try_error_qualified_type(&mut self) -> ParseResult {
+    fn try_error_qualified_type(&mut self, option: ExprOption) -> ParseResult {
         self.scoped_with_expected_prefix(&[TokenKind::Bang], |p| {
             p.eat_tokens(1); // 消耗 '!'
 
             // 解析错误列表
-            let error_list = p.try_expr_without_extended_call()?;
+            let mut context_option = option.with_no_extended_call(true);
+            context_option.stop_at_type_qualifier = true;
+            let error_list = p.try_expr_with_option(context_option)?;
             if error_list == 0 {
                 return Err(ParseError::invalid_syntax(
                     "Expected error list after '!'".to_string(),
@@ -541,7 +791,7 @@ impl Parser<'_> {
             }
 
             // 解析类型表达式
-            let type_expr = p.try_expr_without_extended_call()?;
+            let type_expr = p.try_expr_pratt(50, option.with_no_extended_call(true))?;
             if type_expr == 0 {
                 return Err(ParseError::invalid_syntax(
                     "Expected type expression in error qualified type".to_string(),
@@ -560,12 +810,14 @@ impl Parser<'_> {
     }
 
     // &expr expr
-    fn try_reachability_type(&mut self) -> ParseResult {
+    fn try_reachability_type(&mut self, option: ExprOption) -> ParseResult {
         self.scoped_with_expected_prefix(&[TokenKind::Ampersand], |p| {
             p.eat_tokens(1);
 
             // 解析可达性列表
-            let reachability_set = p.try_expr_without_extended_call()?;
+            let mut context_option = option.with_no_extended_call(true);
+            context_option.stop_at_type_qualifier = true;
+            let reachability_set = p.try_expr_with_option(context_option)?;
             if reachability_set == 0 {
                 return Err(ParseError::invalid_syntax(
                     "Expected reachability list after '&'".to_string(),
@@ -575,7 +827,7 @@ impl Parser<'_> {
             }
 
             // 解析类型表达式
-            let type_expr = p.try_expr_without_extended_call()?;
+            let type_expr = p.try_expr_pratt(50, option.with_no_extended_call(true))?;
             if type_expr == 0 {
                 return Err(ParseError::invalid_syntax(
                     "Expected type expression in reachability type".to_string(),
@@ -661,33 +913,93 @@ impl Parser<'_> {
         })
     }
 
-    /// closure_qualified_type -> ^expr expr
-    fn try_closure_qualified_type(&mut self) -> ParseResult {
-        self.scoped_with_expected_prefix(&[TokenKind::Caret], |p| {
-            p.eat_tokens(1); // consume '^'
-
-            let closure_expr = p.try_expr_without_extended_call()?;
-            if closure_expr == 0 {
+    /// closure_qualified_type -> % (expr | { binding* }) expr
+    fn try_closure_qualified_type(&mut self, option: ExprOption) -> ParseResult {
+        let prefix = self.peek_next_token().kind;
+        if !matches!(prefix, TokenKind::Percent | TokenKind::SeparatedPercent) {
+            return Ok(0);
+        }
+        self.scoped_with_expected_prefix(&[prefix], |p| {
+            p.eat_tokens(1);
+            let context = if p.peek(&[TokenKind::LBrace]) {
+                let bindings = p.try_multi_with_bracket(
+                    &[Rule::comma("closure environment binding", |p| {
+                        p.scoped(|p| {
+                            let name = p.try_id()?;
+                            if name == 0 {
+                                return Ok(0);
+                            }
+                            if !p.eat_token(TokenKind::Colon) {
+                                return Err(ParseError::invalid_syntax(
+                                    "Expected ':' in closure environment binding".into(),
+                                    p.peek_next_token().kind,
+                                    p.current_span(),
+                                ));
+                            }
+                            let ty = p.try_expr_without_extended_call()?;
+                            if ty == 0 {
+                                return Err(ParseError::invalid_syntax(
+                                    "Expected closure environment binding type".into(),
+                                    p.peek_next_token().kind,
+                                    p.current_span(),
+                                ));
+                            }
+                            let value = if p.eat_token(TokenKind::Eq) {
+                                let value = p.try_expr_without_extended_call()?;
+                                if value == 0 {
+                                    return Err(ParseError::invalid_syntax(
+                                        "Expected closure environment binding source".into(),
+                                        p.peek_next_token().kind,
+                                        p.current_span(),
+                                    ));
+                                }
+                                value
+                            } else {
+                                0
+                            };
+                            Ok(NodeBuilder::new(
+                                NodeKind::ClosureEnvironmentBinding,
+                                p.current_span(),
+                            )
+                            .add_single_child(name)
+                            .add_single_child(ty)
+                            .add_single_child(value)
+                            .build(&mut p.ast))
+                        })
+                    })],
+                    (TokenKind::LBrace, TokenKind::RBrace),
+                )?;
+                NodeBuilder::new(NodeKind::ClosureEnvironment, p.current_span())
+                    .add_multiple_children(bindings)
+                    .build(&mut p.ast)
+            } else {
+                let mut context_option = option.with_no_extended_call(true);
+                context_option.stop_at_type_qualifier = true;
+                p.try_expr_with_option(context_option)?
+            };
+            if context == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected closure expression after `^`".to_string(),
+                    "Expected closure context after '%'".into(),
                     p.peek_next_token().kind,
-                    p.next_token_span(),
+                    p.current_span(),
                 ));
             }
-
-            let type_expr = p.try_expr_without_extended_call()?;
-            if type_expr == 0 {
+            // Include a function result arrow, but leave comparisons and
+            // boolean propositions outside the qualified type.
+            // The qualified type still belongs to the surrounding expression;
+            // in a lambda parameter its closing pipe is not a union operator.
+            let body = p.try_expr_pratt(50, option.with_no_extended_call(true))?;
+            if body == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected type expression in closure qualified type".to_string(),
+                    "Expected closure body type".into(),
                     p.peek_next_token().kind,
-                    p.next_token_span(),
+                    p.current_span(),
                 ));
             }
-
             Ok(
                 NodeBuilder::new(NodeKind::ClosureQualifiedType, p.current_span())
-                    .add_single_child(closure_expr)
-                    .add_single_child(type_expr)
+                    .add_single_child(context)
+                    .add_single_child(body)
                     .build(&mut p.ast),
             )
         })
@@ -699,15 +1011,15 @@ impl Parser<'_> {
         token: TokenKind,
         node_kind: NodeKind,
         precedence: i32,
+        option: ExprOption,
     ) -> ParseResult {
         self.scoped_with_expected_prefix(&[token], |p| {
             p.eat_tokens(1); // 消耗前缀token
 
-            let expr = p.try_expr_with_option(
-                ExprOption::new()
-                    .with_precedence(precedence)
-                    .with_no_extended_call(true),
-            )?;
+            // A prefix operand includes tighter postfix operations, but not
+            // lower-precedence infix operators. Keep enclosing delimiters (a
+            // condition's body, lambda pipe or computed-pattern closing >).
+            let expr = p.try_expr_pratt(precedence, option)?;
 
             if expr == 0 {
                 return Err(ParseError::invalid_syntax(
@@ -730,7 +1042,7 @@ impl Parser<'_> {
         left: NodeIndex,
         opt: ExprOption,
     ) -> ParseResult {
-        self.scoped(|p| match tag {
+        let node = self.scoped(|p| match tag {
             TokenKind::LParen => p.try_call_expr(left),
             TokenKind::Lt => p.try_diamond_call_expr(left),
             TokenKind::LBrace => p.try_extended_call_expr(left, opt),
@@ -745,7 +1057,18 @@ impl Parser<'_> {
             TokenKind::Matches => p.try_matches_expr(left, opt),
             TokenKind::Id => p.try_literal_extension_expr(left),
             _ => Ok(0),
-        })
+        })?;
+        if node != 0 {
+            self.include_left_span(left, node);
+        }
+        Ok(node)
+    }
+
+    pub(crate) fn include_left_span(&mut self, left: NodeIndex, node: NodeIndex) {
+        let left_span = self.ast.get_span(left).expect("postfix receiver");
+        let span = self.ast.get_span(node).expect("postfix result");
+        self.ast.spans[node as usize] =
+            rustc_span::Span::new(left_span.lo().min(span.lo()), left_span.hi().max(span.hi()));
     }
 
     /// application -> expr(argument*)
@@ -768,12 +1091,13 @@ impl Parser<'_> {
         })
     }
 
-    /// normal_form_application -> expr<argument*>
-    fn try_diamond_call_expr(&mut self, left: NodeIndex) -> ParseResult {
-        self.scoped_with_expected_prefix(&[TokenKind::Lt], |p| {
+    /// normal_form_head_application -> expr<argument*>
+    pub(crate) fn try_diamond_call_expr(&mut self, left: NodeIndex) -> ParseResult {
+        let node = self.scoped_with_expected_prefix(&[TokenKind::Lt], |p| {
             let args = p.try_multi_with_bracket(
                 &[
                     Rule::comma("optional argument", |p| p.try_optional_arg()),
+                    Rule::comma("extend argument", |p| p.try_extend_arg()),
                     Rule::comma("function argument", |p| p.try_expr()),
                 ],
                 (TokenKind::Lt, TokenKind::Gt),
@@ -781,15 +1105,20 @@ impl Parser<'_> {
 
             // 创建泛型调用节点
             Ok(
-                NodeBuilder::new(NodeKind::NormalFormApplication, p.current_span())
+                NodeBuilder::new(NodeKind::NormalFormHeadApplication, p.current_span())
                     .add_single_child(left)
                     .add_multiple_children(args)
                     .build(&mut p.ast),
             )
-        })
+        })?;
+        if node != 0 {
+            // Also called directly by normal-form pattern parsing.
+            self.include_left_span(left, node);
+        }
+        Ok(node)
     }
 
-    /// extended_application -> expr { (property | expr)* }
+    /// extended_application -> expr { (property | extend_arg | expr)* }
     fn try_extended_call_expr(&mut self, left: NodeIndex, opt: ExprOption) -> ParseResult {
         if opt.no_extended_call {
             return Err(ParseError::MeetPostExtendedCallStart);
@@ -800,6 +1129,7 @@ impl Parser<'_> {
             let children_and_properties = p.try_multi_with_bracket(
                 &[
                     Rule::comma("optional arg", |p| p.try_property()),
+                    Rule::comma("expanded argument", |p| p.try_extend_arg()),
                     Rule::comma("function argument", |p| p.try_expr()),
                 ],
                 (TokenKind::LBrace, TokenKind::RBrace),
@@ -818,6 +1148,7 @@ impl Parser<'_> {
     /// 索引调用表达式
     fn try_index_call_expr(&mut self, left: NodeIndex) -> ParseResult {
         self.scoped_with_expected_prefix(&[TokenKind::LBracket], |p| {
+            p.eat_tokens(1); // consume the opening bracket, not a list literal
             // 解析索引调用参数
             let expr = p.try_expr()?;
             if expr == 0 {
@@ -828,6 +1159,13 @@ impl Parser<'_> {
                 ));
             }
 
+            if !p.eat_token(TokenKind::RBracket) {
+                return Err(ParseError::invalid_syntax(
+                    "Expected ']' after index expression".to_string(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
             // 创建索引调用节点
             Ok(
                 NodeBuilder::new(NodeKind::IndexApplication, p.current_span())
@@ -1095,7 +1433,8 @@ impl Parser<'_> {
                 );
             }
 
-            let arms = p.try_multi(&[Rule::comma("effect handling arm", |p| p.try_case_arm())])?;
+            let arms =
+                p.try_multi(&[Rule::comma("effect handling arm", |p| p.try_effect_arm())])?;
 
             if !p.eat_token(TokenKind::RBrace) {
                 return Err(ParseError::invalid_syntax(
@@ -1262,19 +1601,38 @@ impl Parser<'_> {
     }
 
     /// Literal extension expression (e.g., `123px`, `45deg`)
-    fn try_literal_extension_expr(&mut self, left: NodeIndex) -> ParseResult {
+    pub(crate) fn try_literal_extension_expr(&mut self, left: NodeIndex) -> ParseResult {
         self.scoped_with_expected_prefix(&[TokenKind::Id], |p| {
+            match p.ast.get_node_kind(left) {
+                Some(
+                    NodeKind::Int
+                    | NodeKind::Real
+                    | NodeKind::Str
+                    | NodeKind::StringConcat
+                    | NodeKind::Char,
+                ) => {}
+                Some(NodeKind::LiteralExtension) => {
+                    return Err(ParseError::invalid_syntax(
+                        "A literal accepts only one suffix identifier".to_string(),
+                        p.peek_next_token().kind,
+                        p.next_token_span(),
+                    ));
+                }
+                _ => return Err(ParseError::MeetPostId),
+            }
             let id = p.try_id()?;
             if id == 0 {
                 return Ok(0);
             }
 
-            Ok(
-                NodeBuilder::new(NodeKind::LiteralExtension, p.current_span())
-                    .add_single_child(left)
-                    .add_single_child(id)
-                    .build(&mut p.ast),
-            )
+            let span = rustc_span::Span::new(
+                p.ast.get_span(left).unwrap().lo(),
+                p.ast.get_span(id).unwrap().hi(),
+            );
+            Ok(NodeBuilder::new(NodeKind::LiteralExtension, span)
+                .add_single_child(left)
+                .add_single_child(id)
+                .build(&mut p.ast))
         })
     }
 }

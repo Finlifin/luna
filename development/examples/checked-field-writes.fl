@@ -1,0 +1,70 @@
+typealias Byte = .u8'builtin;
+typealias Bool = true'type;
+struct Pair { left: Byte, right: Byte }
+struct Outer { inner: Pair, tail: Byte }
+struct Box where T { value: T }
+fn sibling() -> Byte {
+    var pair = Pair { left: 4, right: 5 };
+    pair.left = 100;
+    pair.left + pair.right
+}
+fn nested() -> Byte {
+    var outer = Outer { inner: Pair { left: 4, right: 5 }, tail: 7 };
+    outer.inner.left = 100;
+    outer.inner.left + outer.inner.right + outer.tail
+}
+fn unknown(pair: Pair) -> Byte {
+    var copy = pair;
+    copy.left = 100;
+    copy.left + 1
+}
+fn generic(box: Box<Byte>) -> Byte {
+    var copy = box;
+    copy.value = 100;
+    copy.value + 1
+}
+fn unrelated(pair: Pair, value: Byte) -> Byte {
+    assumes value < 255;
+    var copy = pair;
+    copy.left = 100;
+    value + 1
+}
+fn rhs_order() -> Byte {
+    var pair = Pair { left: 4, right: 5 };
+    pair.left = do { pair.right = 10; 20 };
+    pair.left + pair.right
+}
+fn copies() -> (Byte, Byte) {
+    var pair = Pair { left: 4, right: 5 };
+    let old = pair;
+    let callback = || pair.left + pair.right;
+    pair.left = 200;
+    (old.left, callback())
+}
+fn make_pair() -> Pair { Pair { left: 255, right: 255 } }
+fn replaced_nested() -> Byte {
+    var outer = Outer { inner: Pair { left: 4, right: 5 }, tail: 7 };
+    outer.inner = make_pair();
+    outer.inner.left = 100;
+    outer.inner.left + 1
+}
+comptime fn run() -> Byte {
+    var pair = Pair { left: 100, right: 155 };
+    pair.left = 50;
+    pair.left + pair.right
+}
+fn branches(flag: Bool) -> Byte {
+    var pair = Pair { left: 4, right: 5 };
+    if flag { pair.left = 100; } else { pair.left = 200; }
+    pair.left + pair.right
+}
+fn unknown_nested(outer: Outer) -> Byte {
+    var copy = outer;
+    copy.inner.left = 100;
+    copy.inner.left + 1
+}
+fn rhs_replaces_root() -> Byte {
+    var pair = Pair { left: 4, right: 5 };
+    pair.left = do { pair = Pair { left: 1, right: 10 }; 20 };
+    pair.left + pair.right
+}

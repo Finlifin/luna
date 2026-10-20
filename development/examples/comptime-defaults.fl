@@ -1,0 +1,17 @@
+typealias Type = .Type'builtin;
+typealias Int = .Integer'builtin;
+typealias Nine = Bits(3);
+typealias Seven = Bits(3, .width = 7);
+typealias Byte = Select();
+comptime fn Bits(seed: Int, .width: Int = width(seed)) -> Type { .BitVec'builtin<width> }
+comptime fn width(seed: Int) -> Int { seed * seed }
+comptime fn Select(.ty: Type = .u8'builtin) -> Type { ty }
+fn nine() -> Nine { 511 }
+fn seven() -> Seven { 127 }
+fn byte() -> Byte { 255 }
+comptime fn infinite() -> Int { infinite() }
+comptime fn choose(.value: Int = infinite()) -> Int { value }
+comptime fn supplied() -> Int { choose(.value = 23) }
+comptime fn omitted() -> Int { choose() }
+comptime fn echo(value: T, .again: T = value) -> T where T { again }
+comptime fn echoed() -> Int { echo(123) }

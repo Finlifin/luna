@@ -17,7 +17,11 @@ type_bound_decl_clause -> id : expr
 lambda_param -> lambda parameter
 ~~~
 
-环境参数使用 `C: Type.vars.Closure`。
+环境参数使用 `c: Type.vars.Closure`。
+
+函数返回类型中的 `->` 向右结合：`fn() -> fn() -> bool` 表示返回一个
+`fn() -> bool` 函数值的无参函数，即 `fn() -> (fn() -> bool)`。
+`comptime fn` 使用相同的分组规则；括号可以显式划定类型表达式的范围。
 
 ## 正式定义
 
@@ -32,7 +36,7 @@ lambda_param -> lambda parameter
 ### 环境参数化
 
 环境参数化的目的是让高阶函数的签名能同时接受带捕获和无捕获的回调，而不需要类型擦除或隐式堆分配。
-`%C fn(...) -> R` 保留回调环境。C 可以为空，也可以含有捕获及依赖；传参、返回或保存时都必须交付对应的真实环境。
+`%c fn(...) -> R` 保留回调环境。c 可以为空，也可以含有捕获及依赖；传参、返回或保存时都必须交付对应的真实环境。
 
 函数体文本不参与名义类型身份，环境中的普通数值也不单独制造一种闭包类型。类型等价仍须满足环境结构、绑定关系及真实参与类型的依赖。
 
@@ -117,8 +121,8 @@ fn invalid_plain_target(offset: u32) -> u32 {
 ### 接收带环境回调
 
 ~~~flurry
-fn apply(action: %C fn(u32) -> u32, value: u32) -> u32
-where C: Type.vars.Closure
+fn apply(action: %c fn(u32) -> u32, value: u32) -> u32
+where c: Type.vars.Closure
 {
     action(value)
 }
@@ -136,8 +140,8 @@ test {
 ### 传递时保留完整类型
 
 ~~~flurry
-fn relay(action: %C fn(u32) -> u32) -> %C fn(u32) -> u32
-where C: Type.vars.Closure
+fn relay(action: %c fn(u32) -> u32) -> %c fn(u32) -> u32
+where c: Type.vars.Closure
 {
     action
 }
@@ -170,14 +174,14 @@ test {
 
 ~~~flurry
 fn compose(
-    first: %A fn(u32) -> u32,
-    second: %B fn(u32) -> u32,
+    first: %a fn(u32) -> u32,
+    second: %b fn(u32) -> u32,
 ) -> %{
-    first: %A fn(u32) -> u32 = first,
-    second: %B fn(u32) -> u32 = second,
+    first: %a fn(u32) -> u32 = first,
+    second: %b fn(u32) -> u32 = second,
 } fn(u32) -> u32
-where A: Type.vars.Closure,
-    B: Type.vars.Closure
+where a: Type.vars.Closure,
+    b: Type.vars.Closure
 {
     |value: u32| {
         let middle = first(value);
@@ -260,6 +264,6 @@ C 的函数指针与上下文指针是实际替代；Zig 可以通过显式结�
 4. 检查高阶主体中的保存、调用及结果传播，组合实际控制路径的资源状态。
 5. 根据逃逸和 ABI 要求选择承载方案，生成代码与环境交付。
 
-泛型 C 未知时保留环境义务；仅凭 C 存在不能推导其 Copy、无依赖或可任意排列。主体实际允许用户 impl 的资格在实现选择中检查，不能用通配泛型实现替代语言提供的调用语义。
+泛型 c 未知时保留环境义务；仅凭 c 存在不能推导其 Copy、无依赖或可任意排列。主体实际允许用户 impl 的资格在实现选择中检查，不能用通配泛型实现替代语言提供的调用语义。
 
 对组合接口，不只组合函数类型，还要组合调用状态变换。每个出口记录哪些环境字段仍持有值、结果依赖哪一份原环境、以及是否需要外部对象继续存活。若无法从接口得到必须的高阶保持关系，应要求足够的程序契约或受检依据；不能把这种不足交给 PTC 猜测。

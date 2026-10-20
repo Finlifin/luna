@@ -1,0 +1,31 @@
+trait Format {
+    assoc network_order: bool = true;
+}
+
+comptime fn uses_network_order() -> bool where T :- Format {
+    T.as(Format).network_order
+}
+
+trait PacketFormat :- Format {
+    -- This generic comptime call is specialized with the selected Self.
+    assoc reorder: bool = not uses_network_order<Self>();
+    -- The same parent member can also be projected explicitly.
+    assoc original_order: bool = Self.as(Format).network_order;
+}
+
+struct Network {}
+struct LittleEndian {}
+
+impl Format for Network {}
+impl Format for LittleEndian {
+    assoc network_order: bool = false;
+}
+impl PacketFormat for Network {}
+impl PacketFormat for LittleEndian {}
+
+fn entry() -> bool {
+    not Network.as(PacketFormat).reorder
+        and Network.as(PacketFormat).original_order
+        and LittleEndian.as(PacketFormat).reorder
+        and not LittleEndian.as(PacketFormat).original_order
+}

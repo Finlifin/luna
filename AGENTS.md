@@ -16,7 +16,7 @@
 
 ## 2. 分支与集成
 
-- 每完成一个可验证的实现增量，及时在 dev 提交 commit，便于作者追踪进度；提交说明包含行为变化、验证和剩余边界。按范围暂存，保留无关的工作区修改。
+- 用户已取消自动提交。继续在 dev 实现并测试，改动保留工作区，不执行 git add、commit、push，也不为这些操作请求权限，直到用户重新要求提交。
 - `main` 保存已集成产物；日常开发在 `dev`，独立写入任务从明确的 dev 基线建立任务分支或 worktree。
 - 协调者记录每项任务的仓库、基线提交、工作分支和文件边界。依赖未提交改动时，先交付经授权的基础提交或可追踪补丁；新 worktree 不会自动包含原工作区的脏文件。
 - 同一文件一次只能有一个写入负责人。不同 worktree 防止覆盖，但不能替代共享接口协调。
@@ -53,6 +53,7 @@
 ## 5. 不得破坏的语义边界
 
 - Normal form 的头不展开；Identity<T> 不因函数体返回 T 就与 T 相等。
+- Tuple 的签名是 `pure comptime fn Tuple<...Es: meta.List<Type>> -> Type`；变参收集为一个类型列表输入，类型身份保留 Tuple 的 normal-form 头。内部结构视图与迁移期的结构元组表示不能替代这一语言定义。
 - PTC 只处理类型命题；程序状态、内存与资源规格由程序验证层负责。
 - Elaboration 与 comptime interpretation／invocation 交织；冻结稳定残余和契约，不冻结活动推断变量、等待者或候选事务。
 - 运行时依赖类型使用可 intern 的带洞结构与引用端 substitution；共享 core 不等于完整类型相等，环境取得另行保持。
@@ -66,6 +67,12 @@
 这些是容易被实现惯性破坏的检查点；完整契约以 [docs/README.md](docs/README.md)及相关主题为准。
 
 ## 6. 验证与完成标准
+
+开发过程中适时格式化已修改的 Rust 文件；阶段性整理或用户要求时执行全 workspace 格式化。通过 `python3 -B development/command.py --timeout 120 -- cargo fmt --all` 运行全量格式化，追加 `-- --check` 检查格式。格式化不启动构建，不必因此重复全量测试。
+
+Cargo 构建与测试统一使用 `python3 -B development/cargo.py <test|check|build|run> ...`，不再直接启动使用旧调试配置的 Cargo 命令。入口固定复用 `/tmp/luna-dev-002/target`，自动添加 `-j 1 --locked --offline`、禁用 incremental 和 dev/test debuginfo，并在构建前后控制缓存大小。用户已授权自动 `cargo clean`：优先清理 elaboration/luna 产物，必要时清理该 target 全部可重建产物；不为此重复请求确认。配额错误由仍在沙箱内的构建入口就地清理并最多重试一次，不能等到沙箱无法启动才清理。入口使用共享维护锁，不与直接 Cargo 命令并发执行。源码、Cargo.lock、registry 下载缓存和工作区已有修改不属于清理对象。
+
+无人值守时优先通过 `python3 -B development/check.py --timeout 900 -- test ...` 调用上述 cargo.py；已有二进制复现使用 `development/reproduce.py`，可选批量回溯使用 `development/backtrace.py`，证据读取使用 `development/report.py`。入口关闭标准输入，设置超时并保存日志。可选回溯遇到 ptrace 限制时保存 unavailable 后继续独立工作，不为可选诊断反复等待用户；脚本不提供权限绕过，真正必需的受限操作仍遵守环境授权规则。详见 development/README.md。
 
 按变更选择最小充分检查：局部行为测试、相关 crate 检查、接口／端到端验收。检查通过后，只有新改动、失败或尚未解除的疑点才扩大或重复测试。
 

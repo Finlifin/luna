@@ -1,0 +1,37 @@
+typealias Flag = true'type;
+typealias Unary = fn(Flag) -> Flag;
+typealias Captured = (do { let flag = true; || flag })'type;
+
+fn keep(value: T) -> T where T {
+    value
+}
+
+fn identity() -> F where F, requires F == Unary {
+    keep
+}
+
+fn negate() -> F where F, requires F == Unary {
+    |value| not value
+}
+
+fn apply(callback: F, value: Flag) -> Flag where F, requires F == Unary {
+    callback(value)
+}
+
+-- Equal closure types still carry different runtime environments.
+fn capture(flag: Flag) -> F where F, requires F == Captured {
+    || flag
+}
+
+fn invoke(callback: F) -> Flag where F, requires F == Captured {
+    callback()
+}
+
+fn run() -> (Flag, Flag, Flag, Flag) {
+    (
+        apply(identity<Unary>(), true),
+        apply(negate<Unary>(), false),
+        invoke(capture<Captured>(true)),
+        invoke(capture<Captured>(false)),
+    )
+}

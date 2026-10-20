@@ -3,134 +3,134 @@
 -- ==========================================================================
 
 -- #[lang = "iterator"]
-trait Iterator {
-    type Item
+pub trait Iterator {
+    assoc Item: Type;
 
-    fn next(*self) -> ?Item
+    fn next(*self) -> ?Item;
 
     fn map(self, f: fn(Item) -> U) -> MapIterator<Self, U> where U {
-        MapIterator { .iter self, .f f }
+        MapIterator { iter: self, f: f }
     }
 
     fn filter(self, pred: fn(*Item) -> Bool) -> FilterIterator<Self> {
-        FilterIterator { .iter self, .pred pred }
+        FilterIterator { iter: self, pred: pred }
     }
 
     fn foreach(self, f: fn(Item)) {
-        loop {
+        while true {
             self.next() match {
-                Some(item) => f(item),
-                None       => break,
+                .Some(item) => f(item),
+                .None       => break,
             }
         }
     }
 
-    fn collect(self) -> C where C requires FromIterator<Item> {
+    fn collect(self) -> C where C :- FromIterator<Item> {
         C.from_iter(self)
     }
 
     fn count(self) -> Int {
-        let n = 0
-        self.foreach(|_| n = n + 1)
+        var n = 0;
+        self.foreach(|item| { n = n + 1; });
         n
     }
 
     fn enumerate(self) -> EnumerateIterator<Self> {
-        EnumerateIterator { .iter self, .index 0 }
+        EnumerateIterator { iter: self, index: 0 }
     }
 
-    fn zip(self, other: I) -> ZipIterator<Self, I> where I requires Iterator {
-        ZipIterator { .a self, .b other }
+    fn zip(self, other: I) -> ZipIterator<Self, I> where I :- Iterator {
+        ZipIterator { a: self, b: other }
     }
 
     fn fold(self, init: A, f: fn(A, Item) -> A) -> A where A {
-        let acc = init
-        self.foreach(|item| acc = f(acc, item))
+        var acc = init;
+        self.foreach(|item| { acc = f(acc, item); });
         acc
     }
 
     fn any(self, pred: fn(*Item) -> Bool) -> Bool {
-        loop {
+        while true {
             self.next() match {
-                Some(item) => if pred(*item) { return true },
-                None       => return false,
+                .Some(item) => if pred(item.ref) { return true },
+                .None       => return false,
             }
         }
     }
 
     fn all(self, pred: fn(*Item) -> Bool) -> Bool {
-        loop {
+        while true {
             self.next() match {
-                Some(item) => if !pred(*item) { return false },
-                None       => return true,
+                .Some(item) => if not pred(item.ref) { return false },
+                .None       => return true,
             }
         }
     }
 }
 
-trait FromIterator where T {
-    fn from_iter(iter: I) -> Self where I requires Iterator<Item = T>
+pub trait FromIterator where T {
+    fn from_iter(iter: I) -> Self where I :- Iterator, requires I.as(Iterator).Item == T;
 }
 
 -- ── Adapter iterators ──────────────────────────────────────────────────────
 
-struct MapIterator where I requires Iterator, U {
+struct MapIterator where I :- Iterator, U {
     iter: I,
     f: fn(I.Item) -> U,
 }
 
-impl Iterator for MapIterator where I requires Iterator, U {
-    type Item = U
-    fn next(*self) -> ?U = self.iter.next().map(self.f)
+impl Iterator for MapIterator<I, U> where I :- Iterator, U {
+    assoc Item: Type = U;
+    fn next(*self) -> ?U = self.iter.next().map(self.f);
 }
 
-struct FilterIterator where I requires Iterator {
+struct FilterIterator where I :- Iterator {
     iter: I,
     pred: fn(*I.Item) -> Bool,
 }
 
-impl Iterator for FilterIterator where I requires Iterator {
-    type Item = I.Item
+impl Iterator for FilterIterator<I> where I :- Iterator {
+    assoc Item: Type = I.Item;
     fn next(*self) -> ?Item {
-        loop {
+        while true {
             self.iter.next() match {
-                Some(item) => if self.pred(*item) { return Some(item) },
-                None       => return None,
+                .Some(item) => if self.pred(item.ref) { return .Some(item) },
+                .None       => return .None,
             }
         }
     }
 }
 
-struct EnumerateIterator where I requires Iterator {
+struct EnumerateIterator where I :- Iterator {
     iter: I,
     index: Int,
 }
 
-impl Iterator for EnumerateIterator where I requires Iterator {
-    type Item = (Int, I.Item)
+impl Iterator for EnumerateIterator<I> where I :- Iterator {
+    assoc Item: Type = (Int, I.Item);
     fn next(*self) -> ?Item {
         self.iter.next().map(|item| {
-            let i = self.index
-            self.index = self.index + 1
+            let i = self.index;
+            self.index = self.index + 1;
             (i, item)
         })
     }
 }
 
-struct ZipIterator where A requires Iterator, B requires Iterator {
+struct ZipIterator where A :- Iterator, B :- Iterator {
     a: A,
     b: B,
 }
 
-impl Iterator for ZipIterator where A requires Iterator, B requires Iterator {
-    type Item = (A.Item, B.Item)
+impl Iterator for ZipIterator<A, B> where A :- Iterator, B :- Iterator {
+    assoc Item: Type = (A.Item, B.Item);
     fn next(*self) -> ?Item {
-        let a = self.a.next()
-        let b = self.b.next()
+        let a = self.a.next();
+        let b = self.b.next();
         if a.is_some() and b.is_some() {
-            Some((a.unwrap(), b.unwrap()))
+            .Some((a.unwrap(), b.unwrap()))
         } else {
-            None
+            .None
         }
     }
 }

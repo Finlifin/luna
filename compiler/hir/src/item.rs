@@ -9,7 +9,7 @@ use rustc_span::Span;
 
 use crate::body::BodyId;
 use crate::clause::ClauseConstraint;
-use crate::common::{FnSigParam, Ident, Path};
+use crate::common::{FnParam, Ident, Path};
 use crate::expr::Expr;
 use crate::hir_id::{HirId, OwnerId};
 use crate::{ClauseParam, Pattern};
@@ -33,40 +33,75 @@ impl Item<'_> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ItemKind<'hir> {
     Fn(FnSig<'hir>, BodyId),
+    /// Required interface member or bodyless declaration. No synthetic runtime
+    /// body may be invented for a signature-only function.
+    FnDeclaration(FnSig<'hir>),
+    /// An operation signature, never an ordinary function or enum payload.
+    Effect(FnSig<'hir>, EffectModifiers),
+    EffectGroup(EffectGroupDef<'hir>),
+    Associated(AssociatedDecl<'hir>),
     Struct(StructDef<'hir>),
     Enum(EnumDef<'hir>),
     Mod(ModDef),
     Impl(ImplDef<'hir>),
     Trait(TraitDef<'hir>),
-    TypeAlias(&'hir Expr<'hir>),
+    TypeAlias(
+        &'hir Expr<'hir>,
+        &'hir [ClauseParam<'hir>],
+        &'hir [ClauseConstraint<'hir>],
+    ),
+    /// A nominal identity with an explicit representation edge, never an alias.
+    Newtype(
+        &'hir Expr<'hir>,
+        &'hir [ClauseParam<'hir>],
+        &'hir [ClauseConstraint<'hir>],
+    ),
     Use(UsePath<'hir>),
     Const(&'hir Expr<'hir>, &'hir Expr<'hir>),
     Invalid,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EffectModifiers {
+    pub is_async: bool,
+    pub is_inline: bool,
+    pub is_direct_passing: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectGroupDef<'hir> {
+    pub operations: Vec<OwnerId>,
+    pub clause_params: &'hir [ClauseParam<'hir>],
+    pub clause_constraints: &'hir [ClauseConstraint<'hir>],
+}
+
 /// Full function signature: declaration + modifiers + clause parameters.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnSig<'hir> {
-    pub params: &'hir [FnSigParam<'hir>],
+    pub params: &'hir [FnParam<'hir>],
     pub return_ty: Option<&'hir Expr<'hir>>,
     pub return_bind: Option<Ident>,
+    pub return_binding: Option<crate::HirId>,
     pub modifiers: FnModifiers,
     pub clause_params: &'hir [ClauseParam<'hir>],
     pub clause_constraints: &'hir [ClauseConstraint<'hir>],
     pub span: Span,
 }
 
-/// Modifier flags on a function definition (`pure`, `comptime`, `extern`).
+/// Function phase and modifier metadata; normal-form heads remain opaque.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FnModifiers {
+    pub is_inline: bool,
+    pub is_quote: bool,
+    pub is_normal_form_head: bool,
     pub is_pure: bool,
     pub is_comptime: bool,
-    pub is_extern: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct NFSig<'hir> {
-    pub params: &'hir [FnSigParam<'hir>],
+    // 偷懒就直接用FnParam了
+    pub params: &'hir [FnParam<'hir>],
     pub return_ty: Option<&'hir Expr<'hir>>,
     pub return_bind: Option<Ident>,
     pub clause_params: &'hir [ClauseParam<'hir>],
@@ -97,9 +132,18 @@ pub struct FieldDef<'hir> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumDef<'hir> {
     pub variants: &'hir [Variant<'hir>],
+    pub configurations: Vec<Configuration<'hir>>,
     pub clause_params: &'hir [ClauseParam<'hir>],
     pub clause_constraints: &'hir [ClauseConstraint<'hir>],
     pub nested_items: Vec<OwnerId>,
+}
+
+/// Source-ordered metadata of an enclosing definition. These are not fields.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Configuration<'hir> {
+    pub ident: Ident,
+    pub value: &'hir Expr<'hir>,
+    pub span: Span,
 }
 
 /// A single variant of an enum.
@@ -141,9 +185,20 @@ pub struct ImplDef<'hir> {
 /// Definition body of a `trait` item.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraitDef<'hir> {
+    pub super_traits: Option<&'hir Expr<'hir>>,
     pub clause_params: &'hir [ClauseParam<'hir>],
     pub clause_constraints: &'hir [ClauseConstraint<'hir>],
     pub items: Vec<OwnerId>,
+}
+
+/// An associated value, including (but not restricted to) a value of Type.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssociatedDecl<'hir> {
+    pub parameters: &'hir [FnParam<'hir>],
+    pub ty: &'hir Expr<'hir>,
+    pub default: Option<&'hir Expr<'hir>>,
+    pub clause_params: &'hir [ClauseParam<'hir>],
+    pub clause_constraints: &'hir [ClauseConstraint<'hir>],
 }
 
 /// The path and import style of a `use` item.
@@ -160,6 +215,7 @@ pub enum UseKind<'hir> {
     Simple,
     Glob,
     Multi(&'hir [Ident]),
+    Group(&'hir [UsePath<'hir>]),
     Alias(Ident),
 }
 
@@ -169,12 +225,16 @@ pub enum UseKind<'hir> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DefKind {
     Fn,
+    Effect,
+    EffectGroup,
     Struct,
     Enum,
     Mod,
     Impl,
     Trait,
+    Associated,
     TypeAlias,
+    Newtype,
     Use,
     Const,
     Invalid,
@@ -183,13 +243,17 @@ pub enum DefKind {
 impl DefKind {
     pub fn from_item_kind(kind: &ItemKind<'_>) -> Self {
         match kind {
-            ItemKind::Fn(..) => DefKind::Fn,
+            ItemKind::Fn(..) | ItemKind::FnDeclaration(..) => DefKind::Fn,
+            ItemKind::Effect(..) => DefKind::Effect,
+            ItemKind::EffectGroup(..) => DefKind::EffectGroup,
             ItemKind::Struct(..) => DefKind::Struct,
             ItemKind::Enum(..) => DefKind::Enum,
             ItemKind::Mod(..) => DefKind::Mod,
             ItemKind::Impl(..) => DefKind::Impl,
             ItemKind::Trait(..) => DefKind::Trait,
+            ItemKind::Associated(..) => DefKind::Associated,
             ItemKind::TypeAlias(..) => DefKind::TypeAlias,
+            ItemKind::Newtype(..) => DefKind::Newtype,
             ItemKind::Use(..) => DefKind::Use,
             ItemKind::Const(..) => DefKind::Const,
             ItemKind::Invalid => DefKind::Invalid,

@@ -53,6 +53,108 @@ resume_statement -> resume expr? (while expr)?
 
 inline effect 表达内联意向。编译器可以联合展开调用方、被调用计算和 handler，使请求变为局部计算；无法完成时采用兼容的普通 evidence 路径。inline 不改变捕获许可、async 子工作归属或 direct passing 的安装时求值行为。
 
+例如，内层只处理 `true`，其余请求交给外层。一次转发不会卸载内层；第三次 `ask(true)#` 仍由它回答。
+
+```flurry
+inline effect ask(value: bool) -> bool;
+
+inline fn produce() -> #ask bool {
+    let a = ask(true)#;
+    let b = ask(false)#;
+    let c = ask(true)#;
+    not a and b and not c
+}
+
+inline fn filtered() -> #ask bool {
+    produce()# { ask(true) => false, }
+}
+
+fn entry() -> bool {
+    filtered()# { ask(value) => not value, }
+}
+```
+
+结果为 `true`。当前可选展开器将这类部分 direct handler 降为有序匹配和最后的外层转发分支。候选失败先撤销绑定，转发交付原载荷；不会重新运行请求实参，也不会把拥有型载荷自动变为 Copy。对安装者循环的 `break` / `continue` 仍按原词法目标清理被退出的生产者和中间处理层。
+
+
+当前可选优化入口已支持封闭的 direct inline effect：先展开普通 inline callee，再将请求替换为卫生重命名的局部 pattern match。每次请求保留一次参数求值，分支可读写安装位置的外层绑定；显式 resume 通过请求私有的结果边界提前交付，只结束当前分支，后续请求仍可继续；return、break 和 continue 另行保持原函数或词法循环目标，不被 resume 的结果边界捕获；handler 自身的循环与其中已经展开的 inline/quote 调用同样保留局部退出和清理边界；不含效应的闭包保留独立调用边界及捕获责任；转换后重新检查资源并发布析构计划。命令行通过 `--interpret entry --inline-functions --copy-protocol Copy --drop-protocol Drop` 显式启用，协议名按实际源定义填写。
+
+对于带 comptime 参数的 quote 调用，早期 NIR 尚未完成主体展开。物化阶段在 staged 输入、quote 主体和具体类型完成后，会再次尝试封闭 direct inline handler 的消除；这一步不要求提前运行普通函数内联入口。请求和 handler 一起替换为局部控制流，生成的返回存储进入实例图，再进行资源检查与清理规划。不能完整展开的安装保留原有执行路径。嵌套 staged quote 中的部分 handler 可以继续转发到外层安装；完成展开后，提前 return 仍按 Sink、载荷、Producer、转发层、调用者的顺序离开资源作用域。若计算仍调用一个未展开的普通效应函数，物化阶段保留完整安装及该函数调用。失败候选新增的返回存储、源码标记和身份分配均回滚，生成图不会夹带这些候选产物。验收同时检查物化 IR 中不再存在安装／请求节点，以及优化前后的析构事件顺序；只检查执行结果不足以证明调度已消除。
+
+带 comptime 参数的普通 `inline fn` 也会在输入绑定后重试展开，随后由同一物化过程消除封闭的 inline handler。例如：
+
+```flurry
+inline effect deliver(value: bool) -> bool;
+
+inline fn produce(comptime enabled: bool, value: bool) -> #deliver bool {
+    if enabled { return deliver(value)#; }
+    false
+}
+
+fn entry() -> bool {
+    produce(true, true)# {
+        deliver(value) => do { resume value; },
+    }
+}
+```
+
+这里先完成 `enabled` 的绑定，再把 `produce` 的主体接入调用位置，最后展开 `deliver` 的请求和处理分支。普通 runtime 实参仍按调用规则求值一次，并先于前置条件检查；展开后仍保留前后置条件、trait 接口契约及拥有型参数的清理责任。嵌套的 staged inline 调用，以及其主体中的普通 inline 直接调用、泛型调用和具体 trait 方法调用，都可继续展开。方法展开仍合并接口与实现的程序契约，并保持接收者及载荷的清理次序。这一物化补全限定于 staged inline 展开链；其它普通调用仍由前述可选优化入口处理。普通 `inline fn` 保持普通函数身份：直接递归、相互递归或达到展开深度界限时，保留已完成输入绑定的 runtime 调用；这与 quote 函数要求展开的语义不同。上述递归调用若仍包含效应，也会使相应 handler 保留合法执行路径。
+
+在 staged inline 主体中，普通 inline 目标也可以由 runtime `if`、`when`、`match` 或代码块选择。选择条件仍在 runtime 执行；物化阶段只展开各个已知候选，然后尝试消除外层 handler。例如，沿用前面的 `deliver`：
+
+```flurry
+inline fn positive(value: bool) -> #deliver bool { deliver(value)# }
+inline fn negative(value: bool) -> #deliver bool { deliver(not value)# }
+
+inline fn choose(comptime enabled: bool, flag: bool, value: bool) -> #deliver bool {
+    if not enabled { return false; }
+    let action = if flag { positive } else { negative };
+    action(value)
+}
+
+fn run(flag: bool) -> bool {
+    choose(true, flag, true)# {
+        deliver(value) => do { resume value; },
+    }
+}
+```
+
+`run(true)` 返回 true，`run(false)` 返回 false。两个候选都可展开时，生成图可以同时消除函数调用和 handler 调度；只执行 runtime 选中的分支。选择作用域的资源先于实参求值清理，实参仅求值一次；handler 的 resume 与提前 return 保留各自退出目标和析构顺序。若某个候选仍是普通非 inline 效应函数，则保留完整 handler 和必要的调用，不能只根据某次运行选中了可展开候选，就删掉另一条路径需要的处理能力。
+
+可独立封闭的嵌套安装先展开内部，再处理外部。例如内部安装虽然允许使用词法环境中的 `poll`，实际只请求自己处理的 `read`，两层都可展开：
+
+```flurry
+inline effect read() -> bool;
+inline effect poll() -> bool;
+
+inline fn nested() -> #poll bool {
+    let inside = read()# { read() => true, };
+    inside and (poll()#)
+}
+
+fn entry() -> bool {
+    nested()# { poll() => true, }
+}
+```
+
+内部的完整效应行、槽位及操作身份仍要核对。若它实际请求外层操作，或需要未展开 callee 的动态效应路由，当前优化保留相应安装。已独立成功的内层展开可以保留；外层失败只回滚本次外层尝试产生的代码与元数据，不撤销有效的内层结果。
+
+callee 也可只使用调用方行中的一部分操作，或以不同顺序声明它们：
+
+```flurry
+inline fn only_poll() -> #poll bool { poll()# }
+inline fn wider() -> #[read, poll] bool { only_poll() }
+
+fn mapped_entry() -> bool {
+    wider()# { read() => false, poll() => true, }
+}
+```
+
+这里 callee 的槽 0 对应调用方的 `poll` 槽，而不是 `read`。展开逐层组合 EffectRun 槽映射，并核对操作声明及类型实参，之后才选择 handler 模板；子集映射、顺序调整及 `resume` 不改变普通实参的求值次数和清理次序。错误槽位或不匹配的操作身份使该安装尝试回滚，不发布部分代码。
+
+当前转换不处理外层效应行、部分转发、direct passing/capturing/async、带效应的闭包／嵌套效应，也不跨未展开的 effectful callee。遇到这些情况或候选预算不足，整段安装保留普通路径；已经尝试生成的局部身份与来源记录回滚。这是实现范围，不改变上述语言语义。
+
+
 ## 常见示例
 
 ### 用同一主体连接两种处理方式
@@ -176,6 +278,10 @@ test {
 进入分支时切换逻辑处理上下文，返回主体时恢复原上下文；逻辑边界不要求每次都切换物理栈。分支请求外层可捕获操作时，整个调用链仍需遵守可挂起调用的契约。
 
 部分处理先判断模式与 guard；不覆盖时转交外层入口。失败匹配不能消费后续入口仍需要的参数，也不能丢失重新安装内部 handler 的关系。
+
+handler 的 guard 和参数中的顺序计算模式遵循普通候选观察规则，可以调用具名标量函数，也可通过工厂、局部计算模式或 match 取得已知 Copy 代码再调用。它们的读取足迹进入安装函数的内存摘要，局部赋值、临时资源及调用清理边界属于当前 handler 的运行环境。guard 失败后，候选计算已经完成的清理不重放；请求转发到外层，恢复主体后仍使用原内层 handler。清理发布器单独遍历这些模式计算，不把它们当作函数前置条件。
+
+对封闭的 direct inline effect，联合展开把这些候选变成每个请求自己的局部 match。参数中的计算模式及 guard 内部绑定都需卫生重命名；生产函数和回调的求值次数、候选顺序、临时资源与请求参数的清理顺序保持一致。普通分支结果与 `resume` 都遵守这一要求。展开本身不提供不拒绝依据：工厂或它返回的目标可能拒绝时，展开后仍须通过同样的失败路径资源检查。
 
 ## 编译器实现引导
 

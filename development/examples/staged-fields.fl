@@ -1,0 +1,20 @@
+struct Flags { enabled: bool, tracing: bool }
+struct Configuration { flags: Flags, ready: bool }
+
+fn selected(comptime enabled: bool) -> bool { enabled }
+
+fn configured(comptime enabled: bool) -> bool {
+    selected(do {
+        var config = Configuration {
+            flags: Flags { enabled: false, tracing: true },
+            ready: true,
+        };
+        config.flags.enabled = enabled;
+        config.flags.tracing = false;
+        config.ready and config.flags.enabled and not config.flags.tracing
+    })
+}
+
+fn run() -> (bool, bool) {
+    (configured(false), configured(true))
+}

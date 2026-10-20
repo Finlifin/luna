@@ -98,6 +98,8 @@ pub struct Vfs {
     pub root: PathBuf,
     /// Source files, indexed by [`FileId`].
     files: Vec<SourceEntry>,
+    pub selected_root: Option<FileId>,
+    pub source_directories: Vec<PathBuf>,
     /// Parsed ASTs, indexed by [`FileId`]. `None` until parsing is complete.
     asts: Vec<Option<Ast>>,
 }
@@ -109,6 +111,8 @@ impl Vfs {
             name: name.into(),
             root,
             files: Vec::new(),
+            selected_root: None,
+            source_directories: Vec::new(),
             asts: Vec::new(),
         }
     }

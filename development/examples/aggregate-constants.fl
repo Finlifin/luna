@@ -1,0 +1,24 @@
+typealias Flag = true'type;
+typealias Int = .Integer'builtin;
+struct Box where T { value: T, ready: Flag = true }
+enum Entry where T { empty, value(T), tagged { value: T, ready: Flag = true } }
+const BOX: Box<Int> = Box<Int> { value: 8 };
+const EMPTY: Entry<Int> = .empty;
+const VALUE: Entry<Box<Int>> = .value(BOX);
+const TAGGED: Entry<Int> = .tagged { value: 13 };
+const NESTED = (VALUE, TAGGED);
+comptime fn box_value() -> Int { BOX.value }
+comptime fn read() -> Int {
+    VALUE match { .empty => 0, .value(box) => box.value, .tagged { value: box, ready } => box.value }
+}
+comptime fn empty() -> Flag { EMPTY matches .empty }
+comptime fn tagged() -> Int {
+    TAGGED match { .empty => 0, .value(n) => n, .tagged { value: n, ready } => n }
+}
+comptime fn changed() -> Int {
+    let copy = BOX;
+    copy.value = 19;
+    BOX.value
+}
+const WIDTH = read();
+typealias Bits = .BitVec'builtin<WIDTH>;

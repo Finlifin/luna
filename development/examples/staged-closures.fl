@@ -1,0 +1,17 @@
+fn selected(comptime value: bool) -> bool { value }
+
+fn round_trip(comptime initial: bool) -> bool {
+    selected(do {
+        var value = initial;
+        let toggle: %{value: bool} comptime fn() -> bool = || {
+            value = not value;
+            value
+        };
+        toggle();
+        toggle()
+    })
+}
+
+fn run() -> (bool, bool) {
+    (round_trip(false), round_trip(true))
+}

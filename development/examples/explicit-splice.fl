@@ -1,0 +1,25 @@
+-- Explicit protocol invocation; automatic cross-stage insertion is separate.
+typealias Type = .Type'builtin;
+
+trait Splice {
+    assoc RuntimeTarget: Type;
+    fn splice(comptime data: Self) -> RuntimeTarget;
+}
+
+impl Splice for bool {
+    assoc RuntimeTarget: Type = (bool, bool);
+    fn splice(comptime data: bool) -> (bool, bool) {
+        construct(data)
+    }
+}
+
+-- An ordinary runtime call must survive specialization of the staged input.
+fn construct(value: bool) -> (bool, bool) {
+    (value, not value)
+}
+
+const FLAG = true;
+
+fn run() -> ((bool, bool), (bool, bool)) {
+    (bool.as(Splice).splice(FLAG), bool.as(Splice).splice(false))
+}

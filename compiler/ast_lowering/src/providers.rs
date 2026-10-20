@@ -6,12 +6,15 @@
 //! ```ignore
 //! ast_lowering::set_providers(&mut instance.db.providers);
 //! ```
+//!
+//! This is step 4 of adding a new query (see `query::howto`). The
+//! `hir_package` provider below is the live reference implementation.
 
 use std::sync::Arc;
 
 use hir::{HirArena, Package};
-use middle::queries::{Db, Providers};
 use middle::HirPackageBox;
+use middle::queries::{Db, Providers};
 use resolve::Resolver;
 
 /// Provider for the `hir_package` query.
@@ -28,19 +31,90 @@ fn lower_package_ast(db: &Db) -> Arc<HirPackageBox> {
     let source_map = unsafe { input.source_map() };
     let diag_ctx = unsafe { input.diag_ctx() };
 
-    let resolver = Resolver::new(&input.module_tree);
+    let mut resolver = Resolver::new(&input.module_tree);
 
     let arena = HirArena::new();
     let mut package = Package::new();
     crate::lower_to_hir(
         input.ast(),
+        input.file_id(),
         &arena,
         source_map,
         diag_ctx,
         &mut package,
-        &resolver,
+        &mut resolver,
         input.file_scope(),
     );
+
+    let root = package.root_mod;
+    for (file_id, ast, scope) in &input.additional_files {
+        let mut resolver = Resolver::new(&input.module_tree);
+        crate::lower_to_hir(
+            ast,
+            *file_id,
+            &arena,
+            source_map,
+            diag_ctx,
+            &mut package,
+            &mut resolver,
+            *scope,
+        );
+    }
+    package.root_mod = root;
+    // Directory-only modules have no file to lower, but remain real HIR
+    // containers. Reconstruct their parent edges from resolved scope identity.
+    let scopes: Vec<_> = input
+        .module_tree
+        .scope_tree
+        .iter()
+        .filter(|scope| {
+            matches!(
+                scope.kind,
+                resolve::scope::ScopeKind::Package | resolve::scope::ScopeKind::Module
+            )
+        })
+        .collect();
+    for scope in &scopes {
+        if package.definition_owner(scope.owner_def).is_none() {
+            let owner = package.alloc_owner_id();
+            let item = arena.alloc_item(hir::Item {
+                owner_id: owner,
+                ident: hir::common::Ident::new(scope.name.unwrap(), rustc_span::DUMMY_SP),
+                kind: hir::ItemKind::Mod(hir::item::ModDef { items: Vec::new() }),
+                span: rustc_span::DUMMY_SP,
+            });
+            package.insert_owner(
+                owner,
+                hir::owner::OwnerInfo {
+                    node: hir::owner::OwnerNode::Item(item),
+                    nodes: hir::owner::OwnerNodes::new(),
+                },
+            );
+            package.bind_definition(scope.owner_def, owner);
+        }
+    }
+    for scope in &scopes {
+        let owner = package.definition_owner(scope.owner_def).unwrap();
+        let mut item = package.owner(owner).unwrap().node.expect_item().clone();
+        if let hir::ItemKind::Mod(module) = &mut item.kind {
+            for child in &scope.children {
+                let child = input.module_tree.scope_tree.get(*child).unwrap();
+                if matches!(child.kind, resolve::scope::ScopeKind::Module) {
+                    let child_owner = package.definition_owner(child.owner_def).unwrap();
+                    if !module.items.contains(&child_owner) {
+                        module.items.push(child_owner);
+                    }
+                }
+            }
+        }
+        package.insert_owner(
+            owner,
+            hir::owner::OwnerInfo {
+                node: hir::owner::OwnerNode::Item(arena.alloc_item(item)),
+                nodes: hir::owner::OwnerNodes::new(),
+            },
+        );
+    }
 
     // SAFETY: `package` borrows from `arena`.  We erase the `'hir` lifetime so
     // the borrow checker permits moving `arena`.  Both are immediately bundled

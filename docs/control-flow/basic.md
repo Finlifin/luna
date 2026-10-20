@@ -40,15 +40,17 @@ continue_stmt -> continue id? (while expr)?
 
 - 条件为布尔表达式；为真执行 then 块，否则走 `else`（若有）。
 - 作为表达式时，各写出的分支结果类型须一致（可统一）。
-- **无 `else` 的 `if` 表达式**：合法，整个表达式的类型为 `void`（值 `()`）。
+- **无 `else` 的 `if` 表达式**：合法，正常完成时类型为 `void`（值 `()`）；静态确定所选分支不正常完成时为 `never`。
 - `else if` 即 `else` 后接另一个 `if`。
+
+常量布尔条件可以保留确定退出的信息。例如 `if true { return true; }` 不产生正常完成值，后面不需要补返回表达式。布尔 `and` / `or` 遵循短路规则：`true and do { return true; }` 确定退出，`false and do { return true; }` 则正常完成为 false；未知左值不能据此推断确定退出。BitVec 的按位 `and` / `or` 求值两侧，不采用布尔短路规则。未选中的分支仍需通过类型检查。
 
 ### `when`
 
 - 按书写顺序求值各臂左侧的布尔表达式；执行**第一个**为真的臂。
 - 兜底臂写作 `else => …`。
 - 作为表达式时，各臂结果类型须一致。
-- **无 `else` 的 `when` 表达式**：合法，类型为 `void`（与无 `else` 的 `if` 相同）。
+- **无 `else` 的 `when` 表达式**：合法，正常完成时类型为 `void`（与无 `else` 的 `if` 相同）。按条件顺序可以确定所有可达路径都退出时，其类型为 `never`；例如 `when { false => false, true => return true }`。前面的可达且正常完成的 arm 不会被后面的退出 arm 覆盖。
 
 ### `for` / `while`
 
@@ -56,6 +58,39 @@ continue_stmt -> continue id? (while expr)?
 - `while expr block`：条件为真则重复执行块。
 - 二者为**语句**。
 - **标签**：`for:name` / `while:name`。`break name` / `continue name` 作用到该标签；无标签则作用到最内层循环。label 与普通名称共用[命名空间](../code-organization/scope-and-paths.md)，同名局部绑定可以遮蔽它；选中非标签绑定时静态拒绝，不跳过该绑定重新寻找标签。
+
+当前实现中，普通 `for` 在 HIR 中保留 iterable、模式、守卫、循环身份及主体，尚未展开为可执行 NIR。有界 `Integer` 范围的 `inline for` 已接通展开及 comptime guard，参见[inline 控制流](../comptime/inlining-comptime-code.md)。主语在元素绑定作用域之外解析；元素绑定只进入守卫和循环体，标签按上述名称规则解析。AST lowering 不再生成 `__into_iter__`／`__next__` 等约定方法调用；迭代协议 evidence 与 inline effect 的展开仍待接通，NIR 入口对此明确报错。
+
+当循环没有可达的正常出口时，其内部类型为 `never`；这不为 `while` 增加结果值或带值 `break`。例如，下面两个函数都不需要在循环之后补一个 `bool` 值：前者不终止，后者通过 `return` 返回。
+
+```flurry
+fn spin()->bool {
+    while true {}
+}
+
+fn ready()->bool {
+    while true {
+        return true;
+    }
+}
+```
+
+编译器保守判断出口：字面量布尔条件及其 `not` / `and` / `or` 组合可以排除不可达分支；未知条件下的 `break` 仍视为可能出口。嵌套循环的 `break` 按目标标签区分，handler 中跳出安装者循环的 `break` 也属于该循环的出口。已知字面量及元组、结构体、枚举构造值的 `match` 也按 arm 顺序排除不匹配的纯模式；例如 `true match { true => continue, false => break }` 不为所在循环提供出口。模式中的可执行计算、未知主语或无法静态判定的模式保持保守处理，不能遗漏其中的控制转移。此分析不证明任意程序的终止性，也不免除循环内部的类型与资源检查。
+
+```flurry
+enum Signal { idle, ready(Tuple<bool, bool>) }
+
+fn wait_forever() -> bool {
+    while true {
+        Signal.ready((true, false)) match {
+            .ready((true, false)) => continue,
+            _ => break,
+        }
+    }
+}
+```
+
+这里可以确定每次均选中第一个 arm，循环没有正常出口，因此函数不需要补一个 bool 结果。若载荷改为未知输入，则保留退出的可能性。主语构造本身仍须求值，guard 中的控制转移也仍须检查；不能因为最终模式已知就跳过这两部分。当前实现仅判定有直接表示的字面量，未规范化的数值拼写和超出分析预算的结构仍按未知处理。
 
 ### `while … is … do`
 

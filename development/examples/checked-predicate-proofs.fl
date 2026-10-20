@@ -1,0 +1,57 @@
+typealias Byte = .u8'builtin;
+fn repeated(a: Byte, b: Byte) -> Byte {
+    assumes a <= b;
+    assumes a <= b;
+    b - a
+}
+fn branch(a: Byte, b: Byte) -> Byte {
+    if a < b {
+        assumes a != b and a <= b;
+        b - a
+    } else {
+        assumes a >= b;
+        a - b
+    }
+}
+fn changed(a: Byte, b: Byte) -> Byte {
+    var value = a;
+    assumes value <= b;
+    value = 255;
+    assumes value <= b;
+    b - value
+}
+fn impossible() {
+    assumes false;
+}
+fn captured(a: Byte, b: Byte) -> Byte {
+    assumes a <= b;
+    let difference = || {
+        assumes a <= b;
+        b - a
+    };
+    difference()
+}
+fn touch() {}
+fn after_call(a: Byte, b: Byte) -> Byte {
+    assumes a <= b;
+    touch();
+    assumes a <= b;
+    b - a
+}
+fn loop_check(a: Byte) -> Byte {
+    while true {
+        assumes a <= 100;
+        assumes a <= 100;
+        break;
+    }
+    a
+}
+fn tautology(a: Byte, b: Byte) -> Byte {
+    assumes a <= b or a > b;
+    a
+}
+comptime fn run() -> Byte {
+    let a: Byte = 3;
+    assumes a < 10;
+    a
+}

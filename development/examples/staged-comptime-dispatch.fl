@@ -1,0 +1,32 @@
+typealias Type = .Type'builtin;
+
+trait Inspect {
+    comptime fn inspect(self) -> bool;
+}
+
+impl Inspect for bool {
+    comptime fn inspect(self) -> bool { self }
+}
+
+impl Inspect for .u8'builtin {
+    comptime fn inspect(self) -> bool { self == 7 }
+}
+
+comptime fn leaf(comptime T: Type, value: T) -> bool
+where requires T :- Inspect {
+    value.as(Inspect).inspect()
+}
+
+comptime fn forward(comptime T: Type, value: T, again: bool) -> bool
+where requires T :- Inspect {
+    if again { forward(T, value, false) } else { leaf(T, value) }
+}
+
+comptime fn entry() -> (bool, bool) {
+    (forward(bool, true, true), leaf(.u8'builtin, 7))
+}
+
+comptime fn defaulted(comptime .T: Type = bool, .value: T = true) -> bool
+where requires T == bool {
+    leaf(T, value)
+}

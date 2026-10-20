@@ -1,0 +1,107 @@
+{
+  "grader": "independent",
+  "round": 2,
+  "score": "13/13",
+  "gate": "passed",
+  "criteria": [
+    {
+      "id": "C1",
+      "verdict": "pass",
+      "class": "record",
+      "severity": "none",
+      "evidence": "Refreshed graph.json retains concrete source-delta/interface edges and rejected fake edges; the added lexer-to-parser repair edge carries the Char-token ambiguity contract, with staged dispatch/integration records."
+    },
+    {
+      "id": "C2",
+      "verdict": "pass",
+      "class": "record",
+      "severity": "none",
+      "evidence": "Refreshed graph.json declares bounded input, output, owner, write boundary, verifier, selected skill, retry and stop conditions for every worker; repair responsibilities remain within lexer/parser/test ownership."
+    },
+    {
+      "id": "C3",
+      "verdict": "pass",
+      "class": "artifact",
+      "severity": "none",
+      "evidence": "/tmp/luna-dev-002/grader2-artifacts.json independently verifies the manifest and isolated lex/hir/tests copies. All deltas stay within ownership apart from the documented root-supplied AST interface in HIR, whose final difference is formatting only."
+    },
+    {
+      "id": "C4",
+      "verdict": "not_applicable",
+      "class": "artifact",
+      "severity": "none",
+      "evidence": "No external research nodes or claims; repository documentation remains the semantic authority."
+    },
+    {
+      "id": "C5",
+      "verdict": "pass",
+      "class": "artifact",
+      "severity": "none",
+      "evidence": "Independent anchors are retrievable in grader2-tests.log, grader2-check.log, grader2-workspace.json, grader2-artifacts.json and grader2-probes-checked.json."
+    },
+    {
+      "id": "C6",
+      "verdict": "pass",
+      "class": "rerun",
+      "severity": "none",
+      "evidence": "Independent CARGO_BUILD_JOBS=1 TMPDIR=/tmp/luna-dev-002/grader-probes cargo test -p lex -p parse -p hir -p ast_lowering -p luna --locked --offline --target-dir /tmp/luna-dev-002/target exits 0: 106 tests pass, four existing doctests ignored; cargo check -p luna also exits 0. See grader2-tests.log and grader2-check.log. Final CLI independently exercised by 13 additional probes."
+    },
+    {
+      "id": "C7",
+      "verdict": "pass",
+      "class": "record",
+      "severity": "none",
+      "evidence": "Refreshed graph.json records both diagnosed defects, assigns lexer repair plus parser-context and independent-test work, and records their integration/rechecks. Independent grader2-tests.log and grader2-probes-checked.json confirm the repaired behavior."
+    },
+    {
+      "id": "C8",
+      "verdict": "pass",
+      "class": "record",
+      "severity": "none",
+      "evidence": "Refreshed graph.json records explicit positive caps and observed counts within each cap: workers 5 including root, peak concurrency 4, waves 5, retries 1, depth 1, worker_turns 9/16 and elapsed 2915/5400 seconds; grading count remains within its declared cap."
+    },
+    {
+      "id": "C9",
+      "verdict": "pass",
+      "class": "artifact",
+      "severity": "none",
+      "evidence": "Independent Git inspection and grader2-workspace.json retain dev at baseline HEAD 4f5e3733ca88121b086b3a9e4389923abb9d837c. Disclosed cleanup concerns reproducible task build caches; source, snapshots, logs and history remain preserved. No commit/push/publication/external-send artifact."
+    },
+    {
+      "id": "C10",
+      "verdict": "pass",
+      "class": "artifact",
+      "severity": "none",
+      "evidence": "Refreshed report.md accurately distinguishes 106 passing tests from earlier quota and source failures, points to retrievable repaired outputs, identifies record-class evidence, leaves grading pending and explicitly retains elaboration/comptime/interpolation/full BitVec/full-language limitations."
+    },
+    {
+      "id": "C11",
+      "verdict": "pass",
+      "class": "rerun",
+      "severity": "none",
+      "evidence": "grader2-tests.log passes numeric/radix/scientific rejection and lossless-spelling tests. grader2-probes-checked.json independently verifies a 42-digit integer, exact large-exponent float spelling and separate u128/unit conversion suffixes using parsed HIR structure."
+    },
+    {
+      "id": "C12",
+      "verdict": "pass",
+      "class": "rerun",
+      "severity": "none",
+      "evidence": "grader2-tests.log passes 18 lexer and 27 literal CLI groups. grader2-probes-checked.json independently confirms repaired character statements after closing braces, suffixed Unicode characters after nested comments, nested-string/multiline interpolation rejection with explicit unsupported-interpolation diagnostics, escaped-dollar concatenation, scalar boundaries and preserved output files on rejection. Reviewed lexer context save/restore and parser compact take-view reconstruction; object-view regression tests pass."
+    },
+    {
+      "id": "C13",
+      "verdict": "pass",
+      "class": "rerun",
+      "severity": "none",
+      "evidence": "grader2-tests.log passes nine HIR Display groups, all 32 prior CLI tests, nine parser groups and 27 literal CLI groups. Independent probe HIR parses as one complete S-expression, repeats identically, and retains the literal-conversion subtree inside a constant pattern. Fixed-radix BitVec AST identity and unsupported lowering remain tested."
+    },
+    {
+      "id": "C14",
+      "verdict": "pass",
+      "class": "rerun",
+      "severity": "none",
+      "evidence": "Independent verify-workspace.py exits 0; grader2-workspace.json verifies 480 baseline files, no unowned changes, dev and unchanged HEAD. grader2-artifacts.json confirms baseline hashes and that final.patch exactly matches current files. No dependency/backend delta; contract and report clearly retain unfinished language work."
+    }
+  ],
+  "unreachable": []
+}

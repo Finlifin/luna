@@ -1,0 +1,24 @@
+-- Intermediate functions and closures stay at comptime.
+-- Only the final bool crosses into runtime through Splice.
+-- Run with --interpret run --splice-protocol Splice.
+typealias Type = .Type'builtin;
+trait Splice {
+    assoc RuntimeTarget: Type;
+    fn splice(comptime data: Self) -> RuntimeTarget;
+}
+impl Splice for bool {
+    assoc RuntimeTarget: Type = (bool, bool);
+    fn splice(comptime data: bool) -> (bool, bool) { construct(data) }
+}
+fn construct(value: bool) -> (bool, bool) { (value, not value) }
+typealias Callback = %{flag: bool} comptime fn() -> bool;
+comptime fn capture(flag: bool) -> Callback { || flag }
+comptime fn factory() -> comptime fn(bool) -> Callback { capture }
+
+fn forward(comptime flag: bool) -> (bool, bool) {
+    factory()(flag)()
+}
+
+fn run() -> ((bool, bool), (bool, bool)) {
+    (forward(true), (do { factory() })(false)())
+}

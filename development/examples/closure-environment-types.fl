@@ -1,0 +1,19 @@
+typealias Bool = true'type;
+typealias Int = .Integer'builtin;
+typealias Adder = %{offset: Int} comptime fn(Int) -> Int;
+
+comptime fn make_adder(offset: Int) -> Adder { |value: Int| value + offset }
+comptime fn twice(callback: Adder, value: Int) -> Int { callback(callback(value)) }
+const ADD_THREE = make_adder(3);
+const WIDTH = twice(ADD_THREE, 2);
+typealias Byte = .BitVec'builtin<WIDTH>;
+
+fn keep(value: T) -> %{saved: T} fn() -> T where T { || value }
+fn read_pair() -> (Bool, Bool) {
+    let left: %{first: Bool} fn() -> Bool = keep(true);
+    let right: %{second: Bool} fn() -> Bool = keep(false);
+    (left(), right())
+}
+
+comptime fn run() -> Int { twice(ADD_THREE, 4) }
+fn empty(value: %{} Bool) -> Bool { value }

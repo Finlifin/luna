@@ -1,0 +1,31 @@
+typealias Type = .Type'builtin;
+trait Source { assoc Item: Type; }
+trait Allowed {}
+trait Accepts where T {}
+impl Source for bool { assoc Item: Type = bool; }
+impl Allowed for bool {}
+impl Accepts<bool> for bool {}
+
+-- Declaration sugar and explicit requires share the same prerequisites.
+struct Container where A :- Accepts<A.as(Source).Item>,
+    requires A.as(Source).Item :- Allowed,
+    requires A :- Source {
+    value: A.as(Source).Item,
+}
+
+enum Choice where A,
+    requires A.as(Source).Item :- Allowed,
+    requires A :- Source {
+    none,
+    some(bool),
+}
+
+typealias Alias<A :- Accepts<A.as(Source).Item> + Source> = bool;
+
+fn run() -> Alias<bool> {
+    let item = Container<bool> {value: true};
+    Choice<bool>.some(item.value) match {
+        .some(value) => value,
+        .none => false,
+    }
+}

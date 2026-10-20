@@ -1,0 +1,32 @@
+trait Choose {
+    fn choose(.flag: bool = true) -> bool;
+}
+trait Gather {
+    fn gather(...items: (bool, bool)) -> bool;
+}
+struct Host {}
+impl Choose for Host {
+    fn choose(value: bool) -> bool { value }
+}
+impl Gather for Host {
+    fn gather(packet: (bool, bool)) -> bool {
+        let (first, second) = packet;
+        first and not second
+    }
+}
+
+trait Calls {
+    assoc choose: fn(bool) -> bool = Host.as(Choose).choose;
+    assoc gather: fn((bool, bool)) -> bool = Host.as(Gather).gather;
+}
+struct Holder {}
+impl Calls for Holder {}
+
+fn entry() -> bool {
+    -- Direct declaration access has its optional/collection entry protocol.
+    let direct = Host.as(Choose).choose() and Host.as(Gather).gather(true, false);
+    -- Stored callable values take the complete ordinary positional inputs.
+    let chosen = Holder.as(Calls).choose(false);
+    let gathered = Holder.as(Calls).gather((true, false));
+    direct and not chosen and gathered
+}

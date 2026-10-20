@@ -1,0 +1,72 @@
+typealias Byte = .u8'builtin;
+typealias Bool = true'type;
+struct Pair { start: Byte, end: Byte }
+fn next(index: Byte, length: Byte) -> Byte {
+    assumes index < length;
+    index + 1
+}
+fn distance(start: Byte, end: Byte) -> Byte {
+    assumes start <= end;
+    end - start
+}
+fn guarded_distance(start: Byte, end: Byte) -> Byte {
+    if start <= end { end - start } else { start - end }
+}
+fn field_distance(pair: Pair) -> Byte {
+    assumes pair.start <= pair.end;
+    pair.end - pair.start
+}
+fn sum_after_bounds(left: Byte, right: Byte) -> Byte {
+    assumes left < 100 and right < 100;
+    assumes left + right <= 150;
+    left + right + 100
+}
+fn triangle(a: Byte, b: Byte, c: Byte) -> Byte {
+    assumes a < b and b < c;
+    assumes c < 100;
+    a + 157
+}
+fn branches(start: Byte, end: Byte, flag: Bool) -> Byte {
+    if flag { assumes start <= end; } else { assumes start <= end; }
+    end - start
+}
+fn equality(left: Byte, right: Byte) -> Byte {
+    assumes left == right;
+    left - right
+}
+fn cancellation(value: Byte) -> Byte { value - value }
+fn copied_difference(pair: Pair) -> Byte {
+    assumes pair.start <= pair.end;
+    let delta = pair.end - pair.start;
+    delta
+}
+fn closure_parameter() -> Byte {
+    let difference = |start: Byte, end: Byte| { assumes start <= end; end - start };
+    difference(1,255)
+}
+comptime fn run() -> Byte {
+    let pair = Pair { start: 100, end: 255 };
+    assumes pair.start <= pair.end;
+    pair.end - pair.start
+}
+fn cubic(a: Byte, b: Byte, c: Byte) -> Byte {
+    assumes a < 6 and b < 6 and c < 6;
+    assumes a * b * c <= 100;
+    a * b * c + 155
+}
+fn quartic_with_plain_bounds(a: Byte) -> Byte {
+    assumes a <= 2;
+    a * a * a * a
+}
+fn sibling_relation(pair: Pair) -> Byte {
+    var copy = pair;
+    assumes copy.start <= copy.end;
+    copy.start = 0;
+    copy.end - copy.start
+}
+fn variable_limit(left: Byte, right: Byte, limit: Byte) -> Byte {
+    assumes left < 100 and right < 100;
+    assumes left + right <= limit;
+    assumes limit <= 150;
+    left + right + 100
+}

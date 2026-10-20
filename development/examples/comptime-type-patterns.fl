@@ -1,0 +1,20 @@
+typealias Type = .Type'builtin;
+typealias Bool = true'type;
+typealias Char = 'a''type;
+comptime fn SelectType(value: Type) -> Type {
+    value match {
+        'Bool => (Bool, Bool),
+        'Char => (Char, Char),
+        _ => value,
+    }
+}
+comptime fn Same(value: Type, expected: Type) -> Bool {
+    value match { 'expected => true, _ => false }
+}
+comptime fn run() -> (Bool, Bool, Bool) {
+    (Same(Bool, Bool), Same(Bool, Char), Same(SelectType(Bool), (Bool, Bool)))
+}
+typealias Selected = SelectType(Char);
+fn keep(value: Selected) -> (Char, Char) { value }
+pure comptime fn Opaque<T> -> Type { T }
+comptime fn unresolved() -> Bool { Same(Opaque<Bool>, Bool) }

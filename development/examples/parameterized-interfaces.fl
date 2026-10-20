@@ -1,0 +1,30 @@
+trait Echo where T {
+    fn echo(self, value: T) -> T;
+
+    fn indirect(self, value: T) -> T {
+        let invoke = || self.as(Echo<T>).echo(value);
+        invoke()
+    }
+}
+
+trait Child :- Echo<T> where T {}
+
+struct Identity {}
+
+impl Echo<T> for Identity where T {
+    fn echo(self, value: T) -> T { value }
+}
+
+impl Child<T> for Identity where T {}
+
+fn forward(value: U, item: T) -> T where T, U :- Child<T> {
+    value.indirect(item)
+}
+
+fn flag() -> true'type {
+    forward(Identity {}, true)
+}
+
+fn letter() -> 'x''type {
+    Identity {}.as(Child<'x''type>).indirect('x')
+}

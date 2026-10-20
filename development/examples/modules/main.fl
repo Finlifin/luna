@@ -1,0 +1,5 @@
+use logic.{Flag as Boolean, choose as select};
+
+fn main() -> Boolean {
+    select(true)
+}

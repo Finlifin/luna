@@ -1,0 +1,23 @@
+typealias Type = .Type'builtin;
+trait Source { assoc Item: Type; }
+trait Allowed {}
+trait Accepts where T {}
+
+impl Source for bool { assoc Item: Type = bool; }
+impl Allowed for bool {}
+impl Accepts<bool> for bool {}
+
+trait Get { fn get() -> bool; }
+struct Holder where A {}
+
+-- All three prerequisites must be established before this impl is selected.
+impl Get for Holder<A> where A,
+    requires A.as(Source).Item :- Allowed,
+    requires bool :- Accepts<A.as(Source).Item>,
+    requires A :- Source {
+    fn get() -> bool { true }
+}
+
+fn run() -> bool {
+    Holder<bool>.as(Get).get()
+}

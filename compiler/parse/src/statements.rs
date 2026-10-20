@@ -10,7 +10,7 @@ impl Parser<'_> {
             let token = p.peek_next_token();
             match token.kind {
                 // statements
-                TokenKind::Let => p.try_let_statement(),
+                TokenKind::Let | TokenKind::Var => p.try_let_statement(),
                 TokenKind::Const => p.try_const_statement(),
                 TokenKind::If => p.try_if_statement(),
                 TokenKind::Use => p.try_use_statement(),
@@ -22,6 +22,20 @@ impl Parser<'_> {
                 TokenKind::Break => p.try_break_statement(),
                 TokenKind::Continue => p.try_continue_statement(),
                 TokenKind::LBrace => p.try_block(),
+                TokenKind::Inline
+                    if [
+                        TokenKind::Effect,
+                        TokenKind::Fn,
+                        TokenKind::Unsafe,
+                        TokenKind::Spec,
+                        TokenKind::Verified,
+                        TokenKind::Atomic,
+                    ]
+                    .iter()
+                    .any(|next| p.peek(&[TokenKind::Inline, *next])) =>
+                {
+                    p.try_keyword_modified_definition()
+                }
                 TokenKind::Inline => p.try_inline_statement(),
 
                 TokenKind::Pub => {
@@ -40,7 +54,7 @@ impl Parser<'_> {
 
                 // Async/Unsafe: if followed by '{', it's a block expression;
                 // otherwise it's a keyword modifier on a definition.
-                TokenKind::Unsafe | TokenKind::Async => {
+                TokenKind::Unsafe | TokenKind::Async | TokenKind::Comptime => {
                     if p.peek(&[token.kind, TokenKind::LBrace]) {
                         p.try_expr_statement()
                     } else {
@@ -66,11 +80,10 @@ impl Parser<'_> {
 
                 // keyword-modifier definitions (these start definitions)
                 TokenKind::Pure
-                | TokenKind::Comptime
+                | TokenKind::KwQuote
                 | TokenKind::Spec
                 | TokenKind::Verified
-                | TokenKind::Atomic
-                | TokenKind::Extern => p.try_keyword_modified_definition(),
+                | TokenKind::Atomic => p.try_keyword_modified_definition(),
 
                 // verification statements
                 TokenKind::Axiom => p.try_unary(
@@ -122,7 +135,7 @@ impl Parser<'_> {
     }
 
     /// inline statement_expr
-    fn try_inline_statement(&mut self) -> ParseResult {
+    pub(super) fn try_inline_statement(&mut self) -> ParseResult {
         self.scoped_with_expected_prefix(TokenKind::Inline.as_ref(), |p| {
             p.eat_tokens(1); // consume 'inline'
             let inner = p.try_statement_or_definition()?;
@@ -142,7 +155,11 @@ impl Parser<'_> {
     }
 
     pub fn try_let_statement(&mut self) -> ParseResult {
-        self.scoped_with_expected_prefix(TokenKind::Let.as_ref(), |p| {
+        self.scoped(|p| {
+            let mutable = p.peek(TokenKind::Var.as_ref());
+            if !mutable && !p.peek(TokenKind::Let.as_ref()) {
+                return Ok(0);
+            }
             p.eat_tokens(1);
             let pattern = p.try_pattern()?;
             if pattern == 0 {
@@ -165,23 +182,52 @@ impl Parser<'_> {
                 }
             }
 
-            let mut init: u32 = 0;
-            if p.eat_token(TokenKind::Eq) {
-                init = p.try_expr()?;
-                if init == 0 {
+            if !p.eat_token(TokenKind::Eq) {
+                return Err(ParseError::invalid_syntax(
+                    format!(
+                        "{} declaration requires an initializer after '='",
+                        if mutable { "var" } else { "let" }
+                    ),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+            let init = p.try_expr()?;
+            if init == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected an initializer expression after '='".to_string(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+
+            let otherwise = if p.eat_token(TokenKind::Else) {
+                let block = p.try_block()?;
+                if block == 0 {
                     return Err(ParseError::invalid_syntax(
-                        "Expected an initializer expression after '='".to_string(),
+                        "Expected a block after let else".into(),
                         p.peek_next_token().kind,
                         p.next_token_span(),
                     ));
                 }
-            }
+                block
+            } else {
+                0
+            };
 
-            Ok(NodeBuilder::new(NodeKind::LetDecl, p.current_span())
-                .add_single_child(pattern)
-                .add_single_child(expr)
-                .add_single_child(init)
-                .build(&mut p.ast))
+            Ok(NodeBuilder::new(
+                if mutable {
+                    NodeKind::VarDecl
+                } else {
+                    NodeKind::LetDecl
+                },
+                p.current_span(),
+            )
+            .add_single_child(pattern)
+            .add_single_child(expr)
+            .add_single_child(init)
+            .add_single_child(otherwise)
+            .build(&mut p.ast))
         })
     }
 
@@ -249,7 +295,15 @@ impl Parser<'_> {
 
     pub fn try_path(&mut self) -> ParseResult {
         self.scoped(|p| {
-            let mut left = p.try_prefix_path()?;
+            let mut anchors = Vec::new();
+            while matches!(p.peek_next_token().kind, TokenKind::At | TokenKind::Dot) {
+                anchors.push(p.peek_next_token().kind);
+                p.eat_tokens(1);
+            }
+            let mut left = p.try_id()?;
+            if left == 0 {
+                return Ok(0);
+            }
 
             while p.eat_token(TokenKind::Dot) {
                 let next = p.peek_next_token();
@@ -313,6 +367,30 @@ impl Parser<'_> {
                 }
             }
 
+            if p.eat_token(TokenKind::As) {
+                let alias = p.try_id()?;
+                if alias == 0 {
+                    return Err(ParseError::invalid_syntax(
+                        "Expected an identifier after import as".into(),
+                        p.peek_next_token().kind,
+                        p.next_token_span(),
+                    ));
+                }
+                left = NodeBuilder::new(NodeKind::PathAsBind, p.current_span())
+                    .add_single_child(left)
+                    .add_single_child(alias)
+                    .build(&mut p.ast);
+            }
+            for anchor in anchors.into_iter().rev() {
+                let kind = if anchor == TokenKind::At {
+                    NodeKind::PackagePath
+                } else {
+                    NodeKind::SuperPath
+                };
+                left = NodeBuilder::new(kind, p.current_span())
+                    .add_single_child(left)
+                    .build(&mut p.ast);
+            }
             Ok(left)
         })
     }
@@ -481,7 +559,7 @@ impl Parser<'_> {
             }
 
             let arms = p.try_multi_with_bracket(
-                &[Rule::semicolon("case arm", |p| p.try_case_arm())],
+                &[Rule::comma("case arm", |p| p.try_case_arm())],
                 (TokenKind::LBrace, TokenKind::RBrace),
             )?;
 
@@ -829,17 +907,26 @@ impl Parser<'_> {
     /// Parse a definition prefixed by keyword modifiers (pure, comptime, inline, unsafe, etc.)
     /// These become AttributeSetTrue nodes wrapping the inner definition.
     pub fn try_keyword_modified_definition(&mut self) -> ParseResult {
+        if self.peek(&[
+            TokenKind::Pure,
+            TokenKind::Comptime,
+            TokenKind::Fn,
+            TokenKind::Id,
+            TokenKind::Lt,
+        ]) {
+            return self.try_normal_form_head_definition();
+        }
         self.scoped(|p| {
             let token = p.peek_next_token();
             let attr_name = match token.kind {
                 TokenKind::Pure => "__flurry_kw_pure",
+                TokenKind::KwQuote => "__flurry_kw_quote",
                 TokenKind::Comptime => "__flurry_kw_comptime",
                 TokenKind::Inline => "__flurry_kw_inline",
                 TokenKind::Unsafe => "__flurry_kw_unsafe",
                 TokenKind::Spec => "__flurry_kw_spec",
                 TokenKind::Verified => "__flurry_kw_verified",
                 TokenKind::Atomic => "__flurry_kw_atomic",
-                TokenKind::Extern => "__flurry_kw_extern",
                 TokenKind::Async => "__flurry_kw_async",
                 _ => return Ok(0),
             };
@@ -953,6 +1040,7 @@ impl Parser<'_> {
     // expr -= expr
     // expr *= expr
     // expr /= expr
+    // expr %= expr
     pub fn try_expr_statement(&mut self) -> ParseResult {
         self.scoped(|p| {
             let expr = p.try_expr()?;
@@ -960,71 +1048,34 @@ impl Parser<'_> {
                 return Ok(0); // No expression, no statement
             }
 
-            if p.eat_token(TokenKind::Eq) {
+            let assignment = match p.peek_next_token().kind {
+                TokenKind::Eq => Some(NodeKind::Assign),
+                TokenKind::PlusEq => Some(NodeKind::AddAssign),
+                TokenKind::MinusEq => Some(NodeKind::SubAssign),
+                TokenKind::StarEq => Some(NodeKind::MulAssign),
+                TokenKind::SlashEq => Some(NodeKind::DivAssign),
+                TokenKind::PercentEq => Some(NodeKind::RemAssign),
+                _ => None,
+            };
+            if let Some(kind) = assignment {
+                let operator = p.peek_next_token().kind;
+                p.eat_tokens(1);
                 let init = p.try_expr()?;
                 if init == 0 {
                     return Err(ParseError::invalid_syntax(
-                        "Expected an initializer expression after '='".to_string(),
+                        format!("Expected an expression after '{}'", operator.lexme()),
                         p.peek_next_token().kind,
                         p.next_token_span(),
                     ));
                 }
-                return Ok(NodeBuilder::new(NodeKind::Assign, p.current_span())
+                return Ok(NodeBuilder::new(kind, p.current_span())
                     .add_single_child(expr)
                     .add_single_child(init)
                     .build(&mut p.ast));
-            } else if p.eat_token(TokenKind::PlusEq) {
-                let init = p.try_expr()?;
-                if init == 0 {
-                    return Err(ParseError::invalid_syntax(
-                        "Expected an expression after '+='".to_string(),
-                        p.peek_next_token().kind,
-                        p.next_token_span(),
-                    ));
-                }
-                return Ok(NodeBuilder::new(NodeKind::AddAssign, p.current_span())
-                    .add_single_child(expr)
-                    .add_single_child(init)
-                    .build(&mut p.ast));
-            } else if p.eat_token(TokenKind::MinusEq) {
-                let init = p.try_expr()?;
-                if init == 0 {
-                    return Err(ParseError::invalid_syntax(
-                        "Expected an expression after '-='".to_string(),
-                        p.peek_next_token().kind,
-                        p.next_token_span(),
-                    ));
-                }
-                return Ok(NodeBuilder::new(NodeKind::SubAssign, p.current_span())
-                    .add_single_child(expr)
-                    .add_single_child(init)
-                    .build(&mut p.ast));
-            } else if p.eat_token(TokenKind::StarEq) {
-                let init = p.try_expr()?;
-                if init == 0 {
-                    return Err(ParseError::invalid_syntax(
-                        "Expected an expression after '*='".to_string(),
-                        p.peek_next_token().kind,
-                        p.next_token_span(),
-                    ));
-                }
-                return Ok(NodeBuilder::new(NodeKind::MulAssign, p.current_span())
-                    .add_single_child(expr)
-                    .add_single_child(init)
-                    .build(&mut p.ast));
-            } else if p.eat_token(TokenKind::SlashEq) {
-                let init = p.try_expr()?;
-                if init == 0 {
-                    return Err(ParseError::invalid_syntax(
-                        "Expected an expression after '/='".to_string(),
-                        p.peek_next_token().kind,
-                        p.next_token_span(),
-                    ));
-                }
-                return Ok(NodeBuilder::new(NodeKind::DivAssign, p.current_span())
-                    .add_single_child(expr)
-                    .add_single_child(init)
-                    .build(&mut p.ast));
+            }
+
+            if p.peek_next_token().kind == TokenKind::RBrace {
+                return Ok(expr);
             }
 
             Ok(NodeBuilder::new(NodeKind::ExprStatement, p.current_span())
@@ -1036,6 +1087,7 @@ impl Parser<'_> {
     pub fn try_file_scope(&mut self) -> ParseResult {
         self.scoped(|p| {
             let nodes = p.try_multi(&[
+                Rule::comma("configuration", |p| p.try_configuration()),
                 Rule::comma("property", |p| p.try_property()),
                 Rule::semicolon("statement or definition", |p| {
                     p.try_statement_or_definition()

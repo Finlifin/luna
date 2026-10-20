@@ -155,10 +155,8 @@ impl AriadneEmitter {
 
     /// Emit all diagnostics from a context
     pub fn emit_all(&self, context: &DiagnosticContext) {
-        unsafe {
-            for diagnostic in context.diagnostics() {
-                self.emit_diagnostic(diagnostic, context);
-            }
+        for diagnostic in context.diagnostics().iter() {
+            self.emit_diagnostic(diagnostic, context);
         }
     }
 }

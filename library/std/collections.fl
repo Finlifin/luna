@@ -11,86 +11,86 @@ pub struct Vec where T {
     __cap: Int,
 }
 
-impl Vec where T {
+impl Vec<T> where T {
     pub fn new() -> Self {
-        Vec { .__data null, .__len 0, .__cap 0 }
+        Vec { __data: null, __len: 0, __cap: 0 }
     }
 
     pub fn with_capacity(cap: Int) -> Self {
-        Vec { .__data __builtin_alloc(cap), .__len 0, .__cap cap }
+        Vec { __data: __builtin_alloc(cap), __len: 0, __cap: cap }
     }
 
-    pub fn len(self) -> Int = self.__len
+    pub fn len(self) -> Int = self.__len;
 
-    pub fn is_empty(self) -> Bool = self.__len == 0
+    pub fn is_empty(self) -> Bool = self.__len == 0;
 
     pub fn push(*self, value: T) {
-        if self.__len == self.__cap {
+        if self.__len.* == self.__cap.* {
             self.__grow()
         }
         __builtin_vec_push(self, value)
     }
 
     pub fn pop(*self) -> ?T {
-        if self.__len == 0 {
-            None
+        if self.__len.* == 0 {
+            .None
         } else {
-            Some(__builtin_vec_pop(self))
+            .Some(__builtin_vec_pop(self))
         }
     }
 
     pub fn get(self, index: Int) -> ?*T {
         if index >= 0 and index < self.__len {
-            Some(__builtin_vec_get(self, index))
+            .Some(__builtin_vec_get(self, index))
         } else {
-            None
+            .None
         }
     }
 
     fn __grow(*self) {
-        let new_cap = if self.__cap == 0 { 4 } else { self.__cap * 2 }
+        let new_cap = if self.__cap.* == 0 { 4 } else { self.__cap.* * 2 };
         __builtin_vec_grow(self, new_cap)
     }
 }
 
-impl Index<Int> for Vec where T {
-    type Output = T
+impl Index<Int> for Vec<T> where T {
+    assoc Output: Type = T;
     fn index(self, idx: Int) -> *T {
         self.get(idx).unwrap()
     }
 }
 
-impl Iterator for Vec where T {
-    type Item = T
+impl Iterator for Vec<T> where T {
+    assoc Item: Type = T;
     fn next(*self) -> ?T {
         -- Vec iteration is handled by VecIter adapter in practice
         todo()
     }
 }
 
-impl FromIterator<T> for Vec where T {
-    fn from_iter(iter: I) -> Self where I requires Iterator<Item = T> {
-        let v = Vec.new()
-        iter.foreach(|item| v.push(item))
+impl FromIterator<T> for Vec<T> where T {
+    fn from_iter(iter: I) -> Self where I :- Iterator, requires I.as(Iterator).Item == T {
+        var v = Vec.new();
+        iter.foreach(|item| v.push(item));
         v
     }
 }
 
 -- ── Map ────────────────────────────────────────────────────────────────────
 
-pub struct Map where K requires Hash + Eq, V {
+pub struct Map where K :- Hash + Eq, V {
     __data: __intrinsic_map_storage<K, V>,
     __len: Int,
 }
 
-impl Map where K requires Hash + Eq, V {
+impl Map<K, V> where K :- Hash + Eq, V {
     pub fn new() -> Self {
-        Map { .__data __builtin_map_new(), .__len 0 }
+        Map { __data: __builtin_map_new(), __len: 0 }
     }
 
-    pub fn len(self) -> Int = self.__len
+    pub fn len(self) -> Int = self.__len;
 
-    pub fn is_empty(self) -> Bool = self.__len == 0
+    pub fn is_empty(self) -> Bool = self.__len == 0;
 
     pub fn get(self, key: *K) -> ?*V {
         __builtin_map_get(self, key)
@@ -111,18 +111,18 @@ impl Map where K requires Hash + Eq, V {
 
 -- ── Set ────────────────────────────────────────────────────────────────────
 
-pub struct Set where T requires Hash + Eq {
+pub struct Set where T :- Hash + Eq {
     __map: Map<T, Unit>,
 }
 
-impl Set where T requires Hash + Eq {
+impl Set<T> where T :- Hash + Eq {
     pub fn new() -> Self {
-        Set { .__map Map.new() }
+        Set { __map: Map.new() }
     }
 
-    pub fn len(self) -> Int = self.__map.len()
+    pub fn len(self) -> Int = self.__map.len();
 
-    pub fn is_empty(self) -> Bool = self.__map.is_empty()
+    pub fn is_empty(self) -> Bool = self.__map.is_empty();
 
     pub fn insert(*self, value: T) -> Bool {
         self.__map.insert(value, ()).is_none()

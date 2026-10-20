@@ -1,0 +1,17 @@
+typealias Type = .Type'builtin;
+typealias Bool = true'type;
+typealias Char = 'a''type;
+comptime fn SelectType(value: Type) -> Type {
+    if value == Bool { (Bool, Bool) } else { (Char, Char) }
+}
+comptime fn Compare(left: Type, right: Type) -> Bool { left == right }
+comptime fn Different(left: Type, right: Type) -> Bool { left != right }
+comptime fn run() -> (Bool, Bool, Bool) {
+    (Compare(Bool, Bool), Compare(Bool, Char), Different(Bool, Char))
+}
+typealias SelectedBool = SelectType(Bool);
+typealias SelectedChar = SelectType(Char);
+fn keep(value: SelectedBool) -> (Bool, Bool) { value }
+fn keep_char(value: SelectedChar) -> (Char, Char) { value }
+pure comptime fn Opaque<T> -> Type { T }
+comptime fn unresolved() -> Bool { Compare(Opaque<Bool>, Bool) }

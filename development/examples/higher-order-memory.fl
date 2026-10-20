@@ -1,0 +1,40 @@
+-- 运行：development/cargo.py run -p luna --
+-- development/examples/higher-order-memory.fl --interpret entry
+-- --copy-protocol CopyForExecution --drop-protocol DropForExecution
+-- 回调的具体代码证据进入内存分析；复制能力与析构协议仍单独检查。
+trait CopyForExecution {}
+trait DropForExecution { fn drop(*self); }
+
+struct Cell { value: bool }
+struct Operations { update: fn(*Cell) -> *Cell }
+
+fn set(pointer: *Cell) -> *Cell {
+    pointer.value.* = true;
+    pointer
+}
+
+fn clear(pointer: *Cell) -> *Cell {
+    pointer.value.* = false;
+    pointer
+}
+
+fn select(flag: bool) -> Operations {
+    if flag { Operations { update: set } }
+    else { Operations { update: clear } }
+}
+
+fn apply(operations: Operations, pointer: *Cell) -> *Cell {
+    operations.update(pointer)
+}
+
+fn relay(operations: Operations, pointer: *Cell, stop: bool) -> *Cell {
+    if stop { return apply(operations, pointer); }
+    relay(operations, pointer, true)
+}
+
+fn entry() -> bool {
+    let cell = Cell { value: false };
+    let result = relay(select(true), cell.ref, false);
+    -- 返回值仍依赖 cell；此处若先移走 cell，再解引用 result 会被拒绝。
+    result.value.*
+}
