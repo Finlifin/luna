@@ -1,172 +1,188 @@
-# 090 — Take View（`'view_name`）机制深潜：从语法糖到 HIR 专属节点
+# Flurry 演进手记 (090)：一切视角皆 `'`——深入 Take View (`expr'id`) 的语言级扩展机制
 
-> **阅读指南**：在上一回（第 089 回）中，我们用 `pixel'bitvec` 优雅地取出了整数的位向量视图。一路走来，我们已经邂逅了 `'type`、`'bitvec`、`'tuple_enumerate`、`'old`、`'tag_name`、`'intrinsic`、`'builtin` 等一系列以单引号 `'` 连接的后缀操作。为什么 Flurry 要专门引入源自 Ada 属性（Attributes）灵感的 **`expr'id`（Take View，取视图）** 语法，而不是直接用点号 `expr.type` 或全局内置函数？更硬核的是，为什么编译器架构铁律（`AGENTS.md` §5 与 `syntax-and-hir.md`）明确规定：**每一个已定义的 Take View 在 AST Lowering 阶段都必须直接降级为专属的 HIR 节点种类（HIR Node Kind）**？本篇我们将带你从表面语法一直潜入编译器前端 HIR。
+> **所属卷**：第四卷：元编程即类型论——走进两级类型论 (2LTT) 与编译期宇宙 (066–095)  
+> **上一篇**：[089：任意位宽整数 `u5`、`i24` 是怎么炼成的——参数化位宽类型与算术边界](./089-arbitrary-sized-integers-and-bit-widths.md)  
+> **下一篇**：[091：设计静态形状张量（一）：用编译期列表表示维度 `Shape` 与 `Tensor<T, .dims = s>`](./091-static-tensors-part1-shapes-and-types.md)  
+> **参考规范**：[`docs/others/view-taking.md`](../docs/others/view-taking.md)
 
 ---
 
-## 一、 痛点：当“语言级元操作”撞上“用户普通字段”
+## 一、 为什么需要独立的 `expr'id`（Take View）语法？
 
-一门现代系统语言不可避免地需要让程序员观察或转换一个表达式的“另一面（View）”：
-- 给定任意变量 `x`，我想在编译期查询它的静态类型（Type View）；
-- 给定一个整数或可写存储位置 `reg`，我想把它的位表示当作 `BitVec<N>` 来切片或原地更新某几个比特（BitVec View）；
-- 在函数的后置契约 `ensures` 里，我想引用某个可变参数在进入函数前的初始快照（Old Value View）；
-- 给定一个异构元组 `values`，我想在 `inline for` 里同时拿到编译期索引和元素（Tuple Enumerate View）。
+在前面的篇章中，我们已经陆续使用了多种以单引号 `'` 连接的后缀操作：
+- `value'type`：查询表达式的静态类型；
+- `word'bitvec`：获取标量整数的定宽位向量视图；
+- `items'tuple_enumerate`：在编译期对元组生成带 `(index, item)` 的枚举序列；
+- `param'old`：在函数后置条件 `ensures` 中引用参数的入口快照值；
+- `val'tag_name`：读取枚举变体的标签字符串名称（`str`）；
+- `self'get_field(name)`：在反射与派生代码中按字段名访问成员；
+- `op'intrinsic(args).as(T)`：调用底层硬件内建指令。
 
-### 尝试 `v0`：用普通点号 `.type` / `.bitvec` 或全局关键字函数
+为什么 Flurry 要专门设计借鉴自 Ada 属性语法的 **`expr'id`（Take View，取视图）** 机制，而不是直接用普通点号 `expr.type`、`expr.bitvec`，或者设计一堆全局自由函数 `typeof(expr)`、`bitvec_of(expr)`？
 
-如果我们在设计语言时偷懒（`v0`），直接把这些能力塞进普通的点号投影 `expr.type`、`expr.bitvec`、`expr.old` 里，会发生什么灾难？
+### 1. 避免与用户自定义字段或方法发生命名冲突
+
+如果使用普通点号 `.type` 或 `.tag_name` 来表达语言级元查询：
+- 一旦用户自己定义了一个网络包结构体 `struct Packet { type: u8, tag_name: String }`，那么 `pkt.type` 究竟是访问结构体的 `type` 字段，还是查询 `pkt` 的静态类型 `Packet`？
+- 通过将普通成员访问固定在 `.`（点号），而将语言级内置视角切换固定在 `'`（单引号），两套命名空间完全正交：用户的结构体可以自由命名任何字段（包括 `type`、`bitvec`、`old`），永远不会遮蔽或冲突于语言级视图操作。
+
+### 2. 保持从左到右的后缀链式阅读体验
+
+相比于前缀嵌套函数 `as_u16(slice(bitvec_of(deref(ptr)), 4, 12))`，后缀 `'` 与 `.` 可以自然地按数据流方向串联：
 
 ```flurry
--- 假设在一个解析器 AST 结构体里，用户自己定义了一个名叫 type 或 old 的字段：
-struct Token {
-    type: u32,
-    old: bool,
-}
-
--- 尝试 v0：如果用点号 .type 表示“取静态类型”
--- 当你写下 token.type 时：
--- 你到底是在读取结构体字段 token.type (得到 u32 值)，
--- 还是在查询变量 token 本身的类型 (得到 Token 这个 Type)？！
+let field_val = unsafe { ptr.*'bitvec[4..12].as(u16) };
 ```
 
-你看，普通点号 `.` 属于**值与类型的成员命名空间（Member Namespace）**。一旦语言把元级别的视图操作塞进 `.` 里，不仅会污染所有用户结构体的字段名，还会导致更致命的语义混乱：
-- 普通成员访问 `a.b` 默认需要先按值或接收者规则处理 `a`；
-- 而 `value'type` 是在**编译期观察表达式的类型**（在 `quote` 上下文里甚至完全不触发 `value` 的运行时求值！）；
-- `reg'bitvec[0..4] = 0b1010` 则是直接生产一个**直通原存储位置的位段左值视图（Place View）**！
-
-它们的阶段规则（Stage）、左值写回能力（Place Writeback）和求值契约与普通字段/方法调用完全不同！
+数据流从左向右依次经过：指针解引用 `.*` $\rightarrow$ 位向量视图 `'bitvec` $\rightarrow$ 位区间切片 `[4..12]` $\rightarrow$ 标量转换 `.as(u16)`，无需左右跳跃括号层级。
 
 ---
 
-## 二、 破局（v1）：正交的 `'view_name` 命名空间与专属 HIR 节点
+## 二、 核心视图全景图与各自语义契约
 
-受 Ada 语言属性语法（如 `T'Size`、`X'Address`）的启发，Flurry 引入了正交的后缀操作语法——**Take View（`expr'id`）**。
+虽然所有 Take View 都共享 `expr'id` 或 `expr'id(args)` 的后缀表面语法，但每一个视图都有各自严格定义的阶段属性、求值规则与左值/右值契约：
 
-点号 `.` 留给用户的数据成员与方法；单引号 `'` 则专门开辟了一条直达编译器内核的 **语言级视图通道（Language-Level View Channel）**！
-
-### 核心架构铁律：AST Lowering 时直接化身专属 HIR 节点！
-
-在很多简陋的编译器里，`expr'id` 可能会被当成“换了个符号的普通成员访问”留到类型检查阶段再去查字符串表。但在 Flurry 编译器（`docs/compilation/syntax-and-hir.md` 与 `AGENTS.md` §5）中，有一条不可动摇的红线：
-
-> **⚠️ 编译器前端铁律**：
-> **每个已定义的 Take View 操作，在从 AST 降级到 HIR（High-Level IR）时，必须直接进入其对应的专属 HIR Node Kind，绝不能作为泛化的字符串字段投影混入后续阶段！**
-
-让我们通过一张 Code Cartoon，看看当你写下各种 `'view` 时，编译器前端的 AST Lowering 是如何分流的：
-
-```text
-                       源码中的后缀 Take View 表达式 (expr'id)
-                                         │
-                                         ▼
-                     ┌───────────────────────────────────────┐
-                     │     AST Lowering (语法树降级阶段)     │
-                     │  按已知视图名分派，校验语法上下文合法性 │
-                     └───────────────────┬───────────────────┘
-                                         │
-       ┌─────────────────┬───────────────┼───────────────┬─────────────────┐
-       ▼                 ▼               ▼               ▼                 ▼
-┌─────────────┐   ┌─────────────┐ ┌─────────────┐ ┌─────────────┐   ┌─────────────┐
-│ value'type  │   │value'bitvec │ │tag'intrinsic│ │   v'tuple   │   │ value'unknown│
-│             │   │             │ │             │ │ _enumerate  │   │ (未知视图名)│
-└──────┬──────┘   └──────┬──────┘ └──────┬──────┘ └──────┬──────┘   └──────┬──────┘
-       ▼                 ▼               ▼               ▼                 ▼
-┌─────────────┐   ┌─────────────┐ ┌─────────────┐ ┌─────────────┐   ┌─────────────┐
-│ HIR 节点:   │   │ HIR 节点:   │ │ HIR 节点:   │ │ HIR 节点:   │   │  ❌ 立即在  │
-│  `TypeOf`   │   │`BitVecView` │ │`Intrinsic-  │ │`take-tuple- │   │ Lowering 报 │
-│ (编译期类型 │   │ (支持值读取 │ │   View`     │ │ enumerate`  │   │ 未知视图诊断│
-│  观察通道)  │   │ 与位置写回!)│ │(编译器内建) │ │(展开枚举视图│   │ 绝不向下放行│
-└─────────────┘   └─────────────┘ └─────────────┘ └─────────────┘   └─────────────┘
 ```
-
-为什么这条架构设计如此重要？
-1. **阶段与求值规则天然隔离**：在 HIR 中，`TypeOf`（来自 `value'type`）一目了然地告诉 Elaboration 引擎：“我只需要对子表达式做类型推导，不需要生成运行时求值代码”；而 `BitVecView`（来自 `value'bitvec`）则精准挂接位向量代数与原地写回检查器！
-2. **S-Expression Dump 清晰可读**：在 Flurry 编译器的调试输出（Lisp 风格 S-expression dump）中，`values'tuple_enumerate` 直接呈现为结构化的 `(take-tuple-enumerate (path values))`，节点种类与子节点关系清清楚楚。
-3. **非法视图名零延迟拦截**：如果有人拼错了视图名（比如写成了 `value'unknown_view`），AST Lowering 阶段当场就能报错拒绝，根本不会产生幽灵类型错误。
++-------------------------------------------------------------------------+
+|                    Flurry 核心 Take View (`expr'id`) 分类                |
++-------------------------------------------------------------------------+
+|                                                                         |
+|  1. 类型与反射视图 (编译期观察，不触发运行时求值副作用)                    |
+|     • expr'type               ──► 提取表达式的静态类型 (Type)            |
+|     • obj'get_field(sym)      ──► 编译期按字段 Symbol 投影成员位置       |
+|                                                                         |
+|  2. 数据表示与结构视图 (值/位置双向视图或结构变换)                        |
+|     • int_expr'bitvec         ──► 切换为等宽 BitVec<n>（支持原位切片写回）|
+|     • enum_expr'tag_name      ──► 提取当前枚举变体的标签名 (str)         |
+|     • tuple_expr'tuple_enumerate ► 生成 ((0, e0), (1, e1), ...) 序列    |
+|                                                                         |
+|  3. 验证契约与底层桥接视图 (受特定上下文或安全边界约束)                    |
+|     • expr'old                ──► 仅限 ensures 子句：读取函数入口处旧值  |
+|     • tag'intrinsic(args)     ──► 仅限 unsafe 上下文：调用硬件内建指令   |
+|     • name'builtin            ──► 访问编译器内置原语入口                 |
++-------------------------------------------------------------------------+
+```
 
 ---
 
-## 三、 代码实战：Take View 全家桶巡礼（v1 -> v2）
+## 三、 代码实战：常用 Take View 的组合演练
 
-让我们把 Flurry 中最核心的几个 Take View 放在一起，看看它们是如何各司其职、互不干扰的：
+让我们在一个完整示例中串联展示 `'type`、`'bitvec`、`'tag_name`、`'tuple_enumerate` 与 `'old` 的协作方式：
 
 ```flurry
-use std.prelude.*;
-
--- 1. 'type：观察任意表达式的类型（降低为 HIR `TypeOf`）
-pure comptime fn same_type_as(quote a: Any, quote b: Any) -> bool {
-    a'type == b'type
+enum PacketKind {
+    heartbeat,
+    telemetry(u16),
+    command(u8),
 }
 
--- 2. 'bitvec：观察值的位向量视图，或对可写位置做原地比特段更新（降低为 HIR `BitVecView`）
-fn set_low_nibble(target: *u8, nibble: BitVec<4>)
+-- 1. 使用 'type 在编译期约束两个参数具有相同类型
+pure fn same_type_pair(a: T, b: a'type) -> Tuple<T, T>
 where
-    modifies target.*
+    T: Type,
 {
-    -- 直接在可写位置 target.* 上取 'bitvec 并切片赋值！
-    -- 编译器自动保护高 4 位不变，仅将低 4 位 [0..4] 更新为 nibble
-    target.*'bitvec[0..4] = nibble;
+    (a, b)
 }
 
--- 3. 'tuple_enumerate：在 inline for 中展开元组的 (编译期索引, 元素)
-fn print_tuple_items<...Ts: meta.List<Type>>(values: Tuple<...Ts>) {
-    inline for (index, item) in values'tuple_enumerate {
-        println("slot {}: {}", index, item);
-    }
+-- 2. 使用 'bitvec 对可写位置做原地高半字节更新，并用 'old 在 ensures 中验证低半字节未变
+verified fn update_high_nibble(
+    byte_ptr: *u8,
+    high_nibble: BitVec<4>,
+) -> void
+where
+    ensures byte_ptr.*'bitvec[0..4] == (byte_ptr.*)'old'bitvec[0..4]
+        and byte_ptr.*'bitvec[4..8] == high_nibble,
+{
+    byte_ptr.*'bitvec[4..8] = high_nibble;
 }
 
-test {
-    comptime {
-        assumes same_type_as(10u32, 20u32);
+-- 3. 使用 'tuple_enumerate 遍历异构元组并累加加权和
+pure fn weighted_tuple_sum(items: Tuple<u32, u32, u32>) -> u32 {
+    var total: u32 = 0;
+    inline for (idx, val) in items'tuple_enumerate {
+        total = total + (idx.as(u32) + 1) * val;
     }
+    total
+}
 
-    var byte: u8 = 0xF0;
-    set_low_nibble(byte.ref, 0b0101);
-    println("updated byte: {}", byte);
+test take_view_family_showcase {
+    -- 验证 'type
+    let pair = same_type_pair(10u32, 20u32);
+    assumes pair.0 == 10u32 and pair.1 == 20u32;
+
+    -- 验证 'bitvec 原位写回
+    var raw: u8 = 0x05u8;
+    update_high_nibble(raw.ref, 0xA);
+    assumes raw == 0xA5u8;
+
+    -- 验证 'tag_name
+    let pkt = PacketKind.telemetry(42);
+    assumes pkt'tag_name == "telemetry";
+
+    -- 验证 'tuple_enumerate: 1*10 + 2*20 + 3*30 = 140
+    assumes weighted_tuple_sum((10u32, 20u32, 30u32)) == 140u32;
 }
 ```
 
-### 演进到 `v2`：编译器如何拦截非法的 Take View？
+---
 
-当我们试图捏造一个不存在的视图名，或者对不满足左值写回条件的临时位向量视图强行赋值时，专属 HIR 节点与后续检查器会立刻联动拦截：
+## 四、 边界与编译期拒绝：Take View 的三条严格契约
+
+Take View 是语言定义的封闭特性集合（Closed Set of Language Operations），不开放给用户随意捏造未知的 `'custom_view`，且每个视图严格检查其目标类型与位置合法性：
+
+### 1. 拒绝未定义的视图名称
 
 ```flurry
-fn broken_view_operations(x: u32) {
-    -- 负例 1：使用未定义的视图名
-    -- ❌ 编译期直接拒绝！(AST Lowering 阶段立即捕获)
-    -- 'not_a_real_view 不是合法的 Take View 操作，无法映射为任何 HIR 节点！
-    let _ = x'not_a_real_view;
-}
+-- [编译期拒绝示例 1] 未知的 Take View 名称
+-- fn reject_unknown_view(x: u32) -> u32 {
+--     -- 编译错误：`not_a_real_view` 不是已定义的语言视图操作
+--     x'not_a_real_view
+-- }
 ```
 
-> **🔍 语法小贴士：解析器里的另外两条黄金边界**
-> 在 `syntax-and-hir.md` 与 `AGENTS.md` §5 中，除了 Take View 的 HIR 映射外，解析器还严格守护着两条语法边界：
-> 1. **外层结构边界保护**：在 `if`、`while`、`for`、`match` 的头部条件表达式中，顶层大括号 `{ ... }` 永远优先归属控制流代码块本身，而不会被误吞为结构体字面量！因此 `if enabled { ... }` 永远是判断布尔变量 `enabled`；如果真要在条件位置现场构造结构体并取字段，只需加括号：`if (Flag { enabled: true }).enabled { ... }`。
-> 2. **多属性前缀链（Multi-Attribute Prefix）**：像 `^{attr1} ^{attr2} item` 这样连续前置的编译期属性，解析器会保持稳定的左到右列表顺序挂接到目标声明上，绝不丢失或倒序。
+### 2. 拒绝在非后置条件上下文中使用 `'old`
+
+`'old` 专门用于在函数后置契约 `ensures` 中指代函数入口状态，不能出现在普通函数体或前置条件 `requires` 中：
+
+```flurry
+-- [编译期拒绝示例 2] 在普通函数体中使用 'old
+-- fn reject_old_in_body(x: i32) -> i32 {
+--     -- 编译错误：`'old` 视图仅允许出现在 `ensures` 后置条件子句中
+--     x'old + 1
+-- }
+```
+
+### 3. 拒绝对不可写右值视图执行原位赋值
+
+当使用 `'bitvec` 进行位切片写回 `target'bitvec[lo..hi] = val` 时，`target` 必须是一个可修改的存储位置（`var` 变量或解引用指针），不能是不可变绑定 `let` 或临时算术表达式：
+
+```flurry
+-- [编译期拒绝示例 3] 对不可变 let 绑定的 'bitvec 视图做切片写回
+-- fn reject_immutable_bitvec_writeback() -> void {
+--     let frozen_byte: u8 = 0x12u8;
+--     -- 编译错误：`frozen_byte` 是不可变绑定，不能对其 `'bitvec` 视图执行原地切片赋值
+--     frozen_byte'bitvec[0..4] = 0xF;
+-- }
+```
 
 ---
 
-## 本篇小结
+## 五、 本篇小结
 
-| Take View 语法 | 对应 HIR 节点 / 语义分类 | 核心用途与契约 |
+| Take View 语法 | 语义分类 | 核心用途与静态契约 |
 | :--- | :--- | :--- |
-| **`expr'type`** | `TypeOf` | 编译期获取表达式的静态 `Type`，配合 `quote` 时不触发运行时求值 |
-| **`expr'bitvec`** | `BitVecView` | 获取定宽 `BitVec<N>` 视图；作用于可写位置时支持原地比特段切片更新 |
-| **`expr'tuple_enumerate`** | `take-tuple-enumerate` | 在 `inline for` 中将元组展开为 `(index, element)` 序列 |
-| **`expr'old`** | 后置契约旧值视图 | 在 `ensures` 契约中引用被修改位置在函数入口处的初始快照 |
-| **`expr'intrinsic` / `'builtin`** | `IntrinsicView` / 内置视图 | 绑定编译器内建原语与底层类型入口，与普通用户标识符彻底隔离 |
+| **`expr'type`** | 编译期类型查询 | 获取表达式的静态类型，不产生运行期副作用 |
+| **`expr'bitvec`** | 位向量表示视图 | 将定宽标量视为 `BitVec<n>`；当主语为可写位置时支持原位位段写回 |
+| **`expr'tag_name`** | 枚举标签提取 | 获取枚举值当前活跃变体的字符串名称（`str`） |
+| **`expr'tuple_enumerate`** | 元组带下标展开 | 配合 `inline for` 在编译期获取 `(index, element)` 对 |
+| **`obj'get_field(sym)`** | 编译期反射投影 | 根据字段符号名访问聚合体成员，常用于 `derive fn` |
+| **`expr'old`** | 契约历史快照 | 仅在 `ensures` 后置条件中合法，表示函数入口处的值 |
+| **`tag'intrinsic(args)`** | 硬件指令桥接 | 必须在 `unsafe` 上下文中使用，配合 `.as(T)` 显式声明返回类型 |
 
 ---
 
-### 留给下一篇的悬念
+## 六、 下一篇预告
 
-到这里为止，第四卷的前半程已经为我们备齐了所有的神兵利器：
-- **2LTT 双层类型理论**与 `comptime` / `runtime` 阶段分离（066–085）；
-- **分支出现类型（Occurrence Typing）**与 **PTC 11 大理论求解器**（086–088）；
-- **精确位宽**与 **`'view` 视图机制**（089–090）。
+到这里，第四卷关于两级类型论（2LTT）、编译期反射、依赖类型、命题类型约束（PTC）、行多态、任意位宽整数与 Take View 的理论与机制已经全部就位。
 
-现在，是时候把这些积木拼在一起，挑战现代系统与 AI 编程语言皇冠上的明珠了：**从零构建一个类型安全的静态形状张量（Static-Shaped Tensor）引擎！**
-
-在 Python（PyTorch / NumPy）里，两个维度不匹配的矩阵相加，往往要等到显卡跑了半个小时训练代码后，才在运行期抛出一句崩溃的 `RuntimeError: The size of tensor a (128) must match the size of tensor b (64)`。
-
-在接下来的三篇连载（091–093）中，我们将一步步在 Flurry 里打造出编译期 100% 校验维度的 `Tensor`！首先来看第一个问题：**怎么在类型里优雅地表达任意维度的张量形状？为什么 0 维张量 `Tensor<f64>` 在类型关系上能直接等于标量 `f64`？**
-
-下一篇 **《091 — 静态形状张量实战（一）：用类型级列表编码维度与秩》**，我们马上开干！
+接下来（第 091 至 095 篇），我们将迎来第四卷的综合工程实战——**从零设计并实现一个支持编译期维度检查、自动广播推导（Broadcasting）与零开销多维步长内联的静态形状张量引擎 `Tensor<T, .dims = s>`**。

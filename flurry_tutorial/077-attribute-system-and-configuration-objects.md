@@ -4,13 +4,13 @@
 
 在许多传统语言里，“属性（Attributes / Annotations）”是一门寄居在主语言之外的“小方言”——比如特制的括号 `#[...]` 或 `@...`，里面的参数既不是普通表达式，也不能用普通变量保存、组合或通过普通作用域规则查找。
 
-而在 Flurry 的双层类型理论（2LTT）视角下，答案异常干脆：**元数据（Metadata）根本不需要发明一套法外语法，它本来就是编译期宇宙（$U_1$）里的正经 `Object` 值！** 今天，我们就来拆解 Flurry 极简而强大的 `^expr` 前缀属性、`.id expr` 内部配置以及内置 `attrs` 包。
+而在 Flurry 的双层类型理论（2LTT）视角下，答案异常干脆：**元数据（Metadata）根本不需要发明一套法外语法，它本来就是编译期宇宙（$U_1$）里的正经 `Object` 值。** 今天，我们就来拆解 Flurry 极简而强大的 `^expr` 前缀属性、`.id expr` 内部配置以及内置 `attrs` 包。
 
 ---
 
-## 一、 破局与痛点：为什么拒绝“宏方言式”属性？
+## 一、 问题背景与设计思路：为什么拒绝“宏方言式”属性？
 
-假设我们要为张量 DMA 引擎定义一组硬件寄存器帧和状态码。如果属性是一套封闭的特殊标签（`v0` 伪代码体验），我们会立刻撞上三个工程痛点：
+假设我们要为张量 DMA 引擎定义一组硬件寄存器帧和状态码。如果属性是一套封闭的特殊标签（传统伪代码体验），我们会立刻撞上三个核心问题：
 
 1. **无法复用与参数化**：如果 20 个硬件结构体都需要同一套对齐与序列化配置，你没法把这套配置写成一个普通编译期变量或函数返回值去复用。
 2. **名字查找搞特殊化**：特殊属性标签往往有自己独立的命名空间，你不知道某个名字到底来自标准库、第三方库还是当前作用域。
@@ -26,23 +26,23 @@
 
 ---
 
-## 二、 `v1` 升级：`^expr` 与 `.id expr` 的双剑合璧
+## 二、 升级：`^expr` 与 `.id expr` 的双剑合璧
 
 让我们直接用 Flurry 的真实语法来编写 DMA 硬件紧凑帧 `PackedPair`、单字节状态码 `SmallCode` 以及 C ABI 导出函数。
 
-注意看：`.packed true` 写在 `struct PackedPair` 的大括号里面，但它**绝不是一个运行期数据字段**，而是编译期配置项（Configuration）！
+注意看：`.packed true` 写在 `struct PackedPair` 的大括号里面，但它**绝不是一个运行期数据字段**，而是编译期配置项（Configuration）。
 
 ```flurry
 -- 1. 在 struct 内部使用 `.id expr` 配置紧凑布局
 struct PackedPair {
-    .packed true;
+    .packed true,
     first: u8,
     second: u32,
 }
 
 -- 2. 在 enum 内部使用 `.base_type u8` 指定底层判别子表示类型
 enum SmallCode {
-    .base_type u8;
+    .base_type u8,
     ok = 0,
     busy = 1,
 }
@@ -54,21 +54,21 @@ fn exported_add(lhs: i32, rhs: i32) -> i32 {
     lhs + rhs
 }
 
-test "attributes and configurations on DMA types v1" {
-    -- 通过 meta.attrs_of(target) 在编译期读取目标上的元数据表！
-    assert(meta.attrs_of(PackedPair).get(.packed, bool) == true);
-    assert(meta.attrs_of(SmallCode).get(.base_type, Type) == u8);
+test {
+    -- 通过 meta.attrs_of(target) 在编译期读取目标上的元数据表。
+    assumes meta.attrs_of(PackedPair).get(.packed, bool) == true;
+    assumes meta.attrs_of(SmallCode).get(.base_type, Type) == u8;
 
-    -- 紧凑布局消除了 u8 与 u32 之间的 3 字节对齐填充：1 + 4 = 5 字节！
-    assert(Type.size_of(PackedPair) == 5);
-    -- 指定 base_type 为 u8 后，SmallCode 只占 1 字节！
-    assert(Type.size_of(SmallCode) == 1);
+    -- 紧凑布局消除了 u8 与 u32 之间的 3 字节对齐填充：1 + 4 = 5 字节。
+    assumes Type.size_of(PackedPair) == 5;
+    -- 指定 base_type 为 u8 后，SmallCode 只占 1 字节。
+    assumes Type.size_of(SmallCode) == 1;
 }
 ```
 
-> **🔍 语法小贴士：`.packed true;` 与普通字段 `first: u8,` 的视觉区分**
+> **🔍 语法小贴士：`.packed true,` 与普通字段 `first: u8,` 的视觉区分**
 > - 普通结构体字段用冒号 `id: Type` 声明运行期存储槽位；
-> - 内部配置用点号开头加空格 `.id expr;` 声明编译期元数据。它不会在实例中占用任何运行期字段槽位，而是直接把 `{ packed: true }` 写入外层 `PackedPair` 的元数据字典中，并可通过 `meta.attrs_of(PackedPair)` 反射读取！
+> - 内部配置用点号开头加空格 `.id expr,` 声明编译期元数据。它不会在实例中占用任何运行期字段槽位，而是直接把 `{ packed: true }` 写入外层 `PackedPair` 的元数据字典中，并可通过 `meta.attrs_of(PackedPair)` 反射读取。
 
 ---
 
@@ -84,9 +84,9 @@ test "attributes and configurations on DMA types v1" {
 
 $$\text{multi\_element} \rightarrow \text{base\_element} \mid \text{\texttt{\textasciicircum}}expr\ \text{multi\_element}$$
 
-这意味着你不仅可以在顶层声明前连写 `^a ^b`，在结构体字段或参数前同样可以挂载任意多个前缀属性！
+这意味着你不仅可以在顶层声明前连写 `^a ^b`，在结构体字段或参数前同样可以挂载任意多个前缀属性。
 
-### 3.2 结合顺序与覆盖铁律：从内向外应用，外层覆盖内层！
+### 3.2 结合顺序与覆盖核心规则：从内向外应用，外层覆盖内层
 
 假设我们在 `fn annotated()` 前面连写了两个包含同名键 `some_attr` 的属性对象，或者既有内部配置 `.some_attr 2` 又有外部前缀 `^{ some_attr: 1 }`，结果会是多少？
 
@@ -94,7 +94,7 @@ $$\text{multi\_element} \rightarrow \text{base\_element} \mid \text{\texttt{\tex
 
 ```
   +-------------------------------------------------------------------+
-  | 外层前缀属性：^{ some_attr: 1 }   <-- [第 3 步应用：最后写入，最终胜出！]
+  | 外层前缀属性：^{ some_attr: 1 }   <-- [第 3 步应用：最后写入，最终胜出。]
   |   +---------------------------------------------------------------+
   |   | 内层前缀属性：^{ some_attr: 2 } <-- [第 2 步应用：覆盖内部配置]
   |   |   +-----------------------------------------------------------+
@@ -104,10 +104,10 @@ $$\text{multi\_element} \rightarrow \text{base\_element} \mid \text{\texttt{\tex
   +-------------------------------------------------------------------+
 ```
 
-记住这条极其符合直觉的工程铁律：
+记住这条极其符合直觉的工程核心规则：
 1. **距离目标越近（越靠内）的元数据越先应用（打底）**；
-2. **距离目标越远（越靠外）的前缀属性越晚应用，若遇到同名键则覆盖（Override）先前的值**！
-3. 因此：**内部配置 `.id expr` 先于外部前缀 `^expr` 应用；紧贴目标的内层 `^expr` 先于外层 `^expr` 应用**。最终外层前缀属性拥有最高覆盖权！
+2. **距离目标越远（越靠外）的前缀属性越晚应用，若遇到同名键则覆盖（Override）先前的值**。
+3. 因此：**内部配置 `.id expr` 先于外部前缀 `^expr` 应用；紧贴目标的内层 `^expr` 先于外层 `^expr` 应用**。最终外层前缀属性拥有最高覆盖权。
 
 让我们用代码验证这一覆盖顺序：
 
@@ -120,28 +120,28 @@ fn annotated() {}
 -- 内部配置 .some_attr 2 先应用，外部前缀 ^{ some_attr: 1 } 后应用并覆盖它
 ^{ some_attr: 1 }
 struct Configured {
-    .some_attr 2;
+    .some_attr 2,
 }
 
-test "attribute application and override order" {
-    assert(meta.attrs_of(annotated).get(.some_attr, comptime Integer) == 1);
-    assert(meta.attrs_of(Configured).get(.some_attr, comptime Integer) == 1);
+test {
+    assumes meta.attrs_of(annotated).get(.some_attr, comptime Integer) == 1;
+    assumes meta.attrs_of(Configured).get(.some_attr, comptime Integer) == 1;
 }
 ```
 
-为什么这样设计？想象你有一个内部写了默认配置 `.some_attr 2;` 的组件或内层宏生成的声明，当外部调用者在最外层套上 `^{ some_attr: 1 }` 时，外部显式指定的覆盖自然应该战胜内层默认值！
+为什么这样设计？想象你有一个内部写了默认配置 `.some_attr 2,` 的组件或内层宏生成的声明，当外部调用者在最外层套上 `^{ some_attr: 1 }` 时，外部显式指定的覆盖自然应该战胜内层默认值。
 
 ---
 
-## 四、 `v2` 进阶：普通词法作用域查找与 `attrs` 内置包
+## 四、 进阶：普通词法作用域查找与 `attrs` 内置包
 
 很多从其他语言转过来的同学会问：“我在 `^` 后面写名字时，编译器是不是会自动去 `attrs` 包里找？”
 
-**绝对不会！** 这正是 Flurry 属性系统最纯粹的地方：`^expr` 里的 `expr` 就是**普普通通的编译期表达式**，遵循 100% 标准的词法作用域（Lexical Lookup）规则！
+**绝对不会。** 这正是 Flurry 属性系统最纯粹的地方：`^expr` 里的 `expr` 就是**普普通通的编译期表达式**，遵循 100% 标准的词法作用域（Lexical Lookup）规则。
 - 内置包 `attrs`（提供 `attrs.abi`、`attrs.inline`、`attrs.align`、`attrs.cold`、`attrs.target_feature`、`attrs.derivation`、`attrs.diagnostic` 等分类工厂）之所以能直接写 `^attrs.abi(.c)`，仅仅是因为 `attrs` 是预导入的内置包名。
-- 你可以用 `use` 给它起别名，可以把属性对象存进局部 `let` 变量，甚至如果当前作用域有一个同名局部变量，它会**正常遮蔽（Shadow）**导入的名字！
+- 你可以用 `use` 给它起别名，可以把属性对象存进局部 `let` 变量，甚至如果当前作用域有一个同名局部变量，它会**正常遮蔽（Shadow）**导入的名字。
 
-来看 `v2` 中普通作用域查找与局部遮蔽的实证：
+来看 中普通作用域查找与局部遮蔽的实证：
 
 ```flurry
 use attrs.derivation.default as default_strategy;
@@ -153,22 +153,22 @@ struct GlobalConfig {
 }
 
 fn check_lexical_shadowing() {
-    -- 2. 在局部作用域定义一个同名编译期对象，它会按正常词法规则遮蔽导入的 default_strategy！
-    comptime let default_strategy = { custom_tag: 42 };
+    -- 2. 在局部作用域定义一个同名编译期对象，它会按正常词法规则遮蔽导入的 default_strategy。
+    const default_strategy = { custom_tag: 42 }
 
     ^default_strategy
     struct LocalConfig {
         retries: u32,
     }
 
-    assert(meta.attrs_of(LocalConfig).get(.custom_tag, comptime Integer) == 42);
+    assumes meta.attrs_of(LocalConfig).get(.custom_tag, comptime Integer) == 42;
 }
 ```
 
 那么，如果有人在 `^expr` 后面写了一个求值结果不是编译期 `Object` 的表达式，会发生什么？
 
 ```flurry
--- ❌ 编译期直接拒绝！`^expr` 要求 expr 在编译期求值为元数据 Object，裸整数 123 不是合法属性对象
+-- ❌ 编译期直接拒绝：`^expr` 要求 expr 在编译期求值为元数据 Object，裸整数 123 不是合法属性对象
 ^123
 fn invalid_attribute_target() {}
 ```
@@ -189,10 +189,10 @@ fn invalid_attribute_target() {}
 
 ---
 
-## 六、 留给下一篇的悬念
+## 六、 下一篇预告
 
 在最近两回中，我们频繁写出了 `pure comptime fn`、`Type.size_of(T)`、`defer SelectType(wide)` 这样的编译期计算。不知你有没有思考过编译器底层的两个灵魂问题：
-1. 为什么 `pure comptime fn pair_of(T: Type) -> Type` 敢保证“两次传入 `u32` 一定返回同一个类型身份”？如果一个编译期函数悄悄读取了外部可变状态或耗尽了步数预算，编译器怎么防止缓存被污染？
+1. 为什么 `pure comptime fn PairOf(T: Type) -> Type` 敢保证“两次传入 `u32` 一定返回同一个类型身份”？如果一个编译期函数悄悄读取了外部可变状态或耗尽了步数预算，编译器怎么防止缓存被污染？
 2. 当编译器检查一个带有未决参数的函数签名 `fn keep_selected(comptime wide: bool, value: defer SelectType(wide))` 时，`wide` 的具体值还不知道，编译器到底把什么东西**冻结（Freeze）**存进了函数定义里，又把什么东西挡在了门外？
 
-下一回 **《Flurry 演进手记 (078)：当编译期计算遇到副作用与缓存——Comptime 纯度、确定性 memoization 与冻结边界》**，我们将深入编译器前端 Elaboration 与 Comptime 交织运转的心脏！
+下一回 **《Flurry 演进手记 (078)：当编译期计算遇到副作用与缓存——Comptime 纯度、确定性 memoization 与冻结边界》**，我们将深入编译器前端 Elaboration 与 Comptime 交织运转的心脏。

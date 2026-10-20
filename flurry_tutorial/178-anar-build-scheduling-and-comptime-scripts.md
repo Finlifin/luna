@@ -14,18 +14,18 @@
 
 ---
 
-## 一、 `v0` 的构建噩梦：脚本乱跑、宿主与目标平台混淆、增量缓存失灵
+## 一、 传统的构建难题：脚本乱跑、宿主与目标平台混淆、增量缓存失灵
 
 在很多传统构建系统中，开发者经常遭受以下折磨：
 - **配置语言与编程语言割裂**：项目配置用一套残缺的 DSL（或者不受控的外部 Shell/Python 脚本）编写，既没法享受静态类型检查，也没法优雅地表达编译期逻辑。
 - **发现即执行（Discovery = Execution）**：只要构建系统扫描目录看到了构建脚本，不管当前选定的目标用不用得着，先一股脑全编译、全执行一遍，导致哪怕跑个最小的单元测试也要等半天。
-- **交叉编译时的平台精神分裂**：在 `x86_64` 开发机上交叉编译 `aarch64` 固件时，构建脚本自己明明需要在宿主机（Host，`x86_64`）上运行，却错误地读取或污染了目标机（Target，`aarch64`）的配置。
+- **交叉编译时的平台前后不一致**：在 `x86_64` 开发机上交叉编译 `aarch64` 固件时，构建脚本自己明明需要在宿主机（Host，`x86_64`）上运行，却错误地读取或污染了目标机（Target，`aarch64`）的配置。
 
 ---
 
-## 二、 `v1` 升级：同构的 Flurry 配置程序与“宿主 vs 目标”双轨分离
+## 二、 升级：同构的 Flurry 配置程序与“宿主 vs 目标”双轨分离
 
-在 Flurry 中，无论是包配置文件（`package.fl`）还是构建脚本，写的全都是原汁原味的 Flurry 代码！
+在 Flurry 中，无论是包配置文件（`package.fl`）还是构建脚本，写的全都是原汁原味的 Flurry 代码。
 例如，在配置层中，我们可以直接用 `pure comptime fn` 表达带静态类型保障的配置逻辑（源自 `docs/code-organization/configuration-and-scripts.md`）：
 
 ```flurry
@@ -51,26 +51,26 @@ pure comptime fn buffer_limit(debug: bool) -> u32 {
   └─────────────────────────────────────────────────────────────────────┘
 ```
 
-> **💡 核心心智模型：绝对不要混淆“脚本的执行环境（Host）”与“产物的目标平台（Target）”！**
+> **💡 核心心智模型：绝对不要混淆“脚本的执行环境（Host）”与“产物的目标平台（Target）”。**
 > 当你在 `x86_64` Linux 主机上，为一个 `aarch64` 嵌入式目标运行代码生成脚本或过程宏时：
 > - **脚本/宏本身的编译与执行**发生在 **Host（`x86_64`）** 上；
 > - **脚本读取的目标参数与它生成的源码将要被编译到的地方**是 **Target（`aarch64`）**。
-> `anar` 为这两条轨道分别维护独立的编译任务与指纹，绝不允许把宿主机架构误当成目标机架构注入给业务代码！
+> `anar` 为这两条轨道分别维护独立的编译任务与指纹，绝不允许把宿主机架构误当成目标机架构注入给业务代码。
 
 ---
 
-## 三、 `v2` 拓扑调度：`schedule(selected_targets)` 与三阶段严格分离
+## 三、 拓扑调度：`schedule(selected_targets)` 与三阶段严格分离
 
 当你在命令行要求构建某个具体目标（例如 `selected_targets = [app_cli]`）时，`anar` 的调度器 `schedule(selected_targets)` 遵守两条黄金准则：
 
 ### 准则 1：“发现脚本”、“编译脚本”与“执行脚本”三阶段严格分离
-`anar` 扫描工程目录树发现某个脚本文件时，**仅仅是在任务图里登记了一个潜在节点**，绝不会当场编译或执行它！
+`anar` 扫描工程目录树发现某个脚本文件时，**仅仅是在任务图里登记了一个潜在节点**，绝不会当场编译或执行它。
 只有当 `selected_targets` 的反向依赖闭包真正需要某个脚本的产出时，`anar` 才会按拓扑序依次触发：
 1. **Discover（发现与声明解析）**；
 2. **Compile Script（在 Host 环境编译该脚本及其工具依赖）**；
 3. **Execute Script（在受控沙箱中执行脚本，登记生成的源码或产出宏接口）**。
 
-如果 `umbrella` 里的另一个兄弟包 `heavy_gpu_bench` 带有耗时的构建脚本，而你今天只构建 `app_cli`，那么 `heavy_gpu_bench` 的脚本连编译都不会发生！
+如果 `umbrella` 里的另一个兄弟包 `heavy_gpu_bench` 带有耗时的构建脚本，而你今天只构建 `app_cli`，那么 `heavy_gpu_bench` 的脚本连编译都不会发生。
 
 ### 准则 2：宏准备（Macro Preparation）与源码生成的合法拓扑链
 
@@ -90,7 +90,7 @@ pure comptime fn buffer_limit(debug: bool) -> u32 {
   └──────────────────┘    └──────────────────────┘    └──────────────┘    └──────────────┘
 ```
 
-请注意链路 B 中的关键细节：**生成脚本产出的 `.fl` 源文件，必须通过构建接口显式登记（Registered Source），然后和手写源文件一样，走完全相同的 `Parse -> HIR -> Elaboration` 正规前门！** 绝不允许生成脚本绕过模块树直接往编译器后端塞未受检的私有结构。
+请注意链路 B 中的关键细节：**生成脚本产出的 `.fl` 源文件，必须通过构建接口显式登记（Registered Source），然后和手写源文件一样，走完全相同的语法解析与类型检查流程。** 绝不允许生成脚本绕过模块树直接往编译器后端塞未受检的私有结构。
 
 ---
 
@@ -99,10 +99,10 @@ pure comptime fn buffer_limit(debug: bool) -> u32 {
 很多初学者会问：在 Flurry 的同一个包里，模块 `a` 调用模块 `b` 的函数，模块 `b` 调用模块 `a` 的函数（静态模块互递归），是完全合法的。
 那如果模块 `consumer` 的语法解析依赖宏脚本 `macro_gen`，而编译 `macro_gen` 又反过来依赖 `consumer` 解析完成后的结果，行不行？
 
-**绝对不行！这在拓扑调度上是一个不可解的死锁环（Unresolvable Execution Cycle）！**
+**绝对不行。这在拓扑调度上是一个不可解的死锁环（Unresolvable Execution Cycle）。**
 
 ```flurry
--- ❌ 编译期 / 构建调度期直接拒绝！
+-- ❌ 编译期 / 构建调度期直接拒绝。
 -- 试图构造“先有鸡还是先有蛋”的跨阶段执行环：
 --
 --   consumer 模块 Parse ──(需要展开宏)──▶ macro_script 编译与准备
@@ -112,7 +112,7 @@ pure comptime fn buffer_limit(debug: bool) -> u32 {
 -- 构建调度器 (anar) 直接拒绝（Cyclic Task Dependency Error）：
 -- 静态声明之间的互递归之所以合法，是因为两边的语法树都已经存在，可以同时收集签名；
 -- 但 `consumer parse -> macro script prep -> same consumer parse` 是跨阶段的执行依赖环：
--- 不准备好 macro_script 就无法完成 consumer 的解析展开，而不完成 consumer 的解析就无法编译 macro_script！
+-- 不准备好 macro_script 就无法完成 consumer 的解析展开，而不完成 consumer 的解析就无法编译 macro_script。
 ```
 
 ---
@@ -141,13 +141,13 @@ pure comptime fn buffer_limit(debug: bool) -> u32 {
 
 ---
 
-## 留给下一篇的悬念
+## 下一篇预告
 
 到这里，当我们在终端敲下构建命令，`anar` 已经帮我们算好了依赖拓扑图、跑完了必要的宏准备与源码生成脚本，并把一份份整洁的源码和 `build` 实例配置交到了 **`luna` 编译器**手里。
 
-从这一刻起，我们将正式掀开 **Luna 编译器**的引擎盖！
+从这一刻起，我们将正式掀开 **Luna 编译器**的引擎盖。
 当一行 Flurry 代码（比如带有延迟类型计算的 `fn keep_selected(comptime wide: bool, value: defer SelectType(wide)) -> SelectType(wide)`）进入 `luna` 后，它到底经历了怎样一场奇幻漂流？
-- 从 **AST** 到 **HIR**，再到 **Elaboration & Normalization**、**Freeze（冻结）**、**Instantiation（具体实例化）**，最后到 **IIR（高级具体实例）** 与后端产物，这 5 层核心表示各自必须消灭什么、又允许保留什么？
+- 从源码解析到定义期检查（Normalization）、调用期实例化（Instantiation）与运行期代码生成，编译期与运行时的阶段边界是如何划分的？
 - 为什么说在 Flurry 编译器里，“Elaboration（类型精化）与 Comptime Interpretation（编译期解释执行）”不是先后排队的两个独立阶段，而是**交织（Interleaved）**在一起的双螺旋？
 
-下一篇 **[Flurry 演进手记 (179)：掀开 Flurry 编译器的引擎盖——从源码到机器码的完整流水线（Phases）全景图](./179-inside-the-compiler-pipeline-phases-overview.md)**，我们将开启激动人心的编译器内部架构之旅！
+下一篇 **[Flurry 演进手记 (179)：掀开 Flurry 编译器的引擎盖——从源码到机器码的完整流水线（Phases）全景图](./179-inside-the-compiler-pipeline-phases-overview.md)**，我们将开启激动人心的编译器内部架构之旅。

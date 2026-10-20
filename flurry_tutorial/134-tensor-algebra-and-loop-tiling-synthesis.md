@@ -2,42 +2,42 @@
 
 在上一回（133）中，我们看到了编译器如何运用组合子代数（Combinator Algebra）将一维的高阶流管道 `map -> filter -> fold` 去森林化（Deforestation），融合成零临时分配的单次遍历。
 
-现在，让我们把维度从一维拉升到高维，与我们在第四卷（066–095）打造的**静态形状张量引擎 `Tensor<T, S>`** 会师！
+现在，让我们把维度从一维拉升到高维，与我们在第四卷（066–095）打造的**静态形状张量引擎 `Tensor<T, .dims = s>`** 会师。
 在第四卷里，我们已经利用双层类型理论（2LTT）、`Tuple<...>` 和 PTC 命题约束，在编译期彻底解决了张量维度匹配与广播（Broadcasting）的类型安全问题。
 但对于一个真正能打的科学计算与机器学习系统来说，光有“编译期形状不报错”才走完了一半路程——另一半生死攸关的问题在**代码生成与程序合成（Program Synthesis）**上：
 
 当你写下 `C = A * B + D`（逐元素乘加）或者矩阵乘加 `Y = matmul(A, B) + Bias` 时，编译器是怎样把高维的张量代数表达式，一步步降维、实施**算子融合（Operator Fusion）**与**缓存分块循环（Loop Tiling）**，并在遇到别名重叠或求解器 `Unknown` 时死守正确性底线的？
 
-今天，我们就来拆解 Flurry **张量代数与循环合成（Tensor Algebra & Loop Synthesis）** 的核心机制！
+今天，我们就来拆解 Flurry **张量代数与循环合成（Tensor Algebra & Loop Synthesis）** 的核心机制。
 
 ---
 
-## 一、 破局与痛点：为什么“算子级逐个调用库函数”会卡在内存墙（Memory Wall）上？
+## 一、 问题背景与设计思路：为什么“算子级逐个调用库函数”会卡在内存墙（Memory Wall）上？
 
-在传统的张量库设计中（`v0` 急切求值模式），每个运算符 `+`、`*`、`matmul` 都是一个独立的黑盒函数调用：
+在传统的张量库设计中（急切求值模式），每个运算符 `+`、`*`、`matmul` 都是一个独立的黑盒函数调用：
 
 ```
-  [ ❌ v0 算子逐个急切执行 (Eager Operator-by-Operator Execution) ]
+  [ ❌ 算子逐个急切执行 (Eager Operator-by-Operator Execution) ]
   计算表达式：Out = (A + B) * C   (假设 A, B, C 均为百万级元素的张量)
 
   第 1 步：调用 add(A, B)
            ──► 分配百万级临时缓冲 Temp
-           ──► 从主存读 A, B，算出 A[i] + B[i] 写回主存 Temp（此时 Temp 挤爆 L1/L2 缓存！）
+           ──► 从主存读 A, B，算出 A[i] + B[i] 写回主存 Temp（此时 Temp 挤爆 L1/L2 缓存。）
   第 2 步：调用 mul(Temp, C)
            ──► 再次从慢速主存把刚刚写进去的 Temp 读出来，乘以 C[i] 写入 Out
-           ──► 销毁并释放 Temp！
+           ──► 销毁并释放 Temp。
 ```
 
 看出来问题有多严重了吗？
-现代 CPU 的寄存器算术吞吐量极快，但主存（DRAM）带宽却窄得可怜。在 `v0` 中，为了算一次简单的 `(A + B) * C`，每个元素竟然要在主存和寄存器之间来回搬运 **5 次**，还要承受一次昂贵的临时内存分配与释放！
+现代 CPU 的寄存器算术吞吐量极快，但主存（DRAM）带宽却窄得可怜。在逐个算子急切求值模式中，为了算一次简单的 `(A + B) * C`，每个元素竟然要在主存和寄存器之间来回搬运 **5 次**，还要承受一次昂贵的临时内存分配与释放。
 
-而在大尺寸矩阵乘法 `matmul(A, B)` 中，如果采用最朴素的三重循环 `for i -> for j -> for k`，内层循环沿着矩阵 `B` 的列跳跃访问内存，每次访存都引发 Cache Line 失效（Cache Miss），硬件算力连 5% 都发挥不出来！
+而在大尺寸矩阵乘法 `matmul(A, B)` 中，如果采用最朴素的三重循环 `for i -> for j -> for k`，内层循环沿着矩阵 `B` 的列跳跃访问内存，每次访存都引发 Cache Line 失效（Cache Miss），硬件算力连 5% 都发挥不出来。
 
 ---
 
 ## 二、 核心心智模型：索引表示（Index Notation）、算子融合与分块变换（Loop Tiling）
 
-在 Flurry 的程序合成架构中，高维张量运算在进入底层机器指令之前，会在高级实例 IR（IIR）中提取为**有限无环张量映射区域（Tensor Mapping Region）**，并经历三步严谨的等价合成：
+在 Flurry 的程序合成架构中，高维张量运算在进入底层机器指令之前，会被提取为**有限无环张量映射区域（Tensor Mapping Region）**，并经历三步严谨的等价合成：
 
 ```
 +-------------------------------------------------------------------------+
@@ -50,11 +50,11 @@
 |                                                                         |
 |  第 2 步：代数化简与算子融合 (Operator Fusion)                            |
 |  • 消除中间张量 Temp：将共享相同迭代空间的连续逐元素算子，直接内联进      |
-|    前序算子（如 matmul 累加器写回处）或单次遍历循环体内，实现寄存器级直传！|
+|    前序算子（如 matmul 累加器写回处）或单次遍历循环体内，实现寄存器级直传  |
 |                                                                         |
 |  第 3 步：循环调度与缓存分块合成 (Loop Tiling / Blocking)                 |
 |  • 将大跨度循环轴 i, j, k 切分为外层块循环 (io, jo, ko) 与内层微核循环    |
-|    (ii, ji, ki)，使工作集常驻 L1/L2 Cache 与 SIMD 向量寄存器！           |
+|    (ii, ji, ki)，使工作集常驻 L1/L2 Cache 与 SIMD 向量寄存器             |
 +-------------------------------------------------------------------------+
 ```
 
@@ -63,9 +63,9 @@
 ```
   [ 朴素三重循环 (i, j, k)：B 按列大跨步跳跃，频繁 Cache Miss ]
   A 的第 i 行: [ *  *  *  * | *  *  *  * ]
-  B 的第 j 列:   ↓ (跨整行步长！每次读完一个元素，同一 Cache Line 的邻居全被浪费！)
+  B 的第 j 列:   ↓ (跨整行步长。每次读完一个元素，同一 Cache Line 的邻居全被浪费。)
 
-  [ 分块循环合成 (Tile Size = T x T)：小块常驻 L1 缓存重复复用！ ]
+  [ 分块循环合成 (Tile Size = T x T)：小块常驻 L1 缓存重复复用。 ]
   外层循环枚举块坐标 (io, jo, ko)，内层在 T x T 微块内密集计算：
         B 的子块 B[ko..ko+T, jo..jo+T] (完全装入 L1 Cache!)
               +-------+
@@ -79,10 +79,10 @@
 
 ---
 
-## 三、 `v1` 实战：2x2 分块微核与逐元素偏置融合（Fused MatMul + Bias）
+## 三、 实战演练：2x2 分块微核与逐元素偏置融合（Fused MatMul + Bias）
 
 在 Flurry 中，无论合成器搜索出多么精妙的分块参数，它的语义基准永远与显式写出的分块累加 + 尾部融合完全一致。
-让我们在 `v1` 中写出一个静态形状 $4 \times 4$ 矩阵乘加 `Y = A * B + Bias` 的基准模型与 $2 \times 2$ 分块融合实现，并在测试中验证两者在任意输入下 100% 等价：
+让我们写出一个静态形状 $4 \times 4$ 矩阵乘加 `Y = A * B + Bias` 的基准模型与 $2 \times 2$ 分块融合实现，并在测试中验证两者在任意输入下 100% 等价：
 
 ```flurry
 typealias Mat4 = Array<Array<i32, 4>, 4>;
@@ -99,7 +99,7 @@ pure fn matmul_bias_reference(a: Mat4, b: Mat4, bias: Mat4) -> Mat4 {
             out[i][j] = sum;
         }
     }
-    return out;
+    out
 }
 
 -- 2. 分块循环 + 算子融合实现 (Tiled & Fused Candidate, Tile Size = 2)
@@ -126,10 +126,10 @@ pure fn matmul_bias_tiled_fused(a: Mat4, b: Mat4, bias: Mat4) -> Mat4 {
             }
         }
     }
-    return out;
+    out
 }
 
-test "tensor algebra baseline vs tiled fused equivalence v1" {
+test tensor_algebra_baseline_vs_tiled_fused_equivalence {
     let a: Mat4 = [
         [1, 2, 0, 1],
         [0, 1, 3, 2],
@@ -152,51 +152,51 @@ test "tensor algebra baseline vs tiled fused equivalence v1" {
     let ref_result = matmul_bias_reference(a, b, bias);
     let tiled_result = matmul_bias_tiled_fused(a, b, bias);
 
-    -- 验证分块融合候选与基准降码在全元素上严格相等！
-    assert(ref_result == tiled_result);
+    -- 验证分块融合候选与基准降码在全元素上严格相等。
+    assumes ref_result == tiled_result;
     -- 第 0 行第 0 列：bias(10) + (1*2 + 2*1 + 0*0 + 1*3) = 10 + 7 = 17
-    assert(tiled_result[0][0] == 17);
+    assumes tiled_result[0][0] == 17;
 }
 ```
 
 ---
 
-## 四、 `v2` 进阶：程序合成的三大安全红线（重叠写回、数值语义与 `Unknown` 回退）
+## 四、 语义边界：程序合成的三大安全红线（重叠写回、数值语义与 `Unknown` 回退）
 
-正因为张量代数合成器在编译器内部拥有改写循环结构的强大权力，Flurry 对它施加了与 `BitVec` 代数（第 118 回）完全一致的**三大安全紧箍咒（`AGENTS.md` §5）**：
+正因为张量代数合成器在编译器内部拥有改写循环结构的强大权力，Flurry 对它施加了与 `BitVec` 代数（第 118 回）完全一致的**三项安全约束（`docs/` 语言规范）**：
 
-### 红线 1：重叠切片写回（Overlapping Writeback）绝不能边覆盖边读取！
+### 红线 1：重叠切片写回（Overlapping Writeback）绝不能边覆盖边读取
 
-回想我们在 `BitVec` 代数中学过的重叠赋值规则：`word'bitvec[4..12] = word'bitvec[0..8]` 必须先完整取得右侧 `[0..8]` 的值，再写入 `[4..12]`，绝不能在循环里一边覆盖第 `4..8` 位，一边拿已经被污染的新值去填第 `8..12` 位！
+回想我们在 `BitVec` 代数中学过的重叠赋值规则：`word'bitvec[4..12] = word'bitvec[0..8]` 必须先完整取得右侧 `[0..8]` 的值，再写入 `[4..12]`，绝不能在循环里一边覆盖第 `4..8` 位，一边拿已经被污染的新值去填第 `8..12` 位。
 
-在张量切片与视图原地更新（In-Place View Update）中，这条铁律同样成立：
-如果目标写入区域与右侧读取的张量视图可能指向**同一块底层存储且存在索引依赖冲突**（例如 `row[1..4] = row[0..3]`），合成器**严禁**将其直接融合成从左到右覆盖原地的单层裸循环，而必须先通过快照或反向安全调度保持“先取右侧原值、再提交更新”的可观察语义！
+在张量切片与视图原地更新（In-Place View Update）中，这条核心规则同样成立：
+如果目标写入区域与右侧读取的张量视图可能指向**同一块底层存储且存在索引依赖冲突**（例如 `row[1..4] = row[0..3]`），合成器**严禁**将其直接融合成从左到右覆盖原地的单层裸循环，而必须先通过快照或反向安全调度保持“先取右侧原值、再提交更新”的可观察语义。
 
 ```flurry
--- 安全的重叠平移更新：保持右侧原值语义，绝不因正向原地覆盖而把 row[0] 一路广播污染到末尾！
+-- 安全的重叠平移更新：保持右侧原值语义，绝不因正向原地覆盖而把 row[0] 一路广播污染到末尾。
 fn safe_overlapping_shift(row: Array<i32, 4>) -> Array<i32, 4> {
     let snapshot = row;
     var updated = row;
     for i in 0usize..3usize {
         updated[i + 1usize] = snapshot[i];
     }
-    return updated;
+    updated
 }
 
-test "overlapping tensor slice update preserves snapshot semantics v2" {
+test overlapping_tensor_slice_update_preserves_snapshot_semantics {
     let original: Array<i32, 4> = [10, 20, 30, 40];
     let shifted = safe_overlapping_shift(original);
-    -- 正确结果应为 [10, 10, 20, 30]，而非被边写边读污染出的 [10, 10, 10, 10]！
-    assert(shifted == [10, 10, 20, 30]);
+    -- 正确结果应为 [10, 10, 20, 30]，而非被边写边读污染出的 [10, 10, 10, 10]。
+    assumes shifted == [10, 10, 20, 30];
 }
 ```
 
-### 红线 2：形状契约在编译期把关，合成器绝不绕过维度检查！
+### 红线 2：形状契约在编译期把关，合成器绝不绕过维度检查
 
-任何进入张量合成区域的表达式，必须先在类型检查（Elaboration / PTC）阶段通过维度一致性检验。如果有人试图把两个形状不兼容的张量直接相加，连 IIR 合成器的门都进不去，直接在编译期被 PTC 原子命题 `A01: Eq` 拦下：
+任何进入张量合成区域的表达式，必须先在类型检查（Elaboration / PTC）阶段通过维度一致性检验。如果有人试图把两个形状不兼容的张量直接相加，直接在类型检查阶段被维度相等性约束拦下：
 
 ```flurry
--- ❌ 编译期直接拒绝！Array<i32, 4> 与 Array<i32, 3> 维度长度不等，静态形状检查不通过
+-- ❌ 编译期直接拒绝：Array<i32, 4> 与 Array<i32, 3> 维度长度不等，静态形状检查不通过
 fn reject_mismatched_tensor_shapes(
     left: Array<i32, 4>,
     right: Array<i32, 3>,
@@ -213,7 +213,7 @@ $$P(x) \implies \text{defined}(\text{candidate}, x) \land \text{candidate}(x) = 
 
 - **不引入新的未定义行为**：比如分块余数边界（当矩阵维度不是分块大小 `T` 的整数倍时的尾部 Cleanup Loop）绝不能发生越界读取或整数溢出；
 - **不改变浮点结合律敏感语义**：除非用户显式开启了允许结合律重排的数学优化策略，否则严格遵守 IEEE-754 顺序求值契约；
-- **`Unknown` 或超预算时无损回退**：当面对极其复杂的动态步长或符号边界，导致等价性验证器返回 `Unknown` 或搜索预算耗尽时，编译器**直接保留已经生成的合法基准实现（`best = reference`）**，编译照常成功，结果 100% 正确！
+- **`Unknown` 或超预算时无损回退**：当面对极其复杂的动态步长或符号边界，导致等价性验证器返回 `Unknown` 或搜索预算耗尽时，编译器**直接保留已经生成的合法基准实现（`best = reference`）**，编译照常成功，结果 100% 正确。
 
 ---
 
@@ -229,17 +229,17 @@ $$P(x) \implies \text{defined}(\text{candidate}, x) \land \text{candidate}(x) = 
 
 ---
 
-## 六、 留给下一篇的悬念
+## 六、 下一篇预告
 
-理论与武器都已经磨砺到了极致！
+理论与武器都已经磨砺到了极致。
 在过去十几回里，我们分别掌握了：
 - 用 **`@define_macro2` + PEG 文法** 在 Flurry 里解析自定义的嵌入式 DSL（第 130 回）；
 - 用 **CMTT 的 `< Ψ |- T >`、`< T -| Ψ >`、Quoted Arm 与编译期循环** 把数据结构组装成零开销的原生状态机（第 120–126 回）；
-- 用 **`BitVec<N>` 代数与组合子/张量合成** 榨干底层位操作与循环的每一分硬件性能（第 118、133、134 回）。
+- 用 **`BitVec<n>` 代数与组合子/张量合成** 榨干底层位操作与循环的每一分硬件性能（第 118、133、134 回）。
 
-现在，是时候迎来**第六卷的终极实战里程碑（双篇连载：135 & 136）**了！
-我们要为高吞吐传感器网络网关亲手打造一个类似 Linux 内核 **BPF（Berkeley Packet Filter）** 的声明式数据包过滤引擎——**Mini-BPF**！
+现在，是时候迎来**第六卷的终极实战里程碑（双篇连载：135 & 136）**了。
+我们要为高吞吐传感器网络网关亲手打造一个类似 Linux 内核 **BPF（Berkeley Packet Filter）** 的声明式数据包过滤引擎——**Mini-BPF**。
 - 在上半部（135 回），我们将用 `@define_macro2` 的 PEG 文法设计一门优雅的过滤规则小语言，让工程师能直接在代码里写出声明式的数据包过滤规则，并在编译期将其解析为强类型的规则 AST；
-- 在下半部（136 回），我们将用 CMTT 把这棵规则 AST 直接编译成**零解释器开销的原生 Flurry 模式匹配与位检查代码**！
+- 在下半部（136 回），我们将用 CMTT 把这棵规则 AST 直接编译成**零解释器开销的原生 Flurry 模式匹配与位检查代码**。
 
-下一回 **《Flurry 演进手记 (135)：第六卷里程碑（上）：用 PEG 构造宏设计一门迷你数据包过滤语言（Mini-BPF DSL）》**，让我们点火起飞！
+下一回 **《Flurry 演进手记 (135)：第六卷里程碑（上）：用 PEG 构造宏设计一门迷你数据包过滤语言（Mini-BPF DSL）》**，让我们点火起飞。

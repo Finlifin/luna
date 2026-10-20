@@ -1,199 +1,157 @@
-# 第 186 期：运行时依赖类型的编译器表示——`TypeCore`、空洞替换与环境计划
+# Flurry 演进手记 (186)：运行时依赖类型的工程模式——多实例身份隔离、外层环境共享与逃逸防线
 
-> **系列导航**：[Flurry 语言漫游（200 期规划）](./README.md)  
-> **当前卷目**：第八卷 · 编译器原理与全栈实战（181–200）  
-> **上一期**：[第 185 期：交织的舞台——Elaboration、Comptime 与区域冻结（Freezing）](./185-interleaving-elaboration-comptime-and-freezing.md)  
-> **下一期**：[第 187 期：细粒度增量查询（Incremental Queries）、环路检测与错误恢复](./187-fine-grained-incremental-queries-and-cycle-recovery.md)
+在[上一篇（第 185 篇）](./185-interleaving-elaboration-comptime-and-freezing.md)中，我们理清了编译期类型构造头与类型计算函数的区别。
+
+在信号处理、图计算与硬件驱动开发中，我们经常需要让一个轻量级的值（如 4 字节的整数读数或数组下标）在类型层面上绑定到某个具体的**运行时对象身份**（如特定的传感器校准器 `Calibration` 或存储池 `NodeStorage`）。这就是我们在第四卷认识的 **运行时依赖类型（Runtime-Dependent Types）**。
+
+今天，我们通过一个双通道传感器校准系统，总结在工程中使用运行时依赖类型的三大核心法则：
+1. **相同内存布局下的严格身份隔离**：为什么 `Sensor<first.ref>` 与 `Sensor<second.ref>` 布局完全相同（都只占 4 字节），却在静态类型上严格区分？
+2. **外层容器与函数参数的环境供给**：如何在不给每个 `Sensor` 实例增加冗余指针字段的前提下，安全地读取所依赖的运行时校准数据？
+3. **局部依赖的作用域逃逸防线**：为什么绑定了局部栈变量 `local_cal.ref` 的依赖类型不能直接作为函数返回值逃逸？
 
 ---
 
-## 一、开篇痛点：当类型依赖运行时变量，如何兼顾“结构共享”与“身份隔离”？
+## 一、 实战建模：零指针体积膨胀的通道校准传感器
 
-在前面的卷目中，我们学过 Flurry 极具特色的**运行时依赖类型（Runtime-Dependent Types）**：一个类型可以参数化于某个运行时的值或引用（通过 `lift` 提升进入类型位置）。
-
-让我们看一段非常典型的传感器校准代码：
+假设每个传感器采样值本身只是一个 4 字节的原始整数 `raw: i32`，而它的缩放比例存放在运行时的 `Calibration` 结构体中：
 
 ```flurry
 struct Calibration {
     scale: i32,
 }
 
-struct Sensor<cal: lift *Calibration> {
+-- Sensor 的类型身份依赖于运行期校准器指针 cal
+struct Sensor
+where
+    quote cal: lift *Calibration
+{
     raw: i32,
 }
 
-struct SensorPair<first: Calibration, second: Calibration> {
-    left: Sensor<first.ref>,
-    right: Sensor<second.ref>,
-}
-
-fn read_scaled(
+-- 在显式传入 cal: *Calibration 的函数签名中，
+-- 第二个参数的类型 Sensor<cal> 直接绑定到第一个参数 cal 的运行期身份。
+unsafe fn read_scaled(
     cal: *Calibration,
     sensor: Sensor<cal>,
 ) -> i32 {
-    return sensor.raw * cal.*.scale;
+    sensor.raw * cal.scale.*
 }
 ```
 
-请仔细观察 `SensorPair` 结构体里的两个字段：
-- `left` 的类型是 `Sensor<first.ref>`，它绑定的是第一个校准器 `first` 的地址；
-- `right` 的类型是 `Sensor<second.ref>`，它绑定的是第二个校准器 `second` 的地址。
+让我们仔细观察 `Sensor<cal>` 与 `read_scaled` 的设计：
 
-站在编译器设计者的角度，这两个类型给我们出了一道两难的选择题：
-1. **从内存布局与类型模板来看**：无论是 `Sensor<first.ref>`、`Sensor<second.ref>` 还是 `Sensor<cal>`，它们在物理内存中都只包含一个 `raw: i32` 字段（4 字节）！如果程序里有一万个不同变量绑定的 `Sensor<...>`，我们显然希望它们在编译器的全局类型池（Type Interner）里**共享同一个底层类型骨架**，而不是复制一万份结构定义。
-2. **从类型安全与语义身份来看**：`Sensor<first.ref>` 和 `Sensor<second.ref>` **绝对不是同一个类型**！你绝不能把绑定了 `second.ref` 的 `right` 传感器当成 `Sensor<first.ref>` 传给 `read_scaled(first.ref, ...)`，否则就会用错校准系数！
-
-### 初代尝试（`v0`）：把运行时变量直接塞进全局驻留池，或者干脆抹平运行时依赖
-
-在早期的尝试（`v0`）中，两种极端做法都栽了跟头：
-- **做法一（把局部运行时变量直接塞进全局 Interner）**：导致全局类型池被海量的局部栈帧变量 ID 塞满，函数一退出，全局池里全是指向已销毁局部作用域的悬垂变量引用，根本无法跨模块缓存！
-- **做法二（在类型表示里擦除运行时参数，只看 `Sensor` 名字）**：虽然全局池干净了，但编译器把 `Sensor<first.ref>` 和 `Sensor<second.ref>` 当成了完全相等的类型，类型安全性瞬间崩塌！
-
-还有第三个实际问题：在 `SensorPair` 里，为什么 `Sensor<first.ref>` 只需要占 4 个字节（`raw: i32`），而不需要在每个 `Sensor` 实例内部冗余地存一个 8 字节的 `*Calibration` 指针？当代码真正需要读取 `cal.*.scale` 时，编译器怎么知道去哪里拿到那个运行时指针？
-
----
-
-## 二、机制迭代（`v0 -> v1 -> v2`）：`TypeCore` + `TypeRef` + `EnvironmentPlan` 三位一体
-
-为了完美拆解这个难题，Luna 编译器严格遵循 `AGENTS.md` §5 的设计准则：
-
-> **运行时依赖类型使用可 intern 的带洞结构与引用端 substitution；共享 core 不等于完整类型相等，环境取得另行保持。**
-
-让我们用一张架构图，看清 Luna 是如何将运行时依赖类型拆分为三个正交层面的：
-
-```
-  1. 全局可驻留的核心层 (Interned TypeCore) —— 跨全程序唯一共享！
-  +-------------------------------------------------------------------+
-  | TypeCore #42: Sensor<H0>                                          |
-  | - 不可变类型项模板: Struct("Sensor", fields: [raw: i32])          |
-  | - 有序空洞签名 (Ordered Hole Signature):                          |
-  |     H0 : stage = runtime_dependency, ty = lift *Calibration       |
-  +-------------------------------------------------------------------+
-                     ^                               ^
-                    /                                 \
-  2. 引用端替换层 (TypeRef = Core + Substitution) —— 区分完整类型身份！
-  +-----------------------------------+   +-----------------------------------+
-  | TypeRef A (字段 left 的类型)      |   | TypeRef B (字段 right 的类型)     |
-  | - core:  TypeCore #42             |   | - core:  TypeCore #42             |
-  | - subst: { H0 -> R_first_ref }    |   | - subst: { H0 -> R_second_ref }   |
-  +-----------------------------------+   +-----------------------------------+
-         (TypeRef A != TypeRef B！共享 Core 绝不等于完整类型相等！)
-
-  3. 环境取得计划 (EnvironmentPlan) —— 按需获取运行时值，无需膨胀值布局！
-  +-------------------------------------------------------------------+
-  | EnvironmentPlan (在 SensorPair 上下文中):                         |
-  | - R_first_ref  ==> FieldAddr(self, .first)                        |
-  | - R_second_ref ==> FieldAddr(self, .second)                       |
-  +-------------------------------------------------------------------+
+```text
+  ┌─────────────────────────────────────────────────────────────────────┐
+  │ 1. 物理内存布局 (Value Body)                                         │
+  │    Sensor<cal> 在内存中只存储 `raw: i32` (4 字节)，不内联 8 字节指针 │
+  ├─────────────────────────────────────────────────────────────────────┤
+  │ 2. 静态类型身份 (Type Identity)                                      │
+  │    • left  的类型是 Sensor<first.ref>                                │
+  │    • right 的类型是 Sensor<second.ref>                               │
+  │    • 哪怕 first 和 second 的 scale 数值相同，两个类型也绝不相等       │
+  ├─────────────────────────────────────────────────────────────────────┤
+  │ 3. 运行期环境获取 (Environment Supply)                               │
+  │    在 read_scaled(cal, sensor) 中，cal 通过函数形参显式供应并受类型校验│
+  └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### 第一层：`TypeCore`（全局驻留的带洞不可变结构）
-
-在全局类型驻留池（Global Interner）中，编译器绝不存储任何具体的局部运行时变量 ID。相反，它把所有的运行时依赖位置抽象为标准化的**模板空洞（Template Holes：`H0`, `H1`, ...）**。
-- `Sensor<first.ref>` 和 `Sensor<second.ref>` 剥离掉具体的引用后，长相完全一致，都归结为同一个 `TypeCore`：`Sensor<H0>`（其中 `H0` 的空洞签名是 `lift *Calibration`）。
-- 因为 `TypeCore` 不含任何局部栈帧信息，它可以 100% 安全地进行全局哈希驻留（Interning）、跨函数共享以及增量编译持久化！
-
-### 第二层：`TypeRef`（携带引用端 Substitution 的完整类型引用）
-
-每当编译器在具体的外层结构、函数签名或表达式上引用这个类型时，使用的是轻量级的 `TypeRef`：
-
-$$\text{TypeRef} = (\text{interned\_core},\ \sigma_{\text{subst}})$$
-
-- 对于 `left` 字段，它的 `TypeRef` 是 `(Sensor<H0>, [H0 ↦ R_first_ref])`；
-- 对于 `right` 字段，它的 `TypeRef` 是 `(Sensor<H0>, [H0 ↦ R_second_ref])`。
-
-当编译器判断两个类型 `T1` 和 `T2` 是否相等时：
-1. 首先快速比对 `T1.core == T2.core`（仅需一次指针/ID 比较，$O(1)$）；
-2. **绝不就此止步！** 接着必须在当前作用域下逐一比对两者的替换表 `T1.subst == T2.subst`。因为 `R_first_ref != R_second_ref`，编译器立刻判定 `Sensor<first.ref>` 与 `Sensor<second.ref>` 类型不相等！
-
-### 第三层：`EnvironmentPlan`（环境取得计划与布局解耦）
-
-为什么我们还要把 `EnvironmentPlan[dependency_identity] = legal_access_path` 单独拎出来维护？
-
-看看 `SensorPair` 和 `read_scaled`：
-- 在 `SensorPair` 中，`first` 和 `second` 已经作为同级字段存储在 `SensorPair` 内部了。通过 `EnvironmentPlan`，编译器记录下：`R_first_ref` 可以通过外层容器的 `.first.ref` 路径直接获取，因此 `left: Sensor<first.ref>` 的物理内存布局只需要保存 4 字节的 `raw: i32`，完全不需要在 `left` 里面再塞一个 8 字节的指针！
-- 而在 `read_scaled(cal: *Calibration, sensor: Sensor<cal>)` 中，`EnvironmentPlan` 记录下依赖项 `R_cal` 直接取自第 0 个形参寄存器 `cal`！
-
----
-
-## 三、深度法则：严格区分三种“占位符”与避捕获替换复合
-
-在实现运行时依赖类型时，最容易犯的错误就是把编译器里的三种“占位符”混为一谈。在 Luna 内部，它们有着严格隔离的表示与权限边界：
-
-| 占位符种类 | 编译器内部记号 | 语义角色 | 求解器（Unifier）能否对其赋值？ |
-| :--- | :--- | :--- | :--- |
-| **1. 模板空洞 (Template Hole)** | `H0`, `H1` | `TypeCore` 上的形式接口槽位，只存在于驻留核心内部 | **否**（由外层 `TypeRef` 的 `subst` 表填入实参） |
-| **2. 运行时绑定项 (Runtime Binder Term)** | `R_cal`, `R_first` | 代表程序在运行时才会产生的固定值/地址身份 | **绝对禁止！** 它是刚性的运行时身份，绝不是未知推断变量 |
-| **3. 推断元变量 (Inference Metavariable)** | `?M0`, `?T1` | 当前调用点或沙盒探测中等待推导的编译期未知量 | **是**（在当前推断区域内可被合一算法赋值收窄） |
-
-此外，当一个依赖类型嵌套在另一个依赖类型内部时（例如外层泛型的替换表 $\theta$ 作用于内层类型的替换表 $\sigma$），编译器执行**避捕获替换复合（Capture-Avoiding Substitution Composition）**：
-
-$$\text{compose}(\sigma, \theta)[h] = \text{substitute\_capture\_avoiding}(\sigma[h], \theta)$$
-
-如果外层重命名了某个运行时绑定变量（比如在内联或投影重写时将 `cal` 重命名为 `cal_inlined`），编译器会自动在必要时对内部局部绑定做 $\alpha$-重命名，彻底杜绝外层同名变量意外捕获（Variable Capture）内层依赖项的事故！
-
-让我们看看 `SensorPair` 在冻结归一化后的 S-Expression 转储：
-
-```scheme
-(type-core :id tc_sensor :name "Sensor"
-  :holes ((hole H0 :stage runtime-dep :ty (lift (ptr Calibration))))
-  :layout (struct-layout :size 4 :align 4
-            (field "raw" :offset 0 :ty i32)))
-
-(frozen-struct :name "SensorPair"
-  :binders (
-    (binder R_first :name "first" :ty Calibration)
-    (binder R_second :name "second" :ty Calibration))
-  :fields (
-    (field "left"
-      :ty (type-ref :core tc_sensor :subst ((H0 (addr-of R_first))))
-      :env-plan ((H0 (container-field-addr "first"))))
-    (field "right"
-      :ty (type-ref :core tc_sensor :subst ((H0 (addr-of R_second))))
-      :env-plan ((H0 (container-field-addr "second"))))))
-```
-
----
-
-## 四、边界与编译期拒绝：共享 `TypeCore` 绝不能蒙混通过不同依赖身份的检查
-
-让我们看看如果程序员试图把绑定了 `second.ref` 的 `right` 传感器传给期待 `first.ref` 的 `read_scaled` 函数，Luna 编译器是如何精准拦截的：
+来看一个包含两个独立校准通道的测试：
 
 ```flurry
-fn mismatched_calibration(pair: *SensorPair<c1, c2>) -> i32
-where
-    c1: Calibration,
-    c2: Calibration,
-{
-    -- 第 1 个参数传入了 first 的地址，因此第 2 个参数要求类型必须是 Sensor<pair.*.first.ref>
-    -- 但这里却传入了类型为 Sensor<pair.*.second.ref> 的 pair.*.right！
-    return read_scaled(pair.*.first.ref, pair.*.right); -- ❌ 编译期直接拒绝！虽然两个 Sensor 共享同一个 TypeCore `Sensor<H0>`，但它们的引用端替换 `H0 -> R_first_ref` 与 `H0 -> R_second_ref` 不相等！
+test isolated_channel_calibrations {
+    let first = Calibration { scale: 2 }
+    let second = Calibration { scale: 10 }
+
+    let left = Sensor<first.ref> { raw: 15 }
+    let right = Sensor<second.ref> { raw: 15 }
+
+    -- 物理布局验证：每个 Sensor 只占 4 字节 (i32)
+    comptime {
+        assumes Type.size_of(left'type) == 4;
+        assumes left'type != right'type;
+    }
+
+    unsafe {
+        assumes read_scaled(first.ref, left) == 30;
+        assumes read_scaled(second.ref, right) == 150;
+    }
 }
 ```
 
-再看另一个边界：如果某个函数试图返回一个依赖**即将销毁的局部栈变量**的类型，而调用点又无法在外部合法取得该环境路径，`EnvironmentPlan` 检查也会当场拦截：
+---
+
+## 二、 复合结构中的多通道依赖绑定
+
+当我们需要在一个外层结构体或函数中同时管理两个绑定到不同校准器的 `Sensor` 时，可以通过 `where quote ...` 子句将外层环境的绑定清晰地转发给各个字段：
+
+```flurry
+struct DualChannelReading
+where
+    quote cal_a: lift *Calibration,
+    quote cal_b: lift *Calibration
+{
+    ch_a: Sensor<cal_a>,
+    ch_b: Sensor<cal_b>,
+}
+
+unsafe fn total_scaled_reading(
+    cal_a: *Calibration,
+    cal_b: *Calibration,
+    dual: DualChannelReading<cal_a, cal_b>,
+) -> i32 {
+    read_scaled(cal_a, dual.ch_a) + read_scaled(cal_b, dual.ch_b)
+}
+```
+
+因为 `dual.ch_a` 和 `dual.ch_b` 的类型分别锁死了 `cal_a` 和 `cal_b`，在实现 `total_scaled_reading` 时，不可能误把 `dual.ch_b` 传给 `read_scaled(cal_a, ...)`。
+
+---
+
+## 三、 拒绝例：跨通道混用校准器与局部依赖逃逸
+
+### 拒绝例 1：拿通道 A 的校准器去读取通道 B 的传感器
+
+```flurry
+unsafe fn mismatched_calibration(
+    cal_a: *Calibration,
+    cal_b: *Calibration,
+    sensor_b: Sensor<cal_b>,
+) -> i32 {
+    -- ❌ 编译期拒绝：第一个参数传入了 cal_a，因此第二个参数要求类型为 Sensor<cal_a>，
+    -- 但实际传入的 sensor_b 类型为 Sensor<cal_b>，依赖身份不匹配。
+    read_scaled(cal_a, sensor_b)
+}
+```
+
+### 拒绝例 2：返回依赖函数内部局部栈变量的类型
+
+运行时依赖类型所引用的对象必须在类型使用处仍然有效且可访问。如果一个函数试图返回绑定在函数局部栈变量 `local_cal.ref` 上的 `Sensor<local_cal.ref>`，在编译期会被立即拦截：
 
 ```flurry
 fn leaked_local_dependency() -> Sensor<local_cal.ref> {
-    let local_cal = Calibration { scale: 2 };
-    -- ❌ 编译期直接拒绝！返回类型中的运行时依赖项 `local_cal.ref` 引用了函数内部的局部绑定，在函数返回后无法建立合法的外部 EnvironmentPlan 访问路径
-    return Sensor<local_cal.ref> { raw: 10 };
+    let local_cal = Calibration { scale: 2 }
+    -- ❌ 编译期拒绝：返回类型引用了函数内部的局部栈变量 local_cal，
+    -- 函数返回后 local_cal 即被销毁，调用方无法在外部合法取得该依赖环境。
+    Sensor<local_cal.ref> { raw: 10 }
 }
 ```
 
+如果需要跨函数返回带校准的数据，应当由调用方传入长寿命的 `cal: *Calibration`（如 `fn create_sensor(cal: *Calibration, raw: i32) -> Sensor<cal>`），使返回的依赖类型锚定在调用方作用域内依然有效的对象身份上。
+
 ---
 
-## 五、本期小结
+## 四、 本篇小结
 
-| 核心层级 | 数据结构 | 核心职责与不变量 |
+| 工程维度 | 核心契约 | 带来的保障 |
 | :--- | :--- | :--- |
-| **核心模板层** | `TypeCore` | 将运行时依赖抽象为有序空洞签名（`H0, H1`），不含局部栈帧状态，全局安全 Intern 驻留 |
-| **引用替换层** | `TypeRef = (Core, Subst)` | 在使用点为每个空洞填入具体的运行时依赖身份（`R_first` 等）；**共享 Core 绝不等于完整类型相等** |
-| **环境取得层** | `EnvironmentPlan` | 显式记录每个运行时依赖项在当前上下文中的合法获取路径（形参、外层字段等），避免值布局膨胀 |
-| **替换复合算子** | `compose(σ, θ)` | 执行避捕获替换（Capture-Avoiding Substitution），在变量重命名与内联时保持依赖身份一致 |
+| **零膨胀值布局** | `Sensor<cal>` 的值本体只保存数据字段 `raw: i32` | 在数组与紧凑结构体中保持与裸整数一致的缓存密度 |
+| **严格身份判等** | 比较完整类型时同时核验类型构造头与所绑定的运行时身份 `cal` | 编译期彻底杜绝“拿通道 A 的校准参数算通道 B 的数据” |
+| **作用域逃逸检查** | 依赖项必须在结果跨越的作用域边界外仍然有效且可取得 | 防止返回依赖已销毁局部栈变量的悬空依赖类型 |
 
-现在，我们的编译器已经拥有了完整的精化、候选求解、区域冻结与依赖类型表示。但在真实的大型工程开发中，没人愿意每次只改一行代码（比如把一个函数体里的 `+ 1` 改成 `+ 2`），就让编译器把整个工程几千个函数全部从头推导一遍！
+---
 
-编译器怎样才能知道：把 `adjust` 函数体里的 `value + 1` 改成 `value + 2` 后，调用它的 `show_adjusted` 函数**不需要重新做类型检查**，但**需要重新生成内联机器码**？如果程序员不小心写出了 `const FIRST: u32 = SECOND + 1; const SECOND: u32 = FIRST + 1;` 这样的常量死循环，增量查询引擎又该如何确定性地捕获环路并让 IDE 继续正常工作？
+## 五、 下一篇预告
 
-在下一期（**第 187 期**）中，我们将揭秘 **细粒度增量查询（Incremental Queries）、接口隔离、确定性环路检测与错误恢复**！我们下期见！
+在开发包含数百个模块的大型工程时，我们希望修改一个函数的内部实现时，不会迫使整个工程重新检查所有上层模块；同时，当我们在代码中使用 `build.mode` 等编译期配置或定义相互递归的函数与常量时，需要清楚哪些依赖结构是合法的无环图，哪些会构成非法的编译期求值死循环。
+
+下一篇 **[Flurry 演进手记 (187)：大型工程的接口解耦与编译期依赖边界——函数签名隔离、构建配置感知与求值环路防范](./187-fine-grained-incremental-queries-and-cycle-recovery.md)**，我们将探讨模块化工程的最佳实践。

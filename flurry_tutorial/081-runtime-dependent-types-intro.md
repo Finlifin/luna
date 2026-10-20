@@ -3,37 +3,37 @@
 在上一回（080）中，我们用 `refines { ... }` 与 `requires / ensures` 为编译期类型和常数筑起了严密的逻辑防线。但当时我们也抛出了一个极具颠覆性的工程问题：
 
 在真实的高性能张量引擎、图计算（Graph Computing）或网络协议解析器里，很多关键参数只有在**运行期（Runtime）**才能确定：
-- 从模型文件里动态读出的维度长度 `n: usize`，能不能直接放进 `Array<f32, n>` 里作为它的类型参数，从而让 Flurry 根本不需要像 Rust 那样把定长数组 `[T; N]` 和动态切片 `[T]` 拆成两套格格不入的语法？
+- 从模型文件里动态读出的维度长度 `n: usize`，能不能直接放进 `Array<f32, n>` 里作为它的类型参数，从而让 `Array<T, n>` 能够统一表达静态定长数组与运行时长度依赖的数组？
 - 在使用 SOA（Struct of Arrays，数组结构体）布局管理图节点池或 DMA 缓冲池 `NodeStorage` 时，我们用轻量的 `u32` 下标代替笨重的裸指针。但怎么在编译期从类型上彻底杜绝**“张冠李戴——拿第 1 个存储池 `first_storage` 的节点下标，去访问第 2 个存储池 `second_storage`”**的恶性 Bug？
 
-欢迎来到 Flurry 类型系统中最令人惊叹的篇章之一：**运行时依赖类型（Runtime Dependent Types）**！今天，我们就来看看一个类型是如何在零额外内存体积膨胀的前提下，“记住”它所归属的运行期环境的。
+欢迎来到 Flurry 类型系统中最令人惊叹的篇章之一：**运行时依赖类型（Runtime Dependent Types）**。今天，我们就来看看一个类型是如何在零额外内存体积膨胀的前提下，“记住”它所归属的运行期环境的。
 
 ---
 
-## 一、 破局与痛点：SOA 句柄（Handle / Index）的“张冠李戴”惨案
+## 一、 问题背景与设计思路：SOA 句柄（Handle / Index）的“张冠李戴”惨案
 
 在编写高性能计算图、游戏引擎 ECS 或编译器 AST 时，为了极致的缓存局部性（Cache Locality）和避免复杂的指针生命周期，工程师们普遍采用 **SOA + 整数句柄（`u32` Index）** 的模式。
 
-但在传统语言中（`v0` 方案），整数句柄有一个困扰业界几十年的顽疾：
+在仅使用普通整数作为句柄的方案中，存在一个常见的工程隐患：
 
 ```flurry
--- ❌ v0 的传统整数句柄痛点：所有池子的下标都是同一种类型 NodeId！
+-- 传统整数句柄问题背景：所有存储池的下标都是同一种类型 NodeId
 newtype NodeId = u32;
 
 struct BadStorage {
     values: Array<i32, 3>,
 }
 
--- 灾难现场：把属于 graph_a 的节点句柄传给了 graph_b，类型检查器完全放行！
--- 轻则读出静默脏数据，重则触发诡异的数组越界崩溃！
+-- 问题现场：把属于 graph_a 的节点句柄传给了 graph_b，类型检查器完全放行。
+-- 轻则读出静默脏数据，重则触发诡异的数组越界崩溃。
 ```
 
 有人可能会说：“那我在每个 `NodeId` 结构体里面额外存一个指向所属 `NodeStorage` 的指针 `*NodeStorage` 不就行了？”
-**不行！** 在运行期检查指针相等不仅白白消耗 CPU 分支预测，更重要的是：把一个 8 字节的指针塞进原本只有 4 字节的 `u32` 句柄里，加上对齐填充会让每个句柄瞬间膨胀到 **16 字节**（整整大出 4 倍）！我们之所以用 SOA 和 `u32` 下标，本来就是为了省内存和装进 SIMD 寄存器，怎么能为了防呆让体积暴涨 4 倍？
+**不行。** 在运行期检查指针相等不仅白白消耗 CPU 分支预测，更重要的是：把一个 8 字节的指针塞进原本只有 4 字节的 `u32` 句柄里，加上对齐填充会让每个句柄瞬间膨胀到 **16 字节**（整整大出 4 倍）。我们之所以用 SOA 和 `u32` 下标，本来就是为了省内存和装进 SIMD 寄存器，怎么能为了防呆让体积暴涨 4 倍？
 
 那么，能不能**让 `storage` 只活在 `NodeIndex` 的“类型与操作环境”里，而不占用 `NodeIndex` 实例本身的哪怕 1 个字节内存**？
 
-在 Flurry 中，这正是运行时依赖类型的拿手好戏！
+在 Flurry 中，这正是运行时依赖类型的拿手好戏。
 
 ---
 
@@ -48,25 +48,25 @@ struct BadStorage {
 |                                                                         |
 |  1. 运行期值体 (Runtime Value Body) —— 真正躺在内存 / 寄存器里的字节：    |
 |     +-------------------+                                               |
-|     | index: u32 (4 字节)|  <-- 只有这一个字段！绝不内联重复存储指针！      |
+|     | index: u32 (4 字节)|  <-- 只有这一个字段  绝不内联重复存储指针        |
 |     +-------------------+                                               |
 |                                                                         |
 |  2. 类型与操作环境 (Type & Operation Environment) —— 编译期追踪的依附契约：|
 |     • 静态记录：该实例的类型依赖于稳定运行期身份 `storage.ref`            |
 |     • 当调用 `node.value()` 或 `node.left()` 时，编译器自动从外层环境      |
-|       把对应的 `storage` 引用接进来，且返回值 `?Self` 自动继承同一环境！   |
+|       把对应的 `storage` 引用接进来，且返回值 `?Self` 自动继承同一环境     |
 +-------------------------------------------------------------------------+
 ```
 
-请仔细品味这张图！
-1. **`NodeIndex` 在内存里有多大？** 只有 `index: u32` 的 4 字节！
+请仔细品味这张图。
+1. **`NodeIndex` 在内存里有多大？** 只有 `index: u32` 的 4 字节。
 2. **为什么 `where quote storage: lift *NodeStorage` 要写 `quote` 和 `lift`？**
    - `lift *NodeStorage`：将运行期指针类型 `*NodeStorage` 提升到编译期类型描述层，说明这个依赖项在运行期是一个 `*NodeStorage` 指针；
-   - `quote storage`：表明类型参数捕获的是传入实参表达式（如 `first_storage.ref`）所锚定的**运行期稳定身份描述**，而不是在类型声明点立刻去解引用读取运行期内存！
+   - `quote storage`：表明类型参数捕获的是传入实参表达式（如 `first_storage.ref`）所锚定的**运行期稳定身份描述**，而不是在类型声明点立刻去解引用读取运行期内存。
 
 ---
 
-## 三、 `v1` 升级：编写零体积膨胀、绝对防串池的 `NodeIndex`
+## 三、 实战演练：编写零体积膨胀、防跨池混用的 `NodeIndex`
 
 让我们直接看这段来自 Flurry 权威规范的 SOA 二叉树节点句柄实现。注意观察 `NodeStorage` 和 `NodeIndex` 是如何配合的：
 
@@ -78,47 +78,54 @@ struct NodeStorage {
     right: Array<?u32, 3>,
 }
 
--- 运行时依赖类型：NodeIndex 的类型身份依赖于具体的运行期存储池指针 `storage`！
+-- 运行时依赖类型：NodeIndex 的类型身份依赖于具体的运行期存储池指针 `storage`。
 struct NodeIndex
 where
     quote storage: lift *NodeStorage
 {
     index: u32,
 
-    -- 直接利用环境中的 storage 读取当前节点的值！
-    pub fn value(self: *Self) -> i32 {
-        return storage.values[self.index.as(usize)];
+    -- 直接利用环境中的 storage 读取当前节点的值（集中在 unsafe 方法中检查边界并访问存储）
+    pub unsafe fn value(*self) -> ?i32 {
+        let idx = self.index.*;
+        if idx < 3 {
+            storage.*.values[idx.as(usize)]
+        } else {
+            null
+        }
     }
 
-    -- 返回左孩子：注意返回类型 `?Self` 自动保持为 `?NodeIndex<storage>`！
-    pub fn left(self: *Self) -> ?Self {
-        if storage.left[self.index.as(usize)] is (next_index: u32) {
-            return Self { index: next_index };
+    -- 返回左孩子：注意返回类型 `?Self` 自动保持为 `?NodeIndex<storage>`。
+    pub unsafe fn left(*self) -> ?Self {
+        let idx = self.index.*;
+        if idx < 3 and storage.*.left[idx.as(usize)] is (next_index: u32) do {
+            Self { index: next_index }
         } else {
-            return null;
+            null
         }
     }
 
     -- 返回右孩子：同样自动保持在同一个 storage 环境下的 `?Self`
-    pub fn right(self: *Self) -> ?Self {
-        if storage.right[self.index.as(usize)] is (next_index: u32) {
-            return Self { index: next_index };
+    pub unsafe fn right(*self) -> ?Self {
+        let idx = self.index.*;
+        if idx < 3 and storage.*.right[idx.as(usize)] is (next_index: u32) do {
+            Self { index: next_index }
         } else {
-            return null;
+            null
         }
     }
 }
 ```
 
-看看 `left(self: *Self) -> ?Self` 有多优雅！
-当你从一个属于 `first_storage` 的根节点调用 `.left()` 时，因为返回类型是 `?Self`，解包出来的左孩子**自动具有类型 `NodeIndex<first_storage.ref>`**！你既不需要在每次调 `.left()` 时手动传一遍 `&first_storage`，也不需要在每个 `NodeIndex` 结构体里浪费 8 字节存指针！
+看看 `left(*self) -> ?Self` 的返回类型设计：
+当你从一个属于 `first_storage` 的根节点调用 `.left()` 时，因为返回类型是 `?Self`，解包出来的左孩子**自动具有类型 `NodeIndex<first_storage.ref>`**。你既不需要在每次调 `.left()` 时手动传一遍 `&first_storage`，也不需要在每个 `NodeIndex` 结构体里浪费 8 字节存指针。
 
 ---
 
-## 四、 `v2` 进阶：运行期身份相等性 vs 内容相等性
+## 四、 深入理解：运行期绑定身份（Identity）vs 内容相等性
 
 现在到了最关键的考验时刻：
-假设我们在运行期创建了两个存储池 `first_storage` 和 `second_storage`。为了测试编译器是不是真的认“身份”而不是认“长相”，我们故意把这两个存储池里的数组内容填得**一模一样**！
+假设我们在运行期创建了两个存储池 `first_storage` 和 `second_storage`。为了测试编译器是不是真的认“身份”而不是认“长相”，我们故意把这两个存储池里的数组内容填得**一模一样**。
 
 那么，`NodeIndex<first_storage.ref>` 和 `NodeIndex<second_storage.ref>` 是同一个类型吗？能不能把 `second_root` 赋给期待 `NodeIndex<first_storage.ref>` 的变量？
 
@@ -126,70 +133,73 @@ where
   first_storage  (栈地址 0x7ffd...10) ──► 内容: values=[10, 20, 30]
                                            类型: NodeIndex<first_storage.ref>
                                                       ║
-                                           【类型不相等！严禁混用！】
+                                           【类型不相等。严禁混用。】
                                                       ║
   second_storage (栈地址 0x7ffd...40) ──► 内容: values=[10, 20, 30]
                                            类型: NodeIndex<second_storage.ref>
 ```
 
-> **💡 核心心智模型：运行时依赖类型锚定的是“运行期绑定身份（Identity）”，而非“瞬时值内容（Content）”！**
-> 哪怕 `first_storage` 和 `second_storage` 里的每一个字节在当前时刻都相等，它们也是两个独立的运行期绑定实例。因此 `NodeIndex<first_storage.ref>` 与 `NodeIndex<second_storage.ref>` 是**完全不同的静态类型**！
+> **💡 核心心智模型：运行时依赖类型锚定的是“运行期绑定身份（Identity）”，而非“瞬时值内容（Content）”。**
+> 哪怕 `first_storage` 和 `second_storage` 里的每一个字节在当前时刻都相等，它们也是两个独立的运行期绑定实例。因此 `NodeIndex<first_storage.ref>` 与 `NodeIndex<second_storage.ref>` 是**完全不同的静态类型**。
 
-让我们在 `v2` 测试代码中亲眼见证这一奇迹：
+让我们通过测试代码验证这一性质：
 
 ```flurry
-test "runtime dependent NodeIndex safety v2" {
+test runtime_dependent_node_index_safety {
     let first_storage = NodeStorage {
         values: [10, 20, 30],
         left: [1, null, null],
         right: [2, null, null],
-    };
+    }
 
     -- 故意创建一个内容一模一样的第二存储池
     let second_storage = NodeStorage {
         values: [10, 20, 30],
         left: [1, null, null],
         right: [2, null, null],
-    };
+    }
 
     -- 创建归属于 first_storage 的根节点下标
-    let root = NodeIndex<first_storage.ref> { index: 0 };
-    assert(root.value() == 10);
+    let root = NodeIndex<first_storage.ref> { index: 0 }
 
-    -- 顺着 left() 和 right() 游走，返回的节点自动继承 first_storage.ref 环境！
-    if root.left() is (left_node: NodeIndex<first_storage.ref>) {
-        assert(left_node.value() == 20);
-    } else {
-        assert(false);
+    unsafe {
+        assumes root.value() == 10;
+
+        -- 顺着 left() 和 right() 游走，返回的节点自动继承 first_storage.ref 环境
+        if root.left() is (left_node: NodeIndex<first_storage.ref>) do {
+            assumes left_node.value() == 20;
+        } else {
+            assumes false;
+        }
+
+        if root.right() is (right_node: NodeIndex<first_storage.ref>) do {
+            assumes right_node.value() == 30;
+        } else {
+            assumes false;
+        }
     }
 
-    if root.right() is (right_node: NodeIndex<first_storage.ref>) {
-        assert(right_node.value() == 30);
-    } else {
-        assert(false);
-    }
-
-    -- 核心验证：归属于不同运行期存储池的 NodeIndex 具有截然不同的类型！
-    let second_root = NodeIndex<second_storage.ref> { index: 0 };
-    assert(root'type == NodeIndex<first_storage.ref>);
-    assert(second_root'type == NodeIndex<second_storage.ref>);
-    assert(root'type != second_root'type);
+    -- 核心验证：归属于不同运行期存储池的 NodeIndex 具有截然不同的类型
+    let second_root = NodeIndex<second_storage.ref> { index: 0 }
+    assumes root'type == NodeIndex<first_storage.ref>;
+    assumes second_root'type == NodeIndex<second_storage.ref>;
+    assumes root'type != second_root'type;
 }
 ```
 
 如果有人不小心写串了池子，试图把 `second_root` 当作 `NodeIndex<first_storage.ref>` 传进去：
 
 ```flurry
--- ❌ 编译期直接拒绝！期望类型 NodeIndex<first_storage.ref>，实际传入 NodeIndex<second_storage.ref>
+-- ❌ 编译期直接拒绝：期望类型 NodeIndex<first_storage.ref>，实际传入 NodeIndex<second_storage.ref>
 fn reject_cross_storage_mix(
     first_storage: *NodeStorage,
     second_storage: *NodeStorage,
 ) {
-    let wrong: NodeIndex<first_storage> = NodeIndex<second_storage> { index: 0 };
+    let wrong: NodeIndex<first_storage> = NodeIndex<second_storage> { index: 0 }
 }
 ```
 
-不需要任何运行期开销，甚至不需要在 `NodeIndex` 里多存半个比特，困扰高性能图计算与游戏引擎多年的“跨池句柄混用 Bug”在编译期被彻底终结！
+不需要任何运行期开销，甚至不需要在 `NodeIndex` 里多存半个比特，困扰高性能图计算与游戏引擎多年的“跨池句柄混用 Bug”在编译期被彻底终结。
 
 ---
 
@@ -204,11 +214,10 @@ fn reject_cross_storage_mix(
 
 ---
 
-## 六、 留给下一篇的悬念
+## 六、 下一篇预告
 
-看完 `NodeIndex<first_storage.ref>` 和 `NodeIndex<second_storage.ref>`，一个深层次的编译器架构问题立刻浮出水面：
+掌握了单个 `NodeIndex<storage.ref>` 的基本用法后，在更复杂的工程场景中还会遇到新的问题：
+- 当一个外层结构体 `SensorPair` 包含多个依赖同一环境的子字段时，如何转发并共享外层依赖环境？
+- 当把运行时依赖类型作为参数传给其他函数时，函数签名如何表达不同参数间的环境一致性？
 
-既然每次在运行期声明一个新变量 `first_storage`、`second_storage`，都会产生不同的类型 `NodeIndex<first_storage.ref>` 和 `NodeIndex<second_storage.ref>`——难道编译器在内部要为每一个运行期变量都复制粘贴一整份 `NodeIndex` 的类型结构定义吗？
-更危险的是，如果编译器为了省内存，用“驻留（Interning）”技术让它们共享同一个挖了洞的骨架 `NodeIndex<Hole_0>`，怎么防止某个粗心的编译器 pass 只比较了骨架 ID，就误以为 `NodeIndex<first_storage.ref> == NodeIndex<second_storage.ref>`？
-
-下一回 **《Flurry 演进手记 (082)：为什么带洞的 Core 不等于完整类型——NodeIndex、共享环境与替换相等性》**，我们将深入编译器内部，揭秘**带洞类型核（Holed `TypeCore`）与引用端替换（Substitution）**的精巧架构！
+下一回 **《Flurry 演进手记 (082)：运行时依赖类型的等价与替换——动态环境、绑定身份与跨作用域传递》**，我们将继续深入运行时依赖类型的组合与跨函数传递规则。

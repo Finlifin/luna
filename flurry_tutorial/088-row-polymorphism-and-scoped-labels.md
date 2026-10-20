@@ -1,173 +1,170 @@
-# 088 — 行多态（Row Polymorphism）：错误集合与代数效应的本质差异
+# Flurry 演进手记 (088)：行多态（Row Polymorphism）——错误行与效应行的语义差异
 
-> **阅读指南**：在上一回（第 087 回）认识 PTC 的 11 位理论求解器神探时，我们留了一个耐人寻味的悬念：在 Flurry 中，可恢复错误 `![E1, E2] T` 和代数效应 `#[eff1, eff2] T` 都由第 8 号神探 **`ROW`（行求解器）** 管理。为什么同样叫“行（Row）”，错误行会自动把重复的错误类型去重合并（`![E] ![E] T == ![E] T`），而效应行却顽固地保留每一个重复的效应标签（`#[eff] #[eff] T != #[eff] T`）？当行里出现未知行变量 $\rho$ 时，求解器又是怎样做“行合一（Row Unification）”的？本篇我们将彻底讲透 **行多态（Row Polymorphism）** 与 **作用域标签行（Scoped-Label Rows）**。
-
----
-
-## 一、 痛点：为什么不能把“错误”和“效应”都当成普通的集合（Set）？
-
-当我们组合多个可能失败或可能触发代数效应的函数时，最希望看到的是编译器能自动帮我们合并它们的签名，或者通过一个行变量（Row Variable）把“其余错误/其余效应”透传出去。这在类型理论中被称为 **行多态（Row Polymorphism）**。
-
-### 尝试 `v0`：一刀切地用“无序不重复集合”建模所有行
-
-在设计编译器的第一天，最容易冒出来的想法（`v0`）是：“管它是错误行 `![...]` 还是效应行 `#[...]`，统统当成数学上的无序集合（Set）不就好了吗？合并就是求并集（Union），重复的标签直接删掉！”
-
-对于**可恢复错误（Error Rows）**，这个想法简直完美：
-- 如果一个函数既可能在第一阶段抛出 `InputError`，又可能在第二阶段抛出 `InputError`，对调用者来说，这个函数失败时返回的错误原因依然只是 `InputError`。
-- 因此，`![InputError] ![InputError] u32` 和单层的 `![InputError] u32` 在语义和 ABI 上完全等价！
-
-但是，如果我们把这套“自动去重”的集合逻辑照搬到 **代数效应（Effect Rows）** 上，大祸就临头了！
-
-想象一下，我们在写一个支持嵌套事务或嵌套数据源的效应程序，外层有一个 `handle` 处理器负责拦截外层的 `read_number` 效应，内层还有一个 `handle` 处理器负责拦截内层的 `read_number` 效应：
-
-```flurry
-effect fn read_number() -> u32;
-
--- 假设一段计算需要向【内层】处理器请求一次，再向【外层】处理器透传一次：
--- 它的类型携带了两层独立的效应标签：#[read_number] #[read_number] u32
-```
-
-如果在 `v0` 里，编译器自作聪明地把 `#[read_number] #[read_number] u32` 自动去重压缩成了单层的 `#[read_number] u32`：
-- 当最内层的 `handle` 处理器接管并消解掉一层 `read_number` 后，剩下的类型就会直接变成纯值 `u32`！
-- 本该由外层处理器拦截的那一层效应凭空蒸发了，或者反过来，内层处理器错误地把本属于外层作用域的效应一锅端掉了！
-
-**核心痛点**：
-1. **错误是“扁平的标签集合”**：调用者只关心“最终可能拿到哪几种错误类型”，不在乎同一个错误是从哪一层传上来的。
-2. **效应是“带作用域层级的证据通道（Scoped Channels）”**：外层包裹一圈 `#[eff]`，代表外层多了一重待由对应 `handle` 消解的效应处理器边界！
+> **所属卷**：第四卷：元编程即类型论——走进两级类型论 (2LTT) 与编译期宇宙 (066–095)  
+> **上一篇**：[087：读懂类型约束与诊断信息——组合约束推理、残余条件与签名设计](./087-ptc-theory-solvers-and-diagnostics.md)  
+> **下一篇**：[089：任意位宽整数（Arbitrary-Sized Integers）：从 `u4`、`i24` 到位表示契约](./089-arbitrary-sized-integers-and-bit-widths.md)  
+> **参考规范**：[`docs/type/rows.md`](../docs/type/rows.md)
 
 ---
 
-## 二、 破局（v1）：一行两制——唯一标签行 vs. 作用域标签行
+## 一、 为什么错误行与效应行不能共用同一套去重规则？
 
-为了同时兼顾错误处理的简洁性与代数效应的作用域精确性，Flurry 的 `ROW` 理论求解器将行严格划分为两种截然不同的代数结构：
+在 Flurry 中，行（Row）用于描述一个类型中可能出现的错误分支（`![E1, E2] T`），或者一段计算需要使用的代数效应（`#[eff1, eff2] T`）。通过行多态（Row Polymorphism），函数可以只处理自己关心的那部分错误或效应，将其余部分保留在行中传递给调用方。
+
+虽然错误行和效应行在表面语法上都写成方括号列表，但它们携带的语义信息并不相同：
+1. **错误行（Error Rows）描述结果分支集合**：
+   - 调用方关心的是“计算失败时可能返回哪几种错误类型”。同一个错误类型即便在函数内部的多个步骤中都可能触发，最终返回给调用方的错误类型集合也不会因此多出一个重复分支。
+   - 因此，错误行是**唯一标签行（Unique-Label Row）**，相同的错误类型在合并时会自动去重：`![InputError] ![InputError] u32 == ![InputError] u32`。
+2. **效应行（Effect Rows）还描述同种操作由哪一层处理器（Handler）接管**：
+   - 效应不仅标识操作本身，还对应外围处理器的作用域层级。当内层效应处理器在处理 `read_number` 时，自身又向外层请求了一次 `read_number`，内层与外层的同名效应属于两个不同的处理层次。
+   - 因此，效应行是**保留同标签层次的行（Scoped-Label Row）**，同名效应的多层限定不能自动合并去重：`#[read_number] #[read_number] u32 != #[read_number] u32`。
 
 ```text
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    ROW 求解器的“一行两制”对照图                         │
-├────────────────────────────────────┬────────────────────────────────────┤
-│ 1. 错误行 (Error Rows)             │ 2. 效应行 (Effect Rows)            │
-│    语法: ![E1, E2] T               │    语法: #[eff1, eff2] T           │
-├────────────────────────────────────┼────────────────────────────────────┤
-│ ▶ 数学本质: 唯一标签集 (Unique Set)│ ▶ 数学本质: 作用域多重行 (Scoped)  │
-│ ▶ 交换律: 任意两个错误标签均可交换 │ ▶ 交换律: 仅【不相等】的不同标签   │
-│   ![A, B] T == ![B, A] T           │   可交换: #[a, b] T == #[b, a] T   │
-│ ▶ 幂等去重: 相同错误自动合并去重！ │ ▶ 保留重数: 相同标签绝不合并去重！ │
-│   ![E] ![E] T  ===  ![E] T         │   #[e] #[e] T  !==  #[e] T         │
-│   (严格扩展 ⟨e | ρ⟩ 要求 Lacks)    │   (每消解一层 handle 只剥离一层 e) │
-└────────────────────────────────────┴────────────────────────────────────┘
+  ┌────────────────────────────────────┬────────────────────────────────────┐
+  │ 1. 错误行 (Error Rows)             │ 2. 效应行 (Effect Rows)            │
+  │    语法: ![E1, E2] T               │    语法: #[eff1, eff2] T           │
+  ├────────────────────────────────────┼────────────────────────────────────┤
+  │ • 语义模型: 唯一标签集             │ • 语义模型: 保留同标签层次的行     │
+  │ • 交换规则: 不同错误标签可交换顺序 │ • 交换规则: 仅已证明不相等的标签   │
+  │   ![A, B] T == ![B, A] T           │   可交换: #[a, b] T == #[b, a] T   │
+  │ • 重复标签: 相同错误自动合并去重   │ • 重复标签: 保留层次，不合并去重   │
+  │   ![E] ![E] T == ![E] T            │   #[e] #[e] T != #[e] T            │
+  └────────────────────────────────────┴────────────────────────────────────┘
 ```
 
-> **💡 核心心智模型：效应行里的重复标签代表什么？（千万别误解！）**
-> 初学者看到 `#[read_number] #[read_number] u32` 时，最容易产生的一个误区是：“这难道代表函数体里调用了两次 `read_number()` 吗？”
-> **绝对不是！**
-> - 在同一个效应作用域内，无论你调用 `read_number()` 1 次、2 次还是在循环里调用 10000 次，它的类型都只是**单层**的 `#[read_number] u32`！
-> - 只有当类型层面发生了**多层效应行叠加/嵌套遮蔽（Scoped Layering / Tunneling）**时，才会出现两个同名的 `read_number` 标签。每一个同名标签对应着一层独立的 `handle` 拦截边界，它们的相对顺序固定了哪一层归内层处理器、哪一层归外层处理器！
+---
 
-### 演进到 `v1`：用编译期类型相等测试验证“一行两制”
+## 二、 错误行示例：多次传播同一错误不增加重复分支
 
-让我们直接写一段 Flurry 代码，交给 PTC 的 `ROW` 求解器来现场验证这两种行的恒等式：
+先看错误行的组合方式。下面的 `byte_pair` 连续调用了两次 `checked_byte`，两次调用都通过 `!` 传播 `InputError`，但 `byte_pair` 的返回类型只需列出一个 `InputError`：
 
 ```flurry
 use std.prelude.*;
 
-struct InputError {}
+enum InputError {
+    out_of_range(u32),
+}
 
-effect fn read_number() -> u32;
+fn checked_byte(value: u32) -> ![InputError] u32 {
+    if value <= 255 {
+        value
+    } else {
+        error InputError.out_of_range(value)
+    }
+}
 
-const SAME_ERROR_ROW =
-    (![InputError] u32) == (![InputError] ![InputError] u32);
-
-const SAME_EFFECT_ROW =
-    (#[read_number] u32) == (#[read_number] #[read_number] u32);
-
-comptime {
-    -- ✅ 错误行是唯一标签集：重复的 InputError 会被自动合并，结果为 true！
-    assumes SAME_ERROR_ROW;
-    -- ✅ 效应行是作用域行：两层 read_number 与一层绝不相等，结果为 false（取反为 true）！
-    assumes not SAME_EFFECT_ROW;
+fn byte_pair(left: u32, right: u32) -> ![InputError] Tuple<u32, u32> {
+    let first = checked_byte(left)!;
+    let second = checked_byte(right)!;
+    (first, second)
 }
 
 test {
-    println("error rows equal: {}", SAME_ERROR_ROW);
-    println("effect rows equal: {}", SAME_EFFECT_ROW);
+    byte_pair(12, 300) match {
+        (left, right)! => println("pair: {}, {}", left, right),
+        error .out_of_range(value) => println("invalid byte: {}", value),
+    }
 }
 ```
 
-运行这段测试，输出清晰地印证了我们的心智模型：
-- `error rows equal: true`
-- `effect rows equal: false`
+输出为 `invalid byte: 300`。错误的身份是 `InputError`，具体哪一个数值越界由变体载荷 `value` 说明，返回类型不需要记录该错误来自第几次调用。
 
-同时，如果我们在一个只允许单层 `#[read_number] u32` 的类型位置，硬塞进一个双层嵌套的效应类型，编译器会当场拦截：
+---
+
+## 三、 效应行示例：重复标签代表处理层次，而非调用次数
+
+阅读效应行时需要注意一个常见区分：**效应行中的重复标签表示嵌套的处理层次，不表示调用次数。**
+- 在同一个处理器作用域内，连续调用两次 `read_number()#`，使用的仍然是同一个处理入口，函数签名依然是单层的 `#[read_number]`；
+- 当内层 `# { ... }` 处理器在消解一层 `read_number` 的同时，又在处理器分支内部向外层发起 `read_number()#` 请求时，才会在嵌套层次上区分内层入口与外层入口：
 
 ```flurry
-effect fn read_number() -> u32;
+use std.prelude.*;
 
-type NestedReadFn = fn() -> #[read_number] #[read_number] u32;
+effect read_number() -> u32;
 
-fn broken_row_assumption(callback: NestedReadFn) {
-    -- ❌ 编译期直接拒绝！
-    -- ROW 求解器判定：#[read_number] #[read_number] u32 与 #[read_number] u32
-    -- 在标签重数（Multiplicity）上不匹配，拒绝隐式压扁！
+-- 连续调用两次 read_number()#，共享同一层处理入口，类型仍为单层 #[read_number]
+fn number_pair() -> #[read_number] Tuple<u32, u32> {
+    let first = read_number()#;
+    let second = read_number()#;
+    (first, second)
+}
+
+-- 内层处理器接管 number_pair 的请求，并在分支内部向外层再次请求 read_number()#
+fn translated_pair() -> #[read_number] Tuple<u32, u32> {
+    number_pair()# {
+        read_number() => {
+            let outside = read_number()#;
+            outside / 2
+        },
+    }
+}
+
+test {
+    let (left, right) = translated_pair()# {
+        read_number() => 10,
+    }
+    println("pair: {}, {}", left, right);
+}
+```
+
+输出为 `pair: 5, 5`。`number_pair` 中的两次请求都进入 `translated_pair` 的内层处理器，而内层处理器中的 `read_number()#` 则路由到 `test` 块安装的外层处理器（取得 `10` 并折半为 `5`）。
+
+---
+
+## 四、 编译期验证：错误行合并与效应行分层
+
+我们可以直接在 `comptime` 块中验证这两类限定在类型归一化时的等价关系：
+
+```flurry
+use std.prelude.*;
+
+enum InputError {
+    out_of_range(u32),
+}
+
+effect read_number() -> u32;
+
+typealias OneError = ![InputError] u32;
+typealias RepeatedError = ![InputError] ![InputError] u32;
+typealias OneLayer = #[read_number] u32;
+typealias TwoLayers = #[read_number] #[read_number] u32;
+
+comptime {
+    -- 错误行自动合并相同的错误类型
+    assumes OneError == RepeatedError;
+    -- 效应行保留同名效应的处理层次，单层与双层类型不相等
+    assumes OneLayer != TwoLayers;
+}
+```
+
+相应地，如果一个函数签名携带双层效应 `#[read_number] #[read_number] u32`，不能在未消解其中一层的情况下直接赋给只接受单层 `#[read_number] u32` 的函数类型位置：
+
+```flurry
+effect read_number() -> u32;
+
+typealias NestedReadFn = fn() -> #[read_number] #[read_number] u32;
+
+fn reject_implicit_effect_flattening(callback: NestedReadFn) {
+    -- 编译错误：#[read_number] #[read_number] u32 与 #[read_number] u32 的效应层次不同
     let _: fn() -> #[read_number] u32 = callback;
 }
 ```
 
----
-
-## 三、 深入引擎室：行合一（Row Unification）与保护尾（Protected Tail）（v2）
-
-当泛型函数里出现未知的**行变量（Row Variable）** $\alpha, \beta$ 时，`ROW` 求解器又是怎么解方程的呢？
-
-假设求解器要把两行 $\langle a \mid \alpha \rangle$ 和 $\langle b \mid \beta \rangle$ 合一（Unify）：
-1. **同头消去**：如果两个头部标签相等（$a = b$），直接消去头部，继续递归合一尾部 $\alpha = \beta$。
-   - 例如：$\langle a \mid \alpha \rangle = \langle a \rangle$（右侧尾部为空行 $\emptyset$），消去 $a$ 后立即解出 $\alpha = \emptyset$！
-2. **异头暴露（Expose）**：如果 $a \neq b$，说明左侧头部的 $a$ 必须藏在右侧的未知尾 $\beta$ 里面，而右侧头部的 $b$ 也必须藏在左侧的未知尾 $\alpha$ 里面！求解器会引入一个全新的自由行变量 $\gamma$，将方程重写为：
-   $$\alpha = \langle b \mid \gamma \rangle, \quad \beta = \langle a \mid \gamma \rangle$$
-
-但是，如果两边共享了**同一个未知尾变量** $\alpha$ 呢？这时候就会遇到两个著名的“无限行陷阱”！
-
-```text
-┌─────────────────────────────────────────────────────────────────────────┐
-│                 ROW 求解器的两大“无限行拦截器”                          │
-├────────────────────────────────────┬────────────────────────────────────┤
-│ 陷阱 1：自吞噬方程                 │ 陷阱 2：共享尾冲突                 │
-│   α  =  ⟨ a | α ⟩                  │   ⟨ a | α ⟩  =  ⟨ b | α ⟩  (a ≠ b) │
-├────────────────────────────────────┼────────────────────────────────────┤
-│ 如果强行展开：                     │ 左右两边拖着同一个尾巴 α！         │
-│ α = ⟨a | ⟨a | ⟨a | ...⟩⟩⟩          │ 在有限行里，左边比 α 多一个 a，    │
-│ 这是一条无限长的行！               │ 右边比 α 多一个 b (且 a ≠ b)。     │
-│                                    │                                    │
-│ 🛡️ 拦截机制：Occurs-Check          │ 🛡️ 拦截机制：Protected Tail        │
-│ 变量 α 出现在了非空前缀之后，      │ 将公共尾 α 放入 protected_tail 集合│
-│ 直接判定无有限解 (NotEntailed)！   │ 禁止对受保护的公共尾做 Expose 拆分!│
-└────────────────────────────────────┴────────────────────────────────────┘
-```
-
-### 演进到 `v2`：为什么需要 `protected_tail`？
-
-想象一下，如果没有 `protected_tail`（受保护公共尾）机制，当求解器看到 $\langle a \mid \alpha \rangle = \langle b \mid \alpha \rangle$（其中 $a \neq b$）时，它会冒失地对右边的 $\alpha$ 调用 `Expose`，令 $\alpha = \langle a \mid \gamma \rangle$。但别忘了，左边的尾巴**也是同一个 $\alpha$**！把 $\alpha = \langle a \mid \gamma \rangle$ 代回左边，方程又变成了 $\langle a, b \mid \gamma \rangle = \langle b, a \mid \gamma \rangle$，从而陷入无限生成新变量的死循环！
-
-通过先识别出左右两侧共享同一个未决行尾 $\alpha$ 并将其加入 `protected_tail` 禁止拆分，`ROW` 求解器能在 $O(1)$ 时间内识破 $\langle a \mid \alpha \rangle = \langle b \mid \alpha \rangle$（$a \neq b$）无解，保证行合一算法永远**严格终止（Termination）**！
+此外，当行中包含带类型参数的标签时，只有已证明不相等的两个效应标签才允许交换顺序；在参数尚未确定、两个标签实例化后可能相等的情况下，编译器不会随意调换它们的顺序，以保证处理器的绑定层次不会因实例化而改变。
 
 ---
 
-## 本篇小结
+## 五、 本篇小结
 
 | 特性维度 | 错误行（`![E1, E2] T`） | 效应行（`#[eff1, eff2] T`） |
 | :--- | :--- | :--- |
-| **理论模型** | 唯一标签集合行（Unique-Label Row） | 作用域有序多重行（Scoped-Label Row） |
-| **重复标签行为** | 自动合并去重：`![E] ![E] T == ![E] T` | 严格保留重数与同标签相对顺序：`#[e] #[e] T != #[e] T` |
-| **不同标签交换** | 任意交换顺序 | 仅在证明两个标签不相等（$l_1 \neq l_2$）时允许交换 |
-| **行合一防死循环** | 严格扩展约束 $\text{Lacks}(\rho, e)$ + Occurs-Check | 同标签保序消去 + 公共尾保护（`protected_tail`） |
+| **语义模型** | 唯一标签行（Unique-Label Row） | 保留同标签层次的行（Scoped-Label Row） |
+| **重复标签规则** | 自动合并去重：`![E] ![E] T == ![E] T` | 保留层次与相对顺序：`#[e] #[e] T != #[e] T` |
+| **多次调用同一操作** | 不增加重复错误标签 | 共享同一层处理入口，不增加重复效应标签 |
+| **不同标签顺序交换** | 任意交换顺序 | 仅在两个标签已证明不相等时可交换 |
 
 ---
 
-### 留给下一篇的悬念
+## 六、 下一篇预告
 
-我们已经见识了 `ROW` 求解器如何把错误和效应治理得井井有条。现在，让我们把目光投向第 9 号神探 **`BV`（定宽位向量求解器）** 与 Flurry 的底层数值系统。
-
-在写网络协议解析、硬件驱动或紧凑张量量化（如 4-bit 量化权重、5-bit 颜色通道、24-bit 音频采样）时，C/Rust 程序员总是被迫在 `u8`、`u16`、`u32` 里手写各种容易出错的 `& 0x1F` 和移位掩码。
-
-在 Flurry 中，我们可以直接使用任意位宽的整数（如 `u4`、`u5`、`i24`）以及位向量视图 `'bitvec`！但一个最让人好奇的问题是：**一个 5 比特宽的 `u5`，单独放在内存里明明也要占 1 个字节（8 比特），为什么编译器说它的位表示宽度依然严格是 5 位，绝不会悄悄变成 `u8`？**
-
-下一篇 **《089 — 任意位宽整数（Arbitrary-Sized Integers）：从 `u4`、`i24` 到位表示契约》**，我们将揭晓逻辑位宽与物理存储布局的精妙分野！
+除了类型与行约束外，系统编程中另一类常见的静态约束是位宽与数值范围。下一篇 **[089：任意位宽整数（Arbitrary-Sized Integers）：从 `u4`、`i24` 到位表示契约](./089-arbitrary-sized-integers-and-bit-widths.md)** 将介绍 Flurry 中任意位宽整数的逻辑位宽、独立存储布局以及与 `BitVec<n>` 的转换规则。

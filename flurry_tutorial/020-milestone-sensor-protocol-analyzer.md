@@ -1,16 +1,16 @@
 # Flurry 演进手记 (020)：第一卷里程碑——组装一台完整的 8 位传感器协议分析仪
 
-恭喜你！从 [第 001 篇](./001-a-world-in-a-byte.md) 工位上那张皱巴巴的 8 比特传感器手册开始，一路披荆斩棘走到第 020 篇，我们已经完成了 **《Flurry 演进手记》第一卷（基础语法、控制流与数据结构）** 的全部核心积木探索！
+从 [第 001 篇](./001-a-world-in-a-byte.md) 工位上那张皱巴巴的 8 比特传感器手册开始，一路披荆斩棘走到第 020 篇，我们已经完成了 **《Flurry 演进手记》第一卷（基础语法、控制流与数据结构）** 的全部核心积木探索。
 
-在过去 19 篇里，我们拒绝了“死记硬背语法手册”的枯燥学法，而是顺着硬件解码、抗噪重试、通道热切换、字节拼接和抽象封装的真实工程痛点，看着 Flurry 的每一项设计从代码中“长”了出来。
+在过去 19 篇里，我们拒绝了“死记硬背语法手册”的枯燥学法，而是顺着硬件解码、抗噪重试、通道热切换、字节拼接和抽象封装的真实核心问题，看着 Flurry 的每一项设计从代码中“长”了出来。
 
-今天是第一卷的**收官里程碑（Capstone Milestone）**。我们不再只写零散的演示片段，而是要把前 19 篇铸造的所有武器融为一炉，组装出一台**五脏俱全、端到端闭环的 8 位传感器协议分析仪与通道监控固件**！
+今天是第一卷的**收官里程碑（Capstone Milestone）**。我们不再只写零散的演示片段，而是要把前 19 篇铸造的所有武器融为一炉，组装出一台**五脏俱全、端到端闭环的 8 位传感器协议分析仪与通道监控固件**。
 
 ---
 
 ## 全景蓝图：我们要造一台什么样的分析仪？
 
-让我们先用一张 **全景架构 Code Cartoon**，俯瞰这台协议分析仪的五大核心层次，以及每一层对应了我们在第一卷哪几篇学到的语言绝技：
+下面先俯瞰这台协议分析仪的五大核心层次，以及每一层对应了我们在第一卷哪几篇学到的语言绝技：
 
 ```text
  ╔═════════════════════════════════════════════════════════════════════════════╗
@@ -47,15 +47,15 @@
  │ 第 4 层：状态监控、指针投影与失败安全热切换 (003, 016, 018)                   │
  │  • `let` 绑定名称锁定 vs 内部字段/原位比特段更新 `status_reg'bitvec[0..4] += 1`│
  │  • 后缀指针 `.ref`、`.*` 与结构体指针字段投影                                 │
- │  • `var` 覆盖赋值四步铁律：先求值新通道，失败 100% 保留旧通道，成功自动 Drop   │
+ │  • `var` 覆盖赋值四步核心规则：先求值新通道，失败 100% 保留旧通道，成功自动 Drop   │
  └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 第一步：从 naive 的“一锅粥”脚本 (`v0`) 到分层架构 (`v1` → `v2`)
+## 第一步：从 naive 的“一锅粥”脚本 到分层架构
 
-如果在没有学过第一卷之前，让我们写这样一个包含“解码 + 校验 + 告警分类 + 3 次重试 + 备用通道切换 + 状态寄存器位更新”的模块，写出来的 `v0` 往往是一个塞满了魔法数字 `0xF0`、`255`、多层 `if-else` 缩进、且一旦切换失败就会把旧通道误关闭的百行面条函数。
+如果在没有学过第一卷之前，让我们写这样一个包含“解码 + 校验 + 告警分类 + 3 次重试 + 备用通道切换 + 状态寄存器位更新”的模块，写出来的代码往往是一个塞满了机制数字 `0xF0`、`255`、多层 `if-else` 缩进、且一旦切换失败就会把旧通道误关闭的百行面条函数。
 
 而在 Flurry 中，我们可以清晰地分四个模块段落（Stage 1 ~ Stage 4）将它优雅地搭建起来。
 
@@ -69,11 +69,11 @@ use std.prelude.*;
 typealias Byte = u8;
 typealias Nibble = BitVec<4>;
 
--- [018] newtype 建立独立类型身份：防止把传感器读数当成通道号传参！
+-- [018] newtype 建立独立类型身份：防止把传感器读数当成通道号传参。
 newtype ChannelId = u8;
 
 -- [001 & 014] 零额外 Tag 开销的定宽模式枚举：
--- 编译器在定义时自动证明 0x00、0xA_xxxx 与 0xF_0001 编码绝对互斥！
+-- 编译器在定义时自动证明 0x00、0xA_xxxx 与 0xF_0001 编码绝对互斥。
 enum Packet {
     .base_type Byte,
     .discrete_tag true,
@@ -86,7 +86,7 @@ enum Packet {
 -- [016] 用 BitVec 拼接 `++` 组装 16 位上行遥测帧：
 -- 高 8 位为通道号，低 8 位为 Packet 原始编码字节
 pure fn pack_uplink_frame(ch: ChannelId, pkt: Packet) -> u16 {
-    let ch_bits = (ch.as(u8))'bitvec;
+    let ch_bits = (ch.as(u8))'bitvec,
     let pkt_bits = pkt'bitvec;
     (ch_bits ++ pkt_bits).as(u16)
 }
@@ -94,7 +94,7 @@ pure fn pack_uplink_frame(ch: ChannelId, pkt: Packet) -> u16 {
 
 ### Stage 2：错误行建模与带 `case` 视图的领域样本（回顾 002, 012, 019）
 
-接着，我们定义解码错误 `DecodeErr` 和传感器量程错误 `SensorErr`（遵守错误类型以 `Err` 结尾、错误变体用 `PascalCase` 的铁律）。
+接着，我们定义解码错误 `DecodeErr` 和传感器量程错误 `SensorErr`（遵守错误类型以 `Err` 结尾、错误变体用 `PascalCase` 的核心规则）。
 当成功提取出有效读数后，我们把它封装进 `VerifiedSample` 结构体中，并通过 `pub case` 视图向外提供 `.critical_heat(celsius)` 和 `.normal_heat(celsius)` 两种匹配视角，彻底隐藏内部“读数乘以 8 加 10”的温度换算公式：
 
 ```flurry
@@ -193,7 +193,7 @@ fn poll_with_retry(port_value: Byte, max_retries: u8) -> ![DecodeErr, SensorErr]
                 return failure;
             },
         }
-        return result;
+        result
     }
 }
 ```
@@ -221,7 +221,7 @@ struct AnalyzerEngine {
     }
 
     pub fn ingest_byte(*self, raw: Byte) {
-        -- [010 & 019] 对偶模式 (? 与 !) 与自定义 case 视图的完美嵌套！
+        -- [010 & 019] 对偶模式 (? 与 !) 与自定义 case 视图的完美嵌套。
         poll_with_retry(raw, 2u8) match {
             -- 成功、非空、且命中高温告警视图
             (.critical_heat(celsius))?! => {
@@ -257,7 +257,7 @@ impl Drop for AnalyzerEngine {
     }
 }
 
--- [003] 失败安全的热切换：右侧 open 失败时，绝不提前销毁 target 原有的旧通道！
+-- [003] 失败安全的热切换：右侧 open 失败时，绝不提前销毁 target 原有的旧通道。
 fn hot_swap_channel(
     target: *AnalyzerEngine,
     backup_ch: ChannelId,
@@ -292,7 +292,7 @@ test {
     -- 5. 喂入一个线路噪声损坏字节 0x37（触发 2 次重试后报错）
     engine.ingest_byte(0x37);
 
-    -- 6. 尝试热切换到离线通道 9（故意失败！验证通道 1 完好无损！）
+    -- 6. 尝试热切换到离线通道 9（故意失败。验证通道 1 完好无损。）
     hot_swap_channel(engine.ref, 9u8.as(ChannelId), true)! {
         .ChannelOffline(ch) => {
             println("Hot-swap to ch {} failed! Staying on ch {}",
@@ -300,7 +300,7 @@ test {
         },
     }
 
-    -- 7. 热切换到备用通道 2（成功！此时旧的通道 1 立即执行 Drop，随后切入通道 2）
+    -- 7. 热切换到备用通道 2（成功。此时旧的通道 1 立即执行 Drop，随后切入通道 2）
     hot_swap_channel(engine.ref, 2u8.as(ChannelId), false)! {
         .ChannelOffline(_) => (),
     }
@@ -316,21 +316,21 @@ test {
 
 ```flurry
 test {
-    -- ❌ 防线 1 (001/016)：位宽越界拦截！Nibble 是 4 位，字面量 16 当场拒绝！
-    let bad_pkt = Packet.data { payload: 16 };
+    -- ❌ 防线 1 (001/016)：位宽越界拦截。Nibble 是 4 位，字面量 16 编译期拒绝。
+    let bad_pkt = Packet.data { payload: 16 }
 
-    -- ❌ 防线 2 (016)：禁止静默截断！16 位上行帧不能直接 .as(u8)，必须先切片 [0..8]！
+    -- ❌ 防线 2 (016)：禁止静默截断。16 位上行帧不能直接 .as(u8)，必须先切片 [0..8]。
     let bad_byte = pack_uplink_frame(1u8.as(ChannelId), Packet.empty).as(u8);
 
-    -- ❌ 防线 3 (018)：newtype 身份隔离！不能把普通 u8 读数直接当成 ChannelId 传给 open！
+    -- ❌ 防线 3 (018)：newtype 身份隔离。不能把普通 u8 读数直接当成 ChannelId 传给 open。
     let _ = AnalyzerEngine.open(1u8, false);
 
-    -- ❌ 防线 4 (002)：错误行未处理拦截！不能忽略 poll_with_retry 返回的 ![DecodeErr, SensorErr]！
+    -- ❌ 防线 4 (002)：错误行未处理拦截。不能忽略 poll_with_retry 返回的 ![DecodeErr, SensorErr]。
     let raw_sample: ?VerifiedSample = poll_with_retry(0xA5, 2u8);
 
-    -- ❌ 防线 5 (003)：let 绑定名整值替换拦截！
+    -- ❌ 防线 5 (003)：let 绑定名整值替换拦截。
     let fixed_engine = AnalyzerEngine { active_channel: 1u8.as(ChannelId) }
-    fixed_engine = AnalyzerEngine { active_channel: 2u8.as(ChannelId) };
+    fixed_engine = AnalyzerEngine { active_channel: 2u8.as(ChannelId) }
 }
 ```
 
@@ -347,19 +347,19 @@ test {
 | **控制流与守卫** | 后缀 `match`、`if/while ... is ... do`、`return ... while` | 数据流从左往右走；模式层守卫用 `if`，语句跳转守卫用 `while` | 001, 007, 008, 009 |
 | **模式匹配进阶** | `(p)` vs `(p,)`、浮点 `NaN` 覆盖、`pub case` 视图 | 模式与表达式严格对偶；`case` 视图在不暴露内部布局的前提下支持按需解构 | 010, 011, 019 |
 | **错误与容错** | `?T`、`![E1, E2] T`、`error expr`、`! { catch ... }` | 零栈展开开销的结果 ABI；前后置 `catch` 将审计、分类与重试解耦 | 002 |
-| **绑定与资源** | `let` vs `var`、`.ref`、`.*`、覆盖赋值四步铁律 | `let` 只焊死名牌不冻结对象；覆盖赋值先求新值再 Drop 旧值，失败保平安 | 003 |
+| **绑定与资源** | `let` vs `var`、`.ref`、`.*`、覆盖赋值四步核心规则 | `let` 只焊死名牌不冻结对象；覆盖赋值先求新值再 Drop 旧值，失败保平安 | 003 |
 | **用户定义类型** | `struct`、`enum`（含分组与定宽）、`union`、`newtype` | 定宽 `enum` 编译期证互斥；`union` 赋值不自动 Drop；`newtype` 零成本隔离身份 | 001, 012–018 |
 | **BitVec 代数** | `'bitvec`、`++`、`[lo..hi]`、`and`/`or`/`not`、原位回写 | 告别手算掩码移位；`and`/`or` 双侧求值不短路；切片左值直接原位回写 | 001, 015, 016 |
 
 ---
 
-### 迈向第二卷的悬念：函数的十八般武艺！
+### 迈向第二卷的悬念：函数的十八般武艺
 
 看着我们刚刚完成的 `AnalyzerEngine`，它已经非常健壮了。但是，随着这套固件被推广到全公司的十几个产品线，新的需求像雪片一样飞来：
 
 1. **配置参数爆炸**：`poll_with_retry` 现在只有 `max_retries` 一个配置项。如果还要支持 `backoff_ms`（退避时间）、`log_enabled`（是否打日志）、甚至让某个参数的默认值**直接根据前一个参数算出来**（比如 `max_timeout = max_retries * 100`），难道我们要像 C++ 一样写十几个重载函数，或者强迫调用者每次都传一个笨重的 `Config` 结构体吗？
 2. **像写 JSON 一样调用函数**：能不能直接写 ` AnalyzerEngine.open { channel: 1, retries: 3, verbose: true } `，让函数自动把未声明的命名属性收集成一个匿名结构体？
-3. **插件化回调与零开销内联**：如果用户想传入一个自定义的滤波闭包 `|sample| sample.to_celsius() > 50` 来过滤数据，当这个闭包捕获了外部计数器时，Flurry 是如何通过 `%C fn` 追踪闭包环境的生死与清理顺序的？`inline fn` 和 `quote fn` 又是如何做到比 C 宏更安全、且保证**实参永远只求值一次**的？
+3. **插件化回调与零开销内联**：如果用户想传入一个自定义的滤波闭包 `|sample| sample.to_celsius() > 50` 来过滤数据，当这个闭包捕获了外部计数器时，Flurry 是如何通过 `%c fn` 追踪闭包环境的生死与清理顺序的？`inline fn` 和 `quote fn` 又是如何做到比 C 宏更安全、且保证**实参永远只求值一次**的？
 
-休息一下，给自己倒杯咖啡！
-在下一篇——也是 **第二卷《函数的十八般武艺——参数协议、模式链、闭包与模板 (021–040)》** 的开篇之作 **《Flurry 演进手记 (021)：实参求值的铁律——源码从左到右求值、方法接收者与失败回滚边界》** 中，我们将正式开启一段全新的进化旅程！
+休息一下，给自己倒杯咖啡。
+在下一篇——也是 **第二卷《函数的十八般武艺——参数协议、模式链、闭包与模板 (021–040)》** 的开篇之作 **《Flurry 演进手记 (021)：实参求值的核心规则——源码从左到右求值、方法接收者与失败回滚边界》** 中，我们将正式开启一段全新的进化旅程。

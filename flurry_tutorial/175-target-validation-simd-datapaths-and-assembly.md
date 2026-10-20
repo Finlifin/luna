@@ -14,7 +14,7 @@
 
 ---
 
-## 一、 `v0` 的陷阱：只检查入口函数表面，还是把运行时死分支当成免死金牌？
+## 一、 传统的陷阱：只检查入口函数表面，还是把运行时死分支当成豁免凭证？
 
 假设一位习惯了传统脚本或松散宏系统的工程师来设计目标管线的合法性检查器。他很容易犯下两个致命错误：
 
@@ -36,10 +36,10 @@ fn write_sum(out: *i32, a: i32, b: i32) -> void {
 }
 ```
 
-请注意：`add_values` 是一个**没有**挂载 `^cuda.pipelines.global` 属性的普通函数！
+请注意：`add_values` 是一个**没有**挂载 `^cuda.pipelines.global` 属性的普通函数。
 如果编译器只检查 `write_sum` 的表面语法，而不顺着调用图把 `add_values` 納入检查范围，那么一旦有人在 `add_values` 里面偷偷写了一条宿主机专用的系统调用或 AVX2 指令，编译期就会漏网，直到 PTX 汇编器崩溃才报错。
 
-更隐蔽的是：**如果 `add_values<T>` 是一个泛型函数**，在同一个 Kernel 里先被调用了 `add_values<i32>`（目标支持），后被调用了 `add_values<HostOnlySocket>`（目标不支持）。如果检查器的 `visited` 集合只按函数声明的名字 `"add_values"` 去重，第二次调用就会被直接跳过！
+更隐蔽的是：**如果 `add_values<T>` 是一个泛型函数**，在同一个 Kernel 里先被调用了 `add_values<i32>`（目标支持），后被调用了 `add_values<HostOnlySocket>`（目标不支持）。如果检查器的 `visited` 集合只按函数声明的名字 `"add_values"` 去重，第二次调用就会被直接跳过。
 
 ### 错误假想 2：以为运行时 `if false` 里的非法硬件指令可以被放过
 有些工程师会写这样的代码：
@@ -56,11 +56,11 @@ fn broken_runtime_branch(flag: bool, a: f32, b: f32, c: f32) -> f32 {
 }
 ```
 
-**绝对不行！** 运行期条件 `if cond` 的两个分支都会进入当前目标的执行依赖闭包（Execution Dependency Closure）。因为编译器在把函数降级为目标机器码时，必须为所有运行期可达的语法分支生成合法的目标指令；目标能力检查是一道严肃的编译期契约，绝不依赖后端的死代码消除（DCE）来侥幸逃脱！
+**绝对不行。** 运行期条件 `if cond` 的两个分支都会进入当前目标的执行依赖闭包（Execution Dependency Closure）。因为编译器在把函数降级为目标机器码时，必须为所有运行期可达的语法分支生成合法的目标指令；目标能力检查是一道严肃的编译期契约，绝不依赖后端的死代码消除（DCE）来侥幸逃脱。
 
 ---
 
-## 二、 `v1` 升级：基于具体实例（Concrete Instance）的目标依赖闭包
+## 二、 升级：基于具体实例（Concrete Instance）的目标依赖闭包
 
 在 Flurry 中，当一个入口函数被投射到目标管线（如 `^cuda.pipelines.global` 或当前宿主目标）时，编译器会以该入口的**具体实例（Concrete Instance）**为起点，启动一个严密的工作列表（Worklist）算法，验证整棵**必需执行依赖闭包（Required Dependency Closure）**：
 
@@ -79,7 +79,7 @@ fn broken_runtime_branch(flag: bool, a: f32, b: f32, c: f32) -> f32 {
                │  1. 检查当前实例签名与函数体中的类型表示布局       │
                │  2. 检查所有直接使用的硬件 Intrinsics / 特殊操作 │
                │  3. 收集运行期 if/match 所有分支调用的 Helper 实例 │
-               │     (注：inline if 淘汰的分支不进入执行闭包！)     │
+               │     (注：inline if 淘汰的分支不进入执行闭包  )     │
                └────────────────────────┬─────────────────────────┘
                                         │ 发现未访问的具体实例
                                         ▼
@@ -94,7 +94,7 @@ fn broken_runtime_branch(flag: bool, a: f32, b: f32, c: f32) -> f32 {
 
 ---
 
-## 三、 `v2` 实战：构建受目标守卫保护的 `x86_64` FMA 与 AVX2 向量数据路径
+## 三、 实战：构建受目标守卫保护的 `x86_64` FMA 与 AVX2 向量数据路径
 
 掌握了 `inline if` 与目标验证闭包的配合后，我们就可以写出既严密又零开销的硬件加速代码了。
 
@@ -129,7 +129,7 @@ use std.asm.x86.{
     _mm256_add_ps,
     _mm256_loadu_ps,
     _mm256_storeu_ps,
-};
+}
 
 fn add_arrays_avx2(
     comptime Vector: Type,
@@ -151,7 +151,7 @@ fn add_arrays_avx2(
         let right = _mm256_loadu_ps'intrinsic(ys).as(Vector);
         let sum = _mm256_add_ps'intrinsic(left, right).as(Vector);
 
-        -- 无返回值的存储指令：直接返回 void，不需要也不允许写 .as(...)！
+        -- 无返回值的存储指令：直接返回 void，不需要也不允许写 .as(...)。
         _mm256_storeu_ps'intrinsic(zs, sum);
     }
 }
@@ -178,20 +178,20 @@ fn add_arrays_avx2(
                          └───────┬───────┘
                                  │
                                  ▼ _mm256_storeu_ps'intrinsic(zs, sum)
-                    内存输出 zs: *Array<f32, 8>  (返回 void，具内存写副作用，禁删！)
+                    内存输出 zs: *Array<f32, 8>  (返回 void，具内存写副作用，禁删。)
 ```
 
 > **🔍 语法与语义小贴士：为什么 `_mm256_storeu_ps'intrinsic(zs, sum)` 不能被优化器删掉？**
 > 1. **关于 `.as(T)`**：`_mm256_loadu_ps` 和 `_mm256_add_ps` 产出硬件寄存器中的向量值，因此属于“按输出类型多态的指令”，必须跟 `.as(Vector)`；而 `_mm256_storeu_ps` 的职责是把 `sum` 写进 `zs` 指向的内存，输出类型固定为 `void`，所以直接调用即可。
-> 2. **关于副作用（Side Effects）**：虽然 `_mm256_storeu_ps` 返回 `void`，但它绝不是无意义的空操作。编译器在 IIR 和后端降级中会严格保留它的内存写出副作用与求值顺序，绝不会因为“没有使用返回值”而把它当成死代码删掉！
+> 2. **关于副作用（Side Effects）**：虽然 `_mm256_storeu_ps` 返回 `void`，但它绝不是无意义的空操作。编译器会严格保留它的内存写出副作用与求值顺序，绝不会因为“没有使用返回值”而把它当成死代码删掉。
 
 ### 3. 反例警告：把普通标量 `u32` 冒充为 256-bit 向量类型 `Vector`
 
 既然 `add_arrays_avx2` 把 `comptime Vector: Type` 作为参数传入，如果调用者胡乱传一个 `u32` 进去，试图把 256-bit 的加载结果塞进 32-bit 标量里，会发生什么？
 
 ```flurry
--- ❌ 编译期直接拒绝！
-fn reject_invalid_avx2_vector_repr(
+-- ❌ 编译期直接拒绝。
+unsafe fn reject_invalid_avx2_vector_repr(
     xs: *Array<f32, 8>,
     ys: *Array<f32, 8>,
     zs: *Array<f32, 8>,
@@ -202,7 +202,7 @@ fn reject_invalid_avx2_vector_repr(
     -- 编译期直接拒绝（Target / Intrinsic Representation Error）：
     -- 在实例化 add_arrays_avx2(u32, ...) 时，目标与 Intrinsic 验证器检查到
     -- _mm256_loadu_ps 和 _mm256_add_ps 要求与 8x f32 (256-bit) 兼容的向量表示，
-    -- 标量 `u32` 不满足该硬件指令的输入/输出表示契约！
+    -- 标量 `u32` 不满足该硬件指令的输入/输出表示契约。
 }
 ```
 
@@ -231,16 +231,16 @@ inline fn fused_multiply_add_inlined(a: f32, b: f32, c: f32) -> f32 {
 }
 ```
 
-让我们回忆并巩固 `AGENTS.md` §5 与编译模型中的核心铁律：
+让我们回忆并巩固 目标约束与内建指令的核心规则：
 1. **`quote fn` 不属于 `comptime fn`，普通实参依然只求值一次**：当你调用 `fused_multiply_add_expanded(calc_a(), calc_b(), calc_c())` 时，三个实参表达式在调用点被正常求值一次，随后函数体确定性地在调用点展开。
 2. **`inline fn` 是带内联提示的普通函数**：它表达了向调用点内联的优化意图，但语义上依然是一个普通函数定义。
-3. **两者都不能用来“绕过”目标验证**：无论你用 `quote fn` 还是 `inline fn` 把 `unsafe` 和 `'intrinsic` 包起来，展开或调用后的指令依然处于调用者的目标执行依赖闭包中。如果当前目标不是 `x86_64`，目标验证器照样会在编译期精准拦截！
+3. **两者都不能用来“绕过”目标验证**：无论你用 `quote fn` 还是 `inline fn` 把 `unsafe` 和 `'intrinsic` 包起来，展开或调用后的指令依然处于调用者的目标执行依赖闭包中。如果当前目标不是 `x86_64`，目标验证器照样会在编译期精准拦截。
 
 ---
 
 ## 本篇小结
 
-| 工程维度 | Flurry 的编译期契约与机制 | 解决的核心痛点 |
+| 工程维度 | Flurry 的编译期契约与机制 | 解决的核心问题 |
 | :--- | :--- | :--- |
 | **目标依赖闭包 (`pending / visited`)** | 从投射入口的具体实例出发，递归验证所有可达的普通 Helper、类型表示与 Intrinsic | 无需给每个内部小辅助函数重复贴 `^pipeline` 属性，同时杜绝漏检 |
 | **实例唯一标识 (Instance Identity)** | 包含 `(声明身份, 具体泛型替换/编译期实参, 目标配置)` | 防止泛型辅助函数在不同类型实例化下因为“同名”而跳过二次验证 |
@@ -250,14 +250,14 @@ inline fn fused_multiply_add_inlined(a: f32, b: f32, c: f32) -> f32 {
 
 ---
 
-## 留给下一篇的悬念
+## 下一篇预告
 
 到现在为止，我们已经走完了管线投射的前半程：
 声明 `^cuda.pipelines.global` -> 校验跨边界类型与引用 -> 固定硬件 Intrinsic 的 `.as(T)` 输出 -> 验证整棵目标执行依赖闭包。
 
-但是，当编译器前端完成了这一系列检查、生成了具体实例的 **IIR（Implementation IR）** 之后，**宿主机上的编译器进程到底是怎么把这段 IIR 交给外部的 `cuda_compile` 后端去生成 PTX/Cubin 设备代码的？**
+但是，当编译器前端完成了这一系列检查、完成了类型检查与目标约束验证之后，**宿主机上的编译任务是如何通过 Pipeline 回调把待编译函数交给 `cuda_compile` 后端去生成设备代码的？**
 - 为什么 `pub pure comptime fn global(ir: meta.compilation.IIR.Func) -> void` 的返回类型是 `void`？生成的机器码去哪儿了？
 - 那个神秘的 `meta.compilation.IIR.Func` 句柄（Handle）为什么绝对不能被缓存到任务之外？
 - 如果构建中途崩溃，或者磁盘上的 `.cubin` 产物被意外删掉，增量构建缓存（Artifact Cache）如何保证绝不发布半成品？
 
-下一篇 **[Flurry 演进手记 (176)：宿主编译器如何交付设备产物——IIR Handle、多后端协同与增量缓存恢复](./176-host-backends-iir-handles-and-artifact-delivery.md)**，我们将深入管线投射的幕后引擎室，揭秘多后端编译任务的状态机！
+下一篇 **[Flurry 演进手记 (176)：宿主后端与设备产物交付——Pipeline 回调、受控句柄与缓存恢复](./176-host-backends-iir-handles-and-artifact-delivery.md)**，我们将探讨多后端编译任务的产物交付与状态管理机制。

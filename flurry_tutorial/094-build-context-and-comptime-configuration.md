@@ -1,34 +1,34 @@
-# 094 — 构建上下文与编译期配置：`build` 包如何告别 `#ifdef`？
+# Flurry 演进手记 (094)：构建上下文与编译期配置：`build` 包如何告别 `#ifdef`？
 
-> **阅读指南**：在上一回（第 093 回）结束时，我们提出了一个关乎大型工程可维护性的核心问题：当我们的库需要根据构建模式（如 `.debug` vs. `.release`）、目标平台或包特性（Features）来做条件编译时，为什么 C/C++ 的 `#ifdef` 文本宏和某些语言的全局条件编译标志会沦为构建污染的温床？本篇我们将结合 `docs/code-organization/builtin-packages.md` 与 `docs/comptime/configuration-and-scripts.md`，认识 Flurry 的**六大内置包（Builtin Packages）**，并深入探索 `build` 构建上下文是如何用强类型编译期值与严格的**包实例隔离契约**彻底终结 `#ifdef` 乱象的！
+> **阅读指南**：在上一回（第 093 回）结束时，我们提出了一个关乎大型工程可维护性的核心问题：当我们的库需要根据构建模式（如 `.debug` vs. `.release`）、目标平台或包特性（Features）来做条件编译时，为什么 C/C++ 的 `#ifdef` 文本宏和某些语言的全局条件编译标志会沦为构建污染的温床？本篇我们将结合 `docs/code-organization/builtin-packages.md` 与 `docs/comptime/configuration-and-scripts.md`，认识 Flurry 的**六大内置包（Builtin Packages）**，并深入探索 `build` 构建上下文是如何用强类型编译期值与严格的**包实例隔离契约**彻底终结 `#ifdef` 乱象的。
 
 ---
 
-## 一、 痛点：`#ifdef` 文本撕裂与“全局宏污染”
+## 一、 问题背景：`#ifdef` 文本撕裂与“全局宏污染”
 
 在传统的 C/C++ 甚至不少现代语言中，条件编译是一套游离在正常语法与类型系统之外的“法外之地”。
 
-### 尝试 `v0`：文本级条件编译与隐式跨包污染
+### 文本级条件编译与隐式跨包污染
 
-想象一下，在 `v0` 的世界里，你用文本宏或全局环境变量来控制一个张量基础库 `tensor_core` 的调试日志：
+想象一下，在 传统的世界里，你用文本宏或全局环境变量来控制一个张量基础库 `tensor_core` 的调试日志：
 
 ```text
-// 传统语言的 #ifdef 噩梦 (v0)：
+-- 传统语言的 #ifdef 难题：
 #ifdef ENABLE_TRACE
     log_tensor_op(op_name, invalid_variable_in_release);
 #endif
 ```
 
 这种设计有三大原罪：
-1. **未激活分支沦为语法法外之地**：在 Release 模式下，`#ifdef ENABLE_TRACE` 里面的代码被预处理器直接当成字符串删掉了，连最基本的语法解析和名称绑定都不做！很多低级拼写错误在 Release 下潜伏数月，一旦切回 Debug 模式就瞬间编译爆炸。
+1. **未激活分支沦为语法法外之地**：在 Release 模式下，`#ifdef ENABLE_TRACE` 里面的代码被预处理器直接当成字符串删掉了，连最基本的语法解析和名称绑定都不做。很多低级拼写错误在 Release 下潜伏数月，一旦切回 Debug 模式就瞬间编译爆炸。
 2. **两套完全撕裂的语言**：你得先学一套正经的编程语言，再学一套奇形怪状的 `#if defined(...) && ...` 或 `#[cfg(all(..., not(...)))]` 配置子语言。
-3. **跨包环境窃听与污染**：当应用程序 `app` 引入了依赖包 `dep` 时，如果 `dep` 内部直接读取一个所谓的“全局构建宏”，那么 `app` 的局部配置改动就会意外改变 `dep` 早已固化的语义，破坏增量构建缓存的确定性！
+3. **跨包环境窃听与污染**：当应用程序 `app` 引入了依赖包 `dep` 时，如果 `dep` 内部直接读取一个所谓的“全局构建宏”，那么 `app` 的局部配置改动就会意外改变 `dep` 早已固化的语义，破坏增量构建缓存的确定性。
 
 ---
 
-## 二、 破局（v1）：六大内置包与强类型 `build` 上下文
+## 二、 核心机制：六大内置包与强类型 `build` 上下文
 
-在 Flurry 中，**没有 `#ifdef`，也没有独立的条件编译子语言**！因为 Flurry 拥有强大的 `comptime` 求值与 `inline if`，所有的构建配置都直接通过内置的 **`build` 包**，以强类型的编译期值暴露给你的普通 Flurry 代码！
+在 Flurry 中，**没有 `#ifdef`，也没有独立的条件编译子语言**。因为 Flurry 拥有强大的 `comptime` 求值与 `inline if`，所有的构建配置都直接通过内置的 **`build` 包**，以强类型的编译期值暴露给你的普通 Flurry 代码。
 
 在认识 `build` 之前，让我们先全景鸟瞰一下 Flurry 编译器内建的 **六大内置包（Builtin Packages）**（见 `docs/code-organization/builtin-packages.md`）：
 
@@ -55,16 +55,16 @@
 > **🔍 语法小贴士：为什么我们的示例代码开头总是写 `use std.prelude.*;`，却不用导入 `u32` 或 `bool`？**
 > 这正是 `builtin.prelude` 与 `std.prelude` 的职责分工：
 > - 像 `u32`、`f64`、`bool`、`Type`、`Tuple`、`Array` 这些最基础的语言级名字，住在 **`builtin.prelude`** 里，编译器会默认把它们注入每个普通模块的作用域；
-> - 而像 `println` 这样涉及标准库高层设施的名字，住在 **`std.prelude`** 里，需要你在文件顶部显式写一行 `use std.prelude.*;` 才会引入短名。这种分层让无标准库（No-Std / 裸机内核）开发变得无比清爽！
+> - 而像 `println` 这样涉及标准库高层设施的名字，住在 **`std.prelude`** 里，需要你在文件顶部显式写一行 `use std.prelude.*;` 才会引入短名。这种分层让无标准库（No-Std / 裸机内核）开发变得无比清爽。
 
-### 演进到 `v1`：用 `build.mode` 与 `comptime` 常量优雅替代 `#ifdef`
+### 用 `build.mode` 与 `comptime` 常量优雅替代 `#ifdef`
 
-现在来看 `build` 包！当我们想判断当前包是否处于 `.debug` 构建模式时，直接读取 `build.mode`，并用我们在第一卷就熟悉的模式测试操作符 `matches` 把它存成一个 `const` 布尔值即可：
+现在来看 `build` 包。当我们想判断当前包是否处于 `.debug` 构建模式时，直接读取 `build.mode`，并用我们在第一卷就熟悉的模式测试操作符 `matches` 把它存成一个 `const` 布尔值即可：
 
 ```flurry
 use std.prelude.*;
 
--- 演进到 v1：build.mode 是正儿八经的编译期强类型值！
+-- build.mode 是正儿八经的编译期强类型值。
 const TRACE_ENABLED: bool = build.mode matches .debug;
 
 pure fn tracing_allowed(comptime requested: bool) -> bool {
@@ -79,16 +79,16 @@ test {
 
 看看这段代码有多干净：
 - `build.mode matches .debug` 就是普通的 Flurry 表达式，受类型检查器全权保护；
-- 配合 `inline if TRACE_ENABLED { ... }`，当处于 `.release` 模式时，未选中的分支在具象化与代码生成阶段被 100% 剔除（零运行期开销），但它的顶层语法结构依然经过了正统解析器的严格洗礼！
+- 配合 `inline if TRACE_ENABLED { ... }`，当处于 `.release` 模式时，未选中的分支在具象化与代码生成阶段被 100% 剔除（零运行期开销），但它的顶层语法结构依然经过了正统解析器的严格洗礼。
 
 ---
 
-## 三、 模块化隔离铁律：为什么依赖包的 `build` 绝不被调用者篡改？（v2）
+## 三、 模块化隔离核心规则：为什么依赖包的 `build` 绝不被调用者篡改？
 
 现在，让我们回答那个最关键的工程架构问题：
 假设你的业务包 `my_app` 依赖了第三方张量库 `tensor_lib`。如果 `my_app` 开启了某种特殊的构建模式或局部调用，会不会偷偷改变 `tensor_lib` 内部看到的 `build.mode` 或 `build.package_metadata(...)`？
 
-**绝对不会！** 在 `docs/comptime/configuration-and-scripts.md` 中，Flurry 为 `build` 上下文立下了一条铁律：
+**绝对不会。** 在 `docs/comptime/configuration-and-scripts.md` 中，Flurry 为 `build` 上下文立下了一条核心规则：
 
 ```text
   ┌─────────────────────────────────┐       ┌─────────────────────────────────┐
@@ -97,8 +97,8 @@ test {
   └────────────────┬────────────────┘       └────────────────┬────────────────┘
                    │                                         │
                    │  1. 内部查询 `build.mode`               │  1. 内部查询 `build.mode`
-                   │     永远只读 Build(my_app)！            │     永远只读 Build(tensor)！
-                   │     ❌ 绝不会顺着调用栈渗透污染对方！   │
+                   │     永远只读 Build(my_app)。            │     永远只读 Build(tensor)。
+                   │     ❌ 绝不会顺着调用栈渗透污染对方     │
                    │                                         │
                    │  2. 若需让调用方按需定制行为：          │
                    │     ──── 显式传递 comptime 参数 ───────▶│
@@ -107,24 +107,24 @@ test {
 ```
 
 > **💡 核心心智模型：包实例绑定与显式 `comptime` 参数**
-> 1. **谁的代码查 `build`，读的就是谁自己的构建实例**：在 `tensor_lib` 源码中写下的 `build.mode` 或 `build.package_metadata("cuda").features`，永远绑定在构建系统（`anar`）为 `tensor_lib` 这一包实例确定的配置快照上，绝不会因为被 `my_app` 的某个函数调用而发生动态漂移！
-> 2. **跨调用方的定制走显式 `comptime` 参数**：如果库作者确实希望调用者在每次调用时自己决定开不开某个开关（就像上面例子里的 `fn tracing_allowed(comptime requested: bool)`），那就堂堂正正地在函数签名里声明一个 `comptime` 参数！这样既保持了包构建缓存的 100% 确定性，又提供了精确到调用点的零开销定制能力。
+> 1. **谁的代码查 `build`，读的就是谁自己的构建实例**：在 `tensor_lib` 源码中写下的 `build.mode` 或 `build.package_metadata("cuda").features`，永远绑定在构建系统（`anar`）为 `tensor_lib` 这一包实例确定的配置快照上，绝不会因为被 `my_app` 的某个函数调用而发生动态漂移。
+> 2. **跨调用方的定制走显式 `comptime` 参数**：如果库作者确实希望调用者在每次调用时自己决定开不开某个开关（就像上面例子里的 `fn tracing_allowed(comptime requested: bool)`），那就堂堂正正地在函数签名里声明一个 `comptime` 参数。这样既保持了包构建缓存的 100% 确定性，又提供了精确到调用点的零开销定制能力。
 
-### 演进到 `v2`：构建脚本 `package.fl`、宏准备顺序与防篡改红线
+### 构建脚本 `package.fl`、宏准备顺序与防篡改红线
 
 除了在业务代码里只读查询 `build` 外，每个包还可以提供一个在编译期运行的构建配置脚本 `package.fl`。编译器与构建工具对构建配置执行三条严格的安全防线：
 
 1. **业务代码中的 `build` 是严格只读的凝固快照**：一旦进入模块编译阶段，任何企图在普通代码里原地篡改 `build` 上下文的操作都会被直接拒绝；
 2. **先完成 `@use` 宏与依赖准备，再展开消费方**：当一个模块通过 `@use` 引入编译期宏或配置依赖时，构建图严格按照拓扑序先完成被依赖方的编译期准备；
-3. **严禁构建与配置循环依赖（Cycle Detection）**：如果包 A 的构建配置依赖包 B 的构建产物，同时包 B 又反过来依赖包 A，构建阶段会立即检测出有向环并报错终止，绝不陷入死锁！
+3. **严禁构建与配置循环依赖（Cycle Detection）**：如果包 A 的构建配置依赖包 B 的构建产物，同时包 B 又反过来依赖包 A，构建阶段会立即检测出有向环并报错终止，绝不陷入死锁。
 
 让我们看看在业务代码里妄图修改 `build` 或查询非法属性时，编译器是如何拦截的：
 
 ```flurry
 fn broken_build_mutation() {
-    -- ❌ 编译期直接拒绝！
+    -- ❌ 编译期直接拒绝。
     -- build 上下文在模块编译期间是只读的编译期配置快照，
-    -- 绝不允许在函数或模块中动态覆盖 build.mode！
+    -- 绝不允许在函数或模块中动态覆盖 build.mode。
     build.mode = .release;
 }
 ```
@@ -142,12 +142,12 @@ fn broken_build_mutation() {
 
 ---
 
-### 留给下一篇的悬念
+### 下一篇预告
 
 不知不觉中，我们已经走过了第四卷从第 066 回到第 094 回的全部核心概念：
 - 我们理解了 **2LTT（双层类型理论）** 如何让 `Type` 成为编译期的一等公民，同时保证运行时零擦除开销；
 - 我们掌握了 **`pure comptime fn` 类型构造器**、**Normal-Form 类型头** 与 **Occurrence Typing 分支收窄**；
-- 我们深入了 **PTC 11 大理论求解器**、**位向量代数 `BitVec<N>`** 与 **Take View（`'view`）**；
-- 我们还亲手打造了静态形状张量的 **形状精化**、**编译期广播推导**、**`inline for` 步长展开** 与 **`build` 调试开关**！
+- 我们深入了 **PTC 11 大理论求解器**、**位向量代数 `BitVec<n>`** 与 **Take View（`'view`）**；
+- 我们还亲手打造了静态形状张量的 **形状精化**、**编译期广播推导**、**`inline for` 步长展开** 与 **`build` 调试开关**。
 
-现在，是时候迎来第四卷的终极检阅了！在下一篇 **《095 — 第四卷里程碑：构建编译期 100% 形状安全的迷你张量引擎》** 中，我们将把这 30 篇教程积攒下来的所有绝技融会贯通，组装出一个完整的、编译期 100% 免疫形状与越界错误的迷你静态张量引擎！
+现在，是时候迎来第四卷的终极检阅了。在下一篇 **《095 — 第四卷里程碑：构建编译期 100% 形状安全的迷你张量引擎》** 中，我们将把这 30 篇教程积攒下来的所有绝技融会贯通，组装出一个完整的、编译期 100% 免疫形状与越界错误的迷你静态张量引擎。

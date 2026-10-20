@@ -1,176 +1,125 @@
-# 第 187 期：细粒度增量查询（Incremental Queries）、环路检测与错误恢复
+# Flurry 演进手记 (187)：大型工程的接口解耦与编译期依赖边界——函数签名隔离、构建配置感知与求值环路防范
 
-> **系列导航**：[Flurry 语言漫游（200 期规划）](./README.md)  
-> **当前卷目**：第八卷 · 编译器原理与全栈实战（181–200）  
-> **上一期**：[第 186 期：运行时依赖类型的编译器表示——`TypeCore`、空洞替换与环境计划](./186-representing-runtime-dependent-types-in-the-compiler.md)  
-> **下一期**：[第 188 期：为什么 IIR 在降码前要保留高级结构而非过早退化为 SSA？](./188-why-iir-preserves-high-level-structure-before-codegen.md)
+在[上一篇（第 186 篇）](./186-representing-runtime-dependent-types-in-the-compiler.md)中，我们学习了运行时依赖类型的工程模式与逃逸防线。
+
+当一个 Flurry 工程从几百行演进到包含数十个包、数百个模块的大型系统时，良好的接口与依赖设计不仅决定了代码的可维护性，也直接决定了增量构建的速度与编译期求值的稳健性。
+
+今天，我们聚焦于大型工程中的三个关键问题：
+1. **函数签名契约与函数体实现的解耦**：为什么明确声明函数签名可以让普通修改的影响范围严格局限在单个函数内部？
+2. **构建配置（`build.mode`）与编译期常量的显式依赖**：如何根据构建配置定制编译期常量，同时保证切换 `debug` / `release` 时行为确定一致？
+3. **合法的函数相互递归 vs 非法的编译期常量求值死循环**：为什么两个普通函数可以自由互递归，而两个 `const` 常量互相引用却会被编译期环路检查拦截？
 
 ---
 
-## 一、开篇痛点：为什么我只改了函数体里的一个数字，整个工程却要重新类型检查？
+## 一、 签名契约隔离：让实现修改不穿透模块边界
 
-想象你正在开发一个包含 500 个模块的大型系统。你打开其中一个底层工具函数 `adjust`，把函数体里的 `+ 1` 改成了 `+ 2`：
+看下面这两个跨模块调用的函数：
 
 ```flurry
-fn adjust(value: i32) -> i32 {
-    return value + 1; -- 修改为: return value + 2;
+pub fn adjust(value: i32) -> i32 {
+    value + 1
 }
 
-fn show_adjusted(value: i32) -> i32 {
-    return adjust(value);
+pub fn show_adjusted(value: i32) -> i32 {
+    adjust(value)
 }
 ```
 
-请注意：你只改了 `adjust` 的**运行时函数体（Body）**，它的**签名契约（Interface：`fn(i32) -> i32`）**连一根汗毛都没变！
+在 Flurry 中，函数的**外部接口契约（参数类型、返回类型、`where` 约束、错误与效应限定）**全部显式体现在函数签名上。
+- 当你在维护代码时，把 `adjust` 函数体里的 `value + 1` 改为 `value + 2`，它的签名 `fn(i32) -> i32` 没有任何变化；
+- 所有调用 `adjust` 的上层模块（如 `show_adjusted`）所依赖的类型与效应契约依然完全成立，不会因为函数体内部实现的调整而破坏上层调用点的类型正确性。
 
-### 初代尝试（`v0`）：按文件时间戳或粗粒度函数节点级联失效
-
-在传统的批处理编译器或粗粒度增量系统中（`v0`），每个函数只是一个不可分割的黑盒节点 `CheckFn(adjust)`：
-- 当你修改了 `adjust` 里的 `1 -> 2`，`CheckFn(adjust)` 失效重算；
-- 因为 `show_adjusted` 调用了 `adjust`，`v0` 认为 `CheckFn(show_adjusted)` 依赖 `CheckFn(adjust)`，于是把 `show_adjusted` 的类型检查也全部推翻重算；
-- 接着，调用了 `show_adjusted` 的上层百余个模块像多米诺骨牌一样全部失效重跑！
-
-更隐蔽的痛点还在后面：
-1. **构建配置（Build Config）依赖漏记**：如果某段代码写了 `if comptime (build.mode matches .debug) { ... }`，当用户把编译模式从 `debug` 切换到 `release` 时，源码文件一个字节都没改！如果增量缓存只看源码 Hash，就会直接复用旧的 `debug` 缓存，酿成严重的构建事故！
-2. **“负面结果（Negative Results）”缓存不失效**：某个泛型调用原本因为找不到特化实现而回退到了默认实现；后来用户在另一个模块新增了一个特化 `impl`，如果增量系统当初没有记录“当时查过特化候选集且为空”的版本号，旧缓存就不会失效！
-3. **死循环与错误恢复的冲突**：当用户在编辑器里写出 `const FIRST: u32 = SECOND + 1; const SECOND: u32 = FIRST + 1;` 时，编译器既要确定性地抓出环路报错，又要在 IDE 模式下允许其他无关函数继续获得代码补全，但**绝不能让错误的假占位符（比如偷偷塞个 `0`）混过检查流进后端生成错误机器码**！
+```text
+  [ 函数签名作为稳定的契约防火墙 ]
+    adjust 函数体内部实现:  `value + 1`  ──(修改为)──▶  `value + 2`
+                                  │
+                                  ▼
+    adjust 对外签名契约:    `pub fn adjust(value: i32) -> i32` (保持不变。)
+                                  │
+                                  ▼
+    上层调用者 show_adjusted: 类型契约 100% 保持有效，无需修改任何上层代码。
+```
 
 ---
 
-## 二、机制迭代（`v0 -> v1 -> v2`）：三层依赖架构与早期截断（Early Cutoff）
+## 二、 编译期构建配置查询：`build.mode` 与条件常量
 
-为了实现真正工业级的按需增量编译，Luna 编译器首先在内部明确区分了**三类不同尺度的依赖结构**：
-
-```
-  +-----------------------------------------------------------------------+
-  | 1. AST / HIR 包含树 (Containment Hierarchy)                           |
-  |    职责：词法作用域嵌套、源码 Span 映射与快速局部语法重解析            |
-  +-----------------------------------------------------------------------+
-  | 2. 局部目标依赖图 (Local Goal Dependencies —— 见第 183 期)             |
-  |    职责：单个推断区域内的 ?T 变量唤醒、候选探测与局部死锁预防          |
-  +-----------------------------------------------------------------------+
-  | 3. 持久化增量查询图 (Persistent Query Dependency Graph —— 本期主角!)   |
-  |    职责：跨函数、跨模块、跨编辑会话的细粒度缓存复用与精确失效传播      |
-  +-----------------------------------------------------------------------+
-```
-
-在持久化增量查询图中，Luna 采用了 **接口查询与实现查询分离 + 早期截断（Early Cutoff / Red-Green Algorithm）** 的设计（`v2`）：
-
-### 1. 签名契约（Signature）与函数体（Body）彻底解耦
-
-对于每一个函数（如 `adjust`），编译器将其拆分为粒度完全独立的查询键（Query Keys）：
-- `FnSignature(adjust)`：只产出冻结后的函数签名、参数类型、`where` 契约与效应签名；
-- `FnTypecheckBody(adjust)`：检查 `adjust` 的内部函数体是否符合其签名；
-- `FnNormalizedBody(adjust)`：产出 `adjust` 的冻结函数体 IR（供内联或代码生成使用）。
-
-现在，当我们把 `adjust` 函数体里的 `value + 1` 改成 `value + 2` 时，看看增量查询图发生了什么：
-
-```
-  [ 源码修改: adjust 函数体内的 `1` 改为 `2` ]
-        |
-        +---> 触发 FnSignature(adjust) 重验
-        |     发现产出仍是: fn(i32) -> i32 (与旧指纹 100% 相同！)
-        |     ====> 触发早期截断 (Early Cutoff: GREEN)！
-        |           |
-        |           v
-        |     FnTypecheckBody(show_adjusted) 仅依赖 FnSignature(adjust)
-        |     ====> 直接命中缓存跳过！上游 500 个模块的类型检查零开销复用！
-        |
-        +---> 触发 FnNormalizedBody(adjust) 重算
-              产出新的函数体 IR: `value + 2` (指纹变化: RED)
-                    |
-                    v
-              CodegenInstance(show_adjusted) (若内联了 adjust 的函数体)
-              ====> 精准触发下游机器码重生成，绝不漏更！
-```
-
-这就是细粒度增量查询的威力：**`show_adjusted` 的类型检查因为只依赖 `FnSignature(adjust)` 而直接复用；而 `show_adjusted` 的内联代码生成因为依赖了 `FnNormalizedBody(adjust)` 而被精准重算**——既不多算一步冤枉路，也绝不漏掉任何受影响的二进制产物！
-
-### 2. 显式记录构建配置与候选集版本依赖
-
-在 Luna 中，任何影响语义的外部输入都必须是查询图中的显式节点：
+在系统工程中，我们经常需要根据当前构建模式（如 `.debug` 或 `.release`）切换缓冲区容量上限或调试检查级别。
+在 Flurry 中，我们不需要使用脆弱的 C 预处理器文本宏 `#ifdef DEBUG`，而是直接在编译期读取内置 `build` 包提供的强类型配置对象：
 
 ```flurry
-const ACTIVE_LIMIT: usize = if comptime (build.mode matches .debug) {
-    64
-} else {
-    1024
-};
+const ACTIVE_LIMIT: usize = comptime {
+    if build.mode matches .debug {
+        64
+    } else {
+        1024
+    }
+}
+
+pub fn check_capacity(requested: usize) -> bool {
+    requested <= ACTIVE_LIMIT
+}
 ```
 
-当编译期求值器在计算 `ACTIVE_LIMIT` 并读取 `build.mode` 时，查询引擎会自动在 `EvalConst(ACTIVE_LIMIT)` 与 `BuildConfigQuery(mode)` 之间连上一条依赖边。一旦用户将构建命令从 `debug` 切为 `release`，`BuildConfigQuery(mode)` 指纹改变，所有依赖它的常量、条件编译类型和内联产物都会精准失效重算。
-
-同理，当候选求解器（见第 184 期）查询某个 trait 的实现列表时，哪怕只查到了 0 个特化候选，它也会记录对 **`CandidateSetVersion(TraitHead)`** 的依赖。一旦任何地方新增或修改了一个 `impl`，该版本号递增，所有曾经依赖“当时没找到更特化候选”的查询都会自动重新核验！
+使用 `build.mode` 的三大优势：
+1. **两个分支都受完整的语法与名称检查**：不会出现“在 `release` 模式下改坏了 `debug` 分支代码却浑然不知”的隐患；
+2. **类型明确**：`ACTIVE_LIMIT` 具有明确的静态类型 `usize`；
+3. **构建缓存自动追踪配置依赖**：当构建命令在 `debug` 与 `release` 之间切换时，依赖 `build.mode` 的常量与函数会自动按当前配置重新计算，绝不会误用旧配置下的产物。
 
 ---
 
-## 三、深度法则：合法递归 vs 非法求值环路的确定性裁决
+## 三、 合法的函数相互递归 vs 非法的编译期求值死循环
 
-在增量查询引擎运行过程中，如果查询 `Q1` 在计算途中又层层调用回到了正在计算中的 `Q1`（即激活栈上出现了环路 $Q_1 \to Q_2 \to \dots \to Q_1$），编译器该怎么处理？
+在编写递归算法或状态机时，区分“依赖函数签名”与“依赖编译期求值结果”尤为重要。
 
-首先，我们要区分**合法的函数相互递归**与**非法的编译期值/类型计算死循环**。
-
-### 场景 A：合法的函数相互递归（依赖签名，不构成求值环）
+### 1. 合法的普通函数相互递归
 
 ```flurry
 fn is_even(n: u32) -> bool {
-    return if n == 0 { true } else { is_odd(n - 1) };
+    if n == 0 { true } else { is_odd(n - 1) }
 }
 
 fn is_odd(n: u32) -> bool {
-    return if n == 0 { false } else { is_even(n - 1) };
+    if n == 0 { false } else { is_even(n - 1) }
 }
 ```
 
-为什么 `is_even` 和 `is_odd` 互相调用不会触发查询死循环？
-因为在刚刚讲过的细粒度查询拆分下：
-- 检查 `is_even` 的函数体（`FnTypecheckBody(is_even)`）只需要查询 `is_odd` 的**声明签名**（`FnSignature(is_odd)`）；
-- 而 `FnSignature(is_odd)` 直接从源码头解析得出 `fn(u32) -> bool`，**根本不需要反过来查询 `FnTypecheckBody(is_even)`**！因此查询图是完全无环的（DAG）！
+为什么 `is_even` 和 `is_odd` 互相调用完全合法？
+因为检查 `is_even` 的函数体时，只需要知道 `is_odd` 的声明签名 `fn(u32) -> bool`，而不需要在编译期把 `is_odd` 的运行期函数体算出一个常数结果。
 
-### 场景 B：非法的常量/类型求值死循环（确定性拦截，绝不伪造合法值！）
+如果是需要在编译期求值的递归函数（`pure comptime fn`），只要存在明确的递归终止基底（如 `n == 0`），并且传入具体的编译期有限输入（如 `is_even(10)`），同样可以在有限步内正常收敛。
 
-相反，如果两个常量在值计算上直接互相依赖：
+### 2. 拒绝例：编译期常量之间的直接循环依赖
+
+相反，如果两个编译期常量 `FIRST` 和 `SECOND` 在定义值上互相等待对方先算出来，就构成了无解的编译期求值死循环：
 
 ```flurry
+-- ❌ 编译期拒绝：常量求值存在循环依赖 (FIRST -> SECOND -> FIRST)
 const FIRST: u32 = SECOND + 1;
-const SECOND: u32 = FIRST + 1; -- ❌ 编译期直接拒绝！
+const SECOND: u32 = FIRST + 1;
 ```
 
-此时查询栈会出现真实的闭环：
-
-$$\text{EvalConst}(\text{FIRST}) \longrightarrow \text{EvalConst}(\text{SECOND}) \longrightarrow \text{EvalConst}(\text{FIRST})$$
-
-当 Luna 的查询引擎检测到这一闭环时，它严格执行三条铁律：
-1. **确定性环路规范化（Canonical Cycle Normalization）**：无论这次增量编译是从 `FIRST` 先开始算，还是从 `SECOND` 先开始算，编译器都会按照环路节点的稳定标识符对闭环路径进行规范化旋转，生成 100% 确定性的环路诊断报告，绝不因编译入口顺序不同而飘忽不定；
-2. **绝不伪造合法默认值打破环路**：编译器**严禁**为了“把环打破”而偷偷给 `SECOND` 塞一个假的默认值 `0u32` 让 `FIRST` 算出 `1u32`！
-3. **带污染标记的错误恢复占位符（Poisoned Recovery Placeholder）**：为了在 IDE 编写代码时，不因为这一处死循环就让整个文件的语法高亮和无关函数的类型提示瘫痪，查询引擎会产出一个显式的错误恢复节点 `ErrorValue(Cycle#1)`。任何读取了 `ErrorValue` 的下游查询都会自动继承 **`has_error = true`（已污染）** 标记——它允许无关的兄弟分支继续做静态分析，但在进入 IIR 降码和后端代码生成前会被硬性拦截，绝不可能产出伪造的可执行文件！
-
-我们来看看这个环路错误在编译器中的 S-Expression 诊断转储：
-
-```scheme
-(diag-error
-  :stage query-engine
-  :code E0391
-  :message "cyclic dependency detected during constant evaluation"
-  :cycle-path (
-    (query eval-const "FIRST")
-    (query eval-const "SECOND")
-    (query eval-const "FIRST")))
-```
+遇到此类循环定义时，编译期检查器会确定性地报告完整的依赖环路径（`FIRST -> SECOND -> FIRST`），并阻止生成任何目标代码，绝不会偷偷用一个假默认值（如 `0`）去掩盖逻辑死循环。
 
 ---
 
-## 四、本期小结
+## 四、 本篇小结
 
-| 核心设计 | 传统粗粒度缓存 (`v0`) | Luna 细粒度增量查询引擎 (`v2`) |
+| 工程场景 | 语言机制与规则 | 工程收益 |
 | :--- | :--- | :--- |
-| **函数级依赖隔离** | 函数签名与函数体绑死，改一行函数体重跑全工程类型检查 | 拆分 `FnSignature` 与 `FnNormalizedBody`，函数体修改触发 Early Cutoff，上游类型检查直接复用 |
-| **环境与配置追踪** | 漏记构建参数，切换 `debug/release` 易误用旧缓存 | `build.mode` 等编译期配置作为显式查询节点纳入依赖指纹 |
-| **负面结果失效** | 新增特化 `impl` 后，旧的回退选择未能感知变化 | 显式记录对 `CandidateSetVersion` 的依赖，新增候选自动触发重验 |
-| **相互递归与死循环** | 容易将合法函数互递归误判为环，或用假 `0` 掩盖常量死循环 | 互递归仅依赖 `FnSignature` 天然无环；真实求值环路规范化报错，并以带污染标记的恢复节点阻断后端降码 |
+| **模块与函数边界** | 显式声明参数、返回类型、`where` 契约与错误/效应限定 | 隔离内部实现变更，提升代码可读性与增量构建效率 |
+| **构建模式定制** | 在 `comptime` 或 `inline if` 中查询 `build.mode` | 告别无类型 `#ifdef` 宏，确保配置切换时缓存与类型安全 |
+| **互递归与求值环** | 函数类型检查仅依赖对方签名；`const` 求值严禁循环依赖 | 支持自然的状态机互递归，同时在编译期精准拦截常量死循环 |
 
-当所有的 Elaboration、编译期求值与增量查询全部通过检验后，定义被实例化为我们多次提到的 **IIR（Instantiated Intermediate Representation）**。
+---
 
-这时候，很多熟悉 LLVM 或传统编译器后端的同学会问：**“既然在 IIR 里，所有的编译期类型都已经算完了，为什么不干脆把 IIR 直接设计成类似 LLVM IR 的底层 SSA（静态单赋值）基本块形式，还要费劲在 IIR 里保留结构化循环、模式匹配、闭包捕获、错误与代数效应分离、以及高级 `BitVec` 节点？”**
+## 五、 下一篇预告
 
-在下一期（**第 188 期**）中，我们将深入探讨 **为什么 IIR 在降码前要保留高级结构而非过早退化为 SSA**！我们下期见！
+在实际的业务函数中，往往会同时出现多种控制流与抽象特性：
+- 带返回值的 `loop { ... break val; }` 结构化循环；
+- 捕获了外部变量的闭包 `|x| x + base`；
+- 可恢复错误返回 `!InputErr` 与代数效应 `#read_number` 的协同使用。
+
+当这些特性组合在同一个函数里时，它们的语义与执行边界是如何配合的？
+
+下一篇 **[Flurry 演进手记 (188)：高阶控制流、闭包与双轨效应的协同法则——结构化循环、按需捕获与 `!Err` / `#Effect` 组合](./188-why-iir-preserves-high-level-structure-before-codegen.md)**，我们将通过具体代码示例一探究竟。

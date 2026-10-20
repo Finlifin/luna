@@ -13,11 +13,11 @@
 +=============================================================================+
 | 1. 前向依赖可选参数 (.start: u32 = 0, .count: u32 = total - start) [需 >= P3]|
 | 2. 扩展调用块 configure_orion { label: "deep-space", ...preset, (0, true) } |
-| 3. derive TelemetryEncode.use(TelemetryPacket) + sink.ref_mut.dyn(Sink)     |
+| 3. derive TelemetryEncode.use(TelemetryPacket) + sink.ref.dyn(Sink)     |
 +=============================================================================+
 ```
 
-今天，我们就把第二卷的函数参数协议（`docs/functions/parameters.md`）与第三卷的 Trait 派生及动态接口（`docs/traits/derivation.md`、`docs/traits/dynamic-interfaces.md`）融会贯通，构建 Orion 引擎的第八层！
+今天，我们就把第二卷的函数参数协议（`docs/functions/parameters.md`）与第三卷的 Trait 派生及动态接口（`docs/traits/derivation.md`、`docs/traits/dynamic-interfaces.md`）融会贯通，构建 Orion 引擎的第八层。
 
 ---
 
@@ -27,8 +27,8 @@
 
 在许多语言中，默认参数表达式里根本不允许引用前面的形参，逼着你写一堆 `Option<u32>` 再去函数体里 `unwrap_or(total - start)`。
 而在 Flurry（见第 030 篇与 `docs/functions/parameters.md`）中：
-- 可选参数的默认值表达式按**从左到右**的严格顺序求值，**后续可选参数的默认值可以直接引用前面已经绑定的必填参数或可选参数**（如 `.count: u32 = total - start`）！
-- 同时，为了防止默认值求值引发隐蔽的全局状态污染或求值顺序灾难，编译器强制要求**所有默认参数表达式必须满足至少 P3（稳定环境观测，Stable Observation）纯度**，且严禁反向引用排在它后面的参数！
+- 可选参数的默认值表达式按**从左到右**的严格顺序求值，**后续可选参数的默认值可以直接引用前面已经绑定的必填参数或可选参数**（如 `.count: u32 = total - start`）。
+- 同时，为了防止默认值求值引发隐蔽的全局状态污染或求值顺序问题，编译器强制要求**所有默认参数表达式必须满足至少 P3（稳定环境观测，Stable Observation）纯度**，且严禁反向引用排在它后面的参数。
 
 ```flurry
 struct ChannelWindow {
@@ -37,27 +37,27 @@ struct ChannelWindow {
     count: u32,
 }
 
--- ✅ 正向示例：.count 的默认值直接前向依赖前面已绑定的 total 与 start！
+-- ✅ 正向示例：.count 的默认值直接前向依赖前面已绑定的 total 与 start。
 pure fn make_channel_window(
     total: u32,
     .start: u32 = 0,
     .count: u32 = total - start,
 ) -> ChannelWindow {
-    return ChannelWindow {
+    ChannelWindow {
         total: total,
         start: start,
         count: count,
-    };
+    }
 }
 
 pure fn test_window_defaults() -> (ChannelWindow, ChannelWindow) {
     -- 1. 只传 total = 64：start 自动为 0，count 自动推导为 64 - 0 = 64
-    const full_win = make_channel_window(64);
+    let full_win = make_channel_window(64);
 
-    -- 2. 传 total = 64, .start = 16：count 自动利用传入的 start = 16 推导为 64 - 16 = 48！
-    const tail_win = make_channel_window(64, .start = 16);
+    -- 2. 传 total = 64, .start = 16：count 自动利用传入的 start = 16 推导为 64 - 16 = 48。
+    let tail_win = make_channel_window(64, .start = 16);
 
-    return (full_win, tail_win);
+    (full_win, tail_win)
 }
 ```
 
@@ -73,7 +73,7 @@ pure fn bad_backward_default(
     .first: u32 = second,
     .second: u32 = 8,
 ) -> u32 {
-    return first + second;
+    first + second
 }
 ```
 
@@ -81,12 +81,12 @@ pure fn bad_backward_default(
 
 ## 二、 实战第二步：用 `...items`、`...properties` 与花括号扩展调用打造声明式 DSL
 
-当运维人员初始化整个 Orion 节点时，他们希望既能传入一组未命名的通道开关项 `(channel_id, enabled)`，又能传入任意键值配置属性（如 `station_id`、`gain_scale`），甚至直接用 `...default_props()` 展开预设配置包！
+当运维人员初始化整个 Orion 节点时，他们希望既能传入一组未命名的通道开关项 `(channel_id, enabled)`，又能传入任意键值配置属性（如 `station_id`、`gain_scale`），甚至直接用 `...default_props()` 展开预设配置包。
 
 在 Flurry 中（见第 030 篇与 `docs/functions/parameters.md`）：
 - `...items: (u32, bool)` 收集所有未命名的位置序列项；
 - `...properties: Props` 将所有未匹配固定具名参数的 `key: value` 键值对收集为一个匿名结构记录（Record）；
-- 调用时直接使用花括号扩展调用语法 `mount_orion_profile { ... }`！
+- 调用时直接使用花括号扩展调用语法 `mount_orion_profile { ... }`。
 
 ```
 +-----------------------------------------------------------------------------+
@@ -112,13 +112,16 @@ struct OrionNodeSummary {
 }
 
 -- 同时支持前向依赖可选参数、位置序列收集 (...items) 与属性记录收集 (...properties)
-pure fn mount_orion_profile<Props: Type>(
+pure fn mount_orion_profile(
     total_slots: u32,
     .start: u32 = 0,
     .count: u32 = total_slots - start,
-    ...items: (u32, bool),
+    ...items: Tuple<u32, bool>,
     ...properties: Props,
-) -> OrionNodeSummary {
+) -> OrionNodeSummary
+where
+    Props: Type,
+{
     var active_ch: u32 = 0;
     for (ch_id, is_on) in items {
         if is_on {
@@ -126,16 +129,16 @@ pure fn mount_orion_profile<Props: Type>(
         }
     }
 
-    return OrionNodeSummary {
+    OrionNodeSummary {
         active_slots: count,
         enabled_channels: active_ch,
         station_code: properties.station_code,
-    };
+    }
 }
 
 pure fn build_default_station_profile() -> OrionNodeSummary {
     -- 使用极具声明式美感的花括号扩展调用语法初始化 Orion 节点
-    return mount_orion_profile(128) {
+    mount_orion_profile(128) {
         .start = 32,
         station_code: 9001,
         region_tag: "deep-space-array-north",
@@ -143,7 +146,7 @@ pure fn build_default_station_profile() -> OrionNodeSummary {
         (1, true),
         (2, false),
         (3, true),
-    };
+    }
 }
 ```
 
@@ -153,11 +156,11 @@ pure fn build_default_station_profile() -> OrionNodeSummary {
 
 配置加载完毕后，Layer 7 汇总出的遥测数据包 `TelemetryPacket` 需要序列化并推送给后端插件列表。
 1. **编译期反射派生（`derive fn`）**：通过 `derive PacketChecksum.use(TelemetryPacket)`，在编译期遍历结构体字段生成零运行时反射开销的校验和计算实现；
-2. **显式动态分发（`.dyn(TelemetrySink)`）**：在 Flurry（见第 061 篇与 `docs/traits/dynamic-interfaces.md`）中，将具体插件实例转为动态接口胖指针**绝不发生隐式强转**，必须显式调用 `.dyn(TelemetrySink)`！
+2. **显式动态分发（`.dyn(TelemetrySink)`）**：在 Flurry（见第 061 篇与 `docs/traits/dynamic-interfaces.md`）中，将具体插件实例转为动态接口胖指针**绝不发生隐式强转**，必须显式调用 `.dyn(TelemetrySink)`。
 
 ```flurry
 trait PacketChecksum {
-    pure fn compute_checksum(self: *Self) -> u64;
+    pure fn compute_checksum(*self) -> u64;
 }
 
 struct TelemetryPacket {
@@ -166,26 +169,25 @@ struct TelemetryPacket {
     peak_energy: u64,
 }
 
--- 为只有 u64 字段的遥测包编写通用编译期派生函数
-derive fn PacketChecksum(Target: Type) -> Type {
-    return impl PacketChecksum for Target {
-        pure fn compute_checksum(self: *Self) -> u64 {
-            -- 在编译期反射展开 Target 的所有字段并累加异或校验值
-            var acc: u64 = 0x5A5A_5A5A;
-            inline for field in Type.fields_of(Target) {
-                acc = (acc << 3) ^ @field(self.*, field.name);
-            }
-            return acc;
+-- 为只有 u64 字段的遥测包编写具名编译期派生策略
+derive fn xor_checksum for PacketChecksum {
+    pure fn compute_checksum(*self) -> u64 {
+        -- 在编译期反射展开 Self 的所有字段并累加校验值
+        var acc: u64 = 0x5A5A_5A5A;
+        let repr = comptime Type.repr_of(Self);
+        inline for field in repr.struct_repr.fields {
+            acc = acc * 31 + self'get_field(field.name).*;
         }
-    };
+        acc
+    }
 }
 
 -- 启用自动派生：编译期直接生成零开销的字段展开代码
-derive PacketChecksum.use(TelemetryPacket);
+derive PacketChecksum.use(xor_checksum) for TelemetryPacket;
 
 -- 定义热插拔遥测输出插件接口（对象安全，支持 dyn TelemetrySink）
 trait TelemetrySink {
-    fn push_packet(self: *Self, pkt: TelemetryPacket, checksum: u64) -> u64;
+    fn push_packet(*self, pkt: TelemetryPacket, checksum: u64) -> u64;
 }
 
 struct RingLogSink {
@@ -194,10 +196,10 @@ struct RingLogSink {
 }
 
 impl TelemetrySink for RingLogSink {
-    fn push_packet(self: *Self, _pkt: TelemetryPacket, checksum: u64) -> u64 {
-        self.*.written_packets += 1;
-        self.*.last_checksum = checksum;
-        return self.*.written_packets;
+    fn push_packet(*self, _pkt: TelemetryPacket, checksum: u64) -> u64 {
+        self.written_packets.* += 1;
+        self.last_checksum.* = checksum;
+        self.written_packets.*
     }
 }
 
@@ -206,20 +208,20 @@ fn broadcast_to_active_sink(
     sink_ptr: *dyn TelemetrySink,
     pkt: TelemetryPacket,
 ) -> u64 {
-    const chk = pkt.ref.compute_checksum();
-    return sink_ptr.push_packet(pkt, chk);
+    let chk = pkt.ref.compute_checksum();
+    sink_ptr.push_packet(pkt, chk)
 }
 
 fn run_plugin_demo() -> u64 {
-    var local_logger = RingLogSink { written_packets: 0, last_checksum: 0 };
-    const pkt = TelemetryPacket {
+    var local_logger = RingLogSink { written_packets: 0, last_checksum: 0 }
+    let pkt = TelemetryPacket {
         station_code: 9001,
         total_frames: 4096,
         peak_energy: 8800,
-    };
+    }
 
     -- 显式通过 .ref.dyn(TelemetrySink) 将具体类型指针转换为动态 Trait 对象指针
-    return broadcast_to_active_sink(local_logger.ref.dyn(TelemetrySink), pkt);
+    broadcast_to_active_sink(local_logger.ref.dyn(TelemetrySink), pkt)
 }
 ```
 
@@ -232,8 +234,8 @@ fn run_plugin_demo() -> u64 {
 - 用 `...items`、`...properties` 与花括号扩展调用实现了类型安全的声明式配置 DSL；
 - 用 `derive fn` 与显式 `.dyn(TelemetrySink)` 实现了零样板序列化校验与热插拔插件多态。
 
-至此，**Orion 异构流式信号处理与遥测引擎** 的八大业务与架构层（Layer 1 ～ Layer 8）已经全部落成！
+至此，**Orion 异构流式信号处理与遥测引擎** 的八大业务与架构层（Layer 1 ～ Layer 8）已经全部落成。
 但是在将它发射升空或部署到无人值守的深空地面站之前，我们还有最后一道生死攸关的关卡：
 **如何在一台普通的开发机上，以 100% 可复现、确定性的方式，对整套引擎进行包含丢包、GPU 瞬态忙、恶劣尖峰脉冲在内的全链路混沌测试（Deterministic Chaos Testing）？**
 
-在下一篇 **第 199 篇（Layer 9：全链路仿真验收层）** 中，我们将使用 Flurry 独特的 **`template test` 测试模板与虚拟代数效应处理器**，为 Orion 引擎跑通终极确定性验收！
+在下一篇 **第 199 篇（Layer 9：全链路仿真验收层）** 中，我们将使用 Flurry 独特的 **`template test` 测试模板与虚拟代数效应处理器**，为 Orion 引擎跑通终极确定性验收。

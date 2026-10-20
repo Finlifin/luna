@@ -1,6 +1,6 @@
 # Flurry 演进手记 (049)：把一块大缓冲区安全切成两半——内存视图（Memory Views）、字段视图与区间视图
 
-在 [前几篇 (046–048)](./048-preventing-dangling-escapes-with-reachability.md) 中，我们已经看到 Flurry 如何通过对象身份、世代（Generation）和可达性限定类型 `&ReachabilitySet T`，在不需要 Rust 式 `&mut` 独占借用锁的前提下，彻底阻止了悬垂指针逃逸。
+在 [前几篇 (046–048)](./048-preventing-dangling-escapes-with-reachability.md) 中，我们已经看到 Flurry 如何通过对象身份、世代（Generation）和可达性限定类型 `&reachability_set T`，在不需要 Rust 式 `&mut` 独占借用锁的前提下，彻底阻止了悬垂指针逃逸。
 
 但是，当我们继续推进第三卷的核心工程目标——实现一个**高性能零拷贝环形缓冲区（`RingBuffer`）**时，一个新的问题浮出了水面：
 
@@ -9,20 +9,20 @@
 - 底层存放数据的连续数组 `buffer: Array<i32, n>`；
 - 当写游标回绕（Wrap-around）时，有效数据在物理数组上被切成了两半：前半段区间 `buffer[0..mid]` 和后半段区间 `buffer[mid..n]`，或者两个不同的元素槽位 `buffer[first]` 与 `buffer[second]`。
 
-现在思考一个极其现实的工程痛点：
+现在思考一个极其现实的核心问题：
 当我们调用一个辅助方法 `counters.clear_right()` 去清零右侧计数器时，调用方手里原本持有的左侧计数器指针 `left` 以及关于 `left` 的数值事实，会不会因为这次函数调用而“连坐失效”？
 当我们先通过 `let selected = values[index].ref;` 取得了某个元素的指针，随后又修改了下标变量 `index = 1usize;`，`selected` 指向的目标会不会跟着漂移？
 
-在传统语言里，函数签名只知道“我接收了一个 `*Counters` 指针”，至于这个函数在肚子里到底是只改了 `.right` 字段、还是把整个 `Counters` 掀了个底朝天，调用方如果不去翻看（甚至内联展开）函数体，根本无从知晓！
+在传统语言里，函数签名只知道“我接收了一个 `*Counters` 指针”，至于这个函数在肚子里到底是只改了 `.right` 字段、还是把整个 `Counters` 掀了个底朝天，调用方如果不去翻看（甚至内联展开）函数体，根本无从知晓。
 
 为了在**不展开函数实现**的前提下，精确向调用方说明“我只碰了这个结构体的哪个字段、或者这个数组的哪个下标区间”，Flurry 引入了**内存视图（Memory Views）**。
 
 ---
 
-## 第一版：粗粒度整对象指针导致的“事实连坐”痛点（v0）
+## 一、 粗粒度整对象指针带来的状态失效问题
 
-让我们先用最朴素的 `Counters` 结构体写一个 `v0` 版本。
-假设 `Counters` 有 `left` 和 `right` 两个字段。我们在 `preserve_left_v0` 中先确定了 `counters.left.* == 10`，然后调用了一个外部方法 `counters.clear_right_v0()`，最后想断言 `counters.left.* == 10` 依然成立：
+让我们先用最朴素的 `Counters` 结构体写一个初始写法。
+假设 `Counters` 有 `left` 和 `right` 两个字段。我们在 `preserve_left` 中先确定了 `counters.left.* == 10`，然后调用了一个外部方法 `counters.clear_right()`，最后想断言 `counters.left.* == 10` 依然成立：
 
 ```flurry
 use std.prelude.*;
@@ -31,27 +31,27 @@ struct Counters {
     left: i32,
     right: i32,
 
-    -- v0：没有任何区域足迹契约，对外只暴露接收了 *self
-    fn clear_right_v0(*self) {
+    -- 没有任何区域足迹契约，对外只暴露接收了 *self
+    fn clear_right(*self) {
         self.right.* = 0i32;
     }
 }
 
-fn preserve_left_v0(counters: *Counters) -> i32 {
+fn preserve_left(counters: *Counters) -> i32 {
     let left_ptr: *i32 = counters.left;
-    -- 在这里，我们只调用了 clear_right_v0
-    counters.clear_right_v0();
+    -- 在这里，我们只调用了 clear_right
+    counters.clear_right();
     left_ptr.*
 }
 
 test {
     let c = Counters { left: 42i32, right: 99i32 }
-    println("{}", preserve_left_v0(c.ref));
+    println("{}", preserve_left(c.ref));
 }
 ```
 
-如果站在跨模块契约或编译器分析器的角度看 `clear_right_v0(*self)`：
-如果我们把 `*self` 笼统地看作“可能修改整个 `Counters` 对象”，会发生什么灾难？
+如果站在跨模块契约或编译器分析器的角度看 `clear_right(*self)`：
+如果我们把 `*self` 笼统地看作“可能修改整个 `Counters` 对象”，会发生什么问题？
 
 ```text
   粗粒度“整对象”视角的尴尬：
@@ -59,19 +59,19 @@ test {
      ├── .left  (42)  ◄── left_ptr 指向这里
      └── .right (99)
 
-  调用 `counters.clear_right_v0()`：
+  调用 `counters.clear_right()`：
   如果契约只写“修改了 *self 指向的整个对象”：
-     ──► 编译器被迫假设 `.left` 也可能被改写了！
-     ──► 之前关于 `left_ptr.* == 42` 的所有静态事实全部作废，也不能将 `left_ptr.*` 的读取优化提升到调用前！
+     ──► 编译器被迫假设 `.left` 也可能被改写了。
+     ──► 之前关于 `left_ptr.* == 42` 的所有静态事实全部作废，也不能将 `left_ptr.*` 的读取优化提升到调用前。
 ```
 
-更糟糕的是，对于一个容器结构体（比如包含描述符字段 `len` 和底层缓冲区指针 `data`），如果“读取描述符字段 `len`”和“读取缓冲区全部元素 `data[0..n]`”混为一谈，那么任何修改单个元素的操作都会被误认为破坏了描述符！
+更糟糕的是，对于一个容器结构体（比如包含描述符字段 `len` 和底层缓冲区指针 `data`），如果“读取描述符字段 `len`”和“读取缓冲区全部元素 `data[0..n]`”混为一谈，那么任何修改单个元素的操作都会被误认为破坏了描述符。
 
-我们需要一套精确的“解剖刀”语言，把**容器描述符、它指向的缓冲区、结构体中的某个字段、以及数组中的某个元素或区间**，分别命名为独立的目标！
+我们需要一套精确的“解剖刀”语言，把**容器描述符、它指向的缓冲区、结构体中的某个字段、以及数组中的某个元素或区间**，分别命名为独立的目标。
 
 ---
 
-## 第二版：用字段视图与元素视图精确指代内存区域（v1）
+## 二、 用字段视图与元素视图精确指代内存区域
 
 在 Flurry 中，**内存视图（Memory View）**就是用来在契约与规格（如 `requires`、`ensures`、`outcomes`）中精确描述内存区域的语法（详见 `docs/resource-management/memory-views.md`）。
 
@@ -85,17 +85,17 @@ test {
   write_footprint   -> write<expr>       (写入足迹规格)
 ```
 
-> **💡 核心心智模型：内存视图描述的是“元层区域”，它绝不偷偷执行运行时读取！**
+> **💡 核心心智模型：内存视图描述的是“元层区域”，它绝不偷偷执行运行时读取。**
 > 当你在 `where outcomes write<self.right>` 或 `read<values.*[first]>` 里写下 `self.right` 和 `values.*[first]` 时：
-> 1. 它是在**元层（Meta-level）**为验证器指明“哪块内存区域被观察或修改了”，**绝对不会在运行时多执行一次内存读取**！
-> 2. 反过来，单凭在规格里写出一个视图名字，也**不会自动授予你访问该内存的合法资格**——你依然需要先证明指针存活、下标未越界！
+> 1. 它是在**元层（Meta-level）**为验证器指明“哪块内存区域被观察或修改了”，**绝对不会在运行时多执行一次内存读取**。
+> 2. 反过来，单凭在规格里写出一个视图名字，也**不会自动授予你访问该内存的合法资格**——你依然需要先证明指针存活、下标未越界。
 
-### 黄金铁律 1：视图在建立时立刻锁定目标身份，绝不跟随索引变量“漂移”！
+### 核心原则 1：视图在建立时立刻锁定目标身份，绝不跟随索引变量“漂移”
 
 初学者最容易搞混的一个问题是：
 如果我写了 `let selected = values[index].ref;`，此时 `index` 是 `0`。随后我把变量 `index` 改成了 `1`，那么 `selected` 指向的到底是原来的第 `0` 个元素，还是会跟着 `index` 变成第 `1` 个元素？
 
-让我们画一张 **Code Cartoon** 看清 Flurry 的**目标身份绑定规则**：
+下面通过图示看清 Flurry 的**目标身份绑定规则**：
 
 ```text
   var values: Array<i32, 2> = [3, 5];
@@ -108,16 +108,16 @@ test {
             │ 生命周期世代: gen #1                             │
             │ 锁定偏移/下标: 建立时的符号值 0usize (即首元素!) │
             └────────────────────────┬─────────────────────────┘
-                                     │ (焊死在第 0 号槽位！)
+                                     │ (焊死在第 0 号槽位。)
                                      ▼
                               values[0] (值为 3)
 
   [第 2 步] 后来修改索引变量：`index = 1usize;`
             修改新位置：`values[index] = 9;` (改的是 values[1]!)
-            ──► `selected` 依然稳稳指向 `values[0]`，读出来的值依然是 3！
+            ──► `selected` 依然稳稳指向 `values[0]`，读出来的值依然是 3。
 ```
 
-让我们把“精确字段视图 `write<self.right>`”与“视图目标身份锁定”写进 `v1` 代码：
+让我们把“精确字段视图 `write<self.right>`”与“视图目标身份锁定”写进 改进代码：
 
 ```flurry
 use std.prelude.*;
@@ -126,7 +126,7 @@ struct Counters {
     left: i32,
     right: i32,
 
-    -- v1：用 `where outcomes write<self.right>` 精确声明只修改 right 字段视图！
+    -- 用 `where outcomes write<self.right>` 精确声明只修改 right 字段视图。
     fn clear_right(*self)
     where outcomes write<self.right>
     {
@@ -137,7 +137,7 @@ struct Counters {
 fn preserve_left(counters: *Counters) -> i32 {
     let left = counters.left;
     -- 调用方根据 Counters 的字段布局和 clear_right 的精确足迹 `write<self.right>`，
-    -- 无需展开 clear_right 的函数体，就能 100% 确定 `left` 视图未被触碰！
+    -- 无需展开 clear_right 的函数体，就能 100% 确定 `left` 视图未被触碰。
     counters.clear_right();
     left.*
 }
@@ -155,7 +155,7 @@ test {
     index = 1usize;
     values[index] = 9i32;
 
-    -- 输出 3（values[0]），而不是 9（values[1]）！
+    -- 输出 3（values[0]），而不是 9（values[1]）。
     println("selected is still: {}", selected.*);
 }
 ```
@@ -169,10 +169,10 @@ selected is still: 3
 
 ---
 
-## 第三版：入口与出口快照位置（`'old`）与多区域元素视图（v2）
+## 三、 入口与出口快照位置（`'old`）与多区域元素视图
 
 现在，我们来解决一个在设计环形缓冲区和动态数组时更精妙的问题：
-假设一个函数不仅读取和修改了内存，而且在调用过程中，被用作下标或长度的字段自己也变了！
+假设一个函数不仅读取和修改了内存，而且在调用过程中，被用作下标或长度的字段自己也变了。
 比如，向缓冲区末尾追加一个元素 `push(buf, item)`：
 - 在进入函数时（**入口状态，Entry Snapshot**），当前长度 `buf.len.*` 是 `3`；
 - 函数把新元素写在了下标 `3` 的位置（即入口时的 `buf.len.*`），然后把 `buf.len.*` 加 1 变成了 `4`（**出口状态，Exit Snapshot**）。
@@ -185,15 +185,15 @@ Flurry 对快照位置（Snapshot Position）做出了极其清晰的划分（�
   函数调用边界上的快照时间线：
 
   [调用入口状态 (Entry Snapshot)]
-     ├── `requires` 前置条件中的选择器       ──► 按【入口状态】解释！
-     └── `outcomes` 效果足迹中的选择器       ──► 按【入口状态】解释！
-         (例如追加元素写的是入口长度处，绝不会把调用后 +1 的新长度代入同一个足迹表达式！)
+     ├── `requires` 前置条件中的选择器       ──► 按【入口状态】解释。
+     └── `outcomes` 效果足迹中的选择器       ──► 按【入口状态】解释。
+         (例如追加元素写的是入口长度处，绝不会把调用后 +1 的新长度代入同一个足迹表达式。)
         │
         ▼ (执行函数体，状态发生演进)
         │
   [对应出口状态 (Exit Snapshot)]
-     └── `ensures` 后置条件中的选择器        ──► 默认按【出口状态】解释！
-         └── 若需在 ensures 中回溯入口值，使用 `'old` 视图（如 `flag'old`）！
+     └── `ensures` 后置条件中的选择器        ──► 默认按【出口状态】解释。
+         └── 若需在 ensures 中回溯入口值，使用 `'old` 视图（如 `flag'old`）。
 ```
 
 同时，当我们操作同一个数组 `values: *Array<i32, n>` 中的两个动态下标 `first` 和 `second` 时，我们可以直接在 `outcomes` 中分别写出两个元素视图：
@@ -201,12 +201,12 @@ Flurry 对快照位置（Snapshot Position）做出了极其清晰的划分（�
 - `write<values.*[second]>`
 - `read<values.*[first]>`
 
-来看看 `v2` 版本是如何精确刻画数组双下标访问足迹的：
+来看看 进阶版本是如何精确刻画数组双下标访问足迹的：
 
 ```flurry
 use std.prelude.*;
 
--- v2：精确声明对数组内两个独立元素视图 `values.*[first]` 与 `values.*[second]` 的读写足迹
+-- 精确声明对数组内两个独立元素视图 `values.*[first]` 与 `values.*[second]` 的读写足迹
 fn write_distinct(values: *Array<i32, n>, first: usize, second: usize) -> i32
 where n: usize,
     requires first < n and second < n and first != second,
@@ -231,19 +231,19 @@ test {
 res: 11, arr[1]: 11, arr[3]: 22
 ```
 
-### 编译器防呆：试图先执行可能溢出的地址加法再检查范围？或者对空区间解引用？拒绝！
+### 编译器防呆：试图先执行可能溢出的地址加法再检查范围？或者对空区间解引用？拒绝
 
 在使用区间和下标视图时，Flurry 编译器有两条严格的安全红线：
-1. **严禁先溢出再检查**：验证索引或区间边界时，不能先执行可能溢出的整数加法 `start + count < n`，再拿溢出回绕后的结果去假装安全！
-2. **严禁在未建立分离或范围依据时宣称视图有效**：如果声明的 `outcomes` 只允许 `write<self.right>`，你却在函数体里偷偷写了 `self.left.* = 0`，编译器会当场报错拒绝：
+1. **严禁先溢出再检查**：验证索引或区间边界时，不能先执行可能溢出的整数加法 `start + count < n`，再拿溢出回绕后的结果去假装安全。
+2. **严禁在未建立分离或范围依据时宣称视图有效**：如果声明的 `outcomes` 只允许 `write<self.right>`，你却在函数体里偷偷写了 `self.left.* = 0`，编译器会直接报错拒绝：
 
 ```flurry
 struct Counters {
     left: i32,
     right: i32,
 
-    -- ❌ 编译期直接拒绝！
-    -- 错误：契约声明的写足迹仅为 `self.right` 视图，但函数体却越界修改了 `self.left`！
+    -- ❌ 编译期直接拒绝。
+    -- 错误：契约声明的写足迹仅为 `self.right` 视图，但函数体却越界修改了 `self.left`。
     fn dishonest_clear(*self)
     where outcomes write<self.right>
     {
@@ -265,9 +265,9 @@ struct Counters {
 | **足迹构造 `read<V>` / `write<V>`** | 在 `outcomes` 中描述允许读取或修改的视图目标 | 属于元层规格描述，**不产生运行时读取动作**，也不凭空授予未验证的解引用权限 |
 | **入口与出口快照** | `requires` 与 `outcomes` 按入口状态解释；`ensures` 按出口状态解释（可用 `'old` 指代入口值） | 避免将调用后改变的长度或游标错误代入入口足迹选择器 |
 
-### 留给下一篇的悬念
+### 下一篇预告
 
-仔细看我们在 `v2` 里写的那个函数 `write_distinct`：
+仔细看我们在 里写的那个函数 `write_distinct`：
 
 ```flurry
 fn write_distinct(values: *Array<i32, n>, first: usize, second: usize) -> i32
@@ -288,6 +288,6 @@ where n: usize,
 
 为什么编译器能拍着胸脯向你保证最后返回的**一定是 `11`**（甚至可以直接把第 3 行的内存读取优化成常量 `11`）？
 如果把 `Counters` 换成 `union`（联合体），两个字段名字也不同（比如 `u.as_int` 和 `u.as_float`），为什么编译器就**绝对不承认**它们是分离的？
-更刺激的是：在 Rust 里，如果你想把一个数组切成前半段 `[0..mid]` 和后半段 `[mid..n]` 同时原地修改，你不能直接切，必须调用标准库里用 `unsafe` 原始指针黑魔法包出来的 `slice.split_at_mut(mid)`！而在 Flurry 里，为什么**不需要写一行 `unsafe`**，编译器自己就能证明两个视图绝不重叠？
+更刺激的是：在 Rust 里，如果你想把一个数组切成前半段 `[0..mid]` 和后半段 `[mid..n]` 同时原地修改，你不能直接切，必须调用标准库里用 `unsafe` 原始指针底层机制包出来的 `slice.split_at_mut(mid)`。而在 Flurry 里，为什么**不需要写一行 `unsafe`**，编译器自己就能证明两个视图绝不重叠？
 
-在下一篇 **《Flurry 演进手记 (050)：证明两个切片绝不重叠——分离证据（Disjointness Evidence）与并行原地修改》** 中，我们将深入揭秘 Flurry 的分离性证明机制！
+在下一篇 **《Flurry 演进手记 (050)：证明两个切片绝不重叠——分离证据（Disjointness Evidence）与并行原地修改》** 中，我们将深入揭秘 Flurry 的分离性证明机制。
