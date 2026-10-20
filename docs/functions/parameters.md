@@ -152,7 +152,7 @@ fn choose(
     first: bool,
     .second: bool = opposite(first),
     .third: bool = opposite(second),
-) -> (bool, bool) {
+) -> Tuple<bool, bool> {
     (second, third)
 }
 
@@ -333,13 +333,13 @@ test {
 `...expr` 在扩展调用中仍供应位置输入。展开的元组只求值一次，其各项按元组次序交付；属性继续由属性收集入口处理，不把元组改解释为属性包。
 
 ~~~flurry
-fn collect(...items: (u32, bool), ...properties: T) -> ((u32, bool), T)
+fn collect(...items: Tuple<u32, bool>, ...properties: T) -> Tuple<Tuple<u32, bool>, T>
 where T
 {
     (items, properties)
 }
 
-fn inputs() -> (u32, bool) { (7u32, true) }
+fn inputs() -> Tuple<u32, bool> { (7u32, true) }
 
 test {
     let ((count, ready), options) = collect {

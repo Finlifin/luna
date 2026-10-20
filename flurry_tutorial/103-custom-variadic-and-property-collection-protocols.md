@@ -120,7 +120,7 @@ fn last() -> bool {
     false
 }
 
-fn choose(comptime flag: bool, ...items: (bool, bool), .bias: bool = false) -> bool {
+fn choose(comptime flag: bool, ...items: Tuple<bool, bool>, .bias: bool = false) -> bool {
     let (a, b) = items;
     inline if flag { a and bias } else { b }
 }
@@ -145,7 +145,7 @@ test {
 [ 最终形参组装 ]             items = (true, false)   bias = true  ──► 进入 choose()。
 ```
 
-看到了吗？尽管 `first()` 和 `last()` 最终都被归组收集进了同一个形参 `items: (bool, bool)`，但编译器**绝不会为了凑齐 `items` 就擅自把 `last()` 提早到 `bias()` 前面执行**。**“源码顺序决定求值先后，目标协议决定归组布局”**——这就是 Flurry 参数 Elaboration 令人安心的确定性。
+看到了吗？尽管 `first()` 和 `last()` 最终都被归组收集进了同一个形参 `items: Tuple<bool, bool>`，但编译器**绝不会为了凑齐 `items` 就擅自把 `last()` 提早到 `bias()` 前面执行**。**“源码顺序决定求值先后，目标协议决定归组布局”**——这就是 Flurry 参数 Elaboration 令人安心的确定性。
 
 ---
 

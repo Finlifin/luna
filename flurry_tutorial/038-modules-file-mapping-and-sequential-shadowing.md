@@ -143,7 +143,7 @@ mod codec {
         -- `..` 向上两级指向当前包根
         use ..RootToken;
 
-        fn make_tokens() -> (LocalToken, RootToken) {
+        fn make_tokens() -> Tuple<LocalToken, RootToken> {
             (LocalToken {}, RootToken {})
         }
     }

@@ -14,13 +14,13 @@ reference -> expr.ref
 projection -> expr.id
 ~~~
 
-`&R T` 为 T 描述外部有效性要求；它不是另一种取址运算。
+`&r T` 为 T 描述外部有效性要求；它不是另一种取址运算。
 
 ## 正式定义
 
 ### 要求与拥有
 
-`&R T` 表示 T 的相应使用要求 R 中的资源及相关事实保持有效。多个限定合并要求；限定本身不延长生命，不授予写入或释放许可。这一机制的作用类似于 Rust 的生命周期参数，但 Flurry 用显式的可达性集合取代隐式的生命周期推断，从而让跨调用边界的依赖关系在接口中直接可见。
+`&r T` 表示 T 的相应使用要求 r 中的资源及相关事实保持有效。多个限定合并要求；限定本身不延长生命，不授予写入或释放许可。这一机制的作用类似于 Rust 的生命周期参数，但 Flurry 用显式的可达性集合取代隐式的生命周期推断，从而让跨调用边界的依赖关系在接口中直接可见。
 
 值自己拥有的内部资源与外部要求分别解释。拥有字符分配的 String 可以转交其分配；而拥有元素缓冲区的指针容器，仍须暴露元素实际指向外部对象的要求。
 
@@ -128,8 +128,8 @@ read_current 在更新后取得实际当前视图。判断是否扩容必须依�
 ### 返回依赖的保守上界
 
 ~~~flurry
-fn longest(first: &R1 str, second: &R2 str) -> &R1 &R2 str
-where R1: Type.vars.ReachSet, R2: Type.vars.ReachSet,
+fn longest(first: &r1 str, second: &r2 str) -> &r1 &r2 str
+where r1: Type.vars.ReachSet, r2: Type.vars.ReachSet,
     outcomes read(first) and read(second)
 {
     if first.len() >= second.len() {
@@ -146,7 +146,7 @@ where R1: Type.vars.ReachSet, R2: Type.vars.ReachSet,
 
 Rust lifetime 与引用规则是表达来源生命约束的对应物；Flurry 还用具体内存效果说明内容修改、目标终结和可保持关系。[Rust 引用](https://doc.rust-lang.org/reference/types/pointer.html)
 
-C/C++ 可通过 owner、句柄和显式约定表达来源，但普通裸指针类型不会自动传递这些证明义务。Zig 同样可用 allocator 与对象约定管理来源；`&R T` 将要求显式交给跨边界检查。
+C/C++ 可通过 owner、句柄和显式约定表达来源，但普通裸指针类型不会自动传递这些证明义务。Zig 同样可用 allocator 与对象约定管理来源；`&r T` 将要求显式交给跨边界检查。
 
 ## 运行时实现设计引导
 

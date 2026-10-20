@@ -48,7 +48,7 @@ ordinary normalization 要求操作依据可获得。loose normalization 可以�
 下面的工厂在编译时产生一个保存两个同型值的结构。调用者随后在运行时构造并使用这个结构：
 
 ~~~flurry
-pure comptime fn pair_of(T: Type) -> Type {
+pure comptime fn PairOf(T: Type) -> Type {
     struct Pair {
         first: T,
         second: T,
@@ -57,7 +57,7 @@ pure comptime fn pair_of(T: Type) -> Type {
     Pair
 }
 
-typealias Samples = pair_of(u32);
+typealias Samples = PairOf(u32);
 
 fn show_samples(first: u32, second: u32) {
     let samples = Samples { first: first, second: second }
@@ -69,14 +69,14 @@ test {
 }
 ~~~
 
-输出为 `samples: 12, 18`。`pair_of(u32)` 决定字段类型；传入 `show_samples` 的两个数值决定字段内容。运行时的 `samples` 不需要保存工厂对象或一个 `Type` 字段。
+输出为 `samples: 12, 18`。`PairOf(u32)` 决定字段类型；传入 `show_samples` 的两个数值决定字段内容。运行时的 `samples` 不需要保存工厂对象或一个 `Type` 字段。
 
 同一个类型值也可以控制另一个类型的构造：
 
 ~~~flurry
 const Word: Type = u32;
 typealias Counter = Word;
-typealias CounterPair = pair_of(Counter);
+typealias CounterPair = PairOf(Counter);
 
 test {
     let counters = CounterPair { first: 3, second: 9 }

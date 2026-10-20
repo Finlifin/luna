@@ -105,7 +105,7 @@ fn retain(packet: Packet<T>) -> Packet<T> where T {
 当额外绑定的字段具有 Copy 能力时，可以复制该字段，同时移动整个仿射对象：
 
 ~~~flurry
-fn inspect_ready(packet: Packet<T>) -> (bool, Packet<T>) where T {
+fn inspect_ready(packet: Packet<T>) -> Tuple<bool, Packet<T>> where T {
     let {ready} as whole = packet;
     (ready, whole)
 }
@@ -169,7 +169,7 @@ fn choose(value: Packet) {
 候选也可以按不同次序引入同一组仿射绑定：
 
 ~~~flurry
-fn inspect(value: (bool, Ticket, Ticket)) {
+fn inspect(value: Tuple<bool, Ticket, Ticket>) {
     value match {
         (true, first, second) or (false, second, first) => (),
     };
@@ -198,7 +198,7 @@ fn inspect(packet: Packet<T>) -> bool where T {
 只观察绑定的守卫也可位于 `or` 的内部或单个字段上。括号明确划定候选范围：
 
 ```flurry
-fn inspect_packets(value: (Packet<T>, Packet<T>)) -> bool where T {
+fn inspect_packets(value: Tuple<Packet<T>, Packet<T>>) -> bool where T {
     value match {
         ((first, second) if accept(first.ready)) or
         ((second, first) if accept(first.ready)) => first.ready,

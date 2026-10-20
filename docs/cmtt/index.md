@@ -62,7 +62,7 @@ fn packed() -> bool {
 普通包生产者同样保留收集语义：
 
 ~~~flurry
-pure comptime fn packet() -> (bool, char) { (true, 'a') }
+pure comptime fn packet() -> Tuple<bool, char> { (true, 'a') }
 
 fn expanded() -> bool {
     const code = pack(...packet(), false);

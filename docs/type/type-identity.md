@@ -87,7 +87,7 @@ test {
 纯工厂的结果还可以用编译时检查直接比较：
 
 ~~~flurry
-pure comptime fn pair_of(T: Type) -> Type {
+pure comptime fn PairOf(T: Type) -> Type {
     struct Pair {
         first: T,
         second: T,
@@ -96,9 +96,9 @@ pure comptime fn pair_of(T: Type) -> Type {
     Pair
 }
 
-typealias FirstPair = pair_of(u32);
-typealias SecondPair = pair_of(u32);
-typealias FloatPair = pair_of(f32);
+typealias FirstPair = PairOf(u32);
+typealias SecondPair = PairOf(u32);
+typealias FloatPair = PairOf(f32);
 
 comptime {
     assumes FirstPair == SecondPair;
@@ -113,17 +113,17 @@ test {
 }
 ~~~
 
-相同纯调用复用同一结果，因而跨两个 alias 的赋值成立。`pair_of(f32)` 使用不同字段类型，不能复用该实例。
+相同纯调用复用同一结果，因而跨两个 alias 的赋值成立。`PairOf(f32)` 使用不同字段类型，不能复用该实例。
 
 并非所有类型工厂都对输入保持单射：
 
 ~~~flurry
-pure comptime fn storage_for(T: Type) -> Type {
+pure comptime fn StorageFor(T: Type) -> Type {
     u32
 }
 
 comptime {
-    assumes storage_for(i32) == storage_for(f32);
+    assumes StorageFor(i32) == StorageFor(f32);
 }
 ~~~
 

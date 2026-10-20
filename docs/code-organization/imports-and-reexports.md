@@ -17,7 +17,7 @@ projection_all_path -> path . *
 path_as_bind -> path as id
 ~~~
 
-基础名称、父级与包根定位见[路径](scope-and-paths.md)。分组中的每个 path 接在共同前缀之后解释；as 为所选项建立本地别名。
+基础名称与父级定位见[路径](scope-and-paths.md)。分组中的每个 path 接在共同前缀之后解释；as 为所选项建立本地别名。
 
 ## 正式定义
 
@@ -127,7 +127,7 @@ mod source {
 }
 
 mod facade {
-    pub use @source.*;
+    pub use .source.*;
     struct Packet {}
 }
 ~~~
@@ -142,11 +142,11 @@ mod source {
 }
 
 mod first {
-    pub use @source.Packet;
+    pub use .source.Packet;
 }
 
 mod second {
-    pub use @source.Packet;
+    pub use .source.Packet;
 }
 
 use first.*;
@@ -167,12 +167,12 @@ mod source {
 }
 
 pub mod left {
-    pub use @source.Packet;
-    pub use @right.*;
+    pub use .source.Packet;
+    pub use .right.*;
 }
 
 pub mod right {
-    pub use @left.*;
+    pub use .left.*;
 }
 
 comptime {

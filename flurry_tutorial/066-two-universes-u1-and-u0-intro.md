@@ -119,7 +119,7 @@ fn configured() -> bool {
     -- 在 runtime 函数内部声明局部 const Type。
     const Flag = bool;
     -- 编译期计算元组并不可反驳解构，绝不留下任何 runtime 初始化开销。
-    const (enabled, disabled): (Flag, Flag) = (invert(false), invert(true));
+    const (enabled, disabled): Tuple<Flag, Flag> = (invert(false), invert(true));
     const code = '(enabled and not disabled);
     ~<code>
 }

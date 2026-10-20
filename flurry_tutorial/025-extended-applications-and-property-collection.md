@@ -55,7 +55,7 @@ test {
 ```
 
 看着上面那两个只为了打包一次参数而存在的 `InnerOptionsV0` 和 `WorkerOptionsV0`，你不禁要问：
-> **“位置变参可以把散装的位置输入直接收集成元组 `(u32, bool, str)`；难道我们就不能把花括号里的 `key: value` 属性输入，直接收集成一个保留所有字段名和精确类型的匿名结构体吗？”**
+> **“位置变参可以把散装的位置输入直接收集成元组 `Tuple<u32, bool, str>`；难道我们就不能把花括号里的 `key: value` 属性输入，直接收集成一个保留所有字段名和精确类型的匿名结构体吗？”**
 
 在 Flurry 中，答案不仅是“能”，而且它的语法优雅得就像在写原生 JSON。
 
@@ -161,7 +161,7 @@ supplied limit: 8
 ### 2. 在同一个扩展调用里混用“位置展开 `...expr`”与“命名属性 `k: v`”
 
 假设我们的传感器任务收集函数 `collect` 签名里同时有两个变参入口：
-- 第一个入口收集位置元组：`...items: (u32, bool)`
+- 第一个入口收集位置元组：`...items: Tuple<u32, bool>`
 - 第二个入口收集命名属性：`...properties: T`
 
 当调用方写下这样一个交错的扩展调用时：
@@ -181,7 +181,7 @@ collect {
 
 ```text
   扩展调用：collect { label: make_label(), ...inputs(), enabled: make_flag() }
-  函数签名：fn collect(...items: (u32, bool), ...properties: T) -> ((u32, bool), T)
+  函数签名：fn collect(...items: Tuple<u32, bool>, ...properties: T) -> Tuple<Tuple<u32, bool>, T>
 
   [第 1 步：严格按源码从左到右求值所有输入（各求值一次。）]
      1. 求值 `make_label()` ──► 得到 "worker"
@@ -210,13 +210,13 @@ where T
     properties
 }
 
-fn collect(...items: (u32, bool), ...properties: T) -> ((u32, bool), T)
+fn collect(...items: Tuple<u32, bool>, ...properties: T) -> Tuple<Tuple<u32, bool>, T>
 where T
 {
     (items, properties)
 }
 
-fn inputs() -> (u32, bool) {
+fn inputs() -> Tuple<u32, bool> {
     println("2. evaluating inputs()");
     (7u32, true)
 }

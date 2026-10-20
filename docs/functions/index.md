@@ -62,7 +62,7 @@ template_instance -> fn id use expr block
 
 ### 环境属于完整接口
 
-普通 fn 类型接收无所需环境的可调用值。`%C fn(...) -> R` 同时保留函数接口和环境 C；C 为空时可以消去限定。非空环境不能靠隐式分配或丢弃捕获，伪装成普通 fn。
+普通 fn 类型接收无所需环境的可调用值。`%c fn(...) -> R` 同时保留函数接口和环境 c；c 为空时可以消去限定。非空环境不能靠隐式分配或丢弃捕获，伪装成普通 fn。
 
 环境类型相同不表示运行时值相同。两个闭包可有相同接口，却保存不同的偏移量、指向不同对象，或具有不同的调用后状态。替换回调时还要满足行为契约。
 
@@ -73,8 +73,8 @@ template_instance -> fn id use expr block
 下面按用户选择给出报价。折扣上限随回调一起交付，高阶函数只负责调用一次。
 
 ~~~flurry
-fn quote_price(price: u32, lambda adjust: %C fn(u32) -> u32) -> u32
-where C: Type.vars.Closure
+fn quote_price(price: u32, lambda adjust: %c fn(u32) -> u32) -> u32
+where c: Type.vars.Closure
 {
     adjust(price)
 }
@@ -93,7 +93,7 @@ test {
 }
 ~~~
 
-输出 `70 80`。第一次创建闭包时复制 discount，执行主体时才比较和减价。第二个闭包没有捕获。环境参数 C 使同一接口能够接收两者；lambda 标记使第一种 post do 写法有明确的接入位置。
+输出 `70 80`。第一次创建闭包时复制 discount，执行主体时才比较和减价。第二个闭包没有捕获。环境参数 c 使同一接口能够接收两者；lambda 标记使第一种 post do 写法有明确的接入位置。
 
 ### 一个接口中的不同阶段
 

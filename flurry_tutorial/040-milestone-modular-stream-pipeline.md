@@ -116,7 +116,7 @@ mod engine {
         min_threshold: u32,
         .max_limit: u32 = min_threshold * 10u32,
         implicit ctx: *PipelineContext,
-    ) -> ?(SamplePacket, u32) {
+    ) -> ?Tuple<SamplePacket, u32> {
         -- 链式顺序模式匹配 + Copy 字段提取 + `as whole` 整体交付：
         packet match {
             { ready: true, reading } as whole
@@ -192,7 +192,7 @@ impl Drop for StageTrace {
 -- 模块 3：基于 CMTT 的算子模板（封装公共审计与可空短路）
 -- ============================================================================
 template fn stage_runner(
-    input: ?(SamplePacket, u32),
+    input: ?Tuple<SamplePacket, u32>,
     quote lambda body: < packet: SamplePacket, val: u32 |- u32 >,
 ) -> ?u32 {
     let trace = StageTrace { stage_id: 1u32 }

@@ -66,9 +66,9 @@ const SomeType: Type = some_val'type;
 | `!Errors T` | error qualified type |
 | `#Effects T` | effect qualified type |
 | `dyn TraitExpr` | trait object type |
-| `%C T` | closure type |
+| `%c T` | closure type |
 | `*T` | pointer type |
-| `&ReachabilitySet T` | reachability type |
+| `&reachability_set T` | reachability type |
 
 限定前缀可以组合，例如 `#Effects !Errors T` 保存外层效应与内层错误结果两层结构，不把 `!` 解析为 Effects 上的后缀操作。若限定上下文本身需要使用与下一层前缀有歧义的运算，用括号划定范围。限定类型仍遵守所在语法的边界：lambda 参数的结束 `|`、contextual code type 的 `|-` 与结束 `>` 不属于内部类型表达式。
 

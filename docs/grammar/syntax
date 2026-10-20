@@ -587,14 +587,12 @@ path -> id
     | projection_multi_path
     | projection_all_path
     | super_path
-    | package_path
     | path_as_bind
 
 projection_path -> path . id
 projection_multi_path -> path . { path* }
 projection_all_path -> path . *
 super_path -> . path
-package_path -> @ path
 path_as_bind -> path as id
 
 -- token macros；先接回调用位置，再按该位置的普通语法检查。

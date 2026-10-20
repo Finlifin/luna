@@ -50,7 +50,7 @@ pure fn make_channel_window(
     }
 }
 
-pure fn test_window_defaults() -> (ChannelWindow, ChannelWindow) {
+pure fn test_window_defaults() -> Tuple<ChannelWindow, ChannelWindow> {
     -- 1. 只传 total = 64：start 自动为 0，count 自动推导为 64 - 0 = 64
     let full_win = make_channel_window(64);
 
@@ -84,7 +84,7 @@ pure fn bad_backward_default(
 当运维人员初始化整个 Orion 节点时，他们希望既能传入一组未命名的通道开关项 `(channel_id, enabled)`，又能传入任意键值配置属性（如 `station_id`、`gain_scale`），甚至直接用 `...default_props()` 展开预设配置包。
 
 在 Flurry 中（见第 030 篇与 `docs/functions/parameters.md`）：
-- `...items: (u32, bool)` 收集所有未命名的位置序列项；
+- `...items: Tuple<u32, bool>` 收集所有未命名的位置序列项；
 - `...properties: Props` 将所有未匹配固定具名参数的 `key: value` 键值对收集为一个匿名结构记录（Record）；
 - 调用时直接使用花括号扩展调用语法 `mount_orion_profile { ... }`。
 
@@ -96,8 +96,8 @@ pure fn bad_backward_default(
 |      .start = 8,               ---> 命中显式可选形参 .start: u32             |
 |      station_code: 1024,       ---> 归入 ...properties 属性记录字段          |
 |      enable_gpu: true,         ---> 归入 ...properties 属性记录字段          |
-|      (0, true),                ---> 归入 ...items: (u32, bool) 位置序列      |
-|      (1, false),               ---> 归入 ...items: (u32, bool) 位置序列      |
+|      0,                        ---> 归入 ...items: Tuple<u32, bool> 位置序列 |
+|      true,                     ---> 归入 ...items: Tuple<u32, bool> 位置序列 |
 |  }                                                                          |
 +-----------------------------------------------------------------------------+
 ```
@@ -122,12 +122,8 @@ pure fn mount_orion_profile(
 where
     Props: Type,
 {
-    var active_ch: u32 = 0;
-    for (ch_id, is_on) in items {
-        if is_on {
-            active_ch += 1;
-        }
-    }
+    let (primary_ch, is_on) = items;
+    let active_ch: u32 = if is_on { primary_ch + 1 } else { 0 };
 
     OrionNodeSummary {
         active_slots: count,
@@ -142,10 +138,8 @@ pure fn build_default_station_profile() -> OrionNodeSummary {
         .start = 32,
         station_code: 9001,
         region_tag: "deep-space-array-north",
-        (0, true),
-        (1, true),
-        (2, false),
-        (3, true),
+        0,
+        true,
     }
 }
 ```

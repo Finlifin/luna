@@ -60,7 +60,7 @@ fn keep(x: T) -> T where T {
 
 -- 2. T :- Copy + Clone 是以下完整写法的语法糖：
 --    where T: Type, requires T :- Copy, requires T :- Clone
-fn duplicate(x: T) -> (T, T)
+fn duplicate(x: T) -> Tuple<T, T>
 where
     T :- Copy + Clone
 {
@@ -165,7 +165,7 @@ where
 来看一段展示隐式推导、显式指定与编译期拦截的完整代码：
 
 ```flurry
--- 一个编译期辅助函数，返回包含 (Type, usize) 的编译期元组
+-- 一个编译期辅助函数，返回类型为 Tuple<Type, usize> 的编译期元组
 pure comptime fn f32_vec4_packet() -> Tuple<Type, usize> {
     (f32, 4usize)
 }

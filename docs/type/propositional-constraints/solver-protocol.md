@@ -28,7 +28,7 @@ enum StorageKind {
     real,
 }
 
-pure comptime fn storage_type(kind: StorageKind) -> result: Type
+pure comptime fn StorageType(kind: StorageKind) -> result: Type
 where ensures result == u32 or result == f32 {
     kind match {
         .integer => u32,
@@ -42,7 +42,7 @@ where requires T == u32 or T == f32 {
 }
 
 pure comptime fn selected_size(kind: StorageKind) -> usize {
-    let Selected = storage_type(kind);
+    let Selected = StorageType(kind);
     supported_size(Selected)
 }
 
@@ -69,7 +69,7 @@ test {
 结果保证也不是作者可以随意填写的公理。下面是有意错误的工厂：
 
 ~~~flurry
-pure comptime fn broken_storage_type(kind: StorageKind) -> result: Type
+pure comptime fn BrokenStorageType(kind: StorageKind) -> result: Type
 where ensures result == u32 or result == f32 {
     kind match {
         .integer => u32,
@@ -78,7 +78,7 @@ where ensures result == u32 or result == f32 {
 }
 ~~~
 
-检查 `real` 路径可以发现保证不成立。若按阶段规则延迟具体验证，调用 `broken_storage_type(.real)` 时仍必须失败；任何依赖这份保证的实例都不能交付。
+检查 `real` 路径可以发现保证不成立。若按阶段规则延迟具体验证，调用 `BrokenStorageType(.real)` 时仍必须失败；任何依赖这份保证的实例都不能交付。
 
 与这个可复现的失败不同，某个未解释调用的抽象模型给出的返回值，未必有合法源执行可以产生。组合层应验证反例的来源；无法完成验证时保留 Unknown，不能把占位值写进用户诊断冒充实参。
 

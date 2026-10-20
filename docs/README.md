@@ -28,7 +28,7 @@ Flurry 是一门面向系统级编程的语言，在正确性、性能、抽象�
 | [函数契约与效果](functions/contracts-and-effects.md) | 前后条件、行为上界、错误／效应与验证边界 |
 | [Lambda 与捕获](functions/lambdas.md) | 按值捕获、指针观察、最小独立位置 |
 | [闭包环境](functions/closure-environments.md) | 调用状态、逆序清理与逃逸 |
-| [高阶接口](functions/higher-order-functions.md) | `%C fn`、环境传递与回调契约 |
+| [高阶接口](functions/higher-order-functions.md) | `%c fn`、环境传递与回调契约 |
 | [Inline 与 quote fn](functions/inline-and-quote.md) | 确定性接入、上下文替换与实参一次求值 |
 | [函数模板与测试模板](functions/templates.md) | 签名复用、正文接入、初始化和清理 |
 | [函数级模式](functions/pattern-functions.md) | case 参数、多输入分派与 quoted arm |

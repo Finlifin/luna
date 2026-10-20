@@ -78,7 +78,7 @@ fn ready()->bool {
 编译器保守判断出口：字面量布尔条件及其 `not` / `and` / `or` 组合可以排除不可达分支；未知条件下的 `break` 仍视为可能出口。嵌套循环的 `break` 按目标标签区分，handler 中跳出安装者循环的 `break` 也属于该循环的出口。已知字面量及元组、结构体、枚举构造值的 `match` 也按 arm 顺序排除不匹配的纯模式；例如 `true match { true => continue, false => break }` 不为所在循环提供出口。模式中的可执行计算、未知主语或无法静态判定的模式保持保守处理，不能遗漏其中的控制转移。此分析不证明任意程序的终止性，也不免除循环内部的类型与资源检查。
 
 ```flurry
-enum Signal { idle, ready((bool, bool)) }
+enum Signal { idle, ready(Tuple<bool, bool>) }
 
 fn wait_forever() -> bool {
     while true {

@@ -20,7 +20,7 @@ pure comptime fn invert(value: bool) -> bool {
 
 fn configured() -> bool {
     const Flag = bool;
-    const (enabled, disabled): (Flag, Flag) = (invert(false), invert(true));
+    const (enabled, disabled): Tuple<Flag, Flag> = (invert(false), invert(true));
     const code = '(enabled and not disabled);
     ~<code>
 }

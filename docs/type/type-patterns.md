@@ -80,7 +80,7 @@ test {
 
 这次输出 `sample count: 8`。`Expected` 从函数参数取得，单引号让模式使用这个值，而不是引入一个同名局部绑定。
 
-这些函数观察的是 Array 保留的形态。[类型身份](type-identity.md#常见示例)中的普通工厂 `storage_for` 会丢弃输入信息，不能套用同一思路从它返回的 `u32` 逆解输入。
+这些函数观察的是 Array 保留的形态。[类型身份](type-identity.md#常见示例)中的普通工厂 `StorageFor` 会丢弃输入信息，不能套用同一思路从它返回的 `u32` 逆解输入。
 
 ## 与 Rust / Zig / C / C++ 的关键差异
 

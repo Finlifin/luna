@@ -100,11 +100,11 @@ typealias Seven = Tagged<...(.u8'builtin, 7)>;
 
 ~~~flurry
 typealias Byte = .u8'builtin;
-comptime fn packet() -> (Type, Byte) { (Byte, 7) }
+comptime fn packet() -> Tuple<Type, Byte> { (Byte, 7) }
 comptime fn BuildTag() -> Type { Tagged<...packet()> }
 ~~~
 
-该包已经具有 `(Type, Byte)` 类型，其值按位置交付；取得第一个 Type 值后，仍须检查第二个值是否符合依赖参数 `value: T`。包中的 Byte 不会为了适应另一个 T 而被悄悄重新解释。输入计划保留包生产、解构与每项交付的次序；命名参数可以在包前后求值，尾随空包也不能被删除。默认值只复用已取得的绑定，循环中每次执行都重新建立并清理这组绑定。
+该包已经具有 `Tuple<Type, Byte>` 类型，其值按位置交付；取得第一个 Type 值后，仍须检查第二个值是否符合依赖参数 `value: T`。包中的 Byte 不会为了适应另一个 T 而被悄悄重新解释。输入计划保留包生产、解构与每项交付的次序；命名参数可以在包前后求值，尾随空包也不能被删除。默认值只复用已取得的绑定，循环中每次执行都重新建立并清理这组绑定。
 
 普通值的跨阶段 Splice 协议不承担这些子句位置路由。即使已绑定 Splice，类型注解中的包仍在 comptime 求值，不请求 runtime 转换。
 
@@ -119,7 +119,7 @@ comptime fn Choose(flag: bool) -> Type {
 
 block、match 和可从结果上下文推导的泛型包生产函数遵循相同规则。某个字段仍依赖未知 Type 时，该字段保持未决，其他已确定字段的上下文继续传递；这不构成对未决依赖的证明。多个包的位置数都未知时不能任意划分目标槽位，调用者可以通过生产函数签名或元素类型补足信息。已确定为 Integer 的包也不会被重新解释为 Byte 包。
 
-纯类型参数入口同样提供结果上下文。例如 `Pair<...packet()>` 可以为泛型 `packet` 提供 `(Type, Type)` 的目标，从而确定其返回类型。struct、enum、typealias、trait 和函数／方法实例使用同一规则；optional 参数不占位置槽，方法已有的接收者类型实参也不挤占方法自己的展开槽。包依然只求值一次，类型上下文不代替对生产函数要求的检查。
+纯类型参数入口同样提供结果上下文。例如 `Pair<...packet()>` 可以为泛型 `packet` 提供 `Tuple<Type, Type>` 的目标，从而确定其返回类型。struct、enum、typealias、trait 和函数／方法实例使用同一规则；optional 参数不占位置槽，方法已有的接收者类型实参也不挤占方法自己的展开槽。包依然只求值一次，类型上下文不代替对生产函数要求的检查。
 
 ### Quote 输入
 

@@ -99,8 +99,8 @@ Flurry 的位置变参有一条极其优雅的核心设计：
 - 当你写 `...shape: Tuple<u32, u32, u32>` 时，`shape` 在函数体内就是一个 `Tuple<u32, u32, u32>`；
 - 当你写 `...items: T where T` 时，因为 `T` 是泛型类型参数，调用 `keep_inputs(7u32, true, "ready")` 会把 3 个不同类型的位置实参收集成 `(7u32, true, "ready")`，此时 `T` 就被精确推导为 `Tuple<u32, bool, str>`。没有任何类型擦除，没有任何动态装箱，三个位置各自保留 `u32`、`bool` 和 `str` 类型。
 
-> **🔍 语法小贴士：`Tuple<...>` 与 `(A, B)`**
-> 在 Flurry 中，元组类型既可以用简洁的括号语法写为 `(u32, bool)`，也可以用语言标准定义的 normal-form 类型函数写为 `Tuple<u32, bool>`（其签名为 `pure comptime fn Tuple<...Es: meta.List<Type>> -> Type`）。
+> **🔍 语法小贴士：元组类型 `Tuple<...>` 与元组值 `(a, b)`**
+> 在 Flurry 中，元组类型统一通过语言标准定义的 normal-form 类型函数写为 `Tuple<u32, bool>`（其签名为 `pure comptime fn Tuple<...Es: meta.List<Type>> -> Type`），而圆括号 `(7u32, true)` 用于构造或解构元组**值**（若写 `(u32, bool)`，则表示由两个 `Type` 值组成的编译期元组值，其类型为 `Tuple<Type, Type>`，而非元组类型本身）。
 > 在函数体内部，无论你的变参收集了多少个输入，**一个收集参数最终在函数体里都只有一个绑定名**（如 `shape` 或 `items`）。如果你想拆开它，只需用我们熟悉的 `let (width, height, depth) = shape;` 模式解构即可。
 
 让我们用位置变参写出清爽的 改进版本：

@@ -326,7 +326,7 @@ trait Drop { fn drop(*self); }
 struct Flag { value: bool }
 impl Copy for Flag {}
 
-pure fn duplicate(value: Flag) -> (Flag, Flag) {
+pure fn duplicate(value: Flag) -> Tuple<Flag, Flag> {
     (value, value)
 }
 ```

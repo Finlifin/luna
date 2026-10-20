@@ -166,7 +166,7 @@ pub derive fn by_representation_for_json for Serialize<.json> {
 }
 
 -- [第 3 层主力 B] 对异构元组使用 'tuple_enumerate + inline for 展开逐元素运行期操作。
-fn all_channels_ready(values: (A, B)) -> bool
+fn all_channels_ready(values: Tuple<A, B>) -> bool
 where A :- Ready, B :- Ready
 {
     var ok = true;
