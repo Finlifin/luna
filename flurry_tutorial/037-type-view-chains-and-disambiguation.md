@@ -16,14 +16,14 @@ let protocol: u32.as(DecimalCode).as(ProtocolCode) = 7;
 
 更别提，当一个结构体实现了带类型参数的泛型接口（比如 `Serialize<.json>` 和 `Serialize<.binary>`）时，我们又该如何优雅地在调用点切换或锁定接口视角？
 
-今天，我们将深入 `docs/type/receiver-adaptation.md` 与 `docs/type/member-projection.md`，彻底解开 **`.as(View)` 类型视角链**与**显式接口消歧**的奥秘。
+今天，我们将深入 `docs/type/receiver-adaptation.md` 与 `docs/type/member-projection.md`，解开 **`.as(View)` 类型视角链**与**显式接口消歧**的奥秘。
 
 ---
 
 ## 一、 `newtype` 的隔离墙与手动来回转换的局限
 
 在 Flurry 中，为了防止不同领域的 `u32` 混用，我们可以用 **`newtype Name = BaseType;`** 定义新的名义类型。
-请注意 `docs/type/receiver-adaptation.md` 中的一条重要规则：**`newtype` 的底层表示关系本身不会自动继承底层类型的成员，访问仍需要对应的双向 `cast` 关系。**
+请注意 `docs/type/receiver-adaptation.md` 中的一条重要规则：**`newtype` 的底层表示关系本身免于自动继承底层类型的成员，访问仍需要对应的双向 `cast` 关系。**
 
 在没有使用类型视角链之前，如果我们想在一个 `u32` 值上既用 `DecimalCode` 的方法、又用 `ProtocolCode` 的方法，写出来的 初始代码需要在表达式里一遍遍显式转换：
 
@@ -63,7 +63,7 @@ fn process_code(raw: u32) {
 
 ## 二、 给类型戴上“多副眼镜”——`A.as(B).as(C).as(D)` 类型视角链
 
-Flurry 给出了一个极其优雅的解法：**把 `.as(...)` 直接写在变量的类型标注上，构成一条“类型视角链（Type View Chain）”。**
+Flurry 给出了一个简洁清晰的解法：**把 `.as(...)` 直接写在变量的类型标注上，构成一条“类型视角链（Type View Chain）”。**
 
 来看看官方规范中的经典示例：
 
@@ -102,7 +102,7 @@ test {
 10 16
 ```
 
-这段代码虽然短，但背后藏着三条至关重要的语言设计法则。下面通过图示把它彻底拆开。
+这段代码虽然短，但背后藏着三条至关重要的语言设计法则。下面通过图示把它拆开。
 
 ### 核心心智模型：本体不变、后贴优先、星型直连（而非糖葫芦链）
 
@@ -117,10 +117,10 @@ test {
              │    └──────────────── [第 3 顺位视角] C 没有？再查 B 的成员。
              └───────────────────── [第 4 顺位 / 本体] 最后查本体 A 的成员。
 
-  ══════════════════════ ⚠️ 转换关系是“星型直连”，不是“链式传递”。 ══════════════════════
+  ══════════════════════ ⚠️ 转换关系是“星型直连”，并非“链式传递”。 ══════════════════════
 
   ❌ 错误理解（以为是串糖葫芦转换链）：
-     A ──(转)──► B ──(转)──► C ──(转)──► D   (错。B 和 C、C 和 D 之间根本不需要能互转。)
+     A ──(转)──► B ──(转)──► C ──(转)──► D   (错。B 和 C、C 和 D 之间全然无需能互转。)
 
   ✅ 真实语义（每个候选都直接与本体 A 建立双向 cast 关系）：
             ┌───► D  (要求 A 与 D 有双向 cast 关系；选中 D 时直接从 A 适配到 D。)
@@ -133,7 +133,7 @@ test {
 把这张图记在心里，你就瞬间理解了它的全部精髓：
 1. **变量的本体类型依然是 `A`**：在 `let protocol: u32.as(DecimalCode).as(ProtocolCode) = 7;` 中，`protocol` 绑定值本身的类型依然是 `u32`（所以你可以直接把 `7` 赋给它，也可以直接把它当 `u32` 用）。
 2. **查找顺序是“由外向内（后贴的眼镜最先看）”**：对于 `A.as(B).as(C).as(D)`，三层查找的第 1 层会严格按照 **`D -> C -> B -> A`** 的顺序考虑视角。因此，`protocol.category()` 先看最右边的 `ProtocolCode`，发现它有 `category()`，直接命中并返回 `16`。如果调用一个只有 `DecimalCode` 才有的方法（比如前面的 `decimal_base()`），`ProtocolCode` 里没找到，就会顺着视角链退到第 2 顺位的 `DecimalCode` 找到它。
-3. **每个视角都直接相对于本体 `A` 成立**：选中 `ProtocolCode` 时，编译器直接执行从原始类型 `u32` 到 `ProtocolCode` 的合法适配，**绝对不要求先从 `u32` 转成 `DecimalCode`、再从 `DecimalCode` 转成 `ProtocolCode`**。
+3. **每个视角都直接相对于本体 `A` 成立**：选中 `ProtocolCode` 时，编译器直接执行从原始类型 `u32` 到 `ProtocolCode` 的合法适配，**切勿求先从 `u32` 转成 `DecimalCode`、再从 `DecimalCode` 转成 `ProtocolCode`**。
 
 反之，如果你试图把一个跟本体 `u32` 根本没有双向 `cast` 关系的类型塞进视角链里，会发生什么？
 
@@ -142,10 +142,10 @@ struct UnrelatedPacket {
     id: u32,
 }
 
--- ❌ 编译期直接拒绝。
+-- ❌ 编译期直接报错。
 fn bad_view_chain() {
-    -- 错误。UnrelatedPacket 与本体 u32 之间不存在合法的双向 cast 关系，
-    -- 不能作为 u32 的类型视角候选。
+    -- 错误。UnrelatedPacket 与本体 u32 之间未存合法的双向 cast 关系，
+    -- 禁止充当 u32 的类型视角候选。
     let bad: u32.as(UnrelatedPacket) = 7;
 }
 ```
@@ -215,10 +215,10 @@ csv:  42
 ```
 
 > **🔍 语法小贴士：什么时候用 `pkt.serialize<.json>()`，什么时候必须用 `pkt.as(Serialize<.json>).serialize()`？**
-> - 如果当前只有一个接口 `Serialize` 提供 `serialize` 方法，只是它的接口参数 `format` 还没填，那么写 `pkt.serialize<.json>()` 非常简练：`.serialize` 先锁定开放来源 `Serialize`，`<.json>` 补齐该接口的参数，`()` 完成调用。
-> - 但是，如果有**两个完全不同的参数化接口**（比如 `Serialize<format>` 和 `Archive<mode>`）都有同名方法 `serialize`，编译器**绝不会靠“试着把 `<.json>` 填进去看谁不报错”来帮你猜接口来源**。此时必须写 `pkt.as(Serialize<.json>).serialize()` 先锁定接口身份。
+> - 如果当前只有一个接口 `Serialize` 提供 `serialize` 方法，只是它的接口参数 `format` 还没填，那么写 `pkt.serialize<.json>()` 并非常简练：`.serialize` 先锁定开放来源 `Serialize`，`<.json>` 补齐该接口的参数，`()` 完成调用。
+> - 但是，如果有**两个大相径庭的参数化接口**（比如 `Serialize<format>` 和 `Archive<mode>`）都有同名方法 `serialize`，编译器**不会靠“试着把 `<.json>` 填进去看谁零报错”来帮你猜接口来源**。此时必须写 `pkt.as(Serialize<.json>).serialize()` 先锁定接口身份。
 
-同样的道理，当你在类型层访问关联类型（Associated Type，比如智能指针 `MyPtr` 实现了 `Deref` 接口，其中定义了 `assoc Target: Type`）时，也可以通过 **`MyPtr.as(Deref).Target`** 精准指向 `Deref` 接口下的关联项，绝不会与该类型上其他同名关联项发生混淆。
+同样的道理，当你在类型层访问关联类型（Associated Type，比如智能指针 `MyPtr` 实现了 `Deref` 接口，其中定义了 `assoc Target: Type`）时，也可以通过 **`MyPtr.as(Deref).Target`** 精准指向 `Deref` 接口下的关联项，免与该类型上其他同名关联项发生混淆。
 
 ---
 
@@ -235,7 +235,7 @@ csv:  42
 
 ### 下一篇预告
 
-不知不觉中，我们的传感器监控系统已经积累了位向量解码器、浮点校准器、状态结构体、事件枚举、模板处理器和多视角协议码。
+潜移默化中，我们的传感器监控系统已经积累了位向量解码器、浮点校准器、状态结构体、事件枚举、模板处理器和多视角协议码。
 如果把这几千行代码全都塞在同一个 `main.fl` 文件里，任何人都要看眼花了。
 
 是时候把我们的项目拆分成一个工业级的多文件工程了：

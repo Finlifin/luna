@@ -5,6 +5,128 @@ use luna::frontend::{self, Artifact};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn nested_type_containers_preserve_members_and_relative_imports() {
+    let project = Project::new(&[("main.fl", "struct Outer {
+        struct Token {value:bool}
+        pub struct Inner {
+            use .Token;
+            pub fn token()->Token {Token {value:true}}
+            pub enum State {ready,closed}
+        }
+        pub fn read()->bool {Inner.token().value}
+    }
+    fn run()->bool {Outer.read() and (Outer.Inner.State.ready match {.ready=>true,.closed=>false})}")]);
+    assert_eq!(project.run(), Value::Bool(true));
+}
+
+#[test]
+fn enum_containers_admit_nested_types_without_adding_variants() {
+    let project = Project::new(&[(
+        "main.fl",
+        "enum Outer {
+        ready,
+        pub struct Payload {value:bool}
+        pub enum Inner {yes,no}
+        pub fn read()->bool {let item=Payload {value:true};item.value}
+    }
+    fn run()->bool {Outer.read() and (Outer.ready match {.ready=>true}) and
+        (Outer.Inner.yes match {.yes=>true,.no=>false})}",
+    )]);
+    assert_eq!(project.run(), Value::Bool(true));
+    let package = project.compile().unwrap();
+    let outer = package
+        .enums
+        .iter()
+        .find(|item| item.name == "Outer")
+        .unwrap();
+    assert_eq!(outer.variants.len(), 1);
+}
+
+#[test]
+fn nested_structs_capture_generic_parent_inputs() {
+    let source = "typealias Byte=.u8'builtin;
+        struct Outer where T {pub struct Inner where U {outer:T,inner:U}}
+        fn build()->Outer<bool>.Inner<Byte> {Outer<bool>.Inner<Byte> {outer:true,inner:9}}
+        fn run()->bool {let item=build();item.outer and item.inner == 9}";
+    assert_eq!(
+        Project::new(&[("main.fl", source)]).run(),
+        Value::Bool(true)
+    );
+    let wrong = source.replace("inner:9", "inner:false");
+    assert!(Project::new(&[("main.fl", &wrong)]).compile().is_err());
+}
+
+#[test]
+fn deeply_nested_types_keep_all_parent_arguments_and_self() {
+    let project = Project::new(&[(
+        "main.fl",
+        "typealias Byte=.u8'builtin;
+        struct Outer where T {
+            pub struct Middle where U {
+                pub struct Leaf where V {a:T,b:U,c:V,
+                    pub fn keep(self)->Self {self}
+                }
+            }
+        }
+        fn run()->bool {
+            let leaf=Outer<bool>.Middle<Byte>.Leaf<bool> {a:true,b:7,c:false};
+            let kept=leaf.keep();kept.a and kept.b == 7 and not kept.c
+        }",
+    )]);
+    assert_eq!(project.run(), Value::Bool(true));
+}
+
+#[test]
+fn nested_methods_keep_parent_value_parameters_in_distinct_instances() {
+    let project = Project::new(&[(
+        "main.fl",
+        "struct Outer where enabled:bool {
+        pub struct Item {pub fn active(self)->bool {enabled}}
+    }
+    fn run()->bool {
+        let on=Outer<true>.Item {};let off=Outer<false>.Item {};
+        on.active() and not off.active()
+    }",
+    )]);
+    assert_eq!(project.run(), Value::Bool(true));
+}
+
+#[test]
+fn nested_methods_use_parent_trait_contracts_without_weakening_callers() {
+    let source = "trait Flag {fn flag(self)->bool;}
+        impl Flag for bool {fn flag(self)->bool {self}}
+        struct Outer where T:-Flag {
+            pub struct Inner {value:T,
+                pub fn read(self)->bool {self.value.flag()}
+            }
+        }
+        fn run()->bool {let item=Outer<bool>.Inner {value:true};item.read()}";
+    assert_eq!(
+        Project::new(&[("main.fl", source)]).run(),
+        Value::Bool(true)
+    );
+    let invalid = source.replace(
+        "Outer<bool>.Inner {value:true}",
+        "Outer<.u8'builtin>.Inner {value:7}",
+    );
+    assert!(Project::new(&[("main.fl", &invalid)]).compile().is_err());
+}
+
+#[test]
+fn nested_type_visibility_is_checked_at_each_projection() {
+    for declaration in ["private struct Hidden {}", "private enum Hidden {value}"] {
+        let source = format!(
+            "mod secret {{pub struct Outer {{pub struct Inner {{{declaration}}}}}}}
+            fn consume(value:secret.Outer.Inner.Hidden) {{}} fn run()->bool {{true}}"
+        );
+        assert!(
+            Project::new(&[("main.fl", &source)]).compile().is_err(),
+            "{declaration}"
+        );
+    }
+}
 struct Project(PathBuf);
 impl Project {
     fn new(files: &[(&str, &str)]) -> Self {
@@ -57,6 +179,38 @@ impl Drop for Project {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+#[test]
+fn inherited_pattern_outputs_resolve_parent_paths_in_the_declaring_file() {
+    let project = Project::new(&[
+        (
+            "main.fl",
+            "use rules.Child;use rules.Flag;fn run()->bool {const p=Flag.as(Child).pattern();let ~<p> = true;value}",
+        ),
+        (
+            "rules.fl",
+            "pub trait Child :- base.Parent<bool> {} pub struct Flag {}
+            impl base.Parent<bool> for Flag {} impl Child for Flag {}",
+        ),
+        (
+            "base.fl",
+            "pub trait Parent where T {pub comptime fn pattern()-><T -| value:T> {'<value>}}",
+        ),
+    ]);
+    assert_eq!(project.run(), Value::Bool(true));
+}
+
+#[test]
+fn trait_pattern_output_names_follow_cross_file_contracts() {
+    let project = Project::new(&[
+        ("main.fl", "use facade.Rule;use origin.Flag;
+            fn run()->bool {const p=Flag.as(Rule).pattern();let ~<p> = true;value}"),
+        ("facade.fl", "pub use origin.Rule;"),
+        ("origin.fl", "pub trait Rule {pub comptime fn pattern()-><bool -| value:bool>;}
+            pub struct Flag {} impl Rule for Flag {comptime fn pattern()-><bool -| value:bool> {'<value>}}"),
+    ]);
+    assert_eq!(project.run(), Value::Bool(true));
 }
 
 #[test]
@@ -949,4 +1103,49 @@ fn library_frontend_errors_retain_diagnostic_locations_and_causes() {
     .compile()
     .unwrap_err();
     assert!(error.contains("child.fl:1:"), "{error}");
+}
+
+#[test]
+fn lexical_nested_member_projection_keeps_parent_captures() {
+    let source = "struct Outer where T {
+        value:T,
+        pub struct Inner where U {pub typealias Result = T;}
+        pub fn read(self)->Inner<bool>.Result {const R=Inner<bool>.Result;let value:R=self.value;value}
+    }
+    fn run()->bool {
+        let flag=Outer<bool> {value:true};
+        let byte=Outer<.u8'builtin> {value:7};
+        flag.read() and byte.read() == 7
+    }";
+    assert_eq!(
+        Project::new(&[("main.fl", source)]).run(),
+        Value::Bool(true)
+    );
+    let invalid = source.replace("let value:R=self.value", "let value:R=false");
+    assert!(Project::new(&[("main.fl", &invalid)]).compile().is_err());
+}
+
+#[test]
+fn lexical_nested_projection_carries_multiple_ancestors_and_value_domains() {
+    let source = "newtype Indexed<T,U,value:T> = bool;
+        struct Outer where T, value:T {
+            pub struct Middle where U {
+                pub struct Inner where V {pub typealias Result = Indexed<T,U,value>;}
+                pub fn check(self)->bool {
+                    const R=Inner<bool>.Result;
+                    const equal=R == Indexed<T,U,value>;equal
+                }
+            }
+        }
+        fn run()->bool {
+            let a=Outer<.u8'builtin,7>.Middle<bool> {};
+            let b=Outer<.u8'builtin,9>.Middle<.u16'builtin> {};
+            a.check() and b.check()
+        }";
+    assert_eq!(
+        Project::new(&[("main.fl", source)]).run(),
+        Value::Bool(true)
+    );
+    let invalid = source.replace("Outer<.u8'builtin,9>", "Outer<.u8'builtin,false>");
+    assert!(Project::new(&[("main.fl", &invalid)]).compile().is_err());
 }

@@ -9,6 +9,33 @@ fn rigid(local: u32, sort: Sort) -> Term {
         sort,
     }
 }
+
+#[test]
+fn completed_value_domains_can_use_captured_type_suffixes() {
+    let parameters = [id(1), id(2)];
+    let domains = [rigid(2, Sort::Type), Term::Primitive(P::Type)];
+    let valid = [Term::Bool(true), Term::Primitive(P::Bool)];
+    nir::validate_declaration_arguments(&parameters, &domains, &valid, &mut 1000).unwrap();
+    for arguments in [
+        [Term::Bool(true), Term::Primitive(P::U8)],
+        [Term::Bool(true), Term::Bool(false)],
+        [Term::Primitive(P::Bool), Term::Primitive(P::Type)],
+    ] {
+        assert!(
+            nir::validate_declaration_arguments(&parameters, &domains, &arguments, &mut 1000)
+                .is_err()
+        );
+    }
+    assert!(matches!(
+        nir::validate_declaration_arguments(&parameters, &domains, &valid, &mut 0),
+        Err(nir::NominalAdmissionError::Budget)
+    ));
+    // Forward substitution cannot manufacture evidence for a symbolic value.
+    let symbolic = [rigid(3, Sort::ComptimeValue), Term::Primitive(P::Bool)];
+    assert!(
+        nir::validate_declaration_arguments(&parameters, &domains, &symbolic, &mut 1000).is_err()
+    );
+}
 fn record(domains: Vec<Term>) -> Struct {
     Struct {
         parameter_types: domains,
@@ -29,6 +56,46 @@ fn record(domains: Vec<Term>) -> Struct {
             ),
         ],
     }
+}
+
+#[test]
+fn borrowed_value_layouts_require_matching_declarations_and_domains() {
+    use nir::normal_forms::{
+        NominalValueDeclaration as D, nominal_value_fields_with_lookup as fields,
+    };
+    let definition = record(vec![Term::Primitive(P::Type), Term::Primitive(P::Bool)]);
+    let lookup = |_: DeclarationId, fuel: &mut usize| {
+        *fuel = fuel.checked_sub(1)?;
+        Some(D::Struct(&definition))
+    };
+    let ty = Term::Nominal {
+        declaration: id(0),
+        arguments: vec![Term::Primitive(P::U8), Term::Bool(true)],
+    };
+    assert_eq!(
+        fields(&ty, None, &mut 1000, &lookup).unwrap(),
+        vec![
+            Term::Primitive(P::U8),
+            Term::NormalForm {
+                head: id(3),
+                sort: Sort::Type,
+                arguments: vec![Term::Bool(true)]
+            }
+        ]
+    );
+    assert!(fields(&ty, Some(0), &mut 1000, &lookup).is_none());
+    assert!(fields(&ty, None, &mut 0, &lookup).is_none());
+    let wrong_identity = Term::Nominal {
+        declaration: id(5),
+        arguments: vec![Term::Primitive(P::U8), Term::Bool(true)],
+    };
+    assert!(fields(&wrong_identity, None, &mut 1000, &lookup).is_none());
+    let wrong_domain = Term::Nominal {
+        declaration: id(0),
+        arguments: vec![Term::Primitive(P::U8), Term::Unit],
+    };
+    assert!(fields(&wrong_domain, None, &mut 1000, &lookup).is_none());
+    assert!(fields(&ty, None, &mut 1000, &|_, _| None).is_none());
 }
 
 #[test]
@@ -156,7 +223,7 @@ fn phase_validation_checks_unused_nominal_parameter_domains() {
     package.structs.push(record(vec![Term::Primitive(P::Type)]));
     assert_eq!(
         nir::phases::validate(&package).unwrap_err().message,
-        "invalid struct parameter domains"
+        "invalid declaration parameter domains"
     );
     package.structs[0].parameter_types = vec![Term::Primitive(P::Type), Term::Primitive(P::Bool)];
     nir::phases::validate(&package).unwrap();

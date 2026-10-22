@@ -1,6 +1,6 @@
 # Flurry 演进手记 (071)：在定义时抓出泛型 Bug——Normalization（定义端符号检查）与 Instantiation（调用端实例化）
 
-如果你维护过大型 C++ 模板库或者 Zig 的 `comptime` 泛型代码，你一定经历过这种令人困惑的“定时炸弹”时刻：
+如果你维护过大型 C++ 模板库或者 Zig 的 `comptime` 泛型代码，你一定经历过这种令人困惑的“潜在隐患”时刻：
 你写好了一个泛型算子函数，跑了一遍 `cargo build` / `zig build`，编译器绿灯全亮，你高高兴兴地发布了新版本。结果三天后，下游用户在用某个具体类型调用你的函数时，编译器突然在你的库源码第 284 行爆出一百行错误——原来你在某个分支里手滑把变量名拼错了，或者调用了一个根本没在约束里声明的方法。
 
 为什么编译器在你写下这个函数的时候不提醒你？
@@ -13,13 +13,13 @@
 
 ---
 
-## “不调用就不报错”的 Duck-Typing 泛型之痛
+## “跳过调用就零报错”的 Duck-Typing 泛型之痛
 
 假设我们在写张量库的一个泛型缩放算子 `scale_first`。我们在 `where` 子句里只写了 `T :- Copy, n: usize, requires n > 0usize`，却忘了声明 `T :- Mul<T, Output = T>`，甚至还在函数体里写了一个明显的错误操作：
 
 ```flurry
 -- ❌ 设想在 Duck-Typing 模板语言中：
--- 只要没人调用 scale_first，这段漏写约束的代码居然能安静地“编译通过”。
+-- 只要没人调用 scale_first，这段漏写约束的代码却能安静地“编译通过”。
 fn scale_first(values: Array<T, n>, factor: T) -> T
 where
     T :- Copy,
@@ -31,7 +31,7 @@ where
 }
 ```
 
-对于一个严肃的系统级与 AI 基础设施语言来说，“不调用就不检查”是不可接受的。库作者必须在**写下函数定义的那一刻**，就知道函数体是否严格遵守了 `where` 子句所承诺的契约边界。
+对于一个严肃的系统级与 AI 基础设施语言来说，“跳过调用就跳过检查”实属违规。库作者必须在**写下函数定义的那一刻**，就知道函数体是否严格遵守了 `where` 子句所承诺的契约边界。
 
 ---
 
@@ -39,7 +39,7 @@ where
 
 在 Flurry 中，**无论是运行时函数（`fn`）还是编译期函数（`comptime fn`），在定义时都必须立刻经历第一阶段：Normalization（定义端规范化与符号检查）。**
 
-你可能会好奇：在定义 `first_element(values: Array<T, n>)` 的时候，编译器还不知道 `T` 具体是 `f32` 还是 `i32`，也不知道 `n` 具体是 `4` 还是 `128`，它怎么检查函数体呢？
+你可能会好奇：在定义 `first_element(values: Array<T, n>)` 的时候，编译器还无从得知 `T` 具体是 `f32` 还是 `i32`，也无从得知 `n` 具体是 `4` 还是 `128`，它怎么检查函数体呢？
 
 答案是：**符号化求值（Symbolic Evaluation）与类型命题收集（PTC）。**
 
@@ -78,12 +78,12 @@ where
 +-------------------------------------------------------------------------+
 ```
 
-不仅如此，Normalization 还会对函数签名与函数体中那些**已经具备完整编译期输入**的子表达式直接归约化简，而把依赖未知参数 `T`、`n` 的部分保留为经过类型与契约验证的**残余形式（Residual Form）**。
+非但如此，Normalization 还会对函数签名与函数体中那些**已经具备完整编译期输入**的子表达式直接归约化简，而把依赖未知参数 `T`、`n` 的部分保留为经过类型与契约验证的**残余形式（Residual Form）**。
 
 来看一个被 Normalization 在**定义当场**直接拦截的例子：
 
 ```flurry
--- ❌ 编译期在定义处直接拒绝。（哪怕全项目没有任何地方调用它）
+-- ❌ 编译期在定义处直接报错。（哪怕全项目没有任何地方调用它）
 fn bad_generic_add(a: T, b: T) -> T
 where
     T :- Copy
@@ -105,7 +105,7 @@ where
 
 当调用者写下具体调用（例如传入 `T = f32, n = 4usize`）时，编译器启动 **Instantiation**：
 1. **代入具体实参**：把定义端保留的符号参数 `T`、`n` 替换为具体的 `f32` 和 `4usize`；
-2. **继续完成编译期计算**：把定义端因为缺少具体值而挂起的残余编译期表达式彻底算完；
+2. **继续完成编译期计算**：把定义端因为缺少具体值而挂起的残余编译期表达式算完；
 3. **兑现 `assumes` 谓词与 Coherence 检查**：对具体类型和具体编译期值执行最终验证，并生成针对该具体类型的特化实例。
 
 为了让你直观看到 **Normalization（定义端）** 与 **Instantiation（调用端）** 是如何无缝接力的，我们来看看 Flurry 中专门连接这两个阶段的精妙机制——**`comptime predicate` 与 `assumes`**。
@@ -165,7 +165,7 @@ fn test_instantiation(handle: RawHandle) {
     -- ✅ i32 同时满足 Clone 与 Debug，Instantiation 阶段谓词求值为 true
     let ok = inspect_tensor_elem(42i32);
 
-    -- ❌ 编译期在调用端（Instantiation 阶段）直接拒绝。
+    -- ❌ 编译期在调用端（Instantiation 阶段）直接报错。
     -- 代入 T = RawHandle 执行 clone_and_debug(RawHandle) 得到 false，
     -- 违反了 inspect_tensor_elem 的 assumes clone_and_debug(T) 契约。
     let bad = inspect_tensor_elem(handle);
@@ -173,9 +173,9 @@ fn test_instantiation(handle: RawHandle) {
 ```
 
 > **💡 核心心智模型：Normalization 与 Instantiation 适用于所有函数。**
-> 在 Flurry 中，不要把 Normalization/Instantiation 和“编译期函数/运行时函数”混为一谈：
-> - **不管是 `comptime fn` 还是普通的运行时 `fn`**，只要它有声明，在定义时都会经历 **Normalization**，在被具体实参调用时都会经历 **Instantiation**。
-> - Normalization 保证了**定义端不留暗病**（符号契约自洽）；Instantiation 保证了**调用端彻底特化与兑现**（把依赖具体实参的编译期计算算到底）。
+> 在 Flurry 中，切勿将 Normalization/Instantiation 和“编译期函数/运行时函数”混为一谈：
+> - **无论是 `comptime fn` 还是普通的运行时 `fn`**，只要它有声明，在定义时都会经历 **Normalization**，在被具体实参调用时都会经历 **Instantiation**。
+> - Normalization 保证了**定义端不留暗病**（符号契约自洽）；Instantiation 保证了**调用端特化与兑现**（把依赖具体实参的编译期计算算到底）。
 
 ---
 
@@ -193,7 +193,7 @@ fn test_instantiation(handle: RawHandle) {
 既然在**Normalization（定义端）** 中，编译器已经尽量去计算编译期表达式并做符号检查了，那么问题来了：
 
 如果我们在写一个**动态的 `comptime fn`**（比如根据一段格式化字符串 `"Tensor({}): shape={}"` 动态拼装出一个元组类型），在定义这个 `comptime fn` 的时候，格式化字符串参数 `fmt_str` 还是未知的符号变量。
-如果编译器在定义端用过于严苛的规则去检查它，会不会把本该等到具体字符串传入后才能算出来的类型操作给误杀掉？
+如果编译器在定义端用过于严苛的规则去检查它，是否会把本该等到具体字符串传入后才能算出来的类型操作给误杀掉？
 反过来，如果在一个普通的运行时函数签名里，某个参数的类型必须调用一个只有在调用端拿到具体值后才能算出来的类型函数 `Selected(flag)`，我们又该如何告诉编译器“**请把这个类型表达式的具体归约推迟到 Instantiation 阶段**”？
 
 下一篇 **`072-ordinary-loose-reduction-and-defer.md`**，我们将揭晓与“执行阶段（comptime/runtime）”正交的另一个核心维度：**Ordinary（严格检查） vs Loose（宽松检查）**，以及专门用来精细控制求值时机的 **`defer` 延迟表达式**。

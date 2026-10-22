@@ -675,6 +675,7 @@ fn within_input_limits(input: Input<'_>, limit: usize, fuel: &mut usize) -> bool
                     }
                 }
                 Term::Tuple(items)
+                | Term::ClosureContextValue(items)
                 | Term::TypeListValue(items)
                 | Term::TypeListConcat(items)
                 | Term::TupleValue(items)
@@ -699,6 +700,13 @@ fn within_input_limits(input: Input<'_>, limit: usize, fuel: &mut usize) -> bool
                     for parameter in parameters {
                         pending.push((Input::Term(&parameter.ty), depth + 1));
                     }
+                }
+                Term::ContextualClosure { context, signature } => {
+                    if room < 2 {
+                        return false;
+                    }
+                    pending.push((Input::Term(context), depth + 1));
+                    pending.push((Input::Term(signature), depth + 1));
                 }
                 Term::Closure {
                     environment,
@@ -762,6 +770,7 @@ fn subterms(term: &Term) -> Vec<&Term> {
             fields.iter().map(|(_, ty)| ty).collect()
         }
         Term::Tuple(items)
+        | Term::ClosureContextValue(items)
         | Term::TypeListValue(items)
         | Term::TypeListConcat(items)
         | Term::TupleValue(items)
@@ -777,6 +786,9 @@ fn subterms(term: &Term) -> Vec<&Term> {
             .map(|p| &p.ty)
             .chain(std::iter::once(result.as_ref()))
             .collect(),
+        Term::ContextualClosure { context, signature } if !has_bound(term) => {
+            vec![context, signature]
+        }
         Term::Closure {
             environment,
             signature,
@@ -806,11 +818,15 @@ fn has_bound(term: &Term) -> bool {
         Term::Function { parameters, result } => {
             parameters.iter().any(|p| has_bound(&p.ty)) || has_bound(result)
         }
+        Term::ContextualClosure { context, signature } => {
+            has_bound(context) || has_bound(signature)
+        }
         Term::Closure {
             environment,
             signature,
         } => environment.iter().any(has_bound) || has_bound(signature),
         Term::Tuple(items)
+        | Term::ClosureContextValue(items)
         | Term::TypeListValue(items)
         | Term::TypeListConcat(items)
         | Term::TupleValue(items)

@@ -2,19 +2,19 @@
 
 在上一回（076）中，我们学会了用 `Type.size_of(T)` 和 `Type.repr_of(T)` 透视张量元素与 DMA 描述符的物理骨骼，也留了一个关乎硬件生死的悬念：**默认结构体布局不保证字段顺序与无填充紧凑排列**。如果我们的 DMA 硬件控制器要求描述符严格紧凑（`packed`），要求枚举状态码底层用 `u8` 存储（`base_type u8`），要求跨语言回调遵循 C ABI（`abi(.c)`），该怎么向编译器下达指令？
 
-在许多传统语言里，“属性（Attributes / Annotations）”是一门寄居在主语言之外的“小方言”——比如特制的括号 `#[...]` 或 `@...`，里面的参数既不是普通表达式，也不能用普通变量保存、组合或通过普通作用域规则查找。
+在许多传统语言里，“属性（Attributes / Annotations）”是一门寄居在主语言之外的“小方言”——比如特制的括号 `#[...]` 或 `@...`，里面的参数既非普通表达式，亦无法用普通变量保存、组合或通过普通作用域规则查找。
 
-而在 Flurry 的双层类型理论（2LTT）视角下，答案异常干脆：**元数据（Metadata）根本不需要发明一套法外语法，它本来就是编译期宇宙（$U_1$）里的正经 `Object` 值。** 今天，我们就来拆解 Flurry 极简而强大的 `^expr` 前缀属性、`.id expr` 内部配置以及内置 `attrs` 包。
+而在 Flurry 的双层类型理论（2LTT）视角下，答案异常干脆：**元数据（Metadata）全然无需发明一套法外语法，它本来就是编译期宇宙（$U_1$）里的正经 `Object` 值。** 今天，我们就来拆解 Flurry 简洁而强大的 `^expr` 前缀属性、`.id expr` 内部配置以及内置 `attrs` 包。
 
 ---
 
-## 一、 问题背景与设计思路：为什么拒绝“宏方言式”属性？
+## 一、 问题背景与设计思路：为什么报错“宏方言式”属性？
 
 假设我们要为张量 DMA 引擎定义一组硬件寄存器帧和状态码。如果属性是一套封闭的特殊标签（传统伪代码体验），我们会立刻撞上三个核心问题：
 
 1. **无法复用与参数化**：如果 20 个硬件结构体都需要同一套对齐与序列化配置，你没法把这套配置写成一个普通编译期变量或函数返回值去复用。
-2. **名字查找搞特殊化**：特殊属性标签往往有自己独立的命名空间，你不知道某个名字到底来自标准库、第三方库还是当前作用域。
-3. **外部修饰与内部自描述割裂**：有时候我们想在函数头顶挂一个外部修饰（如 `^attrs.inline(.always)`），有时候又想在 `struct` 或模块大括号内部声明它自身的固有配置（如 `.packed true`）。
+2. **名字查找搞特殊化**：特殊属性标签往往有自己独立的命名空间，你无从得知某个名字到底来自标准库、第三方库还是当前作用域。
+3. **外部修饰与内部自描述割裂**：有时候我们想在函数头顶挂一个外部修饰（如 `^attrs.abi(.c)`），有时候又想在 `struct` 或模块大括号内部声明它自身的固有配置（如 `.packed true`）。
 
 在 Flurry 中，这一切被统一成了三种清晰的语法构件：
 
@@ -30,7 +30,7 @@
 
 让我们直接用 Flurry 的真实语法来编写 DMA 硬件紧凑帧 `PackedPair`、单字节状态码 `SmallCode` 以及 C ABI 导出函数。
 
-注意看：`.packed true` 写在 `struct PackedPair` 的大括号里面，但它**绝不是一个运行期数据字段**，而是编译期配置项（Configuration）。
+注意看：`.packed true` 写在 `struct PackedPair` 的大括号里面，但它**并非一个运行期数据字段**，而是编译期配置项（Configuration）。
 
 ```flurry
 -- 1. 在 struct 内部使用 `.id expr` 配置紧凑布局
@@ -48,7 +48,6 @@ enum SmallCode {
 }
 
 -- 3. 使用前缀 `^expr` 挂载内置 attrs 包生成的属性对象
-^attrs.inline(.always)
 ^attrs.abi(.c)
 fn exported_add(lhs: i32, rhs: i32) -> i32 {
     lhs + rhs
@@ -68,7 +67,7 @@ test {
 
 > **🔍 语法小贴士：`.packed true,` 与普通字段 `first: u8,` 的视觉区分**
 > - 普通结构体字段用冒号 `id: Type` 声明运行期存储槽位；
-> - 内部配置用点号开头加空格 `.id expr,` 声明编译期元数据。它不会在实例中占用任何运行期字段槽位，而是直接把 `{ packed: true }` 写入外层 `PackedPair` 的元数据字典中，并可通过 `meta.attrs_of(PackedPair)` 反射读取。
+> - 内部配置用点号开头加空格 `.id expr,` 声明编译期元数据。它免于在实例中占用任何运行期字段槽位，而是直接把 `{ packed: true }` 写入外层 `PackedPair` 的元数据字典中，并可通过 `meta.attrs_of(PackedPair)` 反射读取。
 
 ---
 
@@ -84,7 +83,7 @@ test {
 
 $$\text{multi\_element} \rightarrow \text{base\_element} \mid \text{\texttt{\textasciicircum}}expr\ \text{multi\_element}$$
 
-这意味着你不仅可以在顶层声明前连写 `^a ^b`，在结构体字段或参数前同样可以挂载任意多个前缀属性。
+这意味着你非但可以在顶层声明前连写 `^a ^b`，在结构体字段或参数前同样可以挂载任意多个前缀属性。
 
 ### 3.2 结合顺序与覆盖核心规则：从内向外应用，外层覆盖内层
 
@@ -104,7 +103,7 @@ $$\text{multi\_element} \rightarrow \text{base\_element} \mid \text{\texttt{\tex
   +-------------------------------------------------------------------+
 ```
 
-记住这条极其符合直觉的工程核心规则：
+记住这条契合直觉的工程核心规则：
 1. **距离目标越近（越靠内）的元数据越先应用（打底）**；
 2. **距离目标越远（越靠外）的前缀属性越晚应用，若遇到同名键则覆盖（Override）先前的值**。
 3. 因此：**内部配置 `.id expr` 先于外部前缀 `^expr` 应用；紧贴目标的内层 `^expr` 先于外层 `^expr` 应用**。最终外层前缀属性拥有最高覆盖权。
@@ -124,8 +123,10 @@ struct Configured {
 }
 
 test {
-    assumes meta.attrs_of(annotated).get(.some_attr, comptime Integer) == 1;
-    assumes meta.attrs_of(Configured).get(.some_attr, comptime Integer) == 1;
+    comptime {
+        assumes meta.attrs_of(annotated).get(.some_attr, Integer) == 1;
+        assumes meta.attrs_of(Configured).get(.some_attr, Integer) == 1;
+    }
 }
 ```
 
@@ -135,13 +136,13 @@ test {
 
 ## 四、 进阶：普通词法作用域查找与 `attrs` 内置包
 
-很多从其他语言转过来的同学会问：“我在 `^` 后面写名字时，编译器是不是会自动去 `attrs` 包里找？”
+很多从其他语言转过来的同学会问：“我在 `^` 后面写名字时，编译器是否会自动去 `attrs` 包里找？”
 
-**绝对不会。** 这正是 Flurry 属性系统最纯粹的地方：`^expr` 里的 `expr` 就是**普普通通的编译期表达式**，遵循 100% 标准的词法作用域（Lexical Lookup）规则。
-- 内置包 `attrs`（提供 `attrs.abi`、`attrs.inline`、`attrs.align`、`attrs.cold`、`attrs.target_feature`、`attrs.derivation`、`attrs.diagnostic` 等分类工厂）之所以能直接写 `^attrs.abi(.c)`，仅仅是因为 `attrs` 是预导入的内置包名。
-- 你可以用 `use` 给它起别名，可以把属性对象存进局部 `let` 变量，甚至如果当前作用域有一个同名局部变量，它会**正常遮蔽（Shadow）**导入的名字。
+**并非如此。** 这正是 Flurry 属性系统最纯粹的地方：`^expr` 里的 `expr` 就是**普普通通的编译期表达式**，遵循 100% 标准的词法作用域（Lexical Lookup）规则。
+- 内置包 `attrs`（提供 `attrs.abi`、`attrs.derivation`、`attrs.effects`、`attrs.compilation`、`attrs.comptime_phase`、`attrs.quote_fn_template` 等属性构造接口）之所以能直接写 `^attrs.abi(.c)`，仅仅是因为 `attrs` 是预导入的内置包名。
+- 你可以用 `use` 给它起别名，可以把属性对象存进局部 `const` 绑定，甚至如果当前作用域有一个同名局部绑定，它会**正常遮蔽（Shadow）**导入的名字。
 
-来看 中普通作用域查找与局部遮蔽的实证：
+来看普通作用域查找与局部遮蔽的实证：
 
 ```flurry
 use attrs.derivation.default as default_strategy;
@@ -161,19 +162,21 @@ fn check_lexical_shadowing() {
         retries: u32,
     }
 
-    assumes meta.attrs_of(LocalConfig).get(.custom_tag, comptime Integer) == 42;
+    comptime {
+        assumes meta.attrs_of(LocalConfig).get(.custom_tag, Integer) == 42;
+    }
 }
 ```
 
-那么，如果有人在 `^expr` 后面写了一个求值结果不是编译期 `Object` 的表达式，会发生什么？
+那么，如果有人在 `^expr` 后面写了一个求值结果并非编译期 `Object` 的表达式，会发生什么？
 
 ```flurry
--- ❌ 编译期直接拒绝：`^expr` 要求 expr 在编译期求值为元数据 Object，裸整数 123 不是合法属性对象
+-- ❌ 编译期直接报错：`^expr` 要求 expr 在编译期求值为元数据 Object，裸整数 123 并非合法属性对象
 ^123
 fn invalid_attribute_target() {}
 ```
 
-编译器会干脆利落地报错：属性前缀期待一个编译期键值对象，而不是一个孤零零的整数。
+编译器会干脆利落地报错：属性前缀期待一个编译期键值对象，而非一个孤零零的整数。
 
 ---
 
@@ -182,9 +185,9 @@ fn invalid_attribute_target() {}
 | 特性维度 | Flurry 的设计抉择 | 解决的工程问题 |
 | :--- | :--- | :--- |
 | **前缀属性 `^expr`** | `expr` 在编译期求值为 `Object` 并附加到目标 | 无需特殊属性宏方言，支持函数调用、别名与组合 |
-| **内部配置 `.id expr`** | 在定义体内部向宿主写入元数据（非运行期字段） | 模块、文件与类型可在内部优雅地自描述布局和配置 |
+| **内部配置 `.id expr`** | 在定义体内部向宿主写入元数据（并非运行期字段） | 模块、文件与类型可在内部优雅地自描述布局和配置 |
 | **覆盖优先级** | 内部 `.id expr` $\rightarrow$ 内层 `^expr` $\rightarrow$ 外层 `^expr`（后者覆盖前者） | 允许外层装饰器自然覆盖内层默认配置 |
-| **名字查找规则** | 100% 遵循普通词法作用域查找，不给 `attrs` 开后门 | 杜绝幽灵命名空间，支持 `use ... as` 与局部绑定 |
+| **名字查找规则** | 100% 遵循普通词法作用域查找，不给 `attrs` 开后门 | 避免幽灵命名空间，支持 `use ... as` 与局部绑定 |
 | **反射读取接口** | `meta.attrs_of(target).get(.key, ExpectedType)` | 编译期元编程可以类型安全地读取任何目标的元数据 |
 
 ---
@@ -193,6 +196,6 @@ fn invalid_attribute_target() {}
 
 在最近两回中，我们频繁写出了 `pure comptime fn`、`Type.size_of(T)`、`defer SelectType(wide)` 这样的编译期计算。不知你有没有思考过编译器底层的两个灵魂问题：
 1. 为什么 `pure comptime fn PairOf(T: Type) -> Type` 敢保证“两次传入 `u32` 一定返回同一个类型身份”？如果一个编译期函数悄悄读取了外部可变状态或耗尽了步数预算，编译器怎么防止缓存被污染？
-2. 当编译器检查一个带有未决参数的函数签名 `fn keep_selected(comptime wide: bool, value: defer SelectType(wide))` 时，`wide` 的具体值还不知道，编译器到底把什么东西**冻结（Freeze）**存进了函数定义里，又把什么东西挡在了门外？
+2. 当编译器检查一个带有未决参数的函数签名 `fn keep_selected(comptime wide: bool, value: defer SelectType(wide))` 时，`wide` 的具体值还无从得知，编译器到底把什么东西**冻结（Freeze）**存进了函数定义里，又把什么东西挡在了门外？
 
 下一回 **《Flurry 演进手记 (078)：当编译期计算遇到副作用与缓存——Comptime 纯度、确定性 memoization 与冻结边界》**，我们将深入编译器前端 Elaboration 与 Comptime 交织运转的心脏。

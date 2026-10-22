@@ -468,3 +468,72 @@ fn nominal_domains_preserve_value_prefix_sorts_and_instances() {
         assert_eq!(result.is_ok(), expected);
     }
 }
+
+#[test]
+fn residual_normal_inputs_require_exact_domains_without_weakening_closed_admission() {
+    let symbol = Term::Rigid {
+        declaration: id(10),
+        sort: Sort::ComptimeValue,
+    };
+    let descriptor = Head {
+        role: nir::normal_forms::Role::Opaque,
+        declaration: id(0),
+        requirements: vec![],
+        parameters: vec![
+            parameter(1, Kind::Type, primitive(P::Type)),
+            parameter(
+                2,
+                Kind::Value,
+                record(
+                    "flag",
+                    Term::Rigid {
+                        declaration: id(1),
+                        sort: Sort::Type,
+                    },
+                ),
+            ),
+        ],
+    };
+    let inputs = vec![primitive(P::Bool), value("flag", symbol.clone())];
+    let check = |inputs: &[Term], fuel: &mut usize| {
+        descriptor.check_arguments_with_evidence_budgeted(
+            inputs,
+            |_| false,
+            |_, _, _| None,
+            |input, domain| input == &symbol && domain == &primitive(P::Bool),
+            fuel,
+        )
+    };
+    assert!(check(&inputs, &mut 10000).is_ok());
+    assert!(descriptor.check_closed_arguments(&inputs).is_err());
+    assert!(
+        check(
+            &[primitive(P::Char), value("flag", symbol.clone())],
+            &mut 10000
+        )
+        .is_err()
+    );
+    let unknown = Term::Rigid {
+        declaration: id(11),
+        sort: Sort::ComptimeValue,
+    };
+    assert!(check(&[primitive(P::Bool), value("flag", unknown)], &mut 10000).is_err());
+    assert!(check(&inputs, &mut 0).is_err());
+    assert!(check(&inputs, &mut 10000).is_ok());
+    // Domain authority never changes the sort of a declaration input.
+    let types = Head {
+        parameters: vec![parameter(1, Kind::Type, primitive(P::Type))],
+        ..descriptor
+    };
+    assert!(
+        types
+            .check_arguments_with_evidence_budgeted(
+                &[symbol],
+                |_| false,
+                |_, _, _| None,
+                |_, _| true,
+                &mut 10000
+            )
+            .is_err()
+    );
+}

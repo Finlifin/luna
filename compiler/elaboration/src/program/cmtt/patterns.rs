@@ -79,22 +79,60 @@ impl Checker<'_, '_> {
         self.validate_pattern_code(code, span)
     }
 
+    pub(in crate::program::cmtt) fn pattern_interface_context(
+        interface: &PatternInterface,
+    ) -> crate::calls::InputContext {
+        use crate::calls::InputContext as C;
+        C::Tuple(
+            std::iter::once(C::Known(interface.subject.clone()))
+                .chain(interface.outputs.values().cloned().map(C::Known))
+                .collect(),
+        )
+    }
+
     pub(in crate::program::cmtt) fn pattern_input_value(
         &mut self,
         value: &Expr<'_>,
         interface: &PatternInterface,
+        subject_hint: Option<&Term>,
+        interface_context: Option<&crate::calls::InputContext>,
     ) -> Result<Arc<PatternCode>, Error> {
+        let full_context;
+        let interface_context = match interface_context {
+            Some(context) => Some(context),
+            None => {
+                full_context = Self::pattern_interface_context(interface);
+                Some(&full_context)
+            }
+        };
         match &value.kind {
             H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => self
                 .pattern_codes
                 .get(&local(*id))
                 .cloned()
                 .ok_or_else(|| error(value.span, "expected a pattern code argument")),
-            H::Application(callee, args) => self.invoke_pattern_generator(callee, args, value.span),
-            H::ExtendedApplication(callee, args) => {
-                self.invoke_pattern_properties(value, callee, args, None)
-            }
-            _ => self.pattern_generator_value(value, interface, 0),
+            H::Application(callee, args) => self.invoke_pattern_generator_in_context(
+                callee,
+                args,
+                subject_hint,
+                interface_context,
+                value.span,
+            ),
+            H::ExtendedApplication(callee, args) => self.invoke_pattern_properties_in_context(
+                value,
+                callee,
+                args,
+                subject_hint,
+                interface_context,
+            ),
+            H::CodePatternQuote(..) => self.pattern_generator_value(value, interface, 0),
+            _ => self.pattern_generator_value_inferred(
+                value,
+                None,
+                subject_hint,
+                interface_context,
+                0,
+            ),
         }
     }
 
@@ -183,33 +221,7 @@ impl Checker<'_, '_> {
                     0,
                 )?
             } else {
-                match &value.kind {
-                    H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => self
-                        .pattern_codes
-                        .get(&local(*id))
-                        .cloned()
-                        .ok_or_else(|| {
-                            error(value.span, "expected a comptime pattern code value")
-                        })?,
-                    H::CodePatternQuote(..) => {
-                        return Err(error(
-                            value.span,
-                            "pattern quote requires an explicit subject interface",
-                        ));
-                    }
-                    H::ExtendedApplication(callee, arguments) => {
-                        self.invoke_pattern_properties(value, callee, arguments, None)?
-                    }
-                    H::Application(callee, arguments) => {
-                        self.invoke_pattern_generator(callee, arguments, value.span)?
-                    }
-                    _ => {
-                        return Err(error(
-                            value.span,
-                            "pattern code producer is not yet implemented",
-                        ));
-                    }
-                }
+                self.pattern_generator_value_inferred(value, None, None, None, 0)?
             };
             if let Some((subject, outputs)) = interface {
                 self.require(&code.subject, &subject, value.span)?;
@@ -354,7 +366,11 @@ impl Checker<'_, '_> {
             };
             let mut fuel = usize::try_from(this.required_steps).unwrap_or(usize::MAX);
             let before = fuel;
-            let free = nir::free_bindings::collect_arm(&arm, &mut fuel);
+            let free = nir::free_bindings::collect_arm_with_dependencies(
+                &arm,
+                &this.abstract_code_dependencies,
+                &mut fuel,
+            );
             this.required_steps -= (before - fuel) as u64;
             let free = free.map_err(|message| error(value.span, message))?;
             let pending = this.pattern_quote_pending == Some(true)
@@ -388,29 +404,7 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<n::Pattern, Error> {
         self.require_runtime_code_position(span)?;
-        let code = match operand.kind {
-            H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => {
-                self.pattern_codes.get(&local(id)).cloned().ok_or_else(|| {
-                    error(
-                        span,
-                        "pattern splice requires a comptime pattern code value",
-                    )
-                })?
-            }
-            H::CodePatternQuote(..) => self.build_pattern_quote(operand, subject, None)?,
-            H::ExtendedApplication(callee, arguments) => {
-                self.invoke_pattern_properties(operand, callee, arguments, Some(subject))?
-            }
-            H::Application(callee, arguments) => {
-                self.invoke_pattern_generator_expected(callee, arguments, Some(subject), span)?
-            }
-            _ => {
-                return Err(error(
-                    span,
-                    "pattern splice producer is not yet implemented",
-                ));
-            }
-        };
+        let code = self.pattern_generator_value_inferred(operand, None, Some(subject), None, 0)?;
         self.validate_pattern_code(&code, span)?;
         self.require(subject, &code.subject, span)?;
         let mut connections = BTreeMap::new();

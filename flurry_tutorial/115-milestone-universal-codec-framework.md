@@ -1,13 +1,13 @@
 # Flurry 演进手记 (115)：第五卷里程碑——完成支持自动派生、编译期校验与动态插件的通用编解码器框架
 
-欢迎来到《Flurry 演进手记》第五卷的终极里程碑。
+欢迎来到《Flurry 演进手记》第五卷的阶段里程碑。
 
 在过去的 19 篇（第 096 篇至第 114 篇）中，我们从最基础的 `trait` 声明出发，一步一个脚印地攀登上了现代类型论与系统级接口设计的高峰：
 - 我们告别了 C++ Duck-Typing 模板的滞后报错，建立了在定义端即完成 Normalization 符号检查的名义 Trait 契约；
 - 我们掌握了 `assoc` 关联类型与关联值、父接口正向合取 `:- A + B`、否定约束 `requires not (...)` 以及确定性的**统一深度结构精度（Structural Precision）**特化法则；
 - 我们打通了 Trait 的 **`comptime` / `runtime` 两相**，编写了一等公民的 **`derive fn` 派生策略**，学会了用 **`val.as(Trait)<.dep = ...>`** 为开放实现注入运行时依赖环境，并用 **`dyn Trait`** 与 **`.dyn(Trait)`** 实现了支持 `Self` 再封闭与 `%c` 环境追踪的动态分派。
 
-今天，在这篇第五卷收官大作中，我们将把这二十项核心特性彻底融为一体，交付我们的终极工程作品——**工业级边缘网关通用零拷贝编解码器与遥测框架（Universal Zero-Copy Telemetry & Codec Framework）**。
+今天，在这篇第五卷收官大作中，我们将把这二十项核心特性融为一体，交付我们的综合工程作品——**工业级边缘网关通用零拷贝编解码器与遥测框架（Universal Zero-Copy Telemetry & Codec Framework）**。
 
 ---
 
@@ -101,7 +101,7 @@ where format: Symbol
     fn encode_to(*self, sink: *S) -> ![S.as(WireSink).Error] void
     where S :- WireSink;
 
-    -- 🌌 ^comptime_phase 编译期相：编译期计算紧凑网线字节数（不含内存对齐 Padding。）
+    -- 🌌 ^comptime_phase 编译期相：编译期计算紧凑网线字节数（无内存对齐 Padding。）
     ^comptime_phase
     pure comptime fn wire_bytes() -> usize;
 }
@@ -150,20 +150,26 @@ derive fn framed_binary(magic: u8) for Encode<.binary> {
     where S :- WireSink
     {
         sink.put_u8(magic)!;
-        inline if Type.repr_of(Self) is .struct_repr(info) do {
-            inline for field in info.fields {
-                self'get_field(field.name).ref.encode_to(sink)!;
-            }
+        const repr = Type.repr_of(Self);
+        inline if repr is do {
+            .`struct` => {
+                inline for (_, field) in repr.fields.enumerate() {
+                    self'get_field(field.name).encode_to(sink)!;
+                }
+            },
         }
     }
 
     ^comptime_phase
     pure comptime fn wire_bytes() -> usize {
+        const repr = Type.repr_of(Self);
         var total: usize = 1usize;
-        inline if Type.repr_of(Self) is .struct_repr(info) do {
-            inline for field in info.fields {
-                total += field.ty.as(Encode<.binary>).wire_bytes();
-            }
+        if repr is do {
+            .`struct` => {
+                for (_, field) in repr.fields.enumerate() {
+                    total += field.type.as(Encode<.binary>).wire_bytes();
+                }
+            },
         }
         total
     }
@@ -221,7 +227,7 @@ where
 
 最后一步，我们把网关顶层的**动态插件调度器**接进来。
 假设网关在运行时维护着多种不同类型的遥测节点（如已经校准好的固定节点、计数器节点等），我们需要通过动态接口 `dyn TelemetryNode`：
-1. 调用 `snapshot(*self) -> Self` 在不知道具体隐藏类型的情况下复制一份节点快照（自动再封闭为新的 `dyn TelemetryNode`。）；
+1. 调用 `snapshot(*self) -> Self` 在无从得知具体隐藏类型的情况下复制一份节点快照（自动再封闭为新的 `dyn TelemetryNode`。）；
 2. 读取节点的遥测值，打包成 `TelemetryPacket`，并在编译期精确分配的栈缓冲区信息护航下，通过 `transmit_safe` 零拷贝写入 `FixedSink`。
 
 ```flurry
@@ -285,7 +291,7 @@ test {
 
 ## 编译期防线综合大考：任何越界企图都在定义或调用点静态拦截
 
-为了验证我们这套框架的铜墙铁壁，让我们在同一套契约下测试三道编译期防线：
+为了验证我们这套框架的静态安全防线，让我们在同一套契约下测试三道编译期防线：
 
 ```flurry
 struct SecretKeyPacket {
@@ -301,7 +307,7 @@ fn security_boundary_checks(secret: *SecretKeyPacket, raw: *RawSensor, sink: *Fi
     let _ = transmit_safe(secret, sink);
 
     -- ❌ 防线 2：开放实现缺失运行时环境绑定。
-    -- RawSensor 的 CalibratedRead 实现需要开放参数 `.cal`，未显式绑定 `<.cal = ...>` 直接拒绝。
+    -- RawSensor 的 CalibratedRead 实现需要开放参数 `.cal`，未显式绑定 `<.cal = ...>` 直接报错。
     let _ = raw.as(CalibratedRead).read_calibrated();
 }
 ```
@@ -312,11 +318,11 @@ fn security_boundary_checks(secret: *SecretKeyPacket, raw: *RawSensor, sink: *Fi
 
 | 核心模块 | 关键语法与机制 | 核心语义规则 |
 | :--- | :--- | :--- |
-| **接口声明与契约** | `trait T :- A + B`、`assoc Item: Type = Def`、`requires not (T :- C)` | 关联项统一承载类型与常量；正向合取用 `+`，否定约束进 `requires`；实现不得扩大错误与效应范围 |
+| **接口声明与契约** | `trait T :- A + B`、`assoc Item: Type = Def`、`requires not (T :- C)` | 关联项统一承载类型与常量；正向合取用 `+`，否定约束进 `requires`；实现严禁扩大错误与效应范围 |
 | **结构精度与 Coherence** | 统一深度分解 `cut(head, depth)`、有序本地身份规则 | 同接口内按已暴露结构深度选最具体实现（重复变量或长 `requires` 不提权）；外部 Trait 实现在首个本地身份前禁含自由参数 |
-| **接收者适配与消歧** | `val.as(Trait)`、`A.as(B).as(C)`、三层解析顺序 | 显式视角优先 $\rightarrow$ 解引用深度由浅入深 $\rightarrow$ 同接口内按结构精度；不同 Trait 同名方法绝不靠“少取一次地址”消歧 |
+| **接收者适配与消歧** | `val.as(Trait)`、`A.as(B).as(C)`、三层解析顺序 | 显式视角优先 $\rightarrow$ 解引用深度由浅入深 $\rightarrow$ 同接口内按结构精度；不同 Trait 同名方法不靠“少取一次地址”消歧 |
 | **替换推导与环境交付** | `where quote dep: lift *Obj`、`val.as(Trait)<.dep = obj>` | 可从目标类型自动恢复依赖身份，也可在接口视角上显式封闭开放参数；严禁按局部变量名盲猜 |
-| **Trait 两相与自动派生** | `^comptime_phase`、`comptime impl`/`derive`、`derive fn`、`.use(strategy)` | 属性决定所属 Trait 相（与 `comptime fn` 执行阶段正交）；互补两相共享 Coherence，缺相绝不回退 |
+| **Trait 两相与自动派生** | `^comptime_phase`、`comptime impl`/`derive`、`derive fn`、`.use(strategy)` | 属性决定所属 Trait 相（与 `comptime fn` 执行阶段正交）；互补两相共享 Coherence，缺相不回退 |
 | **动态接口 `dyn Trait`** | `dyn Trait`、`expr.dyn(Trait)`、`%c dyn Trait` | 裸 `dyn` 固定为 `2 * usize`；支持返回 `Self` 的动态再封闭；携带额外环境时推导 `%c` 闭包限定，严禁悬垂逃逸 |
 
 ---
@@ -324,10 +330,10 @@ fn security_boundary_checks(secret: *SecretKeyPacket, raw: *RawSensor, sink: *Fi
 ### 第五卷结语与第六卷预告
 
 至此，你已经完整攻克了《Flurry 演进手记》**第五卷：协议、多态与契约——Trait 系统的深度进化**。
-现在，你不仅能看懂 Flurry 标准库中最复杂的泛型与多态签名，更能自己动手架构兼具零成本静态特化与灵活运行时插件能力的工业级基础设施。
+现在，你非但能看懂 Flurry 标准库中最复杂的泛型与多态签名，更能自己动手架构兼具零成本静态特化与灵活运行时插件能力的工业级基础设施。
 
-但是，在我们的探索之旅中，还有两块极具魅力的神秘大陆等待我们踏足：
+但是，在我们的探索之旅中，还有两块重要的神秘大陆等待我们踏足：
 1. 在第 107 篇和第 108 篇里，我们多次见到了神秘的 `%c` 闭包环境限定和 `quote` 捕获。在底层，Flurry 是如何用**上下文模态类型论（Contextual Modal Type Theory, CMTT）**来精确刻画一段代码或一个类型“依赖哪些外层上下文变量（Boxed Context）”的？
-2. 当我们需要编写像 `sql!(SELECT * FROM sensors WHERE id = ~<id>)` 或声明式硬件寄存器 DSL 这样超越普通函数调用语法的领域特定语言时，Flurry 的**卫生宏系统（Hygienic Macros）与引用拼接（Quoting & Splicing）**又是如何与 CMTT 结合，做到“既能自由变换语法，又绝不污染调用者作用域或破坏阶段安全”的？
+2. 当我们需要编写像 `sql!(SELECT * FROM sensors WHERE id = ~<id>)` 或声明式硬件寄存器 DSL 这样超越普通函数调用语法的领域特定语言时，Flurry 的**卫生宏系统（Hygienic Macros）与引用拼接（Quoting & Splicing）**又是如何与 CMTT 结合，做到“既能自由变换语法，又免于污染调用者作用域或破坏阶段安全”的？
 
 准备好进入下一卷——**《第六卷：上下文模态类型论（CMTT）与卫生宏系统》**吧。我们下一卷见。

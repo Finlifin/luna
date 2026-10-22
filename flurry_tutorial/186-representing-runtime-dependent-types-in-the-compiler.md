@@ -7,7 +7,7 @@
 今天，我们通过一个双通道传感器校准系统，总结在工程中使用运行时依赖类型的三大核心法则：
 1. **相同内存布局下的严格身份隔离**：为什么 `Sensor<first.ref>` 与 `Sensor<second.ref>` 布局完全相同（都只占 4 字节），却在静态类型上严格区分？
 2. **外层容器与函数参数的环境供给**：如何在不给每个 `Sensor` 实例增加冗余指针字段的前提下，安全地读取所依赖的运行时校准数据？
-3. **局部依赖的作用域逃逸防线**：为什么绑定了局部栈变量 `local_cal.ref` 的依赖类型不能直接作为函数返回值逃逸？
+3. **局部依赖的作用域逃逸防线**：为什么绑定了局部栈变量 `local_cal.ref` 的依赖类型禁止直接作为函数返回值逃逸？
 
 ---
 
@@ -48,7 +48,7 @@ unsafe fn read_scaled(
   │ 2. 静态类型身份 (Type Identity)                                      │
   │    • left  的类型是 Sensor<first.ref>                                │
   │    • right 的类型是 Sensor<second.ref>                               │
-  │    • 哪怕 first 和 second 的 scale 数值相同，两个类型也绝不相等       │
+  │    • 哪怕 first 和 second 的 scale 数值相同，两个类型也并不相等       │
   ├─────────────────────────────────────────────────────────────────────┤
   │ 3. 运行期环境获取 (Environment Supply)                               │
   │    在 read_scaled(cal, sensor) 中，cal 通过函数形参显式供应并受类型校验│
@@ -103,13 +103,13 @@ unsafe fn total_scaled_reading(
 }
 ```
 
-因为 `dual.ch_a` 和 `dual.ch_b` 的类型分别锁死了 `cal_a` 和 `cal_b`，在实现 `total_scaled_reading` 时，不可能误把 `dual.ch_b` 传给 `read_scaled(cal_a, ...)`。
+因为 `dual.ch_a` 和 `dual.ch_b` 的类型分别锁死了 `cal_a` 和 `cal_b`，在实现 `total_scaled_reading` 时，难以误把 `dual.ch_b` 传给 `read_scaled(cal_a, ...)`。
 
 ---
 
-## 三、 拒绝例：跨通道混用校准器与局部依赖逃逸
+## 三、 负例：跨通道混用校准器与局部依赖逃逸
 
-### 拒绝例 1：拿通道 A 的校准器去读取通道 B 的传感器
+### 负例 1：拿通道 A 的校准器去读取通道 B 的传感器
 
 ```flurry
 unsafe fn mismatched_calibration(
@@ -117,20 +117,20 @@ unsafe fn mismatched_calibration(
     cal_b: *Calibration,
     sensor_b: Sensor<cal_b>,
 ) -> i32 {
-    -- ❌ 编译期拒绝：第一个参数传入了 cal_a，因此第二个参数要求类型为 Sensor<cal_a>，
-    -- 但实际传入的 sensor_b 类型为 Sensor<cal_b>，依赖身份不匹配。
+    -- ❌ 编译期报错：第一个参数传入了 cal_a，因此第二个参数要求类型为 Sensor<cal_a>，
+    -- 但实际传入的 sensor_b 类型为 Sensor<cal_b>，依赖身份失配。
     read_scaled(cal_a, sensor_b)
 }
 ```
 
-### 拒绝例 2：返回依赖函数内部局部栈变量的类型
+### 负例 2：返回依赖函数内部局部栈变量的类型
 
 运行时依赖类型所引用的对象必须在类型使用处仍然有效且可访问。如果一个函数试图返回绑定在函数局部栈变量 `local_cal.ref` 上的 `Sensor<local_cal.ref>`，在编译期会被立即拦截：
 
 ```flurry
 fn leaked_local_dependency() -> Sensor<local_cal.ref> {
     let local_cal = Calibration { scale: 2 }
-    -- ❌ 编译期拒绝：返回类型引用了函数内部的局部栈变量 local_cal，
+    -- ❌ 编译期报错：返回类型引用了函数内部的局部栈变量 local_cal，
     -- 函数返回后 local_cal 即被销毁，调用方无法在外部合法取得该依赖环境。
     Sensor<local_cal.ref> { raw: 10 }
 }
@@ -145,7 +145,7 @@ fn leaked_local_dependency() -> Sensor<local_cal.ref> {
 | 工程维度 | 核心契约 | 带来的保障 |
 | :--- | :--- | :--- |
 | **零膨胀值布局** | `Sensor<cal>` 的值本体只保存数据字段 `raw: i32` | 在数组与紧凑结构体中保持与裸整数一致的缓存密度 |
-| **严格身份判等** | 比较完整类型时同时核验类型构造头与所绑定的运行时身份 `cal` | 编译期彻底杜绝“拿通道 A 的校准参数算通道 B 的数据” |
+| **严格身份判等** | 比较完整类型时同时核验类型构造头与所绑定的运行时身份 `cal` | 编译期避免“拿通道 A 的校准参数算通道 B 的数据” |
 | **作用域逃逸检查** | 依赖项必须在结果跨越的作用域边界外仍然有效且可取得 | 防止返回依赖已销毁局部栈变量的悬空依赖类型 |
 
 ---

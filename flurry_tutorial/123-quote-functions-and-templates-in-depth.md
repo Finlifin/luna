@@ -1,9 +1,9 @@
 # Flurry 演进手记 (123)：深入 `quote fn` 与 `template quote fn`——可复用的带上下文代码生成组件
 
-> **阅读指南**：在上一回（第 122 回）中，我们厘清了 CMTT 代码见证（Code Evidence）的防伪边界。今天，我们要把第一卷第 034、035 回初识的 **`quote fn`** 与 **`template fn` / `template quote fn`** 放到完整的 CMTT 显微镜下深度剖析。结合 `docs/cmtt/quote-functions-and-templates.md` 与 `docs/functions/inline-and-quote.md`，我们将彻底搞懂：
-> 1. `inline fn`、`comptime fn` 与 `quote fn` 这三兄弟在编译器里到底有什么本质区别？（注意：**`quote fn` 不属于 `comptime fn`，普通实参仍求值一次。**）
-> 2. 为什么在 `quote fn` 里写 `return` 不会把外层调用者函数提前退栈？它的局部 `Drop` 清理又遵循怎样的作用域边界？
-> 3. `implicit quote` 参数是如何与 `template fn` 的 `quote lambda` 完美配合，实现“上下文零样板自动接线”的？
+> **阅读指南**：在上一回（第 122 回）中，我们厘清了 CMTT 代码见证（Code Evidence）的防伪边界。今天，我们要把第一卷第 034、035 回初识的 **`quote fn`** 与 **`template fn` / `template quote fn`** 放到完整的 CMTT 显微镜下深度剖析。结合 `docs/cmtt/quote-functions-and-templates.md` 与 `docs/functions/inline-and-quote.md`，我们将理解：
+> 1. `inline fn`、`comptime fn` 与 `quote fn` 这三兄弟在编译器里到底有什么本质区别？（注意：**`quote fn` 并非属 `comptime fn`，普通实参仍求值一次。**）
+> 2. 为什么在 `quote fn` 里写 `return` 免将外层调用者函数提前退栈？它的局部 `Drop` 清理又遵循怎样的作用域边界？
+> 3. `implicit quote` 参数是如何与 `template fn` 的 `quote lambda` 良好配合，实现“上下文零样板自动接线”的？
 
 ---
 
@@ -26,7 +26,7 @@
 -- 难题 2（未使用实参副作用丢失）：
 --   如果宏体没用到某个参数，实参表达式干脆被删掉了，本该发生的副作用凭空消失。
 -- 难题 3（return 劫持外层函数）：
---   在宏里写一句 return 8，展开后竟然直接把调用者 caller() 整个函数给退栈返回了。
+--   在宏里写一句 return 8，展开后却直接把调用者 caller() 整个函数给退栈返回了。
 ```
 
 而如果改用 C++/Rust 的普通 `inline fn` 呢？第一，普通 `inline` 只是给后端优化器的**建议（Hint）**，不保证 100% 在前端完成代码接入；第二，普通函数无法直接声明“我需要从外层调用环境隐式接入一个 CMTT 上下文变量（`implicit quote`）”。
@@ -35,15 +35,15 @@
 
 ## 二、 核心机制：`quote fn`——既有函数的严谨契约，又有宏的必定接入
 
-在 Flurry 中，**`quote fn`（参数化代码函数）** 把“普通函数的参数求值与返回边界”和“CMTT 代码的 100% 编译期接入”完美融为了一体。
+在 Flurry 中，**`quote fn`（参数化代码函数）** 把“普通函数的参数求值与返回边界”和“CMTT 代码的 100% 编译期接入”良好融为了一体。
 
 首先，让我们用一张对比表（见 `docs/functions/inline-and-quote.md`），牢牢记住 **`inline fn`、`comptime fn` 与 `quote fn` 的本质分工**：
 
 | 函数类别 | 编译期必须完成的工作 | 运行时主体与阶段身份 |
 | :--- | :--- | :--- |
 | **普通 `fn` / `inline fn`** | 按函数接口类型检查；`inline` 仅提供内联优化意向 | 属于 `runtime` 函数；可保留普通机器调用指令 |
-| **`comptime fn`** | 在**编译期**直接跑完整个函数体并算出结果值 | 属于 `comptime` 函数；绝不能留下运行时补算调用 |
-| **`quote fn`** | **必须在编译期完成参数化代码接入（Splice）**；无法接入直接报错，绝不退回普通调用 | **不属于 `comptime fn`。** 它描述的主体在 **`runtime` 执行**，且不能转为运行时函数指针 |
+| **`comptime fn`** | 在**编译期**直接跑完整个函数体并算出结果值 | 属于 `comptime` 函数；无法留下运行时补算调用 |
+| **`quote fn`** | **必须在编译期完成参数化代码接入（Splice）**；无法接入直接报错，不退回普通调用 | **非属 `comptime fn`。** 它描述的主体在 **`runtime` 执行**，且无法转为运行时函数指针 |
 
 下面拆解当你调用 `quote fn` 时，编译器生成的 **“实参一次求值 + 逻辑完成边界（Logical Completion Boundary）”** 结构：
 
@@ -68,7 +68,7 @@
   │                   │ 2. 接入主体：                                     │ │
   │                   │    if fresh_value > 8u32 {                        │ │
   │                   │        -- return 只跳出本逻辑边界，交付 8u32      │ │
-  │                   │        -- ❌ 绝不会把外层的 caller() 提前退栈     │ │
+  │                   │        -- ❌ 并不会把外层的 caller() 提前退栈     │ │
   │                   │        deliver_to_boundary 8u32;                  │ │
   │                   │    } else {                                       │ │
   │                   │        deliver_to_boundary fresh_value;           │ │
@@ -97,7 +97,7 @@ quote fn ignore_arg(unused: i32) -> i32 {
     5i32
 }
 
--- 保证 3：quote fn 内部的 return 只完成本次代码接入，绝不跳出外层 caller。
+-- 保证 3：quote fn 内部的 return 只完成本次代码接入，不跳出外层 caller。
 quote fn clamp(value: u32) -> u32 {
     if value > 8u32 {
         return 8u32;
@@ -127,7 +127,7 @@ test {
 }
 ```
 
-而且，如果 `quote fn` 内部创建了带有 `Drop` 析构函数的局部对象（比如 `let trace = Trace { id: value };`），这个局部对象的生命周期**严格限制在该次 `quote fn` 的逻辑完成边界内**——一旦该次 `quote fn` 求值完毕，它的 `drop` 就会立即执行，绝不会因为代码被展开到了调用者函数里，就把析构推迟到整个外层函数结束时才跑。
+而且，如果 `quote fn` 内部创建了带有 `Drop` 析构函数的局部对象（比如 `let trace = Trace { id: value };`），这个局部对象的生命周期**严格限制在该次 `quote fn` 的逻辑完成边界内**——一旦该次 `quote fn` 求值完毕，它的 `drop` 就会立即执行，免因代码被展开到了调用者函数里，就把析构推迟到整个外层函数结束时才跑。
 
 ---
 
@@ -163,7 +163,7 @@ template fn with_current(
 
 -- 3. 使用模板实例化出 adjusted 函数：
 --    在大括号正文里，由于 with_current 已经授予了 current: u32 上下文，
---    调用 add_current(2u32) 时会自动感应并接入该 current 绑定，连 .current = ... 都不用写。
+--    调用 add_current(2u32) 时会自动感应并接入该 current 绑定，连 .current = ... 都省去书写。
 fn adjusted use with_current {
     add_current(2u32)
 }
@@ -177,11 +177,11 @@ test {
 > **🔍 语法小贴士：简单 `template fn` 签名复用 vs. 高级 `quote lambda` 正文复用**
 > 在 `docs/cmtt/quote-functions-and-templates.md` 中，模板分为两个层次：
 > 1. **简单签名模板**：`template fn unary(value: i32) -> i32;`（没有函数体，以分号结尾）。后续既可以用 `fn ordinary use unary { value * 2i32 }` 生成普通函数，也可以用 `quote fn generated use unary { value * 2i32 }` 生成必须展开的 `quote fn`，各自保留自己的函数类别。
-> 2. **带 `quote lambda` 的上下文模板**：如上面的 `with_current`，它不仅复用签名，还提供外围运行时骨架代码（如初始化 `let current = value;`），并通过 `~<body>` 将使用者的代码块在受控上下文 `< current: u32 |- u32 >` 下安全接入。
+> 2. **带 `quote lambda` 的上下文模板**：如上面的 `with_current`，它非但复用签名，还提供外围运行时骨架代码（如初始化 `let current = value;`），并通过 `~<body>` 将使用者的代码块在受控上下文 `< current: u32 |- u32 >` 下安全接入。
 
 最后，请牢记 `quote fn` 的两条编译期红线：
 1. **在一段 `quote` 或另一个 `quote fn` 内部调用 `quote fn`，计作 1 个隐式接入点（Implicit Splice Hole）**，同样受单洞规则约束（而在普通 `fn` 里调用多次 `quote fn` 则完全不受单洞限制。）；
-2. **`quote fn` 不是运行时函数实体，绝不能当作普通函数指针逃逸到运行期**，也不能在缺乏匹配的 `implicit quote` 上下文且未显式提供时凭空调用：
+2. **`quote fn` 并非运行时函数实体，禁止视作普通函数指针逃逸到运行期**，亦无法在缺乏匹配的 `implicit quote` 上下文且未显式提供时凭空调用：
 
 ```flurry
 quote fn need_ctx(implicit quote current: u32) -> u32 {
@@ -190,12 +190,12 @@ quote fn need_ctx(implicit quote current: u32) -> u32 {
 
 fn broken_quote_fn_usage() -> u32 {
     -- 负例 1：企图把 quote fn 当作运行时函数指针赋值给变量
-    -- ❌ 编译期直接拒绝。
-    -- quote fn 是编译期代码模板，在运行期二进制中没有独立函数入口，不能转为函数指针。
+    -- ❌ 编译期直接报错。
+    -- quote fn 是编译期代码模板，在运行期二进制中没有独立函数入口，无法转为函数指针。
     let _fn_ptr: fn() -> u32 = need_ctx;
 
     -- 负例 2：在没有任何 current 上下文授权的普通函数里裸调 need_ctx()
-    -- ❌ 编译期直接拒绝：缺少 implicit quote current: u32 的上下文供应。
+    -- ❌ 编译期直接报错：缺少 implicit quote current: u32 的上下文供应。
     need_ctx()
 }
 ```
@@ -206,9 +206,9 @@ fn broken_quote_fn_usage() -> u32 {
 
 | 特性 / 机制 | `quote fn` 与 `template` 的契约 | 相比传统宏 / 普通内联的优势 |
 | :--- | :--- | :--- |
-| **函数阶段定位** | `quote fn` 不属于 `comptime fn`；代码描述在编译期接入，主体在运行期执行 | 100% 保证编译期展开，同时绝不在编译期误读未来的运行期实参值 |
-| **普通实参一次求值** | 按源码顺序求值一次并绑定新鲜形参；未使用实参仍保留求值副作用 | 彻底根治 C 宏参数重复求值与副作用丢失顽疾 |
-| **逻辑完成边界** | 内部 `return` 仅结束本次 `quote fn` 应用；局部 `Drop` 在边界退出时立即清理 | 绝不劫持外层调用者函数的控制流，也不延长临时对象的生命周期 |
+| **函数阶段定位** | `quote fn` 并非属 `comptime fn`；代码描述在编译期接入，主体在运行期执行 | 100% 保证编译期展开，同时不在编译期误读未来的运行期实参值 |
+| **普通实参一次求值** | 按源码顺序求值一次并绑定新鲜形参；未使用实参仍保留求值副作用 | 解决 C 宏参数重复求值与副作用丢失顽疾 |
+| **逻辑完成边界** | 内部 `return` 仅结束本次 `quote fn` 应用；局部 `Drop` 在边界退出时立即清理 | 不劫持外层调用者函数的控制流，也不延长临时对象的生命周期 |
 | **`implicit quote` + `template`** | 通过上下文对应直接绑定原运行时对象，配合 `quote lambda` 自动接线 | 无需传递冗长的上下文指针参数，保持底层对象 Identity 与别名安全 |
 
 ---

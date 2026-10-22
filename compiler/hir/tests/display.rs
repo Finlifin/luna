@@ -624,6 +624,21 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
         (ExprKind::Ref(&a), "ref", vec![("value", &a_tree)]),
         (ExprKind::Deref(&a), "deref", vec![("value", &a_tree)]),
         (
+            ExprKind::ErrorPropagate(&a),
+            "error-propagate",
+            vec![("value", &a_tree)],
+        ),
+        (
+            ExprKind::ErrorHandle {
+                value: &a,
+                before: Some(&arms[0]),
+                arms: &arms,
+                after: Some(&arms[0]),
+            },
+            "error-handle",
+            vec![("value", &a_tree)],
+        ),
+        (
             ExprKind::ErrorNew(&a),
             "error-new",
             vec![("value", &a_tree)],
@@ -688,7 +703,11 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
             vec![("params", &a_tree), ("return-type", &b_tree)],
         ),
         (ExprKind::ReachabilityType, "reachability-type", vec![]),
-        (ExprKind::ErrorQualifiedType, "error-qualified-type", vec![]),
+        (
+            ExprKind::ErrorQualifiedType(&a, &b),
+            "error-qualified-type",
+            vec![("errors", &a_tree), ("result", &b_tree)],
+        ),
         (
             ExprKind::EffectQualifiedType(&a, &b),
             "effect-qualified-type",
@@ -736,7 +755,7 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
             vec![("value", &a_tree)],
         ),
     ];
-    assert_eq!(cases.len(), 82);
+    assert_eq!(cases.len(), 84);
     for (kind, tag, children) in cases {
         let tree = parsed(&kind);
         assert_eq!(tree.tag(), tag);
@@ -818,6 +837,12 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
                     tree.field("arms").list()[1].field("condition").tag(),
                     "none"
                 );
+            }
+            "error-handle" => {
+                let expected = parsed(&arms[0]);
+                assert_eq!(&tree.field("before").list()[1], &expected);
+                assert_eq!(tree.field("arms").list(), std::slice::from_ref(&expected));
+                assert_eq!(&tree.field("after").list()[1], &expected);
             }
             "match" | "inline-match" => {
                 let arm = &tree.field("arms").list()[0];

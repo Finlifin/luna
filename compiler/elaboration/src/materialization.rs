@@ -3,7 +3,11 @@
 #[cfg(test)]
 mod callable_tests;
 mod conditional_calls;
+mod dead_tails;
+mod mutable_callbacks;
+mod recursive_factories;
 mod staged;
+mod template_factories;
 use crate::{
     implementation::{ImplementationHead, Index, Selection, TypeAssessment},
     ptc::{Budget, Context},
@@ -89,6 +93,8 @@ struct Builder<'a> {
     queue: VecDeque<Task>,
     functions: HashSet<(Id, Vec<Term>)>,
     staged_functions: HashMap<(Id, Vec<Term>), n::Function>,
+    generated_functions: HashMap<Id, n::Function>,
+    recursive_factories: HashMap<iir::InstanceKey, recursive_factories::Selection>,
     invocation_snapshot: Option<staged::Snapshot>,
     types: HashSet<Term>,
     normalized_types: HashMap<Term, Term>,
@@ -469,6 +475,8 @@ fn build(
         queue: VecDeque::new(),
         functions: HashSet::new(),
         staged_functions: HashMap::new(),
+        generated_functions: HashMap::new(),
+        recursive_factories: HashMap::new(),
         invocation_snapshot: None,
         types: HashSet::new(),
         normalized_types: HashMap::new(),
@@ -691,6 +699,7 @@ impl Builder<'_> {
             .functions
             .iter()
             .find(|f| f.declaration == id)
+            .or_else(|| self.generated_functions.get(&id))
             .ok_or("missing dispatch function")?;
         if self.instances.is_some() && f.phase == n::FunctionPhase::NormalForm {
             return Err(
@@ -1240,6 +1249,36 @@ impl Builder<'_> {
     fn normalize_expression(&mut self, expression: &mut n::Expr) -> Result<(), String> {
         // Private working copies are discarded on any failure. Selected values
         // are substituted before dependency discovery, including nested patterns.
+        if self.instances.is_some() {
+            dead_tails::prune(expression, &mut self.fuel)?;
+            // Expose runtime template factories before collecting local target
+            // choices. Their argument frames and effects remain runtime code.
+            let mut fuel = self.fuel;
+            let result = iir::visit::expression_mut_pruned(expression, &mut fuel, |expr, fuel| {
+                self.fuel = *fuel;
+                let factory = matches!(&expr.kind, K::Call { callee, .. }
+                    if matches!(callee.ty.callable_signature(), Term::Function { result, .. }
+                        if matches!(result.callable_signature(), Term::Function { parameters, .. }
+                            if parameters.iter().any(|p| p.sort != nir::Sort::Runtime))));
+                let result = if factory {
+                    self.stage_direct_call(expr)
+                } else {
+                    Ok(true)
+                };
+                *fuel = self.fuel;
+                result
+            });
+            self.fuel = fuel.min(self.fuel);
+            result?;
+            mutable_callbacks::lower(expression, &mut self.quote_cursor, &mut self.fuel)?;
+            staged::forward_template_aliases(
+                expression,
+                &mut self.quote_cursor,
+                &mut self.quote_sources,
+                &mut self.fuel,
+            )?;
+            template_factories::discard_selections(expression, &mut self.fuel)?;
+        }
         let mut fuel = self.fuel;
         let result = iir::visit::expression_mut(expression, &mut fuel, |expr, fuel| {
             self.fuel = *fuel;
@@ -1561,10 +1600,42 @@ impl Builder<'_> {
         Ok(())
     }
 
+    fn returns_staged_callable(ty: &Term) -> bool {
+        matches!(ty.callable_signature(), Term::Function { result, .. }
+            if matches!(result.callable_signature(), Term::Function { parameters, .. }
+                if parameters.iter().any(|p| p.sort != nir::Sort::Runtime)))
+    }
+
+    fn merge_entry_contract(
+        function: &mut n::Function,
+        requirements: Vec<n::TypePredicate>,
+        capabilities: Vec<n::TraitRequirement>,
+        program: nir::contracts::ProgramContract,
+    ) {
+        function.requirements.extend(requirements);
+        function.capabilities.extend(capabilities);
+        function.preconditions.extend(program.preconditions);
+        function.postconditions.extend(program.postconditions);
+        function.result_binding = function.result_binding.or(program.result_binding);
+        for snapshot in program.entry_snapshots {
+            if !function
+                .entry_snapshots
+                .iter()
+                .any(|s| s.parameter == snapshot.parameter)
+            {
+                function.entry_snapshots.push(snapshot);
+            }
+        }
+    }
+
     fn stage_direct_call(&mut self, expression: &mut n::Expr) -> Result<bool, String> {
+        if self.lower_recursive_factory_call(expression)? {
+            return Ok(true);
+        }
         if !self.active_staged_inlines.is_empty() {
             if let K::Call { callee, .. } = &expression.kind {
                 if matches!(callee.kind, K::TraitMethod { .. })
+                    && !Self::returns_staged_callable(&callee.ty)
                     && matches!(callee.ty.callable_signature(), Term::Function { parameters, .. }
                         if parameters.iter().all(|p| p.sort == nir::Sort::Runtime))
                 {
@@ -1611,7 +1682,9 @@ impl Builder<'_> {
                 method_arguments,
             } = &callee.kind
             {
-                if matches!(callee.ty.callable_signature(),Term::Function {parameters,..} if parameters.iter().any(|p|p.sort!=nir::Sort::Runtime))
+                if Self::returns_staged_callable(&callee.ty)
+                    || matches!(callee.ty.callable_signature(),Term::Function {parameters,..}
+                        if parameters.iter().any(|p|p.sort!=nir::Sort::Runtime))
                 {
                     let instance = n::InterfaceInstance {
                         declaration: *interface,
@@ -1794,17 +1867,41 @@ impl Builder<'_> {
         let Term::Function { parameters, .. } = template.signature.callable_signature() else {
             return Ok(true);
         };
+        if Self::returns_staged_callable(&callee.ty)
+            && self.active_staged_inlines.contains(&declaration)
+        {
+            return Err(format!(
+                "recursive staged-callback factory `{}` is not yet supported; finite target analysis is required",
+                template.name
+            ));
+        }
         if !parameters.iter().any(|p| p.sort != nir::Sort::Runtime) {
-            // Continue ordinary inline calls exposed inside a staged expansion.
-            // Outside that expansion the explicit NIR optimization policy stays
-            // unchanged; a plain runtime function is not implicitly a quote.
-            if self.active_staged_inlines.is_empty() || !template.inline {
+            // Continue inline calls exposed inside a staged expansion, and
+            // specialize higher-order uses of staged template arguments.
+            // Ordinary runtime-only callbacks keep the existing inline policy.
+            let staged_callback = parameters.iter().any(|parameter| {
+                matches!(parameter.ty.callable_signature(), Term::Function { parameters, .. }
+                    if parameters.iter().any(|input| input.sort != nir::Sort::Runtime))
+            }) || matches!(callee.ty.callable_signature(), Term::Function { result, .. }
+                if matches!(result.callable_signature(), Term::Function { parameters, .. }
+                    if parameters.iter().any(|input| input.sort != nir::Sort::Runtime)));
+            if !staged_callback && (self.active_staged_inlines.is_empty() || !template.inline) {
                 return Ok(true);
             }
             let mut bound = template
                 .instantiate_parameters(&self.input_binders(&template.type_parameters), &arguments)
                 .map_err(|e| e.to_string())?;
             bound.type_parameters.clear();
+            if let Some((requirements, capabilities, program)) = entry_contract {
+                Self::merge_entry_contract(&mut bound, requirements, capabilities, program);
+            }
+            // A staged callable is a template identity, not a runtime entry
+            // address. Expose its uses before producing concrete IIR entries.
+            // The normal inline argument frame preserves evaluation and contracts.
+            bound.inline |= staged_callback;
+            if self.expand_returning_template(&bound, expression)? {
+                return Ok(false);
+            }
             return self
                 .expand_inline_instance(&bound, expression)
                 .map(|expanded| !expanded);
@@ -1815,20 +1912,7 @@ impl Builder<'_> {
             .map_err(|e| e.to_string())?;
         template.type_parameters.clear();
         if let Some((requirements, capabilities, program)) = entry_contract {
-            template.requirements.extend(requirements);
-            template.capabilities.extend(capabilities);
-            template.preconditions.extend(program.preconditions);
-            template.postconditions.extend(program.postconditions);
-            template.result_binding = template.result_binding.or(program.result_binding);
-            for snapshot in program.entry_snapshots {
-                if !template
-                    .entry_snapshots
-                    .iter()
-                    .any(|s| s.parameter == snapshot.parameter)
-                {
-                    template.entry_snapshots.push(snapshot);
-                }
-            }
+            Self::merge_entry_contract(&mut template, requirements, capabilities, program);
         }
         template.signature = self.staging_type_view(&template.signature)?;
         let mut fuel = self.fuel;
@@ -1904,8 +1988,14 @@ impl Builder<'_> {
             },
         );
         self.fuel = fuel.min(self.fuel);
-        let (instance, call) = result?;
+        let (mut instance, call) = result?;
         *expression = call;
+        if matches!(instance.function.signature.callable_signature(), Term::Function { result, .. }
+            if matches!(result.callable_signature(), Term::Function { parameters, .. }
+                if parameters.iter().any(|p| p.sort != nir::Sort::Runtime)))
+        {
+            instance.function.inline = true;
+        }
         let quote = self
             .package
             .quote_templates
@@ -1924,7 +2014,9 @@ impl Builder<'_> {
                 &mut self.fuel,
             )?;
             self.register_quote_layouts(generated)?;
-        } else if self.expand_inline_instance(&instance.function, expression)? {
+        } else if self.expand_returning_template(&instance.function, expression)?
+            || self.expand_inline_instance(&instance.function, expression)?
+        {
             // The guarded expansion already normalized its descendants. Visiting
             // again after releasing the guard would re-expand recursive calls.
             return Ok(false);
@@ -2326,27 +2418,32 @@ impl Builder<'_> {
                     .iter()
                     .find(|n| n.declaration == *declaration)
                 {
-                    n.validate_completed_arguments_with_layouts(
-                        arguments,
-                        &mut self.fuel,
-                        |ty, variant, fuel| {
-                            nir::normal_forms::nominal_value_fields_budgeted(
-                                self.package,
-                                ty,
-                                variant,
-                                fuel,
-                            )
-                            .ok_or_else(|| {
-                                if *fuel == 0 {
-                                    nir::NominalAdmissionError::Budget
-                                } else {
-                                    nir::NominalAdmissionError::Invalid(
-                                        "nominal value layout unavailable".into(),
-                                    )
-                                }
-                            })
-                        },
-                    )?;
+                    // Dispatch preparation retains generic identities. Closed
+                    // value admission belongs to concrete materialization, as
+                    // for struct and enum; invocation checks scoped evidence.
+                    if self.instances.is_some() {
+                        n.validate_completed_arguments_with_layouts(
+                            arguments,
+                            &mut self.fuel,
+                            |ty, variant, fuel| {
+                                nir::normal_forms::nominal_value_fields_budgeted(
+                                    self.package,
+                                    ty,
+                                    variant,
+                                    fuel,
+                                )
+                                .ok_or_else(|| {
+                                    if *fuel == 0 {
+                                        nir::NominalAdmissionError::Budget
+                                    } else {
+                                        nir::NominalAdmissionError::Invalid(
+                                            "nominal value layout unavailable".into(),
+                                        )
+                                    }
+                                })
+                            },
+                        )?;
+                    }
                     let parameters = n.parameter_binders().map_err(|e| e.to_string())?;
                     self.formation_requirements_with_parameters(
                         &n.requirements,

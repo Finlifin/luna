@@ -4,8 +4,8 @@
 
 今天，在为我们的 `RingBuffer` 编写槽位注册与回调导出接口时，我们将直面 C 和 C++ 历史上造成最多高危安全漏洞（CVE）的头号杀手：**栈上局部地址逃逸（Stack Address Escape / Dangling Pointer Return）**。
 
-每个写过 C 语言的程序员都知道不能写 `int x = 23; return &x;`。
-但在真实的、上万行的大型系统工程里，悬垂指针从来不会这么赤裸裸地写在脸上。它们往往披着三件极具欺骗性的伪装外衣：
+每个写过 C 语言的程序员都知道禁写 `int x = 23; return &x;`。
+但在真实的、上万行的大型系统工程里，悬垂指针素来免于这么赤裸裸地写在脸上。它们往往披着三件隐蔽的伪装外衣：
 1. **伪装一（通过堆容器逃逸）**：把局部变量的地址 `local.ref` 压进一个堆分配的动态数组 `Vec<*i32>` 里，然后把 `Vec` 返回出去；
 2. **伪装二（写进外部输出参数或被返回闭包捕获）**：通过一个外部传进来的容器指针 `out_list: *Vec<*i32>` 把 `local.ref` 存进去，或者返回一个捕获了 `local.ref` 的闭包；
 3. **伪装三（分支里的半吊子覆盖）**：指针变量 `saved` 一开始指向局部变量 `local.ref`，只在 `if` 分支里改指向了合法的外部参数 `outer`，而 `else` 分支里忘了改，最后把 `saved` 返回出去。
@@ -16,18 +16,18 @@
 
 ## 第一幕：直接返回数值 vs 直接返回局部地址
 
-我们先从最基础的对比热身：为什么 `make_number()` 可以把局部变量 `local` 返回出去，而 `escape_address()` 却不能把 `local.ref` 返回出去？
+我们先从最基础的对比热身：为什么 `make_number()` 可以把局部变量 `local` 返回出去，而 `escape_address()` 却禁止将 `local.ref` 返回出去？
 
 ```flurry
 use std.prelude.*;
 
--- ✅ 完全合法：读取局部变量取得独立标量值，不再依赖 local 的栈槽位。
+-- ✅ 完全合法：读取局部变量取得独立标量值，摆脱依赖 local 的栈槽位。
 fn make_number() -> i32 {
     let local = 23i32;
     local
 }
 
--- ❌ 编译期直接拒绝。
+-- ❌ 编译期直接报错。
 fn escape_address() -> *i32 {
     let local = 23i32;
     -- 错误：返回的指针依赖局部位置 `local`，但 `local` 在函数退出清理后已终结。
@@ -69,12 +69,12 @@ fn escape_address() -> *i32 {
 fn make_values() -> Vec<i32> {
     let values = Vec.new();
     let local = 23i32;
-    -- 把 local 的数值 23 复制进 Vec 的堆缓冲区，与 local 的栈槽位彻底脱钩。
+    -- 把 local 的数值 23 复制进 Vec 的堆缓冲区，与 local 的栈槽位脱钩。
     values.push(local);
     values
 }
 
--- ❌ 编译期直接拒绝。
+-- ❌ 编译期直接报错。
 fn make_addresses() -> Vec<*i32> {
     let values = Vec.new();
     let local = 23i32;
@@ -99,13 +99,13 @@ fn make_addresses() -> Vec<*i32> {
   当 `make_addresses` 退出时：
   1. `values` 自己的堆内存所有权转移给了调用者（堆内存没释放）；
   2. 但栈上的 `local` 在退出时被 KILLED 💀。
-  3. 出口验尸发现返回的 `values` 依然背负着对已死目标 `{local}` 的依赖 ──► ❌ 静态拒绝。
+  3. 出口验尸发现返回的 `values` 依然背负着对已死目标 `{local}` 的依赖 ──► ❌ 静态报错。
 ```
 
-不仅如此，根据 `docs/resource-management/reachability.md` 的规定，编译器在出口处核验的**绝不仅仅是函数的返回值**，而是全面覆盖以下三个出口通道：
+非但如此，根据 `docs/resource-management/reachability.md` 的规定，编译器在出口处核验的**非止是函数的返回值**，而是全面覆盖以下三个出口通道：
 1. **函数的返回值**（如上面的 `return values;`）；
 2. **写入外部对象的保留值**（比如函数参数传入了一个外部容器指针 `out_vec: *Vec<*i32>`，你在函数里写 `out_vec.push(local.ref);`——哪怕函数返回类型是 `void`，因为外部对象 `out_vec` 在函数退出后依然存活，把局部地址写进外部对象的行为同样会在出口验尸时被当场抓获。）；
-3. **返回或逃逸闭包的捕获环境**（哪怕把闭包或对象用 `dyn Trait` 擦除了具体类型，类型擦除也绝不会抹去它底层背负的可达性依赖要求。）。
+3. **返回或逃逸闭包的捕获环境**（哪怕把闭包或对象用 `dyn Trait` 擦除了具体类型，类型擦除亦免于抹去它底层背负的可达性依赖要求。）。
 
 ---
 
@@ -135,14 +135,14 @@ fn choose_outer_safely(outer: *i32) -> *i32 {
     let _ = cursor.*;
 
     -- 关键一步：对单个确定槽位 `cursor` 执行无条件完整覆盖。
-    -- 编译器将 cursor 的依赖集合从 {scratch} 彻底替换为 {outer}。
+    -- 编译器将 cursor 的依赖集合从 {scratch} 替换为 {outer}。
     cursor = outer;
 
     -- 出口验尸时，cursor 的依赖只有 {outer}，完全不背负 scratch 的地址。
     cursor
 }
 
--- ❌ 编译期直接拒绝。
+-- ❌ 编译期直接报错。
 -- 版本 B：只在条件分支中部分覆盖，另一条路径仍残留对 scratch 的依赖。
 fn uncertain_overwrite_bug(outer: *i32, use_outer: bool) -> *i32 {
     let scratch = 1i32;
@@ -165,7 +165,7 @@ fn uncertain_overwrite_bug(outer: *i32, use_outer: bool) -> *i32 {
   场景 A：无条件完整覆盖 (`choose_outer_safely`)
   [初始] `cursor` ──依赖──► { scratch (局部) }
   [覆盖] `cursor = outer;` (目标是单个精确局部槽位。触发【强更新 Strong Update】)
-         `cursor` ──依赖──► { outer (外部参数) }  (旧的 `{scratch}` 依赖被彻底擦除。✨)
+         `cursor` ──依赖──► { outer (外部参数) }  (旧的 `{scratch}` 依赖被擦除。✨)
   [出口] `scratch` 销毁，但 `cursor` 只依赖 `{outer}` ──► ✅ 安全返回。
 
   场景 B：条件分支汇合或未知别名覆盖 (`uncertain_overwrite_bug`)
@@ -173,26 +173,26 @@ fn uncertain_overwrite_bug(outer: *i32, use_outer: bool) -> *i32 {
          ├── [if true]  `cursor = outer;` ──► { outer }
          └── [if false] (未覆盖)          ──► { scratch }
   [汇合] 两条路径取并集：`cursor` ──依赖──► { outer, scratch }
-  [出口] `scratch` 销毁，`cursor` 仍残留 `{scratch}` 依赖 ──► ❌ 静态拒绝。
+  [出口] `scratch` 销毁，`cursor` 仍残留 `{scratch}` 依赖 ──► ❌ 静态报错。
 ```
 
 总结强更新（洗白旧依赖）的三个严格前提：
-1. 被赋值的目标必须是**单个精确的具体实例位置**（如局部变量 `cursor`）；如果是通过一个可能指向多个对象的未知别名指针去写，或者往一个汇总了多个元素的数组槽位里写，编译器不能借一次写入就盲目清空全部旧依赖。
-2. 必须是**完整覆盖（Full Overwrite）**，而不能只是修改了结构体里的某一半字段，另一半字段里还留着旧指针。
-3. 在到达函数出口的所有**可达路径**上，旧的局部依赖都必须已经被彻底替换或消费完毕。
+1. 被赋值的目标必须是**单个精确的具体实例位置**（如局部变量 `cursor`）；如果是通过一个可能指向多个对象的未知别名指针去写，或者往一个汇总了多个元素的数组槽位里写，编译器无法借一次写入就盲目清空全部旧依赖。
+2. 必须是**完整覆盖（Full Overwrite）**，而无法只是修改了结构体里的某一半字段，另一半字段里还留着旧指针。
+3. 在到达函数出口的所有**可达路径**上，旧的局部依赖都必须已经被替换或消费完毕。
 
 ---
 
 ## 本篇小结
 
-通过这场“悬垂指针越狱与缉捕”的实战，我们彻底摸清了 Flurry 跨作用域可达性检查的铜墙铁壁：
+通过这场“悬垂指针越狱与缉捕”的实战，我们理清了 Flurry 跨作用域可达性检查的静态安全防线：
 
 | 逃逸企图 / 场景 | 代码形态 | 编译器的判定与理由 |
 | :--- | :--- | :--- |
 | **按值返回标量** | `let local = 23; return local;` | **✅ 放行**：标量值复制后与原栈槽脱钩，无外部可达依赖 |
-| **直接返回局部指针** | `let local = 23; return local.ref;` | **❌ 拒绝**：出口清理先终结 `local`，返回结果依赖已死目标 |
-| **通过堆容器逃逸** | `vec.push(local.ref); return vec;` | **❌ 拒绝**：容器虽拥有堆缓冲区，但元素仍暴露对局部 `local` 的可达依赖 |
-| **写入外部对象或闭包捕获** | `out_vec.push(local.ref);` | **❌ 拒绝**：出口检查同时核验返回值、外部写入保留值与捕获环境（含 `dyn` 擦除） |
+| **直接返回局部指针** | `let local = 23; return local.ref;` | **❌ 报错**：出口清理先终结 `local`，返回结果依赖已死目标 |
+| **通过堆容器逃逸** | `vec.push(local.ref); return vec;` | **❌ 报错**：容器虽拥有堆缓冲区，但元素仍暴露对局部 `local` 的可达依赖 |
+| **写入外部对象或闭包捕获** | `out_vec.push(local.ref);` | **❌ 报错**：出口检查同时核验返回值、外部写入保留值与捕获环境（含 `dyn` 擦除） |
 | **精确槽位完整覆盖** | `var p = local.ref; p = outer; return p;` | **✅ 放行**：对单一确定位置做完整覆盖触发强更新，新依赖 `{outer}` 替换旧依赖 |
 
 ### 下一篇预告
@@ -203,6 +203,6 @@ fn uncertain_overwrite_bug(outer: *i32, use_outer: bool) -> *i32 {
 在真正的环形缓冲区和信号处理内核里，我们面对的是一整块连续的内存大数组（比如容量为 1024 的底层缓冲区 `storage`），我们需要：
 1. 把这块大缓冲区安全地**切分（Slice / View）**成前半段的“消费者读取区间 `[0..mid]`”和后半段的“生产者写入区间 `[mid..len]`”；
 2. 或者只取出结构体数组里某一个字段的投影视图；
-3. 最关键的是：当我们把 `[0..mid]` 和 `[mid..len]` 两个可变切片同时传给一个原地处理函数时，编译器怎么知道**这两个来自同一个大数组的不同区间是互不重叠（Disjoint）的**？
+3. 最关键的是：当我们把 `[0..mid]` 和 `[mid..len]` 两个可变切片同时传给一个原地处理函数时，编译器怎么知道**这两个来自同一个大数组的不同区间是互彼此分离（Disjoint）的**？
 
 在下一篇 **《Flurry 演进手记 (049)：把一块大缓冲区安全切成两半——内存视图（Memory Views）、字段视图与区间视图》** 中，我们将正式进入 Flurry 内存视图与区间代数的精彩世界。

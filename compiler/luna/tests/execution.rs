@@ -46169,3 +46169,98 @@ fn named_field_candidates_remap_alternatives_and_keep_declaration_order() {
     assert_eq!(trace, ["first", "second"]);
     luna::instantiation::instantiate(&package, "run", 200_000).unwrap();
 }
+
+#[test]
+fn quote_callable_adapters_keep_affine_receiver_and_caller_cleanup_order() {
+    for action in [
+        "host.as(Consume).consume();",
+        "let action=Held.as(Consume).consume;action(host);",
+    ] {
+        let source = format!(
+            "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            trait Consume {{fn consume(self);}}
+            struct Held {{}} struct Caller {{}} struct Nested {{}}
+            fn held_clean() {{}} fn caller_clean() {{}} fn nested_clean() {{}}
+            impl Retire for Held {{quote fn drop(*self) {{held_clean();}}}}
+            impl Retire for Caller {{quote fn drop(*self) {{caller_clean();}}}}
+            impl Retire for Nested {{quote fn drop(*self) {{nested_clean();}}}}
+            impl Consume for Held {{quote fn consume(self) {{let nested=Nested {{}};return;}}}}
+            fn run()->bool {{let caller=Caller {{}};let host=Held {{}};{action}true}}"
+        );
+        let package = compile(&source);
+        let budget = elaboration::ptc::Budget::default();
+        let mut items = intrinsic::LangItems::new();
+        let protocol = |name| {
+            package
+                .traits
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap()
+                .declaration
+        };
+        items
+            .bind_source_traits(
+                &package,
+                &[
+                    (intrinsic::LangItem::Copy, protocol("Duplicate")),
+                    (intrinsic::LangItem::Drop, protocol("Retire")),
+                ],
+            )
+            .unwrap();
+        let executable = key_world(&package, |world| {
+            luna::cleanup::prepare_source(
+                &package,
+                world,
+                &items,
+                iir::InstanceKey {
+                    declaration: id(&package, "run"),
+                    arguments: vec![],
+                },
+                &mut 100_000,
+                budget,
+            )
+        })
+        .unwrap();
+        let mut vm = Interpreter::from_iir(&executable.graph, Budget::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&executable.entry, vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        let observed = calls(&package, &vm);
+        let cleanup: Vec<_> = observed
+            .iter()
+            .filter(|name| name.ends_with("_clean"))
+            .collect();
+        assert_eq!(
+            cleanup,
+            vec!["nested_clean", "held_clean", "caller_clean"],
+            "{observed:?}"
+        );
+        assert_eq!(
+            observed
+                .iter()
+                .filter(|name| name.as_str() == "drop::callable")
+                .count(),
+            3
+        );
+        let invalid = source.replace(
+            &format!("{action}true"),
+            &format!("{action}host.as(Consume).consume();true"),
+        );
+        let invalid = compile(&invalid);
+        assert!(
+            luna::execution::interpret_with_protocols(
+                &invalid,
+                "run",
+                "Duplicate",
+                "Retire",
+                100_000
+            )
+            .is_err(),
+            "moved receiver reused"
+        );
+    }
+}

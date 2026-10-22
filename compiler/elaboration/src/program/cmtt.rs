@@ -73,19 +73,90 @@ impl Checker<'_, '_> {
         )
     }
 
-    fn pattern_generator_callee(&self, callee: &Expr<'_>) -> bool {
+    fn pattern_generator_callee(&mut self, callee: &Expr<'_>) -> bool {
         let head = match callee.kind {
             H::NFApplication(head, _) => head,
             _ => callee,
         };
         matches!(head.kind,H::ResolvedDef {def_id,..} if self.package.definition_owner(def_id).is_some_and(|owner|self.is_pattern_generator(owner)))
+            || self
+                .generic_code_method_hint(head)
+                .is_some_and(|owner| self.is_pattern_generator(owner))
     }
 
-    fn pattern_code_producer(&self, value: &Expr<'_>, annotation: Option<&Expr<'_>>) -> bool {
-        matches!(value.kind, H::CodePatternQuote(..))
-            || annotation.is_some_and(|ty| matches!(ty.kind, H::ContextualPatternType(..)))
-            || matches!(value.kind, H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) if self.pattern_codes.contains_key(&local(id)))
-            || matches!(value.kind, H::Application(callee, _) | H::ExtendedApplication(callee, _) if self.pattern_generator_callee(callee))
+    fn pattern_code_producer(&mut self, value: &Expr<'_>, annotation: Option<&Expr<'_>>) -> bool {
+        annotation.is_some_and(|ty| matches!(ty.kind, H::ContextualPatternType(..)))
+            || self.pattern_producer_in(value, &mut BTreeSet::new(), 0)
+    }
+
+    fn pattern_producer_in(
+        &mut self,
+        value: &Expr<'_>,
+        bindings: &mut BTreeSet<n::LocalId>,
+        depth: usize,
+    ) -> bool {
+        if depth >= 64 {
+            return false;
+        }
+        match &value.kind {
+            H::CodePatternQuote(..) => true,
+            H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => {
+                bindings.contains(&local(*id)) || self.pattern_codes.contains_key(&local(*id))
+            }
+            H::Application(callee, _) | H::ExtendedApplication(callee, _) => {
+                self.pattern_generator_callee(callee)
+            }
+            H::Let(decl) => {
+                if decl
+                    .init
+                    .is_some_and(|value| self.pattern_producer_in(value, bindings, depth + 1))
+                    || decl
+                        .ty
+                        .is_some_and(|ty| matches!(ty.kind, H::ContextualPatternType(..)))
+                {
+                    bindings.extend(pattern_binding_ids(&decl.pattern));
+                }
+                false
+            }
+            H::Return(Some(value)) | H::Semi(value) | H::InlineControl(value) => {
+                self.pattern_producer_in(value, bindings, depth + 1)
+            }
+            H::If(_, yes, no) => {
+                let yes = self.pattern_block_producer(yes, bindings, depth + 1);
+                let no =
+                    no.is_some_and(|value| self.pattern_producer_in(value, bindings, depth + 1));
+                yes || no
+            }
+            H::Block(body) | H::Loop(body) | H::For { body, .. } => {
+                self.pattern_block_producer(body, bindings, depth + 1)
+            }
+            H::When(arms) => arms
+                .iter()
+                .any(|arm| self.pattern_producer_in(arm.body, bindings, depth + 1)),
+            H::Match(_, arms) => arms
+                .iter()
+                .any(|arm| self.pattern_producer_in(arm.body, bindings, depth + 1)),
+            _ => false,
+        }
+    }
+
+    fn pattern_block_producer(
+        &mut self,
+        body: &hir::Block<'_>,
+        bindings: &mut BTreeSet<n::LocalId>,
+        depth: usize,
+    ) -> bool {
+        if depth >= 64 {
+            return false;
+        }
+        let mut returned = false;
+        for statement in body.stmts {
+            returned |= self.pattern_producer_in(statement, bindings, depth + 1);
+        }
+        returned
+            || body
+                .expr
+                .is_some_and(|value| self.pattern_producer_in(value, bindings, depth + 1))
     }
 
     pub(super) fn code_declaration(
@@ -247,11 +318,21 @@ impl Checker<'_, '_> {
         interface: Option<&Interface>,
         depth: usize,
     ) -> Result<Arc<ExpressionCode>, Error> {
+        self.code_value_in_context(value, interface, None, depth)
+    }
+
+    fn code_value_in_context(
+        &mut self,
+        value: &Expr<'_>,
+        interface: Option<&Interface>,
+        result_context: Option<&crate::calls::InputContext>,
+        depth: usize,
+    ) -> Result<Arc<ExpressionCode>, Error> {
         if self.code_construction_depth >= 32 {
             return Err(error(value.span, "code construction depth exhausted"));
         }
         self.code_construction_depth += 1;
-        let result = self.code_value_inner(value, interface, depth);
+        let result = self.code_value_inner(value, interface, result_context, depth);
         self.code_construction_depth -= 1;
         result
     }
@@ -260,6 +341,7 @@ impl Checker<'_, '_> {
         &mut self,
         value: &Expr<'_>,
         interface: Option<&Interface>,
+        result_context: Option<&crate::calls::InputContext>,
         depth: usize,
     ) -> Result<Arc<ExpressionCode>, Error> {
         if depth >= 64 || self.required_steps == 0 {
@@ -277,23 +359,40 @@ impl Checker<'_, '_> {
                 self.ascribe_code(code, interface, value.span)
             }
             H::Application(callee, arguments) => {
-                let code = self.invoke_code_generator(value, callee, arguments, interface)?;
+                let code = self.invoke_code_generator(
+                    value,
+                    callee,
+                    arguments,
+                    interface,
+                    result_context,
+                )?;
                 self.ascribe_code(code, interface, value.span)
             }
             H::ExtendedApplication(callee, arguments) => {
-                let code = self.invoke_property_generator(value, callee, arguments, interface)?;
+                let code = self.invoke_property_generator(
+                    value,
+                    callee,
+                    arguments,
+                    interface,
+                    result_context,
+                )?;
                 self.ascribe_code(code, interface, value.span)
             }
-            H::Block(block) => self.code_block(block, interface, depth + 1),
-            H::Match(subject, arms) => {
-                self.generator_code_match(value, subject, arms, interface, depth + 1)
-            }
+            H::Block(block) => self.code_block(block, interface, result_context, depth + 1),
+            H::Match(subject, arms) => self.generator_code_match(
+                value,
+                subject,
+                arms,
+                interface,
+                result_context,
+                depth + 1,
+            ),
             H::InlineControl(inner)
                 if matches!(inner.kind, H::If(..) | H::When(..) | H::Match(..)) =>
             {
                 // Construction decisions already run at comptime; definition
                 // checking must still validate the unselected branches.
-                self.code_value(inner, interface, depth + 1)
+                self.code_value_in_context(inner, interface, result_context, depth + 1)
             }
             H::When(arms) => {
                 if !arms.iter().any(|arm| arm.cond.is_none()) {
@@ -304,7 +403,12 @@ impl Checker<'_, '_> {
                     let selected = self.generator_when_condition(arm.cond)?;
                     if self.checking_code_generator {
                         let code = self.generator_scope(arm.span, |this| {
-                            this.code_value(arm.body, interface, depth + 1)
+                            this.code_value_in_context(
+                                arm.body,
+                                interface,
+                                result_context,
+                                depth + 1,
+                            )
                         })?;
                         if let Some(previous) = &first {
                             self.require_code_branch(previous, code, arm.span)?;
@@ -313,19 +417,27 @@ impl Checker<'_, '_> {
                         }
                     } else if selected == Some(true) {
                         return self.generator_scope(arm.span, |this| {
-                            this.code_value(arm.body, interface, depth + 1)
+                            this.code_value_in_context(
+                                arm.body,
+                                interface,
+                                result_context,
+                                depth + 1,
+                            )
                         });
                     }
                 }
                 first.ok_or_else(|| error(value.span, "code-valued when selected no arm"))
             }
-            H::Return(Some(value)) => self.code_value(value, interface, depth + 1),
+            H::Return(Some(value)) => {
+                self.code_value_in_context(value, interface, result_context, depth + 1)
+            }
             H::If(condition, yes, Some(no)) => {
                 if self.checking_code_generator {
                     let checked = self.expr(condition, Some(&p(P::Bool)))?;
                     self.validate_generator_data(&checked, condition.span)?;
-                    let yes = self.code_block(yes, interface, depth + 1)?;
-                    let no = self.code_value(no, interface, depth + 1)?;
+                    let yes = self.code_block(yes, interface, result_context, depth + 1)?;
+                    let no =
+                        self.code_value_in_context(no, interface, result_context, depth + 1)?;
                     self.require_code_branch(&yes, no, value.span)?;
                     Ok(yes)
                 } else {
@@ -333,10 +445,10 @@ impl Checker<'_, '_> {
                         self.generator_data_expression(condition, Some(&p(P::Bool)))?;
                     match condition {
                         comptime_interpretor::Value::Bool(true) => {
-                            self.code_block(yes, interface, depth + 1)
+                            self.code_block(yes, interface, result_context, depth + 1)
                         }
                         comptime_interpretor::Value::Bool(false) => {
-                            self.code_value(no, interface, depth + 1)
+                            self.code_value_in_context(no, interface, result_context, depth + 1)
                         }
                         _ => Err(error(
                             value.span,
@@ -353,7 +465,13 @@ impl Checker<'_, '_> {
                     // the quoted body is retained only after actual invocation.
                     checker.pattern_quote_pending = Some(false);
                     checker.checking_attempt(true, false, |checker| {
-                        checker.expr(body, interface.map(|interface| &interface.result))
+                        if interface.is_none()
+                            && let Some(context) = result_context
+                        {
+                            checker.input_context_expression(body, context)
+                        } else {
+                            checker.expr(body, interface.map(|interface| &interface.result))
+                        }
                     })
                 });
                 let body = checked?.ok_or_else(|| {
@@ -364,16 +482,16 @@ impl Checker<'_, '_> {
                 })?;
                 constants::charge_copy(&body, &mut self.required_steps, value.span)?;
                 let mut fuel = self.required_steps as usize;
-                let free = nir::free_bindings::collect(&body, &mut fuel);
+                let free = nir::free_bindings::collect_with_dependencies(
+                    &body,
+                    &self.abstract_code_dependencies,
+                    &mut fuel,
+                );
                 self.required_steps = fuel as u64;
                 let free = free.map_err(|message| error(value.span, message))?;
                 let mut actual_free = BTreeSet::new();
                 for id in free {
-                    if let Some(dependencies) = self.abstract_code_dependencies.get(&id) {
-                        actual_free.extend(dependencies);
-                    } else if !(self.checking_code_generator
-                        && self.generator_data.contains_key(&id))
-                    {
+                    if !(self.checking_code_generator && self.generator_data.contains_key(&id)) {
                         actual_free.insert(id);
                     }
                 }
@@ -599,6 +717,9 @@ impl Checker<'_, '_> {
             self.locals.insert(id, code.result.clone());
             self.abstract_code_dependencies
                 .insert(id, connections.values().copied().collect());
+            if let Some(pending) = &mut self.pattern_quote_pending {
+                *pending = true;
+            }
             return Ok(n::Expr {
                 ty: code.result.clone(),
                 source: source(site.span),

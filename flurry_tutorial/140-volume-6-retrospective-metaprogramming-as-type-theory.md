@@ -94,7 +94,7 @@ test end_to_end_metaprogramming_showcase use gateway_verification_suite {
     let frame = pack_sensor_frame(0xA, 0x3, 20u8);
 
     -- 3. 第六卷：展开 quote fn 提取 payload，并接入 CMTT 校准代码计算 20 * 2 + 2 = 42
-    let calibrate = build_calibration_code(2u32, 2u32);
+    const calibrate = build_calibration_code(2u32, 2u32);
     if extract_verified_payload(frame, 0xA) is (payload: u8) do {
         let calibrated = ~[raw_payload = payload]<calibrate>;
         assumes calibrated == 42u32;
@@ -103,7 +103,7 @@ test end_to_end_metaprogramming_showcase use gateway_verification_suite {
         assumes false;
     }
 
-    -- 4. 验证通道不匹配时安全返回 null
+    -- 4. 验证通道失配时安全返回 null
     if extract_verified_payload(frame, 0xB) is (_: u8) do {
         assumes false;
     } else {
@@ -112,7 +112,7 @@ test end_to_end_metaprogramming_showcase use gateway_verification_suite {
 }
 ```
 
-在这段代码中，比特级的 `channel ++ flags ++ payload'bitvec`、编译期布局查询 `Type.size_of(u16)`、`quote fn` 的局部 `return null` 边界、CMTT 的 `~[raw_payload = payload]<calibrate>` 上下文重绑定，以及 `template test` 的 `verified_count` 夹具在编译期完成展开与检查，不引入额外的运行期间接开销。
+在这段代码中，比特级的 `channel ++ flags ++ payload'bitvec`、编译期布局查询 `Type.size_of(u16)`、`quote fn` 的局部 `return null` 边界、CMTT 的 `~[raw_payload = payload]<calibrate>` 上下文重绑定，以及 `template test` 的 `verified_count` 夹具在编译期完成展开与检查，免于引入额外的运行期间接开销。
 
 ---
 
@@ -123,16 +123,16 @@ test end_to_end_metaprogramming_showcase use gateway_verification_suite {
 | **1** | **Normal-Form 头** | 尖括号构造器（如 `Identity<T>`、`Tuple<...Es>`、`Box<T, v>`）保留构造器头身份，`Identity<T> != T`，不因函数体返回 `T` 而自动展开 |
 | **2** | **冻结边界** | 定义期冻结只保存稳定绑定、契约与合法残余项（如 `defer`）；不冻结活动推断元变量、等待者或未决候选事务 |
 | **3** | **PTC 与程序验证** | PTC 仅处理 $U_1$ 类型与编译期纯值命题；运行期内存状态与资源规格归属程序验证层 |
-| **4** | **运行时依赖类型** | 值体与操作环境分离；相同构造器头不等于完整类型相等，需同时比对所绑定的运行期身份 |
+| **4** | **运行时依赖类型** | 值体与操作环境分离；相同构造器头有别于完整类型相等，需同时比对所绑定的运行期身份 |
 | **5** | **属性与配置** | `^expr` 求值为编译期 `Object`，按普通词法规则解析名字；外层前缀属性覆盖内层前缀属性与内部 `.id expr` 配置 |
-| **6** | **`quote fn` 语义** | `quote fn` 不属于 `comptime fn`；其普通运行期实参只求值一次，内部 `return` 仅完成本次应用，且不作为函数指针逃逸 |
-| **7** | **CMTT 单洞与资源** | 每段 Quote 的运行期主体至多包含一个接入点（可通过循环链式包裹构造多步程序）；复制代码值不复制运行期资源，接入后检查 `Once` 与可达性 |
+| **6** | **`quote fn` 语义** | `quote fn` 并非属 `comptime fn`；其普通运行期实参只求值一次，内部 `return` 仅完成本次应用，且免作为函数指针逃逸 |
+| **7** | **CMTT 单洞与资源** | 每段 Quote 的运行期主体至多包含一个接入点（可通过循环链式包裹构造多步程序）；复制代码值免于复制运行期资源，接入后检查 `Once` 与可达性 |
 | **8** | **模板宏 vs 构造宏** | `define` 模板宏仅限当前文件、展开后再做语法检查且重复参数会重复替换；跨文件 AST / PEG / 原始文本处理使用 `@define_macro1/2` 与 `^macro3/4` |
 | **9** | **分阶段完备性** | 进入运行期代码生成前，所有类型的编译期部分与代码拼接必须完成，仅保留合法的运行期依赖 |
 | **10** | **程序合成底线** | `BitVec`、组合子与张量合成均保留合法基准实现；遇到求解器未决或超预算时回退基准实现，不跳过输入求值与资源清理责任 |
 
 ```flurry
--- ❌ 编译期拒绝：同一段 quote 主体内不能出现两个 splice 接入点（违反单洞规则）
+-- ❌ 编译期报错：同一段 quote 主体内无法出现两个 splice 接入点（违反单洞规则）
 pure comptime fn reject_two_holes_in_one_quote(
     a: < |- u32 >,
     b: < |- u32 >,

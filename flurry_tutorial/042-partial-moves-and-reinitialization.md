@@ -1,11 +1,11 @@
 # Flurry 演进手记 (042)：把结构体拆开搬走一半——部分移出（Partial Move）、重新初始化与合并交付
 
-在 [上一篇 (041)](./041-once-clone-and-copy-responsibilities.md) 中，我们認識了 `Once`（默认仿射移动）、`Clone` 和 `Copy`。我们知道，当一个非 `Copy` 的值被按值移走后，它的源位置就会变成“已移出（Moved-out）”状态，不能再被读取。
+在 [上一篇 (041)](./041-once-clone-and-copy-responsibilities.md) 中，我们認識了 `Once`（默认仿射移动）、`Clone` 和 `Copy`。我们知道，当一个并非 `Copy` 的值被按值移走后，它的源位置就会变成“已移出（Moved-out）”状态，禁止再被读取。
 
-但是，在编写 `RingBuffer` 的槽位管理代码时，我们面对的往往不是单个原子值，而是由多个字段组装而成的**聚合结构体（Aggregate `struct`）**。
+但是，在编写 `RingBuffer` 的槽位管理代码时，我们面对的往往并非单个原子值，而是由多个字段组装而成的**聚合结构体（Aggregate `struct`）**。
 
 想象一下，环形缓冲区里的每个数据帧槽位 `FrameSlot` 包含两部分：
-1. **`payload: DataBlock`**：装着真正的数据载荷（这是一个非 `Copy` 的仿射资源）；
+1. **`payload: DataBlock`**：装着真正的数据载荷（这是一个并非 `Copy` 的仿射资源）；
 2. **`tag_id: u32`**：记录这个槽位的序列号标签，并且为了调试审计，我们给 `FrameSlot` 实现了 `Drop`，在槽位销毁时打印 `"Closing slot #<tag_id>"`。
 
 在缓冲区的“取出并原地轮换（Pop & Rotate）”操作中，我们需要做两件事：
@@ -13,7 +13,7 @@
 - **场景二（原地换芯）**：把 `DoubleSlot` 中的旧载荷 `first` 移走处理掉，再往空的 `first` 槽位里塞入一个新载荷，最后把恢复完整初始化状态的整个 `DoubleSlot` 返回出去。
 
 如果你在 C++ 或 Rust 里写过类似的代码，你一定被折磨得死去活来过：
-- 在 C++ 里，把字段 `std::move` 走之后，原字段还留着一个“合法但未指定状态”的空壳，析构函数照跑不误，极易触发空指针解引用；
+- 在 C++ 里，把字段 `std::move` 走之后，原字段还留着一个“合法但未指定状态”的空壳，析构函数照跑不误，容易触发空指针解引用；
 - 在 Rust 里，只要一个 `struct` 实现了 `Drop`，编译器就会一刀切地报错 `cannot move out of type because it implements the Drop trait`——哪怕你的 `drop()` 函数里只读了 `self.tag_id`，根本没碰 `self.payload`。
 
 Flurry 是如何打破这个僵局的？让我们从 传统开始一探究竟。
@@ -46,7 +46,7 @@ impl Drop for FrameSlotV0 {
 
 看看 `FrameSlotV0` 的委屈：在业务逻辑里，一个有效的 `FrameSlot` 只要存在，它的 `payload` 本来是 100% 存在的。仅仅为了在最后取出 `payload` 时不跟 `Drop` 冲突，我们就被迫把类型弱化成了 `?DataBlock`——结果导致整个代码库里所有访问 `slot.payload` 的地方，都得去处理一个根本不该存在的 `null` 分支，而且在内存中还白白多占了一个判别标签（Tag）的空间。
 
-为什么不能直接定义 `payload: DataBlock`，然后堂堂正正地把 `slot.payload` 搬走呢？
+为什么禁止直接定义 `payload: DataBlock`，然后堂堂正正地把 `slot.payload` 搬走呢？
 在 Flurry 里：**完全可以。**
 
 ---
@@ -54,7 +54,7 @@ impl Drop for FrameSlotV0 {
 ## 二、 字段级位置状态树与精准的 `Drop` 前提检查
 
 为什么 Flurry 允许你直接从带有 `Drop` 的结构体里移走字段？
-因为在编译器内部，Flurry 维护的不是一个粗糙的“变量是否存活”布尔值，而是一棵精细到每一个子字段的**位置状态树（Location State Tree）**（详见 `docs/resource-management/moves-and-initialization.md` 与 `docs/resource-management/drop-elaboration.md`）。
+因为在编译器内部，Flurry 维护的并非一个粗糙的“变量是否存活”布尔值，而是一棵精细到每一个子字段的**位置状态树（Location State Tree）**（详见 `docs/resource-management/moves-and-initialization.md` 与 `docs/resource-management/drop-elaboration.md`）。
 
 下面来看看当你从结构体里移走一个字段时，编译器的位置状态树发生了什么变化：
 
@@ -71,7 +71,7 @@ impl Drop for FrameSlotV0 {
 ```
 
 当 `slot` 处于**[部分初始化 Partial]**状态时，编译器遵循三条核心原则：
-1. **禁止需要完整对象的操作**：此时你不能再把整个 `slot` 按值传给别的函数，也不能再去读取已经变成 `[已移出 ❌]` 的 `slot.payload`；
+1. **禁止需要完整对象的操作**：此时你禁止再把整个 `slot` 按值传给别的函数，亦无法再去读取已经变成 `[已移出 ❌]` 的 `slot.payload`；
 2. **分离的未移出字段照常可用**：因为 `slot.tag_id` 依然是 `[已初始化 ✅]` 且与 `payload` 物理分离，你依然可以合法地读取或移出 `slot.tag_id`。
 3. **存在用户 `Drop` 不一刀切禁止部分移出，只看实际访问前提**。
    当作用域结束需要清理残余的 `slot` 时，编译器会检查 `FrameSlot.drop(*self)` 的契约与实现：
@@ -122,19 +122,19 @@ test {
 ```
 
 看看上面这段 `test` 的输出顺序：
-1. 在 `extract_payload` 即将返回时，`value.payload` 已被移交到返回值槽位；残余的 `value` 执行清理，打印 **`Closing slot #101`**（注意：此时绝不会触发 `DataBlock` 的 `drop`，因为它已经被移走了。）；
+1. 在 `extract_payload` 即将返回时，`value.payload` 已被移交到返回值槽位；残余的 `value` 执行清理，打印 **`Closing slot #101`**（注意：此时规避触发 `DataBlock` 的 `drop`，因为它已经被移走了。）；
 2. 回到 `test` 中，打印 **`Extracted block of size 64`**；
 3. 最后 `test` 结束时，接收了返回值的 `block` 离开作用域，打印 **`Drop DataBlock(size=64)`**。
 
 > **🔍 语法小贴士：模式解构中的 `Copy` 字段与移动字段混合拆包**
 > 如果你在模式匹配或 `let` 解构里写 `let { payload, tag_id } = slot;`：
 > - 因为 `tag_id: u32` 具有 **`Copy` 能力**，解构 `tag_id` 只是**复制了一份副本**，父对象 `slot` 里的 `.tag_id` 原字段**依然保持已初始化状态**（因此 `FrameSlot.drop` 依然可以安全读取 `self.tag_id.*`）。
-> - 而因为 `payload: DataBlock` 是非 `Copy` 的仿射类型，解构 `payload` 则是真正的**移动（Move）**，将父对象的 `.payload` 置为已移出。
+> - 而因为 `payload: DataBlock` 是并非 `Copy` 的仿射类型，解构 `payload` 则是真正的**移动（Move）**，将父对象的 `.payload` 置为已移出。
 
 相反，如果有人在 `FrameSlot.drop` 里写了读取 `self.payload` 的代码，还想把 `value.payload` 移走，编译器会立刻亮起红灯：
 
 ```flurry
--- ❌ 编译期直接拒绝。
+-- ❌ 编译期直接报错。
 struct BadSlot {
     payload: DataBlock,
     tag_id: u32,
@@ -142,7 +142,7 @@ struct BadSlot {
 
 impl Drop for BadSlot {
     fn drop(*self) {
-        -- 注意：这个 Drop 居然要读取 self.payload.size。
+        -- 注意：这个 Drop 却要读取 self.payload.size。
         println("Dropping slot with payload size {}", self.payload.size.*);
     }
 }
@@ -176,7 +176,7 @@ fn illegal_extract(value: BadSlot) -> DataBlock {
   [第 3 步] 给空字段重新赋值（重新初始化 Reinitialization）：
   slot.first = DataBlock { size: 128u32 };
   ──► 编译器发现 `slot.first` 当前是 [已移出 ❌] 空槽位：
-      1. 不需要清理旧值（因为 B1 早就在第 2 步搬走了。绝不会重复 Drop。）；
+      1. 无需清理旧值（因为 B1 早就在第 2 步搬走了。免重复 Drop。）；
       2. 直接把新构造的 B3 装进 `slot.first`；
       3. 将 `slot.first` 恢复为 [已初始化 ✅]；
       4. 检查发现所有字段都已齐备，整个 `slot` 重新晋升为 [完整初始化 ✅]。
@@ -211,7 +211,7 @@ fn replace_first(var pair: DoubleSlot, new_size: u32) -> DoubleSlot {
     println("Consuming previous first block of size {}", previous.size);
 
     -- 2. 重新初始化已移出的 pair.first 字段。
-    -- 编译器知道此时 pair.first 是空的，不会在此处重复触发 previous 的 Drop。
+    -- 编译器知道此时 pair.first 是空的，免于在此处重复触发 previous 的 Drop。
     pair.first = DataBlock { size: new_size }
 
     -- 3. 此时 pair 的所有字段均已恢复初始化，可以直接整体返回。
@@ -251,14 +251,14 @@ test {
 
 在今天的代码里，结构体的两个字段 `first` 和 `second` 是完全独立的——移动整個结构体，只是把这两个字段搬到新的栈帧或寄存器里。
 
-但是，在设计高性能 `RingBuffer` 和零拷贝解析器时，我们马上就会遇到一个让无数 C++ 和 Rust 程序员闻风丧胆的终极 Boss：**自引用结构（Self-Referential Struct）**。
+但是，在设计高性能 `RingBuffer` 和零拷贝解析器时，我们马上就会遇到一个让无数 C++ 和 Rust 程序员棘手的核心难题：**自引用结构（Self-Referential Struct）**。
 想象一下下面这两种结构体：
 - **结构体 A（指向堆分配的视图）**：`struct HeapPacket { storage: String, view: str }`——其中 `view` 指向 `storage` 在**堆上**分配的字符数组；
 - **结构体 B（指向内联字段的指针）**：`struct InlineLink { value: i32, pointer: ?*i32 }`——其中 `pointer` 直接指向同一个结构体肚子里的**内联字段 `local.value.ref`**。
 
 思考一下：
 1. 当我们把结构体 A（`HeapPacket`）按值移动返回给调用者时，它的 `view` 还会有效吗？
-2. 当我们把结构体 B（`InlineLink`）按值移动返回给调用者时，`local` 的栈内存已经销毁了，`pointer` 岂不是瞬间变成了指向旧栈帧的悬垂指针（Dangling Pointer）？为什么 Flurry 不需要发明像 Rust `Pin<P>` 那样拧巴的包装类型，就能直接区分并守住这两者的安全边界？
+2. 当我们把结构体 B（`InlineLink`）按值移动返回给调用者时，`local` 的栈内存已经销毁了，`pointer` 岂不是瞬间变成了指向旧栈帧的悬垂指针（Dangling Pointer）？为什么 Flurry 无需发明像 Rust `Pin<P>` 那样拧巴的包装类型，就能直接区分并守住这两者的安全边界？
 3. 还有在类型签名里偶尔见到的 `Self`、`Itself` 和 `itself`——这三兄弟又有什么区别？
 
 在下一篇 **《Flurry 演进手记 (043)：当对象内部指向自己——自引用结构（Self-Reference）的移动与安全锚定》** 中，我们将正面迎战系统编程中最棘手的自引用难题。

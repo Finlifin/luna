@@ -21,9 +21,9 @@ struct Counter {
 
 如果每次调用方法或读取字段前，程序员都得在脑子里数清楚“我现在手里到底是几级指针？该方法要的是 `self` 还是 `*self`？我该补 `.ref` 还是补几个 `.*`？”，代码很快就会变成满屏的 `outer.*.read()` 或 `counter.ref.read()`。
 
-更进一步：当我们的结构体同时实现了两个都带有 `fn code(*self) -> u32` 方法的接口（比如 `WireCode` 和 `DisplayCode`），在泛型函数里调 `status.code()` 时，万一实例化传入的具体类型同時实现了这两个接口，会不会突然报歧义错误或者调错方法？
+更进一步：当我们的结构体同时实现了两个都带有 `fn code(*self) -> u32` 方法的接口（比如 `WireCode` 和 `DisplayCode`），在泛型函数里调 `status.code()` 时，万一实例化传入的具体类型同時实现了这两个接口，是否会突然报歧义错误或者调错方法？
 
-今天，我们将深入 `docs/type/receiver-adaptation.md` 与 `docs/type/member-projection.md`，把 Flurry 的**方法接收者适配**、**三层查找优先级**与**定义端固定成员来源**彻底看个通透。
+今天，我们将深入 `docs/type/receiver-adaptation.md` 与 `docs/type/member-projection.md`，把 Flurry 的**方法接收者适配**、**三层查找优先级**与**定义端固定成员来源**看清全貌。
 
 ---
 
@@ -45,7 +45,7 @@ fn manual_verbose() {
 }
 ```
 
-而在 Flurry 中，当你写下 `outer.read()`、`counter.read()` 或 `pointer.value` 时，编译器的**接收者适配引擎（Receiver Adaptation）**会自动为你铺平道路，而且**绝对不会偷偷复制整個 `Counter` 对象**。
+而在 Flurry 中，当你写下 `outer.read()`、`counter.read()` 或 `pointer.value` 时，编译器的**接收者适配引擎（Receiver Adaptation）**会自动为你铺平道路，而且**不会偷偷复制整個 `Counter` 对象**。
 
 来看看官方规范中的标准示例：
 
@@ -104,25 +104,25 @@ test {
   [末端指针适配检查]：
   `Counter.read` 要求接收者是 `*Counter`。
   Wait! 难道我们要先把 `Counter` 整个复制一份，再对副本取地址 `.ref` 吗？
-  ❌ 绝不。
+  ❌ 不。
   编译器发现刚才在 [深度 1] 时手里就已经拿着现成的 `*Counter` 指针（即 `outer.*`）。
   直接把 `outer.*` 交给 `Counter.read(*self)`，全程零对象拷贝。
 ```
 
 仔细体会这条核心规则（详见 `docs/type/receiver-adaptation.md`）：
-> **当已有指针能直接满足方法需求时，绝不先复制所指对象再取副本地址。且接收者表达式只求值一次，候选搜索过程不执行任何运行时动作，只有最终选中的路径才生成解引用或取址指令。**
+> **当已有指针能直接满足方法需求时，不先复制所指对象再取副本地址。且接收者表达式只求值一次，候选搜索过程跳过执行任何运行时动作，只有最终选中的路径才生成解引用或取址指令。**
 
-那如果 `Counter` 是一个**不可复制（非 `Copy`）**的仿射资源对象，而有人试图通过指针上的“目标引导读取”把它自动搬出来呢？
+那如果 `Counter` 是一个**唯一无二（并非 `Copy`）**的仿射资源对象，而有人试图通过指针上的“目标引导读取”把它自动搬出来呢？
 
 ```flurry
 struct AffineSensor {
     id: u32,
 }
 
--- ❌ 编译期直接拒绝。
+-- ❌ 编译期直接报错。
 fn bad_auto_read(ptr: *AffineSensor) -> AffineSensor {
     -- 错误。目标引导读取（自动插入内建指针读取 `.*`）要求最终读出的值必须具备 `Copy` 能力。
-    -- 编译器绝不会利用隐式读取规则把非 Copy 的仿射对象从指针后面偷偷搬走。
+    -- 编译器不会利用隐式读取规则把并非 Copy 的仿射对象从指针后面偷偷搬走。
     ptr
 }
 ```
@@ -133,7 +133,7 @@ fn bad_auto_read(ptr: *AffineSensor) -> AffineSensor {
 
 现在你可能会问：如果一个对象外层包了指针，或者实现了自定义智能指针的 `Deref` 接口，又或者带有显式类型视角（我们下一篇会详谈），编译器到底是按什么顺序搜索方法的？
 
-Flurry 制定了严格、确定、绝不回退掩盖错误的**三层查找顺序（Three-Tier Lookup Order）**：
+Flurry 制定了严格、确定、不回退掩盖错误的**三层查找顺序（Three-Tier Lookup Order）**：
 
 ```text
   ══════════════════ 方法查找的三层严格优先级 ══════════════════
@@ -157,14 +157,14 @@ Flurry 制定了严格、确定、绝不回退掩盖错误的**三层查找顺�
 ```
 
 注意两条防踩坑边界：
-1. **不能靠“少取一次地址”在不同 Trait 之间消歧**：
-   假设 `TraitA.foo(self)` 按值接收，而 `TraitB.foo(*self)` 按指针接收。如果你拿着值 `x` 调用 `x.foo()`，编译器在同一个解引用深度上同时看到了 `TraitA.foo` 和 `TraitB.foo`——此时它们来自两个不同的 Trait 来源，**直接报同名歧义错误**。编译器不会隐式地说“因为 `TraitA.foo(self)` 不用取地址 `.ref`，所以帮你在两个毫无关系的 Trait 里挑了 `TraitA`”。
+1. **无法靠“少取一次地址”在不同 Trait 之间消歧**：
+   假设 `TraitA.foo(self)` 按值接收，而 `TraitB.foo(*self)` 按指针接收。如果你拿着值 `x` 调用 `x.foo()`，编译器在同一个解引用深度上同时看到了 `TraitA.foo` 和 `TraitB.foo`——此时它们来自两个各异的 Trait 来源，**直接报同名歧义错误**。编译器不会隐式地说“因为 `TraitA.foo(self)` 无须取地址 `.ref`，所以帮你在两个毫无关系的 Trait 里挑了 `TraitA`”。
 2. **选定来源后报错不回退**：
-   一旦高优先级层找到了匹配的方法来源，如果随后因为你传错了参数类型或违反了资源契约而报错，编译器会**直接报告该调用的错误**，绝不会悄悄退回更深层的解引用去调另一个同名方法来掩盖你的 bug。
+   一旦高优先级层找到了匹配的方法来源，如果随后因为你传错了参数类型或违反了资源契约而报错，编译器会**直接报告该调用的错误**，不会悄悄退回更深层的解引用去调另一个同名方法来掩盖你的 bug。
 
 ---
 
-## 三、 定义端固定成员来源——为什么泛型实例化绝不“临阵倒戈”？
+## 三、 定义端固定成员来源——为什么泛型实例化不“临阵倒戈”？
 
 接下来看本篇最核心的架构级特性：**成员来源稳定性（Source Stability，详见 `docs/type/member-projection.md`）**。
 
@@ -220,7 +220,7 @@ test {
     println("wire: {}", status.as(WireCode).code());
     println("display: {}", status.as(DisplayCode).code());
 
-    -- 2. 传入泛型函数 protocol_code：稳稳输出 7，绝不因 Status 还有 DisplayCode 而产生歧义。
+    -- 2. 传入泛型函数 protocol_code：稳稳输出 7，不因 Status 还有 DisplayCode 而产生歧义。
     println("generic wire: {}", protocol_code(status.ref));
 }
 ```
@@ -248,16 +248,16 @@ generic wire: 7
   [阶段 2：实例化 `T = Status`]
   直接去查 `impl WireCode for Status` 的 `code` 实现。
   哪怕 `Status` 后来还实现了 `DisplayCode.code`，甚至有个固有字段/方法，
-  也绝不重新竞争、绝不篡改已锁定的 `WireCode` 来源。
+  也不重新竞争、不篡改已锁定的 `WireCode` 来源。
 ```
 
-那如果在 `test` 块里，我们对 `status` **不加 `.as(WireCode)` 也不加 `.as(DisplayCode)`**，直接裸写 `status.code()` 呢？
+那如果在 `test` 块里，我们对 `status` **省略 `.as(WireCode)` 也省略 `.as(DisplayCode)`**，直接裸写 `status.code()` 呢？
 
 ```flurry
--- ❌ 编译期直接拒绝。
+-- ❌ 编译期直接报错。
 fn ambiguous_call(status: Status) -> u32 {
     -- Status 同时实现了 WireCode.code 和 DisplayCode.code，
-    -- 在同一视角、同一解引用深度下存在两个平级的不同来源，编译器拒绝猜测，要求显式 .as(...) 消歧。
+    -- 在同一视角、同一解引用深度下存在两个平级的不同来源，编译器报错猜测，要求显式 .as(...) 消歧。
     status.code()
 }
 ```
@@ -271,7 +271,7 @@ fn ambiguous_call(status: Status) -> u32 {
 | **方法接收者适配** | 沿内建 `.*` 与唯一 `Deref` 从浅到深寻路，末端按需补一次 `.ref` / `Reference` | 拿着二级指针 `**Counter` 也能直接写 `outer.read()`，且复用已有指针、零对象拷贝 |
 | **目标引导读取** | 当绑定/参数/返回值有明确目标类型且目标值可 `Copy` 时，自动读取字段指针 | `let field = ptr.value;` 保有 `*u32` 指针，而 `let snap: u32 = ptr.value;` 直接拿到 `u32` 值 |
 | **三层查找优先级** | 1. 显式视角顺序 $\rightarrow$ 2. 解引用深度（浅到深） $\rightarrow$ 3. 实现结构精度 | 查找次序 100% 确定可预测；选定高优来源后报错不回退 |
-| **定义端固定来源** | 参数化代码在定义检查时锁定成员所属的接口身份，实例化只负责兑现该接口 | 彻底告别 C++ 模板实例化时的同名方法劫持与意外歧义 |
+| **定义端固定来源** | 参数化代码在定义检查时锁定成员所属的接口身份，实例化只负责兑现该接口 | 告别 C++ 模板实例化时的同名方法劫持与意外歧义 |
 
 ---
 
@@ -289,6 +289,6 @@ let protocol: u32.as(DecimalCode).as(ProtocolCode) = 7;
 
 - 一个变量的类型怎么能写成 `u32.as(DecimalCode).as(ProtocolCode)`？
 - 这个变量 `protocol` 的本体类型到底是 `u32`、`DecimalCode` 还是 `ProtocolCode`？
-- 当我调用 `protocol.category()` 时，为什么它会按 **`ProtocolCode -> DecimalCode -> u32`** 从右往左倒着找方法？而且为什么 `ProtocolCode` 是直接跟最左边的 `u32` 建立双向转换关系，而不是串糖葫芦式的 `u32 -> DecimalCode -> ProtocolCode`？
+- 当我调用 `protocol.category()` 时，为什么它会按 **`ProtocolCode -> DecimalCode -> u32`** 从右往左倒着找方法？而且为什么 `ProtocolCode` 是直接跟最左边的 `u32` 建立双向转换关系，而非串糖葫芦式的 `u32 -> DecimalCode -> ProtocolCode`？
 
 在下一篇 **《Flurry 演进手记 (037)：同一数值的多种人格——`.as(View)` 类型视角链与显式接口消歧》** 中，我们将揭秘这个让底层标量同时拥有多层领域方法视图的这一设计。

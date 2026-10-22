@@ -1,14 +1,14 @@
 # Flurry 演进手记 (165)：资源池租借（Arena / Pool Lease）与 Handler 作用域生命周期绑定
 
-> **阅读指南**：在上一回（第 164 回）末尾，我们提出了系统编程中关于 **Arena（区域内存池）与对象池租借（Pool Lease）** 的终极安全拷问：当业务代码通过代数效应从当前 Handler 安装的局部 `Arena` 或 `StackPool` 中借出一块内存视图/指针时，怎样保证在计算过程中可以畅行无阻地使用它，但**绝不允许任何指向该池的指针或未归还的 Continuation 逃逸出该池的存活作用域**？本篇我们将结合 `docs/algebraic-effect-and-delimited-continuation/handling-capability.md`、`effect-abi.md` 与第三卷的核心武器 `docs/resource-management/reachability.md`，见证 **可达性限定（`&r T`）与效应 Handler 作用域** 的天作之合。
+> **阅读指南**：在上一回（第 164 回）末尾，我们提出了系统编程中关于 **Arena（区域内存池）与对象池租借（Pool Lease）** 的最终安全拷问：当业务代码通过代数效应从当前 Handler 安装的局部 `Arena` 或 `StackPool` 中借出一块内存视图/指针时，怎样保证在计算过程中可以畅行无阻地使用它，但**禁止任何指向该池的指针或未归还的 Continuation 逃逸出该池的存活作用域**？本篇我们将结合 `docs/algebraic-effect-and-delimited-continuation/handling-capability.md`、`effect-abi.md` 与第三卷的核心武器 `docs/resource-management/reachability.md`，见证 **可达性限定（`&r T`）与效应 Handler 作用域** 的天作之合。
 
 ---
 
 ## 一、 问题背景：Arena 分配器的“1 纳秒天堂”与“悬垂指针隐患”
 
-在写编译器前端、游戏引擎帧循环或高频网络网关时，**Arena（竞技场/区域内存池）** 是公认的性能神器：
+在写编译器前端、游戏引擎帧循环或高频网络网关时，**Arena（竞技场/区域内存池）** 是公认的性能利器：
 - 分配内存时，只需要把游标指针往前推一下（Bump Pointer），耗时不到 1 纳秒；
-- 释放内存时，不需要逐个对象调用 `free`，等整个阶段（即 Handler 作用域）结束时，**一把将游标归零或释放整块缓冲区**。
+- 释放内存时，无需逐个对象调用 `free`，等整个阶段（即 Handler 作用域）结束时，**一把将游标归零或释放整块缓冲区**。
 
 ### 当通过效应借出的指针偷偷溜出了 Handler 的大门
 
@@ -18,7 +18,7 @@
 -- 假想初始写法：如果没有可达性依赖追踪 (&r T)
 -- 1. 我们在函数内部创建了一个局部内存池 var arena = LocalArena { ... }
 -- 2. 在业务代码块里通过 alloc_slot()# 拿到了一个指向 arena 内部缓冲区的指针 ptr: *u32
--- 3. 业务代码块居然直接把 ptr 当作返回值 return 了出去。
+-- 3. 业务代码块却直接把 ptr 当作返回值 return 了出去。
 -- 4. 离开 Handler 作用域后，local arena 被整块销毁重置，
 --    外层拿到的 ptr 瞬间变成指向已销毁内存的悬垂指针（Dangling Pointer / Use-After-Free）。
 ```
@@ -29,7 +29,7 @@
 
 ## 二、 核心机制：有状态 Handler + `&r T` 可达性限定——读出数值可带走，借出指针锁门内
 
-Flurry 是如何在不引入繁琐生命周期体操的前提下，彻底封死这类池逃逸漏洞的？
+Flurry 是如何在免于引入繁琐生命周期体操的前提下，封堵这类池逃逸漏洞的？
 答案就藏在第三卷 `docs/resource-management/reachability.md` 与第七卷 `docs/algebraic-effect-and-delimited-continuation/handling-capability.md` 的联动法则里：
 
 > **💡 核心心智模型：“租借的视图带着池的烙印，独立的数值自由离开。”**
@@ -37,7 +37,7 @@ Flurry 是如何在不引入繁琐生命周期体操的前提下，彻底封死�
 >    当 Handler 分支从局部对象 `arena`（或 `pool`）中取出一个指针或切片视图（例如 `arena.slot.ref`）交付给效应请求时，该指针携带着对 `arena` 实例的可达性依赖 **`&arena *u32`**。无论你在业务代码里把这个指针复制多少次、塞进元组还是传给辅助函数，这份“我依赖 `arena` 存活”的烙印都如影随形。
 > 2. **跨作用域交付审查（Cross-Scope Delivery Check）**：
 >    当 `# { ... }` 处理块结束、且局部 `arena` 即将随作用域退出而终结（Kill / Drop）时，编译器会审查从该块交付出去的**返回值**和**写入外部对象的状态**：
->    - 如果返回值只是一个**读取出来的独立标量数值**（如 `u32`、`bool`，或者拥有独立堆内存的 `Vec<i32>`），它不再依赖局部 `arena` 的存储，**100% 放行带走**。
+>    - 如果返回值只是一个**读取出来的独立标量数值**（如 `u32`、`bool`，或者拥有独立堆内存的 `Vec<i32>`），它摆脱依赖局部 `arena` 的存储，**100% 放行带走**。
 >    - 如果返回值里还夹带着任何依赖局部 `arena` 的指针 `*u32`、切片视图或未归还栈槽的 `Continuation`，编译器会立刻发现“结果依赖即将结束的局部资源”，**在编译期静态拦截**。
 
 下面来看清“池内自由租借使用”与“池外严格禁止逃逸”的边界：
@@ -126,7 +126,7 @@ use std.prelude.*;
 fn broken_escape_address() -> *i32 {
     let local_slot = 23i32;
 
-    -- ❌ 编译期直接拒绝：(Reachability Escape Error)
+    -- ❌ 编译期直接报错：(Reachability Escape Error)
     -- 返回的指针 *i32 依赖即将随函数退出而终结的局部存储 local_slot。
     local_slot.ref
 }
@@ -137,10 +137,10 @@ fn broken_escape_in_vec() -> Vec<*i32> {
     let local_slot = 23i32;
     values.push(local_slot.ref);
 
-    -- ❌ 编译期直接拒绝。
+    -- ❌ 编译期直接报错。
     -- 虽然 Vec 自己的堆缓冲区可以转交所有权，但它的元素类型 *i32
     -- 依然携带着对局部存储 local_slot 的外部可达性要求。
-    -- 把局部地址装进堆容器绝不会延长局部对象的生命。
+    -- 把局部地址装进堆容器不会延长局部对象的生命。
     values
 }
 ```
@@ -181,7 +181,7 @@ test {
 
 > **🔍 深度补充：栈池实例（`.use(pool)`）的可达性核心规则**
 > 正如 `docs/algebraic-effect-and-delimited-continuation/effect-abi.md` 所述：
-> 当你使用 `(work()# { ... }).use(pool)` 接入显式栈池时，捕获到的任何 `builtin.Continuation` 都会在可达性图中记录对 `pool` 存储实例的依赖。**`pool` 的有效期必须完整覆盖所有尚未归还的执行栈及其关联依赖**——编译器绝不允许你先把 `pool` 销毁，却让依赖它的 `continuation` 逃逸出去。
+> 当你使用 `(work()# { ... }).use(pool)` 接入显式栈池时，捕获到的任何 `builtin.Continuation` 都会在可达性图中记录对 `pool` 存储实例的依赖。**`pool` 的有效期必须完整覆盖所有尚未归还的执行栈及其关联依赖**——编译器禁止你先把 `pool` 销毁，却让依赖它的 `continuation` 逃逸出去。
 
 ---
 
@@ -190,8 +190,8 @@ test {
 | 场景 / 操作 | 可达性与效应规则（`reachability.md` & `effect-abi.md`） | 编译期安全裁决 |
 | :--- | :--- | :--- |
 | **池内借用并交付独立数值** | 指针仅在 Handler 作用域内读写，最终读取出标量 `u32` 或独立拥有型 `Vec<i32>` | ✅ 标量不附着原存储槽位依赖，允许自由离开局部池作用域 |
-| **直接返回局部池指针** | 返回值 `*i32` 携带对即将销毁的局部存储的可达性要求 | ❌ 编译期直接拒绝（防止 Use-After-Free） |
-| **将局部指针装入 `Vec<*i32>` 返回** | 容器自有缓冲区可转交，但元素仍暴露对局部对象的外部可达性要求 | ❌ 编译期直接拒绝（堆容器不延长所指局部对象的生命周期） |
+| **直接返回局部池指针** | 返回值 `*i32` 携带对即将销毁的局部存储的可达性要求 | ❌ 编译期直接报错（防止 Use-After-Free） |
+| **将局部指针装入 `Vec<*i32>` 返回** | 容器自有缓冲区可转交，但元素仍暴露对局部对象的外部可达性要求 | ❌ 编译期直接报错（堆容器不延长所指局部对象的生命周期） |
 | **显式栈池 `.use(pool)`** | `Continuation` 持有的每段栈记录其来源 `pool` 依赖 | ✅ 强制保证在所有挂起栈完成清理归还前 `pool` 始终有效 |
 
 ---

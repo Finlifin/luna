@@ -101,6 +101,39 @@ pub fn instantiate<'a, 'w>(
     world: &'a World<'w>,
     budget: Budget,
 ) -> Result<Instance<'a, 'w>, Error> {
+    instantiate_with_domains(declaration, arguments, world, budget, |_, _, _| false)
+}
+
+pub fn instantiate_with_domains<'a, 'w>(
+    declaration: &'a Declaration,
+    arguments: &[Term],
+    world: &'a World<'w>,
+    budget: Budget,
+    declared: impl FnMut(&Term, &Term, &mut usize) -> bool,
+) -> Result<Instance<'a, 'w>, Error> {
+    instantiate_with_evidence(
+        declaration,
+        arguments,
+        world,
+        budget,
+        |_, _, _| {
+            Err(nir::NominalAdmissionError::from(
+                "effect value requires nominal layout evidence",
+            ))
+        },
+        declared,
+    )
+}
+
+/// Layout and symbolic-domain evidence must come from the caller's checked declarations.
+pub fn instantiate_with_evidence<'a, 'w>(
+    declaration: &'a Declaration,
+    arguments: &[Term],
+    world: &'a World<'w>,
+    budget: Budget,
+    layout: impl FnMut(&Term, Option<u32>, &mut usize) -> Result<Vec<Term>, nir::NominalAdmissionError>,
+    declared: impl FnMut(&Term, &Term, &mut usize) -> bool,
+) -> Result<Instance<'a, 'w>, Error> {
     if declaration.type_parameters.len() != arguments.len() {
         return Err(Error::InvalidInput);
     }
@@ -112,15 +145,36 @@ pub fn instantiate<'a, 'w>(
         .and_then(|n| n.checked_add(declaration.capabilities.len()))
         .ok_or(Error::BudgetExhausted)?;
     fuel = fuel.checked_sub(count).ok_or(Error::BudgetExhausted)?;
+    for domain in &declaration.parameter_types {
+        charge(domain, &mut fuel, depth)?;
+    }
+    let binders =
+        nir::declaration_parameters(&declaration.type_parameters, &declaration.parameter_types)
+            .map_err(|_| Error::InvalidInput)?;
     let before = fuel;
-    for argument in arguments {
+    for (argument, binder) in arguments.iter().zip(&binders) {
         charge(argument, &mut fuel, depth)?;
-        if argument.sort() != Sort::Type {
+        if argument.sort() != binder.sort {
             return Err(Error::InvalidInput);
         }
         argument.check_scope(&[]).map_err(|_| Error::InvalidInput)?;
     }
     let argument_cost = before - fuel;
+    nir::validate_declaration_arguments_with_evidence(
+        &declaration.type_parameters,
+        &declaration.parameter_types,
+        arguments,
+        &mut fuel,
+        layout,
+        declared,
+    )
+    .map_err(|e| {
+        if matches!(e, nir::NominalAdmissionError::Budget) {
+            Error::BudgetExhausted
+        } else {
+            Error::InvalidInput
+        }
+    })?;
     let before = fuel;
     charge(&declaration.signature, &mut fuel, depth)?;
     for requirement in &declaration.requirements {
@@ -162,21 +216,21 @@ pub fn instantiate<'a, 'w>(
         .map_err(|_| Error::InvalidInput)?;
     let signature = declaration
         .signature
-        .instantiate_types(&declaration.type_parameters, arguments)
+        .instantiate_parameters(&binders, arguments)
         .map_err(|_| Error::InvalidInput)?;
     let mut predicates = declaration
         .requirements
         .iter()
         .map(|predicate| {
             predicate
-                .instantiate_types(&declaration.type_parameters, arguments)
+                .instantiate_parameters(&binders, arguments)
                 .map_err(|_| Error::InvalidInput)
         })
         .collect::<Result<Vec<_>, _>>()?;
     for requirement in &declaration.capabilities {
         predicates.push(TypePredicate::Trait(
             requirement
-                .instantiate_types(&declaration.type_parameters, arguments)
+                .instantiate_parameters(&binders, arguments)
                 .map_err(|_| Error::InvalidInput)?,
         ));
     }

@@ -2,6 +2,89 @@
 use super::*;
 
 impl Checker<'_, '_> {
+    /// Check availability without invoking computations in a rejected iteration.
+    fn check_inline_input_availability(
+        &mut self,
+        value: &n::Expr,
+        staged: &BTreeSet<n::LocalId>,
+        span: Span,
+    ) -> Result<(), Error> {
+        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let free = nir::free_bindings::collect(value, &mut fuel);
+        self.required_steps -= (before - fuel) as u64;
+        // Definition checking precedes required invocation. Ordinary parameters
+        // and locals of a comptime function are already in that phase even
+        // while no invocation is currently running.
+        let comptime_owner = self
+            .signature_owner
+            .and_then(|owner| self.package.item(owner))
+            .is_some_and(|item| {
+                matches!(&item.kind,
+                ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)
+                if signature.modifiers.is_comptime)
+            });
+        for binding in free.map_err(|message| error(span, message))? {
+            if comptime_owner
+                || self.in_required_comptime
+                || staged.contains(&binding)
+                || self.open_staged_locals.contains(&binding)
+                || self.generator_data.contains_key(&binding)
+                || self.type_input_bindings.contains_key(&binding)
+                || self.value_input_bindings.contains_key(&binding)
+            {
+                continue;
+            }
+            return Err(error(
+                span,
+                "inline iteration computation cannot read a runtime parameter or unstaged local",
+            ));
+        }
+        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let checked = nir::visit::expression_in_scope(value, &mut fuel, |expr, fuel| {
+            if let K::Call { callee, .. } = &expr.kind {
+                if !callee.ty.is_comptime_callable() {
+                    let id = match callee.kind {
+                        K::Function(id)
+                        | K::FunctionInstance {
+                            declaration: id, ..
+                        } => Some(id),
+                        _ => None,
+                    };
+                    let mut normal_head = false;
+                    if let Some(id) = id {
+                        for (owner, _) in self.package.owners() {
+                            *fuel = fuel
+                                .checked_sub(1)
+                                .ok_or("inline phase checking budget exhausted")?;
+                            if matches_declaration(
+                                self.package,
+                                &self.package_identities,
+                                owner,
+                                id,
+                            ) {
+                                normal_head = matches!(&self.package.item(owner).unwrap().kind,
+                                    ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)
+                                    if sig.modifiers.is_comptime || sig.modifiers.is_normal_form_head);
+                                break;
+                            }
+                        }
+                    }
+                    if !normal_head {
+                        return Err(
+                            "runtime callable is unavailable in an inline iteration computation"
+                                .into(),
+                        );
+                    }
+                }
+            }
+            Ok(())
+        });
+        self.required_steps -= (before - fuel) as u64;
+        checked.map_err(|message| error(span, message))
+    }
+
     /// Expose only the tuple layout; the input retains its nominal type and
     /// runtime evaluation. No comptime invocation is needed to inspect shape.
     pub(super) fn tuple_enumeration_input(
@@ -118,12 +201,22 @@ impl Checker<'_, '_> {
                 self.generator_data = saved_data.clone();
                 self.immutable = saved_immutable.clone();
                 self.context = saved_context.clone();
+                self.immutable.extend(pattern_binding_ids(pat));
                 let pattern = self.pattern(pat, &p(P::Integer))?;
-                if !self.pattern_exhaustive(&pattern, &p(P::Integer)) {
-                    return Err(error(
-                        pat.span,
-                        "refutable inline range patterns are not yet supported; use an irrefutable pattern with a guard",
-                    ));
+                let staged: BTreeSet<_> = self
+                    .locals
+                    .keys()
+                    .filter(|id| !saved_locals.contains_key(id))
+                    .copied()
+                    .collect();
+                if !self.checking_open_behavior {
+                    let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                    let before = fuel;
+                    let observations = nir::visit::pattern_observations(&pattern, &mut fuel);
+                    self.required_steps -= (before - fuel) as u64;
+                    for observation in observations.map_err(|message| error(pat.span, message))? {
+                        self.check_inline_input_availability(observation, &staged, pat.span)?;
+                    }
                 }
                 if self.checking_open_behavior {
                     // An abstract index is an input to the behavior witness,
@@ -139,30 +232,32 @@ impl Checker<'_, '_> {
                     span: body.span,
                     kind: H::Block(body),
                 };
-                let statements = if count == 0 {
+                let matched = if count == 0 {
+                    false
+                } else if let Some(bindings) = self.select_inline_pattern(
+                    &pattern,
+                    &Term::Integer(current.clone()),
+                    &source_body,
+                )? {
+                    // Only successful matches export staged bindings. Failed
+                    // iterations still receive ordinary body/phase checking.
+                    self.materialize_inline_bindings(&bindings, &source_body)?;
+                    true
+                } else {
+                    false
+                };
+                let statements = Vec::new();
+                if !matched {
                     self.inline_selection = Some((expr.hir_id, usize::MAX));
                     self.in_unselected_inline = true;
-                    Vec::new()
-                } else {
-                    let bindings = self
-                        .select_inline_pattern(
-                            &pattern,
-                            &Term::Integer(current.clone()),
-                            &source_body,
-                        )?
-                        .ok_or_else(|| error(pat.span, "inline range binding did not match"))?;
-                    // These Integer bindings exist only during expansion. Their
-                    // uses are substituted through generator_data; no runtime
-                    // storage may be allocated for a comptime-only value.
-                    self.materialize_inline_bindings(&bindings, &source_body)?;
-                    Vec::new()
-                };
+                }
                 let selected = if let Some(guard) = guard {
-                    if count == 0 {
+                    if !matched {
                         if !self.checking_open_behavior {
-                            self.with_staged_input(true, |this| {
+                            let checked = self.with_staged_input(true, |this| {
                                 this.expr(guard, Some(&p(P::Bool)))
                             })?;
+                            self.check_inline_input_availability(&checked, &staged, guard.span)?;
                         }
                         false
                     } else {
@@ -177,7 +272,7 @@ impl Checker<'_, '_> {
                         selected
                     }
                 } else {
-                    true
+                    matched
                 };
                 if !selected {
                     self.inline_selection = Some((expr.hir_id, usize::MAX));
@@ -327,13 +422,8 @@ impl Checker<'_, '_> {
                 self.context = saved_context.clone();
                 self.inline_selection = saved_selection;
                 self.in_unselected_inline = saved_suppressed;
+                self.immutable.extend(pattern_binding_ids(pat));
                 let index_pattern = self.pattern(index_source, &p(P::Integer))?;
-                if !self.pattern_exhaustive(&index_pattern, &p(P::Integer)) {
-                    return Err(error(
-                        index_source.span,
-                        "tuple_enumerate index pattern must be irrefutable",
-                    ));
-                }
                 let index_bindings: Vec<_> = self
                     .locals
                     .iter()
@@ -345,39 +435,54 @@ impl Checker<'_, '_> {
                     span: body.span,
                     kind: H::Block(body),
                 };
-                if suppressed {
+                let staged: BTreeSet<_> = index_bindings.iter().map(|(id, _)| *id).collect();
+                if !self.checking_open_behavior {
+                    let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                    let before = fuel;
+                    let observations = nir::visit::pattern_observations(&index_pattern, &mut fuel);
+                    self.required_steps -= (before - fuel) as u64;
+                    for observation in
+                        observations.map_err(|message| error(index_source.span, message))?
+                    {
+                        self.check_inline_input_availability(
+                            observation,
+                            &staged,
+                            index_source.span,
+                        )?;
+                    }
+                }
+                let index_matched = if suppressed {
                     if self.checking_open_behavior {
                         for (binding, ty) in &index_bindings {
                             self.ordinary_behavior_inputs.insert(*binding, ty.clone());
                         }
                     }
-                } else {
-                    let bindings = self
-                        .select_inline_pattern(
-                            &index_pattern,
-                            &Term::Integer(comptime_runtime::Integer::from_u128(index as u128)),
-                            &source_body,
-                        )?
-                        .ok_or_else(|| {
-                            error(index_source.span, "tuple index pattern did not match")
-                        })?;
+                    true
+                } else if let Some(bindings) = self.select_inline_pattern(
+                    &index_pattern,
+                    &Term::Integer(comptime_runtime::Integer::from_u128(index as u128)),
+                    &source_body,
+                )? {
                     self.materialize_inline_bindings(&bindings, &source_body)?;
+                    true
+                } else {
+                    false
+                };
+                if !index_matched {
+                    self.inline_selection = Some((expr.hir_id, usize::MAX));
+                    self.in_unselected_inline = true;
                 }
                 let element_pattern = self.pattern(element_source, ty)?;
-                if !self.pattern_exhaustive(&element_pattern, ty) {
-                    return Err(error(
-                        element_source.span,
-                        "tuple_enumerate element pattern must be irrefutable",
-                    ));
-                }
+                let element_irrefutable = self.pattern_exhaustive(&element_pattern, ty);
                 let selected = if let Some(guard) = guard {
-                    if suppressed {
+                    if suppressed || !index_matched {
                         if !self.checking_open_behavior {
-                            self.with_staged_input(true, |this| {
+                            let checked = self.with_staged_input(true, |this| {
                                 this.expr(guard, Some(&p(P::Bool)))
                             })?;
+                            self.check_inline_input_availability(&checked, &staged, guard.span)?;
                         }
-                        true
+                        index_matched
                     } else {
                         let comptime_interpretor::Value::Bool(selected) =
                             self.required_value(guard, P::Bool)?
@@ -390,7 +495,7 @@ impl Checker<'_, '_> {
                         selected
                     }
                 } else {
-                    true
+                    index_matched
                 };
                 if !selected {
                     self.inline_selection = Some((expr.hir_id, usize::MAX));
@@ -440,7 +545,15 @@ impl Checker<'_, '_> {
                         },
                         value: Box::new(value),
                         guard: None,
-                        otherwise: None,
+                        otherwise: if selected && !element_irrefutable {
+                            Some(Box::new(n::Expr {
+                                source: source(element_source.span),
+                                ty: p(P::Never),
+                                kind: K::Continue(identity),
+                            }))
+                        } else {
+                            None
+                        },
                     },
                 };
                 let checked = if selected {
@@ -563,12 +676,19 @@ impl Checker<'_, '_> {
             .ok_or_else(|| error(loop_span, "inline loop identity space exhausted"))?;
         let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
         let mut fuel = before;
-        let rewritten = nir::visit::expression_mut(&mut checked, &mut fuel, |node, _| {
-            if matches!(node.kind, K::Continue(target) if target == loop_identity) {
-                node.kind = K::Break(iteration);
+        let rewritten = (|| {
+            // Element-pattern failure lives in the prefix and must skip only
+            // this unrolled iteration, just like a source-body continue.
+            for expression in statements.iter_mut().chain(std::iter::once(&mut checked)) {
+                nir::visit::expression_mut(expression, &mut fuel, |node, _| {
+                    if matches!(node.kind, K::Continue(target) if target == loop_identity) {
+                        node.kind = K::Break(iteration);
+                    }
+                    Ok(())
+                })?;
             }
-            Ok(())
-        });
+            Ok::<_, String>(())
+        })();
         self.required_steps -= (before - fuel) as u64;
         rewritten.map_err(|e| error(body_span, e))?;
         statements.push(checked);

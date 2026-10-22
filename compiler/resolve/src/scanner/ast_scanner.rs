@@ -176,6 +176,51 @@ impl<'a> AstScanner<'a> {
         Ok(())
     }
 
+    fn trait_parent_paths(
+        &self,
+        node: NodeIndex,
+        depth: usize,
+    ) -> Option<Vec<Vec<(Symbol, rustc_span::Span)>>> {
+        if node == 0 {
+            return Some(Vec::new());
+        }
+        if depth >= 64 {
+            return None;
+        }
+        let children = self.ast.get_children(node);
+        match self.ast.get_node_kind(node)? {
+            NodeKind::Add => {
+                let mut paths = self.trait_parent_paths(children[0], depth + 1)?;
+                paths.extend(self.trait_parent_paths(children[1], depth + 1)?);
+                Some(paths)
+            }
+            _ => Some(vec![self.trait_parent_path(node, depth + 1)?]),
+        }
+    }
+    fn trait_parent_path(
+        &self,
+        node: NodeIndex,
+        depth: usize,
+    ) -> Option<Vec<(Symbol, rustc_span::Span)>> {
+        if depth >= 64 {
+            return None;
+        }
+        let (_, span, children) = self.ast.get_node(node)?;
+        match self.ast.get_node_kind(node)? {
+            NodeKind::Id => Some(vec![(self.extract_name(node).ok()?, span)]),
+            NodeKind::NormalFormHeadApplication => self.trait_parent_path(children[0], depth + 1),
+            NodeKind::Projection => {
+                let mut path = self.trait_parent_path(children[0], depth + 1)?;
+                if self.ast.get_node_kind(children[1]) != Some(NodeKind::Id) {
+                    return None;
+                }
+                path.push((self.extract_name(children[1]).ok()?, span));
+                Some(path)
+            }
+            _ => None,
+        }
+    }
+
     fn scan_adt_def(
         &mut self,
         parent_scope: ScopeId,
@@ -187,7 +232,7 @@ impl<'a> AstScanner<'a> {
         let def_id = self.def_gen.next();
         let scope_id = self.scope_gen.next();
 
-        let scope = Scope::new(
+        let mut scope = Scope::new(
             scope_id,
             scope_kind,
             Some(parent_scope),
@@ -195,6 +240,9 @@ impl<'a> AstScanner<'a> {
             def_id,
             false,
         );
+        if scope_kind == ScopeKind::TraitBody {
+            scope.trait_parent_paths = self.trait_parent_paths(self.ast.get_children(item)[1], 0);
+        }
         self.scope_tree.add_scope(scope);
         self.scope_tree.add_child(parent_scope, scope_id);
 

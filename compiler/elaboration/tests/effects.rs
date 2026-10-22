@@ -295,6 +295,7 @@ fn declared_operation() -> nir::effects::Declaration {
         group: None,
         name: "echo".into(),
         type_parameters: vec![id(99)],
+        parameter_types: vec![],
         signature: Term::Function {
             parameters: vec![nir::Parameter {
                 sort: Sort::Runtime,
@@ -307,6 +308,77 @@ fn declared_operation() -> nir::effects::Declaration {
         requirements: vec![],
         capabilities: vec![],
     }
+}
+
+#[test]
+fn operation_value_domains_check_dependent_and_symbolic_arguments() {
+    let context = Context::default();
+    let index = elaboration::implementation::Index::default();
+    let world = elaboration::capabilities::World {
+        index: &index,
+        implementations: &[],
+        traits: &[],
+        assumptions: &[],
+        context: &context,
+    };
+    let mut declaration = declared_operation();
+    declaration.type_parameters.push(id(100));
+    declaration.parameter_types = vec![ty(P::Type), rigid()];
+    let yes = elaboration::effects::instantiate(
+        &declaration,
+        &[ty(P::Bool), Term::Bool(true)],
+        &world,
+        Budget::default(),
+    )
+    .unwrap();
+    let no = elaboration::effects::instantiate(
+        &declaration,
+        &[ty(P::Bool), Term::Bool(false)],
+        &world,
+        Budget::default(),
+    )
+    .unwrap();
+    assert_ne!(yes.operation(), no.operation());
+    assert!(declaration.to_string().contains("(parameter-types"));
+    for arguments in [
+        vec![ty(P::Bool), Term::Unit],
+        vec![ty(P::U8), Term::Bool(true)],
+        vec![ty(P::Bool), ty(P::Bool)],
+    ] {
+        assert!(
+            elaboration::effects::instantiate(&declaration, &arguments, &world, Budget::default())
+                .is_err()
+        );
+    }
+    let symbolic = Term::Rigid {
+        declaration: id(101),
+        sort: Sort::ComptimeValue,
+    };
+    let arguments = [ty(P::Bool), symbolic.clone()];
+    assert!(
+        elaboration::effects::instantiate(&declaration, &arguments, &world, Budget::default())
+            .is_err()
+    );
+    elaboration::effects::instantiate_with_domains(
+        &declaration,
+        &arguments,
+        &world,
+        Budget::default(),
+        |value, domain, _| *value == symbolic && *domain == ty(P::Bool),
+    )
+    .unwrap();
+    assert!(matches!(
+        elaboration::effects::instantiate(
+            &declaration,
+            &[ty(P::Bool), Term::Bool(true)],
+            &world,
+            Budget {
+                steps: 0,
+                ..Default::default()
+            }
+        ),
+        Err(Error::BudgetExhausted)
+    ));
 }
 
 #[test]

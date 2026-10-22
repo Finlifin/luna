@@ -110,10 +110,14 @@ fn operation(
     fuel: &mut usize,
 ) -> Result<(), String> {
     for arg in &op.arguments {
-        if arg.sort() != Sort::Type {
-            return Err("IIR effect label argument is not a Type".into());
+        if arg.sort() == Sort::Type {
+            package.validate_type(arg, fuel)?;
+        } else if arg.is_structural_index_value() {
+            crate::completed_dependencies(arg, &package.runtime_bindings, fuel)?;
+            package.type_links(arg, fuel)?;
+        } else {
+            return Err("IIR effect label argument is not a completed input".into());
         }
-        package.validate_type(arg, fuel)?;
     }
     package.validate_type(signature, fuel)?;
     let Term::Function { parameters, result } = signature else {
@@ -376,7 +380,11 @@ fn expression(
                     return Err("IIR direct passing operation has parameters".into());
                 }
                 if parameters.len() != arguments.len()
-                    || !compatible(result, &expr.ty)
+                    || !(compatible(result, &expr.ty)
+                        || expr.ty == Term::Primitive(Primitive::Never)
+                            && arguments
+                                .iter()
+                                .any(|argument| argument.ty == Term::Primitive(Primitive::Never)))
                     || parameters
                         .iter()
                         .zip(arguments)

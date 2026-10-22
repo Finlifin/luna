@@ -7,7 +7,7 @@
 为什么传统序列化库慢？
 1. **无脑堆分配**：每次序列化一个小小的 8 字节传感器报文头 `SensorHeader`，都要先在堆上 `malloc` 一个动态 `Vec<u8>`；
 2. **定宽与变长割裂**：定宽报文（如固定 12 字节的 CAN 总线帧）明明可以在编译期就知道精确帧长、直接一次性做边界检查，却被迫和变长字符串一起走逐字节动态扩容的慢速路径；
-3. **多格式协议冲突**：同一个结构体既要支持紧凑二进制协议（`.binary`），又要支持调试文本协议（`.json`），如果 Trait 不支持协议参数化，你就得定义 `BinaryEncode`、`JsonEncode`、`MsgPackEncode` 一大堆互不相通的接口。
+3. **多格式协议冲突**：同一个结构体既要支持紧凑二进制协议（`.binary`），又要支持调试文本协议（`.json`），如果 Trait 暂未涵盖协议参数化，你就得定义 `BinaryEncode`、`JsonEncode`、`MsgPackEncode` 一大堆互不相通的接口。
 
 今天作为三部曲的第一篇，我们就来用 Flurry 的名义 Trait 体系，设计出既统一紧凑二进制与文本格式、又兼顾静态定宽与动态变长的 **`Encode` / `Decode` 核心接口**。
 
@@ -28,7 +28,7 @@ trait NaiveEncode {
 ```
 
 显然，这种玩具接口根本上不了工业级网关的台面。在嵌入式和边缘网关里，我们希望：
-- **零拷贝流式读写**：直接往调用者传入的 `Writer` 或游标视图 `Cursor` 里读写字节，绝不暗中分配堆内存；
+- **零拷贝流式读写**：直接往调用者传入的 `Writer` 或游标视图 `Cursor` 里读写字节，不暗中分配堆内存；
 - **参数化完整接口实例**：通过 `where format: Symbol` 参数化 Trait，让 `Encode<.binary>` 和 `Encode<.json>` 成为同一 Trait 声明下不同的**完整接口实例（Complete Interface Instances）**；
 - **关联元数据**：利用 `assoc` 关联值记录静态字节特征。
 
@@ -58,7 +58,7 @@ trait NaiveEncode {
 +-------------------------------------------------------------------------+
 ```
 
-更棒的是，在 `docs/traits/declarations.md` 中我们看到，Flurry 的 **`assoc` 关联项**不仅可以声明关联类型（如 `assoc Element: Type`），还可以**直接声明任意合法类型的关联值并提供默认值**（如 `assoc fixed_bytes: usize = 0`）。
+更棒的是，在 `docs/traits/declarations.md` 中我们看到，Flurry 的 **`assoc` 关联项**非但可以声明关联类型（如 `assoc Element: Type`），还可以**直接声明任意合法类型的关联值并提供默认值**（如 `assoc fixed_bytes: usize = 0`）。
 
 让我们先定义零拷贝读写游标接口 `WireSink` 与 `WireSource`（复用上一篇学到的关联错误行），然后写出 `Encode` 与 `Decode` 的核心声明：
 
@@ -113,8 +113,8 @@ where format: Symbol
 ```
 
 看看这段 `Encode` 声明有多么优雅：
-1. **统一关联类型与关联值**：`assoc is_fixed_size: bool = false` 和 `assoc wire_size: usize = 0` 直接携带了默认关联值。如果是变长类型，甚至不需要手写这两个 `assoc`；如果是定宽类型（比如 `u32` 或 `SensorHeader`），只需在 `impl` 中覆盖它们即可。
-2. **默认方法自动读取关联项**：默认方法 `encoded_len(*self)` 内部直接通过 `Self.as(Encode<format>).wire_size` 获取当前实现提供的关联帧长。它不依赖任何具体结构体的私有字段，因此在 `trait Encode` 定义当场就通过了编译器的符号检查。
+1. **统一关联类型与关联值**：`assoc is_fixed_size: bool = false` 和 `assoc wire_size: usize = 0` 直接携带了默认关联值。如果是变长类型，甚至无须手写这两个 `assoc`；如果是定宽类型（比如 `u32` 或 `SensorHeader`），只需在 `impl` 中覆盖它们即可。
+2. **默认方法自动读取关联项**：默认方法 `encoded_len(*self)` 内部直接通过 `Self.as(Encode<format>).wire_size` 获取当前实现提供的关联帧长。它独立于任何具体结构体的私有字段，因此在 `trait Encode` 定义当场就通过了编译器的符号检查。
 
 ---
 
@@ -181,10 +181,10 @@ impl Decode<.binary> for u32 {
 impl WireCodec<.binary> for u32 {}
 ```
 
-### 编译期安全红线：空实现 `impl WireCodec` 绝不能绕过父接口契约
+### 编译期安全红线：空实现 `impl WireCodec` 无法绕过父接口契约
 
 请注意 `docs/traits/declarations.md` 中的一条严格规则：
-> **合取要求每项能力分别成立，不合并各 trait 的声明身份……移除其中任一实现，空的子接口实现就不能满足父接口要求。**
+> **合取要求每项能力分别成立，免于合并各 trait 的声明身份……移除其中任一实现，空的子接口实现就难以契合父接口要求。**
 
 来看一个被编译器静态拦截的负例：如果我们定义了一个 `RawPacket`，只给它写了 `Encode<.binary>`，却忘了写 `Decode<.binary>`，然后试图写 `impl WireCodec<.binary> for RawPacket {}`：
 
@@ -204,13 +204,13 @@ impl Encode<.binary> for RawPacket {
     }
 }
 
--- ❌ 编译期直接拒绝。
+-- ❌ 编译期直接报错。
 -- `WireCodec<.binary>` 的父接口契约要求 `Encode<.binary> + Decode<.binary>` 分别成立，
 -- `RawPacket` 尚未实现 `Decode<.binary>`，无法通过空的 `impl WireCodec` 蒙混过关。
 impl WireCodec<.binary> for RawPacket {}
 ```
 
-同理，如果我们想写一个安全的网络发送函数 `send_frame`，要求类型 `T` 不仅实现了 `Encode<.binary>`，而且**没有**被标记为禁止外发的敏感内部数据类型 `SensitiveInternalOnly`，只需结合正向约束 `:-` 与 `requires not (...)` 否定子句：
+同理，如果我们想写一个安全的网络发送函数 `send_frame`，要求类型 `T` 并非但实现了 `Encode<.binary>`，而且**没有**被标记为禁止外发的敏感内部数据类型 `SensitiveInternalOnly`，只需结合正向约束 `:-` 与 `requires not (...)` 否定子句：
 
 ```flurry
 trait SensitiveInternalOnly {}
@@ -242,7 +242,7 @@ where
 ### 下一篇预告
 
 在刚才的代码里，当我们为 `RawPacket` 实现 `Encode<.binary>` 时，我们手写了 `self.tag.encode_to(sink)!;`。
-如果我们的边缘网关里有 **200 个**不同的传感器报文结构体，每个结构体有 10 个字段——难道我们要手写 200 遍枯燥乏味、极易漏掉字段的 `self.field1.encode_to(sink)!; self.field2.encode_to(sink)!;` 吗？
+如果我们的边缘网关里有 **200 个**不同的传感器报文结构体，每个结构体有 10 个字段——难道我们要手写 200 遍枯燥乏味、容易漏掉字段的 `self.field1.encode_to(sink)!; self.field2.encode_to(sink)!;` 吗？
 
 当然不。
 在下一篇 **`111-zero-copy-codec-trait-part2-auto-deriver.md`** 中，我们将祭出 Flurry 的 **`derive fn` 派生策略机制**与**类型反射**，手把手为 `Encode` 和 `Decode` 编写自动派生器。让用户只需写下一行 `derive Encode<.binary> for SensorFrame;`，就能自动获得经过完整类型检查的零拷贝编解码实现。

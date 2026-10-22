@@ -536,3 +536,149 @@ fn runtime_conditional_calls_only_expand_in_the_opted_in_context() {
     assert!(matches!(candidate.kind, K::If { .. }));
     assert!(!sources.is_empty());
 }
+
+#[test]
+fn template_alias_forwarding_keeps_writes_addresses_and_captures() {
+    let (base, binding, signature) = fixture();
+    let observers = [
+        expr(
+            K::Assign {
+                place: n::Place {
+                    root: binding,
+                    fields: vec![],
+                },
+                value: Box::new(expr(
+                    K::Function(Id {
+                        package: 0,
+                        local: 2,
+                    }),
+                    signature.clone(),
+                )),
+            },
+            Term::Primitive(Primitive::Void),
+        ),
+        expr(
+            K::AddressOf(Box::new(expr(K::Local(binding), signature.clone()))),
+            Term::Pointer(Box::new(signature.clone())),
+        ),
+        expr(
+            K::Closure {
+                captures: vec![n::Capture {
+                    binding,
+                    ty: signature.clone(),
+                    value: None,
+                }],
+                parameters: vec![],
+                body: std::sync::Arc::new(expr(K::Local(binding), signature.clone())),
+            },
+            Term::Closure {
+                environment: vec![signature.clone()],
+                signature: Box::new(Term::Function {
+                    parameters: vec![],
+                    result: Box::new(signature),
+                }),
+            },
+        ),
+    ];
+    for observer in observers {
+        let mut candidate = base.clone();
+        let K::Block { statements, .. } = &mut candidate.kind else {
+            unreachable!()
+        };
+        statements.push(observer);
+        let original = candidate.clone();
+        staged::forward_template_aliases(&mut candidate, &mut 100, &mut vec![], &mut 10000)
+            .unwrap();
+        assert_eq!(candidate, original);
+    }
+    let mut candidate = base.clone();
+    staged::forward_template_aliases(&mut candidate, &mut 100, &mut vec![], &mut 10000).unwrap();
+    let K::Block {
+        statements,
+        result: Some(result),
+    } = candidate.kind
+    else {
+        unreachable!()
+    };
+    assert!(matches!(statements[0].kind, K::Unit));
+    let K::Call { callee, .. } = result.kind else {
+        unreachable!()
+    };
+    assert!(matches!(callee.kind, K::Function(_)));
+    assert!(
+        staged::forward_template_aliases(&mut base.clone(), &mut 100, &mut vec![], &mut 0).is_err()
+    );
+}
+
+#[test]
+fn mutable_template_storage_keeps_address_escape_opaque() {
+    let (mut candidate, binding, signature) = fixture();
+    let K::Block { statements, .. } = &mut candidate.kind else {
+        unreachable!()
+    };
+    statements.push(expr(
+        K::Assign {
+            place: n::Place {
+                root: binding,
+                fields: vec![],
+            },
+            value: Box::new(expr(
+                K::Function(Id {
+                    package: 0,
+                    local: 2,
+                }),
+                signature.clone(),
+            )),
+        },
+        Term::Primitive(Primitive::Void),
+    ));
+    statements.push(expr(
+        K::AddressOf(Box::new(expr(K::Local(binding), signature.clone()))),
+        Term::Pointer(Box::new(signature)),
+    ));
+    let original = candidate.clone();
+    mutable_callbacks::lower(&mut candidate, &mut 100, &mut 10000).unwrap();
+    assert_eq!(candidate, original);
+    assert!(mutable_callbacks::lower(&mut candidate, &mut 100, &mut 0).is_err());
+}
+
+#[test]
+fn mutable_template_components_preserve_escaping_aliases_and_unknown_sources() {
+    let (base, binding, signature) = fixture();
+    let other = n::LocalId {
+        owner: binding.owner,
+        index: binding.index + 1,
+    };
+    for escaping in [false, true] {
+        let mut candidate = base.clone();
+        let K::Block { statements, .. } = &mut candidate.kind else {
+            unreachable!()
+        };
+        if escaping {
+            statements.push(expr(
+                K::Let {
+                    binding: other,
+                    value: Box::new(expr(K::Local(binding), signature.clone())),
+                },
+                Term::Primitive(Primitive::Void),
+            ));
+            statements.push(expr(
+                K::AddressOf(Box::new(expr(K::Local(other), signature.clone()))),
+                Term::Pointer(Box::new(signature.clone())),
+            ));
+        }
+        statements.push(expr(
+            K::Assign {
+                place: n::Place {
+                    root: binding,
+                    fields: vec![],
+                },
+                value: Box::new(expr(K::Local(other), signature.clone())),
+            },
+            Term::Primitive(Primitive::Void),
+        ));
+        let original = candidate.clone();
+        mutable_callbacks::lower(&mut candidate, &mut 100, &mut 10000).unwrap();
+        assert_eq!(candidate, original);
+    }
+}

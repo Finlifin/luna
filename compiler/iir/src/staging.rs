@@ -1603,11 +1603,10 @@ pub fn bind_call_with_layouts_and_type_views<'layout, C>(
                 },
             }),
             arguments: runtime_arguments,
-            parameter_bindings: if parameter_bindings.is_empty() {
-                vec![]
-            } else {
-                function.parameters.clone()
-            },
+            // Specialization has selected a concrete body even when the source
+            // was an indirect call. Publish its remaining parameter frame so
+            // resource/default analysis can bind each runtime input uniquely.
+            parameter_bindings: function.parameters.clone(),
         },
     };
     Ok((crate::FunctionInstance { key, function }, result))
@@ -1629,6 +1628,17 @@ fn wrap<'layout>(
     let heads = heads.into();
     if bindings.is_empty() {
         return Ok(());
+    }
+    // A computation is an explicit environment boundary, not a first-class
+    // block result. Reconstruct staged constants inside that boundary so the
+    // residual body retains its ordinary delivered type and effect context.
+    let mut expression = expression;
+    while matches!(expression.kind, K::EffectComputation { .. }) {
+        charge(fuel, 1)?;
+        let K::EffectComputation { body, .. } = &mut expression.kind else {
+            unreachable!()
+        };
+        expression = body;
     }
     // Only surviving uses need runtime reconstruction. In particular, a Type
     // or Integer used exclusively to prepare another instance has no runtime

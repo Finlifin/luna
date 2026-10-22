@@ -1,6 +1,6 @@
 # Flurry 演进手记 (063)：复杂控制流中的移动与析构——分支汇合、循环不变量与提前返回清理
 
-> **系列导读**：在第三卷开篇（041–042 期），我们确立了 Flurry“按值移动（`Once`）优先、显式选择按位复制（`Copy`）”以及确定性析构（`Drop`）的基本直觉。但在真实的系统工程中，资源的生命周期绝不是一条笔直的直线：你可能移走了一个结构体的半边字段（Partial Move），然后在几行之后又给它赋上了新值；你可能会在一个只有运行期才知道真假的 `if` 分支里移走资源；甚至你可能为一个实现了 `Drop` 的结构体做局部字段拆解。今天，我们将深入理解聚合体中的**字段级位置树（Location Tree）**与**确定性析构（Drop）**是如何与前几期学到的**内存效果（`read`/`kill`）和可达性（`&r`）**协同工作的。
+> **系列导读**：在第三卷开篇（041–042 期），我们确立了 Flurry“按值移动（`Once`）优先、显式选择按位复制（`Copy`）”以及确定性析构（`Drop`）的基本直觉。但在真实的系统工程中，资源的生命周期并非一条笔直的直线：你可能移走了一个结构体的半边字段（Partial Move），然后在几行之后又给它赋上了新值；你可能会在一个只有运行期才知道真假的 `if` 分支里移走资源；甚至你可能为一个实现了 `Drop` 的结构体做局部字段拆解。今天，我们将深入理解聚合体中的**字段级位置树（Location Tree）**与**确定性析构（Drop）**是如何与前几期学到的**内存效果（`read`/`kill`）和可达性（`&r`）**协同工作的。
 
 ---
 
@@ -9,7 +9,7 @@
 在初学阶段，我们习惯把变量看作一个整体：要么“活着（Initialized）”，要么“移走了（Moved Out）”。
 但在 Flurry 编译器内部，任何一个聚合变量（`struct`、元组、枚举）都被建模为一棵精细到叶子字段的**位置树（Location Tree）**。
 
-让我们看一个包含两个 `String`（非 `Copy` 资源）的结构体 `Pair`：
+让我们看一个包含两个 `String`（并非 `Copy` 资源）的结构体 `Pair`：
 
 ```flurry
 struct Pair {
@@ -28,7 +28,7 @@ struct Pair {
          /        \                     /           \
   .first (Init)  .second (Init)  .first (MovedOut)  .second (Init)
                                        │                  │
-                                  ❌ 不可读/不析构    ✅ 依然可读/退出时单独析构。
+                                  ❌ 晦涩难读/不析构    ✅ 依然可读/退出时单独析构。
 
 [ 步骤 3：pair.first = String.from("c"); ]
         pair (Init —— 整棵树重新愈合为完整状态。)
@@ -36,7 +36,7 @@ struct Pair {
   .first (Init)  .second (Init)
 ```
 
-如果我们在步骤 2 直接结束作用域，Drop 展开器**不会**对整个 `pair` 调用析构，而是**只针对仍然处于 `Init` 状态的叶子节点 `pair.second` 生成析构调用**。
+如果我们在步骤 2 直接结束作用域，Drop 展开器**免除**对整个 `pair` 调用析构，而是**只针对仍然处于 `Init` 状态的叶子节点 `pair.second` 生成析构调用**。
 而如果我们在步骤 3 重新为 `pair.first` 赋上新值，整棵位置树会瞬间“愈合”，`pair` 再次可以作为一个完整的 `Pair` 整体移动或传参：
 
 ```flurry
@@ -51,7 +51,7 @@ fn partial_move_and_heal() -> Pair {
     println(taken.as_str());
     println(pair.second.as_str()); -- ✅ 合法：兄弟字段仍然活跃
 
-    -- ❌ 若在此处直接 return pair，编译期直接拒绝：因为 pair.first 处于 MovedOut 状态
+    -- ❌ 若在此处直接 return pair，编译期直接报错：因为 pair.first 处于 MovedOut 状态
 
     -- 2. 重新初始化被移走的字段：位置树重新愈合。
     pair.first = String.from("c");
@@ -72,8 +72,8 @@ fn conditional_move(flag: bool) -> void {
         consume(text);
     }
 
-    -- ❌ 编译期直接拒绝。
-    -- 在合流点之后，text 在 true 分支已 MovedOut，不是全路径必然初始化状态，严禁读取。
+    -- ❌ 编译期直接报错。
+    -- 在合流点之后，text 在 true 分支已 MovedOut，并非全路径必然初始化状态，严禁读取。
     -- println(text.as_str());
 
     -- ✅ 但作用域结束时完全合法。
@@ -121,7 +121,7 @@ fn extract_text_safely(label: *str) -> String {
 }
 ```
 
-反之，如果 `Drop.drop` 内部确实读取了 `self.text`（产生 `read<self.text>` 效果），而你又试图在外面移走 `item.text`，Flurry 编译器就会精准指出冲突并拒绝编译：
+反之，如果 `Drop.drop` 内部确实读取了 `self.text`（产生 `read<self.text>` 效果），而你又试图在外面移走 `item.text`，Flurry 编译器就会精准指出冲突并编译报错：
 
 ```flurry
 struct HungryDrop {
@@ -137,20 +137,20 @@ impl Drop for HungryDrop {
 
 fn bad_extract() -> String {
     let item = HungryDrop { text: String.from("payload") }
-    -- ❌ 编译期直接拒绝。
+    -- ❌ 编译期直接报错。
     -- 移走 item.text 会使该字段进入 MovedOut 状态，
     -- 但作用域退出时 HungryDrop.drop 需要读取 self.text。
     item.text
 }
 ```
 
-看到了吗？在 Flurry 中，**局部移动与 `Drop` 不再是一刀切的对立关系，而是统一在字段级位置树与内存效果契约下的精确协同**。
+看到了吗？在 Flurry 中，**局部移动与 `Drop` 已并非一刀切的对立关系，而是统一在字段级位置树与内存效果契约下的精确协同**。
 
 ---
 
 ## 三、确定性析构的核心规则：析构顺序与覆盖赋值
 
-在系统编程（尤其是锁、事务卫兵与环形缓冲区槽位管理）中，**谁先析构、谁后析构**直接决定了程序会不会死锁或踩内存。Flurry 的 Drop Elaboration 严格规定了以下三条核心规则：
+在系统编程（尤其是锁、事务卫兵与环形缓冲区槽位管理）中，**谁先析构、谁后析构**直接决定了程序是否会死锁或踩内存。Flurry 的 Drop Elaboration 严格规定了以下三条核心规则：
 
 ### 核心规则 1：局部作用域按声明逆序（LIFO）析构，覆盖赋值原地析构旧值
 
@@ -162,7 +162,7 @@ fn overwrite_and_exit_order() -> void {
     -- 覆盖赋值（Overwriting Assignment）：
     -- 1. 先求值右侧表达式 Trace(3)（若右侧求值失败早退，first 仍保持旧值 Trace(1)）
     -- 2. 立即原地 drop 旧值 Trace(1)。
-    -- 3. 将新值 Trace(3) 写入 first，且【不改变】first 与 second 在作用域退出时的相对析构顺序。
+    -- 3. 将新值 Trace(3) 写入 first，且【维持原状而未改】first 与 second 在作用域退出时的相对析构顺序。
     first = Trace(3);
 
     -- 作用域退出时：依然严格按照变量声明的逆序析构：
@@ -187,7 +187,7 @@ fn overwrite_and_exit_order() -> void {
 
 ## 四、当 `Drop` 遇上可达性（`&r`）：防止析构函数里的悬垂读取
 
-在结束本章之前，让我们看一个极其隐蔽、只有在结合了 `Drop` 与指针可达性（`&r`）时才会暴露的边界陷阱：
+在结束本章之前，让我们看一个十分隐蔽、只有在结合了 `Drop` 与指针可达性（`&r`）时才会暴露的边界陷阱：
 
 如果一个结构体 `PrintOnDrop` 内部持有一个指向外部 `String` 的只读指针 `text: *str`，并且在它的 `Drop.drop` 方法里读取并打印了这个 `self.text.*`：
 
@@ -211,7 +211,7 @@ fn dangling_drop_bad() -> void {
     let text = String.from("hello");
     let guard = PrintOnDrop { text: text.as_str() }
 
-    -- ❌ 编译期直接拒绝。
+    -- ❌ 编译期直接报错。
     -- guard 在作用域末尾退出时，其 Drop.drop 会对 guard.text（可达性绑定于 text）执行读取。
     -- 在此之前提前 consume(text) 会产生 kill<text> 效果，导致 guard 析构时发生 Use-After-Free。
     consume(text);
@@ -227,10 +227,10 @@ fn dangling_drop_bad() -> void {
 | 机制 / 规则 | 语言语义与检查规则 | 带来的安全与工程收益 |
 | :--- | :--- | :--- |
 | **位置树（Location Tree）** | 每个聚合变量按字段拆分为叶子节点，独立追踪 `Init` / `MovedOut` / `Path-Conditional` | 支持局部字段移动、兄弟字段继续使用、重新赋值后整体愈合 |
-| **`Drop` 与局部移动协同** | 检查自定义 `Drop.drop` 的字段级 `read`/`write` 效果是否与 `MovedOut` 字段冲突 | 只要 `Drop` 不访问被移走的字段，即使实现了 `Drop` 也能安全地局部移动 |
+| **`Drop` 与局部移动协同** | 检查自定义 `Drop.drop` 的字段级 `read`/`write` 效果是否与 `MovedOut` 字段冲突 | 只要 `Drop` 免于访问被移走的字段，即使实现了 `Drop` 也能安全地局部移动 |
 | **局部与字段析构顺序** | 局部变量按声明逆序（LIFO）；结构体先执行外层 `Drop.drop`，再按字段声明逆序析构活跃字段 | 100% 确定性析构，天然契合资源依赖拓扑（后创建的资源往往依赖先创建的资源） |
-| **覆盖赋值（Overwrite）** | 右侧求值成功后立即析构旧值，不改变变量在作用域出口的相对析构顺序 | 杜绝内存泄漏，同时保证异常/错误早退时的状态一致性 |
-| **析构期可达性保护** | 将作用域出口处 `Drop.drop` 的指针读取纳入可达性生命周期检查 | 彻底杜绝“被借用对象先死、析构卫兵后死导致析构函数内 Use-After-Free”的漏洞 |
+| **覆盖赋值（Overwrite）** | 右侧求值成功后立即析构旧值，维持原状而未改变量在作用域出口的相对析构顺序 | 避免内存泄漏，同时保证异常/错误早退时的状态一致性 |
+| **析构期可达性保护** | 将作用域出口处 `Drop.drop` 的指针读取纳入可达性生命周期检查 | 避免“被借用对象先死、析构卫兵后死导致析构函数内 Use-After-Free”的漏洞 |
 
 ---
 

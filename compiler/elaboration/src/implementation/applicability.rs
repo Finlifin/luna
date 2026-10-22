@@ -284,6 +284,7 @@ pub(super) fn validate(
             }
             Work::Term(
                 Term::Tuple(items)
+                | Term::ClosureContextValue(items)
                 | Term::TypeListValue(items)
                 | Term::TypeListConcat(items)
                 | Term::TupleValue(items)
@@ -334,6 +335,13 @@ pub(super) fn validate(
                             .map(|t| (Work::Term(t), depth + 1)),
                     );
                 }
+            }
+            Work::Term(Term::ContextualClosure { context, signature }) => {
+                if fuel < 2 {
+                    return Err("input budget exhausted".into());
+                }
+                pending.push((Work::Term(context), depth + 1));
+                pending.push((Work::Term(signature), depth + 1));
             }
             Work::Term(Term::Closure {
                 environment,
@@ -540,7 +548,7 @@ impl ImplementationHead {
             }
             other => (other.clone(), None),
         };
-        if matches!(shape, Term::Closure { .. }) {
+        if matches!(shape, Term::Closure { .. } | Term::ContextualClosure { .. }) {
             return Err(TypeAssessment::ForbiddenSubject(shape));
         }
         if !matches!(

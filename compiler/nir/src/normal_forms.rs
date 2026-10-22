@@ -128,6 +128,7 @@ pub fn supported_input_type_in_scope(
         }
         remaining -= 1;
         match ty {
+            Term::ClosureContextType => {}
             Term::Primitive(
                 Primitive::Type
                 | Primitive::Void
@@ -432,6 +433,25 @@ impl Head {
         nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
         fuel: &mut usize,
     ) -> Result<(), ApplicationError> {
+        self.check_arguments_with_evidence_budgeted(
+            arguments,
+            is_tuple,
+            nominal_fields,
+            |_, _| false,
+            fuel,
+        )
+    }
+
+    /// Residual inputs need independent declaration-domain evidence. Closed
+    /// argument admission above deliberately supplies no such authority.
+    pub fn check_arguments_with_evidence_budgeted(
+        &self,
+        arguments: &[Term],
+        is_tuple: impl Fn(DeclarationId) -> bool,
+        nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
+        declared: impl Fn(&Term, &Term) -> bool,
+        fuel: &mut usize,
+    ) -> Result<(), ApplicationError> {
         let mut remaining = *fuel;
         let result = (|| {
             if arguments.len() != self.parameters.len() {
@@ -510,6 +530,16 @@ impl Head {
                     remaining -= 1;
                     let accepted = match (&expected, argument) {
                         (
+                            _,
+                            Term::Rigid {
+                                sort: Sort::ComptimeValue,
+                                ..
+                            },
+                        ) => {
+                            expected != Term::Primitive(Primitive::Type)
+                                && declared(argument, &expected)
+                        }
+                        (
                             Term::Nominal { .. },
                             Term::NominalValue {
                                 ty,
@@ -579,6 +609,7 @@ impl Head {
                             true
                         }
                         (Term::Primitive(Primitive::Type), value) => value.sort() == Sort::Type,
+                        (Term::ClosureContextType, Term::ClosureContextValue(_)) => true,
                         (Term::Primitive(Primitive::BitVec(width)), Term::BitVec(value)) => {
                             *width == value.width()
                         }
@@ -648,27 +679,63 @@ pub fn nominal_value_fields(
 ) -> Option<Vec<Term>> {
     nominal_value_fields_budgeted(package, ty, variant, &mut 100_000)
 }
+pub enum NominalValueDeclaration<'a> {
+    Struct(&'a crate::program::Struct),
+    Enum(&'a crate::program::Enum),
+    Newtype(&'a crate::newtypes::Newtype),
+}
+
 pub fn nominal_value_fields_budgeted(
     package: &Package,
     ty: &Term,
     variant: Option<u32>,
     fuel: &mut usize,
 ) -> Option<Vec<Term>> {
-    nominal_value_fields_at(package, ty, variant, fuel, 0)
+    nominal_value_fields_with_lookup(ty, variant, fuel, &|id, fuel| {
+        for definition in &package.enums {
+            spend_layout(fuel, 1)?;
+            if definition.declaration == id {
+                return Some(NominalValueDeclaration::Enum(definition));
+            }
+        }
+        for definition in &package.newtypes {
+            spend_layout(fuel, 1)?;
+            if definition.declaration == id {
+                return Some(NominalValueDeclaration::Newtype(definition));
+            }
+        }
+        for definition in &package.structs {
+            spend_layout(fuel, 1)?;
+            if definition.declaration == id {
+                return Some(NominalValueDeclaration::Struct(definition));
+            }
+        }
+        None
+    })
 }
 
-fn nominal_value_fields_at(
-    package: &Package,
+/// Borrow checked declarations without cloning a package just to inspect a value.
+/// Lookup must charge its work to the shared budget.
+pub fn nominal_value_fields_with_lookup<'a>(
     ty: &Term,
     variant: Option<u32>,
     fuel: &mut usize,
+    lookup: &impl Fn(DeclarationId, &mut usize) -> Option<NominalValueDeclaration<'a>>,
+) -> Option<Vec<Term>> {
+    nominal_value_fields_at(ty, variant, fuel, lookup, 0)
+}
+fn nominal_value_fields_at<'a>(
+    ty: &Term,
+    variant: Option<u32>,
+    fuel: &mut usize,
+    lookup: &impl Fn(DeclarationId, &mut usize) -> Option<NominalValueDeclaration<'a>>,
     depth: usize,
 ) -> Option<Vec<Term>> {
     if depth >= 128 {
         return None;
     }
     let layout = |ty: &Term, variant, fuel: &mut usize| {
-        nominal_value_fields_at(package, ty, variant, fuel, depth + 1).ok_or_else(|| {
+        nominal_value_fields_at(ty, variant, fuel, lookup, depth + 1).ok_or_else(|| {
             if *fuel == 0 {
                 crate::NominalAdmissionError::Budget
             } else {
@@ -683,63 +750,59 @@ fn nominal_value_fields_at(
     else {
         return None;
     };
-    if let Some(index) = variant {
-        for definition in &package.enums {
-            spend_layout(fuel, 1)?;
-            if definition.declaration == *declaration {
-                let admitted = crate::validate_declaration_arguments_with_layouts(
-                    &definition.type_parameters,
-                    &definition.parameter_types,
-                    arguments,
-                    fuel,
-                    layout,
-                );
-                layout_admission(admitted, fuel)?;
-                return instantiate_value_fields(
-                    &definition.type_parameters,
-                    &definition.parameter_types,
-                    arguments,
-                    definition.variants.get(index as usize)?.fields.iter(),
-                    fuel,
-                );
-            }
+    match (lookup(*declaration, fuel)?, variant) {
+        (NominalValueDeclaration::Enum(definition), Some(index))
+            if definition.declaration == *declaration =>
+        {
+            let admitted = crate::validate_declaration_arguments_with_layouts(
+                &definition.type_parameters,
+                &definition.parameter_types,
+                arguments,
+                fuel,
+                layout,
+            );
+            layout_admission(admitted, fuel)?;
+            instantiate_value_fields(
+                &definition.type_parameters,
+                &definition.parameter_types,
+                arguments,
+                definition.variants.get(index as usize)?.fields.iter(),
+                fuel,
+            )
         }
-    } else {
-        for definition in &package.newtypes {
-            spend_layout(fuel, 1)?;
-            if definition.declaration == *declaration {
-                let admitted =
-                    definition.validate_completed_arguments_with_layouts(arguments, fuel, layout);
-                layout_admission(admitted, fuel)?;
-                return Some(vec![
-                    definition
-                        .representation_budgeted(arguments, &[], fuel)
-                        .ok()?,
-                ]);
-            }
+        (NominalValueDeclaration::Newtype(definition), None)
+            if definition.declaration == *declaration =>
+        {
+            let admitted =
+                definition.validate_completed_arguments_with_layouts(arguments, fuel, layout);
+            layout_admission(admitted, fuel)?;
+            Some(vec![
+                definition
+                    .representation_budgeted(arguments, &[], fuel)
+                    .ok()?,
+            ])
         }
-        for definition in &package.structs {
-            spend_layout(fuel, 1)?;
-            if definition.declaration == *declaration {
-                let admitted = crate::validate_declaration_arguments_with_layouts(
-                    &definition.type_parameters,
-                    &definition.parameter_types,
-                    arguments,
-                    fuel,
-                    layout,
-                );
-                layout_admission(admitted, fuel)?;
-                return instantiate_value_fields(
-                    &definition.type_parameters,
-                    &definition.parameter_types,
-                    arguments,
-                    definition.fields.iter().map(|(_, ty)| ty),
-                    fuel,
-                );
-            }
+        (NominalValueDeclaration::Struct(definition), None)
+            if definition.declaration == *declaration =>
+        {
+            let admitted = crate::validate_declaration_arguments_with_layouts(
+                &definition.type_parameters,
+                &definition.parameter_types,
+                arguments,
+                fuel,
+                layout,
+            );
+            layout_admission(admitted, fuel)?;
+            instantiate_value_fields(
+                &definition.type_parameters,
+                &definition.parameter_types,
+                arguments,
+                definition.fields.iter().map(|(_, ty)| ty),
+                fuel,
+            )
         }
+        _ => None,
     }
-    None
 }
 // Legacy layout callers use None plus exhausted fuel to distinguish resource
 // failure from invalid metadata. Admission can fail a multi-step charge while
@@ -835,6 +898,7 @@ fn nominal_domain_scope(
             | Term::NormalForm { arguments, .. }
             | Term::Tuple(arguments)
             | Term::TupleValue(arguments)
+            | Term::ClosureContextValue(arguments)
             | Term::TypeListValue(arguments)
             | Term::TypeListConcat(arguments) => pending.extend(arguments),
             Term::Record(fields) | Term::RecordValue(fields) => {
@@ -849,12 +913,20 @@ fn nominal_domain_scope(
                 pending.push(result);
                 pending.extend(parameters.iter().map(|p| &p.ty));
             }
+            Term::ContextualClosure { context, signature } => {
+                pending.push(context);
+                pending.push(signature);
+            }
             Term::Closure {
                 environment,
                 signature,
             } => {
                 pending.push(signature);
                 pending.extend(environment);
+            }
+            Term::ErrorResult { errors, result } => {
+                pending.push(result);
+                pending.extend(errors);
             }
             Term::Computation { effects, result } => {
                 pending.push(result);

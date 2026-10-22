@@ -122,6 +122,13 @@ pub enum ExprKind<'hir> {
     Ref(&'hir Expr<'hir>),
     Deref(&'hir Expr<'hir>),
     ErrorNew(&'hir Expr<'hir>),
+    ErrorPropagate(&'hir Expr<'hir>),
+    ErrorHandle {
+        value: &'hir Expr<'hir>,
+        before: Option<&'hir PatternArm<'hir>>,
+        arms: &'hir [PatternArm<'hir>],
+        after: Option<&'hir PatternArm<'hir>>,
+    },
     Closure(&'hir [ClosureParam<'hir>], Option<&'hir Expr<'hir>>, BodyId),
     Cast(&'hir Expr<'hir>, &'hir Expr<'hir>),
 
@@ -174,7 +181,7 @@ pub enum ExprKind<'hir> {
 
     /// TODO
     ReachabilityType,
-    ErrorQualifiedType,
+    ErrorQualifiedType(&'hir Expr<'hir>, &'hir Expr<'hir>),
     EffectQualifiedType(&'hir Expr<'hir>, &'hir Expr<'hir>),
 
     /// Type inference placeholder `_`.

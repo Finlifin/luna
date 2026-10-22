@@ -27,7 +27,7 @@ fn inert_input(expression: &n::Expr, fuel: &mut usize) -> Result<bool, String> {
     Ok(inert)
 }
 
-fn scoped_targets_supported(callee: &n::Expr, fuel: &mut usize) -> Result<bool, String> {
+pub(super) fn scoped_targets_supported(callee: &n::Expr, fuel: &mut usize) -> Result<bool, String> {
     let mut pending = vec![callee];
     while let Some(value) = pending.pop() {
         *fuel = fuel
@@ -39,6 +39,10 @@ fn scoped_targets_supported(callee: &n::Expr, fuel: &mut usize) -> Result<bool, 
         match &value.kind {
             K::Function(_) | K::FunctionInstance { .. } | K::TraitMethod { .. } => {}
             K::Block {
+                result: Some(result),
+                ..
+            }
+            | K::CallPreparation {
                 result: Some(result),
                 ..
             } => pending.push(result),
@@ -77,7 +81,7 @@ pub(super) fn complete_inputs<C>(
     };
     if !matches!(
         callee.kind,
-        K::If { .. } | K::Match { .. } | K::Block { .. }
+        K::If { .. } | K::Match { .. } | K::Block { .. } | K::CallPreparation { .. }
     ) || !parameter_bindings.is_empty()
         || arguments.iter().any(|a| a.is_default)
     {
@@ -170,7 +174,10 @@ impl Builder<'_> {
         else {
             return Ok(());
         };
-        if matches!(callee.kind, K::Match { .. } | K::Block { .. }) {
+        if matches!(
+            callee.kind,
+            K::Match { .. } | K::Block { .. } | K::CallPreparation { .. }
+        ) {
             return resolve_scoped_callable(expression, include_runtime, next, sources, fuel);
         }
         let K::If {
@@ -408,7 +415,7 @@ fn resolve_scoped_callable(
     }
 }
 
-fn tag_targets(
+pub(super) fn tag_targets(
     value: &mut n::Expr,
     targets: &mut Vec<n::Expr>,
     tag_type: &Term,
@@ -426,6 +433,10 @@ fn tag_targets(
     }
     match &mut value.kind {
         K::Block {
+            result: Some(result),
+            ..
+        }
+        | K::CallPreparation {
             result: Some(result),
             ..
         } => tag_targets(result, targets, tag_type, fuel, depth + 1)?,
@@ -625,4 +636,77 @@ mod tests {
         assert_eq!(producer_ids.iter().filter(|&&id| id == 1).count(), 2);
         assert!(!producer_ids.contains(&0) && !producer_ids.contains(&2));
     }
+}
+
+// Evaluate a template selection at its original binding point. Only the tag
+// survives at runtime; later calls dispatch to statically specialized targets.
+pub(super) fn freeze_template_selection(
+    value: &n::Expr,
+    next: &mut u32,
+    sources: &mut Vec<n::ExpansionSource>,
+    fuel: &mut usize,
+) -> Result<Option<(n::Expr, n::Expr)>, String> {
+    if !scoped_targets_supported(value, fuel)? {
+        return Ok(None);
+    }
+    let mut remaining = *fuel as u64;
+    nir::copy_budget::charge_expression(value, &mut remaining)
+        .map_err(|_| "template selection copy budget exhausted")?;
+    *fuel = remaining as usize;
+    let tag_type = Term::Primitive(nir::Primitive::U64);
+    let tag = n::LocalId {
+        owner: u32::MAX,
+        index: *next,
+    };
+    *next = next
+        .checked_add(1)
+        .ok_or("template selection identity space exhausted")?;
+    let mut selection = value.clone();
+    let mut targets = Vec::new();
+    tag_targets(&mut selection, &mut targets, &tag_type, fuel, 0)?;
+    let Some(last) = targets.len().checked_sub(1) else {
+        return Ok(None);
+    };
+    let index =
+        u32::try_from(sources.len()).map_err(|_| "template selection source space exhausted")?;
+    sources.push(n::ExpansionSource {
+        original: value.source,
+        site: value.source,
+    });
+    let binding_source = n::SourceRange::generated(index);
+    let dispatch = n::Expr {
+        source: value.source,
+        ty: value.ty.clone(),
+        kind: K::Match {
+            value: Box::new(n::Expr {
+                source: value.source,
+                ty: tag_type,
+                kind: K::Local(tag),
+            }),
+            arms: targets
+                .into_iter()
+                .enumerate()
+                .map(|(index, body)| n::MatchArm {
+                    pattern: if index == last {
+                        P::Wild
+                    } else {
+                        P::Literal(n::Literal::UnsignedInteger(index as u128))
+                    },
+                    guard: None,
+                    body,
+                })
+                .collect(),
+        },
+    };
+    Ok(Some((
+        n::Expr {
+            source: binding_source,
+            ty: Term::Primitive(nir::Primitive::Void),
+            kind: K::Let {
+                binding: tag,
+                value: Box::new(selection),
+            },
+        },
+        dispatch,
+    )))
 }

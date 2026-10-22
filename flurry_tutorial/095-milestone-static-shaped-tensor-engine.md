@@ -18,7 +18,7 @@
 │     └─▶ 结合可选参数决定是否输出形状跟踪信息                                 │
 │                                                                              │
 │  2. 形状契约与 PTC 求解层 (077–087, 091–092)                                 │
-│     • comptime predicate valid_shape(s)         ──▶ 拒绝 d == 0 的退化轴     │
+│     • comptime predicate valid_shape(s)         ──▶ 禁止 d == 0 的退化轴     │
 │     • comptime predicate broadcastable(s1, s2)  ──▶ 从右向左校验广播兼容性   │
 │     • pure comptime fn broadcast_shape(s1, s2)  ──▶ 编译期计算输出张量形状   │
 │     • pure comptime fn flat_element_count(s)    ──▶ 编译期计算底层缓冲区总长 │
@@ -26,7 +26,7 @@
 │  3. 类型构造与分支收窄层 (066–076, 085–086, 090–091)                         │
 │     • pure comptime fn Tensor<T, ...dims> -> Type                            │
 │       ├─ dims 为空 [] ──▶ 退化为标量 T (Rank-0 等价)                         │
-│       └─ dims 非空     ──▶ Normal-Form 结构体，内嵌 Array<T, total_len>      │
+│       └─ dims 并非空     ──▶ Normal-Form 结构体，内嵌 Array<T, total_len>      │
 │     • Occurrence Typing + 类型模式 ──▶ 静态提取张量的阶数与形状              │
 │                                                                              │
 │  4. 步长预计算与展开层 (093)                                                 │
@@ -62,7 +62,7 @@ where
     ensures result > 0
 {
     var total: usize = 1;
-    inline for d in shape {
+    for d in shape {
         total = total * d;
     }
     total
@@ -77,7 +77,7 @@ pure comptime fn broadcast_axis(d1: usize, d2: usize) -> usize
 where
     requires axis_compatible(d1, d2)
 {
-    inline if d1 == 1 { d2 } else { d1 }
+    if d1 == 1 { d2 } else { d1 }
 }
 
 comptime predicate broadcastable(
@@ -86,10 +86,10 @@ comptime predicate broadcastable(
 ) {
     let r1 = s1.len();
     let r2 = s2.len();
-    let common = inline if r1 < r2 { r1 } else { r2 }
+    let common = if r1 < r2 { r1 } else { r2 };
 
     var ok = true;
-    inline for offset in 1 .. (common + 1) {
+    for offset in 1 .. (common + 1) {
         ok = ok and axis_compatible(s1[r1 - offset], s2[r2 - offset]);
     }
     ok
@@ -106,20 +106,20 @@ where
 {
     let r1 = s1.len();
     let r2 = s2.len();
-    let max_rank = inline if r1 > r2 { r1 } else { r2 }
+    let max_rank = if r1 > r2 { r1 } else { r2 };
 
     var out: meta.List<usize> = [];
-    inline for idx in 0 .. max_rank {
+    for idx in 0 .. max_rank {
         let offset = max_rank - idx;
-        let d1 = inline if offset <= r1 { s1[r1 - offset] } else { 1 }
-        let d2 = inline if offset <= r2 { s2[r2 - offset] } else { 1 }
+        let d1 = if offset <= r1 { s1[r1 - offset] } else { 1 };
+        let d2 = if offset <= r2 { s2[r2 - offset] } else { 1 };
         out = out.push_back(broadcast_axis(d1, d2));
     }
     out
 }
 ```
 
-### 模块二：`Tensor` 类型构造器、步长计算与 Occurrence Typing 提取
+### 模块二：`Tensor` 类型构造器、步长计算与类型模式提取
 
 接下来写出 `Tensor` 类型构造器，将编译期算出的 `flat_element_count(dims)` 用于底层定长存储 `Array<T, flat_element_count(dims)>`：
 
@@ -132,7 +132,7 @@ pure comptime fn row_major_strides(
     var strides: meta.List<usize> = [];
     var running: usize = 1;
 
-    inline for rev_idx in 0 .. rank {
+    for rev_idx in 0 .. rank {
         let axis = rank - 1 - rev_idx;
         strides = [running] ++ strides;
         running = running * shape[axis];
@@ -148,7 +148,7 @@ pure comptime fn Tensor<
 where
     ensures dims.is_empty() ==> result == T
 {
-    inline if dims.is_empty() {
+    if dims.is_empty() {
         T
     } else {
         struct {
@@ -163,9 +163,9 @@ where
     }
 }
 
--- 083 & 086 篇：利用 Occurrence Typing 与类型模式提取张量的阶数
+-- 083 篇：利用类型模式匹配提取张量的阶数
 pure comptime fn tensor_rank_of(T: Type) -> ?usize {
-    inline if T is do {
+    T match {
         Tensor<_, .dims = s> => s.len(),
         _ => null,
     }
@@ -223,7 +223,7 @@ where
 
 ---
 
-## 三、 验收测试：正向证明与负向拒绝用例
+## 三、 验收测试：正向证明与负向禁止用例
 
 下面验证合法调用与违约调用的检查行为：
 
@@ -256,24 +256,24 @@ test {
 }
 ```
 
-再看违约调用如何被编译期拒绝：
+再看违约调用如何被编译期报错：
 
 ```flurry
 fn broken_tensor_engine_usage(
     mat: Tensor<f64, 2, 3>,
     bad_bias: Tensor<f64, 4>,
 ) {
-    -- 拒绝 1：试图声明带有 0 维度的非法张量类型
-    -- ❌ 编译期拒绝：违反 refines { valid_shape(itself) } 契约
+    -- 报错 1：试图声明带有 0 维度的非法张量类型
+    -- ❌ 编译期报错：违反 refines { valid_shape(itself) } 契约
     let _: Tensor<f64, 2, 0> = undefined;
 
-    -- 拒绝 2：试图将 (2, 3) 的矩阵与 (4,) 的向量做广播
-    -- ❌ 编译期拒绝：尾轴 3 与 4 既不相等也非 1，
+    -- 报错 2：试图将 (2, 3) 的矩阵与 (4,) 的向量做广播
+    -- ❌ 编译期报错：尾轴 3 与 4 既互异也并非 1，
     -- 违反 requires broadcastable([2, 3], [4]) 契约
     let _ = broadcast_check_and_rank(mat, bad_bias);
 
-    -- 拒绝 3：试图用越界坐标 (2, 0) 访问 2×3 矩阵
-    -- ❌ 编译期拒绝：row == 2 不满足 requires row < 2
+    -- 报错 3：试图用越界坐标 (2, 0) 访问 2×3 矩阵
+    -- ❌ 编译期报错：row == 2 违背 requires row < 2
     let _ = get_2d(mat, 2, 0);
 }
 ```
@@ -284,7 +284,7 @@ fn broken_tensor_engine_usage(
 
 | 章节模块 | 核心机制与关键字 | 解决的问题 |
 | :--- | :--- | :--- |
-| **066–070：2LTT 与子句参数** | `comptime`、`const`、`quote`、`Type`、`where` | 统一编译期计算、类型参数与非类型子句参数声明 |
+| **066–070：2LTT 与子句参数** | `comptime`、`const`、`quote`、`Type`、`where` | 统一编译期计算、类型参数与并非类型子句参数声明 |
 | **071–076：类型构造与反射** | `pure comptime fn` 返回 `Type`、Normal-Form 头、`Type.size_of` | 用纯编译期函数表达泛型与类型构造，保留名义头身份 |
 | **077–083：精化与类型模式** | `comptime predicate`、`refines`、`requires` / `ensures`、类型模式 | 将值域约束与结构关系写入签名，支持类型解构 |
 | **084–088：PTC 与命题约束** | Occurrence Typing、算术/序列/行/位宽等理论协同求解 | 在分支内收窄类型与事实，检验编译期类型命题 |

@@ -1,6 +1,27 @@
 //! Declaration routing and source-ordered preparation of tuple collections.
 use super::*;
 
+/// A preparation may exit before delivering an already checked operation.
+/// Its completion type stays Never, while the operation's formed result can
+/// still constrain generic inputs. Do not infer a type from an arbitrary
+/// divergent expression or inspect function bodies.
+pub(super) fn inference_type(mut value: &n::Expr) -> Option<&Term> {
+    for _ in 0..64 {
+        if !is_never(&value.ty) {
+            return Some(&value.ty);
+        }
+        let K::CallPreparation {
+            result: Some(result),
+            ..
+        } = &value.kind
+        else {
+            return None;
+        };
+        value = result;
+    }
+    None
+}
+
 pub(super) struct RoutedArgument<'h> {
     pub parameter: usize,
     values: Vec<Expr<'h>>,

@@ -2,8 +2,9 @@
 use super::*;
 
 impl Walker<'_> {
-    // A complete scalar-write summary cannot overwrite a pointer cell. Unknown
-    // calls and aggregate/pointer writes cannot establish this guarantee.
+    // A complete Bool/fixed-integer write summary cannot replace a pointer
+    // cell or an enum tag. Unknown calls and aggregate/pointer writes cannot
+    // establish this guarantee; scalar range facts still require invalidation.
     pub(super) fn call_preserves_pointer_bindings(
         &mut self,
         callee: &Expr,

@@ -4,14 +4,7 @@
 use super::*;
 
 impl Checker<'_, '_> {
-    pub(super) fn infer_effect_request(
-        &mut self,
-        head: &Expr<'_>,
-        arguments: &[Arg<'_>],
-        expected: Option<&Term>,
-        structural_result: Option<&crate::calls::InputContext>,
-        span: Span,
-    ) -> Result<Option<(nir::effects::Operation, Vec<n::Expr>)>, Error> {
+    pub(super) fn inferred_effect_owner(&self, head: &Expr<'_>) -> Option<OwnerId> {
         let owner = match &head.kind {
             H::ResolvedDef { .. } => self.effect_head_owner(head).ok(),
             H::Projection(group, member) if matches!(group.kind, H::ResolvedDef { .. }) => {
@@ -28,12 +21,23 @@ impl Checker<'_, '_> {
             }
             _ => None,
         };
-        let Some(owner) = owner.filter(|owner| {
+        owner.filter(|owner| {
             matches!(
                 self.package.item(*owner).map(|i| &i.kind),
                 Some(ItemKind::Effect(..))
             )
-        }) else {
+        })
+    }
+
+    pub(super) fn infer_effect_request(
+        &mut self,
+        head: &Expr<'_>,
+        arguments: &[Arg<'_>],
+        expected: Option<&Term>,
+        structural_result: Option<&crate::calls::InputContext>,
+        span: Span,
+    ) -> Result<Option<(nir::effects::Operation, Vec<n::Expr>)>, Error> {
+        let Some(owner) = self.inferred_effect_owner(head) else {
             return Ok(None);
         };
         if self.type_parameters[&owner].is_empty() {
@@ -41,11 +45,18 @@ impl Checker<'_, '_> {
         }
         self.ensure_signature(owner, span)?;
         self.ensure_contract(owner, span)?;
-        let binders = self.type_parameters[&owner].clone();
-        let signature = &self.signatures[&owner];
-        crate::associated::charge_projection_copy(signature, &mut 100_000)
+        let plan_owner = self.effect_parents.get(&owner).copied().unwrap_or(owner);
+        let all_binders = self.type_parameters[&owner].clone();
+        let (binders, template, pending) = self.function_type_plan(plan_owner, &[], span)?;
+        let signature = self.instantiate_input_types(
+            &self.signatures[&owner].clone(),
+            &all_binders,
+            &template,
+            span,
+        )?;
+        crate::associated::charge_projection_copy(&signature, &mut 100_000)
             .map_err(|m| error(span, m))?;
-        let Term::Function { parameters, .. } = signature else {
+        let Term::Function { parameters, .. } = &signature else {
             return Err(error(span, "invalid effect signature"));
         };
         if parameters.len() != arguments.len() {
@@ -59,23 +70,23 @@ impl Checker<'_, '_> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let scheme = crate::calls::Scheme {
-            parameter_sorts: vec![],
+            parameter_sorts: self
+                .input_binders(&binders)
+                .iter()
+                .map(|binder| binder.sort)
+                .collect(),
             type_parameters: binders.len(),
             signature: signature
-                .abstract_types(&binders)
+                .abstract_parameters(&self.input_binders(&binders))
                 .map_err(|e| error(span, e.to_string()))?,
         };
         let caller_scope = self.call_inference_domains();
         let mut checked: Vec<Option<n::Expr>> = vec![None; inputs.len()];
+        let mut defaults = BTreeMap::new();
         let type_arguments = loop {
             let actual: Vec<_> = checked
                 .iter()
-                .map(|value| {
-                    value
-                        .as_ref()
-                        .filter(|v| !is_never(&v.ty))
-                        .map(|v| v.ty.clone())
-                })
+                .map(|value| value.as_ref().and_then(arguments::inference_type).cloned())
                 .collect();
             let mut candidate = scheme
                 .infer_sparse_scoped_types_mode(
@@ -103,6 +114,15 @@ impl Checker<'_, '_> {
                     crate::ptc::Budget::default(),
                 )
                 .map_err(|e| call_inference_error(span, e))?;
+            self.settle_function_defaults(
+                plan_owner,
+                &binders,
+                &template,
+                &pending,
+                &mut defaults,
+                &mut candidate,
+                span,
+            )?;
             if checked.iter().all(Option::is_some) {
                 break candidate
                     .inferred_type_arguments()
@@ -176,6 +196,10 @@ impl Checker<'_, '_> {
                 ));
             }
         };
+        let type_arguments = template
+            .iter()
+            .map(|input| self.instantiate_input_types(input, &binders, &type_arguments, span))
+            .collect::<Result<Vec<_>, _>>()?;
         // No full signature is copied by inference. Formation is responsible for
         // bounded substitution and proving declaration/parent-group contracts.
         if let Some(group) = self.effect_parents.get(&owner).copied() {

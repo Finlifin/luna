@@ -973,10 +973,50 @@ impl Checker<'_, '_> {
                 self.required_steps -= (before - budget.steps) as u64;
                 Ok(value)
             }
-            n::Pattern::Binding { inner, .. }
-            | n::Pattern::Remap { pattern: inner, .. }
-            | n::Pattern::Guard { pattern: inner, .. } => {
+            n::Pattern::Binding { inner, .. } | n::Pattern::Remap { pattern: inner, .. } => {
                 self.matched_value_pattern_input(inner, ty, span, depth + 1)
+            }
+            n::Pattern::Guard { pattern, condition } => {
+                if let Some(value) =
+                    self.matched_value_pattern_input(pattern, ty, span, depth + 1)?
+                {
+                    return Ok(Some(value));
+                }
+                if *ty == p(P::Bool)
+                    && let n::Pattern::Binding { binding, inner } = pattern.as_ref()
+                    && matches!(inner.as_ref(), n::Pattern::Wild)
+                {
+                    let mut admitted = 0u8;
+                    for candidate in [false, true] {
+                        let Some(outcomes) = boolean_guard_values(
+                            condition,
+                            *binding,
+                            candidate,
+                            &mut self.required_steps,
+                            span,
+                            depth + 1,
+                        )?
+                        else {
+                            return Ok(None);
+                        };
+                        if outcomes & 2 != 0 {
+                            admitted |= 1 << u8::from(candidate);
+                        }
+                    }
+                    return Ok(match admitted {
+                        1 => Some(Term::Bool(false)),
+                        2 => Some(Term::Bool(true)),
+                        _ => None,
+                    });
+                }
+                if let n::Pattern::Binding { binding, inner } = pattern.as_ref()
+                    && matches!(inner.as_ref(), n::Pattern::Wild)
+                    && matches!(ty, Term::Primitive(primitive) if primitive.fixed_integer_layout().is_some()
+                        || matches!(primitive, P::Integer | P::Char | P::Symbol | P::Str | P::BitVec(_)))
+                {
+                    return self.exact_scalar_guard_input(condition, *binding, ty, span, depth + 1);
+                }
+                Ok(None)
             }
             n::Pattern::Then { first, value, next } => {
                 if let Some(value) = self.matched_value_pattern_input(first, ty, span, depth + 1)? {
@@ -1007,6 +1047,78 @@ impl Checker<'_, '_> {
             }
             _ => Ok(None),
         }
+    }
+
+    fn exact_scalar_guard_input(
+        &mut self,
+        condition: &n::Expr,
+        binding: n::LocalId,
+        ty: &Term,
+        span: Span,
+        depth: usize,
+    ) -> Result<Option<Term>, Error> {
+        let mut fuel = self.required_steps;
+        let result = pattern_guard_evidence(
+            condition,
+            binding,
+            true,
+            &mut fuel,
+            span,
+            depth,
+            &mut |expr, truth, fuel| {
+                let (left, right) = match &expr.kind {
+                    K::ScalarEqual(left, right)
+                    | K::BitEqual(left, right)
+                    | K::IntegerBinary {
+                        op: n::IntegerOp::Equal,
+                        left,
+                        right,
+                    } => (left, right),
+                    _ => return Ok(None),
+                };
+                if left.ty != *ty || right.ty != *ty {
+                    return Ok(None);
+                }
+                if !readonly_guard_operand(left, fuel, span)?
+                    || !readonly_guard_operand(right, fuel, span)?
+                {
+                    return Ok(None);
+                }
+                if !truth {
+                    return Ok(Some(PatternGuard::Unknown));
+                }
+                let value = match (&left.kind, &right.kind) {
+                    (K::Local(id), _) if *id == binding => right,
+                    (_, K::Local(id)) if *id == binding => left,
+                    _ => return Ok(Some(PatternGuard::Unknown)),
+                };
+                let before = usize::try_from(*fuel).unwrap_or(usize::MAX);
+                let mut budget = comptime_runtime::Budget {
+                    steps: before,
+                    max_limbs: 4096,
+                };
+                let value = self.known_normal_input(value, 0, &mut budget);
+                *fuel -= (before - budget.steps) as u64;
+                if let (Some(Term::Integer(value)), Term::Primitive(primitive)) = (&value, ty)
+                    && let Some((signed, width)) = primitive.fixed_integer_layout()
+                    && (if signed {
+                        value.to_signed(width).is_err()
+                    } else {
+                        value.to_unsigned(width).is_err()
+                    })
+                {
+                    return Ok(Some(PatternGuard::Unknown));
+                }
+                Ok(Some(
+                    value.map_or(PatternGuard::Unknown, PatternGuard::Exact),
+                ))
+            },
+        );
+        self.required_steps = fuel;
+        Ok(match result? {
+            Some(PatternGuard::Exact(value)) => Some(value),
+            _ => None,
+        })
     }
 
     // Recover an identity from already elaborated structure, never by running a
@@ -1134,17 +1246,29 @@ impl Checker<'_, '_> {
             }
             K::FunctionType {
                 comptime,
+                comptime_parameters,
                 parameters,
             } => {
                 budget.consume(parameters.len().saturating_add(1)).ok()?;
+                if comptime_parameters.len() != parameters.len() {
+                    return None;
+                }
                 let mut types = Vec::with_capacity(parameters.len());
-                for parameter in parameters {
+                for (parameter, staged) in parameters.iter().zip(comptime_parameters) {
                     let ty = self.known_normal_input_in(parameter, depth + 1, budget, bindings)?;
                     if ty.sort() != Sort::Type {
                         return None;
                     }
                     types.push(Parameter {
-                        sort: Sort::Runtime,
+                        sort: if *staged {
+                            if ty == p(P::Type) {
+                                Sort::Type
+                            } else {
+                                Sort::ComptimeValue
+                            }
+                        } else {
+                            Sort::Runtime
+                        },
                         ty,
                     });
                 }
@@ -2903,4 +3027,108 @@ impl Checker<'_, '_> {
                 .ok_or_else(|| error(source.span, "incomplete normal-form input plan"))?,
         }))
     }
+}
+
+/// Possible Boolean results (bit 0 = false, bit 1 = true) for a fixed subject.
+/// Other Boolean locals
+/// remain unknown; their correlations may be lost, but no result is excluded
+/// without evidence. This is a non-mutating syntactic subset, not invocation.
+pub(super) fn boolean_guard_values(
+    expr: &n::Expr,
+    subject: n::LocalId,
+    candidate: bool,
+    fuel: &mut u64,
+    span: Span,
+    depth: usize,
+) -> Result<Option<u8>, Error> {
+    if depth >= 128 {
+        return Err(error(span, "Boolean guard evidence depth exhausted"));
+    }
+    *fuel = fuel
+        .checked_sub(1)
+        .ok_or_else(|| error(span, "Boolean guard evidence budget exhausted"))?;
+    if expr.ty != p(P::Bool) {
+        return Ok(None);
+    }
+    Ok(Some(match &expr.kind {
+        K::Literal(n::Literal::Bool(value)) => 1 << u8::from(*value),
+        K::Local(id) => {
+            if *id == subject {
+                1 << u8::from(candidate)
+            } else {
+                3
+            }
+        }
+        K::Block {
+            statements,
+            result: Some(result),
+        } if statements.is_empty() => {
+            return boolean_guard_values(result, subject, candidate, fuel, span, depth + 1);
+        }
+        K::If {
+            condition,
+            then_branch,
+            else_branch: Some(else_branch),
+        } => {
+            let Some(condition) =
+                boolean_guard_values(condition, subject, candidate, fuel, span, depth + 1)?
+            else {
+                return Ok(None);
+            };
+            let Some(yes) =
+                boolean_guard_values(then_branch, subject, candidate, fuel, span, depth + 1)?
+            else {
+                return Ok(None);
+            };
+            let Some(no) =
+                boolean_guard_values(else_branch, subject, candidate, fuel, span, depth + 1)?
+            else {
+                return Ok(None);
+            };
+            (if condition & 2 != 0 { yes } else { 0 }) | (if condition & 1 != 0 { no } else { 0 })
+        }
+        K::Not(value) => {
+            let Some(mask) =
+                boolean_guard_values(value, subject, candidate, fuel, span, depth + 1)?
+            else {
+                return Ok(None);
+            };
+            ((mask & 1) << 1) | ((mask & 2) >> 1)
+        }
+        K::And(left, right) | K::Or(left, right) | K::ScalarEqual(left, right)
+            if left.ty == p(P::Bool) && right.ty == p(P::Bool) =>
+        {
+            let Some(left) = boolean_guard_values(left, subject, candidate, fuel, span, depth + 1)?
+            else {
+                return Ok(None);
+            };
+            let Some(right) =
+                boolean_guard_values(right, subject, candidate, fuel, span, depth + 1)?
+            else {
+                return Ok(None);
+            };
+            let mut outcomes = 0;
+            for a in [false, true] {
+                for b in [false, true] {
+                    if left & (1 << u8::from(a)) == 0 || right & (1 << u8::from(b)) == 0 {
+                        continue;
+                    }
+                    let result = match expr.kind {
+                        K::And(..) => a && b,
+                        K::Or(..) => a || b,
+                        _ => a == b,
+                    };
+                    outcomes |= 1 << u8::from(result);
+                }
+            }
+            outcomes
+        }
+        _ => {
+            if readonly_guard_comparison(expr, fuel, span)? {
+                3
+            } else {
+                return Ok(None);
+            }
+        }
+    }))
 }

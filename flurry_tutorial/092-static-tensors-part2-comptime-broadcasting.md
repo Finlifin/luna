@@ -1,17 +1,17 @@
 # Flurry 演进手记 (092)：静态形状张量实战（二）：编译期形状广播（Broadcasting）推导
 
-> **阅读指南**：在上一篇（第 091 篇）中，我们用 `meta.List<usize>` 定义了 `Tensor<T, ...dims>`，并能静态拦截两个形状不同的张量。但在实际科学计算与 AI 模型里，把一个形状为 `(128, 64)` 的批量特征矩阵加上一个形状为 `(64,)` 的偏置向量（Bias），是常见操作。这就要求类型系统不仅支持形状相等判断，还支持 **张量广播（Broadcasting）**。本篇我们将结合 `docs/comptime/static-shaped-tensors.md`，编写 `comptime predicate broadcastable` 与 `pure comptime fn broadcast_shape`，看看 Flurry 如何在编译期从右向左推导广播形状，并在两阶段检查（定义阶段与实例化阶段）中处理符号维度。
+> **阅读指南**：在上一篇（第 091 篇）中，我们用 `meta.List<usize>` 定义了 `Tensor<T, ...dims>`，并能静态拦截两个形状不同的张量。但在实际科学计算与 AI 模型里，把一个形状为 `(128, 64)` 的批量特征矩阵加上一个形状为 `(64,)` 的偏置向量（Bias），是常见操作。这就要求类型系统非但支持形状相等判断，还支持 **张量广播（Broadcasting）**。本篇我们将结合 `docs/comptime/static-shaped-tensors.md`，编写 `comptime predicate broadcastable` 与 `pure comptime fn broadcast_shape`，看看 Flurry 如何在编译期从右向左推导广播形状，并在两阶段检查（定义阶段与实例化阶段）中处理符号维度。
 
 ---
 
 ## 一、 问题背景：运行期广播与固定重载的局限
 
-**形状广播（Broadcasting）** 允许两个不同形状的张量做逐元素运算（如加法、乘法），且**不需要在物理内存中复制扩展数据**（仅将对应轴的步长 Stride 设为 0 做虚拟复用）。
+**形状广播（Broadcasting）** 允许两个不同形状的张量做逐元素运算（如加法、乘法），且**无需在物理内存中复制扩展数据**（仅将对应轴的步长 Stride 设为 0 做虚拟复用）。
 
 ### 把广播留到运行期，或者用固定的重载穷举
 
 如果不在编译期计算广播形状，通常会遇到两类问题：
-1. **运行期广播的问题**：假设本意是把 `(batch, features)` 和 `(batch, 1)` 相加，却误传成了 `(batch,)`（少了一个维度）。如果恰好 `batch == features`，运行期广播不会报错，但会把行广播成列；如果 `batch != features`，则会在运行中途报错。
+1. **运行期广播的问题**：假设本意是把 `(batch, features)` 和 `(batch, 1)` 相加，却误传成了 `(batch,)`（少了一个维度）。如果恰好 `batch == features`，运行期广播顺利通过，但会把行广播成列；如果 `batch != features`，则会在运行中途报错。
 2. **用固定的函数重载列举广播**：
 
 ```flurry
@@ -49,7 +49,7 @@ where
 1. **同维保持（Equal Dimensions）**：如果当前轴两边的长度相等（$d_1 == d_2$），则输出轴长度为 $d_1$；
 2. **单位轴扩展（Unit Dimension `1`）**：如果其中一方的长度为 `1`（例如 $d_1 == 1, d_2 == k$），则长度为 `1` 的那一方沿着该轴虚拟复用以匹配另一方，输出轴长度为 $k$；
 3. **缺失前导轴虚拟补 `1`（Missing Leading Dimensions）**：如果其中一个张量的阶数（Rank）更低，从右向左对齐时它的前导轴已经用完，则视为在左侧**虚拟补 `1`**（仅参与编译期形状推导与步长映射，**不在运行时分配额外内存**），输出轴直接取高阶张量对应的前导轴长度；
-4. **其余情况不相容（Incompatible）**：既不相等、又没有任何一方为 `1`（比如 `64` 和 `32`），在编译期拒绝。
+4. **其余情况不相容（Incompatible）**：既互异、又没有任何一方为 `1`（比如 `64` 和 `32`），在编译期报错。
 
 下面展示 `(256, 1, 64)` 与 `(32, 64)` 如何在编译期从右向左推导出 `(256, 32, 64)`：
 
@@ -90,7 +90,7 @@ pure comptime fn broadcast_axis(d1: usize, d2: usize) -> usize
 where
     requires axis_compatible(d1, d2)
 {
-    inline if d1 == 1 { d2 } else { d1 }
+    if d1 == 1 { d2 } else { d1 }
 }
 
 -- 判定两个形状列表 s1 和 s2（从右向左对齐）是否满足广播契约
@@ -100,11 +100,11 @@ comptime predicate broadcastable(
 ) {
     let r1 = s1.len();
     let r2 = s2.len();
-    let common = inline if r1 < r2 { r1 } else { r2 }
+    let common = if r1 < r2 { r1 } else { r2 };
 
     -- 从右向左逐一检查公共后缀轴是否全部满足 axis_compatible
     var ok = true;
-    inline for offset in 1 .. (common + 1) {
+    for offset in 1 .. (common + 1) {
         let d1 = s1[r1 - offset];
         let d2 = s2[r2 - offset];
         ok = ok and axis_compatible(d1, d2);
@@ -124,14 +124,14 @@ where
 {
     let r1 = s1.len();
     let r2 = s2.len();
-    let max_rank = inline if r1 > r2 { r1 } else { r2 }
+    let max_rank = if r1 > r2 { r1 } else { r2 };
 
     var out: meta.List<usize> = [];
-    inline for idx in 0 .. max_rank {
+    for idx in 0 .. max_rank {
         -- 将左起索引转换为距最右端的偏移 offset
         let offset = max_rank - idx;
-        let d1 = inline if offset <= r1 { s1[r1 - offset] } else { 1 }
-        let d2 = inline if offset <= r2 { s2[r2 - offset] } else { 1 }
+        let d1 = if offset <= r1 { s1[r1 - offset] } else { 1 };
+        let d2 = if offset <= r2 { s2[r2 - offset] } else { 1 };
         out = out.push_back(broadcast_axis(d1, d2));
     }
     out
@@ -170,17 +170,17 @@ where
 > **💡 核心心智模型：两阶段检查如何处理未决符号维度？**
 > 如果在另一个泛型函数内部调用 `tensor_add`，此时维度还是符号变量（比如 `Tensor<f64, batch, 1, hidden>` 和 `Tensor<f64, 1, seq_len, hidden>`），编译器尚未拿到具体的数字，检查如何进行？
 > 正如 `static-shaped-tensors.md` 所述，Flurry 的检查分为两个阶段：
-> 1. **阶段一（类型归一化与定义检查）**：对于符号维度 `(batch, 1, hidden)` 与 `(1, seq_len, hidden)`，不需要知道 `batch`、`seq_len`、`hidden` 的具体数值，凭自反性 `hidden == hidden` 和常量 `1 == 1` 即可在定义阶段证明 `broadcastable` 成立，并化简出符号结果形状 `[batch, seq_len, hidden]`。对于依赖未知维度的具体计算，则等待输入确定后再执行。
+> 1. **阶段一（类型归一化与定义检查）**：对于符号维度 `(batch, 1, hidden)` 与 `(1, seq_len, hidden)`，无需知道 `batch`、`seq_len`、`hidden` 的具体数值，凭自反性 `hidden == hidden` 和常量 `1 == 1` 即可在定义阶段证明 `broadcastable` 成立，并化简出符号结果形状 `[batch, seq_len, hidden]`。对于依赖未知维度的具体计算，则等待输入确定后再执行。
 > 2. **阶段二（具体实例化）**：当调用点传入具体维度常量时，所有形状表达式求值为具体正整数列表，不相容的形状在此时报错。
 
-当两个张量形状无法广播时，编译器会在编译期拒绝：
+当两个张量形状无法广播时，编译器会在编译期报错：
 
 ```flurry
 fn broken_broadcast_call(
     features: Tensor<f64, 128, 64>,
     wrong_bias: Tensor<f64, 32>,
 ) {
-    -- ❌ 编译期拒绝：
+    -- ❌ 编译期报错：
     -- 从右向左对齐尾轴时，features 的尾轴是 64，wrong_bias 的尾轴是 32。
     -- 64 != 32 且双方均不为 1，broadcastable([128, 64], [32]) 为 false。
     let _ = tensor_add(features, wrong_bias);
@@ -196,7 +196,7 @@ fn broken_broadcast_call(
 | **1. 同维相等** | `64` vs `64` | ✅ 兼容，输出 `64` |
 | **2. 单位轴扩展** | `1` vs `32`（或 `32` vs `1`） | ✅ 兼容，单位轴虚拟复用，输出 `32` |
 | **3. 缺失前导轴** | `256` vs *(无，阶数较低)* | ✅ 兼容，低阶张量左侧虚拟补 `1`（零内存分配），输出 `256` |
-| **4. 既不相等也非 1** | `64` vs `32` | ❌ 编译期拒绝（违反 `requires broadcastable(s1, s2)`） |
+| **4. 既互异也并非 1** | `64` vs `32` | ❌ 编译期报错（违反 `requires broadcastable(s1, s2)`） |
 
 ---
 

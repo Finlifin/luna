@@ -76,6 +76,7 @@ impl Facts {
         }
         let mut alternative = self.fork(limits)?;
         alternative.assume_inner(condition, !truth, 0, limits)?;
+        alternative.propagate_retained_conditions(limits)?;
         if alternative.is_reachable() {
             Err(Unknown::InsufficientBounds)
         } else {

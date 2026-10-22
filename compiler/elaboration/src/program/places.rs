@@ -20,8 +20,15 @@ impl Checker<'_, '_> {
         if staged {
             return true;
         }
-        self.readable_storage_input(ty, &mut 10_000, 0, true)
+        self.readable_storage_input(ty, &mut 10_000, 0, true, false)
             .unwrap_or(false)
+    }
+    /// Form aggregate loads; resource checking still requires Copy and live origins.
+    pub(super) fn copy_read_input(&self, ty: &Term) -> bool {
+        self.wrapped_read_input(ty)
+            || self
+                .readable_storage_input(ty, &mut 10_000, 0, true, true)
+                .unwrap_or(false)
     }
     fn readable_storage_input(
         &self,
@@ -29,6 +36,7 @@ impl Checker<'_, '_> {
         fuel: &mut usize,
         depth: usize,
         pointer: bool,
+        nested_pointers: bool,
     ) -> Result<bool, String> {
         if depth >= 128 {
             return Err("read layout depth exhausted".into());
@@ -42,7 +50,13 @@ impl Checker<'_, '_> {
             _ => None,
         }) {
             for field in fields {
-                if !self.readable_storage_input(field, fuel, depth + 1, false)? {
+                if !self.readable_storage_input(
+                    field,
+                    fuel,
+                    depth + 1,
+                    pointer && nested_pointers,
+                    nested_pointers,
+                )? {
                     return Ok(false);
                 }
             }
@@ -61,7 +75,13 @@ impl Checker<'_, '_> {
                     let value = definition
                         .representation_budgeted(arguments, &[], fuel)
                         .map_err(|e| e.to_string())?;
-                    return self.readable_storage_input(&value, fuel, depth + 1, pointer);
+                    return self.readable_storage_input(
+                        &value,
+                        fuel,
+                        depth + 1,
+                        pointer,
+                        nested_pointers,
+                    );
                 }
                 if let Some(definition) = self.structs.get(declaration) {
                     definition
@@ -84,7 +104,13 @@ impl Checker<'_, '_> {
             _ => return Ok(false),
         };
         for field in fields {
-            if !self.readable_storage_input(&field, fuel, depth + 1, false)? {
+            if !self.readable_storage_input(
+                &field,
+                fuel,
+                depth + 1,
+                pointer && nested_pointers,
+                nested_pointers,
+            )? {
                 return Ok(false);
             }
         }

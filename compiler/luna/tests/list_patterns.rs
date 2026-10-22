@@ -511,3 +511,98 @@ fn observation_subject_addresses_cannot_escape_into_successful_bindings() {
         "{failure}"
     );
 }
+
+#[test]
+fn quote_list_extractors_preserve_candidate_order_and_staged_indices() {
+    let source = PROTOCOL
+        .replace(
+            "fn list_pattern_view_get_len(*self)->Size {",
+            "quote fn list_pattern_view_get_len(*self)->Size {",
+        )
+        .replace(
+            "fn list_pattern_view_get_element(*self,comptime index:Size)->bool {",
+            "quote fn list_pattern_view_get_element(*self,comptime index:Size)->bool {",
+        );
+    let package=compile_with_source_bindings(&format!("{source}
+        fn entry()->bool {{Repeated {{length:2,value:true}} match {{[false,_]=>false,[a,b]=>a and b,_=>false}}}}"),
+        &Default::default(),luna::protocols::type_constructors::Selectors {list_pattern:Some("input::ListView"),..Default::default()}).unwrap();
+    let graph = luna::instantiation::instantiate(&package, "entry", 200_000).unwrap();
+    let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    let observed = names(&graph, &vm);
+    let trace: Vec<_> = observed
+        .iter()
+        .filter(|name| matches!(name.as_str(), "length" | "element"))
+        .collect();
+    assert_eq!(
+        trace,
+        vec!["length", "element", "length", "element", "element"]
+    );
+    assert!(
+        observed.iter().any(|name| name.ends_with("::callable")),
+        "{observed:?}"
+    );
+}
+
+#[test]
+fn quote_list_extractors_remain_resource_checked() {
+    let source = PROTOCOL
+        .replace(
+            "fn list_pattern_view_get_len(*self)->Size {",
+            "quote fn list_pattern_view_get_len(*self)->Size {",
+        )
+        .replace(
+            "fn list_pattern_view_get_element(*self,comptime index:Size)->bool {",
+            "quote fn list_pattern_view_get_element(*self,comptime index:Size)->bool {",
+        );
+    let package = compile_with_source_bindings(
+        &format!(
+            "{source}
+        trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+        fn entry()->bool {{Repeated {{length:2,value:true}} match {{[a,b]=>a and b,_=>false}}}}"
+        ),
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            list_pattern: Some("input::ListView"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        luna::execution::interpret_with_protocols(
+            &package,
+            "entry",
+            "Duplicate",
+            "Retire",
+            200_000
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+    let invalid = source.replace("element();self.value.*", "self.value.* = false;false");
+    let invalid = compile_with_source_bindings(
+        &format!(
+            "{invalid}
+        trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+        fn entry()->bool {{Repeated {{length:2,value:true}} match {{[a,b]=>a and b,_=>false}}}}"
+        ),
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            list_pattern: Some("input::ListView"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let failure = luna::execution::interpret_with_protocols(
+        &invalid,
+        "entry",
+        "Duplicate",
+        "Retire",
+        200_000,
+    )
+    .unwrap_err();
+    assert!(failure.contains("observation"), "{failure}");
+}

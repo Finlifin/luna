@@ -1,8 +1,8 @@
 # Flurry 演进手记 (153)：把真实睡眠替换成瞬间快进——用效应 Handler 为异步网络协议编写确定性仿真测试
 
-在分布式系统与物联网边缘网关领域，FoundationDB 和 TigerBeetle 带火了一项让所有基础设施工程师梦寐以求的终极测试技术——**确定性仿真测试（Deterministic Simulation Testing, DST）**。
+在分布式系统与物联网边缘网关领域，FoundationDB 和 TigerBeetle 带火了一项让所有基础设施工程师梦寐以求的最终测试技术——**确定性仿真测试（Deterministic Simulation Testing, DST）**。
 
-为什么传统的异步网络单元测试既慢又不可靠（Flaky Tests）？
+为什么传统的异步网络单元测试既慢又隐患重重（Flaky Tests）？
 假设你在写一个传感器网关的**指数退避重试协议（Exponential Backoff Retry）**：
 - 第 1 次发送失败后，调用 `sleep_ms(1000)#` 等待 1 秒；
 - 第 2 次发送失败后，调用 `sleep_ms(2000)#` 等待 2 秒；
@@ -11,7 +11,7 @@
 如果在传统语言里，你在业务代码里直接调了操作系统定时器或绑定了重型异步运行时的 `sleep`，每次跑这一个单测就要真刀真枪地干等 **7 秒钟**。要是想为了 make sure 稳定性跑 10,000 次随机丢包仿真，就得等上整整两天。
 更头疼的是，在传统语言里想把时间、网络和错误处理抽成可替换的 Mock 接口，你得在每个函数的参数列表里层层传递 `clock: &mut dyn Clock, net: &mut dyn Network, err_policy: &dyn ErrorPolicy`——业务代码还没写两行，函数签名已经被依赖注入（Dependency Injection）的脚手架撑爆了。
 
-而在 Flurry 中，**代数效应（Algebraic Effects）天生就是类型安全、零样板代码的终极依赖注入与仿真引擎。**
+而在 Flurry 中，**代数效应（Algebraic Effects）天生就是类型安全、零样板代码的最终依赖注入与仿真引擎。**
 今天，我们就结合 `docs/algebraic-effect-and-delimited-continuation/handling-capability.md` 与 `async-algebraic-effect.md`，看看如何不改一行协议代码，用有状态 Handler、`.use(handler)` 与 `handles` 能力绑定，把 7 秒钟的真实睡眠变成**纳秒级的虚拟时间快进**。
 
 ---
@@ -113,7 +113,7 @@ test {
     var clock = SimClock { elapsed_ms: 0u32 }
 
     let reading = (fetch_with_backoff()# {
-        -- 1. 拦截 sleep_ms 效应：直接拨快虚拟时钟 clock，绝不真正阻塞线程。
+        -- 1. 拦截 sleep_ms 效应：直接拨快虚拟时钟 clock，不真正阻塞线程。
         sleep_ms(duration) => clock.advance(duration),
 
         -- 2. 拦截 async effect request_reading：
@@ -138,7 +138,7 @@ test {
 
 ## 使用 `handles` 绑定模式与 `.use(handler)` 复用标准处理策略
 
-除了手写 `# { ... }` 分支将请求转发给 `clock.advance(...)` 之外，如果我们有一套在多个测试或业务模块之间反复复用的标准错误/效应处理器（比如“遇到传感器读数超限错误 `LimitErr.TooLarge` 时，自动截断钳位到最大安全值 `ClampTo`”），能不能把它封装成一个可复用的处理器对象，直接用 `.use(handler)` 挂载上去？
+除了手写 `# { ... }` 分支将请求转发给 `clock.advance(...)` 之外，如果我们有一套在多个测试或业务模块之间反复复用的标准错误/效应处理器（比如“遇到传感器读数超限错误 `LimitErr.TooLarge` 时，自动截断钳位到最大安全值 `ClampTo`”），能否把它封装成一个可复用的处理器对象，直接用 `.use(handler)` 挂载上去？
 
 当然可以。这正是 `docs/algebraic-effect-and-delimited-continuation/handling-capability.md` 中定义的**处理能力绑定（`pattern handles expr`）与 `.use(handler)` 协议接入**。
 
@@ -186,17 +186,17 @@ test {
 }
 ```
 
-> **💡 核心心智模型（来自 `handling-capability.md`）：`handles` 只出现在局部绑定模式，绝不写进函数签名。**
+> **💡 核心心智模型（来自 `handling-capability.md`）：`handles` 只出现在局部绑定模式，省略进函数签名。**
 > 请特别注意两条语义规则：
-> 1. **函数签名不添加 `handles`**：函数的错误与效应需求始终写在返回类型的限定前缀上（如 `-> !LimitErr u32` 或 `-> #[next_number] u32`）。`handles` 只是局部绑定模式（`let handler handles LimitErr = ...`）中的能力注解，用来告诉 elaboration 该对象提供哪些处理入口。
-> 2. **绑定 `handles` 不等于隐式全局生效**：写下 `let handler handles LimitErr = ...` 并不会像动态作用域全局变量那样自动吞掉整个函数里所有的 `LimitErr`；你仍然必须在需要处理的位置显式写 `.use(handler)` 来安装它。
+> 1. **函数签名省略添加 `handles`**：函数的错误与效应需求始终写在返回类型的限定前缀上（如 `-> !LimitErr u32` 或 `-> #[next_number] u32`）。`handles` 只是局部绑定模式（`let handler handles LimitErr = ...`）中的能力注解，用来告诉 elaboration 该对象提供哪些处理入口。
+> 2. **绑定 `handles` 有别于隐式全局生效**：写下 `let handler handles LimitErr = ...` 并未像动态作用域全局变量那样自动吞掉整个函数里所有的 `LimitErr`；你仍然必须在需要处理的位置显式写 `.use(handler)` 来安装它。
 
 ---
 
 ## 进阶技巧与编译期红线：在内层 Handler 中转发同名请求（外层供应保持）
 
 在构建分层仿真测试时，我们经常会写一个“中间件式”的内层 Handler：
-比如内层 Handler 拦截 `next_number()` 请求，但它自己并不凭空造数，而是**向外层再发起一次 `next_number()#` 请求**，拿到外层给的基准值后加 `1` 返回。
+比如内层 Handler 拦截 `next_number()` 请求，但它自己并未凭空造数，而是**向外层再发起一次 `next_number()#` 请求**，拿到外层给的基准值后加 `1` 返回。
 
 ```flurry
 effect next_number() -> u32;
@@ -212,7 +212,7 @@ fn total() -> #[next_number] u32 {
 fn total_with_offset() -> #[next_number] u32 {
     total()# {
         next_number() => {
-            -- 这里的 next_number()# 会精准路由到外层环境，绝不会死循环递归调用自己。
+            -- 这里的 next_number()# 会精准路由到外层环境，不会死循环递归调用自己。
             let outside = next_number()#;
             outside + 1u32
         },
@@ -227,11 +227,11 @@ test {
 ```
 
 这里紧跟着一条编译期安全红线：
-**因为内层处理分支 `next_number() => { let outside = next_number()#; ... }` 自己又向外部发起了 `next_number` 请求，所以它并没有把整个函数的 `#[next_number]` 需求彻底消去。**
-如果你试图在 `total_with_offset` 的函数签名上把 `#[next_number]` 删掉，谎称自己已经不需要外层供应了，编译器会直接报错拦截：
+**因为内层处理分支 `next_number() => { let outside = next_number()#; ... }` 自己又向外部发起了 `next_number` 请求，所以它并没有把整个函数的 `#[next_number]` 需求消去。**
+如果你试图在 `total_with_offset` 的函数签名上把 `#[next_number]` 删掉，谎称自己已经无需外层供应了，编译器会直接报错拦截：
 
 ```flurry
--- ❌ 编译期直接拒绝。
+-- ❌ 编译期直接报错。
 -- 内层处理分支自身发起了对外层 `next_number()#` 的请求，
 -- 该外层效应需求尚未被消去，函数返回类型必须保留 `#[next_number] u32`。
 fn bad_swallow_outer_requirement() -> u32 {
@@ -252,7 +252,7 @@ fn bad_swallow_outer_requirement() -> u32 {
 | :--- | :--- | :--- |
 | **有状态对象接入 Handler** | `expr# { op(x) => sim.method(x), }` | 将真实睡眠、网络 I/O 替换为内存状态机，实现纳秒级确定性仿真测试（DST） |
 | **异步效应同步仿真分支** | `async op(x) => mock_calc(x),` | 测试中可直接计算模拟值，保留 `async` 关键字以维持 `Future` 与结构化范围契约 |
-| **能力绑定与 `.use` 接入** | `let h handles Cap1 and Cap2 = ...;`<br>`comp.use(h)` | 封装可复用的错误/效应处理策略；通过 `.use(h)` 显式安装，函数签名不添加 `handles` |
+| **能力绑定与 `.use` 接入** | `let h handles Cap1 and Cap2 = ...;`<br>`comp.use(h)` | 封装可复用的错误/效应处理策略；通过 `.use(h)` 显式安装，函数签名省略添加 `handles` |
 | **内层转发与外层供应** | 分支内调用同名 `op()#` 路由至外层 Handler | 支持中间件式的偏移/日志装饰器，且编译器严格检查未消去的外层效应行 |
 
 ---
@@ -260,6 +260,6 @@ fn bad_swallow_outer_requirement() -> u32 {
 ### 下一篇预告
 
 看到代数效应在异步并发和确定性仿真测试中如此灵活，一个关心底层性能的系统级程序员一定会忍不住发问：
-> **“这套效应查找、直接返回、安装值传递、以及捕获 Continuation 挂起恢复的机制，在底层机器码和 ABI 层面到底是怎么跑的？会不会每次调个简单的配置读取效应都要去遍历整条调用栈或者分配堆内存？如果挂起区域中间夹着一个 C 语言函数（`^attrs.abi(.c)`），又会发生什么？”**
+> **“这套效应查找、直接返回、安装值传递、以及捕获 Continuation 挂起恢复的机制，在底层机器码和 ABI 层面到底是怎么跑的？是否会每次调个简单的配置读取效应都要去遍历整条调用栈或者分配堆内存？如果挂起区域中间夹着一个 C 语言函数（`^attrs.abi(.c)`），又会发生什么？”**
 
 下一篇 **`154-under-the-hood-of-effect-abi-and-evidence-passing.md`**，我们将直接掀开 `docs/algebraic-effect-and-delimited-continuation/effect-abi.md` 的发动机舱盖，一探**证据传递（Evidence Passing）、五种 ABI 交接类别、显式池化栈后端（`.use(pool)`）与跨 C 语言边界屏障**的底层奥秘。

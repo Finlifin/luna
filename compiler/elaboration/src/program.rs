@@ -438,6 +438,7 @@ pub fn elaborate_packages_with_protocols(
                         | ItemKind::Newtype(..)
                         | ItemKind::TypeAlias(..)
                         | ItemKind::Impl(_)
+                        | ItemKind::EffectGroup(_)
                 ) {
                     match parameter.kind {
                         hir::clause::ClauseParamKind::Positional(_, ty)
@@ -715,8 +716,11 @@ pub fn elaborate_packages_with_protocols(
                     functions.push((owner, item, sig, body));
                 }
             }
-            ItemKind::Effect(_, _) => checker.ensure_signature(owner, item.span)?,
-            ItemKind::EffectGroup(_) => {}
+            ItemKind::Effect(_, _) => {
+                checker.ensure_signature(owner, item.span)?;
+                checker.check_type_defaults(owner)?;
+            }
+            ItemKind::EffectGroup(_) => checker.check_type_defaults(owner)?,
             ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::Newtype(..) => {
                 checker.ensure_nominal(owner, item.span)?
             }
@@ -871,6 +875,14 @@ pub fn elaborate_packages_with_protocols(
                     .map(|group| declaration(package, package_identities, *group)),
                 name: item.ident.name.as_str().into(),
                 type_parameters: checker.type_parameters[&owner].clone(),
+                parameter_types: checker.type_parameters[&owner]
+                    .iter()
+                    .map(|id| {
+                        checker
+                            .trait_input_domain(*id)
+                            .unwrap_or_else(|| p(P::Type))
+                    })
+                    .collect(),
                 signature: checker.signatures[&owner].clone(),
                 abi: if modifiers.is_direct_passing {
                     nir::effects::Abi::DirectPassing
@@ -896,6 +908,7 @@ pub fn elaborate_packages_with_protocols(
     let code_methods: BTreeSet<_> = checker
         .code_generators
         .keys()
+        .chain(checker.pattern_generators.keys())
         .map(|owner| declaration(package, package_identities, *owner))
         .collect();
     for interface in &mut output.traits {
@@ -903,6 +916,7 @@ pub fn elaborate_packages_with_protocols(
             !matches!(
                 method.signature,
                 nir::code_interfaces::MethodSignature::Generator(_)
+                    | nir::code_interfaces::MethodSignature::PatternGenerator(_)
             )
         });
     }
@@ -1343,7 +1357,11 @@ impl Checker<'_, '_> {
                 .get(&owner)
                 .or_else(|| self.self_containers.get(&owner))
             {
-                self.type_parameters[parent].clone()
+                self.type_parameters[parent]
+                    .iter()
+                    .copied()
+                    .chain(self.nominal_capture_ids(*parent))
+                    .collect()
             } else {
                 match self.self_types.get(&owner) {
                     Some(Term::Rigid {
@@ -2251,12 +2269,7 @@ impl Checker<'_, '_> {
         let instance = loop {
             let actual = checked
                 .iter()
-                .map(|value| {
-                    value
-                        .as_ref()
-                        .filter(|value| !is_never(&value.ty))
-                        .map(|value| value.ty.clone())
-                })
+                .map(|value| value.as_ref().and_then(arguments::inference_type).cloned())
                 .collect::<Vec<_>>();
             let mut candidate = scheme
                 .infer_sparse_scoped_types(
@@ -2577,7 +2590,14 @@ impl Checker<'_, '_> {
             Term::Primitive(primitive) => {
                 matches!(
                     primitive,
-                    P::Bool | P::Char | P::Integer | P::Float | P::F32 | P::F64 | P::BitVec(_)
+                    P::Bool
+                        | P::Char
+                        | P::Symbol
+                        | P::Integer
+                        | P::Float
+                        | P::F32
+                        | P::F64
+                        | P::BitVec(_)
                 ) || primitive.fixed_integer_layout().is_some()
             }
             Term::Tuple(fields) => {
@@ -3113,6 +3133,33 @@ impl Checker<'_, '_> {
                     .and_then(|o| self.package.item(o)).is_some_and(|i| matches!(&i.kind,
                         ItemKind::Fn(sig, _) if sig.modifiers.is_normal_form_head)))
             }
+            H::Projection(base, _) if self.is_type_head(base) => {
+                let is_type = |id| {
+                    self.package
+                        .definition_owner(id)
+                        .and_then(|owner| self.package.item(owner))
+                        .is_some_and(|item| {
+                            matches!(
+                                item.kind,
+                                ItemKind::Struct(_)
+                                    | ItemKind::Enum(_)
+                                    | ItemKind::Newtype(..)
+                                    | ItemKind::TypeAlias(..)
+                            )
+                        })
+                };
+                if let Some(member) = self.package.member_projections.get(&expr.hir_id) {
+                    is_type(*member)
+                } else {
+                    self.package
+                        .deferred_member_projections
+                        .get(&expr.hir_id)
+                        .is_some_and(|members| {
+                            !members.is_empty()
+                                && members.iter().all(|(_, member)| is_type(*member))
+                        })
+                }
+            }
             H::ResolvedDef { def_id, .. } => self
                 .package
                 .definition_owner(*def_id)
@@ -3130,6 +3177,15 @@ impl Checker<'_, '_> {
         }
     }
     fn type_expr(&mut self, expr: &Expr<'_>) -> Result<Term, Error> {
+        if let H::Projection(value, field) = &expr.kind {
+            if field.name.as_str() == "Closure"
+                && let H::Projection(base, namespace) = &value.kind
+                && namespace.name.as_str() == "vars"
+                && self.type_expr(base)? == p(P::Type)
+            {
+                return Ok(Term::ClosureContextType);
+            }
+        }
         if let Some(ty) = self.projected_member_type(expr)? {
             return Ok(ty);
         }
@@ -3584,6 +3640,25 @@ impl Checker<'_, '_> {
             }
             H::TyClosure(context, body) => {
                 let H::TyClosureEnvironment(bindings) = &context.kind else {
+                    if let H::ResolvedClauseParam(_, id) = &context.kind {
+                        let declaration = DeclarationId {
+                            package: semantic_package(&self.package_identities, id.pkg),
+                            local: id.index,
+                        };
+                        if self.trait_input_domain(declaration) == Some(Term::ClosureContextType) {
+                            let context = self
+                                .alias_substitution
+                                .get(&declaration)
+                                .map(|value| (**value).clone())
+                                .unwrap_or(Term::Rigid {
+                                    declaration,
+                                    sort: Sort::ComptimeValue,
+                                });
+                            let signature = self.type_expr(body)?;
+                            return Term::contextual_closure(context, signature)
+                                .map_err(|e| error(expr.span, e.to_string()));
+                        }
+                    }
                     return Err(error(
                         context.span,
                         "open closure contexts require environment-parameter elaboration not yet implemented",
@@ -3630,7 +3705,7 @@ impl Checker<'_, '_> {
             H::TyFn(params) | H::TyComptimeFn(params) => {
                 let mut parameters = Vec::new();
                 for parameter in *params {
-                    if parameter.flags != 0 {
+                    if parameter.flags & !hir::common::TPARAM_COMPTIME != 0 {
                         return Err(error(
                             expr.span,
                             "function type parameter protocols are not implemented",
@@ -3642,12 +3717,21 @@ impl Checker<'_, '_> {
                             "function type parameter form is not implemented",
                         ));
                     };
+                    let ty = self
+                        .type_expr(value)?
+                        .abstract_parameters(&[])
+                        .map_err(|e| error(value.span, e.to_string()))?;
                     parameters.push(Parameter {
-                        sort: Sort::Runtime,
-                        ty: self
-                            .type_expr(value)?
-                            .abstract_parameters(&[])
-                            .map_err(|e| error(value.span, e.to_string()))?,
+                        sort: if parameter.is_comptime() {
+                            if ty == p(P::Type) {
+                                Sort::Type
+                            } else {
+                                Sort::ComptimeValue
+                            }
+                        } else {
+                            Sort::Runtime
+                        },
+                        ty,
                     });
                 }
                 Ok(Term::Function {
@@ -4953,7 +5037,10 @@ impl Checker<'_, '_> {
                 C::Tuple(_) | C::NormalTuple { .. } | C::Record(_) | C::Nominal { .. },
                 H::Application(..) | H::ExtendedApplication(..) | H::EffectRequest(_),
             )
-            | (C::Callable(_), H::EffectRequest(_)) => {
+            | (
+                C::Callable(_),
+                H::Application(..) | H::ExtendedApplication(..) | H::EffectRequest(_),
+            ) => {
                 let saved = self
                     .structural_result_context
                     .replace((input.hir_id, context.clone()));
@@ -5400,12 +5487,7 @@ impl Checker<'_, '_> {
             && !matches!(expected, Some(Term::Computation { .. }));
         let initial_types: Vec<_> = checked
             .iter()
-            .map(|value| {
-                value
-                    .as_ref()
-                    .filter(|value| !is_never(&value.ty))
-                    .map(|value| value.ty.clone())
-            })
+            .map(|value| value.as_ref().and_then(arguments::inference_type).cloned())
             .collect();
         // Propagate result information before probing children. Besides making
         // bidirectional checking effective for nested calls, this avoids
@@ -5512,17 +5594,17 @@ impl Checker<'_, '_> {
                 .map(|(index, value)| {
                     value
                         .as_ref()
+                        .and_then(arguments::inference_type)
                         // A definition-side default may still contain this
                         // declaration's rigid binders. It is not a concrete
                         // caller input that can constrain those same binders.
-                        .filter(|v| {
+                        .filter(|ty| {
                             assigned[index]
-                                || v.ty
+                                || ty
                                     .abstract_parameters(&self.input_binders(&parameters))
                                     .is_ok_and(|t| t.check_scope(&[]).is_ok())
                         })
-                        .filter(|v| !is_never(&v.ty))
-                        .map(|v| v.ty.clone())
+                        .cloned()
                 })
                 .collect();
             let mut candidate = scheme
@@ -7501,7 +7583,8 @@ impl Checker<'_, '_> {
         value: &n::Expr,
     ) -> Result<n::Pattern, Error> {
         let observed = self.known_pattern_type_value(value);
-        let pattern = self.pattern_observed(&arm.pat, &value.ty, observed.as_ref())?;
+        let domain = arguments::inference_type(value).unwrap_or(&value.ty);
+        let pattern = self.pattern_observed(&arm.pat, domain, observed.as_ref())?;
         let guard = arm
             .guard
             .map(|guard| {
@@ -7627,6 +7710,32 @@ impl Checker<'_, '_> {
                     guard: None,
                     body,
                 });
+            }
+            // Desugarings such as `matches` give both synthetic arm bodies the
+            // same source span. Cleanup uses body sites as runtime identities:
+            // assign distinct generated sites while preserving diagnostics.
+            self.required_steps = self
+                .required_steps
+                .checked_sub(checked.len() as u64)
+                .ok_or_else(|| error(expr.span, "match arm source budget exhausted"))?;
+            let mut body_sites = BTreeMap::new();
+            for arm in &checked {
+                *body_sites
+                    .entry((arm.body.source.start, arm.body.source.end))
+                    .or_insert(0usize) += 1;
+            }
+            for arm in &mut checked {
+                let original = arm.body.source;
+                if original == source(expr.span) || body_sites[&(original.start, original.end)] > 1
+                {
+                    let index = u32::try_from(self.expansion_sources.len())
+                        .map_err(|_| error(expr.span, "match arm source space exhausted"))?;
+                    self.expansion_sources.push(n::ExpansionSource {
+                        original,
+                        site: source(expr.span),
+                    });
+                    arm.body.source = n::SourceRange::generated(index);
+                }
             }
             let patterns: Vec<_> = checked
                 .iter()
@@ -8569,6 +8678,7 @@ impl Checker<'_, '_> {
                         self.type_parameters
                             .get(&scope)
                             .is_some_and(|parameters| parameters.contains(&declaration))
+                            || self.nominal_capture_ids(scope).contains(&declaration)
                     })
             }) && let Some(domain) = self
                 .trait_input_domain(declaration)
@@ -8770,6 +8880,22 @@ impl Checker<'_, '_> {
                     kind: K::Literal(n::Literal::Bool(value)),
                 });
             }
+            H::TyClosure(context, _) if matches!(context.kind, H::ResolvedClauseParam(..)) => {
+                // A clause context is a symbolic declaration input, not a
+                // runtime environment construction. Keep the complete type
+                // value so specialization substitutes its context and body
+                // together before runtime materialization.
+                let value = self.type_expr(expr)?;
+                let ty = p(P::Type);
+                if let Some(expected) = expected {
+                    self.require_expression(&ty, expected, expr.span)?;
+                }
+                return Ok(n::Expr {
+                    source: source(expr.span),
+                    ty,
+                    kind: K::TypeValue(value),
+                });
+            }
             H::RefinedType { .. } | H::RefinementSubject => {
                 let value = self.type_expr(expr)?;
                 let ty = p(P::Type);
@@ -8929,8 +9055,9 @@ impl Checker<'_, '_> {
             H::TyFn(parameters) | H::TyComptimeFn(parameters) => {
                 let comptime = matches!(expr.kind, H::TyComptimeFn(_));
                 let mut fields = Vec::new();
+                let mut comptime_parameters = Vec::new();
                 for parameter in *parameters {
-                    if parameter.flags != 0 {
+                    if parameter.flags & !hir::common::TPARAM_COMPTIME != 0 {
                         return Err(error(
                             expr.span,
                             "function type parameter protocols are not implemented",
@@ -8943,6 +9070,7 @@ impl Checker<'_, '_> {
                         ));
                     };
                     fields.push(self.expr(value, Some(&p(P::Type)))?);
+                    comptime_parameters.push(parameter.is_comptime());
                 }
                 let ty = if fields.iter().any(|field| is_never(&field.ty)) {
                     p(P::Never)
@@ -8958,12 +9086,21 @@ impl Checker<'_, '_> {
                 {
                     let parameters = fields
                         .into_iter()
-                        .map(|field| {
+                        .zip(&comptime_parameters)
+                        .map(|(field, staged)| {
                             let K::TypeValue(ty) = field.kind else {
                                 unreachable!()
                             };
                             Parameter {
-                                sort: Sort::Runtime,
+                                sort: if *staged {
+                                    if ty == p(P::Type) {
+                                        Sort::Type
+                                    } else {
+                                        Sort::ComptimeValue
+                                    }
+                                } else {
+                                    Sort::Runtime
+                                },
                                 ty,
                             }
                         })
@@ -8978,6 +9115,7 @@ impl Checker<'_, '_> {
                 } else {
                     K::FunctionType {
                         comptime,
+                        comptime_parameters,
                         parameters: fields,
                     }
                 };
@@ -9424,7 +9562,7 @@ impl Checker<'_, '_> {
                 let Term::Pointer(ty) = &pointer.ty else {
                     return Err(error(expr.span, "dereference requires a pointer"));
                 };
-                if !self.intrinsic_pointer_input(ty) && !self.wrapped_read_input(ty) {
+                if !self.intrinsic_pointer_input(ty) && !self.copy_read_input(ty) {
                     return Err(error(
                         expr.span,
                         "pointer reads of non-intrinsic values require Copy evidence or a memory transfer contract; this read is not yet supported",
@@ -9605,7 +9743,12 @@ impl Checker<'_, '_> {
                 self.loops.push(identity);
                 let body = self.block(block, None);
                 self.loops.pop();
-                let body = body?;
+                let mut body = body?;
+                let mut source_fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                let before = source_fuel;
+                let freshened = control::freshen_loop_sites(&mut body, source(expr.span), &mut self.expansion_sources, &mut source_fuel);
+                self.required_steps -= (before - source_fuel) as u64;
+                freshened.map_err(|reason| error(expr.span, reason))?;
                 let may_complete = control::loop_may_complete(&body, identity, &mut 100_000)
                     .map_err(|reason| error(expr.span, reason))?;
                 (
@@ -9661,7 +9804,11 @@ impl Checker<'_, '_> {
                     )
                 })?;
                 let value = self.expr(init, annotation.as_ref())?;
-                let binding_type = annotation.unwrap_or_else(|| value.ty.clone());
+                // Preparation can exit before an operation with an already
+                // formed result. Retain that domain for static pattern checks;
+                // the initializer itself stays Never and binds no runtime value.
+                let binding_type = annotation.unwrap_or_else(||
+                    arguments::inference_type(&value).unwrap_or(&value.ty).clone());
                 // The failure branch cannot observe bindings from this declaration.
                 let otherwise = decl
                     .otherwise
@@ -10170,8 +10317,302 @@ fn is_float_literal(expr: &Expr<'_>) -> bool {
     )
 }
 
-// This is a sufficient proof for the currently supported finite, immutable
-// value-construction fragment, not the complete runtime purity/specification solver.
+// Evidence about an original retained input, conditional on a guard outcome.
+// Unknown is a safe expression with no unique identity; None from the evaluator
+// means an unsupported computation that may change the candidate binding.
+#[derive(Clone, Copy)]
+enum PatternGuard<T> {
+    Impossible,
+    Unknown,
+    Exact(T),
+}
+
+impl<T: PartialEq> PatternGuard<T> {
+    fn both(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Impossible, _) | (_, Self::Impossible) => Self::Impossible,
+            (Self::Exact(value), _) | (_, Self::Exact(value)) => Self::Exact(value),
+            _ => Self::Unknown,
+        }
+    }
+    fn either(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Impossible, other) | (other, Self::Impossible) => other,
+            (Self::Exact(left), Self::Exact(right)) if left == right => Self::Exact(left),
+            _ => Self::Unknown,
+        }
+    }
+}
+
+fn pattern_guard_evidence<'a, T: PartialEq>(
+    expression: &'a n::Expr,
+    binding: n::LocalId,
+    truth: bool,
+    fuel: &mut u64,
+    span: Span,
+    depth: usize,
+    atom: &mut impl FnMut(&'a n::Expr, bool, &mut u64) -> Result<Option<PatternGuard<T>>, Error>,
+) -> Result<Option<PatternGuard<T>>, Error> {
+    use PatternGuard::{Impossible, Unknown};
+    if depth >= 128 {
+        return Err(error(span, "type guard evidence depth exhausted"));
+    }
+    *fuel = fuel
+        .checked_sub(1)
+        .ok_or_else(|| error(span, "type guard evidence budget exhausted"))?;
+    Ok(Some(match &expression.kind {
+        K::Literal(n::Literal::Bool(value)) => {
+            if *value == truth {
+                Unknown
+            } else {
+                Impossible
+            }
+        }
+        K::Local(_) => Unknown,
+        K::Not(value) => {
+            return pattern_guard_evidence(value, binding, !truth, fuel, span, depth + 1, atom);
+        }
+        K::And(left, right) | K::Or(left, right) => {
+            // Only this finite, non-mutating subset may combine observations
+            // of a binding across operands. Calls, statement blocks and writes remain
+            // unsupported, even if one operand appears to identify the type.
+            let Some(left) =
+                pattern_guard_evidence(left, binding, truth, fuel, span, depth + 1, atom)?
+            else {
+                return Ok(None);
+            };
+            let Some(right) =
+                pattern_guard_evidence(right, binding, truth, fuel, span, depth + 1, atom)?
+            else {
+                return Ok(None);
+            };
+            let both = matches!(expression.kind, K::And(..)) == truth;
+            if both {
+                left.both(right)
+            } else {
+                left.either(right)
+            }
+        }
+        K::ScalarEqual(left, right) if left.ty == p(P::Bool) && right.ty == p(P::Bool) => {
+            // A literal side fixes the other outcome directly. Do not branch
+            // twice over nested `== true` wrappers: their cost must be linear.
+            if let K::Literal(n::Literal::Bool(value)) = left.kind {
+                return pattern_guard_evidence(
+                    right,
+                    binding,
+                    truth == value,
+                    fuel,
+                    span,
+                    depth + 1,
+                    atom,
+                );
+            }
+            if let K::Literal(n::Literal::Bool(value)) = right.kind {
+                return pattern_guard_evidence(
+                    left,
+                    binding,
+                    truth == value,
+                    fuel,
+                    span,
+                    depth + 1,
+                    atom,
+                );
+            }
+            let Some(left_true) =
+                pattern_guard_evidence(left, binding, true, fuel, span, depth + 1, atom)?
+            else {
+                return Ok(None);
+            };
+            let Some(left_false) =
+                pattern_guard_evidence(left, binding, false, fuel, span, depth + 1, atom)?
+            else {
+                return Ok(None);
+            };
+            let Some(right_for_true) =
+                pattern_guard_evidence(right, binding, truth, fuel, span, depth + 1, atom)?
+            else {
+                return Ok(None);
+            };
+            let Some(right_for_false) =
+                pattern_guard_evidence(right, binding, !truth, fuel, span, depth + 1, atom)?
+            else {
+                return Ok(None);
+            };
+            left_true
+                .both(right_for_true)
+                .either(left_false.both(right_for_false))
+        }
+        K::Block {
+            statements,
+            result: Some(result),
+        } if statements.is_empty() => {
+            return pattern_guard_evidence(result, binding, truth, fuel, span, depth + 1, atom);
+        }
+        K::If {
+            condition,
+            then_branch,
+            else_branch: Some(else_branch),
+        } => {
+            let Some(yes_condition) =
+                pattern_guard_evidence(condition, binding, true, fuel, span, depth + 1, atom)?
+            else {
+                return Ok(None);
+            };
+            let Some(no_condition) =
+                pattern_guard_evidence(condition, binding, false, fuel, span, depth + 1, atom)?
+            else {
+                return Ok(None);
+            };
+            let Some(yes) =
+                pattern_guard_evidence(then_branch, binding, truth, fuel, span, depth + 1, atom)?
+            else {
+                return Ok(None);
+            };
+            let Some(no) =
+                pattern_guard_evidence(else_branch, binding, truth, fuel, span, depth + 1, atom)?
+            else {
+                return Ok(None);
+            };
+            yes_condition.both(yes).either(no_condition.both(no))
+        }
+        _ => {
+            if let Some(evidence) = atom(expression, truth, fuel)? {
+                return Ok(Some(evidence));
+            }
+            if readonly_guard_comparison(expression, fuel, span)? {
+                Unknown
+            } else {
+                return Ok(None);
+            }
+        }
+    }))
+}
+
+// A comparison may constrain a different input/domain than the identity
+// currently being recovered. Keep its outcome unknown, but only after proving
+// structurally that its operands cannot modify the candidate or call code.
+fn readonly_guard_comparison(expr: &n::Expr, fuel: &mut u64, span: Span) -> Result<bool, Error> {
+    let (left, right) = match &expr.kind {
+        K::TypeEqual(left, right)
+        | K::ScalarEqual(left, right)
+        | K::ScalarLess(left, right)
+        | K::ScalarLessEqual(left, right)
+        | K::ScalarGreater(left, right)
+        | K::ScalarGreaterEqual(left, right)
+        | K::BitEqual(left, right) => (left, right),
+        K::IntegerBinary { op, left, right }
+            if matches!(
+                op,
+                n::IntegerOp::Equal
+                    | n::IntegerOp::NotEqual
+                    | n::IntegerOp::Less
+                    | n::IntegerOp::LessEqual
+                    | n::IntegerOp::Greater
+                    | n::IntegerOp::GreaterEqual
+            ) =>
+        {
+            (left, right)
+        }
+        _ => return Ok(false),
+    };
+    Ok(readonly_guard_operand(left, fuel, span)? && readonly_guard_operand(right, fuel, span)?)
+}
+
+fn readonly_guard_operand(expr: &n::Expr, fuel: &mut u64, span: Span) -> Result<bool, Error> {
+    let mut pending = vec![(expr, 0usize)];
+    while let Some((expr, depth)) = pending.pop() {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or_else(|| error(span, "guard observation budget exhausted"))?;
+        if depth >= 128 {
+            return Err(error(span, "guard observation depth exhausted"));
+        }
+        match &expr.kind {
+            K::Local(_) | K::Literal(_) | K::TypeValue(_) => {}
+            K::IntegerNegate(value)
+            | K::FloatNegate(value)
+            | K::Not(value)
+            | K::BitConvert(value)
+            | K::TakeBits(value)
+            | K::SymbolName(value)
+            | K::BitSlice { value, .. } => pending.push((value, depth + 1)),
+            K::IntegerBinary { left, right, .. }
+            | K::FloatBinary { left, right, .. }
+            | K::And(left, right)
+            | K::Or(left, right)
+            | K::BitConcat(left, right)
+            | K::BitEqual(left, right)
+            | K::TypeEqual(left, right)
+            | K::ScalarEqual(left, right)
+            | K::ScalarLess(left, right)
+            | K::ScalarLessEqual(left, right)
+            | K::ScalarGreater(left, right)
+            | K::ScalarGreaterEqual(left, right) => {
+                pending.push((right, depth + 1));
+                pending.push((left, depth + 1));
+            }
+            K::Block {
+                statements,
+                result: Some(value),
+            } if statements.is_empty() => pending.push((value, depth + 1)),
+            K::If {
+                condition,
+                then_branch,
+                else_branch: Some(no),
+            } => {
+                pending.push((no, depth + 1));
+                pending.push((then_branch, depth + 1));
+                pending.push((condition, depth + 1));
+            }
+            _ => return Ok(false),
+        }
+    }
+    Ok(true)
+}
+
+type PatternTypeGuard<'a> = PatternGuard<&'a Term>;
+
+fn pattern_type_guard<'a>(
+    expression: &'a n::Expr,
+    binding: n::LocalId,
+    truth: bool,
+    fuel: &mut u64,
+    span: Span,
+    depth: usize,
+) -> Result<Option<PatternTypeGuard<'a>>, Error> {
+    use PatternGuard::{Exact, Unknown};
+    pattern_guard_evidence(
+        expression,
+        binding,
+        truth,
+        fuel,
+        span,
+        depth,
+        &mut |expression, truth, _| {
+            Ok(Some(match &expression.kind {
+                K::TypeEqual(left, right)
+                    if matches!(left.kind, K::Local(_) | K::TypeValue(_))
+                        && matches!(right.kind, K::Local(_) | K::TypeValue(_)) =>
+                {
+                    if truth {
+                        match (&left.kind, &right.kind) {
+                            (K::Local(id), K::TypeValue(ty)) | (K::TypeValue(ty), K::Local(id))
+                                if *id == binding =>
+                            {
+                                Exact(ty)
+                            }
+                            _ => Unknown,
+                        }
+                    } else {
+                        Unknown
+                    }
+                }
+                _ => return Ok(None),
+            }))
+        },
+    )
+}
+
 /// A successful pattern fixes its subject to this exact Type value. Wrappers
 /// preserve that fact; an alternative contributes only when every arm agrees.
 fn matched_type_pattern_value<'a>(
@@ -10194,13 +10635,11 @@ fn matched_type_pattern_value<'a>(
             if let Some(ty) = matched_type_pattern_value(pattern, fuel, span, depth + 1)? {
                 return Ok(Some(ty));
             }
-            if let (n::Pattern::Binding { binding, inner }, K::TypeEqual(subject, expected)) =
-                (pattern.as_ref(), &condition.kind)
-            {
-                if matches!(inner.as_ref(), n::Pattern::Wild)
-                    && matches!(subject.kind, K::Local(id) if id == *binding)
-                {
-                    if let K::TypeValue(ty) = &expected.kind {
+            if let n::Pattern::Binding { binding, inner } = pattern.as_ref() {
+                if matches!(inner.as_ref(), n::Pattern::Wild) {
+                    if let Some(PatternTypeGuard::Exact(ty)) =
+                        pattern_type_guard(condition, *binding, true, fuel, span, depth + 1)?
+                    {
                         return Ok(Some(ty));
                     }
                 }
@@ -10652,3 +11091,6 @@ fn pattern_bindings(
     }
     Ok(result)
 }
+
+#[cfg(test)]
+mod type_guard_tests;

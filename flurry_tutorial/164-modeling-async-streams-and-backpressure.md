@@ -18,14 +18,14 @@
 -- 假想初始写法：无背压的“先全部生产进队列，再慢慢消费”
 -- 问题 1（内存爆炸 OOM）：
 --   上游 1 秒钟塞进队列 100,000 个采样包，下游无线网络 1 秒钟只能发走 500 个。
---   不到一分钟，边缘设备的内存就被积压的队列彻底撑爆。
+--   不到一分钟，边缘设备的内存就被积压的队列耗尽。
 -- 问题 2（手写 Poll 状态机的痛苦）：
 --   如果在传统语言里手写带背压的 AsyncStream 状态机，你得自己维护 Poll.Pending、
 --   Waker 注册、水位线（High/Low Watermark）和取消清理，代码复杂度飙升十倍。
 ```
 
 **核心洞察**：
-为什么需要复杂的通道和水位线？因为生产者和消费者被割裂成了两个互不知情的盲目循环。
+为什么需要复杂的通道和水位线？因为生产者和消费者被割裂成了两个彼此无感知的盲目循环。
 而在代数效应的世界里：**每一次 `yield_sample(val)#` 本质上都是生产者主动交出执行权（挂起 Continuation），等待 Handler 调用 `resume` 来唤醒它生产下一个值。**
 
 ---
@@ -55,7 +55,7 @@
 
 看到了吗？
 - **零额外缓冲区**：在下游 `transmit(10u32)#.await` 还没有完成之前，Handler 根本没有执行 `resume`。因此上游生产者安安静静地停留在第 1 次 `emit_sample` 的挂起点上，**连第 2 个采样值都还没有生成**。
-- **双向信息反馈（Ack-Driven Backpressure）**：`emit_sample(sample: u32) -> FlowControl` 甚至可以有返回值。当下游通过 `resume .continue_producing` 恢复生产者时，生产者继续；如果下游网络彻底断开或收到停止指令，下游只需 `resume .stop_stream`（或者干脆不 `resume` 直接退出 Handler 走放弃清理协议），上游生产者就能立刻优雅停机。
+- **双向信息反馈（Ack-Driven Backpressure）**：`emit_sample(sample: u32) -> FlowControl` 甚至可以有返回值。当下游通过 `resume .continue_producing` 恢复生产者时，生产者继续；如果下游网络断开或收到停止指令，下游只需 `resume .stop_stream`（或者干脆不 `resume` 直接退出 Handler 走放弃清理协议），上游生产者就能立刻优雅停机。
 
 ### 一拍一握手的严格步进异步流（Strict Step-Locked Stream）
 
@@ -92,7 +92,7 @@ test {
         sensor_producer()# {
             emit_sample(sample, continuation) => {
                 -- 先启动异步传输子任务，并 .await 等待远端确认完成。
-                -- 在 .await 完成前，不会执行 resume，上游生产者被自然背压挂起。
+                -- 在 .await 完成前，跳过执行 resume，上游生产者被自然背压挂起。
                 let pending = transmit_packet(sample)#;
                 let ok = pending.await;
                 resume ok;
@@ -113,9 +113,9 @@ test {
 
 ## 三、 进阶：窗口化流水线并发（Pipelined Window）与结构化范围核心规则
 
-你可能会问：“一拍一握手（发完第 1 个才允许生产第 2 个）虽然内存占用是极致的 $O(1)$，但如果我想允许**最多 2 个数据包同时在网络上飞（In-Flight Pipelining）**，既有并发吞吐量，又严格限制最大内存占用不超过 2 个包，该怎么写？”
+你可能会问：“一拍一握手（发完第 1 个才允许生产第 2 个）虽然内存占用是高度的 $O(1)$，但如果我想允许**最多 2 个数据包同时在网络上飞（In-Flight Pipelining）**，既有并发吞吐量，又严格限制最大内存占用至多 2 个包，该怎么写？”
 
-在 Flurry 中，因为 **`async effect` 在发出请求 `transmit_packet(x)#` 的那一刻就已经登记并启动了子工作（而不需要等到 `.await` 才启动。）**（见 `docs/algebraic-effect-and-delimited-continuation/async-algebraic-effect.md`），我们可以先连续发出两个异步请求拿到两个 `Future`，然后再依次 `.await` 它们。
+在 Flurry 中，因为 **`async effect` 在发出请求 `transmit_packet(x)#` 的那一刻就已经登记并启动了子工作（而无需等到 `.await` 才启动。）**（见 `docs/algebraic-effect-and-delimited-continuation/async-algebraic-effect.md`），我们可以先连续发出两个异步请求拿到两个 `Future`，然后再依次 `.await` 它们。
 
 ### 先并发派发双子工作，再按序 `.await` 兑现结构化完成
 
@@ -124,7 +124,7 @@ use std.prelude.*;
 
 async effect upload_chunk(chunk_id: u32) -> u32;
 
--- 有界窗口并发（最多 2 个子工作同时在途，绝不无界膨胀。）
+-- 有界窗口并发（最多 2 个子工作同时在途，不无界膨胀。）
 fn upload_two_chunks_windowed(c1: u32, c2: u32) -> #[upload_chunk] u32 {
     -- 1. 连续发出两个异步效应请求：
     --    注意：请求发出时两个子 task 已经登记启动，无需等到 .await 才开始。
@@ -148,14 +148,14 @@ test {
 
 > **💡 核心心智模型：异步效应与结构化并发的三大安全红线**
 > 在结合 `async effect` 与流控制时，请牢记 `async-algebraic-effect.md` 的三条核心规则：
-> 1. **丢弃 `Future` 不等于取消子工作，安装范围必须负责到底**：
+> 1. **丢弃 `Future` 有别于取消子工作，安装范围必须负责到底**：
 >    即使你写了 `let _ = upload_chunk(7u32)#;` 而没有写 `.await`，子工作依然属于当前 `# { async ... }` 的结构化安装范围。该范围正常退出前会**自动等待所有未完成的派生子工作结束**；若因错误或提前返回退出，则会先发起取消并等待子工作完成资源清理后，才释放它们依赖的外层环境。
-> 2. **同一个单次消费的 `Future` 或 `Continuation` 绝不能被复制或重复等待消费 Once 资源**：
->    如果异步操作的结果 `Y` 是只能消费一次的仿射资源（Once Resource），对同一个 `pending` 连续 `.await` 两次交付所有权会被编译器直接拒绝。
+> 2. **同一个单次消费的 `Future` 或 `Continuation` 无法被复制或重复等待消费 Once 资源**：
+>    如果异步操作的结果 `Y` 是只能消费一次的仿射资源（Once Resource），对同一个 `pending` 连续 `.await` 两次交付所有权会被编译器直接报错。
 > 3. **声明为 `async effect` 的操作，其 Handler 分支必须显式写 `async` 标记**：
->    删掉分支前的 `async` 不会“自动帮你包一层已完成的 Future”，而是会因为入口类别不匹配被编译器静态拦截。
+>    删掉分支前的 `async` 免于“自动帮你包一层已完成的 Future”，而是会因为入口类别失配被编译器静态拦截。
 
-让我们看看漏写 `async` 分支修饰符或企图把非 `Copy` 结果从同一个 `Future` 里移出两次时的编译期拒绝例：
+让我们看看漏写 `async` 分支修饰符或企图把并非 `Copy` 结果从同一个 `Future` 里移出两次时的编译期负例：
 
 ```flurry
 async effect fetch_value(id: u32) -> u32;
@@ -165,9 +165,9 @@ fn broken_async_handler() -> u32 {
         let fut = fetch_value(1u32)#;
         fut.await
     }# {
-        -- ❌ 编译期直接拒绝：(Handler Entry Kind Mismatch)
+        -- ❌ 编译期直接报错：(Handler Entry Kind Mismatch)
         -- fetch_value 声明为 `async effect`，其处理分支必须以 `async fetch_value(id) => ...`
-        -- 明确子工作归属与 Future 交付契约，不能省略 `async` 伪装成普通同步分支。
+        -- 明确子工作归属与 Future 交付契约，不可省略 `async` 伪装成普通同步分支。
         fetch_value(id) => id + 1u32,
     }).use(runtime)
 }
@@ -181,8 +181,8 @@ fn broken_async_handler() -> u32 {
 | :--- | :--- | :--- |
 | **步进背压（Step-Locked）** | 在 `emit_sample` 分支内先 `.await` 下游 `async` 操作，再 `resume` | 内存积压严格为 $O(1)$，下游未完成时上游生产者自动静止在挂起点 |
 | **窗口化并发（Windowed）** | 先连续调用 $K$ 次 `async_op()#` 启动子工作，再集中 `.await` | 兼顾并发吞吐与严格的有界内存上限 $O(K)$ |
-| **结构化范围兜底** | `# { async ... }.use(runtime)` 拥有全部派生子工作 | 退出范围前强制完成等待或取消清理，绝不产生孤儿任务与悬垂栈引用 |
-| **入口类别静态校验** | `async effect` 强制配对 `async pattern => ...` 分支 | 杜绝同步/异步交接协议错位 |
+| **结构化范围兜底** | `# { async ... }.use(runtime)` 拥有全部派生子工作 | 退出范围前强制完成等待或取消清理，免生孤儿任务与悬垂栈引用 |
+| **入口类别静态校验** | `async effect` 强制配对 `async pattern => ...` 分支 | 避免同步/异步交接协议错位 |
 
 ---
 
@@ -190,9 +190,9 @@ fn broken_async_handler() -> u32 {
 
 在上面的异步流与解析器里，为了避免频繁调用操作系统的全局堆分配器（`malloc` / `free`），高性能系统往往会使用一种神级内存管理技术：**区域内存池 / 竞技场分配器（Arena / Pool Allocator）**。
 
-它的工作方式是：在处理一个请求或一帧协议时，所有的临时对象都从局部 `Arena` 里极速切块分配（只需移动一个指针，耗时仅 1 纳秒。）；等这个请求处理完毕、离开 Handler 作用域时，**一次性重置整个 `Arena`**。
+它的工作方式是：在处理一个请求或一帧协议时，所有的临时对象都从局部 `Arena` 里高速切块分配（只需移动一个指针，耗时仅 1 纳秒。）；等这个请求处理完毕、离开 Handler 作用域时，**一次性重置整个 `Arena`**。
 
-但这带来了一个致命的内存安全挑战：
-**如果业务代码通过 `#ArenaAlloc` 效应从局部 Arena 里拿到了一块内存指针 `*Node`，万一业务代码偷偷把这个指针塞进了返回值或者外部容器里，带出了 Handler 的 `.use(...)` 作用域——而此时 Arena 已经被整块重置销毁了——岂不是立刻造成了毁灭性的悬垂指针（Use-After-Free）？**
+但这带来了一个严重的内存安全挑战：
+**如果业务代码通过 `#ArenaAlloc` 效应从局部 Arena 里拿到了一块内存指针 `*Node`，万一业务代码偷偷把这个指针塞进了返回值或者外部容器里，带出了 Handler 的 `.use(...)` 作用域——而此时 Arena 已经被整块重置销毁了——岂不是立刻造成了破坏性的悬垂指针（Use-After-Free）？**
 
 下一篇 **《Flurry 演进手记 (165)：资源池租借（Arena / Pool Lease）与 Handler 作用域生命周期绑定》**，我们将把第三卷的 **`&reachability_set`（可达性系统）** 与第七卷的 **效应 Handler** 双剑合璧，在编译期 100% 封死 Arena 指针逃逸。

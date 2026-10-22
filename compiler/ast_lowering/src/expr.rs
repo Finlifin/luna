@@ -700,6 +700,83 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             NodeKind::IfStatement => {
                 self.lower_if_stmt(ctx, children[0], children[1], children[2], span)
             }
+            NodeKind::ErrorQualifiedType => {
+                let errors = self.lower_expr(ExprContext::Type, children[0]);
+                let result = self.lower_expr(ExprContext::Type, children[1]);
+                Expr {
+                    hir_id: self.next_hir_id(),
+                    span,
+                    kind: ExprKind::ErrorQualifiedType(
+                        self.arena.alloc_expr(errors),
+                        self.arena.alloc_expr(result),
+                    ),
+                }
+            }
+            NodeKind::ErrorPropagation => {
+                let value = self.lower_expr(ctx, children[0]);
+                Expr {
+                    hir_id: self.next_hir_id(),
+                    span,
+                    kind: ExprKind::ErrorPropagate(self.arena.alloc_expr(value)),
+                }
+            }
+            NodeKind::ErrorElimination => {
+                let value = self.lower_expr(ctx, children[0]);
+                let value = self.arena.alloc_expr(value);
+                let nodes = self
+                    .ast
+                    .get_multi_child_slice(children[1])
+                    .unwrap_or(&[])
+                    .to_vec();
+                let mut catches = Vec::new();
+                let mut arms = Vec::new();
+                for (index, node) in nodes.iter().copied().enumerate() {
+                    let mut head = node;
+                    while let Some((
+                        NodeKind::Attribute | NodeKind::AttributeSetTrue,
+                        _,
+                        children,
+                    )) = self.ast.get_node(head)
+                    {
+                        head = children[1];
+                    }
+                    let is_catch =
+                        matches!(self.ast.get_node(head), Some((NodeKind::CatchArm, _, _)));
+                    let arm = self.lower_match_arm(ctx, node);
+                    if is_catch {
+                        catches.push((index, arm));
+                    } else {
+                        arms.push(arm);
+                    }
+                }
+                let valid = match catches.as_slice() {
+                    [] => true,
+                    [(index, _)] => *index + 1 == nodes.len(),
+                    [(first, _), (last, _)] => *first == 0 && *last + 1 == nodes.len(),
+                    _ => false,
+                };
+                if !valid {
+                    self.emit_malformed("error elimination permits one trailing catch, or one leading and one trailing catch", span);
+                }
+                let mut before = None;
+                let mut after = None;
+                if catches.len() == 2 {
+                    before = Some(&self.arena.alloc_arm_slice(vec![catches.remove(0).1])[0]);
+                }
+                if let Some((_, arm)) = catches.into_iter().next() {
+                    after = Some(&self.arena.alloc_arm_slice(vec![arm])[0]);
+                }
+                Expr {
+                    hir_id: self.next_hir_id(),
+                    span,
+                    kind: ExprKind::ErrorHandle {
+                        value,
+                        before,
+                        arms: self.arena.alloc_arm_slice(arms),
+                        after,
+                    },
+                }
+            }
             NodeKind::EffectQualifiedType => {
                 let effects = self.lower_expr(ExprContext::Type, children[0]);
                 let result = self.lower_expr(ExprContext::Type, children[1]);
@@ -942,7 +1019,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             // `while :label? scrutinee is do { arms… }`
             //   →  `loop { match scrutinee { arms… } }`
             NodeKind::WhileMatch => {
-                self.lower_while_match_expr(ctx, children[1], children[2], span)
+                self.lower_while_match_expr(ctx, children[0], children[1], children[2], span)
             }
 
             // ── Desugaring: for ──────────────────────────────────────────
@@ -2007,10 +2084,16 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
     fn lower_while_match_expr(
         &mut self,
         ctx: ExprContext,
+        label_node: NodeIndex,
         scrutinee_node: NodeIndex,
         arms_multi: NodeIndex,
         span: Span,
     ) -> Expr<'hir> {
+        let scope = self.local_enter(RibKind::Block);
+        let loop_id = self.next_hir_id();
+        if label_node != 0 {
+            self.define_loop_label(self.node_to_ident(label_node), label_node, loop_id);
+        }
         let scrutinee = self.lower_expr(ctx, scrutinee_node);
         let scrutinee_ref = self.arena.alloc_expr(scrutinee);
         let arm_nodes = self.ast.get_multi_child_slice(arms_multi).unwrap_or(&[]);
@@ -2032,8 +2115,9 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             span,
         };
         let loop_block_ref = self.arena.alloc_block(loop_block);
+        self.local_exit(scope);
         Expr {
-            hir_id: self.next_hir_id(),
+            hir_id: loop_id,
             kind: ExprKind::Loop(loop_block_ref),
             span,
         }
@@ -2178,7 +2262,9 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 .push((span, "case arm attribute".into()));
             return self.lower_match_arm(ctx, children[1]);
         }
-        let Some((NodeKind::CaseArm, span, children)) = self.ast.get_node(node) else {
+        let Some((NodeKind::CaseArm | NodeKind::CatchArm, span, children)) =
+            self.ast.get_node(node)
+        else {
             unreachable!(
                 "not a pattern case arm node or invalid pattern arm node: no such node index {:?}",
                 node
@@ -2262,7 +2348,10 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 self.bind_arm_pattern_inner(children[0], first, seen);
                 self.bind_arm_pattern_inner(children[2], next, seen);
             }
-            PatternKind::Guard(pattern, _) | PatternKind::OptionSome(pattern) => {
+            PatternKind::Guard(pattern, _)
+            | PatternKind::OptionSome(pattern)
+            | PatternKind::ErrorOk(pattern)
+            | PatternKind::ErrorErr(pattern) => {
                 self.bind_arm_pattern_inner(children[0], pattern, seen)
             }
             PatternKind::Binding(_, name, inner) => {
@@ -2447,14 +2536,23 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
         let param_nodes = self.ast.get_multi_child_slice(params_multi).unwrap_or(&[]);
 
-        // Lower each parameter type (including return type as the last entry)
-        // as a `TyParamKind::Positional`. By convention, the last TyParam is the return type.
+        // Result types are separate TyFnArrow nodes. Preserve each input's
+        // staging modifier instead of lowering its wrapper as a Type expression.
         let ty_params: Vec<TyParam<'hir>> = param_nodes
             .iter()
             .map(|&n| {
-                let ty_expr = self.lower_expr(ExprContext::Type, n);
+                let mut inner = n;
+                let mut flags = 0;
+                while let Some((NodeKind::ComptimeParam, _, children)) = self.ast.get_node(inner) {
+                    flags |= hir::common::TPARAM_COMPTIME;
+                    inner = children[0];
+                }
+                let ty_expr = self.lower_expr(ExprContext::Type, inner);
                 let ty_ref = self.arena.alloc_expr(ty_expr);
-                TyParam::new(self.next_hir_id(), TyParamKind::Positional(ty_ref), span)
+                let mut parameter =
+                    TyParam::new(self.next_hir_id(), TyParamKind::Positional(ty_ref), span);
+                parameter.flags = flags;
+                parameter
             })
             .collect();
 

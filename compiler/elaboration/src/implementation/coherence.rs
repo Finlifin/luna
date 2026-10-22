@@ -178,6 +178,7 @@ fn separation_goal(
                 Term::Nominal { arguments, .. }
                 | Term::NormalForm { arguments, .. }
                 | Term::Tuple(arguments)
+                | Term::ClosureContextValue(arguments)
                 | Term::TypeListValue(arguments)
                 | Term::TypeListConcat(arguments)
                 | Term::TupleValue(arguments) => terms.extend(arguments),
@@ -198,6 +199,10 @@ fn separation_goal(
                     for operation in effects {
                         terms.extend(&operation.arguments);
                     }
+                }
+                Term::ContextualClosure { context, signature } => {
+                    terms.push(context);
+                    terms.push(signature);
                 }
                 Term::Closure {
                     environment,

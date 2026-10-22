@@ -20,9 +20,9 @@ where
 
 第一眼看到这段代码，你的注意力立刻聚焦在最核心的业务签名上：`conv2d_first_channel(input: Tensor<T, b, c, h, w>) -> Tensor<T, b, 1usize, h, w>`。至于 `T` 是类型参数、`b/c/h/w` 是编译期 `usize` 维度参数、以及 `c > 0usize` 的前置条件，全都整整齐齐地收纳在末尾的 `where` 子句里。
 
-此外：既然 `T, b, c, h, w` 写在函数参数列表**后面**的 `where` 子句里，为什么前面的参数 `input: Tensor<T, b, c, h, w>` 却能直接引用它们？编译器到底按什么顺序解析参数阶段依赖？调用端又是怎么不用写 `<f32, 1, 3, 224, 224>` 就能自动完成隐式推导的？
+此外：既然 `T, b, c, h, w` 写在函数参数列表**后面**的 `where` 子句里，为什么前面的参数 `input: Tensor<T, b, c, h, w>` 却能直接引用它们？编译器到底按什么顺序解析参数阶段依赖？调用端又是怎么省去书写 `<f32, 1, 3, 224, 224>` 就能自动完成隐式推导的？
 
-今天，我们就来彻底拆解 Flurry 的 `where` 子句声明体系与**参数阶段依赖（Parameter Stage Dependencies）**。
+今天，我们就来拆解 Flurry 的 `where` 子句声明体系与**参数阶段依赖（Parameter Stage Dependencies）**。
 
 ---
 
@@ -40,7 +40,7 @@ fn reduce_sum<T: Add + Default + Copy, const N: usize, Acc: From<T> = T>(data: A
 1. **阅读主次颠倒**：读者最关心的是“函数叫什么、输入输出是什么结构”，结果视线先撞上一大堆类型变量声明和 trait 约束。
 2. **子句能力割裂**：有些语言既要在函数名后写 `<T, const N: usize>`，又要在函数签名末尾写 `where T: Copy`，同一个参数 `T` 的声明和约束被劈成两半，散落在签名的首尾两端。
 
-在 Flurry 中，对于运行时函数、`struct`、`enum` 和 `trait`，语言设计者做出了一个极其干脆的决定：**将所有子句参数（Clause Parameters）与编译期前置约束统一收归到 `where` 子句中。**（注：仅返回类型的类型函数如 `Tuple<...>` 允许在头部使用 `<...>` 以匹配类型构造器语法，但其语义与 `where` 子句参数完全同构。）
+在 Flurry 中，对于运行时函数、`struct`、`enum` 和 `trait`，语言设计者做出了一个十分干脆的决定：**将所有子句参数（Clause Parameters）与编译期前置约束统一收归到 `where` 子句中。**（注：仅返回类型的类型函数如 `Tuple<...>` 允许在头部使用 `<...>` 以匹配类型构造器语法，但其语义与 `where` 子句参数完全同构。）
 
 ---
 
@@ -73,9 +73,9 @@ where
 
 ### 2. 编译期值子句参数（`n: usize`）与 `requires` 前置条件
 
-在 2LTT 体系下，`where` 子句里的参数不仅可以是 `Type`，还可以是任意可出现在类型签名中的编译期参数（比如数组长度 `n: usize`、标志位 `flag: bool`、形状列表 `s: meta.List<usize>`、闭包环境 `c: Type.vars.Closure`、可达集 `r: Type.vars.ReachSet`），并且紧接着就能用 `requires` 对这个编译期参数施加约束。
+在 2LTT 体系下，`where` 子句里的参数非但可以是 `Type`，还可以是任意可出现在类型签名中的编译期参数（比如数组长度 `n: usize`、标志位 `flag: bool`、形状列表 `s: meta.List<usize>`、闭包环境 `c: Type.vars.Closure`、可达集 `r: Type.vars.ReachSet`），并且紧接着就能用 `requires` 对这个编译期参数施加约束。
 
-> **📏 子句参数命名规范**：在 `where` 子句和 `<...>` 参数列表中，**只有类型参数（`: Type` 或 `:- Trait`）和类型构造子参数（`-> Type`）使用大驼峰（`PascalCase`）命名**；所有非类型子句参数（如 `n: usize`、`s: meta.List<usize>`、`format: Symbol`、`c: Type.vars.Closure`、`r: Type.vars.ReachSet` 等）一律使用 `snake_case` 命名。
+> **📏 子句参数命名规范**：在 `where` 子句和 `<...>` 参数列表中，**只有类型参数（`: Type` 或 `:- Trait`）和类型构造子参数（`-> Type`）使用大驼峰（`PascalCase`）命名**；所有并非类型子句参数（如 `n: usize`、`s: meta.List<usize>`、`format: Symbol`、`c: Type.vars.Closure`、`r: Type.vars.ReachSet` 等）一律使用 `snake_case` 命名。
 
 ```flurry
 fn first_element(values: Array<T, n>) -> T
@@ -154,7 +154,7 @@ where
 +-------------------------------------------------------------------------+
 ```
 
-这条三阶段依赖规则极其清晰：
+这条三阶段依赖规则清晰明确：
 1. **子句参数内部有序**：在 `where` 子句内部，排在后面的子句参数（比如 `.Out: Type = T` 或 `copy: T = value`）可以依赖排在它前面的子句参数，但反过来不行。
 2. **普通参数依赖子句参数**：圆括号 `( ... )` 里的普通参数类型在阶段 ① 建立好的环境中解析，因此天然可以使用 `T` 和 `n`。
 3. **调用端的双向畅通（隐式推导 + 显式指定）**：
@@ -190,16 +190,16 @@ fn demo_calls(arr4: Array<f32, 4usize>, empty: Array<f32, 0usize>) {
     -- ✅ 方式 3：用 ... 把编译期元组 (f32, 4usize) 展开进子句参数列表。
     let c = first_element<...f32_vec4_packet()>(arr4);
 
-    -- ❌ 编译期直接拒绝。
+    -- ❌ 编译期直接报错。
     -- 推导得出 T = f32, n = 0usize，违反了 where 子句中的 requires n > 0usize。
     let bad = first_element(empty);
 }
 ```
 
-再看一个违反**子句参数顺序依赖**的编译期拒绝负例：
+再看一个违反**子句参数顺序依赖**的编译期报错负例：
 
 ```flurry
--- ❌ 编译期直接拒绝。
+-- ❌ 编译期直接报错。
 -- 在阶段 ① 建立 where 子句参数时，按从左到右的顺序解析：
 -- 解析 .B: Type = A 时，A 还没声明。子句参数必须先声明、后引用。
 struct BadPair where .B: Type = A, A {
@@ -224,11 +224,11 @@ struct BadPair where .B: Type = A, A {
 
 ### 下一篇预告
 
-现在，我们已经能写出极其优雅的带约束泛型算子签名了：
+现在，我们已经能写出简洁清晰的带约束泛型算子签名了：
 `fn first_element(values: Array<T, n>) -> T where T :- Copy, n: usize, requires n > 0usize`
 
 但是，思考一个关键问题：
-如果在写 `first_element` 的**函数体内部**时，作者不小心写成了 `return values[n];`（越界访问。因为合法下标是 `0 .. n`），或者对没有声明 `Add` 约束的 `T` 写了 `return values[0usize] + values[0usize];`——
+如果在写 `first_element` 的**函数体内部**时，作者偶有疏忽写成了 `return values[n];`（越界访问。因为合法下标是 `0 .. n`），或者对没有声明 `Add` 约束的 `T` 写了 `return values[0usize] + values[0usize];`——
 **编译器是在定义 `first_element` 的那一刻（哪怕全工程还没有任何人调用它）就会直接报错？还是像 C++ 模板 / Zig `comptime` 那样，等到某个人用具体类型调用它时才报错？**
 
 下一篇 **`071-normalization-vs-instantiation-two-phases.md`**，我们将揭开 Flurry 编译期架构中最硬核的双阶段引擎：**Normalization（定义端符号检查）** 与 **Instantiation（调用端具体实例化）**。

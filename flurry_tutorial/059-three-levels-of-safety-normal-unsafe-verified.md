@@ -1,6 +1,6 @@
 # Flurry 演进手记 (059)：安全的三重境界——normal（默认安全）、unsafe 与 verified 的边界交互
 
-在 [前两篇 (057 & 058)](./058-proving-termination-with-decreases.md) 中，我们在写环形缓冲区的辅助函数时，既写过不带任何安全修饰词的普通 `fn`（默认 `safe` 等级），也写过带 `verified fn` 的形式化验证函数；而在更早的第 017 篇操作 `union` 时，我们还写过 `unsafe fn`。
+在 [前两篇 (057 & 058)](./058-proving-termination-with-decreases.md) 中，我们在写环形缓冲区的辅助函数时，既写过未带任何安全修饰词的普通 `fn`（默认 `safe` 等级），也写过带 `verified fn` 的形式化验证函数；而在更早的第 017 篇操作 `union` 时，我们还写过 `unsafe fn`。
 
 如果你审视今天主流的编程语言，会发现大家往往陷入了一种“非黑即白”的二分法困境：
 - **C / C++**：默认允许一切底层操作，指针随便指、数组随便越界，一旦出错全靠线上 Core Dump 抓鬼；
@@ -41,7 +41,7 @@ Flurry 给出的解决方案，是打破传统的二分法，建立一套在同�
 ```
 
 仔细看图中标注的两个编译器检查阶段（详见 `docs/resource-management/contracts-and-verification.md` §两种检查载体）：
-1. **默认 `safe` 检查位于 Normalized IR**：它必须在泛型和模块定义端就完成责任、清理和调用契约检查，算术自动推导严格限制在总次数不超过三次的多元多项式片段内——这保证了日常 `safe` 代码的编译速度极快、报错位置极其稳定，绝不会像 C++ 模板那样等到别人实例化时才爆出莫名其妙的内部错误。
+1. **默认 `safe` 检查位于 Normalized IR**：它必须在泛型和模块定义端就完成责任、清理和调用契约检查，算术自动推导严格限制在总次数至多三次的多元多项式片段内——这保证了日常 `safe` 代码的编译速度快速、报错位置十分稳定，免如 C++ 模板那样等到别人实例化时才爆出莫名其妙的内部错误。
 2. **`verified` 证明位于 Instantiated IR**：当你为环形缓冲区核心算法或密码学原语标上 `verified fn` 时，编译器会在具体实例化后的 IR 上动用完整的形式化验证引擎（结合 Outcome Separation Logic、Reachability Logic 与 Matching Logic），为你完成严格的数学定理证明。
 
 ---
@@ -66,17 +66,17 @@ where requires index < cap
 }
 ```
 
-如果一个普通的 `safe` 函数想直接调用 `raw_write_slot`，而不加 `unsafe { ... }` 块，或者虽然加了 `unsafe` 块却没有满足它的 `requires index < cap` 前置契约，编译器会毫不留情地拦截：
+如果一个普通的 `safe` 函数想直接调用 `raw_write_slot`，而省略 `unsafe { ... }` 块，或者虽然加了 `unsafe` 块却没有满足它的 `requires index < cap` 前置契约，编译器会严苛无情地拦截：
 
 ```flurry
--- ❌ 编译期直接拒绝：safe 函数不能在没有 unsafe { ... } 块的情况下直接调用 unsafe fn。
+-- ❌ 编译期直接报错：safe 函数禁止于没有 unsafe { ... } 块的情况下直接调用 unsafe fn。
 fn bad_safe_caller(base: *u32, idx: usize, cap: usize) {
     raw_write_slot(base, idx, cap, 42u32);
 }
 
--- ❌ 编译期直接拒绝：记住 `BitVec` 与安全规范的核心规则：
---    “进入 unsafe 也不能跳过已声明的入口契约。”
---    这里既没有证明 idx < cap，也没有用 assumes 建立受检事实，依然拒绝。
+-- ❌ 编译期直接报错：记住 `BitVec` 与安全规范的核心规则：
+--    “进入 unsafe 亦无法跳过已声明的入口契约。”
+--    这里既没有证明 idx < cap，也没有用 assumes 建立受检事实，依然报错。
 fn bad_unsafe_block(base: *u32, idx: usize, cap: usize) {
     unsafe {
         raw_write_slot(base, idx, cap, 42u32);
@@ -113,8 +113,8 @@ where requires value < 4294967295u32,
     value + 1u32
 }
 
--- 普通的 safe 函数可以直接调用 verified fn，完全不需要写 unsafe 块，
--- 更不会被传染成 verified fn。
+-- 普通的 safe 函数可以直接调用 verified fn，全然无须写 unsafe 块，
+-- 更免于被传染成 verified fn。
 fn next_step(value: u32) -> u32 {
     assumes value < 4294967295u32;
     let res = checked_increment(value);
@@ -152,15 +152,15 @@ test {
      └──► 调用 safe / unsafe / verified ──► ✅ 均可直接调用（仍须遵守已声明的契约与资源规则）
 ```
 
-> **💡 核心心智模型：为什么 `safe` 调用 `verified` 不会发生“验证传染”？**
-> 很多用过形式化验证工具的工程师最怕一件事：“一旦我给底层库的一个函数加了 `verified`，是不是整个项目所有调它的上层业务函数都得被迫写成 `verified`？”
-> **在 Flurry 中，绝对不会。**
-> `safe` 调用 `verified fn` 时，完全保持 `safe` 自己的检查模式（在 Normalized IR 上做常规检查，无法静态自动证明的入口条件只需一行 `assumes` 即可受检兑现），而编译器会在后台自动记录对那个 `verified fn` 实例的**证明依赖（Proof Dependency）**：只要 `verified fn` 自己的实现证明通过了，`safe` 调用方就能直接白嫖它 `ensures` 出来的强数学结论。如果 `verified fn` 内部写错了、证明没通过，编译器则绝对禁止交付最终程序。
+> **💡 核心心智模型：为什么 `safe` 调用 `verified` 免于发生“验证传染”？**
+> 很多用过形式化验证工具的工程师最怕一件事：“一旦我给底层库的一个函数加了 `verified`，是否整个项目所有调它的上层业务函数都得被迫写成 `verified`？”
+> **在 Flurry 中，不会。**
+> `safe` 调用 `verified fn` 时，完全保持 `safe` 自己的检查模式（在 Normalized IR 上做常规检查，无法静态自动证明的入口条件只需一行 `assumes` 即可受检兑现），而编译器会在后台自动记录对那个 `verified fn` 实例的**证明依赖（Proof Dependency）**：只要 `verified fn` 自己的实现证明通过了，`safe` 调用方就能直接白嫖它 `ensures` 出来的强数学结论。如果 `verified fn` 内部写错了、证明没通过，编译器则严格禁止交付最终程序。
 
 ```flurry
--- ❌ 编译期/交付期直接拒绝。
+-- ❌ 编译期/交付期直接报错。
 -- verified fn 的实现返回了原值 value，违反了自己声明的 ensures result == value + 1u32。
--- 哪怕外面的调用方全都满足了 requires，只要 verified 实现证明失败，程序就绝不允许交付。
+-- 哪怕外面的调用方全都满足了 requires，只要 verified 实现证明失败，程序就禁止交付。
 verified fn broken_increment(value: u32) -> result: u32
 where requires value < 4294967295u32,
       ensures result == value + 1u32
@@ -171,10 +171,10 @@ where requires value < 4294967295u32,
 
 ### 实战典范：用 `predicate` + `verified` 把高次算术判定装进安全胶囊
 
-还记得我们在 [第 055 篇](./055-cubic-polynomial-automatic-bounds-proving.md) 讲过，为了保证日常编译速度，`safe` 的自动算术推导限制在**总次数不超过三次（Cubic）的多元多项式**以内吗？
-那如果我们的传感器信号处理需要检查一个**四维数组** `a * b * c * d <= limit`（这是**四次**多项式。）的容量是否放得下、且中间乘法绝不溢出，该怎么办？
+还记得我们在 [第 055 篇](./055-cubic-polynomial-automatic-bounds-proving.md) 讲过，为了保证日常编译速度，`safe` 的自动算术推导限制在**总次数至多三次（Cubic）的多元多项式**以内吗？
+那如果我们的传感器信号处理需要检查一个**四维数组** `a * b * c * d <= limit`（这是**四次**多项式。）的容量是否放得下、且中间乘法不溢出，该怎么办？
 
-我们可以写一个专门的 **`predicate`**（程序谓词），用安全的防溢出除法阶梯实现四维判定，并由验证层支撑它的数学规格；随后普通的 `safe` 代码只需要一行 `assumes four_dimensions_fit(...)`，就能直接享受这个四次关系的保护，根本不需要在业务代码里操心高次证明。
+我们可以写一个专门的 **`predicate`**（程序谓词），用安全的防溢出除法阶梯实现四维判定，并由验证层支撑它的数学规格；随后普通的 `safe` 代码只需要一行 `assumes four_dimensions_fit(...)`，就能直接享受这个四次关系的保护，全然无需在业务代码里操心高次证明。
 
 ```flurry
 use std.prelude.*;
@@ -214,7 +214,7 @@ test {
 | 安全等级 | 关键字标注 | 检查阶段与核心武器 | 工程定位与团队协作角色 |
 | :--- | :--- | :--- | :--- |
 | **`safe`（默认）** | 无需标注 | Normalized IR；仿射类型、可达性、三次以内自动算术、`assumes` 受检事实 | **90% 日常应用与系统逻辑**：开发飞快、零悬垂零泄漏 |
-| **`unsafe`** | `unsafe fn` / `unsafe { }` | 显式放宽特定底层静态检查，由开发者在边界维护不变量 | **硬件驱动、C FFI 与极底层原语**：范围极小、边界醒目易审计 |
+| **`unsafe`** | `unsafe fn` / `unsafe { }` | 显式放宽特定底层静态检查，由开发者在边界维护不变量 | **硬件驱动、C FFI 与底层层原语**：范围微小、边界醒目易审计 |
 | **`verified`** | `verified fn` | Instantiated IR；OSL / RL / Matching Logic 完整形式化证明 | **核心数据结构（如 `RingBuffer`）与高可信模块**：将 `unsafe` 和复杂算术封装成 100% 数学可信的 `safe` 接口 |
 
 ---
@@ -223,7 +223,7 @@ test {
 
 在这篇的最后，我们惊鸿一瞥地看到了 `predicate four_dimensions_fit(...)` 和 `verified fn`。
 你一定跃跃欲试了：
-- 为什么 语言规范 特别强调：**“PTC 只处理类型命题；程序状态、内存与资源规格由程序验证层负责”**？这决定了为什么我们的程序 `predicate` **绝对不加 `comptime` 前缀**。
+- 为什么 语言规范 特别强调：**“PTC 只处理类型命题；程序状态、内存与资源规格由程序验证层负责”**？这决定了为什么我们的程序 `predicate` **省略 `comptime` 前缀**。
 - 如果现在让你从零开始，亲手为环形缓冲区写一个带 `while` 循环的批量清零或累加函数，并用 **`verified fn`**、**`predicate`** 和循环不变量 **`invariant`** 把它从头到尾完整地做一次形式化数学证明，具体该怎么写？当循环不变量写得太弱时，编译器是怎么提醒你的？
 
 在下一篇 **《Flurry 演进手记 (060)：写出第一段经过数学证明的代码——predicate 与 verified fn 实战》** 中，我们将手把手带你完成人生中第一段经过编译器形式化验证的 Flurry 代码。

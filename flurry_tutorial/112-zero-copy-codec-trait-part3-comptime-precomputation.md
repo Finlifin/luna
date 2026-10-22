@@ -3,9 +3,9 @@
 在上一篇（三部曲之二）末尾，我们发现了一个在真实网络协议与硬件通信中至关重要的细节：
 假设我们有一个传感器数据帧结构体 `TaggedSample { tag: u8, reading: u32 }`。
 因为 CPU 访问 `u32` 需要 4 字节对齐，编译器在内存中为 `TaggedSample` 安排的布局是：`1 字节 tag + 3 字节 Padding 空洞 + 4 字节 reading = 8 字节`（即 `Type.size_of(TaggedSample) == 8`）。
-可是，当我们用紧凑二进制协议（`.binary`）把它发到 CAN 总线或 LoRa 无线信道上时，我们绝不希望把那 3 个毫无意义的 Padding 空洞字节也发出去。**它在网线上的真实紧凑字节数（Exact Wire Bytes）应该是 `1 + 4 = 5` 字节。**
+可是，当我们用紧凑二进制协议（`.binary`）把它发到 CAN 总线或 LoRa 无线信道上时，我们忌讳把那 3 个毫无意义的 Padding 空洞字节也发出去。**它在网线上的真实紧凑字节数（Exact Wire Bytes）应该是 `1 + 4 = 5` 字节。**
 
-不仅如此，在网关启动或接收报文前，我们还希望在**编译期（$U_1$）**做两件事：
+非但如此，在网关启动或接收报文前，我们还希望在**编译期（$U_1$）**做两件事：
 1. 为 `Encode` 接口增加带 **`^comptime_phase`** 属性的编译期相成员（如 `pure comptime fn wire_bytes() -> usize` 和 `pure comptime fn schema_hash() -> u32`），通过 **`comptime impl`** 与 **`comptime derive`** 递归算出任意嵌套结构体的**精确网线帧长**与**协议版本指纹**，甚至直接用这个帧长去声明栈上的静态接收数组 `Array<u8, TaggedSample.as(Encode<.binary>).wire_bytes()>`。
 2. 在编译期预先算好一张 256 项的 **CRC-8 校验查找表（Lookup Table）**，通过 `Splice` 零成本物化到运行时解码器中。
 
@@ -24,7 +24,7 @@
 -- 你根本没法在编译期类型位置写：`Array<u8, TaggedSample.as(Encode<.binary>).wire_bytes()>`。
 ```
 
-为什么？因为数组长度 `Array<u8, n>` 的第二个参数 `n` 位于类型签名位置，要求一个 **$U_1$ 编译期常量**。一个普通的运行时方法 `fn encoded_len(*self)` 在运行期执行，根本不能在编译期类型位置调用。
+为什么？因为数组长度 `Array<u8, n>` 的第二个参数 `n` 位于类型签名位置，要求一个 **$U_1$ 编译期常量**。一个普通的运行时方法 `fn encoded_len(*self)` 在运行期执行，根本禁止于编译期类型位置调用。
 
 ---
 
@@ -59,7 +59,7 @@
 |          【合并为同一实现关系的互补两相，共享 Coherence 与结构精度  】        |
 |   ⚠️ 核心规则 1：属性 (`^comptime_phase`) 决定所属 Trait 相，                    |
 |              函数前缀 (`comptime fn` vs `fn`) 独立决定执行阶段               |
-|   ⚠️ 核心规则 2：缺了哪一相就是缺了对应能力，绝不跨相冒充，也绝不退回低精度实现   |
+|   ⚠️ 核心规则 2：缺了哪一相就是缺了对应能力，不会跨相冒充，也不会退回低精度实现   |
 +-----------------------------------------------------------------------------+
 ```
 
@@ -139,34 +139,41 @@ derive fn compact_binary for Encode<.binary> {
     fn encode_to(*self, sink: *S) -> ![S.as(WireSink).Error] void
     where S :- WireSink
     {
-        inline if Type.repr_of(Self) is .struct_repr(info) do {
-            inline for field in info.fields {
-                self'get_field(field.name).ref.encode_to(sink)!;
-            }
-        } else {
-            meta.compilation.err("compact_binary only supports structs");
+        const repr = Type.repr_of(Self);
+        inline if repr is do {
+            .`struct` => {
+                inline for (_, field) in repr.fields.enumerate() {
+                    self'get_field(field.name).encode_to(sink)!;
+                }
+            },
         }
     }
 
     ^comptime_phase
     pure comptime fn wire_bytes() -> usize {
+        const repr = Type.repr_of(Self);
         var total: usize = 0usize;
-        inline if Type.repr_of(Self) is .struct_repr(info) do {
-            inline for field in info.fields {
-                -- 在编译期直接累加各字段类型的紧凑网线字节数（完全剔除内存对齐 Padding 空洞。）
-                total += field.ty.as(Encode<.binary>).wire_bytes();
-            }
+        if repr is do {
+            .`struct` => {
+                for (_, field) in repr.fields.enumerate() {
+                    -- 在编译期直接累加各字段类型的紧凑网线字节数（完全剔除内存对齐 Padding 空洞）
+                    total += field.type.as(Encode<.binary>).wire_bytes();
+                }
+            },
         }
         total
     }
 
     ^comptime_phase
     pure comptime fn schema_hash() -> u32 {
+        const repr = Type.repr_of(Self);
         var h: u32 = 0u32;
-        inline if Type.repr_of(Self) is .struct_repr(info) do {
-            inline for field in info.fields {
-                h = (h * 31u32) + field.ty.as(Encode<.binary>).schema_hash();
-            }
+        if repr is do {
+            .`struct` => {
+                for (_, field) in repr.fields.enumerate() {
+                    h = (h * 31u32) + field.type.as(Encode<.binary>).schema_hash();
+                }
+            },
         }
         h
     }
@@ -198,7 +205,7 @@ fn alloc_exact_frame_buffer() -> Array<u8, TaggedSample.as(Encode<.binary>).wire
 }
 ```
 
-### 编译期安全红线：只写了 `impl` 没写 `comptime impl`，绝不能跨相调用
+### 编译期安全红线：只写了 `impl` 没写 `comptime impl`，无法跨相调用
 
 在 Flurry 中，如果某个类型只通过普通 `impl`（或 `derive`）实现了 Runtime 相，而没有通过 `comptime impl`（或 `comptime derive`）实现 Comptime 相，当你试图调用 `^comptime_phase` 方法时，编译器会直接报错：
 
@@ -211,9 +218,9 @@ struct RuntimeOnlyPacket {
 derive Encode<.binary> for RuntimeOnlyPacket;
 
 comptime {
-    -- ❌ 编译期直接拒绝。
+    -- ❌ 编译期直接报错。
     -- RuntimeOnlyPacket 只实现了 Encode<.binary> 的 Runtime 相，
-    -- 缺少 Comptime 相（^comptime_phase）实现，不能调用 wire_bytes()。
+    -- 缺少 Comptime 相（^comptime_phase）实现，无权调用 wire_bytes()。
     -- let n = RuntimeOnlyPacket.as(Encode<.binary>).wire_bytes();
 }
 ```
@@ -233,7 +240,7 @@ pure comptime fn compute_crc8_byte(val: u8) -> u8 {
     var crc: BitVec<8> = val'bitvec;
     let zero_bit: BitVec<1> = 0;
     let poly: BitVec<8> = 0x07;
-    inline for _ in 0 .. 8 {
+    for _ in 0 .. 8 {
         let msb: BitVec<1> = crc[7..8];
         let low7: BitVec<7> = crc[0..7];
         let shifted: BitVec<8> = low7 ++ zero_bit;
@@ -243,7 +250,7 @@ pure comptime fn compute_crc8_byte(val: u8) -> u8 {
             crc = shifted;
         }
     }
-    crc.as(u8)
+    unsafe { crc.as(u8) }
 }
 
 -- 编译期预计算并通过 Splice 落地为运行时只读查找表的 CRC8 步进函数
@@ -254,7 +261,7 @@ fn crc8_update(prev_crc: u8, byte: u8) -> u8 {
     }
     let a = prev_crc'bitvec;
     let b = byte'bitvec;
-    let idx = ((a and not b) or (not a and b)).as(u8);
+    let idx = unsafe { ((a and not b) or (not a and b)).as(u8) };
     -- 在实际表驱动实现中直接索引编译期生成的 256 字节静态表
     idx
 }
@@ -273,8 +280,8 @@ fn crc8_update(prev_crc: u8, byte: u8) -> u8 {
 | :--- | :--- | :--- |
 | **`^comptime_phase` 成员** | Trait 的 **Comptime 相** | 由 `comptime impl` 或 `comptime derive` 兑现，供编译期表达式与类型签名直接调用 |
 | **无 `^comptime_phase` 成员** | Trait 的 **Runtime 相（默认相）** | 由普通 `impl` 或 `derive` 兑现；函数自身的 `comptime fn` / `fn` 前缀独立决定执行阶段 |
-| **互补实现与共享 Coherence** | `impl` + `comptime impl` 合流 | 同头同条件组成互补两相；严禁跨相同精度重叠，且缺相时绝不退回低精度实现 |
-| **编译期紧凑帧长计算** | `inline for field in info.fields` 累加 `field.ty.as(Encode).wire_bytes()` | 彻底避开 CPU 内存对齐 Padding 空洞，在编译期获得精确到字节的物理网线帧长 |
+| **互补实现与共享 Coherence** | `impl` + `comptime impl` 合流 | 同头同条件组成互补两相；严禁跨相同精度重叠，且缺相时不退回低精度实现 |
+| **编译期紧凑帧长计算** | `for (_, field) in repr.fields.enumerate()` 累加 `field.type.as(Encode<.binary>).wire_bytes()` | 避开 CPU 内存对齐 Padding 空洞，在编译期获得精确到字节的物理网线帧长 |
 
 ---
 
@@ -288,4 +295,4 @@ fn crc8_update(prev_crc: u8, byte: u8) -> u8 {
 如果一个 Trait 的接收者是按值 `self`，另一个 Trait 的接收者是按指针 `*self`，编译器是否会隐式地“挑那个少取一次地址的方法”？
 我们又该如何用 **`.as(Trait)` 显式接口视角** 和 **`u32.as(DecimalCode).as(ProtocolCode)` 类型视角链**，指挥编译器精准命中我们想要的那个方法？
 
-下一篇 **`113-disambiguating-trait-methods-with-as-views.md`**，我们将彻底摸透 Flurry 的**接收者适配三层法则与 `.as(...)` 视角消歧艺术**。
+下一篇 **`113-disambiguating-trait-methods-with-as-views.md`**，我们将掌握 Flurry 的**接收者适配三层法则与 `.as(...)` 视角消歧艺术**。

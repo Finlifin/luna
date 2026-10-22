@@ -407,6 +407,7 @@ mod bit_coverage;
 mod float_coverage;
 mod interval_coverage;
 mod machine_float_coverage;
+mod symbol_coverage;
 
 /// Program-state arithmetic reasoning, separate from the type proposition engine.
 pub mod verification;

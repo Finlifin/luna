@@ -1,6 +1,6 @@
 # Flurry 演进手记 (160)：第七卷里程碑（下）：在自定义执行器上运行高并发传感器聚合服务并进行故障注入测试
 
-欢迎来到《Flurry 演进手记》第七卷的终极收官之战。
+欢迎来到《Flurry 演进手记》第七卷的最终收官之战。
 
 在上一篇（里程碑上半场）中，我们用 `effect enum CoopSched`、`catch continuation: builtin.Continuation` 和 `async effect` 亲手打造了一个支持**协作式步进配额、超时自动 `Drop` 清理与并发扇出**的执行器内核。
 
@@ -53,7 +53,7 @@ enum ProbeErr {
 -- 异步硬件探头效应：在子 task 中采集通道 ch，可能返回 ProbeErr
 async effect probe_channel(ch: u32) -> !ProbeErr u32;
 
--- 外部不可逆告警广播效应（P0 外部事件，严禁直接放进 STM atomic 块内。）
+-- 外部单向告警广播效应（P0 外部事件，严禁直接放进 STM atomic 块内。）
 effect emit_alarm(new_peak: u32);
 
 -- 协作式配额调度效应组
@@ -80,7 +80,7 @@ pure fn sanitize_reading(raw: u32, max_valid: u32) -> u32 {
 
 请特别注意我们在 `aggregate_sensor_round` 中是如何结合：
 1. **双通道异步扇出与局部错误恢复**：用 `fut1.await! { .Disconnected(_) => 0u32, }` 将单通道故障優雅降级为 `0u32`；
-2. **STM 原子提交与外部效应隔离**：在 `atomic(sum, peak, count) { ... }` 中完成三个共享变量的原子更新，计算出是否突破了历史峰值 `?u32`；等事务块彻底提交后，再在事务外调用 `emit_alarm(confirmed_peak)#`。
+2. **STM 原子提交与外部效应隔离**：在 `atomic(sum, peak, count) { ... }` 中完成三个共享变量的原子更新，计算出是否突破了历史峰值 `?u32`；等事务块提交后，再在事务外调用 `emit_alarm(confirmed_peak)#`。
 
 ```flurry
 -- STM 原子事务辅助函数：同时更新总和、样本计数与历史峰值水位线。
@@ -148,7 +148,7 @@ fn aggregate_sensor_round(
 ## 第三步：搭建多提示符故障注入沙盒，一键验证故障降级与事务一致性
 
 现在，我们在 `test` 块中化身“混沌工程（Chaos Engineering）测试官”。
-我们不需要启动任何真实的硬件探头，也不需要修改 `aggregate_sensor_round` 的哪怕一个字符，直接通过嵌套安装 Handler：
+我们无需启动任何真实的硬件探头，也无需修改 `aggregate_sensor_round` 的哪怕一个字符，直接通过嵌套安装 Handler：
 - **注入故障**：规定当 `ch == 1u32`（主通道）时，故意返回 `error ProbeErr.Disconnected(1u32)`；当 `ch == 2u32`（备通道）时，正常返回读数 `180u32`。
 - **验证恢复与告警**：主通道断连降级为 `0u32`，备通道返回 `180u32`，合并值 `180u32` 突破初始峰值 `100u32`，触发唯一一次 `emit_alarm(180u32)`。
 
@@ -216,7 +216,7 @@ test {
 
 ---
 
-## 编译期安全防线终极大考：休想破坏事务纯度或跨越 C 边界泄漏效应
+## 编译期安全防线最终大考：休想破坏事务纯度或跨越 C 边界泄漏效应
 
 让我们最后用两个负例，检验编译器是如何守护这套高并发架构的边界的：
 
@@ -225,7 +225,7 @@ test {
 fn bad_effect_inside_stm(peak: *u32) -> #[emit_alarm] void {
     atomic(peak) {
         peak.* += 10u32;
-        -- 编译期直接拒绝。
+        -- 编译期直接报错。
         -- `emit_alarm` 是未封闭的外部效应（P0），且 `yield_tick` 涉及切栈挂起，
         -- 均严禁出现在可投机回滚重试的 `atomic` 事务块内。
         emit_alarm(peak.*)#;
@@ -239,7 +239,7 @@ pub fn bad_c_firmware_entry(
     peak: *u32,
     count: *u32,
 ) -> #[probe_channel, emit_alarm, CoopSched] u32 {
-    -- 编译期直接拒绝。
+    -- 编译期直接报错。
     -- C ABI 入口函数的效应行必须为空。必须在 Flurry 包装函数内消去全部效应后才能交付给 C。
     aggregate_sensor_round(1u32, 2u32, sum, peak, count)#
 }
@@ -254,7 +254,7 @@ pub fn bad_c_firmware_entry(
 | **代数效应与错误正交** | `effect op(...) -> Y;`、`#[Eff] !Err T`、`expr#`、`expr!` | 错误走值判别返回通道（唯一标签去重）；效应走 Handler 证据路由（保留同名嵌套层次） |
 | **多提示符限定 Continuation** | `catch continuation: builtin.Continuation`、`resume`、`.use(pool)` | 仅切片到选定 Handler 边界；Deep 恢复自动重装内层边界；单次消费（`!Copy`），放弃时沿隐藏中止通道执行 `Drop` |
 | **无染色异步与结构化并发** | `async effect`、`async pat => ...`、`.await`、`.use(runtime)` | 请求时立即登记子工作并交付 `Future`；安装范围正常退出等待全部子工作，提前退出先取消并等待全部 `Drop` 完成 |
-| **五级 ABI 与 C 边界屏障** | 直接处理 / `direct_passing` / 捕获 / `async`、`^attrs.abi(.c)` | 不捕获时不分配协程栈；C ABI 入口效应行必须为空，挂起栈含 C 帧时可恢复但严禁跨 C 帧静默放弃 |
+| **五级 ABI 与 C 边界屏障** | 直接处理 / `direct_passing` / 捕获 / `async`、`^attrs.abi(.c)` | 未捕获时免于分配协程栈；C ABI 入口效应行必须为空，挂起栈含 C 帧时可恢复但严禁跨 C 帧静默放弃 |
 | **STM 软件事务内存** | `atomic(id*) { ... }`、`atomic fn`、纯度金字塔 P0–P5 | 乐观读写日志消除死锁并支持组合；事务内仅允许受管读写与 `pure fn`（含私有局部 `var`），外部 I/O 遵循 Commit-Then-Act |
 
 ---
@@ -267,9 +267,9 @@ pub fn bad_c_firmware_entry(
 但是，我们的旅程还没有到终点。
 在刚刚编写高并发网关和底层控制后端时，你可能注意到了几个更深邃的关键词：
 - 我们在第三卷和本卷中见到了 `requires`、`ensures`、`decreases`、`invariant`、`predicate`、`spec fn` 与 `verified fn`；
-- 在面对极致的硬件寄存器操作、SIMD 内联指令（`'intrinsic`）、位向量（`BitVec`）精确位段读写以及零开销形式化验证时：
+- 在面对高度的硬件寄存器操作、SIMD 内联指令（`'intrinsic`）、位向量（`BitVec`）精确位段读写以及零开销形式化验证时：
   - Flurry 是如何区分 **PTC（编译期类型命题检查）** 与 **程序验证层（OSL 分离逻辑、状态精化与前后置契约证明）** 的？
   - 怎么用 **`refines { expr } Type` 精化类型** 和 **`BitVec`** 写出连一个比特位都不会算错的硬件驱动？
-  - 当我们不得不进入 `unsafe` 边界时，编译器又是如何核验它的安全封装契约的？
+  - 当我们严禁未进入 `unsafe` 边界时，编译器又是如何核验它的安全封装契约的？
 
 准备好踏入《Flurry 演进手记》的最终高地——**《第八卷：程序验证、精化类型与系统级底层编程》**吧。我们下一卷见。

@@ -22,7 +22,8 @@ impl Checker<'_, '_> {
                 partial,
                 &self.context,
                 crate::ptc::Budget::default(),
-                false,
+                self.active_effect_environment().is_some()
+                    && !matches!(expected, Some(Term::Computation { .. })),
                 &self.call_inference_domains(),
             )
             .map_err(|cause| call_inference_error(span, cause))?;
@@ -54,69 +55,144 @@ impl Checker<'_, '_> {
         checked: &mut PreparedInputs,
         packets: &mut BTreeMap<usize, n::Expr>,
     ) -> Result<crate::calls::CallCandidate, Error> {
-        let slots = (0..width).collect::<Vec<_>>();
+        self.infer_packet_inputs(
+            scheme,
+            width,
+            args,
+            None,
+            Some(context),
+            span,
+            checked,
+            packets,
+        )
+    }
+
+    /// Alternate packet and peer evidence without discarding partially known
+    /// callable/aggregate domains. Checked producers are retained for delivery;
+    /// inference order never changes their runtime evaluation order.
+    pub(in crate::program) fn infer_packet_inputs(
+        &mut self,
+        scheme: &crate::calls::Scheme,
+        width: usize,
+        args: &[Arg<'_>],
+        expected: Option<&Term>,
+        context: Option<&crate::calls::InputContext>,
+        span: Span,
+        checked: &mut PreparedInputs,
+        packets: &mut BTreeMap<usize, n::Expr>,
+    ) -> Result<crate::calls::CallCandidate, Error> {
+        self.infer_routed_packet_inputs(
+            scheme,
+            vec![None; width],
+            args,
+            None,
+            0,
+            expected,
+            None,
+            context,
+            &vec![false; width],
+            span,
+            checked,
+            packets,
+            false,
+        )
+    }
+
+    /// Feed checked packet fields through declaration routing, including
+    /// receivers and collected parameters. Only real producers enter NIR;
+    /// type evidence remains separate from the retained operand cache.
+    pub(in crate::program) fn infer_routed_packet_inputs(
+        &mut self,
+        scheme: &crate::calls::Scheme,
+        actual: Vec<Option<Term>>,
+        args: &[Arg<'_>],
+        declarations: Option<&[hir::common::FnParam<'_>]>,
+        offset: usize,
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+        structural: Option<&crate::calls::InputContext>,
+        stages: &[bool],
+        span: Span,
+        checked: &mut PreparedInputs,
+        packets: &mut BTreeMap<usize, n::Expr>,
+        defer_staged: bool,
+    ) -> Result<crate::calls::CallCandidate, Error> {
         let mut widths = BTreeMap::new();
-        let mut packet_fields = BTreeMap::<usize, Vec<Term>>::new();
-        let mut actual = vec![None; width];
+        let mut fields = BTreeMap::new();
         let mut fuel = 10_000usize;
         loop {
-            let layout = self.spread_packet_layout_with_widths(args, &slots, span, &widths)?;
-            for (index, fields) in &packet_fields {
-                if let Some(slots) = &layout[*index] {
-                    if slots.len() != fields.len() {
-                        return Err(error(span, "spread packet width disagrees with payload"));
-                    }
-                    for (slot, ty) in slots.iter().zip(fields) {
-                        actual[*slot] = Some(ty.clone());
-                    }
-                }
-            }
-            for (slot, (_, value)) in checked.iter() {
-                if !is_never(&value.ty) {
-                    actual[*slot] = Some(value.ty.clone());
-                }
-            }
-            let candidate = self.infer_spread_inputs(
+            let candidate = self.infer_spread_evidence(
                 scheme,
                 actual.clone(),
                 args,
-                None,
-                0,
-                None,
-                None,
-                Some(context),
+                declarations,
+                offset,
+                expected,
+                partial,
+                structural,
                 Some(&widths),
                 span,
                 checked,
+                defer_staged,
+                &fields,
             )?;
+            let types = (offset..actual.len())
+                .map(|slot| {
+                    candidate
+                        .parameter_input_context(slot)
+                        .map_err(|cause| call_inference_error(span, cause))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let positional =
+                self.spread_parameter_input_context(types, declarations, stages, args, span)?;
+            let layout = positional
+                .as_ref()
+                .map(|positional| {
+                    self.spread_packet_layout_with_widths(args, positional, span, &widths)
+                })
+                .transpose()?;
+            // A diverging packet has no payload type. Once live peers fix
+            // the remaining layout, retain that destination width for routing
+            // the other operands; never invent a payload type for Never.
+            let mut settled = false;
+            if let Some(layout) = &layout {
+                for (index, packet) in packets.iter() {
+                    if is_never(&packet.ty)
+                        && !widths.contains_key(index)
+                        && let Some(fields) = &layout[*index]
+                    {
+                        widths.insert(*index, fields.len());
+                        settled = true;
+                    }
+                }
+            }
+            if settled {
+                continue;
+            }
             let mut progress = false;
             for (index, arg) in args.iter().enumerate() {
-                let Arg::Expand(input) = arg else {
-                    continue;
-                };
+                let Arg::Expand(input) = arg else { continue };
                 if matches!(input.kind, H::Tuple(_)) || packets.contains_key(&index) {
                     continue;
                 }
-                let slots = &layout[index];
+                let context = layout.as_ref().and_then(|layout| layout[index].as_ref());
+                // An opaque packet crossing a stage boundary must be handled
+                // by the existing dependent/staged preparation machinery.
+                if context.map_or(stages.iter().any(|stage| *stage), |fields| {
+                    fields.iter().any(|(_, stage)| *stage)
+                }) {
+                    continue;
+                }
                 fuel = fuel
                     .checked_sub(1)
                     .ok_or_else(|| error(span, "spread packet inference budget exhausted"))?;
-                let packet_context = if let Some(slots) = slots {
-                    let fields = slots
-                        .iter()
-                        .map(|slot| {
-                            candidate
-                                .parameter_input_context(*slot)
-                                .map_err(|e| call_inference_error(span, e))
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
+                let packet_context = context.map_or(Input::Unknown, |fields| {
+                    let fields = fields.iter().map(|(ty, _)| ty.clone()).collect();
                     match self.protocols.tuple {
-                        Some(head) => crate::calls::InputContext::NormalTuple { head, fields },
-                        None => crate::calls::InputContext::Tuple(fields),
+                        Some(head) => Input::NormalTuple { head, fields },
+                        None => Input::Tuple(fields),
                     }
-                } else {
-                    crate::calls::InputContext::Unknown
-                };
+                });
                 let Some(value) = self.argument_attempt_with_input(
                     input,
                     None,
@@ -127,28 +203,22 @@ impl Checker<'_, '_> {
                 else {
                     continue;
                 };
-                if is_never(&value.ty) {
-                    packets.insert(index, value);
-                    progress = true;
-                    break;
+                if !is_never(&value.ty) {
+                    let Term::Tuple(payload) = self.structural_type(&value.ty, input.span)? else {
+                        return Err(error(
+                            input.span,
+                            "type mismatch: positional spread requires a tuple value",
+                        ));
+                    };
+                    if context.is_some_and(|fields| fields.len() != payload.len()) {
+                        return Err(error(
+                            input.span,
+                            "argument count mismatch: spread packet width disagrees with payload",
+                        ));
+                    }
+                    widths.insert(index, payload.len());
+                    fields.insert(index, payload);
                 }
-                let Term::Tuple(fields) = self.structural_type(&value.ty, input.span)? else {
-                    return Err(error(
-                        input.span,
-                        "positional spread requires a tuple value",
-                    ));
-                };
-                if slots
-                    .as_ref()
-                    .is_some_and(|slots| fields.len() != slots.len())
-                {
-                    return Err(error(
-                        input.span,
-                        "argument count mismatch: spread packet width disagrees with payload",
-                    ));
-                }
-                widths.insert(index, fields.len());
-                packet_fields.insert(index, fields);
                 packets.insert(index, value);
                 progress = true;
                 break;
@@ -173,7 +243,7 @@ impl Checker<'_, '_> {
         span: Span,
         checked: &mut PreparedInputs,
     ) -> Result<crate::calls::CallCandidate, Error> {
-        self.infer_spread_inputs_with_staging(
+        self.infer_spread_evidence(
             scheme,
             actual,
             args,
@@ -186,10 +256,11 @@ impl Checker<'_, '_> {
             span,
             checked,
             false,
+            &BTreeMap::new(),
         )
     }
 
-    pub(in crate::program) fn infer_spread_inputs_with_staging(
+    fn infer_spread_evidence(
         &mut self,
         scheme: &crate::calls::Scheme,
         mut actual: Vec<Option<Term>>,
@@ -203,11 +274,27 @@ impl Checker<'_, '_> {
         span: Span,
         checked: &mut PreparedInputs,
         defer_staged: bool,
+        packet_fields: &BTreeMap<usize, Vec<Term>>,
     ) -> Result<crate::calls::CallCandidate, Error> {
+        let mut evidence = BTreeMap::new();
         let mut flat = Vec::new();
         let mut post_positions = std::collections::BTreeSet::new();
         let mut fuel = 10_000usize;
-        let layout = if structural.is_some() {
+        // A declaration slot is not necessarily one positional operand.
+        // Collections, omitted/defaulted inputs and post-lambdas need the
+        // declaration router; do not use telescope length as a packet width.
+        let fixed_positions = declarations.is_none_or(|parameters| {
+            parameters.iter().all(|parameter| {
+                !parameter.ty.is_implicit()
+                    && matches!(
+                        parameter.ty.kind,
+                        TyParamKind::Positional(_) | TyParamKind::PositionalDependencyCatched(..)
+                    )
+            })
+        }) && !args
+            .iter()
+            .any(|arg| matches!(arg, Arg::Named(..) | Arg::PostLambda(_)));
+        let layout = if structural.is_some() && fixed_positions {
             Some(self.spread_packet_layout_with_widths(
                 args,
                 &actual[offset..],
@@ -249,7 +336,13 @@ impl Checker<'_, '_> {
                         fuel = fuel
                             .checked_sub(width)
                             .ok_or_else(|| error(span, "spread input routing budget exhausted"))?;
-                        for _ in 0..width {
+                        for field in 0..width {
+                            if let Some(ty) = packet_fields
+                                .get(&argument_index)
+                                .and_then(|fields| fields.get(field))
+                            {
+                                evidence.insert(flat.len(), ty.clone());
+                            }
                             flat.push((
                                 None,
                                 Expr {
@@ -277,6 +370,18 @@ impl Checker<'_, '_> {
             })
             .collect();
         let (routes, _) = route_arguments(&routed, declarations, actual.len() - offset, span)?;
+        for route in &routes {
+            if !route.is_collected() {
+                if let Some(ty) = route.single_position().and_then(|position| {
+                    checked
+                        .get(&position)
+                        .and_then(|(_, value)| arguments::inference_type(value))
+                        .or_else(|| evidence.get(&position))
+                }) {
+                    actual[route.parameter + offset] = Some(ty.clone());
+                }
+            }
+        }
         loop {
             let mut candidate =
                 self.spread_candidate(scheme, &actual, expected, partial, structural, span)?;
@@ -288,9 +393,10 @@ impl Checker<'_, '_> {
                     .map(|(position, _)| {
                         checked
                             .get(&position)
-                            .filter(|(_, value)| !is_never(&value.ty))
-                            .map_or(crate::calls::InputContext::Unknown, |(_, value)| {
-                                crate::calls::InputContext::Known(value.ty.clone())
+                            .and_then(|(_, value)| arguments::inference_type(value))
+                            .or_else(|| evidence.get(&position))
+                            .map_or(crate::calls::InputContext::Unknown, |ty| {
+                                crate::calls::InputContext::Known(ty.clone())
                             })
                     })
                     .collect();
@@ -411,8 +517,8 @@ impl Checker<'_, '_> {
                         |this|this.argument_attempt_with_input(&route.expression(input), context.as_ref(), partial.as_ref(), false, Some(&input_context)),
                     )?
                 {
-                    if !is_never(&value.ty) {
-                        actual[parameter] = Some(value.ty.clone());
+                    if let Some(ty) = arguments::inference_type(&value) {
+                        actual[parameter] = Some(ty.clone());
                     }
                     checked.insert(position, (input.hir_id, value));
                     progress = true;

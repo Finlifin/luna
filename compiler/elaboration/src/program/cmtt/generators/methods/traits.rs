@@ -70,6 +70,7 @@ impl Checker<'_, '_> {
         if !matches!(
             contract.signature,
             nir::code_interfaces::MethodSignature::Generator(_)
+                | nir::code_interfaces::MethodSignature::PatternGenerator(_)
         ) {
             return Err(error(
                 head.span,

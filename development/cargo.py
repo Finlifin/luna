@@ -59,21 +59,31 @@ class Runner:
         # df does not expose all container/user quotas. A cache cap is needed too.
         return self.cache_size() >= MAX_CACHE or shutil.disk_usage(self.target.parent).free < MIN_FREE
 
-    def clean(self, *, full: bool = False) -> None:
+    def clean(self, *, full: bool = False, packages: tuple[str, ...] = REBUILDABLE_PACKAGES) -> None:
         command = ["cargo", "clean", "--target-dir", str(self.target)]
         if not full:
-            for package in REBUILDABLE_PACKAGES:
+            for package in packages:
                 command += ["-p", package]
-        print("cargo-cache: cleaning " + ("the target directory" if full else "elaboration/luna outputs"), file=sys.stderr, flush=True)
+        print("cargo-cache: cleaning " + ("the target directory" if full else "/".join(packages) + " outputs"), file=sys.stderr, flush=True)
         subprocess.run(command, cwd=self.root, env=self.env, check=True)
 
     def reclaim(self, *, force: bool = False) -> None:
-        if force or self.pressure():
-            self.clean()
+        if force:
             # A reported quota failure is stronger evidence than disk_usage:
             # user/container quotas may be exhausted even below our cache cap.
-            if force or self.pressure():
-                self.clean(full=True)
+            self.clean()
+            self.clean(full=True)
+            return
+        if not self.pressure():
+            return
+        # Test harnesses are cheaper to rebuild than the compiler. Keep the
+        # elaboration archive whenever removing luna outputs supplies headroom.
+        self.clean(packages=("luna",))
+        if not self.pressure():
+            return
+        self.clean(packages=("elaboration",))
+        if self.pressure():
+            self.clean(full=True)
 
     def execute(self, command: list[str]) -> tuple[int, bool]:
         process = subprocess.Popen(command, cwd=self.root, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)

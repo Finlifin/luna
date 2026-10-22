@@ -2,10 +2,10 @@
 
 欢迎来到 **《Flurry 演进手记》**。
 
-这里不是一份枯燥的语法说明书，也不是按字母表排列的特性词典。
+这里并非一份枯燥的语法说明书，亦非按字母表排列的特性词典。
 本系列教程通过 **200 篇循序渐进的工程实战专题**，从具体系统编程问题出发，在分析边界条件与演进设计的过程中，一步步展开 Flurry 语言的核心机制与工程实践。
 
-> **关于生态假设与权威规范**：由于 Flurry 目前正处于语言核心与编译器实现阶段（内置包与标准库仍在设计中），本系列教程**专注于语言本身的设计与心智模型**。所有示例均严格遵循 [`docs/`](../docs/README.md) 中的正式语言规范，不依赖尚未定型的外部库生态。
+> **关于生态假设与权威规范**：由于 Flurry 目前正处于语言核心与编译器实现阶段（内置包与标准库仍在设计中），本系列教程**专注于语言本身的设计与心智模型**。所有示例均严格遵循 [`docs/`](../docs/README.md) 中的正式语言规范，独立于尚未定型的外部库生态。
 
 ---
 
@@ -15,7 +15,7 @@
 - [x] **[001：一个字节里的世界——从繁琐掩码到定宽模式](./001-a-world-in-a-byte.md)** (`docs/control-flow/pattern-matching/bitvec.md`, `docs/type/user-defined-types/enums.md`)
 - [x] **[002：当传感器遇到噪声——从可选类型 `?T` 到错误行 `!Err T`](./002-when-sensors-meet-noise.md)** (`docs/type/qualified-types/error-type.md`, `docs/algebraic-effect-and-delimited-continuation/error-handling.md`)
 - [x] **[003：`let` 并没有冻结你的对象——绑定、字段指针与失败安全的资源更替](./003-let-does-not-freeze-your-object.md)** (`docs/resource-management/bindings.md`, `docs/resource-management/pointers.md`)
-- [x] **[004：为什么 `a<b` 不是小于号——词法边界、空白规则与省略分号的哲学](./004-why-a-lt-b-is-not-less-than.md)** (`docs/basics/lexical.md`, `docs/grammar/index.md`)
+- [x] **[004：为什么 `a<b` 并非小于号——词法边界、空白规则与省略分号的哲学](./004-why-a-lt-b-is-not-less-than.md)** (`docs/basics/lexical.md`, `docs/grammar/index.md`)
 - [x] **[005：给数字贴上单位标签——编译期字面量、`Symbol` 与 `LiteralInto` 后缀协议](./005-literals-symbols-and-custom-suffixes.md)** (`docs/basics/literals.md`, `docs/traits/protocols.md`)
 - [x] **[006：空无一物的三种面孔——`()`、`null`、`_` 与危险的 `undefined`](./006-three-faces-of-nothingness.md)** (`docs/basics/unit-null-undefined.md`, `docs/basics/primitives.md`)
 - [x] **[007：状态机分支大扫除——表达式化的 `if`/`when` 与带 `while` 守卫的跳转](./007-branching-with-if-when-and-while-guards.md)** (`docs/control-flow/basic.md`)
@@ -23,14 +23,14 @@
 - [x] **[009：把流式解析写得像呼吸一样自然——`while ... is ... do` 与 `let ... else`](./009-streaming-parsers-with-while-is-and-let-else.md)** (`docs/control-flow/basic.md`, `docs/control-flow/pattern-matching/index.md`)
 - [x] **[010：给数据包做外科手术——模式优先级、括号分组 `(p)` vs `(p,)` 与范围模式](./010-pattern-precedence-grouping-and-ranges.md)** (`docs/control-flow/pattern-matching/index.md`)
 - [x] **[011：当 `NaN` 闯入浮点数匹配——区间覆盖证明与纯守卫的穷尽性分析](./011-when-nan-crashes-float-matching.md)** (`docs/control-flow/pattern-matching/index.md`)
-- [x] **[012：字段顺序不等于内存顺序——`struct` 声明序求值、默认字段与物理布局解耦](./012-struct-evaluation-order-vs-memory-layout.md)** (`docs/type/user-defined-types/structs.md`)
+- [x] **[012：字段顺序有别于内存顺序——`struct` 声明序求值、默认字段与物理布局解耦](./012-struct-evaluation-order-vs-memory-layout.md)** (`docs/type/user-defined-types/structs.md`)
 - [x] **[013：从高层消息到底层枚举——`enum` 分组变体 `.network.{...}` 与 `'tag_name` 视图](./013-enum-grouped-variants-and-tag-names.md)** (`docs/type/user-defined-types/enums.md`)
 - [x] **[014：手写 RISC-V 指令解码器——32 位定宽 `enum` 的互斥性与覆盖性证明](./014-riscv-decoder-with-fixed-width-enums.md)** (`docs/type/user-defined-types/fixed-width-enum-example.md`)
 - [x] **[015：跨越字节边界的比特流——跨元素 `BitVec` 模式与 UTF-8 变长解码](./015-cross-element-bitvec-patterns-and-utf8.md)** (`docs/control-flow/pattern-matching/bitvec.md`)
-- [x] **[016：不用移位和掩码怎么写位操作——`BitVec<n>` 拼接 `++`、切片与原位回写](./016-bitvec-concatenation-slicing-and-writeback.md)** (`docs/program-synthesis/bitvec-algebra.md`)
+- [x] **[016：无须移位和掩码怎么写位操作——`BitVec<n>` 拼接 `++`、切片与原位回写](./016-bitvec-concatenation-slicing-and-writeback.md)** (`docs/program-synthesis/bitvec-algebra.md`)
 - [x] **[017：与硬件寄存器赤身肉搏——`union` 共享存储、C ABI 与显式初始化契约](./017-unions-shared-storage-and-c-abi.md)** (`docs/type/user-defined-types/unions.md`)
-- [x] **[018：同样是 `u32`，凭什么不能混用——`newtype` 独立类型身份与 `typealias` 透明别名](./018-newtype-identity-vs-typealias.md)** (`docs/type/user-defined-types/newtype-and-typealias.md`)
-- [x] **[019：在不暴露内部结构的情况下匹配——`case` 自定义匹配视图](./019-custom-pattern-views-with-case.md)** (`docs/control-flow/pattern-matching/index.md`)
+- [x] **[018：同样是 `u32`，凭什么禁止混用——`newtype` 独立类型身份与 `typealias` 透明别名](./018-newtype-identity-vs-typealias.md)** (`docs/type/user-defined-types/newtype-and-typealias.md`)
+- [x] **[019：在隐匿内部结构的情况下匹配——`case` 自定义匹配视图](./019-custom-pattern-views-with-case.md)** (`docs/control-flow/pattern-matching/index.md`)
 - [x] **[020：第一卷里程碑：组装一台完整的 8 位传感器协议分析仪](./020-milestone-sensor-protocol-analyzer.md)** (综合实战 001–019)
 
 ---
@@ -40,12 +40,12 @@
 
 - [x] **[021：实参求值的核心规则——源码从左到右求值、方法接收者与失败回滚边界](./021-call-evaluation-order-and-failure-boundaries.md)** (`docs/functions/calls-and-returns.md`)
 - [x] **[022：让配置接口告别重载膨胀——可选参数 `.id = expr` 与前序参数依赖](./022-optional-parameters-and-forward-dependencies.md)** (`docs/functions/parameters.md`)
-- [x] **[023：为什么默认参数里不能偷偷打日志——运行时默认值与 `P3` 稳定观测契约](./023-why-default-params-require-p3-stability.md)** (`docs/functions/parameters.md`, `docs/resource-management/runtime-purity.md`)
+- [x] **[023：为什么默认参数里无法偷偷打日志——运行时默认值与 `P3` 稳定观测契约](./023-why-default-params-require-p3-stability.md)** (`docs/functions/parameters.md`, `docs/resource-management/runtime-purity.md`)
 - [x] **[024：把异构参数打包进元组——位置变参 `...items` 与 `.items = tuple` 完整供应](./024-variadic-tuples-and-direct-supply.md)** (`docs/functions/parameters.md`)
 - [x] **[025：像写 JSON 一样调用函数——扩展调用 `fn { k: v }` 与匿名结构体属性收集](./025-extended-applications-and-property-collection.md)** (`docs/functions/parameters.md`, `docs/control-flow/pattern-matching/index.md`)
 - [x] **[026：上下文自动注入与尾随块——`implicit` 参数、`post do` 与 `tactic lambda`](./026-implicit-parameters-and-post-do-blocks.md)** (`docs/functions/parameter-elaboration.md`)
 - [x] **[027：直接按数据形状分派函数——`case` 参数与多输入模式函数](./027-pattern-functions-and-case-parameters.md)** (`docs/functions/pattern-functions.md`)
-- [x] **[028：在模式匹配中途算个值——`and expr is pat` 链式顺序匹配与局部观察块](./028-chained-matching-with-and-is-and-observation-blocks.md)** (`docs/control-flow/pattern-matching/index.md`)
+- [x] **[028：在模式匹配中途算个值——`and expr is pat` 链式顺序匹配](./028-chained-matching-with-and-is-and-observation-blocks.md)** (`docs/control-flow/pattern-matching/index.md`)
 - [x] **[029：既要检查字段又要搬走整个包——仿射类型的 `as whole` 与 `or` 模式所有权汇合](./029-affine-pattern-matching-as-whole-and-or.md)** (`docs/control-flow/pattern-matching/index.md`)
 - [x] **[030：当 Lambda 捕获外部世界——`|x| expr`、按值捕获与最小独立位置指针观察](./030-lambdas-value-capture-and-pointer-observation.md)** (`docs/functions/lambdas.md`)
 - [x] **[031：闭包环境的生死簿——`%c fn` 闭包限定类型、捕获状态更新与逆序清理](./031-closure-environments-and-cleanup-order.md)** (`docs/functions/closure-environments.md`, `docs/type/qualified-types/closure-type.md`)
@@ -69,11 +69,11 @@
 - [x] **[043：当对象内部指向自己——自引用结构（Self-Reference）的移动与安全锚定](./043-self-referential-structs-and-safe-anchoring.md)** (`docs/resource-management/moves-and-initialization.md`, `docs/type/self-reference.md`)
 - [x] **[044：析构函数背后的精密钟表——局部与聚合 `Drop` 次序、失败路径与环境约束](./044-drop-elaboration-and-failure-paths.md)** (`docs/resource-management/drop-elaboration.md`)
 - [x] **[045：那些一闪而过的匿名值——临时值生命周期、视图保活与 `_` 立即丢弃规则](./045-temporaries-view-lifetime-and-wildcard-drop.md)** (`docs/resource-management/temporaries.md`)
-- [x] **[046：为什么 Flurry 不需要 `&mut` 独占锁——指针目标身份、世代（Generation）与顺序别名](./046-pointer-identities-generations-and-sequential-aliasing.md)** (`docs/resource-management/pointers.md`, `docs/resource-management/reachability.md`)
+- [x] **[046：为什么 Flurry 无需 `&mut` 独占锁——指针目标身份、世代（Generation）与顺序别名](./046-pointer-identities-generations-and-sequential-aliasing.md)** (`docs/resource-management/pointers.md`, `docs/resource-management/reachability.md`)
 - [x] **[047：追踪指针从哪里来、到哪里去——可达性限定类型 `&reachability_set T` 入门](./047-reachability-types-tracking-origins.md)** (`docs/resource-management/reachability.md`, `docs/type/reachability-type.md`)
 - [x] **[048：阻止悬垂指针逃逸出作用域——返回值、容器与闭包中的可达性检查](./048-preventing-dangling-escapes-with-reachability.md)** (`docs/resource-management/reachability.md`, `docs/type/qualified-types/reachability-type-also.md`)
 - [x] **[049：把一块大缓冲区安全切成两半——内存视图（Memory Views）、字段视图与区间视图](./049-memory-views-fields-and-intervals.md)** (`docs/resource-management/memory-views.md`)
-- [x] **[050：证明两个切片绝不重叠——分离证据（Disjointness Evidence）与并行原地修改](./050-disjointness-evidence-and-in-place-mutation.md)** (`docs/resource-management/memory-views.md`)
+- [x] **[050：证明两个切片彼此分离——分离证据（Disjointness Evidence）与并行原地修改](./050-disjointness-evidence-and-in-place-mutation.md)** (`docs/resource-management/memory-views.md`)
 - [x] **[051：给每次内存触碰记账——六种内存效果（`read`/`write`/`alloc`/`free`...）与行为上界](./051-six-memory-effects-and-behavior-bounds.md)** (`docs/resource-management/memory-effects.md`)
 - [x] **[052：函数退出时留下了什么——出口状态契约與跨调用事实保持](./052-exit-states-and-fact-preservation.md)** (`docs/resource-management/memory-effects.md`, `docs/functions/contracts-and-effects.md`)
 - [x] **[053：“纯函数”不是非黑即白——运行时纯度的六层阶梯（`P0` 到 `P5`）全解](./053-six-tiers-of-runtime-purity-p0-to-p5.md)** (`docs/resource-management/runtime-purity.md`)
@@ -95,16 +95,16 @@
 ## 第四卷：元编程即类型论——走进两级类型论 (2LTT) 与编译期宇宙 (066–095)
 *故事主线：打造一套在编译期自动完成维度检查与广播推导的静态形状张量库（Static-Shaped Tensor）。*
 
-- [x] **[066：为什么泛型不需要第二套语法——编译期宇宙 ($U_1$) 与运行时宇宙 ($U_0$) 初探](./066-two-universes-u1-and-u0-intro.md)** (`docs/comptime/index.md`, `docs/type/2-level-type.md`)
+- [x] **[066：为什么泛型无需第二套语法——编译期宇宙 ($U_1$) 与运行时宇宙 ($U_0$) 初探](./066-two-universes-u1-and-u0-intro.md)** (`docs/comptime/index.md`, `docs/type/2-level-type.md`)
 - [x] **[067：普通函数怎么变成类型构造器——`comptime fn` 与返回 `Type` 的函数](./067-functions-that-return-types.md)** (`docs/functions/comptime_fn.md`, `docs/comptime/purity-and-normal-form.md`)
-- [x] **[068：为什么 `Identity<T>` 不等于 `T`——`pure comptime fn Name<...>` 与 Normal-Form 头](./068-normal-form-heads-and-type-identity.md)** (`docs/comptime/purity-and-normal-form.md`, `docs/type/type-identity.md`)
+- [x] **[068：为什么 `Identity<T>` 有别于 `T`——`pure comptime fn Name<...>` 与 Normal-Form 头](./068-normal-form-heads-and-type-identity.md)** (`docs/comptime/purity-and-normal-form.md`, `docs/type/type-identity.md`)
 - [x] **[069：连元组都是一个类型函数——深入 `pure comptime fn Tuple<...Es: meta.List<Type>> -> Type`](./069-tuple-as-a-variadic-normal-form-type-function.md)** (`docs/comptime/purity-and-normal-form.md`)
 - [x] **[070：把类型参数写进 `where` 子句——子句声明、参数阶段依赖与隐式类型推导](./070-where-clauses-and-parameter-stage-dependencies.md)** (`docs/functions/comptime_fn.md`, `docs/grammar/syntax`)
 - [x] **[071：在定义时抓出泛型 Bug——Normalization（定义端符号检查）与 Instantiation（调用端实例化）](./071-normalization-vs-instantiation-two-phases.md)** (`docs/comptime/normalization-and-instantiation.md`)
 - [x] **[072：什么时候算、什么时候留——Ordinary 严格求值、Loose 宽松归约与 `defer` 延迟表达式](./072-ordinary-loose-reduction-and-defer.md)** (`docs/comptime/normalization-and-instantiation.md`)
 - [x] **[073：穿越两个宇宙的桥梁——隐式与显式的 `Lift`、Quote `'(` 与 Splice `~<...>`](./073-lift-quote-and-splice-across-universes.md)** (`docs/comptime/quoting-and-splicing.md`, `docs/basics/primitives.md`)
 - [x] **[074：为什么整数字面量叫 `Integer`——编译期无限精度类型向运行时 Proxy 的 Splice 落地](./074-comptime-integer-float-and-runtime-proxies.md)** (`docs/basics/primitives.md`, `docs/comptime/quoting-and-splicing.md`)
-- [x] **[075：把循环和分支在编译期彻底摊平——`comptime { ... }` 块与 `inline if` / `inline for`](./075-comptime-blocks-and-inline-control-flow.md)** (`docs/comptime/inlining-comptime-code.md`)
+- [x] **[075：把循环和分支在编译期摊平——`comptime { ... }` 块与 `inline if` / `inline for`](./075-comptime-blocks-and-inline-control-flow.md)** (`docs/comptime/inlining-comptime-code.md`)
 - [x] **[076：在编译期透视任何类型的骨骼——`Type.size_of`、结构反射与内存布局查询](./076-type-reflection-and-layout-queries.md)** (`docs/type/reflection-and-layout.md`, `docs/type/type_id.md`)
 - [x] **[077：元数据也是正经的编译期对象——`^expr` 属性系统、`.id expr` 配置与 `attrs` 包](./077-attribute-system-and-configuration-objects.md)** (`docs/comptime/attribute.md`)
 - [x] **[078：当编译期计算遇到副作用与缓存——Comptime 纯度、确定性缓存与分阶段实例化](./078-comptime-purity-memoization-and-freezing.md)** (`docs/comptime/purity-and-normal-form.md`)
@@ -114,7 +114,7 @@
 - [x] **[082：运行时依赖类型的等价与替换——动态环境、绑定身份与跨作用域传递](./082-holed-type-cores-and-substitution-equality.md)** (`docs/type/runtime-dependent-type.md`, `docs/type/type-identity.md`)
 - [x] **[083：在类型自身上做模式匹配——`expr<type_pattern_argument*>` 类型模式详解](./083-pattern-matching-on-types.md)** (`docs/type/type-patterns.md`, `docs/grammar/syntax`)
 - [x] **[084：初识命题类型约束（PTC）——为什么类型系统需要一个专门的逻辑求解器](./084-propositional-type-constraints-ptc-intro.md)** (`docs/type/propositional-constraints/index.md`)
-- [x] **[085：PTC 的 19 类原子命题——从类型相等、子类型到 Trait 满足性与位宽关系](./085-the-19-atomic-propositions-of-ptc.md)** (`docs/type/propositional-constraints/atoms.md`)
+- [x] **[085：PTC 的核心原子命题——从类型相等、Normal-Form 头匹配到 Trait 满足性与布局性质](./085-the-19-atomic-propositions-of-ptc.md)** (`docs/type/propositional-constraints/atoms.md`)
 - [x] **[086：走进分支后类型自动变精确了——Occurrence Typing（出现类型推导）的奥秘](./086-occurrence-typing-in-branches.md)** (`docs/type/propositional-constraints/occurrence-typing.md`)
 - [x] **[087：读懂类型约束与诊断信息——组合约束推理、残余条件与签名设计](./087-ptc-theory-solvers-and-diagnostics.md)** (`docs/type/propositional-constraints/index.md`, `docs/type/propositional-constraints/atoms.md`)
 - [x] **[088：把枚举行与记录行玩出花——Row Polymorphism（行多态）与唯一标签路由](./088-row-polymorphism-and-scoped-labels.md)** (`docs/type/rows.md`)
@@ -141,7 +141,7 @@
 - [x] **[103：定制你自己的变参与属性收集器——参数收集协议与 Elaboration 接入](./103-custom-variadic-and-property-collection-protocols.md)** (`docs/functions/parameter-elaboration.md`, `docs/traits/protocols.md`)
 - [x] **[104：告别黑盒过程宏派生——用纯语言级 `derive fn` 编写类型安全的自动派生器](./104-writing-type-safe-derivers-with-derive-fn.md)** (`docs/traits/derivation.md`)
 - [x] **[105：具名派生策略与默认策略——`^attrs.derivation.default` 与 `derive Trait for Type`](./105-named-and-default-derivation-strategies.md)** (`docs/traits/derivation.md`, `docs/code-organization/builtin-packages.md`)
-- [x] **[106：当编译期不知道具体类型时——`dyn Trait` 动态接口与 `.dyn(Trait)` 显式擦除](./106-dynamic-interfaces-dyn-trait-and-erasure.md)** (`docs/traits/dynamic-interfaces.md`)
+- [x] **[106：当编译期无从得知具体类型时——`dyn Trait` 动态接口与 `.dyn(Trait)` 显式擦除](./106-dynamic-interfaces-dyn-trait-and-erasure.md)** (`docs/traits/dynamic-interfaces.md`)
 - [x] **[107：连返回 `Self` 和带依赖环境都能动态调用？——Flurry 动态接口的高级边界](./107-self-results-and-dependent-environments-in-dyn-traits.md)** (`docs/traits/dynamic-interfaces.md`)
 - [x] **[108：开放实现绑定是怎么传递环境的——替换推导（Substitution Inference）与依赖交付](./108-substitution-inference-and-dependency-delivery.md)** (`docs/type/substitution-inference.md`)
 - [x] **[109：在 Trait 方法里优雅地处理错误与效应——关联错误行与效应行多态](./109-associated-error-and-effect-rows-in-traits.md)** (`docs/traits/declarations.md`, `docs/type/rows.md`)
@@ -157,13 +157,13 @@
 ## 第六卷：带类型的元编程革命——上下文模态类型论 (CMTT) 与宏系统 (116–140)
 *故事主线：构建一个在编译期把正则表达式/协议规范直接编译成零分支跳转冗余状态机（FSM）的代码生成器。*
 
-- [x] **[116：为什么字符串拼接宏和 AST 宏还不够好——带上下文类型的代码值（CMTT）登场](./116-why-cmtt-typed-contextual-code-values.md)** (`docs/cmtt/index.md`)
+- [x] **[116：为什么字符串拼接宏和 AST 宏还欠缺好——带上下文类型的代码值（CMTT）登场](./116-why-cmtt-typed-contextual-code-values.md)** (`docs/cmtt/index.md`)
 - [x] **[117：读懂 `< x: i32 |- u64 >`——显式运行时上下文（Context）与表达式代码类型](./117-understanding-contextual-expression-types.md)** (`docs/cmtt/index.md`, `docs/cmtt/quotation-and-stages.md`)
 - [x] **[118：把代码装进盒子再拼出来——Quote `'(`、Splice `~<...>` 与阶段安全保证](./118-quoting-and-splicing-typed-code-fragments.md)** (`docs/cmtt/quotation-and-stages.md`)
 - [x] **[119：连接两段代码的管道工——上下文替换 `~[ a = b ] <expr>` 与变量重绑定](./119-context-substitution-and-rebinding.md)** (`docs/cmtt/contexts-and-substitution.md`)
 - [x] **[120：连模式匹配也能在编译期动态拼装。——模式代码类型 `< T -| x: U >` 与 `' <pat>`](./120-contextual-pattern-types-and-quoted-patterns.md)** (`docs/cmtt/patterns-and-arms.md`)
 - [x] **[121：动态组装一个 `match` 表达式——Quoted Arm 与 `match { use arms }` 接入协议](./121-quoted-arms-and-match-use-injection.md)** (`docs/cmtt/patterns-and-arms.md`, `docs/grammar/syntax`)
-- [x] **[122：当生成的代码类型还不确定时——CMTT 中的 `Any` 与代码见证（Code Evidence）](./122-any-and-code-evidence-in-cmtt.md)** (`docs/cmtt/any-and-code-evidence.md`)
+- [x] **[122：当生成的代码类型还待定时——CMTT 中的 `Any` 与代码见证（Code Evidence）](./122-any-and-code-evidence-in-cmtt.md)** (`docs/cmtt/any-and-code-evidence.md`)
 - [x] **[123：深入 `quote fn` 与 `template quote fn`——可复用的带上下文代码生成组件](./123-quote-functions-and-templates-in-depth.md)** (`docs/cmtt/quote-functions-and-templates.md`)
 - [x] **[124：用单洞上下文组合出完整循环与状态机——有限程序组装（Program Construction）](./124-assembling-finite-programs-and-automata.md)** (`docs/cmtt/program-construction.md`)
 - [x] **[125：实战 CMTT：把声明式状态转移表编译成内联的零开销跳转代码](./125-compiling-state-tables-to-inline-code-with-cmtt.md)** (`docs/cmtt/program-construction.md`)
@@ -179,7 +179,7 @@
 - [x] **[135：第六卷里程碑（上）：用 PEG 构造宏设计一门迷你数据包过滤语言（Mini-BPF DSL）](./135-milestone-part1-mini-bpf-dsl-with-peg-macros.md)** (综合实战 116–134)
 - [x] **[136：第六卷里程碑（下）：用 CMTT 将 Mini-BPF AST 编译为类型安全的零开销原生匹配器](./136-milestone-part2-compiling-mini-bpf-with-cmtt.md)** (综合实战 116–134)
 - [x] **[137：用 `template test` 为生成的自动机编写全覆盖性质测试](./137-property-testing-generated-automata-with-templates.md)** (`docs/functions/templates.md`, `docs/cmtt/program-construction.md`)
-- [x] **[138：当 CMTT 遇到资源管理——保证生成代码中的仿射值与指针绝不泄漏](./138-resource-safety-inside-cmtt-generated-code.md)** (`docs/cmtt/contexts-and-substitution.md`, `docs/resource-management/index.md`)
+- [x] **[138：当 CMTT 遇到资源管理——保证生成代码中的仿射值与指针零泄漏](./138-resource-safety-inside-cmtt-generated-code.md)** (`docs/cmtt/contexts-and-substitution.md`, `docs/resource-management/index.md`)
 - [x] **[139：诊断生成代码中的错误——源码溯源（Span Tracking）与两阶段报错定位](./139-diagnostics-and-span-tracking-in-staged-code.md)** (`docs/cmtt/index.md`, `docs/cmtt/quotation-and-stages.md`)
 - [x] **[140：第六卷总结：从“写代码的人”进化为“教编译器写代码的人”](./140-volume-6-retrospective-metaprogramming-as-type-theory.md)**
 
@@ -188,22 +188,22 @@
 ## 第七卷：控制流的大一统——代数效应、限定 Continuation 与结构化并发 (141–170)
 *故事主线：从零构建一个支持虚拟时钟测试、协程调度、异步无锁 I/O 与软件事务内存（STM）的微型运行时。*
 
-- [x] **[141：把“做什么”与“怎么做”彻底拆开——代数效应 `effect` 与 `#Effects T` 初探](./141-algebraic-effects-separating-what-from-how.md)** (`docs/algebraic-effect-and-delimited-continuation/index.md`, `docs/algebraic-effect-and-delimited-continuation/algebraic-effect.md`)
+- [x] **[141：把“做什么”与“怎么做”拆开——代数效应 `effect` 与 `#Effects T` 初探](./141-algebraic-effects-separating-what-from-how.md)** (`docs/algebraic-effect-and-delimited-continuation/index.md`, `docs/algebraic-effect-and-delimited-continuation/algebraic-effect.md`)
 - [x] **[142：发起请求与就地拦截——后缀 `#` 传播、`expr# { ... }` 效应消去与 `resume`](./142-effect-propagation-elimination-and-resume.md)** (`docs/algebraic-effect-and-delimited-continuation/algebraic-effect.md`)
 - [x] **[143：组织一整套系统能力——`effect enum` 操作组、嵌套处理与未覆盖效应自动转发](./143-effect-enums-nesting-and-forwarding.md)** (`docs/algebraic-effect-and-delimited-continuation/algebraic-effect.md`, `docs/type/qualified-types/effect-type.md`)
-- [x] **[144：为什么函数签名里不写 `handles`——基于 Trait 的处理能力（Handling Capability）与 `.use(handler)`](./144-handling-capabilities-and-dot-use-injection.md)** (`docs/algebraic-effect-and-delimited-continuation/handling-capability.md`, `docs/type/handlers.md`)
-- [x] **[145：不用切栈也能注入配置与上下文——Direct Passing（直接传值效应）的零开销机制](./145-zero-cost-context-injection-with-direct-passing.md)** (`docs/algebraic-effect-and-delimited-continuation/direct-passing.md`)
+- [x] **[144：为什么函数签名里省略 `handles`——基于 Trait 的处理能力（Handling Capability）与 `.use(handler)`](./144-handling-capabilities-and-dot-use-injection.md)** (`docs/algebraic-effect-and-delimited-continuation/handling-capability.md`, `docs/type/handlers.md`)
+- [x] **[145：无须切栈也能注入配置与上下文——Direct Passing（直接传值效应）的零开销机制](./145-zero-cost-context-injection-with-direct-passing.md)** (`docs/algebraic-effect-and-delimited-continuation/direct-passing.md`)
 - [x] **[146：只跑一次、跑在尾部、还是暂停保存？——尾恢复（Tail-Resumptive）与单次限定 Continuation](./146-tail-resumptive-vs-one-shot-delimited-continuations.md)** (`docs/algebraic-effect-and-delimited-continuation/multi-prompt-delimited-continuation.md`)
 - [x] **[147：当 Continuation 被中止（Abort）时——跨越挂起栈帧的 `Drop` 逆序清理保证](./147-aborting-continuations-and-guaranteed-drop-cleanup.md)** (`docs/algebraic-effect-and-delimited-continuation/multi-prompt-delimited-continuation.md`)
 - [x] **[148：用 50 行代码自己写一个生成器（Generator / Iterator）——基于代数效应的按需产出](./148-building-generators-and-iterators-with-effects.md)** (`docs/algebraic-effect-and-delimited-continuation/multi-prompt-delimited-continuation.md`)
-- [x] **[149：错误 `!Err` 与效应 `#Eff` 的楚河汉界——为什么两者拥有截然不同的 ABI 与组合规则](./149-why-errors-and-effects-have-distinct-abis.md)** (`docs/algebraic-effect-and-delimited-continuation/error-handling.md`, `docs/algebraic-effect-and-delimited-continuation/effect-abi.md`)
+- [x] **[149：错误 `!Err` 与效应 `#Eff` 的楚河汉界——为什么两者拥有迥然各异的 ABI 与组合规则](./149-why-errors-and-effects-have-distinct-abis.md)** (`docs/algebraic-effect-and-delimited-continuation/error-handling.md`, `docs/algebraic-effect-and-delimited-continuation/effect-abi.md`)
 - [x] **[150：当 `#Effects !Errors T` 组合在一起——限定前缀的嵌套顺序与交互法则](./150-combining-effect-and-error-qualified-types.md)** (`docs/grammar/index.md`, `docs/type/qualified-types/effect-qualified-type.md`)
 - [x] **[151：告别“红蓝函数染色”——`async effect`、`async { ... }` 块与 `.await` 的效应本质](./151-async-effects-without-function-coloring.md)** (`docs/algebraic-effect-and-delimited-continuation/async-algebraic-effect.md`)
-- [x] **[152：绝不留下孤儿任务——结构化并发（Structured Concurrency）、取消传播与作用域退出](./152-structured-concurrency-and-cancellation-safety.md)** (`docs/algebraic-effect-and-delimited-continuation/async-algebraic-effect.md`)
+- [x] **[152：不留下孤儿任务——结构化并发（Structured Concurrency）、取消传播与作用域退出](./152-structured-concurrency-and-cancellation-safety.md)** (`docs/algebraic-effect-and-delimited-continuation/async-algebraic-effect.md`)
 - [x] **[153：把真实睡眠替换成瞬间快进——用效应 Handler 为异步网络协议编写确定性仿真测试](./153-deterministic-simulation-testing-by-swapping-handlers.md)** (`docs/algebraic-effect-and-delimited-continuation/handling-capability.md`)
 - [x] **[154：深入效应 ABI 的发动机舱——证据传递（Evidence Passing）、池化栈帧与跨 C 边界限制](./154-under-the-hood-of-effect-abi-and-evidence-passing.md)** (`docs/algebraic-effect-and-delimited-continuation/effect-abi.md`)
 - [x] **[155：告别死锁与锁顺序难题——`atomic(vars) { ... }` 软件事务内存（STM）入门](./155-software-transactional-memory-atomic-blocks.md)** (`docs/concurrency/software-transactional-memory.md`)
-- [x] **[156：为什么事务里不能直接发网络包——STM 内部的纯度、重试（Retry）与效应隔离契约](./156-purity-and-effect-isolation-inside-stm-transactions.md)** (`docs/concurrency/software-transactional-memory.md`)
+- [x] **[156：为什么事务里禁止直接发网络包——STM 内部的纯度、重试（Retry）与效应隔离契约](./156-purity-and-effect-isolation-inside-stm-transactions.md)** (`docs/concurrency/software-transactional-memory.md`)
 - [x] **[157：在多提示符（Multi-Prompt）栈上精准导航——嵌套 Handler 的路由与标签隔离](./157-multi-prompt-stacks-and-scoped-handler-routing.md)** (`docs/algebraic-effect-and-delimited-continuation/multi-prompt-delimited-continuation.md`, `docs/type/rows.md`)
 - [x] **[158：当闭包捕获了效应 Handler——`%c` 环境限定、可达性与效应能力的安全传递](./158-capturing-effect-handlers-in-closures-safely.md)** (`docs/algebraic-effect-and-delimited-continuation/handling-capability.md`, `docs/functions/closure-environments.md`)
 - [x] **[159：第七卷里程碑（上）：从零实现一个支持协程挂起、超时取消与协作调度的异步执行器](./159-milestone-part1-custom-async-executor-with-effects.md)** (综合实战 141–158)
@@ -218,7 +218,7 @@
   - [x] **[167：跨模块与跨包边界的效应隐藏与接口封装](./167-encapsulating-effects-across-module-boundaries.md)**
   - [x] **[168：用 `verified` 契约验证效应 Handler 的状态不变量](./168-verifying-effect-handler-invariants.md)**
   - [x] **[169：对比 C++20 Coroutines、Rust Async 与 Flurry 代数效应的底层开销](./169-comparing-coroutines-async-and-flurry-effects.md)**
-  - [x] **[170：第七卷总结：控制流不再是语言写死的黑盒](./170-volume-7-retrospective-unified-control-flow.md)**
+  - [x] **[170：第七卷总结：控制流已非语言写死的黑盒](./170-volume-7-retrospective-unified-control-flow.md)**
 
 ---
 
@@ -228,7 +228,7 @@
 - [x] **[171：一份源码，跨越 CPU 与加速器——流水线投影（Pipeline Projection）总览](./171-pipeline-projection-overview.md)** (`docs/pipeline-projection/index.md`)
 - [x] **[172：声明一个 GPU / 设备 Kernel——投影属性、先行类型接口与主机/设备参数契约](./172-declaring-projected-kernels-and-type-interfaces.md)** (`docs/pipeline-projection/declarations-and-interfaces.md`)
 - [x] **[173：直接调用底层硬件指令——`expr'intrinsic(args).as(T)` 与输出类型安全契约](./173-hardware-intrinsics-and-typed-outputs.md)** (`docs/pipeline-projection/intrinsics.md`)
-- [x] **[174：为什么 Intrinsic 省略 `.as(T)` 默认是 `void`——拒绝隐式返回类型猜测](./174-why-intrinsics-require-explicit-as-output.md)** (`docs/pipeline-projection/intrinsics.md`)
+- [x] **[174：为什么 Intrinsic 省略 `.as(T)` 默认是 `void`——免作隐式返回类型猜测](./174-why-intrinsics-require-explicit-as-output.md)** (`docs/pipeline-projection/intrinsics.md`)
 - [x] **[175：把 SIMD 向量数据路径关进安全笼子——目标约束检查、Helper 闭包与内联汇编封装](./175-target-validation-simd-datapaths-and-assembly.md)** (`docs/pipeline-projection/target-validation-and-assembly.md`)
 - [x] **[176：宿主后端与设备产物交付——Pipeline 回调、受控句柄与缓存恢复](./176-host-backends-iir-handles-and-artifact-delivery.md)** (`docs/pipeline-projection/backends-and-artifacts.md`)
 - [x] **[177：管理大型多包工程——Package、Umbrella 聚合包与最小可见性边界](./177-packages-umbrellas-and-architecture-boundaries.md)** (`docs/code-organization/packages-and-umbrella.md`)
@@ -244,7 +244,7 @@
 - [x] **[187：构建可快速迭代的大型代码库——接口解耦、编译期计算边界与模块组织](./187-fine-grained-incremental-queries-and-cycle-recovery.md)** (`docs/code-organization/packages-and-umbrella.md`, `docs/code-organization/visibility.md`)
 - [x] **[188：零成本抽象的工程落点——高阶控制流、局部可变性与可预测的性能模型](./188-why-iir-preserves-high-level-structure-before-codegen.md)** (`docs/resource-management/runtime-purity.md`, `docs/functions/inline-and-quote.md`)
 - [x] **[189：高可靠位级协议工程——`BitVec` 代数、双向编解码与原位字段更新](./189-implementing-verified-bitvec-synthesis-with-fallback.md)** (`docs/program-synthesis/bitvec-algebra.md`, `docs/control-flow/pattern-matching/bitvec.md`)
-- [x] **[190–200：终极综合实战：用 Flurry 构建一个端到端的高性能异构流式信号处理系统（11 篇）**：
+- [x] **[190–200：全栈综合实战：用 Flurry 构建一个端到端的高性能异构流式信号处理系统（11 篇）**：
   - [x] **[190：系统架构设计：从硬件传感器采集、零拷贝缓冲到 SIMD/GPU 滤波内核](./190-capstone-architecture-heterogeneous-signal-system.md)**
   - [x] **[191：第一层（协议层）：用定宽 `enum` 与跨元素 `BitVec` 模式实现零拷贝帧解码](./191-capstone-layer1-zero-copy-frame-decoder.md)**
   - [x] **[192：第二层（内存层）：用可达性类型 `&reachability` 与内存视图构建无锁分片环形队列](./192-capstone-layer2-reachability-safe-sharded-queue.md)**

@@ -2,7 +2,7 @@
 
 在软件工程界，Bob Nystrom 那篇著名的《What Color is Your Function?（你的函数是什么颜色？）》道出了现代主流语言（JS、Python、Rust、C#）异步编程最深沉的痛：
 一旦你在语言里引入了 `async fn`（红色函数）与普通 `fn`（蓝色函数）的二元对立，你的整个代码库就会被劈成两半：
-1. **调用传染与生态割裂**：蓝色函数不能直接调红色函数；标准库的高阶函数 `map`、`filter` 或者 我们在第五卷刚写好的通用编解码器 `Encode`，被迫纠结到底是写成同步版还是 `async` 版；
+1. **调用传染与生态割裂**：蓝色函数禁止直接调红色函数；标准库的高阶函数 `map`、`filter` 或者 我们在第五卷刚写好的通用编解码器 `Encode`，被迫纠结到底是写成同步版还是 `async` 版；
 2. **执行模型僵化**：在常见的异步设计中，需要明确区分“何时发起异步操作”与“何时等待结果完成”，并避免将业务代码与单一全局执行器耦合。
 
 而在 Flurry 中，当你翻开 `docs/algebraic-effect-and-delimited-continuation/async-algebraic-effect.md` 时，你会发现一个令人豁然开朗的设计：
@@ -15,7 +15,7 @@
 
 ## 传统异步里的“串行假并发”与状态机割裂
 
-在很多传统异步写法里，新手想并发发起两个请求，往往会不小心写出这样的“伪并发”代码：
+在很多传统异步写法里，新手想并发发起两个请求，往往会偶有疏忽写出这样的“伪并发”代码：
 
 ```
 -- 💭 传统异步模型的常见问题背景：
@@ -38,7 +38,7 @@ async effect double(value: u32) -> u32;
 请仔细观察这行声明的语义契约（来自 `docs/algebraic-effect-and-delimited-continuation/async-algebraic-effect.md`）：
 1. **请求点交付 `Future` 并立即启动子工作**：
    虽然 `double` 声明的操作完成结果类型是 `u32`，但当你在代码中通过后缀 `#` 发起效应请求 **`let first = double(20u32)#;`** 时，Handler 的处理工作会被交给一个**异步子任务（Child Task）**。
-   请求点**在发出请求的那一刻就已经登记了子工作**，并立即拿到代表该子工作的 `Future` 对象继续往下走，**不需要等到 `.await` 才启动工作**。
+   请求点**在发出请求的那一刻就已经登记了子工作**，并立即拿到代表该子工作的 `Future` 对象继续往下走，**无需等到 `.await` 才启动工作**。
 2. **处理端使用 `async pattern => ...` 分支并接入 `.use(runtime)`**：
    在 `# { ... }` 处理块中，用 `async double(value) => ...` 声明该分支在子任务的执行栈上运行，并在外层通过 **`.use(runtime)`** 显式接入你选择的运行时实例（由该 `runtime` 封装并供应底层栈池与调度器）。
 3. **等待端使用后缀 `.await`**：
@@ -93,12 +93,12 @@ println("{}", total);
 
 ---
 
-## 当 `async effect` 遇上 `!Error` 错误行——正交组合，绝不搅成一锅粥
+## 当 `async effect` 遇上 `!Error` 错误行——正交组合，不搅成一锅粥
 
 如果异步子任务在执行过程中可能失败（比如远程校准计算遇到除零错误 `DivideErr.Zero`），在 Flurry 中会发生什么？
-错误会不会像某些语言的 `Promise.reject` 那样变成另一种破坏控制流的特殊异常信号？
+错误是否会像某些语言的 `Promise.reject` 那样变成另一种破坏控制流的特殊异常信号？
 
-**绝不会。** 在 Flurry 中，**异步效应（`async effect`）与错误行（`!Err`）是完全正交的**：
+**并非如此。** 在 Flurry 中，**异步效应（`async effect`）与错误行（`!Err`）是完全正交的**：
 - 当你声明 `async effect divide(numerator: u32, denominator: u32) -> !DivideErr u32;` 时，子任务的完成结果类型 `Y` 就是 `!DivideErr u32`；
 - 当你对 `pending` 调用 **`pending.await`** 时，`.await` 交付出来的就是一个普通的错误限定值 `!DivideErr u32`；
 - 随后，你直接用熟悉的 `!` 错误传播或 `completed! { .Zero => ... }` 错误消去语法处理它即可。
@@ -130,7 +130,7 @@ let value = (do {
 println("{}", value);
 ```
 
-运行结果输出 `0`。你看，异步等待（`.await`）只管把子任务算出来的 `!DivideErr u32` 交到你手上，错误处理依然走纯粹的 `!` 错误通道，两者井水不犯河水。
+运行结果输出 `0`。你看，异步等待（`.await`）只管把子任务算出来的 `!DivideErr u32` 交到你手上，错误处理依然走纯粹的 `!` 错误通道，两者各司其职而互无干犯。
 
 ---
 
@@ -138,11 +138,11 @@ println("{}", value);
 
 在使用 `async effect` 时，有两条核心编译期防线需要牢记：
 
-### 红线 1：删掉处理器分支上的 `async` 关键字，绝不等于“同步返回一个已完成 Future”
-有些同学在写单元测试 Mock 时可能会想：“既然我在测试里只是算个 `value * 2u32`，我能不能把 Handler 分支里的 `async double(value) => ...` 前面的 `async` 删掉，写成普通同步分支？”
+### 红线 1：删掉处理器分支上的 `async` 关键字，有别于“同步返回一个已完成 Future”
+有些同学在写单元测试 Mock 时可能会想：“既然我在测试里只是算个 `value * 2u32`，我能否把 Handler 分支里的 `async double(value) => ...` 前面的 `async` 删掉，写成普通同步分支？”
 
-**不行。** `docs/algebraic-effect-and-delimited-continuation/async-algebraic-effect.md` 明确指出：
-> **`async` 声明与 `async` 分支相对应……删去 `async` 不表示“自动构造已完成 `Future`”，而是入口类别不符合该声明。**
+**行之难通。** `docs/algebraic-effect-and-delimited-continuation/async-algebraic-effect.md` 明确指出：
+> **`async` 声明与 `async` 分支相对应……删去 `async` 不表示“自动构造已完成 `Future`”，而是入口类别违背该声明。**
 即使你在测试里只做简单计算，也仍须写 `async double(value) => value * 2u32`，以保留子工作归属与 `Future` 交付契约。
 
 ```flurry
@@ -153,16 +153,16 @@ fn bad_missing_async_arm() {
         let f = double(10u32)#;
         f.await
     }# {
-        -- ❌ 编译期直接拒绝。
+        -- ❌ 编译期直接报错。
         -- `double` 被声明为 `async effect`，请求点期望交付 Future 并登记子工作，
-        -- 处理分支缺少 `async` 修饰导致入口 ABI 类别与声明不匹配。
+        -- 处理分支缺少 `async` 修饰导致入口 ABI 类别与声明失配。
         double(value) => value * 2u32,
     }).use(runtime);
 }
 ```
 
-### 红线 2：不能默认复制一个只能消费一次（`Once`）的异步结果
-当 `first.await` 交付的结果类型 `Y` 是一个只允许消费一次的仿射资源（非 `Copy` 的拥有权对象）时，第一次 `.await` 就已经把结果的所有权移交给了调用者；此时如果你试图对同一个 `first` 再次 `.await`，或者试图复制其内部的等待 continuation，编译器会依据结果交付协议与仿射所有权规则直接拦截。
+### 红线 2：无法默认复制一个只能消费一次（`Once`）的异步结果
+当 `first.await` 交付的结果类型 `Y` 是一个只允许消费一次的仿射资源（并非 `Copy` 的拥有权对象）时，第一次 `.await` 就已经把结果的所有权移交给了调用者；此时如果你试图对同一个 `first` 再次 `.await`，或者试图复制其内部的等待 continuation，编译器会依据结果交付协议与仿射所有权规则直接拦截。
 
 ---
 

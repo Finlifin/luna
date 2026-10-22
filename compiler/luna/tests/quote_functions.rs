@@ -1738,3 +1738,168 @@ fn quote_trait_value_clauses_expand_selected_and_default_bodies() {
         assert_eq!(calls, ["run"]);
     }
 }
+
+#[test]
+fn quote_implementations_supply_ordinary_trait_callable_entries() {
+    for body in [
+        "Flag {}.as(Access).read()",
+        "invoke(Flag {})",
+        "let action = Flag.as(Access).read; action(Flag {})",
+    ] {
+        let source = format!(
+            "trait Access {{fn read(self)->bool;}}
+            struct Flag {{}}
+            quote fn identity(value:bool)->bool {{value}}
+            impl Access for Flag {{quote fn read(self)->bool {{identity(true)}}}}
+            fn invoke(value:T)->bool where T:-Access {{value.as(Access).read()}}
+            fn run()->bool {{{body}}}"
+        );
+        let (value, calls) = execute(&source, vec![]);
+        assert_eq!(value, comptime_interpretor::Value::Bool(true), "{body}");
+        assert!(
+            calls.iter().any(|name| name.ends_with("::callable")),
+            "{calls:?}"
+        );
+        assert!(!calls.iter().any(|name| name == "identity"), "{calls:?}");
+    }
+}
+
+#[test]
+fn quote_callable_adapters_preserve_generic_and_value_telescopes() {
+    let source = "struct Flag where enabled:bool {}
+        trait Read where outer:bool {
+            fn read(self,value:Flag<flag>)->bool where flag:bool;
+        }
+        struct Host where T {}
+        impl Read<true> for Host<T> where T {
+            quote fn read(self,value:Flag<flag>)->bool where flag:bool {flag}
+        }
+        fn forward(host:H)->bool where H:-Read<true> {
+            host.as(Read<true>).read(Flag<true>{})
+        }
+        fn run()->bool {forward(Host<bool>{})
+            and not Host<.char'builtin>{}.as(Read<true>).read<false>(Flag<false>{})}";
+    assert_eq!(
+        execute(source, vec![]).0,
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn quote_callable_adapters_preserve_public_defaults_and_single_evaluation() {
+    let source = "trait Select {fn choose(value:bool,.fallback:bool=value)->bool;}
+        struct Host {}
+        impl Select for Host {quote fn choose(input:bool,.other:bool=false)->bool {other}}
+        fn input()->bool {true}
+        fn run()->bool {Host.as(Select).choose(input())}";
+    let (value, calls) = execute(source, vec![]);
+    assert_eq!(value, comptime_interpretor::Value::Bool(true));
+    assert_eq!(
+        calls.iter().filter(|name| name.as_str() == "input").count(),
+        1
+    );
+}
+
+#[test]
+fn quote_callable_adapters_preserve_interface_contracts() {
+    let source = "trait Select where enabled:bool {
+        fn choose(value:bool)->result:bool where requires value == enabled, ensures result == enabled;
+    }
+    struct Switch {}
+    impl Select<true> for Switch {quote fn choose(value:bool)->bool {value}}
+    impl Select<false> for Switch {quote fn choose(value:bool)->bool {value}}
+    fn run()->bool {Switch.as(Select<true>).choose(true) and not Switch.as(Select<false>).choose(false)}";
+    assert_eq!(
+        execute(source, vec![]).0,
+        comptime_interpretor::Value::Bool(true)
+    );
+    for invalid in [
+        source.replace("choose(true)", "choose(false)"),
+        source.replace("->bool {value}", "->bool {not value}"),
+    ] {
+        let failure = compile(&invalid, Emit::Nir)
+            .err()
+            .expect("invalid contract accepted");
+        assert!(failure.contains("not proven"), "{failure}");
+    }
+}
+
+#[test]
+fn quote_callable_adapters_preserve_staged_inputs_and_effects() {
+    let source = "effect poll()->bool;
+        trait Select {fn choose(comptime enabled:bool,value:bool)->#poll bool;}
+        struct Host {}
+        impl Select for Host {
+            quote fn choose(comptime enabled:bool,value:bool)->#poll bool {
+                poll()#; if enabled {return value;} false
+            }
+        }
+        fn run()->bool {Host.as(Select).choose(true,true)# {poll()=>false,}}";
+    assert_eq!(
+        execute(&source.replace("quote fn choose", "fn choose"), vec![]).0,
+        comptime_interpretor::Value::Bool(true)
+    );
+    assert_eq!(
+        execute(source, vec![]).0,
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn quote_callable_reference_receivers_preserve_writes_and_public_defaults() {
+    let source = "trait Flip {fn flip(*self,.flag:bool=true)->bool;}
+        struct Flag {value:bool}
+        impl Flip for Flag {quote fn flip(*self,.replacement:bool=false)->bool {
+            self.value.* = replacement;self.value.*
+        }}
+        fn flip(value:*T)->bool where T :- Flip {value.as(Flip).flip()}
+        fn run()->bool {var value=Flag {value:false};flip(value.ref) and value.value}";
+    assert_eq!(
+        execute(source, vec![]).0,
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn quote_callable_cleanup_invalidates_external_observations() {
+    let source = "trait Retire {fn drop(*self);}
+        struct Watch {target:*bool}
+        impl Retire for Watch {quote fn drop(*self) {self.target.*.* = false;}}
+        fn change(p:*bool) {let watch=Watch {target:p};}
+        fn rejected(p:*bool)->result:bool where ensures result {
+            let before=p.*;change(p);before==p.*
+        }";
+    let failure = compile(source, Emit::Nir)
+        .err()
+        .expect("cleanup write must invalidate the observation");
+    assert!(failure.contains("postcondition"), "{failure}");
+}
+
+#[test]
+fn quote_callable_consumers_require_pointer_memory_contracts() {
+    for modifier in ["", "quote "] {
+        let source = format!(
+            "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            trait Consume {{fn consume(self);}}
+            struct Held {{target:*bool}}
+            impl Retire for Held {{{modifier}fn drop(*self) {{self.target.*.* = true;}}}}
+            impl Consume for Held {{{modifier}fn consume(self) {{}}}}
+            fn run()->bool {{var flag=false;Held {{target:flag.ref}}.as(Consume).consume();flag}}"
+        );
+        let Artifact::Nir(package) = compile(&source, Emit::Nir).unwrap() else {
+            panic!("wrong stage")
+        };
+        let failure = luna::execution::interpret_with_protocols(
+            &package,
+            "run",
+            "Duplicate",
+            "Retire",
+            100_000,
+        )
+        .unwrap_err();
+        assert!(
+            failure.contains("pointer dependencies requires a memory contract"),
+            "{failure}"
+        );
+    }
+}

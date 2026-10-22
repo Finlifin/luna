@@ -39,6 +39,11 @@ pub fn validate(value: &Term, domain: &Term, fuel: &mut usize) -> Result<(), Err
     value.check_scope(&[]).map_err(|_| {
         Error::Invalid("captured comptime value contains an unbound invocation slot")
     })?;
+    if matches!(value, Term::ClosureContextValue(_)) != matches!(domain, Term::ClosureContextType) {
+        return Err(Error::Invalid(
+            "captured closure context disagrees with its declared domain",
+        ));
+    }
     if let (Some(actual), Term::Primitive(expected)) = (value.scalar_index_domain(), domain) {
         if let (Term::Integer(value), Some((signed, width))) =
             (value, expected.fixed_integer_layout())

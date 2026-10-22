@@ -114,9 +114,11 @@ impl Invocation {
         if matches.next().is_some() || function.phase != FunctionPhase::Comptime || !function.pure {
             return Err("memoization requires one ordinary pure comptime function".into());
         }
+        let mut binder_fuel = budget.steps;
+        let binders = package.declaration_binders(&function.type_parameters, &mut binder_fuel)?;
         let signature = function
             .signature
-            .instantiate_types(&function.type_parameters, &arguments)
+            .instantiate_parameters(&binders, &arguments)
             .map_err(|e| e.to_string())?;
         let Term::Function { parameters, result } = &signature else {
             return Err("memoized function signature is invalid".into());
@@ -168,7 +170,7 @@ impl Invocation {
         let frames = vec![parameters.iter().map(|p| p.sort).collect()];
         for predicate in requirements {
             let predicate = predicate
-                .instantiate_types(&function.type_parameters, &arguments)
+                .instantiate_parameters(&binders, &arguments)
                 .map_err(|e| e.to_string())?;
             let mut open = false;
             map_requirement(
@@ -647,8 +649,9 @@ fn prepare_bound_entry<'a>(
     let mut fuel = context.remaining();
     let before = fuel;
     let result: Result<_, String> = (|| {
+        let binders = package.declaration_binders(&function.type_parameters, &mut fuel)?;
         let mut template = function
-            .instantiate_types(&function.type_parameters, arguments)
+            .instantiate_parameters(&binders, arguments)
             .map_err(|e| e.to_string())?;
         template.type_parameters.clear();
         let Term::Function { parameters, .. } = template.signature.callable_signature() else {

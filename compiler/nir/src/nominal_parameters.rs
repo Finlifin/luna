@@ -103,37 +103,49 @@ pub fn validate_completed_with_layouts(
     domains: &[Term],
     arguments: &[Term],
     fuel: &mut usize,
+    layout: impl FnMut(&Term, Option<u32>, &mut usize) -> Result<Vec<Term>, AdmissionError>,
+) -> Result<(), AdmissionError> {
+    validate_with_evidence(parameters, domains, arguments, fuel, layout, |_, _, _| {
+        false
+    })
+}
+
+/// Symbolic value leaves require independent declaration-domain evidence.
+pub fn validate_with_evidence(
+    parameters: &[DeclarationId],
+    domains: &[Term],
+    arguments: &[Term],
+    fuel: &mut usize,
     mut layout: impl FnMut(&Term, Option<u32>, &mut usize) -> Result<Vec<Term>, AdmissionError>,
+    mut declared: impl FnMut(&Term, &Term, &mut usize) -> bool,
 ) -> Result<(), AdmissionError> {
     let parameters = binders(parameters, domains).map_err(|e| e.to_string())?;
     if parameters.len() != arguments.len() {
         return Err("nominal argument count mismatch".into());
     }
-    for (index, (parameter, argument)) in parameters.iter().zip(arguments).enumerate() {
+    // This boundary validates already supplied values, not source evaluation
+    // order. Captured parent inputs may occupy a suffix after own inputs whose
+    // domains use them. Check the whole input vector before substituting it.
+    for (parameter, argument) in parameters.iter().zip(arguments) {
         crate::type_computations::charge_term(argument, fuel).map_err(AdmissionError::from)?;
         argument.check_scope(&[]).map_err(|e| e.to_string())?;
         if parameter.sort != argument.sort() {
             return Err("nominal argument sort mismatch".into());
         }
+    }
+    for (index, (parameter, argument)) in parameters.iter().zip(arguments).enumerate() {
         if parameter.sort == Sort::Type {
             continue;
         }
         let domain = crate::type_computations::instantiate_parameters_bounded(
             &domains[index],
-            &parameters[..index],
-            &arguments[..index],
+            &parameters,
+            arguments,
             &[],
             fuel,
         )
         .map_err(AdmissionError::from)?;
-        validate_value(
-            argument,
-            &domain,
-            fuel,
-            &mut layout,
-            &mut |_, _, _| false,
-            0,
-        )?;
+        validate_value(argument, &domain, fuel, &mut layout, &mut declared, 0)?;
     }
     Ok(())
 }
@@ -231,6 +243,19 @@ fn validate_value(
         return Ok(());
     }
     if *domain == Term::Primitive(Primitive::Type) && argument.sort() == Sort::Type {
+        return Ok(());
+    }
+    if let (Term::ClosureContextValue(fields), Term::ClosureContextType) = (argument, domain) {
+        for field in fields {
+            validate_value(
+                field,
+                &Term::Primitive(Primitive::Type),
+                fuel,
+                layout,
+                declared,
+                depth + 1,
+            )?;
+        }
         return Ok(());
     }
     if let (Term::Integer(value), Term::Primitive(primitive)) = (argument, domain) {

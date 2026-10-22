@@ -2,9 +2,9 @@
 
 在 [上一篇 (056)](./056-assumes-runtime-checks-and-fact-invalidation.md) 中，我们学会了在函数体内部用 `assumes expr;` 语句建立受检事实，并见证了当内存被修改时，编译器如何通过版本机制自动将过期的旧事实作废。
 
-但是，如果一个系统有上百个函数，难道每次调用 `ring_buffer.advance_cursor(step)` 或 `quotient(a, b)` 时，调用者和实现者都要翻开对方的函数体源码，一行行去猜“传 `0` 进去会不会除零崩掉？”、“函数返回的新游标到底保不保证小于缓冲区容量 `cap`？”吗？
+但是，如果一个系统有上百个函数，难道每次调用 `ring_buffer.advance_cursor(step)` 或 `quotient(a, b)` 时，调用者和实现者都要翻开对方的函数体源码，一行行去猜“传 `0` 进去是否会除零崩掉？”、“函数返回的新游标到底保不保证小于缓冲区容量 `cap`？”吗？
 
-当然不。真正的模块化验证，必须**在函数签名边界立下军令状（Function Contracts）**，让调用方不必展开被调函数的实现就能完成静态检查，也让实现方不必知道谁会调用自己就能独立验证函数体。
+当然不。真正的模块化验证，必须**在函数签名边界立下军令状（Function Contracts）**，让调用方无须展开被调函数的实现就能完成静态检查，也让实现方无须知道谁会调用自己就能独立验证函数体。
 
 这一篇，我们就来解锁 Flurry 函数契约系统的两大基石：**`where requires` 前置条件** 与 **`ensures` 后置条件**（详见 `docs/functions/contracts-and-effects.md` 与 `docs/resource-management/contracts-and-verification.md`）。
 
@@ -13,7 +13,7 @@
 ## 一、 把前提藏在肚子里的“盲盒函数”
 
 假设我们在编写环形缓冲区（`RingBuffer`）的游标步进计算与平均吞吐率计算函数 `quotient(numerator: u32, denominator: u32) -> u32`。
-如果我们不写函数签名契约，而是把 `assumes` 藏在函数体里面：
+如果我们省略函数签名契约，而是把 `assumes` 藏在函数体里面：
 
 ```flurry
 use std.prelude.*;
@@ -28,7 +28,7 @@ fn compute_rate(bytes: u32, elapsed_sec: u32) -> u32 {
     -- 问题 1：调用者在调用处哪怕已经检查过 elapsed_sec > 0，
     --        因为 quotient 的签名没有声明 requires，每次进去还是得做检查。
     -- 问题 2：如果调用者忘了检查、直接传了 0 进来，错误直到深入 quotient 内部才暴露。
-    -- 问题 3：调用者拿到的返回值只知道是个 u32，编译器根本不知道它必然 <= bytes。
+    -- 问题 3：调用者拿到的返回值只知道是个 u32，编译器根本无从得知它必然 <= bytes。
     quotient(bytes, elapsed_sec)
 }
 ```
@@ -37,8 +37,8 @@ fn compute_rate(bytes: u32, elapsed_sec: u32) -> u32 {
 
 ```text
   [ 调用方 compute_rate ]                 [ 被调方 quotient ]
-   我手里其实知道 elapsed_sec == 3 != 0，      我不知道外面传了啥，只能自己 assumes denominator != 0；
-   但我不知道 quotient 需要这个事实；       我其实算出的结果一定 <= numerator，
+   我手里其实知道 elapsed_sec == 3 != 0，      我无从得知外面传了啥，只能自己 assumes denominator != 0；
+   但我无从得知 quotient 需要这个事实；       我其实算出的结果一定 <= numerator，
    拿到返回值后，我也完全丢失了范围信息。      但签名只写了 -> u32，白白扔掉了这条宝贵性质。
                   │                                         ▲
                   └────────── 只有干巴巴的 fn(u32, u32) -> u32 ──┘
@@ -103,7 +103,7 @@ test {
  │ 1. 【调用方的义务】               │               │ 2. 【实现方的权利】               │
  │    必须在调用发生前证明或受检建立 │ ──requires──► │    进入函数体时，直接将           │
  │    `denominator != 0`             │               │    `denominator != 0` 当作已知真  │
- │    (若未满足，在调用点直接拒绝!)  │               │    因此 `numerator / denominator` │
+ │    (若未满足，在调用点直接报错!)  │               │    因此 `numerator / denominator` │
  │                                   │               │    无需再次检查除零               │
  │                                   │               │                                   │
  │ 4. 【调用方的收获】               │               │ 3. 【实现方的义务】               │
@@ -113,24 +113,24 @@ test {
                                                      └───────────────────────────────────┘
 ```
 
-> **🔍 语法与语义小贴士：具名结果 `-> result: T` 不是局部变量。**
+> **🔍 语法与语义小贴士：具名结果 `-> result: T` 并非局部变量。**
 > 看到 `fn quotient(...) -> result: u32` 了吗？
 > 1. 这里的 `result:` 是专门为结果规格（如 `ensures result <= numerator`）提供的**返回结果绑定名**。
-> 2. **它不会在函数体入口自动创建一个未初始化的局部变量 `var result`。** 在函数体里，你依然像往常一样用尾表达式 `numerator / denominator` 或 `return expr;` 返回结果，编译器会自动把所有正常出口交付的值与规格中的 `result` 对应起来。
+> 2. **它免于在函数体入口自动创建一个未初始化的局部变量 `var result`。** 在函数体里，你依然像往常一样用尾表达式 `numerator / denominator` 或 `return expr;` 返回结果，编译器会自动把所有正常出口交付的值与规格中的 `result` 对应起来。
 > 3. **多出口统一核验**：像 `next_cursor` 里既有 `return 0usize while stepped == cap;` 提前返回，又有末尾的 `stepped` 返回，**每一条正常返回路径都必须满足 `ensures next < cap`**。
 
 ```flurry
--- ❌ 编译期直接拒绝：调用方没有证明或受检建立 denominator != 0，违反 requires 契约。
+-- ❌ 编译期直接报错：调用方没有证明或受检建立 denominator != 0，违反 requires 契约。
 fn bad_caller(a: u32, b: u32) -> u32 {
     quotient(a, b)
 }
 
--- ❌ 编译期直接拒绝：提前 return 分支返回了 cap，违反了 ensures next < cap 的后置承诺。
+-- ❌ 编译期直接报错：提前 return 分支返回了 cap，违反了 ensures next < cap 的后置承诺。
 fn bad_next_cursor(cursor: usize, cap: usize) -> next: usize
 where requires cap > 0usize and cursor < cap,
       ensures next < cap
 {
-    return cap while cursor == 0usize; -- ❌ 此时 next == cap，不满足 next < cap。
+    return cap while cursor == 0usize; -- ❌ 此时 next == cap，违背 next < cap。
     cursor
 }
 ```
@@ -211,9 +211,9 @@ test {
 ### 什么时候用 `requires`？什么时候用 `!Err` 错误返回？
 
 很多初学者会问：“既然除零有两种写法——一种是 `where requires denominator != 0`，另一种是返回 `!DivideErr u32`，我们在工程里该怎么选？”
-规范（`docs/functions/contracts-and-effects.md`）给出了极其清晰的工程准则：
+规范（`docs/functions/contracts-and-effects.md`）给出了清晰明确的工程准则：
 - **选 `where requires`（契约前置条件）**：当违反该条件属于**调用方逻辑 Bug**（例如传给内部环形缓冲区的游标越界、传入的容量为 0），且调用方完全有能力在调用前通过静态不变量或 `assumes` 消除它，从而让被调函数内部做到**零分支检查开销**。
-- **选 `!Err T`（错误限定结果）**：当失败来自**不可控的外部输入或预期内的可恢复异常**（例如用户刚从命令行输入的除数可能是 0，或者串口收到了噪声字节），希望调用者用 `!` 传播或用 `! { ... }` 分支优雅恢复。
+- **选 `!Err T`（错误限定结果）**：当失败来自**失控的外部输入或预期内的可恢复异常**（例如用户刚从命令行输入的除数可能是 0，或者串口收到了噪声字节），希望调用者用 `!` 传播或用 `! { ... }` 分支优雅恢复。
 
 ---
 
@@ -231,7 +231,7 @@ test {
 ### 下一篇预告
 
 仔细看我们在总结表格里写的一句话：
-> **“`ensures` 描述的是函数在正常返回路径上交付的保证，但它并不自动表示函数一定会终止（Terminate）。”**
+> **“`ensures` 描述的是函数在正常返回路径上交付的保证，但它并未自动表示函数一定会终止（Terminate）。”**
 
 什么意思？假设有人写了一个递归函数：
 ```flurry
@@ -241,7 +241,7 @@ where ensures result == 0u32
     bad_countdown(n) -- 无限原地递归。
 }
 ```
-如果只看“一旦返回，返回值一定等于 0”，这个死循环函数在部分正确性（Partial Correctness）下竟然是成立的——因为它永远不会返回，所以永远不会返回一个不等于 0 的值。
+如果只看“一旦返回，返回值一定等于 0”，这个死循环函数在部分正确性（Partial Correctness）下实际上是成立的——因为它永免返回，所以永免返回一个有别于 0 的值。
 但在 Flurry 中，如果把这种不会停下来的函数放进编译期计算、运行时默认参数（要求 `P3` 稳定且有限完成）、或者高可信的 `verified fn` 里，就会导致严重错误。
 
 **我们怎样向编译器给出严格的数学证明，证明一个递归函数或 `while` 循环无论如何都一定会在有限步内停下来？**

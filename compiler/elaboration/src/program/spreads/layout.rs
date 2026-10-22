@@ -11,6 +11,66 @@ enum PreservedInput {
 }
 
 impl Checker<'_, '_> {
+    pub(in crate::program) fn spread_input_packet_contexts(
+        &mut self,
+        args: &[Arg<'_>],
+        types: &[crate::calls::InputContext],
+        span: Span,
+    ) -> Result<(Vec<Option<Term>>, Vec<Option<crate::calls::InputContext>>), Error> {
+        self.spread_input_packet_contexts_with_widths(args, types, span, &BTreeMap::new())
+    }
+
+    pub(in crate::program) fn checked_packet_widths(
+        &self,
+        packets: &BTreeMap<usize, n::Expr>,
+        span: Span,
+    ) -> Result<BTreeMap<usize, usize>, Error> {
+        let mut widths = BTreeMap::new();
+        for (index, packet) in packets {
+            if let Some(width) = self.tuple_width(&packet.ty, span)? {
+                widths.insert(*index, width);
+            }
+        }
+        Ok(widths)
+    }
+
+    pub(in crate::program) fn spread_input_packet_contexts_with_widths(
+        &mut self,
+        args: &[Arg<'_>],
+        types: &[crate::calls::InputContext],
+        span: Span,
+        widths: &BTreeMap<usize, usize>,
+    ) -> Result<(Vec<Option<Term>>, Vec<Option<crate::calls::InputContext>>), Error> {
+        use crate::calls::InputContext as C;
+        let mut complete = Vec::new();
+        let mut partial = Vec::new();
+        for fields in self.spread_packet_layout_with_widths(args, types, span, widths)? {
+            let Some(fields) = fields else {
+                complete.push(None);
+                partial.push(None);
+                continue;
+            };
+            let known = fields
+                .iter()
+                .map(|field| match field {
+                    C::Known(ty) => Some(ty.clone()),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>();
+            if let Some(fields) = known {
+                complete.push(Some(self.tuple_value_type(fields, span)?));
+                partial.push(None);
+            } else {
+                complete.push(None);
+                partial.push(Some(match self.protocols.tuple {
+                    Some(head) => C::NormalTuple { head, fields },
+                    None => C::Tuple(fields),
+                }));
+            }
+        }
+        Ok((complete, partial))
+    }
+
     // Keep a partial structural context when only some packet domains are
     // known. Inference state stays outside Term and never enters typed NIR.
     pub(in crate::program) fn spread_partial_packet_contexts(
@@ -20,34 +80,15 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<(Vec<Option<Term>>, Vec<Option<crate::calls::InputContext>>), Error> {
         use crate::calls::InputContext as C;
-        let mut complete = Vec::new();
-        let mut partial = Vec::new();
-        for fields in self.spread_packet_layout(args, types, span)? {
-            let Some(fields) = fields else {
-                complete.push(None);
-                partial.push(None);
-                continue;
-            };
-            if fields.iter().all(Option::is_some) {
-                complete.push(Some(self.tuple_value_type(
-                    fields.into_iter().map(Option::unwrap).collect(),
-                    span,
-                )?));
-                partial.push(None);
-            } else {
-                let fields = fields
-                    .into_iter()
-                    .map(|ty| ty.map_or(C::Unknown, C::Known))
-                    .collect();
-                let context = match self.protocols.tuple {
-                    Some(head) => C::NormalTuple { head, fields },
-                    None => C::Tuple(fields),
-                };
-                complete.push(None);
-                partial.push(Some(context));
-            }
-        }
-        Ok((complete, partial))
+        self.spread_input_packet_contexts(
+            args,
+            &types
+                .iter()
+                .cloned()
+                .map(|ty| ty.map_or(C::Unknown, C::Known))
+                .collect::<Vec<_>>(),
+            span,
+        )
     }
 
     pub(in crate::program) fn spread_packet_contexts(
@@ -819,7 +860,7 @@ impl Checker<'_, '_> {
         Ok(width)
     }
 
-    fn tuple_width(&self, ty: &Term, span: Span) -> Result<Option<usize>, Error> {
+    pub(super) fn tuple_width(&self, ty: &Term, span: Span) -> Result<Option<usize>, Error> {
         Ok(match self.structural_type(ty, span)? {
             Term::Tuple(fields) => Some(fields.len()),
             _ => None,

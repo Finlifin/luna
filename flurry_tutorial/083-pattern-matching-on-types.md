@@ -14,7 +14,7 @@
 
 假设我们要编写一个编译期函数 `word_array_length(T: Type)`：当传入的类型 `T` 是 `Array<u32, n>` 时，返回 `n * 100`；当传入的是其他元素类型的 `Array<Element, n>` 时，返回 `n`。
 
-如果直接沿用普通值模式的写法而不加区分地写 `Array<u32, length>`，就会产生语法歧义：
+如果直接沿用普通值模式的写法而未作区分地写 `Array<u32, length>`，就会产生语法歧义：
 
 ```
   [ 模式 Array<u32, length> 中的名字解析问题 ]
@@ -90,7 +90,7 @@ test {
     assumes word_array_length(Array<u32, 4>) == 400;
     -- 命中第 2 分支 Array<Element, length>：返回 8
     assumes word_array_length(Array<u8, 8>) == 8;
-    -- 非数组类型命中兜底分支 _：返回 0
+    -- 并非数组类型命中兜底分支 _：返回 0
     assumes word_array_length(u32) == 0;
 
     -- 动态对比外层参数 Expected：
@@ -100,7 +100,7 @@ test {
 ```
 
 > **说明：为什么 `'Expected` 不会遮蔽外层参数？**
-> 单引号 `'Expected` 指示编译器不要创建名为 `Expected` 的新模式变量，而是查找外层作用域中参数 `Expected: Type` 的值（例如第二次调用时的 `u32`），并检验被匹配数组的第一个类型参数是否与之相等。因此 `array_length_of(Array<u16, 6>, u32)` 会跳过第一分支并返回 `0`。
+> 单引号 `'Expected` 指示编译器切勿创建名为 `Expected` 的新模式变量，而是查找外层作用域中参数 `Expected: Type` 的值（例如第二次调用时的 `u32`），并检验被匹配数组的第一个类型参数是否与之相等。因此 `array_length_of(Array<u16, 6>, u32)` 会跳过第一分支并返回 `0`。
 
 ---
 
@@ -174,8 +174,8 @@ test {
 
 在使用类型模式匹配时，需要注意第 068 篇介绍过的语义边界：**类型模式 `<...>` 匹配的是保留下来的 Normal-Form 构造器头（如 `Array<...>`、`Tuple<...>`、`Box<...>`、`Identity<...>`）**。
 
-1. **普通圆括号函数不保留构造器头**：如果定义了一个普通圆括号函数 `pure comptime fn StorageFor(T: Type) -> Type { u32 }`，调用 `StorageFor(bool)` 求值后直接得到 `u32`，不会保留 `StorageFor` 调用头，因此不能通过模式匹配从 `u32` 反推 `bool`。
-2. **外层 Normal-Form 头不会自动展开**：如果把 `Box<bool, true>` 包装进 `Identity<Box<bool, true>>`，由于 `Identity<...>` 是独立的 Normal-Form 头，它不会自动剥离为 `Box<bool, true>`：
+1. **普通圆括号函数不保留构造器头**：如果定义了一个普通圆括号函数 `pure comptime fn StorageFor(T: Type) -> Type { u32 }`，调用 `StorageFor(bool)` 求值后直接得到 `u32`，不会保留 `StorageFor` 调用头，因此无法经由模式匹配从 `u32` 反推 `bool`。
+2. **外层 Normal-Form 头免于自动展开**：如果把 `Box<bool, true>` 包装进 `Identity<Box<bool, true>>`，由于 `Identity<...>` 是独立的 Normal-Form 头，它免于自动剥离为 `Box<bool, true>`：
 
 ```flurry
 pure comptime fn Identity<T: Type> -> Type {
@@ -183,16 +183,16 @@ pure comptime fn Identity<T: Type> -> Type {
 }
 
 test {
-    -- Identity<Box<bool, true>> 的最外层头是 Identity，不是 Box
-    -- 因此 unbox_bool 会落入 _ 分支返回 false，除非显式匹配 Identity<Box<...>>
+    -- Identity<Box<bool, true>> 的最外层头是 Identity，并非 Box
+    -- 因此 unbox_bool 会落入 _ 分支返回 false，除并非显式匹配 Identity<Box<...>>
     assumes not unbox_bool(Identity<Box<bool, true>>);
 }
 ```
 
-此外，如果在类型模式中第 2 槽位的模式与第 1 槽位确定的类型域不一致，编译期会直接报错：
+此外，如果在类型模式中第 2 槽位的模式与第 1 槽位确定的类型域存在分歧，编译期会直接报错：
 
 ```flurry
--- ❌ 编译期拒绝：当第 1 槽位已限定为 'bool 时，第 2 槽位属于 bool 域，不能使用整数模式 123
+-- ❌ 编译期报错：当第 1 槽位已限定为 'bool 时，第 2 槽位属于 bool 域，无法使用整数模式 123
 pure comptime fn invalid_dependent_pattern(B: Type) -> bool {
     B match {
         Box<'bool, 123> => true,
@@ -223,6 +223,6 @@ pure comptime fn invalid_dependent_pattern(B: Type) -> bool {
 - `0 <= index and index + 1 < length`（编译期整数线性不等式）；
 - `T match { Array<'u32, length> => ... }`（类型模式匹配）。
 
-当函数签名中带有 `where requires ...` 子句时，编译器如何在定义阶段对尚未代入具体数值的符号参数进行静态推理？为什么“定义期未能证出某条约束恒成立”不等于“证明了该约束恒为假”？
+当函数签名中带有 `where requires ...` 子句时，编译器如何在定义阶段对尚未代入具体数值的符号参数进行静态推理？为什么“定义期未能证出某条约束恒成立”有别于“证明了该约束恒为假”？
 
 下一篇 **《Flurry 演进手记 (084)：初识命题类型约束（PTC）——定义期符号推理与约束检验》**，我们将介绍 Flurry 的命题类型约束机制。

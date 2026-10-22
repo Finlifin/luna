@@ -1,4 +1,4 @@
-# Flurry 演进手记 (194)：终极实战第四层（元编程层）：用 2LTT 与 CMTT 在编译期根据滤波器阶数生成展开的卷积代码
+# Flurry 演进手记 (194)：综合实战第四层（元编程层）：用 2LTT 与 CMTT 在编译期根据滤波器阶数生成展开的卷积代码
 
 在前面三篇手记中，我们的 **Orion 异构流式信号处理引擎** 已经打通了底层数据通路：
 - **Layer 1（协议层）**：用跨元素 `BitVec` 枚举完成了零拷贝电报帧解码；
@@ -51,7 +51,7 @@ $$y[\text{idx}] = \sum_{k=0}^{K-1} h[k] \cdot x[\text{idx} - k]$$
 很多刚接触模态元编程的开发者，在写编译期展开时容易写出这样的“双孔分支引号”：
 `'(if cond { ~<branch_a> } else { ~<branch_b> })` 或者在单次引号里同时把 `~<acc>` 填进两个孔里。
 请记住 `docs/cmtt/program-construction.md` 中的核心规则：
-> **永远在 `comptime` 宿主控制流中先做分支判断，再用单孔引号（Single-Hole Quote）扩展前一步的 `acc_code`，绝不要把已经构造好的代码片段在同一个引号里重复拼接两次，也绝不要指望后端优化器替你裁剪死分支代码。**
+> **永远在 `comptime` 宿主控制流中先做分支判断，再用单孔引号（Single-Hole Quote）扩展前一步的 `acc_code`，切勿将已经构造好的代码片段在同一个引号里重复拼接两次，也切勿指望后端优化器替你裁剪死分支代码。**
 
 ```
 +-----------------------------------------------------------------------------+
@@ -78,7 +78,7 @@ $$y[\text{idx}] = \sum_{k=0}^{K-1} h[k] \cdot x[\text{idx} - k]$$
 
 让我们写出 Orion Layer 4 的核心编译期生成器 `build_sparse_fir_kernel`。
 它接收窗口大小 `n` 和编译期已知的抽头系数数组 `taps: Array<f32, k>`，在编译期遍历每一个抽头：
-- 如果 `coeff == 0.0`，编译期直接 `continue`，连一个加法节点都不生成；
+- 如果 `coeff == 0.0`，编译期直接 `continue`，连一个加法节点都免于生成；
 - 如果 `coeff == 1.0`，编译期省去乘法，只生成 `+ samples[idx - tap]`；
 - 否则，生成标准的乘累加项 `+ samples[idx - tap] * coeff`。
 
@@ -101,7 +101,7 @@ where
 
         -- 在编译期（Stage U1）直接裁剪掉零系数与单位系数。
         if coeff == 0.0 {
-            -- 稀疏零抽头：什么都不生成。
+            -- 稀疏零抽头：什么都免于生成。
         } else if coeff == 1.0 {
             let previous = acc_code;
             acc_code = '(~<previous> + samples[idx - tap_offset]);
@@ -164,7 +164,7 @@ where
 而在 Flurry 的 CMTT 中，上下文 `< samples: Array<f32, 64>, idx: usize |- f32 >` 是类型签名的一部分。如果拼接点漏传了 `idx`，或者传错了类型，编译器会在拼接点静态拦截：
 
 ```flurry
--- ❌ 拒绝例：拼接开放代码盒时遗漏了上下文要求的自由变量 `idx`
+-- ❌ 负例：拼接开放代码盒时遗漏了上下文要求的自由变量 `idx`
 pure fn broken_fir_eval(window: Array<f32, 64>) -> f32 {
     const fir_code = build_sparse_fir_kernel(64, ORION_HALFBAND_TAPS);
 

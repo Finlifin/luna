@@ -53,10 +53,10 @@ impl Describe for Sample<i32> {
 ```
 
 有两条非常重要但容易被忽略的细节：
-1. **附加的 `requires` 约束或重复类型变量只决定“是否适用”，不增加结构精度**：
-   例如，`impl Classify for Pair<T, T> where T: Type` 与 `impl Classify for Pair<A, B> where A: Type, B: Type` 的实现头在第一层都是两个未定泛型槽 `Pair<◇, ◇>`，因此它们的**结构精度相同（都是 1）**。写成 `Pair<T, T>` 只是多了一个 `A == B` 的适用性前提，并不会让它比 `Pair<A, B>` 结构精度更高。
-2. **必须等待参数类型揭晓，绝不提前抢跑选用宽泛实现**：
-   如果在某个泛型调用点中，变量 `item` 的类型暂时是 `Sample<?M>`（其中 `?M` 稍后由兄弟参数确定为 `i32`），即使宽泛的 `impl Describe for Sample<T>` 已经能匹配任何 `Sample<?M>`，类型检查器也**绝不会抢先锁定宽泛实现**，而是等待 `?M` 确定为 `i32` 后，准确选中结构精度更高的 `impl Describe for Sample<i32>`。
+1. **附加的 `requires` 约束或重复类型变量只决定“是否适用”，免增结构精度**：
+   例如，`impl Classify for Pair<T, T> where T: Type` 与 `impl Classify for Pair<A, B> where A: Type, B: Type` 的实现头在第一层都是两个未定泛型槽 `Pair<◇, ◇>`，因此它们的**结构精度相同（都是 1）**。写成 `Pair<T, T>` 只是多了一个 `A == B` 的适用性前提，并未让它比 `Pair<A, B>` 结构精度更高。
+2. **必须等待参数类型揭晓，不提前抢跑选用宽泛实现**：
+   如果在某个泛型调用点中，变量 `item` 的类型暂时是 `Sample<?M>`（其中 `?M` 稍后由兄弟参数确定为 `i32`），即使宽泛的 `impl Describe for Sample<T>` 已经能匹配任何 `Sample<?M>`，类型检查器也**不会抢先锁定宽泛实现**，而是等待 `?M` 确定为 `i32` 后，准确选中结构精度更高的 `impl Describe for Sample<i32>`。
 
 ```flurry
 test specificity_selection {
@@ -75,8 +75,8 @@ test specificity_selection {
 ## 二、 编译期显式错误与候选筛选的边界
 
 在利用 `comptime` 编写条件特化逻辑时，需要注意区分：
-- **Trait 的 `where requires` 子句**：用于声明某个 `impl` 的适用前提。当 `requires` 不满足时，该 `impl` 候选被安全排除，继续选择其他适用候选；
-- **显式调用的 `meta.compilation.err(...)`**：当程序员在已选定执行的 `comptime` 块中显式调用 `meta.compilation.err("...")` 时，它代表一个确定性的编译期报错，不会被当成“某个候选不适用”而静默忽略：
+- **Trait 的 `where requires` 子句**：用于声明某个 `impl` 的适用前提。当 `requires` 违背时，该 `impl` 候选被安全排除，继续选择其他适用候选；
+- **显式调用的 `meta.compilation.err(...)`**：当程序员在已选定执行的 `comptime` 块中显式调用 `meta.compilation.err("...")` 时，它代表一个确定性的编译期报错，免遭当成“某个候选无从适用”而静默忽略：
 
 ```flurry
 const FAIL: i32 = comptime {
@@ -87,12 +87,12 @@ const FAIL: i32 = comptime {
 
 ---
 
-## 三、 拒绝例：同精度重叠冲突与消歧方法
+## 三、 负例：同精度重叠冲突与消歧方法
 
 如果两个 `impl` 都能匹配同一个目标类型，且它们的结构精度分不出高下，会发生什么？
-Flurry 绝不会按“谁写在前面就选谁”来掩盖冲突，而是直接在编译期报告重叠或二义性错误。
+Flurry 免按“谁写在前面就选谁”来掩盖冲突，而是直接在编译期报告重叠或二义性错误。
 
-### 拒绝例 1：`Pair<T, i32>` 与 `Pair<i32, U>` 的对称重叠冲突
+### 负例 1：`Pair<T, i32>` 与 `Pair<i32, U>` 的对称重叠冲突
 
 ```flurry
 trait Merge {
@@ -123,7 +123,7 @@ where U: Type
 }
 
 fn trigger_ambiguity(p: Pair<i32, i32>) -> i32 {
-    -- ❌ 编译期拒绝：对于 Pair<i32, i32>，候选 A 与候选 B 均适用且结构精度相同，存在二义性冲突。
+    -- ❌ 编译期报错：对于 Pair<i32, i32>，候选 A 与候选 B 均适用且结构精度相同，存在二义性冲突。
     p.select()
 }
 ```
@@ -151,6 +151,6 @@ fn trigger_ambiguity(p: Pair<i32, i32>) -> i32 {
 
 在前面几篇中，我们多次用到了 `pure comptime fn Identity<T: Type>() -> Type` 和 `pure comptime fn SelectType(wide: bool) -> Type`。
 - 为什么带尖括号 `<...>` 的 `pure comptime fn Identity<T: Type> -> Type` 定义的是具有独立类型身份的 **Normal-Form 类型构造头**（使得 `Identity<i32> != i32`），而带圆括号 `(...)` 的 `pure comptime fn SelectType(wide: bool) -> Type` 却会在调用时直接归约为 `i32` 或 `i64`？
-- 当一个泛型函数在定义点完成检查后，在多个不同调用点被实例化时，如何保证各次调用互不干扰？
+- 当一个泛型函数在定义点完成检查后，在多个不同调用点被实例化时，如何保证各次调用互无扰于？
 
-下一篇 **[Flurry 演进手记 (185)：类型构造头 `Name<...>` 与类型计算函数 `Name(...)`——类型身份、编译期纯度与多点实例化](./185-interleaving-elaboration-comptime-and-freezing.md)**，我们将彻底理清这两类类型函数的核心差异。
+下一篇 **[Flurry 演进手记 (185)：类型构造头 `Name<...>` 与类型计算函数 `Name(...)`——类型身份、编译期纯度与多点实例化](./185-interleaving-elaboration-comptime-and-freezing.md)**，我们将理清这两类类型函数的核心差异。

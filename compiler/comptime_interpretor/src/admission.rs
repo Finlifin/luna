@@ -25,7 +25,10 @@ impl Interpreter<'_> {
     pub fn validate_immutable_input(&mut self, value: &Value, ty: &Term) -> Result<(), Error> {
         self.tick(None)?;
         let work = value
-            .scoped_copy_work(&self.abstract_type_parameters)
+            .scoped_copy_work_with_evidence(
+                &self.abstract_type_parameters,
+                &self.abstract_value_parameters,
+            )
             .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
         self.integer_operation(None, |budget| budget.consume(work))?;
         let work = type_value_work(ty, &self.normal_forms)
@@ -39,6 +42,38 @@ impl Interpreter<'_> {
         }
         self.admit_value_types(value, 0)
     }
+    /// Host inputs can hide Type descriptions inside immutable aggregates.
+    /// Check their formation before invocation; this does not read pointers,
+    /// copy storage, or invoke user code.
+    pub(super) fn admit_embedded_type_descriptions(
+        &mut self,
+        value: &Value,
+        depth: usize,
+    ) -> Result<(), Error> {
+        if depth >= 128 {
+            return Err(self.failure(ErrorKind::DepthExhausted, None));
+        }
+        self.tick(None)?;
+        match value {
+            Value::Type(_) | Value::TypeList(_) => self.admit_value_types(value, depth)?,
+            Value::Newtype { value, .. } => {
+                self.admit_embedded_type_descriptions(value, depth + 1)?
+            }
+            Value::Tuple(fields) | Value::Record { fields, .. } | Value::Variant { fields, .. } => {
+                for field in fields {
+                    self.admit_embedded_type_descriptions(field, depth + 1)?;
+                }
+            }
+            Value::AnonymousRecord(fields) => {
+                for (_, field) in fields {
+                    self.admit_embedded_type_descriptions(field, depth + 1)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn admit_value_types(&mut self, value: &Value, depth: usize) -> Result<(), Error> {
         if depth >= 128 {
             return Err(self.failure(ErrorKind::DepthExhausted, None));
@@ -97,7 +132,7 @@ impl Interpreter<'_> {
         }
         Ok(())
     }
-    fn admit_type(&mut self, ty: &Term, depth: usize) -> Result<(), Error> {
+    pub(super) fn admit_type(&mut self, ty: &Term, depth: usize) -> Result<(), Error> {
         if depth >= 128 {
             return Err(self.failure(ErrorKind::DepthExhausted, None));
         }
@@ -137,18 +172,20 @@ impl Interpreter<'_> {
                 let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
                 let mut remaining = before;
                 let valid = if let Some(definition) = self.newtypes.get(declaration) {
-                    definition.validate_completed_arguments_with_layouts(
+                    definition.validate_completed_arguments_with_evidence(
                         arguments,
                         &mut remaining,
                         |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
+                        |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)),
                     )
                 } else {
-                    nir::validate_declaration_arguments_with_layouts(
+                    nir::validate_declaration_arguments_with_evidence(
                         parameters,
                         domains,
                         arguments,
                         &mut remaining,
                         |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
+                        |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)),
                     )
                 };
                 self.budget.steps -= (before - remaining) as u64;
@@ -196,7 +233,7 @@ impl Interpreter<'_> {
                     .unwrap_or(usize::MAX)
                     .min(100_000);
                 let before = fuel;
-                let checked = metadata.check_closed_arguments_budgeted(
+                let checked = metadata.check_arguments_with_evidence_budgeted(
                     arguments,
                     |head| {
                         self.normal_forms
@@ -204,6 +241,7 @@ impl Interpreter<'_> {
                             .is_some_and(|head| head.role == nir::normal_forms::Role::Tuple)
                     },
                     |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
+                    |value, domain| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)),
                     &mut fuel,
                 );
                 self.budget.steps -= (before - fuel) as u64;
@@ -231,6 +269,7 @@ impl Interpreter<'_> {
                 }
             }
             Term::Tuple(types)
+            | Term::ClosureContextValue(types)
             | Term::TypeListValue(types)
             | Term::TypeListConcat(types)
             | Term::TupleValue(types) => {
@@ -265,6 +304,7 @@ impl Interpreter<'_> {
                 }
                 self.admit_type(signature, depth + 1)?;
             }
+            Term::ErrorResult { .. } => return Err(self.failure(ErrorKind::Type, None)),
             Term::Computation { effects, result } => {
                 // Row entries preserve declaration identity, order and repeated
                 // occurrences. Formation does not install a handler or grant an
@@ -275,9 +315,43 @@ impl Interpreter<'_> {
                         .effect_declarations
                         .get(&operation.declaration)
                         .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
+                    let mut fuel = usize::try_from(self.budget.steps)
+                        .unwrap_or(usize::MAX)
+                        .min(100_000);
+                    let before = fuel;
+                    let checked = nir::validate_declaration_arguments_with_evidence(
+                        &declaration.type_parameters,
+                        &declaration.parameter_types,
+                        &operation.arguments,
+                        &mut fuel,
+                        |ty, variant, fuel| {
+                            self.normal_value_fields(ty, variant, fuel).ok_or_else(|| {
+                                nir::NominalAdmissionError::from(
+                                    "effect value layout is unavailable",
+                                )
+                            })
+                        },
+                        |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)),
+                    );
+                    self.budget.steps -= (before - fuel) as u64;
+                    checked.map_err(|_| {
+                        self.failure(
+                            if fuel == 0 {
+                                ErrorKind::StepsExhausted
+                            } else {
+                                ErrorKind::Type
+                            },
+                            None,
+                        )
+                    })?;
                     let signature = declaration
                         .signature
-                        .instantiate_types(&declaration.type_parameters, &operation.arguments)
+                        .instantiate_parameters(
+                            &declaration
+                                .parameter_binders()
+                                .map_err(|_| self.failure(ErrorKind::Type, None))?,
+                            &operation.arguments,
+                        )
                         .map_err(|_| self.failure(ErrorKind::Type, None))?;
                     let work = self
                         .type_description_work(&signature)
@@ -289,14 +363,24 @@ impl Interpreter<'_> {
                     for predicate in &declaration.requirements {
                         self.tick(None)?;
                         let predicate = predicate
-                            .instantiate_types(&declaration.type_parameters, &operation.arguments)
+                            .instantiate_parameters(
+                                &declaration
+                                    .parameter_binders()
+                                    .map_err(|_| self.failure(ErrorKind::Type, None))?,
+                                &operation.arguments,
+                            )
                             .map_err(|_| self.failure(ErrorKind::Type, None))?;
                         self.check_type_contract(&predicate, source)?;
                     }
                     for capability in &declaration.capabilities {
                         self.tick(None)?;
                         let capability = capability
-                            .instantiate_types(&declaration.type_parameters, &operation.arguments)
+                            .instantiate_parameters(
+                                &declaration
+                                    .parameter_binders()
+                                    .map_err(|_| self.failure(ErrorKind::Type, None))?,
+                                &operation.arguments,
+                            )
                             .map_err(|_| self.failure(ErrorKind::Type, None))?;
                         self.check_type_contract(
                             &nir::program::TypePredicate::Trait(capability),
@@ -313,6 +397,10 @@ impl Interpreter<'_> {
                 declaration,
                 sort: nir::Sort::Type,
             } if self.abstract_type_parameters.contains(declaration) => {}
+            Term::Rigid {
+                declaration,
+                sort: nir::Sort::ComptimeValue,
+            } if self.abstract_value_parameters.contains_key(declaration) => {}
             Term::AssociatedType { .. }
             | Term::Rigid { .. }
             | Term::Runtime(_)

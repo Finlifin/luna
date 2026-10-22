@@ -289,6 +289,23 @@ impl Engine<'_> {
         let domain = self.domain(types[0])?;
         let mut types = types;
         types[0] = &domain;
+        if *types[0] == Term::Primitive(Primitive::Symbol) {
+            let cells =
+                crate::symbol_coverage::cases(rows.iter().map(|row| row[0]), &mut self.steps)?;
+            for cell in cells {
+                let mut next = Vec::new();
+                for row in &rows {
+                    if crate::symbol_coverage::covers_case(row[0], &cell, &mut self.steps)? {
+                        self.spend(row.len())?;
+                        next.push(row[1..].to_vec());
+                    }
+                }
+                if !self.matrix(types[1..].to_vec(), next, depth + 1)? {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
         if *types[0] == Term::Primitive(Primitive::Float) {
             return self.float_matrix(&types[1..], rows, depth);
         }

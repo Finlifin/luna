@@ -23,7 +23,7 @@
 use std.prelude.*;
 
 -- 1. 定义无主体的签名模板（以分号 `;` 结尾）
--- 注意：template 的 function 必须是非 comptime 函数。
+-- 注意：template 的 function 必须是并非 comptime 函数。
 template fn bounded(value: u32, limit: u32) -> result: u32
 where ensures result <= limit;
 
@@ -53,12 +53,12 @@ test {
 运行这段代码，输出 `8 0 8`。
 
 看看这里发生了什么：
-- **参数名自动就位**：在 `clamp`、`zero` 和 `clamp_code` 的花括号里，你不需要再写 `(value: u32, limit: u32)`——因为 `use bounded` 已经把模板接口里的 `value` 和 `limit` 绑定到了当前实例的主体作用域中。
-- **不改变实例自身的函数类别**：模板本身只是提供接口。`clamp` 依然是普通函数，`zero` 带有 `inline` 意向，`clamp_code` 则必须作为 `quote fn` 完成代码接入。
+- **参数名自动就位**：在 `clamp`、`zero` 和 `clamp_code` 的花括号里，你无需再写 `(value: u32, limit: u32)`——因为 `use bounded` 已经把模板接口里的 `value` 和 `limit` 绑定到了当前实例的主体作用域中。
+- **维持原状而未改实例自身的函数类别**：模板本身只是提供接口。`clamp` 依然是普通函数，`zero` 带有 `inline` 意向，`clamp_code` 则必须作为 `quote fn` 完成代码接入。
 - **共享契约 100% 强制执行**：如果某个粗心的程序员写了一个违背 `ensures result <= limit` 的实例：
 
 ```flurry
--- ❌ 编译期直接拒绝。
+-- ❌ 编译期直接报错。
 -- 当 value > limit 时，直接返回 value 违反了模板声明的 `ensures result <= limit` 契约。
 fn broken_clamp use bounded {
     value
@@ -71,7 +71,7 @@ fn broken_clamp use bounded {
 
 ## 二、 基于 CMTT 的正文复用——带上下文骨架的 `template fn`
 
-光复用签名还不够过瘾。现在看第二个需求：
+光复用签名还欠缺过瘾。现在看第二个需求：
 每次处理一个传感器请求 `request: ?u32` 时，我们都希望：
 1. 先创建一个带 `Drop` 审计日志的追踪对象 `let trace = RequestTrace { id: 1 }`；
 2. 用 `let number = request?;` 检查请求是否为空——如果为 `null`，直接提前返回 `null`（并自动触发 `trace` 的 `Drop` 清理。）；
@@ -164,27 +164,27 @@ absent
 ```
 
 仔细品味这段代码带来的工程震撼：
-1. **调用者眼里只有普通函数参数**：当你调用 `halve_request(8)` 时，你**不需要**传什么 `body`——因为 `quote lambda body` 已经在定义 `fn halve_request use checked_request { ... }` 时静态绑定好了。
+1. **调用者眼里只有普通函数参数**：当你调用 `halve_request(8)` 时，你**无需**传什么 `body`——因为 `quote lambda body` 已经在定义 `fn halve_request use checked_request { ... }` 时静态绑定好了。
 2. **早期退出依然 100% 触发资源清理**：在 `clamp_request(null)` 中，`let number = request?;` 遇到 `null` 直接提前返回，正文根本没有执行，但模板里创建的 `trace` 依然稳稳地执行了 `Drop`，打印出 `"finish request 1"`。
-3. **严格的上下文隔离（绝不泄漏模板私有变量。）**：
-   你可能会问：“既然 `~<body>` 把正文拼进了模板里，那正文能不能偷偷访问模板里的局部变量 `trace`？”
-   **绝对不行。** 因为 `body` 的类型写得清清楚楚是 `< number: u32 |- u32 >`，模板只向正文授权了 `number`，没有授权 `trace`。
+3. **严格的上下文隔离（零泄漏模板私有变量。）**：
+   你可能会问：“既然 `~<body>` 把正文拼进了模板里，那正文能否偷偷访问模板里的局部变量 `trace`？”
+   **行之难通。** 因为 `body` 的类型写得清清楚楚是 `< number: u32 |- u32 >`，模板只向正文授权了 `number`，没有授权 `trace`。
 
 ```flurry
--- ❌ 编译期直接拒绝。
+-- ❌ 编译期直接报错。
 fn inspect_template_local use checked_request {
     -- 错误。`trace` 是模板内部的私有局部变量，不在 `< number: u32 |- u32 >` 公开的上下文接口中。
     trace.id
 }
 ```
 
-这彻底杜绝了传统宏或文本模板中“内部临时变量名污染用户代码”或“用户代码意外篡改模板内部状态”的隐患。同时，每个实例（如 `halve_request` 和 `clamp_request`）每次调用都会建立各自独立的局部存储，绝不会跨实例共享同一个 `number` 或 `trace`。
+这消除了传统宏或文本模板中“内部临时变量名污染用户代码”或“用户代码意外篡改模板内部状态”的隐患。同时，每个实例（如 `halve_request` 和 `clamp_request`）每次调用都会建立各自独立的局部存储，不会跨实例共享同一个 `number` 或 `trace`。
 
 ---
 
 ## 三、 批量验收利器——`template test` 与锚定子句参数
 
-学会了 `template fn`，再看第三个需求——**测试模板 `template test`**——简直是水到渠成。
+学会了 `template fn`，再看第三个需求——**测试模板 `template test`**——水到渠成。
 
 当我们有几十个测试都需要先准备一套相同的计数器指针或资源追踪器时，我们可以定义一个 `template test`。
 它的语法有一点贴心的小区别：因为 `test` 本身没有运行时的调用参数列表 `(...)`，所以 `template test` 通过 `where` 子句中**唯一的一个锚定子句参数（Anchored Clause Parameter，如 `where body: < counter: *u32 |- void >`）**来接收测试正文。
@@ -209,7 +209,7 @@ test increment use with_counter {
     counter.* += 1;
 }
 
--- 测试实例 2：自增两次（拥有自己全新初始化的 value = 0，绝不与上一个测试串台。）
+-- 测试实例 2：自增两次（拥有自己全新初始化的 value = 0，不与上一个测试串台。）
 test increment_twice use with_counter {
     counter.* += 1;
     counter.* += 1;
@@ -220,9 +220,9 @@ test increment_twice use with_counter {
 - `increment` 独立输出 `final 1`；
 - `increment_twice` 独立输出 `final 2`。
 
-> **⚠️ 重要心智提醒：写在 `~<body>;` 后面的普通语句不是 `finally`。**
+> **⚠️ 重要心智提醒：写在 `~<body>;` 后面的普通语句并非 `finally`。**
 > 在 `template fn` 或 `template test` 中，如果你在 `~<body>` 后面写了一条普通的 `println(...)`，而实例正文里执行了提前 `return`（或错误传播 `!` / `?`），那么控制流会直接沿着退出路径离开，`~<body>` 后面的普通语句会被正常跳过。
-> **真正需要覆盖所有提前退出路径的清理动作，永远交给像 `RequestTrace` 那样实现了 `Drop` 的资源对象。** 即使测试正文不需要任何上下文变量（写作空上下文 `where body: < |- void >`），模板里的 `Drop` 对象也会在测试退出时自动完成清理。
+> **真正需要覆盖所有提前退出路径的清理动作，永远交给像 `RequestTrace` 那样实现了 `Drop` 的资源对象。** 即使测试正文无需任何上下文变量（写作空上下文 `where body: < |- void >`），模板里的 `Drop` 对象也会在测试退出时自动完成清理。
 
 ---
 
@@ -232,8 +232,8 @@ test increment_twice use with_counter {
 
 | 模板形式 | 声明与实例化语法 | 核心语义与安全边界 |
 | :--- | :--- | :--- |
-| **简单签名模板** | `template fn f(x: u32) -> u32;` <br> `fn g use f { ... }` | 共享参数名、返回类型与 `requires`/`ensures` 契约；不改变实例自身的 `fn` / `inline fn` / `quote fn` 类别 |
-| **上下文正文模板** | `template fn f(..., quote lambda body: < ctx |- R >) { ... ~<body> }` | 模板先完成公共校验与资源准备，再将授权的 `ctx` 绑定接入正文；模板私有变量对正文严格不可见 |
+| **简单签名模板** | `template fn f(x: u32) -> u32;` <br> `fn g use f { ... }` | 共享参数名、返回类型与 `requires`/`ensures` 契约；维持原状而未改实例自身的 `fn` / `inline fn` / `quote fn` 类别 |
+| **上下文正文模板** | `template fn f(..., quote lambda body: < ctx |- R >) { ... ~<body> }` | 模板先完成公共校验与资源准备，再将授权的 `ctx` 绑定接入正文；模板私有变量对正文严格隐蔽 |
 | **测试模板** | `template test t where body: < ctx |- void > { ... ~<body>; }` <br> `test my_test use t { ... }` | 通过唯一锚定子句参数绑定测试正文；每个测试实例拥有独立的初始化状态与受检的 `Drop` 退出清理 |
 
 ---
@@ -251,9 +251,9 @@ struct Counter {
 }
 ```
 
-如果在一个复杂的传感器拓扑结构中，你手里拿到的不仅是一层指针 `pointer: *Counter`，而是指向指针的二级指针 `outer: **Counter`（甚至三级指针 `***Counter`）。
+如果在一个复杂的传感器拓扑结构中，你手里拿到的非但是一层指针 `pointer: *Counter`，而是指向指针的二级指针 `outer: **Counter`（甚至三级指针 `***Counter`）。
 当你直接写下 **`outer.read()`** 时：
-- 为什么你不需要手写 `outer.*.*.read()`，编译器就能顺着多层指针直接找到 `Counter.read`？
+- 为什么你无需手写 `outer.*.*.read()`，编译器就能顺着多层指针直接找到 `Counter.read`？
 - 在穿过 `**Counter` $\rightarrow$ `*Counter` 的过程中，编译器会机械地把整个 `Counter` 结构体复制（Copy）一份出来吗？
 - 当一个类型同时有固有方法（Inherent Method）、多个 Trait 方法以及自动解引用（`Deref`）目标上的方法时，Flurry 到底按照什么优先级顺序决定调用哪一个？
 

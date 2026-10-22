@@ -36,9 +36,6 @@ pub(super) fn equivalent_code(
     actual: &nir::code_interfaces::CodeFunctionSignature,
     budget: Budget,
 ) -> bool {
-    use nir::code_interfaces::{CodeInput, ExpressionCodeInterface};
-    use nir::program::LocalId;
-    use std::collections::{BTreeMap, BTreeSet};
     let mut fuel = budget.steps;
     if expected.charge(&mut fuel).is_err()
         || actual.charge(&mut fuel).is_err()
@@ -47,6 +44,38 @@ pub(super) fn equivalent_code(
     {
         return false;
     }
+    equivalent_code_inputs(
+        context,
+        &expected.inputs,
+        &actual.inputs,
+        expected
+            .clause_domains
+            .iter()
+            .zip(&actual.clause_domains)
+            .collect(),
+        vec![(&expected.output, &actual.output)],
+        Budget {
+            steps: fuel,
+            ..budget
+        },
+    )
+}
+
+fn equivalent_code_inputs<'a>(
+    context: &Context,
+    expected_inputs: &'a [(nir::program::LocalId, nir::code_interfaces::CodeInput)],
+    actual_inputs: &'a [(nir::program::LocalId, nir::code_interfaces::CodeInput)],
+    mut pairs: Vec<(&'a Term, &'a Term)>,
+    mut interfaces: Vec<(
+        &'a nir::code_interfaces::ExpressionCodeInterface,
+        &'a nir::code_interfaces::ExpressionCodeInterface,
+    )>,
+    budget: Budget,
+) -> bool {
+    use nir::code_interfaces::CodeInput;
+    use nir::program::LocalId;
+    use std::collections::{BTreeMap, BTreeSet};
+    let fuel = budget.steps;
     let mut mapping = BTreeMap::new();
     let mut reverse = BTreeMap::new();
     fn connect(
@@ -64,13 +93,7 @@ pub(super) fn equivalent_code(
         reverse.insert(to, from);
         true
     }
-    let mut pairs = expected
-        .clause_domains
-        .iter()
-        .zip(&actual.clause_domains)
-        .collect::<Vec<_>>();
-    let mut interfaces: Vec<(&ExpressionCodeInterface, &ExpressionCodeInterface)> = Vec::new();
-    for ((left_id, left), (right_id, right)) in expected.inputs.iter().zip(&actual.inputs) {
+    for ((left_id, left), (right_id, right)) in expected_inputs.iter().zip(actual_inputs) {
         if mapping.contains_key(left_id)
             || reverse.contains_key(right_id)
             || !connect(&mut mapping, &mut reverse, *left_id, *right_id)
@@ -90,7 +113,6 @@ pub(super) fn equivalent_code(
             _ => return false,
         }
     }
-    interfaces.push((&expected.output, &actual.output));
     for (left, right) in &interfaces {
         if left.infer_context
             || right.infer_context
@@ -145,6 +167,53 @@ pub(super) fn equivalent_code(
     equivalent(
         context,
         pairs,
+        Budget {
+            steps: fuel,
+            ..budget
+        },
+    )
+}
+
+/// Pattern outputs preserve their names and success types; they have no
+/// expression context ports or default connections to alpha-rename.
+pub(super) fn equivalent_pattern(
+    context: &Context,
+    expected: &nir::code_interfaces::PatternFunctionSignature,
+    actual: &nir::code_interfaces::PatternFunctionSignature,
+    budget: Budget,
+) -> bool {
+    let mut fuel = budget.steps;
+    if expected.charge(&mut fuel).is_err()
+        || actual.charge(&mut fuel).is_err()
+        || expected.inputs.len() != actual.inputs.len()
+        || expected.clause_domains.len() != actual.clause_domains.len()
+        || !expected
+            .output
+            .outputs
+            .keys()
+            .eq(actual.output.outputs.keys())
+    {
+        return false;
+    }
+    let mut pairs = expected
+        .clause_domains
+        .iter()
+        .zip(&actual.clause_domains)
+        .collect::<Vec<_>>();
+    pairs.push((&expected.output.subject, &actual.output.subject));
+    pairs.extend(
+        expected
+            .output
+            .outputs
+            .values()
+            .zip(actual.output.outputs.values()),
+    );
+    equivalent_code_inputs(
+        context,
+        &expected.inputs,
+        &actual.inputs,
+        pairs,
+        Vec::new(),
         Budget {
             steps: fuel,
             ..budget
@@ -312,6 +381,86 @@ mod tests {
     fn boolean() -> Term {
         Term::Primitive(nir::Primitive::Bool)
     }
+    #[test]
+    fn pattern_signatures_preserve_output_names_types_and_input_categories() {
+        use nir::code_interfaces::{CodeInput, PatternCodeInterface, PatternFunctionSignature};
+        use nir::program::LocalId;
+        use std::collections::BTreeMap;
+        let output = PatternCodeInterface {
+            subject: boolean(),
+            outputs: BTreeMap::from([("value".into(), boolean())]),
+        };
+        let expected = PatternFunctionSignature {
+            clause_domains: vec![Term::Primitive(nir::Primitive::Type)],
+            inputs: vec![(
+                LocalId { owner: 1, index: 0 },
+                CodeInput::Pattern(output.clone()),
+            )],
+            output,
+        };
+        let context = Context::with_scope(vec![]);
+        let mut actual = expected.clone();
+        actual.inputs[0].0.owner = 2;
+        assert!(equivalent_pattern(
+            &context,
+            &expected,
+            &actual,
+            Budget::default()
+        ));
+        assert!(!equivalent_pattern(
+            &context,
+            &expected,
+            &actual,
+            Budget {
+                steps: 0,
+                ..Budget::default()
+            }
+        ));
+        let mut changed = actual.clone();
+        changed.output.outputs = BTreeMap::from([("other".into(), boolean())]);
+        assert!(!equivalent_pattern(
+            &context,
+            &expected,
+            &changed,
+            Budget::default()
+        ));
+        let mut changed = actual.clone();
+        changed.output.subject = Term::Primitive(nir::Primitive::Char);
+        assert!(!equivalent_pattern(
+            &context,
+            &expected,
+            &changed,
+            Budget::default()
+        ));
+        let mut changed = actual.clone();
+        changed.inputs[0].1 = CodeInput::Data(boolean());
+        assert!(!equivalent_pattern(
+            &context,
+            &expected,
+            &changed,
+            Budget::default()
+        ));
+        let mut changed = actual.clone();
+        changed
+            .output
+            .outputs
+            .insert("value".into(), Term::Bool(true));
+        assert!(!equivalent_pattern(
+            &context,
+            &changed,
+            &changed,
+            Budget::default()
+        ));
+        let mut changed = actual.clone();
+        changed.inputs.push(changed.inputs[0].clone());
+        assert!(!equivalent_pattern(
+            &context,
+            &changed,
+            &changed,
+            Budget::default()
+        ));
+    }
+
     #[test]
     fn contextual_signatures_preserve_connections_under_binding_renaming() {
         let expected = code_signature(1, boolean());

@@ -10,13 +10,20 @@ impl Checker<'_, '_> {
         definition: &Generator,
         span: Span,
     ) -> Result<(), Error> {
+        self.install_generator_capture_values(&definition.captures, span)
+    }
+
+    pub(in crate::program::cmtt) fn install_generator_capture_values(
+        &mut self,
+        captures: &[(DeclarationId, Term)],
+        span: Span,
+    ) -> Result<(), Error> {
         self.alias_substitution.extend(
-            definition
-                .captures
+            captures
                 .iter()
                 .map(|(id, value)| (*id, Arc::new(value.clone()))),
         );
-        for (id, value) in &definition.captures {
+        for (id, value) in captures {
             let domain = self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type));
             let sort = if domain == p(P::Type) {
                 Sort::Type
@@ -184,7 +191,10 @@ impl Checker<'_, '_> {
         .map(Some)
     }
 
-    pub(super) fn generic_code_method_hint(&mut self, callee: &Expr<'_>) -> Option<OwnerId> {
+    pub(in crate::program::cmtt) fn generic_code_method_hint(
+        &mut self,
+        callee: &Expr<'_>,
+    ) -> Option<OwnerId> {
         if !self.interfaces_ready {
             return None;
         }
@@ -233,7 +243,7 @@ impl Checker<'_, '_> {
             let member = *members.iter().next()?;
             return self.package.owners().find_map(|(owner, _)| {
                 (matches_declaration(self.package, &self.package_identities, owner, member)
-                    && self.is_code_generator(owner))
+                    && (self.is_code_generator(owner) || self.is_pattern_generator(owner)))
                 .then_some(owner)
             });
         }
@@ -259,7 +269,7 @@ impl Checker<'_, '_> {
             .find(|(member, _)| member == name.name.as_str())?;
         self.package.owners().find_map(|(owner, _)| {
             (matches_declaration(self.package, &self.package_identities, owner, *body)
-                && self.is_code_generator(owner))
+                && (self.is_code_generator(owner) || self.is_pattern_generator(owner)))
             .then_some(owner)
         })
     }
@@ -267,7 +277,10 @@ impl Checker<'_, '_> {
     // Classification only: do not invoke a type producer, defaults, or arguments.
     // Invocation below replays the selected implementation evidence and checks
     // access. In particular, a matching name in an unrelated impl is no hint.
-    pub(super) fn static_code_method_hint(&self, callee: &Expr<'_>) -> Option<OwnerId> {
+    pub(in crate::program::cmtt) fn static_code_method_hint(
+        &self,
+        callee: &Expr<'_>,
+    ) -> Option<OwnerId> {
         if !self.interfaces_ready {
             return None;
         }
@@ -303,12 +316,12 @@ impl Checker<'_, '_> {
             .find(|(member, _)| member == name.name.as_str())?;
         self.package.owners().find_map(|(owner, _)| {
             (matches_declaration(self.package, &self.package_identities, owner, *body)
-                && self.is_code_generator(owner))
+                && (self.is_code_generator(owner) || self.is_pattern_generator(owner)))
             .then_some(owner)
         })
     }
 
-    pub(super) fn with_code_method_callee<R>(
+    pub(in crate::program::cmtt) fn with_code_method_callee<R>(
         &mut self,
         callee: &Expr<'_>,
         invoke: impl FnOnce(&mut Self, &Expr<'_>, Option<&Expr<'_>>) -> Result<R, Error>,
@@ -406,7 +419,7 @@ impl Checker<'_, '_> {
                         "resolved code member disagrees with implementation selection",
                     ));
                 }
-                if !self.is_code_generator(owner) {
+                if !self.is_code_generator(owner) && !self.is_pattern_generator(owner) {
                     return Err(error(
                         head.span,
                         "code position requires a code-producing method",

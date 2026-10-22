@@ -420,7 +420,13 @@ impl Walker<'_> {
                 if let Some(condition) =
                     condition.renamed(&mapping, &state.facts, same_lineage, self.limits, 0)?
                 {
-                    state.facts.assume(&condition, truth, self.limits)?;
+                    // Copy evidence already establishes this premise, and the
+                    // source bounds/relations were transported above. Remember
+                    // its unresolved choices without replaying every retained
+                    // disjunction after each individual field binding.
+                    state
+                        .facts
+                        .remember_condition(&condition, truth, self.limits)?;
                 }
             }
             // A current source and its copy are equal, but their identities and
@@ -673,11 +679,18 @@ impl Walker<'_> {
         if value.fields.is_none() && value.nominal_type.is_none() {
             return Ok(value);
         }
-        if value
-            .projection
-            .as_ref()
-            .is_some_and(|p| p.path.root.owner == u64::MAX - 1)
-        {
+        if value.projection.as_ref().is_some_and(|p| {
+            let private_unchanged = u32::try_from(p.path.root.owner).ok().is_some_and(|owner| {
+                let binding = LocalId {
+                    owner,
+                    index: p.path.root.local,
+                };
+                !self.addressed_locals.contains(&binding) && !self.written_locals.contains(&binding)
+            });
+            p.path.root.owner == u64::MAX - 1
+                || ((state.frozen.contains_key(&p.path.root) || private_unchanged)
+                    && state.facts.value(p.path.root) == Some(p.root_version))
+        }) {
             return Ok(value);
         }
         if !state.facts.is_reachable() {
@@ -718,6 +731,38 @@ impl Walker<'_> {
             owner: u64::MAX - 1,
             local,
         }))
+    }
+    // Rewrite a branch predicate onto surviving input observations before
+    // pattern bindings leave scope. Equality evidence, never field spelling,
+    // authorizes each substitution.
+    pub(super) fn scoped_condition(
+        &mut self,
+        condition: &Condition,
+        state: &State,
+        scope: &BTreeSet<PlaceId>,
+    ) -> Result<Condition, Reason> {
+        let mut preferred = BTreeSet::new();
+        for (path, id) in &state.paths {
+            self.limits.step(1)?;
+            if scope.contains(&path.root) {
+                preferred.insert(*id);
+            }
+        }
+        for root in scope {
+            self.limits.step(1)?;
+            preferred.extend(state.facts.value(*root));
+        }
+        let mut mapping = BTreeMap::new();
+        for (a, b) in exact_equal_values(&state.facts, self.limits)? {
+            if preferred.contains(&a) && !preferred.contains(&b) {
+                mapping.insert(b, a);
+            } else if preferred.contains(&b) && !preferred.contains(&a) {
+                mapping.insert(a, b);
+            }
+        }
+        condition
+            .renamed(&mapping, &state.facts, true, self.limits, 0)?
+            .ok_or(Reason::Unsupported)
     }
     pub(super) fn bind_result(
         &mut self,

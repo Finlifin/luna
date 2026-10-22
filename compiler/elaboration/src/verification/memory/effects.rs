@@ -1,26 +1,118 @@
-//! Conditional memory inference for data-only direct effect delivery. These premises do
-//! not claim that a handler is pure: its captured storage is checked separately
-//! by the installer. They cannot authorize pointer arguments or escaping results.
+//! Conditional memory inference for direct effect delivery. Captured storage is
+//! checked separately by the installer. An explicit identity-transfer premise
+//! can carry an operand's pointer and callable provenance; it grants neither dereference nor
+//! lifetime extension. Unreturned alias-bearing inputs require checked Copy
+//! obligations, including when the result is independent data.
 use super::*;
+
+/// Conditional accesses through a pointer supplied in an operation input.
+/// Paths address owned input fields, not storage behind another pointer.
+/// Variant-qualified paths apply only while the corresponding payload exists.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EffectParameterAccess {
+    pub parameter: usize,
+    pub input_fields: Vec<usize>,
+    pub read_value: bool,
+    pub write: bool,
+}
+impl fmt::Display for EffectParameterAccess {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(parameter-access (parameter {}) (input-fields",
+            self.parameter
+        )?;
+        display_owned_path(&self.input_fields, f)?;
+        write!(f, ") (read {}) (write {}))", self.read_value, self.write)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct EffectInput {
     pub operation: nir::effects::Operation,
     pub abi: nir::effects::Abi,
     pub signature: Term,
+    /// Possible complete input origins; grants no dereference or lifetime extension.
+    pub forwarded_parameters: Option<BTreeSet<usize>>,
+    /// Conditional checked Copy obligations, including cleanup compatibility.
+    pub copy_parameters: BTreeSet<usize>,
+    pub parameter_accesses: BTreeSet<EffectParameterAccess>,
+}
+impl EffectInput {
+    pub(crate) fn charge_parameter_accesses(&self, fuel: &mut usize) -> Result<(), String> {
+        for access in &self.parameter_accesses {
+            *fuel = fuel
+                .checked_sub(access.input_fields.len().saturating_add(1))
+                .ok_or("effect parameter access budget exhausted")?;
+        }
+        Ok(())
+    }
 }
 impl fmt::Display for EffectInput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "(effect-input {} (abi {}) (signature {}) (capture-contract stable-scalar-storage))",
+            "(effect-input {} (abi {}) (signature {}) (capture-contract stable-scalar-storage) (forwarded-parameters",
             self.operation, self.abi, self.signature
-        )
+        )?;
+        if let Some(parameters) = &self.forwarded_parameters {
+            for parameter in parameters {
+                write!(f, " {parameter}")?;
+            }
+        }
+        f.write_str(") (copy-inputs")?;
+        for parameter in &self.copy_parameters {
+            write!(f, " {parameter}")?;
+        }
+        f.write_str(") (parameter-accesses")?;
+        for access in &self.parameter_accesses {
+            write!(f, " {access}")?;
+        }
+        f.write_str("))")
     }
+}
+fn access_pointee(
+    package: Option<&Package>,
+    ty: &Term,
+    fields: &[usize],
+    fuel: &mut usize,
+) -> Result<Term, String> {
+    let layout = pointer_input_layout(package, ty, fuel)?;
+    let leaf = layout
+        .into_iter()
+        .find(|leaf| leaf.input_fields == fields)
+        .ok_or("effect parameter access does not select a pointer input")?;
+    if !scalar(&leaf.pointee) {
+        return Err("effect parameter access requires scalar storage".into());
+    }
+    Ok(leaf.pointee)
 }
 fn scalar(ty: &Term) -> bool {
     matches!(ty, Term::Primitive(_))
         && (intrinsic_pointer_value(ty) || *ty == Term::Primitive(Primitive::Void))
+}
+/// Values whose origins can be transported unchanged by the identity premise.
+/// This authorizes no call or dereference of the delivered value.
+pub(crate) fn effect_transfer_layout(
+    package: Option<&Package>,
+    ty: &Term,
+    fuel: &mut usize,
+) -> Result<bool, String> {
+    if !matches!(
+        ty,
+        Term::Pointer(_)
+            | Term::Function { .. }
+            | Term::Closure { .. }
+            | Term::Record(_)
+            | Term::Nominal { .. }
+    ) && tuple_fields(package, ty).is_none()
+    {
+        return Ok(false);
+    }
+    // Validate every field under the same bounded layout rules used by the
+    // provenance maps. Identity transfer never interprets or rebuilds fields.
+    pointer_input_layout(package, ty, fuel)?;
+    Ok(true)
 }
 /// Only a representation/provenance check. This does not grant Copy, Drop or
 /// ownership permission; the resource checker separately validates delivery.
@@ -121,9 +213,19 @@ pub(crate) fn effect_data_layout(
 }
 pub(super) fn charge_inputs(inputs: &[EffectInput], fuel: &mut usize) -> Result<(), String> {
     for input in inputs {
+        input.charge_parameter_accesses(fuel)?;
         *fuel = fuel
             .checked_sub(1)
             .ok_or("effect memory premise budget exhausted")?;
+        *fuel = fuel
+            .checked_sub(
+                input
+                    .forwarded_parameters
+                    .as_ref()
+                    .map_or(0, BTreeSet::len)
+                    .saturating_add(input.copy_parameters.len()),
+            )
+            .ok_or("effect transfer premise budget exhausted")?;
         bound_type(&input.signature, fuel)?;
         for argument in &input.operation.arguments {
             bound_type(argument, fuel)?;
@@ -155,10 +257,63 @@ pub(super) fn validate_inputs(
         {
             return Err("effect memory premise requires data-only direct delivery or a scalar direct-passing slot".into());
         }
-        if !effect_data_layout(Some(package), result, fuel, 0)? {
+        if let Some(indices) = &input.forwarded_parameters {
+            if indices.is_empty() {
+                return Err("effect transfer premise requires nonempty origins".into());
+            }
+            *fuel = fuel
+                .checked_sub(indices.len())
+                .ok_or("effect transfer validation budget exhausted")?;
+            for parameter in indices {
+                if input.abi != nir::effects::Abi::Direct
+                    || parameters.get(*parameter).is_none_or(|p| p.ty != **result)
+                {
+                    return Err(
+                        "effect transfer premise requires matching input/result domains".into(),
+                    );
+                }
+            }
+        }
+        *fuel = fuel
+            .checked_sub(input.copy_parameters.len())
+            .ok_or("effect copy premise budget exhausted")?;
+        if input
+            .copy_parameters
+            .iter()
+            .any(|index| *index >= parameters.len())
+        {
+            return Err("effect copy premise parameter is out of range".into());
+        }
+        input.charge_parameter_accesses(fuel)?;
+        for access in &input.parameter_accesses {
+            if !access.read_value && !access.write {
+                return Err("effect parameter access must read or write".into());
+            }
+            let parameter = parameters
+                .get(access.parameter)
+                .ok_or("effect parameter access index out of range")?;
+            access_pointee(Some(package), &parameter.ty, &access.input_fields, fuel)?;
+        }
+        let identity_transfer = input.forwarded_parameters.is_some()
+            && (effect_transfer_layout(Some(package), result, fuel)?
+                || effect_data_layout(Some(package), result, fuel, 0)?);
+        if !identity_transfer && !effect_data_layout(Some(package), result, fuel, 0)? {
             return Err("effect memory premise requires data-only direct delivery".into());
         }
-        for parameter in parameters {
+        for (index, parameter) in parameters.iter().enumerate() {
+            if identity_transfer
+                && input
+                    .forwarded_parameters
+                    .as_ref()
+                    .is_some_and(|indices| indices.contains(&index))
+            {
+                continue;
+            }
+            if input.copy_parameters.contains(&index)
+                && effect_transfer_layout(Some(package), &parameter.ty, fuel)?
+            {
+                continue;
+            }
             if !effect_data_layout(Some(package), &parameter.ty, fuel, 0)? {
                 return Err("effect memory premise requires data-only direct delivery".into());
             }
@@ -180,7 +335,10 @@ pub(super) fn validate_inputs(
         bound_type(&declaration.signature, fuel)?;
         let signature = declaration
             .signature
-            .instantiate_types(&declaration.type_parameters, &input.operation.arguments)
+            .instantiate_parameters(
+                &declaration.parameter_binders().map_err(|e| e.to_string())?,
+                &input.operation.arguments,
+            )
             .map_err(|e| e.to_string())?;
         bound_type(&signature, fuel)?;
         if declaration.abi != input.abi || signature != input.signature {
@@ -191,8 +349,10 @@ pub(super) fn validate_inputs(
 }
 
 /// Infer a conditional footprint. The caller must establish every returned
-/// effect input at the installation: data-only delivery and live, stable captured
-/// storage whose writes cannot invalidate pointer provenance or ownership.
+/// effect input at the installation: data-only delivery or proven identity
+/// transfer, checked representation-copy permission (including cleanup
+/// compatibility) for every copy input, and live, stable captured storage whose
+/// writes cannot invalidate pointer provenance or ownership.
 /// This API does not discharge those obligations or publish unconditional facts.
 pub fn infer_with_effect_inputs(
     package: &Package,
@@ -226,6 +386,41 @@ pub fn infer_with_effect_inputs(
 }
 
 impl<'a> Infer<'a> {
+    fn join_effect_value(&mut self, destination: &Expr, value: &Expr) -> Result<(), String> {
+        let key = destination as *const Expr as usize;
+        let pointers = self.pointer_fields_for(value)?;
+        let code = self.local_fields_for(value)?;
+        let callees = self.value_callees(value)?;
+        let callable = self.callee_key(value)?;
+        let previous = self.aggregate_pointers.remove(&key).unwrap_or_default();
+        let pointers = self.join_pointer_fields(previous, pointers)?;
+        let previous = self.local_code_fields.remove(&key).unwrap_or_default();
+        let code = self.join_local_fields(previous, code)?;
+        let previous = self.aggregate_callees.remove(&key).unwrap_or_default();
+        let callees = self.join_callee_fields(previous, callees)?;
+        let mut previous = self
+            .callable_results
+            .remove(&key)
+            .unwrap_or(CallableResult::Unknown);
+        previous.join(&callable, self.fuel)?;
+        self.aggregate_pointers.insert(key, pointers);
+        self.local_code_fields.insert(key, code);
+        self.aggregate_callees.insert(key, callees);
+        self.callable_results.insert(key, previous);
+        Ok(())
+    }
+    fn forward_effect_value(&mut self, destination: &Expr, value: &Expr) -> Result<(), String> {
+        let key = destination as *const Expr as usize;
+        let pointers = self.pointer_fields_for(value)?;
+        let code = self.local_fields_for(value)?;
+        let callees = self.value_callees(value)?;
+        let callable = self.callee_key(value)?;
+        self.aggregate_pointers.insert(key, pointers);
+        self.local_code_fields.insert(key, code);
+        self.aggregate_callees.insert(key, callees);
+        self.callable_results.insert(key, callable);
+        Ok(())
+    }
     pub(super) fn bind_data_pattern(
         &mut self,
         pattern: &'a Pattern,
@@ -414,16 +609,31 @@ impl<'a> Infer<'a> {
             self.step(depth)?;
             let operation = self.effect_operation(&handler.operation)?;
             let signature = self.ty(&handler.signature)?;
-            let input = EffectInput {
+            let Term::Function { parameters, .. } = &signature else {
+                return Err("handler memory requires an operation signature".into());
+            };
+            // Memory analysis computes footprints under ordinary resource
+            // validation. Copy obligations must be discharged by the installer.
+            let forwarded_parameters =
+                super::super::effect_transfer::forwarded_parameters(handler, self.fuel)?;
+            let mut copy_parameters = BTreeSet::new();
+            for (index, parameter) in parameters.iter().enumerate() {
+                if !forwarded_parameters
+                    .as_ref()
+                    .is_some_and(|origins| origins.contains(&index))
+                    && effect_transfer_layout(self.package, &parameter.ty, self.fuel)?
+                {
+                    copy_parameters.insert(index);
+                }
+            }
+            let mut input = EffectInput {
+                parameter_accesses: Default::default(),
+                copy_parameters,
+                forwarded_parameters,
                 operation: operation.clone(),
                 abi: handler.abi,
                 signature: signature.clone(),
             };
-            validate_inputs(
-                self.package.ok_or("handler memory requires a package")?,
-                std::slice::from_ref(&input),
-                self.fuel,
-            )?;
             if let Some(slot) = handler.fallback {
                 if outer_row.get(slot) != Some(&operation) {
                     return Err("handler memory fallback row mismatch".into());
@@ -432,7 +642,18 @@ impl<'a> Infer<'a> {
                 if previous.signature != signature || previous.abi != handler.abi {
                     return Err("handler memory fallback premise mismatch".into());
                 }
+                let origins = previous.forwarded_parameters.clone();
+                input.forwarded_parameters = super::super::effect_transfer::with_fallback(
+                    input.forwarded_parameters,
+                    origins.as_ref(),
+                    self.fuel,
+                )?;
             }
+            validate_inputs(
+                self.package.ok_or("handler memory requires a package")?,
+                std::slice::from_ref(&input),
+                self.fuel,
+            )?;
             let Term::Function { parameters, .. } = &signature else {
                 unreachable!()
             };
@@ -444,14 +665,17 @@ impl<'a> Infer<'a> {
             );
             for arm in &handler.arms {
                 self.environment = self.clone_environment(&base)?;
+                let mut captures = Vec::new();
                 for binding in nir::free_bindings::collect_arm(arm, self.fuel)? {
                     let ty = self
                         .locals
                         .get(&binding)
                         .ok_or("handler memory capture is not in scope")?;
                     bound_type(ty, self.fuel)?;
-                    if let Term::Pointer(subject) = ty {
-                        if !scalar(subject) {
+                    captures.push((binding, ty.clone()));
+                    let layout = pointer_input_layout(self.package, ty, self.fuel)?;
+                    if !layout.is_empty() {
+                        if layout.iter().any(|leaf| !scalar(&leaf.pointee)) {
                             return Err(
                                 "handler memory pointer capture needs scalar storage".into()
                             );
@@ -463,6 +687,27 @@ impl<'a> Infer<'a> {
                                 .into(),
                         );
                     }
+                }
+                if let Some(summary) =
+                    direct_handler_accesses(self.package, handler, arm, &captures, self.fuel)?
+                {
+                    self.may_reject |= summary.memory.may_reject;
+                    for (binding, access) in summary.capture_accesses {
+                        let targets = if access.target.input_fields.is_empty() {
+                            self.environment.pointers.get(&binding)
+                        } else {
+                            self.environment.field_pointers.get(&CallablePlace {
+                                binding,
+                                fields: access.target.input_fields.clone(),
+                            })
+                        }
+                        .cloned()
+                        .flatten()
+                        .ok_or("handler capture access requires known pointer provenance")?;
+                        self.record_access(targets, access.write, access.read_value, access.ty)?;
+                    }
+                    input.parameter_accesses.extend(summary.accesses);
+                    continue;
                 }
                 let (pattern, mut guards) = outer_guards(&arm.pattern);
                 guards.extend(arm.guard.as_ref());
@@ -498,14 +743,25 @@ impl<'a> Infer<'a> {
         if row != effects || self.ty(&expr.ty)? != *result {
             return Err("handler memory completion mismatch".into());
         }
-        if !effect_data_layout(self.package, &result, self.fuel, 0)? {
+        if !effect_transfer_layout(self.package, &result, self.fuel)?
+            && !effect_data_layout(self.package, &result, self.fuel, 0)?
+        {
             return Err("handler memory completion needs data-only delivery".into());
         }
         charge_inputs(&inputs, self.fuel)?;
         inputs.sort_by_cached_key(ToString::to_string);
         self.environment = self.clone_environment(&base)?;
         let previous = std::mem::replace(&mut self.round.effects, inputs);
-        let walked = self.walk(computation, depth + 1);
+        let walked = (|| {
+            self.walk(computation, depth + 1)?;
+            self.forward_effect_value(expr, computation)?;
+            if self.local_pointer_value(&result)? {
+                let targets = self.optional_target(computation, depth + 1)?;
+                self.expression_results
+                    .insert(expr as *const Expr as usize, targets);
+            }
+            Ok(())
+        })();
         self.round.effects = previous;
         walked
     }
@@ -519,7 +775,7 @@ impl<'a> Infer<'a> {
             // view inferred for memory access must not rewrite a label's head.
             bound_type(argument, self.fuel)?;
             let argument = argument
-                .instantiate_types(self.parameters, self.arguments)
+                .instantiate_parameters(&self.declarations, self.arguments)
                 .map_err(|e| e.to_string())?;
             bound_type(&argument, self.fuel)?;
             arguments.push(argument);
@@ -529,24 +785,56 @@ impl<'a> Infer<'a> {
             arguments,
         })
     }
+    // A worklist can retain several scoped providers for one operation. Until
+    // its memory key distinguishes occurrences, conservatively join their
+    // origins/obligations; picking the first premise would underapproximate.
     fn require_effect(
         &mut self,
         operation: &nir::effects::Operation,
-    ) -> Result<&EffectInput, String> {
+    ) -> Result<EffectInput, String> {
+        let mut matched: Option<EffectInput> = None;
         for input in &self.round.effects {
             *self.fuel = self
                 .fuel
                 .checked_sub(1)
                 .ok_or("effect memory premise lookup budget exhausted")?;
+            *self.fuel = self
+                .fuel
+                .checked_sub(
+                    input
+                        .forwarded_parameters
+                        .as_ref()
+                        .map_or(0, BTreeSet::len)
+                        .saturating_add(input.copy_parameters.len()),
+                )
+                .ok_or("effect transfer lookup budget exhausted")?;
+            input.charge_parameter_accesses(self.fuel)?;
             bound_type(&input.signature, self.fuel)?;
             for argument in &input.operation.arguments {
                 bound_type(argument, self.fuel)?;
             }
             if &input.operation == operation {
-                return Ok(input);
+                if let Some(previous) = &mut matched {
+                    if previous.abi != input.abi || previous.signature != input.signature {
+                        return Err("conflicting effect memory premises".into());
+                    }
+                    previous.forwarded_parameters = super::super::effect_transfer::with_fallback(
+                        previous.forwarded_parameters.take(),
+                        input.forwarded_parameters.as_ref(),
+                        self.fuel,
+                    )?;
+                    previous
+                        .copy_parameters
+                        .extend(input.copy_parameters.iter().copied());
+                    previous
+                        .parameter_accesses
+                        .extend(input.parameter_accesses.iter().cloned());
+                } else {
+                    matched = Some(input.clone());
+                }
             }
         }
-        Err("effect request requires an installed handler memory premise".into())
+        matched.ok_or_else(|| "effect request requires an installed handler memory premise".into())
     }
     pub(super) fn effect_completion(&mut self, ty: &Term) -> Result<Term, String> {
         let ty = self.type_view(ty)?;
@@ -554,10 +842,15 @@ impl<'a> Infer<'a> {
             for operation in effects {
                 self.require_effect(operation)?;
             }
-            // Pointer/closure delivery needs a result-provenance lattice across
-            // suspension. Do not erase those dependencies behind a wrapper.
-            if !effect_data_layout(self.package, result, self.fuel, 0)? {
-                return Err("effect memory completion requires data-only delivery".into());
+            // Pointer and callable origins cross the boundary through the
+            // result caches; the computation wrapper grants no extra lifetime.
+            if !effect_transfer_layout(self.package, &result, self.fuel)?
+                && !effect_data_layout(self.package, result, self.fuel, 0)?
+            {
+                return Err(
+                    "effect memory completion requires data-only delivery or tracked origins"
+                        .into(),
+                );
             }
             return Ok(result.as_ref().clone());
         }
@@ -573,7 +866,9 @@ impl<'a> Infer<'a> {
             } => self.walk_handler(expr, computation, handlers, outer, depth + 1)?,
             K::EffectResume(value) => {
                 let ty = self.ty(&value.ty)?;
-                if !effect_data_layout(self.package, &ty, self.fuel, 0)? {
+                if !effect_transfer_layout(self.package, &ty, self.fuel)?
+                    && !effect_data_layout(self.package, &ty, self.fuel, 0)?
+                {
                     return Err("handler memory resume needs data-only delivery".into());
                 }
                 self.walk(value, depth + 1)?;
@@ -594,18 +889,72 @@ impl<'a> Infer<'a> {
                 if input.signature != signature || input.abi != *abi {
                     return Err("effect memory request disagrees with its premise".into());
                 }
+                let forwarded = input.forwarded_parameters.clone();
                 let Term::Function { parameters, result } = signature else {
                     unreachable!()
                 };
                 if parameters.len() != arguments.len() || self.ty(&expr.ty)? != *result {
                     return Err("effect memory request signature mismatch".into());
                 }
-                for (argument, parameter) in arguments.iter().zip(parameters) {
+                let mut returned = None;
+                let mut have_result = false;
+                let mut pending_accesses = Vec::new();
+                for (index, (argument, parameter)) in arguments.iter().zip(parameters).enumerate() {
                     let ty = self.ty(&argument.ty)?;
                     if ty != parameter.ty && ty != Term::Primitive(Primitive::Never) {
                         return Err("effect memory request argument mismatch".into());
                     }
                     self.walk(argument, depth + 1)?;
+                    for access in &input.parameter_accesses {
+                        self.step(access.input_fields.len().saturating_add(1))?;
+                        if access.parameter != index {
+                            continue;
+                        }
+                        let pointee = access_pointee(
+                            self.package,
+                            &parameter.ty,
+                            &access.input_fields,
+                            self.fuel,
+                        )?;
+                        let targets = if access.input_fields.is_empty() {
+                            self.optional_target(argument, depth + 1)?
+                        } else {
+                            self.pointer_fields_for(argument)?
+                                .remove(&access.input_fields)
+                                .flatten()
+                        }
+                        .ok_or("effect parameter access requires known pointer provenance")?;
+                        self.target_work(&targets)?;
+                        pending_accesses.push((targets, access.write, access.read_value, pointee));
+                    }
+                    if forwarded
+                        .as_ref()
+                        .is_some_and(|indices| indices.contains(&index))
+                    {
+                        if have_result {
+                            self.join_effect_value(expr, argument)?;
+                        } else {
+                            self.forward_effect_value(expr, argument)?;
+                        }
+                        if self.local_pointer_value(&result)? {
+                            let next = self.optional_target(argument, depth + 1)?;
+                            returned = if have_result {
+                                self.join_targets(returned, next)?
+                            } else {
+                                next
+                            };
+                        }
+                        have_result = true;
+                    }
+                }
+                // Snapshot each argument before later operands run, then apply
+                // the operation footprint after argument preparation completes.
+                for (targets, write, read, pointee) in pending_accesses {
+                    self.record_access(targets, write, read, pointee)?;
+                }
+                if self.local_pointer_value(&result)? {
+                    self.expression_results
+                        .insert(expr as *const Expr as usize, returned);
                 }
                 // Handler predicate failure/lexical escape is not normal return.
                 // Keep possible rejection even though delivery introduces no aliases.
@@ -632,9 +981,15 @@ impl<'a> Infer<'a> {
                     return Err("effect memory boundary signature mismatch".into());
                 }
                 let previous = std::mem::replace(&mut self.effect_row, row);
-                let result = self.walk(body, depth + 1);
+                let walked = self.walk(body, depth + 1);
                 self.effect_row = previous;
-                result?;
+                walked?;
+                self.forward_effect_value(expr, body)?;
+                if self.local_pointer_value(&result)? {
+                    let targets = self.optional_target(body, depth + 1)?;
+                    self.expression_results
+                        .insert(expr as *const Expr as usize, targets);
+                }
             }
             K::EffectRun { computation, slots } => {
                 let ty = self.ty(&computation.ty)?;
@@ -652,6 +1007,12 @@ impl<'a> Infer<'a> {
                     return Err("effect memory run routing mismatch".into());
                 }
                 self.walk(computation, depth + 1)?;
+                self.forward_effect_value(expr, computation)?;
+                if self.local_pointer_value(&result)? {
+                    let targets = self.optional_target(computation, depth + 1)?;
+                    self.expression_results
+                        .insert(expr as *const Expr as usize, targets);
+                }
             }
             _ => unreachable!(),
         }
@@ -704,4 +1065,383 @@ pub fn infer_closure_with_effect_inputs(
         effect_inputs,
         memory,
     })
+}
+
+/// Parameter-relative memory analysis of a closed handler arm. This is a
+/// conditional summary, not permission to borrow actual request arguments.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HandlerParameterSummary {
+    pub memory: ArgumentSummary,
+    pub accesses: BTreeSet<EffectParameterAccess>,
+    /// Borrowed environment accesses retain their lexical binding separately
+    /// from operation parameters. Virtual slots exist only in `memory`.
+    pub capture_accesses: Vec<(LocalId, Access)>,
+}
+impl fmt::Display for HandlerParameterSummary {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("(handler-parameter-memory (accesses")?;
+        for access in &self.accesses {
+            write!(f, " {access}")?;
+        }
+        f.write_str(") (capture-accesses")?;
+        for (binding, access) in &self.capture_accesses {
+            write!(f, " (capture {binding} {access})")?;
+        }
+        write!(f, ") {})", self.memory)
+    }
+}
+
+/// Reuse normal memory inference and pattern binding for closed direct arms.
+/// Input identities belong to the complete parameters, even when a pattern
+/// exposes only their fields. Captures still require an environment adapter.
+pub fn infer_handler_arm_memory(
+    package: &Package,
+    handler: &nir::program::EffectHandler,
+    arm: &nir::program::MatchArm,
+    fuel: &mut usize,
+) -> Result<HandlerParameterSummary, String> {
+    infer_handler_arm_memory_with_captures(package, handler, arm, &[], fuel)
+}
+
+fn infer_handler_arm_memory_with_captures(
+    package: &Package,
+    handler: &nir::program::EffectHandler,
+    arm: &nir::program::MatchArm,
+    captures: &[(LocalId, Term)],
+    fuel: &mut usize,
+) -> Result<HandlerParameterSummary, String> {
+    if handler.abi != nir::effects::Abi::Direct {
+        return Err("handler parameter inference requires direct ABI".into());
+    }
+    bound_type(&handler.signature, fuel)?;
+    let Term::Function { parameters, .. } = &handler.signature else {
+        return Err("handler parameter inference requires an operation signature".into());
+    };
+    let free = nir::free_bindings::collect_arm(arm, fuel)?;
+    let mut capture_bindings = BTreeSet::new();
+    for (binding, ty) in captures {
+        bound_type(ty, fuel)?;
+        let layout = pointer_input_layout(Some(package), ty, fuel)?;
+        if !capture_bindings.insert(*binding)
+            || if layout.is_empty() {
+                !effect_data_layout(Some(package), ty, fuel, 0)?
+            } else {
+                layout.iter().any(|leaf| !scalar(&leaf.pointee))
+            }
+        {
+            return Err(
+                "handler parameter inference requires data or stable scalar-pointer captures"
+                    .into(),
+            );
+        }
+    }
+    if free != capture_bindings {
+        return Err("handler parameter inference needs an explicit capture environment".into());
+    }
+    let (pattern, mut guards) = outer_guards(&arm.pattern);
+    guards.extend(arm.guard.as_ref());
+    let Pattern::Tuple(fields) = pattern else {
+        return Err("handler parameter inference requires a parameter tuple".into());
+    };
+    if fields.len() != parameters.len() {
+        return Err("handler parameter inference arity mismatch".into());
+    }
+    // The private closure receives complete inputs, then uses ordinary pattern
+    // binding to expose the source arm's locals. Reserve an owner absent from
+    // the arm's bindings and uses so analysis inputs cannot shadow source names.
+    fn pattern_owners(
+        pattern: &Pattern,
+        owners: &mut BTreeSet<u32>,
+        fuel: &mut usize,
+    ) -> Result<(), String> {
+        let mut pending = vec![pattern];
+        while let Some(pattern) = pending.pop() {
+            *fuel = fuel
+                .checked_sub(1)
+                .ok_or("handler pattern budget exhausted")?;
+            match pattern {
+                Pattern::Binding { binding, inner } | Pattern::Observe { binding, inner } => {
+                    owners.insert(binding.owner);
+                    pending.push(inner);
+                }
+                Pattern::Remap { pattern, bindings } => {
+                    *fuel = fuel
+                        .checked_sub(bindings.len())
+                        .ok_or("handler remap budget exhausted")?;
+                    for (from, to) in bindings {
+                        owners.insert(from.owner);
+                        owners.insert(to.owner);
+                    }
+                    pending.push(pattern);
+                }
+                Pattern::Tuple(fields)
+                | Pattern::Record { fields, .. }
+                | Pattern::AnonymousRecord { fields, .. }
+                | Pattern::Variant { fields, .. }
+                | Pattern::Or(fields)
+                | Pattern::TypeTuple(fields)
+                | Pattern::NominalType { fields, .. }
+                | Pattern::NormalForm {
+                    arguments: fields, ..
+                } => {
+                    *fuel = fuel
+                        .checked_sub(fields.len())
+                        .ok_or("handler field budget exhausted")?;
+                    pending.extend(fields);
+                }
+                Pattern::Guard { pattern, .. } => pending.push(pattern),
+                Pattern::Then { first, next, .. } => {
+                    pending.push(first);
+                    pending.push(next);
+                }
+                Pattern::CodeEvidence { .. } => {
+                    return Err("handler has unresolved pattern code".into());
+                }
+                Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => {}
+            }
+        }
+        Ok(())
+    }
+    let mut owners: BTreeSet<_> = captures.iter().map(|(binding, _)| binding.owner).collect();
+    pattern_owners(pattern, &mut owners, fuel)?;
+    let observations = nir::visit::pattern_observations(pattern, fuel)?;
+    for expression in std::iter::once(&arm.body)
+        .chain(guards.iter().copied())
+        .chain(observations)
+    {
+        nir::visit::expression(expression, fuel, |node, fuel| {
+            bound_type(&node.ty, fuel)?;
+            match &node.kind {
+                K::Local(binding) | K::Let { binding, .. } => {
+                    owners.insert(binding.owner);
+                }
+                K::LetPattern { pattern, .. } => pattern_owners(pattern, &mut owners, fuel)?,
+                K::Match { arms, .. } => {
+                    for arm in arms {
+                        pattern_owners(&arm.pattern, &mut owners, fuel)?;
+                    }
+                }
+                K::Closure { .. } | K::EffectHandle { .. } => {
+                    return Err(
+                        "nested handler or closure requires an explicit memory environment".into(),
+                    );
+                }
+                _ => {}
+            }
+            Ok(())
+        })?;
+    }
+    let mut owner = u32::MAX;
+    while owners.contains(&owner) {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or("handler analysis owner budget exhausted")?;
+        owner = owner
+            .checked_sub(1)
+            .ok_or("handler analysis owner space exhausted")?;
+    }
+    let mut bindings = Vec::new();
+    let mut statements = Vec::new();
+    for (index, (field, parameter)) in fields.iter().zip(parameters).enumerate() {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or("handler parameter binding budget exhausted")?;
+        let binding = LocalId {
+            owner,
+            index: u32::try_from(index).map_err(|_| "handler parameter index overflow")?,
+        };
+        bindings.push(binding);
+        statements.push(Expr {
+            ty: Term::Primitive(Primitive::Void),
+            source: arm.body.source,
+            kind: K::LetPattern {
+                pattern: field.clone(),
+                value: Box::new(Expr {
+                    ty: parameter.ty.clone(),
+                    source: arm.body.source,
+                    kind: K::Local(binding),
+                }),
+                guard: None,
+                otherwise: None,
+            },
+        });
+    }
+    for guard in guards {
+        statements.push(Expr {
+            ty: Term::Primitive(Primitive::Void),
+            source: guard.source,
+            kind: K::Discard(Box::new(guard.clone())),
+        });
+    }
+    // Guard failure excludes this body at runtime. Including it here is a
+    // conservative footprint; candidate ownership is checked independently.
+    let mut body = Expr {
+        ty: arm.body.ty.clone(),
+        source: arm.body.source,
+        kind: K::Block {
+            statements,
+            result: Some(Box::new(arm.body.clone())),
+        },
+    };
+    nir::visit::expression_mut_pruned(&mut body, fuel, |node, _| {
+        match &node.kind {
+            K::Return(_) => {
+                return Err("handler lexical return requires a separate exit summary".into());
+            }
+            K::Closure { .. } | K::EffectHandle { .. } => {
+                return Err(
+                    "nested handler or closure requires an explicit memory environment".into(),
+                );
+            }
+            K::EffectResume(_) => {
+                let K::EffectResume(value) = std::mem::replace(&mut node.kind, K::Unit) else {
+                    unreachable!()
+                };
+                // The private closure's return target represents only this
+                // handler's resume; source lexical returns remain distinct.
+                node.kind = K::Return(Some(value));
+            }
+            _ => {}
+        }
+        Ok(true)
+    })?;
+    let definition = Expr {
+        ty: Term::Closure {
+            environment: captures.iter().map(|(_, ty)| ty.clone()).collect(),
+            signature: Box::new(handler.signature.clone()),
+        },
+        source: arm.body.source,
+        kind: K::Closure {
+            parameters: bindings,
+            captures: captures
+                .iter()
+                .map(|(binding, ty)| nir::program::Capture {
+                    binding: *binding,
+                    ty: ty.clone(),
+                    value: None,
+                })
+                .collect(),
+            body: std::sync::Arc::new(body),
+        },
+    };
+    let memory = infer_closure_with_borrowed_captures(
+        package,
+        &definition,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        fuel,
+    )?;
+    let mut pointer_captures = Vec::new();
+    for capture in captures {
+        if !pointer_input_layout(Some(package), &capture.1, fuel)?.is_empty() {
+            pointer_captures.push(capture);
+        }
+    }
+    let mut capture_accesses = Vec::new();
+    let mut accesses = BTreeSet::new();
+    for access in &memory.accesses {
+        *fuel = fuel
+            .checked_sub(access.target.path_cost())
+            .ok_or("handler parameter access budget exhausted")?;
+        if !access.target.conditions.is_empty()
+            || !access.target.through.is_empty()
+            || !access.target.fields.is_empty()
+        {
+            return Err(
+                "handler parameter access requires a scalar pointee without pointer traversal"
+                    .into(),
+            );
+        }
+        if access.target.parameter >= parameters.len() {
+            let (binding, ty) = pointer_captures
+                .get(access.target.parameter - parameters.len())
+                .ok_or("handler memory access is not a parameter or capture")?;
+            let pointee = access_pointee(Some(package), ty, &access.target.input_fields, fuel)?;
+            if pointee != access.ty {
+                return Err("handler capture access pointee mismatch".into());
+            }
+            capture_accesses.push((*binding, access.clone()));
+            continue;
+        }
+        let parameter = &parameters[access.target.parameter];
+        let pointee = access_pointee(
+            Some(package),
+            &parameter.ty,
+            &access.target.input_fields,
+            fuel,
+        )?;
+        if pointee != access.ty {
+            return Err("handler parameter access pointee mismatch".into());
+        }
+        accesses.insert(EffectParameterAccess {
+            parameter: access.target.parameter,
+            input_fields: access.target.input_fields.clone(),
+            read_value: access.read_value,
+            write: access.write,
+        });
+    }
+    Ok(HandlerParameterSummary {
+        memory,
+        accesses,
+        capture_accesses,
+    })
+}
+
+/// Admission shared by source memory inference and resource installation.
+/// Direct arms with data results and explicit scalar input accesses can combine
+/// their parameter contract with independently validated lexical captures.
+pub(crate) fn direct_handler_accesses(
+    package: Option<&Package>,
+    handler: &nir::program::EffectHandler,
+    arm: &nir::program::MatchArm,
+    captures: &[(LocalId, Term)],
+    fuel: &mut usize,
+) -> Result<Option<HandlerParameterSummary>, String> {
+    let Some(package) = package else {
+        return Ok(None);
+    };
+    let Term::Function { parameters, result } = &handler.signature else {
+        return Ok(None);
+    };
+    if handler.abi != nir::effects::Abi::Direct
+        || !effect_data_layout(Some(package), result, fuel, 0)?
+    {
+        return Ok(None);
+    }
+    let mut has_pointer = false;
+    for parameter in parameters {
+        if !pointer_input_layout(Some(package), &parameter.ty, fuel)?.is_empty() {
+            has_pointer = true;
+            break;
+        }
+    }
+    if !has_pointer {
+        for (_, ty) in captures {
+            if !pointer_input_layout(Some(package), ty, fuel)?.is_empty() {
+                has_pointer = true;
+                break;
+            }
+        }
+    }
+    if !has_pointer {
+        return Ok(None);
+    }
+    let summary =
+        match infer_handler_arm_memory_with_captures(package, handler, arm, captures, fuel) {
+            Ok(summary) => summary,
+            Err(error) if *fuel == 0 => return Err(error),
+            Err(_) => return Ok(None),
+        };
+    if (summary.accesses.is_empty() && summary.capture_accesses.is_empty())
+        || summary.memory.may_run_cleanup
+        || summary.memory.result_targets.is_some()
+        || !summary.memory.pointer_fields.is_empty()
+    {
+        return Ok(None);
+    }
+    // Variant-qualified parameter paths retain their conditional identity.
+    // Guarded captures require stable tag evidence from the installer.
+    Ok(Some(summary))
 }

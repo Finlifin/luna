@@ -13,7 +13,7 @@ mod rows;
 pub use rows::{RowEmbedding, RowLayer, embed_row, select_layer};
 
 mod instances;
-pub use instances::{Instance, instantiate};
+pub use instances::{Instance, instantiate, instantiate_with_domains, instantiate_with_evidence};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -178,6 +178,10 @@ fn charge(term: &Term, fuel: &mut usize, depth: usize) -> Result<(), Error> {
         Ok(())
     }
     match term {
+        Term::ErrorResult { errors, result } => {
+            terms(errors, fuel, depth - 1)?;
+            charge(result, fuel, depth - 1)
+        }
         Term::Computation { effects, result } => {
             if effects.len() > *fuel {
                 return Err(Error::BudgetExhausted);
@@ -189,7 +193,8 @@ fn charge(term: &Term, fuel: &mut usize, depth: usize) -> Result<(), Error> {
             }
             Ok(())
         }
-        Term::Primitive(_)
+        Term::ClosureContextType
+        | Term::Primitive(_)
         | Term::Rigid { .. }
         | Term::Bound { .. }
         | Term::Hole { .. }
@@ -215,6 +220,7 @@ fn charge(term: &Term, fuel: &mut usize, depth: usize) -> Result<(), Error> {
         | Term::FunctionValue { arguments, .. }
         | Term::NormalForm { arguments, .. }
         | Term::Tuple(arguments)
+        | Term::ClosureContextValue(arguments)
         | Term::TypeListValue(arguments)
         | Term::TypeListConcat(arguments)
         | Term::TupleValue(arguments) => terms(arguments, fuel, depth - 1),
@@ -223,6 +229,10 @@ fn charge(term: &Term, fuel: &mut usize, depth: usize) -> Result<(), Error> {
         } => {
             charge(subject, fuel, depth - 1)?;
             terms(arguments, fuel, depth - 1)
+        }
+        Term::ContextualClosure { context, signature } => {
+            charge(context, fuel, depth - 1)?;
+            charge(signature, fuel, depth - 1)
         }
         Term::Closure {
             environment,

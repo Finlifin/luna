@@ -1,6 +1,7 @@
 //! Tuple spreads are evaluated once, then unpacked in the enclosing call's
 //! preparation scope. Packet storage is not a new full-expression boundary.
 use super::*;
+use crate::calls::InputContext as Input;
 mod inputs;
 mod layout;
 
@@ -49,24 +50,33 @@ impl Checker<'_, '_> {
             return build(self, &flat, false);
         }
         let mut checked = inputs::PreparedInputs::new();
+        let mut packets = BTreeMap::new();
+        let structural = self
+            .structural_result_context
+            .as_ref()
+            .filter(|(id, _)| *id == expr.hir_id)
+            .map(|(_, context)| context.clone());
         let context = self.spread_context(
             callee,
             collected,
             expected,
             partial,
+            structural.as_ref(),
             resolved,
             expr.span,
             &mut checked,
+            &mut packets,
         )?;
+        let widths = self.checked_packet_widths(&packets, expr.span)?;
         let (contexts, partial_contexts, stages) = if let Some(context) = context {
             let types = context.iter().map(|(ty, _)| ty.clone()).collect::<Vec<_>>();
             let stages = context.iter().map(|(_, stage)| *stage).collect::<Vec<_>>();
-            let (contexts, partial_contexts) =
-                self.spread_partial_packet_contexts(collected, &types, expr.span)?;
+            let (contexts, partial_contexts) = self
+                .spread_input_packet_contexts_with_widths(collected, &types, expr.span, &widths)?;
             (
                 contexts,
                 partial_contexts,
-                self.spread_packet_layout(collected, &stages, expr.span)?
+                self.spread_packet_layout_with_widths(collected, &stages, expr.span, &widths)?
                     .into_iter()
                     .map(|fields| {
                         fields.is_some_and(|fields| fields.into_iter().any(|stage| stage))
@@ -80,12 +90,13 @@ impl Checker<'_, '_> {
                 vec![false; collected.len()],
             )
         };
+        let mut source_packets = BTreeMap::new();
         let mut source_contexts = Vec::new();
         let mut source_partial_contexts = Vec::new();
         let mut source_stages = Vec::new();
         let mut collected_index = 0;
         let mut record_seen = false;
-        for arg in args {
+        for (source_index, arg) in args.iter().enumerate() {
             if matches!(arg, Arg::Named(..)) {
                 source_contexts.push(None);
                 source_partial_contexts.push(None);
@@ -95,6 +106,9 @@ impl Checker<'_, '_> {
                     record_seen = true;
                 }
             } else {
+                if let Some(packet) = packets.remove(&collected_index) {
+                    source_packets.insert(source_index, packet);
+                }
                 source_contexts.push(contexts[collected_index].clone());
                 source_partial_contexts.push(partial_contexts[collected_index].clone());
                 source_stages.push(stages[collected_index]);
@@ -110,7 +124,7 @@ impl Checker<'_, '_> {
             let mut record_slot = None;
             let mut fields = Vec::new();
             let mut fuel = 10_000;
-            for arg in args {
+            for (source_index, arg) in args.iter().enumerate() {
                 match arg {
                     Arg::Named(_, value) => {
                         if record_slot.is_none() {
@@ -123,7 +137,34 @@ impl Checker<'_, '_> {
                     _ => {
                         let width = match arg {
                             Arg::Expand(value) => {
-                                self.spread_width(value, &mut fuel, 0)?.ok_or_else(|| {
+                                // Completed producers are stronger evidence
+                                // than syntax-only hints (e.g. method calls).
+                                // Reuse their actual tuple layout without
+                                // checking or executing the producer again.
+                                let completed = source_packets
+                                    .get(&source_index)
+                                    .map(|packet| self.tuple_width(&packet.ty, value.span))
+                                    .transpose()?
+                                    .flatten();
+                                let contextual = match (
+                                    &source_contexts[source_index],
+                                    &source_partial_contexts[source_index],
+                                ) {
+                                    (Some(ty), _) => self.tuple_width(ty, value.span)?,
+                                    (
+                                        _,
+                                        Some(
+                                            Input::Tuple(fields)
+                                            | Input::NormalTuple { fields, .. },
+                                        ),
+                                    ) => Some(fields.len()),
+                                    _ => None,
+                                };
+                                let width = match completed.or(contextual) {
+                                    Some(width) => Some(width),
+                                    None => self.spread_width(value, &mut fuel, 0)?,
+                                };
+                                width.ok_or_else(|| {
                                     error(
                                         value.span,
                                         "checked spread inputs have no stable packet layout",
@@ -170,7 +211,7 @@ impl Checker<'_, '_> {
             &source_stages,
             Some(&source_partial_contexts),
             source_checked,
-            BTreeMap::new(),
+            source_packets,
             1,
             build,
         )
@@ -387,27 +428,37 @@ impl Checker<'_, '_> {
         open_instance: Option<OwnerId>,
     ) -> Result<n::Expr, Error> {
         let mut checked = inputs::PreparedInputs::new();
+        let mut packets = BTreeMap::new();
+        let structural = self
+            .structural_result_context
+            .as_ref()
+            .filter(|(id, _)| *id == expr.hir_id)
+            .map(|(_, context)| context.clone());
         let context = self.spread_context(
             callee,
             args,
             expected,
             partial,
+            structural.as_ref(),
             resolved.as_ref(),
             expr.span,
             &mut checked,
+            &mut packets,
         )?;
+        let widths = self.checked_packet_widths(&packets, expr.span)?;
         let (packet_contexts, partial_contexts) = if let Some(types) = &context {
-            self.spread_partial_packet_contexts(
+            self.spread_input_packet_contexts_with_widths(
                 args,
                 &types.iter().map(|(ty, _)| ty.clone()).collect::<Vec<_>>(),
                 expr.span,
+                &widths,
             )?
         } else {
             (vec![None; args.len()], vec![None; args.len()])
         };
         let packet_stages = if let Some(types) = &context {
             let markers = types.iter().map(|(_, staged)| *staged).collect::<Vec<_>>();
-            self.spread_packet_layout(args, &markers, expr.span)?
+            self.spread_packet_layout_with_widths(args, &markers, expr.span, &widths)?
                 .into_iter()
                 .map(|fields| fields.is_some_and(|fields| fields.into_iter().any(|staged| staged)))
                 .collect::<Vec<_>>()
@@ -421,7 +472,7 @@ impl Checker<'_, '_> {
             &packet_stages,
             Some(&partial_contexts),
             checked,
-            BTreeMap::new(),
+            packets,
             0,
             |this, inputs, diverges| {
                 let expected = expected.filter(|_| !diverges);
@@ -479,7 +530,7 @@ impl Checker<'_, '_> {
         )
     }
 
-    fn prepare_spreads_checked(
+    pub(super) fn prepare_spreads_checked(
         &mut self,
         expr: &Expr<'_>,
         args: &[Arg<'_>],
@@ -612,7 +663,31 @@ impl Checker<'_, '_> {
                         let shape = if is_never(&value.ty) {
                             match packet_context.as_ref() {
                                 Some(context) => self.structural_type(context, expr.span)?,
-                                None => value.ty.clone(),
+                                None => {
+                                    use crate::calls::InputContext as C;
+                                    // No packet is produced on this path, but
+                                    // the destination may already determine its
+                                    // unreachable unpack bindings. Publish only
+                                    // completed types, never inference holes.
+                                    match input_contexts
+                                        .and_then(|contexts| contexts[argument_index].as_ref())
+                                    {
+                                        Some(C::Known(ty)) => {
+                                            self.structural_type(ty, expr.span)?
+                                        }
+                                        Some(C::Tuple(fields) | C::NormalTuple { fields, .. }) => {
+                                            let fields = fields.iter().map(|field| match field {
+                                                C::Known(ty) => Some(ty.clone()),
+                                                _ => None,
+                                            }).collect::<Option<Vec<_>>>().ok_or_else(|| error(
+                                                expr.span,
+                                                "diverging spread requires a resolved tuple input layout",
+                                            ))?;
+                                            Term::Tuple(fields)
+                                        }
+                                        _ => value.ty.clone(),
+                                    }
+                                }
                             }
                         } else {
                             self.structural_type(&value.ty, expr.span)?
@@ -817,10 +892,12 @@ impl Checker<'_, '_> {
         args: &[Arg<'_>],
         expected: Option<&Term>,
         partial: Option<&crate::calls::CallableContext>,
+        structural: Option<&crate::calls::InputContext>,
         resolved: Option<&(n::Expr, Vec<n::Expr>)>,
         span: Span,
         checked: &mut inputs::PreparedInputs,
-    ) -> Result<Option<Vec<(Option<Term>, bool)>>, Error> {
+        packets: &mut BTreeMap<usize, n::Expr>,
+    ) -> Result<Option<Vec<(Input, bool)>>, Error> {
         if let Some((callee, prefix)) = resolved {
             let shape = self.structural_type(&callee.ty, span)?;
             let shape = if self.incomplete_method_instance(callee) {
@@ -869,7 +946,11 @@ impl Checker<'_, '_> {
                 .unwrap_or_default();
             let types =
                 if let Some(hints) = Self::dependent_spread_hints(signature, &generics, span)? {
-                    hints[offset..].to_vec()
+                    hints[offset..]
+                        .iter()
+                        .cloned()
+                        .map(|ty| ty.map_or(Input::Unknown, Input::Known))
+                        .collect()
                 } else if self.incomplete_method_instance(callee) {
                     let (owner, arguments) = self.method_instantiation_inputs(callee).unwrap();
                     let remaining = &self.type_parameters[&owner][arguments.len()..];
@@ -890,7 +971,7 @@ impl Checker<'_, '_> {
                             actual[index] = Some(value.ty.clone());
                         }
                     }
-                    let candidate = self.infer_spread_inputs(
+                    let candidate = self.infer_routed_packet_inputs(
                         &scheme,
                         actual,
                         args,
@@ -898,25 +979,30 @@ impl Checker<'_, '_> {
                         offset,
                         expected,
                         partial,
-                        None,
-                        None,
+                        structural,
+                        &parameters[offset..]
+                            .iter()
+                            .map(|p| callee.ty.is_comptime_callable() || p.sort != Sort::Runtime)
+                            .collect::<Vec<_>>(),
                         span,
                         checked,
+                        packets,
+                        false,
                     )?;
                     (offset..parameters.len())
                         .map(|index| {
                             candidate
-                                .parameter_type(index)
+                                .parameter_input_context(index)
                                 .map_err(|cause| call_inference_error(span, cause))
                         })
                         .collect::<Result<Vec<_>, _>>()?
                 } else {
                     parameters[offset..]
                         .iter()
-                        .map(|parameter| Some(parameter.ty.clone()))
+                        .map(|parameter| Input::Known(parameter.ty.clone()))
                         .collect()
                 };
-            return self.spread_parameter_context(
+            return self.spread_parameter_input_context(
                 types,
                 declarations,
                 &parameters[offset..]
@@ -951,7 +1037,7 @@ impl Checker<'_, '_> {
         // here: they may need inputs that have not yet been prepared.
         if let Some(definition) = self.open_functions.get(&owner) {
             let domains = definition.input_domains();
-            let mut types = domains
+            let types = domains
                 .iter()
                 .map(|(_, ty)| {
                     let Some(ty) = ty else { return Ok(None) };
@@ -974,21 +1060,27 @@ impl Checker<'_, '_> {
                     Ok(Some(ty))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            let mut inputs = types
+                .iter()
+                .cloned()
+                .map(|ty| ty.map_or(Input::Unknown, Input::Known))
+                .collect::<Vec<_>>();
             if !self.type_parameters[&owner].is_empty()
                 && types.iter().any(Option::is_none)
-                && let Some(candidate) =
-                    self.open_spread_candidate(owner, expected, args, checked, span)?
+                && let Some(candidate) = self.open_spread_candidate(
+                    owner, expected, partial, structural, args, checked, packets, span,
+                )?
             {
-                for (slot, ty) in types.iter_mut().enumerate() {
+                for (slot, ty) in types.iter().enumerate() {
                     if ty.is_none() {
-                        *ty = candidate
-                            .parameter_type(slot)
+                        inputs[slot] = candidate
+                            .parameter_input_context(slot)
                             .map_err(|cause| call_inference_error(span, cause))?;
                     }
                 }
             }
-            return self.spread_parameter_context(
-                types,
+            return self.spread_parameter_input_context(
+                inputs,
                 Some(declarations),
                 &domains
                     .iter()
@@ -1004,8 +1096,11 @@ impl Checker<'_, '_> {
             let Term::Function { parameters, .. } = signature.callable_signature() else {
                 unreachable!()
             };
-            return self.spread_parameter_context(
-                types,
+            return self.spread_parameter_input_context(
+                types
+                    .into_iter()
+                    .map(|ty| ty.map_or(Input::Unknown, Input::Known))
+                    .collect(),
                 Some(declarations),
                 &parameters
                     .iter()
@@ -1023,14 +1118,17 @@ impl Checker<'_, '_> {
             };
             parameters
                 .iter()
-                .map(|p| Some(p.ty.clone()))
+                .map(|p| Input::Known(p.ty.clone()))
                 .collect::<Vec<_>>()
         } else if type_parameters.is_empty() {
             let signature = self.callable_input_view(&signature, span)?;
             let Term::Function { parameters, .. } = signature.callable_signature() else {
                 return Ok(None);
             };
-            parameters.iter().map(|p| Some(p.ty.clone())).collect()
+            parameters
+                .iter()
+                .map(|p| Input::Known(p.ty.clone()))
+                .collect()
         } else {
             let scheme = crate::calls::Scheme {
                 parameter_sorts: self
@@ -1043,7 +1141,7 @@ impl Checker<'_, '_> {
                     .abstract_parameters(&self.input_binders(&type_parameters))
                     .map_err(|cause| error(span, cause.to_string()))?,
             };
-            let candidate = self.infer_spread_inputs(
+            let candidate = self.infer_routed_packet_inputs(
                 &scheme,
                 vec![None; declarations.len()],
                 args,
@@ -1051,20 +1149,25 @@ impl Checker<'_, '_> {
                 0,
                 expected,
                 partial,
-                None,
-                None,
+                structural,
+                &declarations
+                    .iter()
+                    .map(|p| declaration.modifiers.is_comptime || p.ty.is_comptime())
+                    .collect::<Vec<_>>(),
                 span,
                 checked,
+                packets,
+                false,
             )?;
             (0..declarations.len())
                 .map(|index| {
                     candidate
-                        .parameter_type(index)
+                        .parameter_input_context(index)
                         .map_err(|cause| call_inference_error(span, cause))
                 })
                 .collect::<Result<Vec<_>, _>>()?
         };
-        self.spread_parameter_context(
+        self.spread_parameter_input_context(
             types,
             Some(declarations),
             &declarations
@@ -1084,6 +1187,41 @@ impl Checker<'_, '_> {
         args: &[Arg<'_>],
         span: Span,
     ) -> Result<Option<Vec<(Option<Term>, bool)>>, Error> {
+        Ok(self
+            .spread_parameter_input_context(
+                types
+                    .into_iter()
+                    .map(|ty| ty.map_or(Input::Unknown, Input::Known))
+                    .collect(),
+                declarations,
+                stages,
+                args,
+                span,
+            )?
+            .map(|inputs| {
+                inputs
+                    .into_iter()
+                    .map(|(ty, stage)| {
+                        (
+                            match ty {
+                                Input::Known(ty) => Some(ty),
+                                _ => None,
+                            },
+                            stage,
+                        )
+                    })
+                    .collect()
+            }))
+    }
+
+    pub(super) fn spread_parameter_input_context(
+        &mut self,
+        types: Vec<Input>,
+        declarations: Option<&[hir::common::FnParam<'_>]>,
+        stages: &[bool],
+        args: &[Arg<'_>],
+        span: Span,
+    ) -> Result<Option<Vec<(Input, bool)>>, Error> {
         let post_target = arguments::post_lambda_target(args, declarations, types.len(), span)?;
         let mut inputs = Vec::new();
         let mut unresolved = None;
@@ -1107,12 +1245,16 @@ impl Checker<'_, '_> {
             if declaration
                 .is_some_and(|parameter| matches!(parameter.ty.kind, TyParamKind::Varadic(..)))
             {
-                let structure = ty
-                    .as_ref()
-                    .map(|ty| self.structural_type(ty, span))
-                    .transpose()?;
-                if let Some(Term::Tuple(fields)) = structure {
-                    inputs.extend(fields.into_iter().map(|ty| (Some(ty), stages[index])));
+                let fields = match ty {
+                    Input::Known(ty) => match self.structural_type(&ty, span)? {
+                        Term::Tuple(fields) => Some(fields.into_iter().map(Input::Known).collect()),
+                        _ => None,
+                    },
+                    Input::Tuple(fields) | Input::NormalTuple { fields, .. } => Some(fields),
+                    _ => None,
+                };
+                if let Some(fields) = fields {
+                    inputs.extend(fields.into_iter().map(|ty| (ty, stages[index])));
                 } else {
                     // One unresolved collection has a unique remainder after
                     // all anchors. Width evidence routes operands only; the
@@ -1149,7 +1291,7 @@ impl Checker<'_, '_> {
             };
             inputs.splice(
                 position..position,
-                std::iter::repeat_n((None, stage), width),
+                std::iter::repeat_n((Input::Unknown, stage), width),
             );
         }
         Ok(Some(inputs))
@@ -1189,7 +1331,9 @@ impl Checker<'_, '_> {
                 statements,
                 result: Some(call),
             } => (*call, statements, true),
-            K::Call { .. } | K::Variant { .. } => (call, Vec::new(), false),
+            K::Call { .. } | K::Variant { .. } | K::EffectRequest { .. } => {
+                (call, Vec::new(), false)
+            }
             _ => return Err(error(span, "spread application requires an ordinary call")),
         };
         let mut leading = Vec::new();
@@ -1217,6 +1361,12 @@ impl Checker<'_, '_> {
         if let K::Variant { fields, .. } = &mut call.kind {
             for field in fields {
                 statements.push(stage(self, field)?);
+            }
+        } else if let K::EffectRequest { arguments, .. } = &mut call.kind {
+            // An operation label has no runtime callee evaluation. Its inputs
+            // use the same source-order preparation as ordinary calls.
+            for argument in arguments {
+                statements.push(stage(self, argument)?);
             }
         } else if !prepared {
             let K::Call {

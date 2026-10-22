@@ -170,7 +170,7 @@ impl Checker<'_, '_> {
                 ItemKind::TypeAlias(value, ..) => {
                     checker.alias_type(owner, value, &arguments, expr.span)
                 }
-                ItemKind::Newtype(..) => {
+                ItemKind::Newtype(..) | ItemKind::Struct(_) | ItemKind::Enum(_) => {
                     arguments.extend(checker.nominal_capture_arguments(owner, expr.span)?);
                     Ok(Term::Nominal {
                         declaration: declaration(
@@ -237,7 +237,11 @@ impl Checker<'_, '_> {
         };
         if !matches!(
             self.package.item(owner).unwrap().kind,
-            ItemKind::TypeAlias(..) | ItemKind::Newtype(..) | ItemKind::Const(..)
+            ItemKind::TypeAlias(..)
+                | ItemKind::Newtype(..)
+                | ItemKind::Struct(_)
+                | ItemKind::Enum(_)
+                | ItemKind::Const(..)
         ) {
             return Ok(None);
         }
@@ -250,12 +254,25 @@ impl Checker<'_, '_> {
         }
         let (parent, instance, arguments) = if let Some(prepared) = prepared {
             prepared
-        } else {
-            let H::NFApplication(head, inputs) = base.kind else {
+        } else if !matches!(base.kind, H::NFApplication(head, _) if matches!(head.kind, H::ResolvedDef { .. }))
+        {
+            let Some((parent_id, instance, arguments)) = self.prepared_alias_container(base)?
+            else {
                 return Ok(None);
             };
-            let H::ResolvedDef { def_id, .. } = head.kind else {
+            let Some(parent) = self.self_containers.get(&owner).copied() else {
                 return Ok(None);
+            };
+            if declaration(self.package, &self.package_identities, parent) != parent_id {
+                return Err(error(base.span, "type member container identity mismatch"));
+            }
+            (parent, instance, arguments)
+        } else {
+            let H::NFApplication(head, inputs) = base.kind else {
+                unreachable!()
+            };
+            let H::ResolvedDef { def_id, .. } = head.kind else {
+                unreachable!()
             };
             let parent = self
                 .package
@@ -270,6 +287,8 @@ impl Checker<'_, '_> {
             };
             (parent, instance, arguments)
         };
+        let mut parameters = self.type_parameters[&parent].clone();
+        parameters.extend(self.nominal_captures(parent, expr.span)?);
         if constant && self.runtime_value_context() {
             // Formation belongs to comptime; only the Splice result may enter
             // runtime storage. Reuse the already checked container expression.
@@ -287,9 +306,15 @@ impl Checker<'_, '_> {
                     "constant member container is not a completed nominal type",
                 ));
             };
+            if parameters.len() != arguments.len() {
+                return Err(error(
+                    base.span,
+                    "type member container argument count mismatch",
+                ));
+            }
             let saved_substitution = self.alias_substitution.clone();
             self.alias_substitution.extend(
-                self.type_parameters[&parent]
+                parameters
                     .iter()
                     .copied()
                     .zip(arguments.into_iter().map(std::sync::Arc::new)),
@@ -309,7 +334,6 @@ impl Checker<'_, '_> {
             self.alias_substitution = saved_substitution;
             return result;
         }
-        let parameters = self.type_parameters[&parent].clone();
         if parameters.len() != arguments.len() {
             return Err(error(
                 base.span,
@@ -329,7 +353,7 @@ impl Checker<'_, '_> {
                 .iter()
                 .filter(|clause| !matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..)))
                 .count();
-            let binders = self.declaration_binders(parent);
+            let binders = self.input_binders(&parameters);
             // Prepared parent values live in locals. Recover only structural
             // evidence from their initializers, without invoking input code.
             let mut known_parent = BTreeMap::new();
@@ -639,7 +663,6 @@ impl Checker<'_, '_> {
                 result: Some(Box::new(local)),
             },
         };
-        arguments.truncate(self.type_parameters[&owner].len());
         Ok((instance, arguments))
     }
 
@@ -789,7 +812,13 @@ impl Checker<'_, '_> {
             return Ok(None);
         };
         let item = self.package.item(owner).unwrap();
-        if !matches!(item.kind, ItemKind::TypeAlias(..) | ItemKind::Newtype(..)) {
+        if !matches!(
+            item.kind,
+            ItemKind::TypeAlias(..)
+                | ItemKind::Newtype(..)
+                | ItemKind::Struct(_)
+                | ItemKind::Enum(_)
+        ) {
             return Ok(None);
         }
         let H::Projection(base, _) = &projection.kind else {
@@ -817,7 +846,8 @@ impl Checker<'_, '_> {
                     .then_some(owner)
             })
             .ok_or_else(|| error(expr.span, "type member container declaration is missing"))?;
-        let parameters = self.type_parameters[&parent].clone();
+        let mut parameters = self.type_parameters[&parent].clone();
+        parameters.extend(self.nominal_captures(parent, expr.span)?);
         if parameters.len() != outer.len() {
             return Err(error(
                 expr.span,
@@ -832,7 +862,7 @@ impl Checker<'_, '_> {
         let domains = self.trait_domains(owner)?;
         let mixed = domains.iter().any(|domain| *domain != p(P::Type));
         let domains = if mixed {
-            let binders = self.declaration_binders(parent);
+            let binders = self.input_binders(&parameters);
             domains
                 .iter()
                 .map(|domain| self.instantiate_trait_domain(domain, &binders, &outer, expr.span))
@@ -909,7 +939,7 @@ impl Checker<'_, '_> {
                 let Term::Pointer(ty) = &pointer.ty else {
                     unreachable!()
                 };
-                if !self.intrinsic_pointer_input(ty) && !self.wrapped_read_input(ty) {
+                if !self.intrinsic_pointer_input(ty) && !self.copy_read_input(ty) {
                     return Err(error(
                         expr.span,
                         "pointer reads of non-intrinsic values require Copy evidence or a memory transfer contract; this read is not yet supported",

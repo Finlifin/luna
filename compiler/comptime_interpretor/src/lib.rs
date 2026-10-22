@@ -208,6 +208,13 @@ impl Value {
         self.scoped_copy_work(&BTreeSet::new())
     }
     fn scoped_copy_work(&self, parameters: &BTreeSet<DeclarationId>) -> Option<usize> {
+        self.scoped_copy_work_with_evidence(parameters, &BTreeMap::new())
+    }
+    fn scoped_copy_work_with_evidence(
+        &self,
+        parameters: &BTreeSet<DeclarationId>,
+        value_parameters: &BTreeMap<DeclarationId, Term>,
+    ) -> Option<usize> {
         let mut pending = vec![(self, 0usize)];
         let mut work = 0usize;
         while let Some((value, depth)) = pending.pop() {
@@ -217,17 +224,25 @@ impl Value {
             work = work.checked_add(1)?;
             let extra = match value {
                 Self::Type(ty) | Self::Newtype { ty, .. } | Self::AbstractValue { ty, .. } => {
-                    scoped_type_value_work(ty, &BTreeMap::new(), parameters)?
+                    scoped_type_value_work_with_evidence(
+                        ty,
+                        &BTreeMap::new(),
+                        parameters,
+                        value_parameters,
+                        |_, _, _| None,
+                    )?
                 }
                 Self::TypeList(types) => {
                     if types.len() > 100_000 {
                         return None;
                     }
                     types.iter().try_fold(types.len(), |n, ty| {
-                        let total = n.checked_add(scoped_type_value_work(
+                        let total = n.checked_add(scoped_type_value_work_with_evidence(
                             ty,
                             &BTreeMap::new(),
                             parameters,
+                            value_parameters,
+                            |_, _, _| None,
                         )?)?;
                         (total <= 100_000).then_some(total)
                     })?
@@ -244,7 +259,13 @@ impl Value {
                         return None;
                     }
                     arguments.iter().try_fold(0usize, |n, ty| {
-                        let total = n.checked_add(instance_argument_work(ty, &BTreeMap::new())?)?;
+                        let total = n.checked_add(scoped_term_value_work_with_evidence(
+                            ty,
+                            &BTreeMap::new(),
+                            parameters,
+                            value_parameters,
+                            |_, _, _| None,
+                        )?)?;
                         (total <= 100_000).then_some(total)
                     })?
                 }
@@ -463,8 +484,18 @@ impl Value {
                     }
                 }
                 Value::Type(ty) => {
-                    let work = scoped_type_value_work(ty, &BTreeMap::new(), parameters)
-                        .ok_or(ErrorKind::Type)?;
+                    let work = if invocation {
+                        scoped_type_value_work_with_evidence(
+                            ty,
+                            &BTreeMap::new(),
+                            parameters,
+                            value_parameters,
+                            |_, _, _| None,
+                        )
+                    } else {
+                        scoped_type_value_work(ty, &BTreeMap::new(), parameters)
+                    }
+                    .ok_or(ErrorKind::Type)?;
                     charge(budget, work)?;
                     ty.clone()
                 }
@@ -472,8 +503,18 @@ impl Value {
                     // Charge width before traversing or allocating a frozen list.
                     charge(budget, types.len())?;
                     for ty in types {
-                        let work = scoped_type_value_work(ty, &BTreeMap::new(), parameters)
-                            .ok_or(ErrorKind::Type)?;
+                        let work = if invocation {
+                            scoped_type_value_work_with_evidence(
+                                ty,
+                                &BTreeMap::new(),
+                                parameters,
+                                value_parameters,
+                                |_, _, _| None,
+                            )
+                        } else {
+                            scoped_type_value_work(ty, &BTreeMap::new(), parameters)
+                        }
+                        .ok_or(ErrorKind::Type)?;
                         charge(budget, work)?;
                     }
                     Term::TypeListValue(types.clone())
@@ -526,8 +567,18 @@ impl Value {
                     if !matches!(ty, Term::Nominal { .. }) {
                         return Err(ErrorKind::Type);
                     }
-                    let work = scoped_type_value_work(ty, &BTreeMap::new(), parameters)
-                        .ok_or(ErrorKind::Type)?;
+                    let work = if invocation {
+                        scoped_type_value_work_with_evidence(
+                            ty,
+                            &BTreeMap::new(),
+                            parameters,
+                            value_parameters,
+                            |_, _, _| None,
+                        )
+                    } else {
+                        scoped_type_value_work(ty, &BTreeMap::new(), parameters)
+                    }
+                    .ok_or(ErrorKind::Type)?;
                     charge(budget, work.saturating_add(1))?;
                     Term::NominalValue {
                         ty: Box::new(ty.clone()),
@@ -555,12 +606,22 @@ impl Value {
                 } => {
                     charge(budget, arguments.len().saturating_add(fields.len()))?;
                     for argument in arguments {
-                        let work = scoped_term_value_work_with_layouts(
-                            argument,
-                            &BTreeMap::new(),
-                            parameters,
-                            |_, _, _| None,
-                        )
+                        let work = if invocation {
+                            scoped_term_value_work_with_evidence(
+                                argument,
+                                &BTreeMap::new(),
+                                parameters,
+                                value_parameters,
+                                |_, _, _| None,
+                            )
+                        } else {
+                            scoped_term_value_work_with_layouts(
+                                argument,
+                                &BTreeMap::new(),
+                                parameters,
+                                |_, _, _| None,
+                            )
+                        }
                         .ok_or(ErrorKind::Type)?;
                         charge(budget, work)?;
                     }
@@ -1788,10 +1849,11 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
     fn type_description_work(&self, ty: &Term) -> Option<usize> {
-        scoped_type_value_work_with_layouts(
+        scoped_type_value_work_with_evidence(
             ty,
             &self.normal_forms,
             &self.abstract_type_parameters,
+            &self.abstract_value_parameters,
             |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
         )
     }
@@ -1941,10 +2003,11 @@ impl<'a> Interpreter<'a> {
         }
         self.tick(None)?;
         for ty in &types {
-            let work = scoped_term_value_work_with_layouts(
+            let work = scoped_term_value_work_with_evidence(
                 ty,
                 &self.normal_forms,
-                &BTreeSet::new(),
+                &self.abstract_type_parameters,
+                &self.abstract_value_parameters,
                 |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
             )
             .ok_or_else(|| self.failure(ErrorKind::Type, None))? as u64;
@@ -2386,6 +2449,9 @@ impl<'a> Interpreter<'a> {
             if !self.has_type(&representation, &expected) {
                 return Err(self.failure(ErrorKind::Type, None));
             }
+            if self.comptime_only {
+                self.admit_embedded_type_descriptions(&representation, 0)?;
+            }
             if parameter.sort == nir::Sort::Type
                 || (parameter.sort == nir::Sort::ComptimeValue
                     && expected == Term::Primitive(Primitive::Type))
@@ -2411,11 +2477,10 @@ impl<'a> Interpreter<'a> {
             } else if parameter.sort == nir::Sort::ComptimeValue
                 && self.normal_input_is_data(&representation, source)?
             {
-                // Closed data inputs can occur in subsequent
-                // normal inputs, results and body annotations. Freeze after
-                // validating the domain and use the same scoped substitution
-                // as Type inputs; the opaque normal-form head is preserved.
-                type_inputs[index] = Some(self.normal_input_term(representation, source)?);
+                // Checked data inputs may remain symbolic in a generic
+                // invocation. Preserve their authorized declaration identity
+                // in dependent inputs, results and body annotations.
+                type_inputs[index] = Some(self.residual_input_term(representation, source)?);
                 type_scope = Some(
                     signature
                         .prepare_function_inputs(&type_inputs)
@@ -2485,10 +2550,11 @@ impl<'a> Interpreter<'a> {
                     });
             }
             return self.newtypes.get(declaration).is_some_and(|d| {
-                d.validate_completed_arguments_with_layouts(
+                d.validate_completed_arguments_with_evidence(
                     arguments,
                     &mut 100_000,
                     |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
+                    |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)),
                 )
                 .is_ok()
                     && d.parameter_binders().is_ok_and(|parameters| {
@@ -2583,12 +2649,13 @@ impl<'a> Interpreter<'a> {
                         .enums
                         .get(declaration)
                         .filter(|definition| {
-                            nir::validate_declaration_arguments_with_layouts(
+                            nir::validate_declaration_arguments_with_evidence(
                                 &definition.type_parameters,
                                 &definition.parameter_types,
                                 arguments,
                                 &mut 100_000,
                                 |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
+                    |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)),
                             )
                             .is_ok()
                                 && definition.parameter_binders().is_ok_and(|parameters| {
@@ -2703,12 +2770,13 @@ impl<'a> Interpreter<'a> {
                 },
             ) if declaration == expected && actual_arguments == arguments => {
                 self.structs.get(declaration).is_some_and(|s| {
-                    if nir::validate_declaration_arguments_with_layouts(
+                    if nir::validate_declaration_arguments_with_evidence(
                         &s.type_parameters,
                         &s.parameter_types,
                         arguments,
                         &mut 100_000,
                         |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
+                    |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)),
                     )
                     .is_err()
                         || !s.parameter_binders().is_ok_and(|parameters| {
@@ -3491,7 +3559,7 @@ impl<'a> Interpreter<'a> {
             if let Some(plan) = plan {
                 environment.insert(plan.bindings[slot], value.clone());
             }
-            let term = self.normal_input_term(value, argument.source())?;
+            let term = self.residual_input_term(value, argument.source())?;
             type_parameters.push(nir::DeclarationParameter {
                 declaration: parameter.declaration,
                 sort: if parameter.kind == nir::normal_forms::Kind::Type {
@@ -3525,7 +3593,7 @@ impl<'a> Interpreter<'a> {
                 let value =
                     self.finish_staged_normal_argument(staged, &mut literals, input.source(), 0)?;
                 environment.insert(plan.as_ref().unwrap().bindings[index], value.clone());
-                let term = self.normal_input_term(value, input.source())?;
+                let term = self.residual_input_term(value, input.source())?;
                 type_parameters.push(nir::DeclarationParameter {
                     declaration: metadata.parameters[index].declaration,
                     sort: if metadata.parameters[index].kind == nir::normal_forms::Kind::Type {
@@ -3613,8 +3681,16 @@ impl<'a> Interpreter<'a> {
                 return Err(self.failure(ErrorKind::DepthExhausted, Some(source)));
             }
             let width = match value {
-                Value::Tuple(values) => values.len(),
+                Value::Tuple(values)
+                | Value::Record { fields: values, .. }
+                | Value::Variant { fields: values, .. } => values.len(),
+                Value::Newtype { .. } => 1,
                 Value::AnonymousRecord(fields) => fields.len(),
+                Value::AbstractValue { declaration, ty }
+                    if self.abstract_value_parameters.get(declaration) == Some(ty) =>
+                {
+                    continue;
+                }
                 Value::Unit
                 | Value::Bool(_)
                 | Value::Char(_)
@@ -3636,9 +3712,12 @@ impl<'a> Interpreter<'a> {
             // payload sizes, labels and completed embedded types separately.
             self.integer_operation(Some(source), |budget| budget.consume(width))?;
             match value {
-                Value::Tuple(values) => {
+                Value::Tuple(values)
+                | Value::Record { fields: values, .. }
+                | Value::Variant { fields: values, .. } => {
                     pending.extend(values.iter().rev().map(|value| (value, depth + 1)))
                 }
+                Value::Newtype { value, .. } => pending.push((value, depth + 1)),
                 Value::AnonymousRecord(fields) => {
                     pending.extend(fields.iter().rev().map(|(_, value)| (value, depth + 1)))
                 }
@@ -3648,13 +3727,19 @@ impl<'a> Interpreter<'a> {
         Ok(true)
     }
 
-    fn normal_input_term(&mut self, value: Value, source: SourceRange) -> Result<Term, Error> {
+    // Type construction may retain authorized value binders during a generic
+    // invocation. Completed input export keeps its separate closed rules.
+    fn residual_input_term(&mut self, value: Value, source: SourceRange) -> Result<Term, Error> {
         let steps = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
         let mut budget = comptime_runtime::Budget {
             steps,
             max_limbs: 4096,
         };
-        let term = value.into_scoped_normal_term(&mut budget, &self.abstract_type_parameters);
+        let term = value.into_abstract_invocation_term(
+            &mut budget,
+            &self.abstract_type_parameters,
+            &self.abstract_value_parameters,
+        );
         self.budget.steps -= (steps - budget.steps) as u64;
         term.map_err(|kind| self.failure(kind, Some(source)))
     }
@@ -4058,6 +4143,11 @@ impl<'a> Interpreter<'a> {
                         return Ok(Flow::Value(Value::TypeParameter(*declaration)));
                     }
                 }
+                // Structural scope permits transporting residual identities;
+                // their nominal domains still need independent admission.
+                if !self.abstract_value_parameters.is_empty() {
+                    self.admit_type(ty, 0)?;
+                }
                 if let Some(work) = self.type_description_work(ty) {
                     self.integer_operation(Some(expr.source), |budget| budget.consume(work))?;
                     return Ok(Flow::Value(Value::Type(ty.clone())));
@@ -4110,14 +4200,26 @@ impl<'a> Interpreter<'a> {
         let ty = match &expr.kind {
             K::FunctionType {
                 comptime,
+                comptime_parameters,
                 parameters,
             } => {
+                if comptime_parameters.len() != parameters.len() {
+                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                }
                 let mut types = Vec::with_capacity(parameters.len());
-                for parameter in parameters {
+                for (parameter, staged) in parameters.iter().zip(comptime_parameters) {
                     let value = value!(self.eval(parameter, environment));
                     let ty = self.type_description_term(value, parameter.source)?;
                     types.push(nir::Parameter {
-                        sort: nir::Sort::Runtime,
+                        sort: if *staged {
+                            if ty == Term::Primitive(Primitive::Type) {
+                                nir::Sort::Type
+                            } else {
+                                nir::Sort::ComptimeValue
+                            }
+                        } else {
+                            nir::Sort::Runtime
+                        },
                         ty,
                     });
                 }
@@ -4533,7 +4635,7 @@ impl<'a> Interpreter<'a> {
                     let copy = self.checkpoint_representation(&value, argument.source())?;
                     environment.insert(bindings[slot], copy);
                 }
-                types[slot] = self.normal_input_term(value, argument.source())?;
+                types[slot] = self.residual_input_term(value, argument.source())?;
                 ready.insert(slot);
             }
             // Captures are stored after own inputs. Resolve pending inputs as
@@ -4603,7 +4705,7 @@ impl<'a> Interpreter<'a> {
                         let copy = self.checkpoint_representation(&value, input.source())?;
                         environment.insert(bindings[index], copy);
                     }
-                    types[index] = self.normal_input_term(value, input.source())?;
+                    types[index] = self.residual_input_term(value, input.source())?;
                     ready.insert(index);
                     progress = true;
                 }
@@ -4624,7 +4726,7 @@ impl<'a> Interpreter<'a> {
         // Captured newtype binders follow their own capture-first admission
         // order; do not replace it with the ordinary declaration telescope.
         let valid = if let Some(def) = self.newtypes.get(declaration).filter(|_| alias.is_none()) {
-            def.validate_completed_arguments_with_layouts(
+            def.validate_completed_arguments_with_evidence(
                 &types,
                 &mut remaining,
                 |ty, variant, fuel| {
@@ -4638,9 +4740,10 @@ impl<'a> Interpreter<'a> {
                         }
                     })
                 },
+                |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)),
             )
         } else {
-            nir::validate_declaration_arguments_with_layouts(
+            nir::validate_declaration_arguments_with_evidence(
                 &ids,
                 domains,
                 &types,
@@ -4656,6 +4759,7 @@ impl<'a> Interpreter<'a> {
                         }
                     })
                 },
+                |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)),
             )
         };
         self.budget.steps -= (before - remaining) as u64;
@@ -5476,20 +5580,13 @@ impl<'a> Interpreter<'a> {
                     ErrorKind::Type
                 }
             })?;
-            if let Term::Rigid {
-                declaration,
-                sort: nir::Sort::ComptimeValue,
-            } = argument
-                && self.abstract_value_parameters.get(declaration) == Some(&domain)
-            {
-                continue;
-            }
-            nir::validate_declaration_arguments_with_layouts(
+            nir::validate_declaration_arguments_with_evidence(
                 &[binder.declaration],
                 &[domain],
                 std::slice::from_ref(argument),
                 fuel,
                 |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
+                |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)),
             )
             .map_err(|failure| {
                 if matches!(failure, nir::NominalAdmissionError::Budget) {
@@ -8585,10 +8682,20 @@ fn scoped_type_value_work_with_layouts(
     parameters: &BTreeSet<DeclarationId>,
     nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
 ) -> Option<usize> {
+    scoped_type_value_work_with_evidence(ty, heads, parameters, &BTreeMap::new(), nominal_fields)
+}
+
+fn scoped_type_value_work_with_evidence(
+    ty: &Term,
+    heads: &BTreeMap<DeclarationId, &nir::normal_forms::Head>,
+    parameters: &BTreeSet<DeclarationId>,
+    value_parameters: &BTreeMap<DeclarationId, Term>,
+    nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
+) -> Option<usize> {
     if ty.sort() != nir::Sort::Type {
         return None;
     }
-    scoped_term_value_work_with_layouts(ty, heads, parameters, nominal_fields)
+    scoped_term_value_work_with_evidence(ty, heads, parameters, value_parameters, nominal_fields)
 }
 
 // Instance identities contain completed value arguments as well as types.
@@ -8604,6 +8711,16 @@ fn scoped_term_value_work_with_layouts(
     ty: &Term,
     heads: &BTreeMap<DeclarationId, &nir::normal_forms::Head>,
     parameters: &BTreeSet<DeclarationId>,
+    nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
+) -> Option<usize> {
+    scoped_term_value_work_with_evidence(ty, heads, parameters, &BTreeMap::new(), nominal_fields)
+}
+
+fn scoped_term_value_work_with_evidence(
+    ty: &Term,
+    heads: &BTreeMap<DeclarationId, &nir::normal_forms::Head>,
+    parameters: &BTreeSet<DeclarationId>,
+    value_parameters: &BTreeMap<DeclarationId, Term>,
     nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
 ) -> Option<usize> {
     let mut pending = vec![(ty, 0usize)];
@@ -8640,6 +8757,7 @@ fn scoped_term_value_work_with_layouts(
             Term::NominalValue { fields, .. } => fields.len().saturating_add(1),
             Term::Record(fields) | Term::RecordValue(fields) => fields.len(),
             Term::Tuple(items)
+            | Term::ClosureContextValue(items)
             | Term::TypeListValue(items)
             | Term::TypeListConcat(items)
             | Term::TupleValue(items)
@@ -8655,6 +8773,7 @@ fn scoped_term_value_work_with_layouts(
             | Term::NormalForm {
                 arguments: items, ..
             } => items.len(),
+            Term::ErrorResult { errors, .. } => errors.len().saturating_add(1),
             Term::Computation { effects, .. } => {
                 work = work.checked_add(effects.len())?;
                 effects
@@ -8682,7 +8801,7 @@ fn scoped_term_value_work_with_layouts(
                 let mut fuel = 100_000usize.checked_sub(work)?;
                 let before = fuel;
                 metadata
-                    .check_closed_arguments_budgeted(
+                    .check_arguments_with_evidence_budgeted(
                         arguments,
                         |head| {
                             heads
@@ -8690,6 +8809,7 @@ fn scoped_term_value_work_with_layouts(
                                 .is_some_and(|head| head.role == nir::normal_forms::Role::Tuple)
                         },
                         &nominal_fields,
+                        |value, domain| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if value_parameters.get(declaration)==Some(domain)),
                         &mut fuel,
                     )
                     .ok()?;
@@ -8708,6 +8828,10 @@ fn scoped_term_value_work_with_layouts(
                 declaration,
                 sort: nir::Sort::Type,
             } if parameters.contains(declaration) => {}
+            Term::Rigid {
+                declaration,
+                sort: nir::Sort::ComptimeValue,
+            } if value_parameters.contains_key(declaration) => {}
             Term::AssociatedType { .. }
             | Term::Rigid { .. }
             | Term::Runtime(_)
@@ -8716,6 +8840,7 @@ fn scoped_term_value_work_with_layouts(
                 return None;
             }
             Term::Tuple(items)
+            | Term::ClosureContextValue(items)
             | Term::TypeListValue(items)
             | Term::TypeListConcat(items)
             | Term::TupleValue(items)
@@ -8732,6 +8857,10 @@ fn scoped_term_value_work_with_layouts(
                 arguments: items, ..
             } => {
                 pending.extend(items.iter().map(|t| (t, depth + 1)));
+            }
+            Term::ErrorResult { errors, result } => {
+                pending.push((result, depth + 1));
+                pending.extend(errors.iter().map(|ty| (ty, depth + 1)));
             }
             Term::Computation { effects, result } => {
                 pending.push((result, depth + 1));

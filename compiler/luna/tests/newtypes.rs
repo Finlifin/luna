@@ -2156,7 +2156,7 @@ fn canonical_tuple_data_pointer_delivery_keeps_normal_form_head() {
 #[test]
 fn tuple_pointer_delivery_does_not_unfold_other_heads_or_hide_aliases() {
     let prefix = "typealias Type=.Type'builtin;pure comptime fn List<T>->Type {T}pure comptime fn Tuple<...Es:List<Type>>->Type {bool}pure comptime fn Identity<T>->Type {T}";
-    for ty in ["Identity<(bool,bool)>", "(*bool,bool)"] {
+    for ty in ["Identity<(bool,bool)>"] {
         let source = format!("{prefix}fn read(p:*{ty})->{ty} {{p.*}}");
         let error = compile_selected(&source, Emit::Nir, true)
             .err()
@@ -2166,6 +2166,33 @@ fn tuple_pointer_delivery_does_not_unfold_other_heads_or_hide_aliases() {
             "{ty}: {error}"
         );
     }
+    // Pointer fields are supported through declared Tuple layout and tracked
+    // result provenance; copying the container must not extend their lifetime.
+    let source = format!("{prefix}trait Duplicate {{}}trait Retire {{fn drop(*self);}}
+        impl Duplicate for (*bool,bool) {{}}
+        fn read(p:*(*bool,bool))->(*bool,bool) {{p.*}}
+        fn run()->bool {{let flag=true;let pair=(flag.ref,false);let (pointer,tag)=read(pair.ref);pointer.* and not tag}}
+        fn escape()->(*bool,bool) {{let flag=true;let pair=(flag.ref,false);read(pair.ref)}}");
+    let Artifact::Nir(package) = compile_selected(&source, Emit::Nir, true).unwrap() else {
+        panic!("NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret_with_protocols(&package, "run", "Duplicate", "Retire", 100_000)
+            .unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    let error = luna::execution::interpret_with_protocols(
+        &package,
+        "escape",
+        "Duplicate",
+        "Retire",
+        100_000,
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("pointer target unavailable outside its local scope (escaping provenance)"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -2267,7 +2294,7 @@ fn enum_pointer_tag_evidence_tracks_copy_and_replacement() {
 }
 
 #[test]
-fn enum_pointer_delivery_requires_copy_and_rejects_hidden_pointers() {
+fn enum_pointer_delivery_requires_copy_and_preserves_payload_provenance() {
     let source = "trait Duplicate {}trait Retire {fn drop(*self);}enum Choice {yes,no}fn read(p:*Choice)->Choice {p.*}fn run()->bool {let value=Choice.yes;read(value.ref) match {.yes=>true,.no=>false}}";
     let Artifact::Nir(package) = compile(source, Emit::Nir).unwrap() else {
         panic!("wrong stage")
@@ -2276,14 +2303,29 @@ fn enum_pointer_delivery_requires_copy_and_rejects_hidden_pointers() {
         luna::execution::interpret_with_protocols(&package, "run", "Duplicate", "Retire", 100_000)
             .unwrap_err();
     assert!(error.contains("checked Copy permission"), "{error}");
-    let error = compile(
-        "enum Choice {none,some(*bool)}fn read(p:*Choice)->Choice {p.*}",
-        Emit::Nir,
+    let source="trait Duplicate {}trait Retire {fn drop(*self);}
+        enum Choice {none,some(*bool)}impl Duplicate for Choice {}
+        fn read(p:*Choice)->Choice {p.*}
+        fn run()->bool {let flag=true;let value=Choice.some(flag.ref);read(value.ref) match {.none=>false,.some(pointer)=>pointer.*}}
+        fn escape()->Choice {let flag=true;let value=Choice.some(flag.ref);read(value.ref)}";
+    let Artifact::Nir(package) = compile(source, Emit::Nir).unwrap() else {
+        panic!("NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret_with_protocols(&package, "run", "Duplicate", "Retire", 100_000)
+            .unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    let error = luna::execution::interpret_with_protocols(
+        &package,
+        "escape",
+        "Duplicate",
+        "Retire",
+        100_000,
     )
-    .err()
-    .expect("hidden pointer needs provenance contract");
+    .unwrap_err();
     assert!(
-        error.contains("pointer reads of non-intrinsic values"),
+        error.contains("pointer target unavailable outside its local scope (escaping provenance)"),
         "{error}"
     );
 }

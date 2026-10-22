@@ -46,28 +46,45 @@ impl Checker<'_, '_> {
         owner: OwnerId,
         _span: Span,
     ) -> Result<Vec<DeclarationId>, Error> {
+        Ok(self.nominal_capture_ids(owner))
+    }
+
+    pub(super) fn nominal_capture_ids(&self, owner: OwnerId) -> Vec<DeclarationId> {
         if !matches!(
             self.package.item(owner).map(|item| &item.kind),
-            Some(ItemKind::Newtype(..) | ItemKind::TypeAlias(..))
+            Some(
+                ItemKind::Newtype(..)
+                    | ItemKind::TypeAlias(..)
+                    | ItemKind::Struct(_)
+                    | ItemKind::Enum(_)
+            )
         ) {
-            return Ok(Vec::new());
+            return Vec::new();
         }
-        let Some(parent) = self.self_containers.get(&owner) else {
-            return Ok(Vec::new());
-        };
         let mut captures = Vec::new();
-        if matches!(
-            self.package.item(*parent).map(|item| &item.kind),
-            Some(ItemKind::Trait(_))
-        ) {
-            captures.push(declaration(self.package, &self.package_identities, *parent));
-        }
-        for parameter in &self.type_parameters[parent] {
-            if !captures.contains(parameter) {
-                captures.push(*parameter);
+        let mut cursor = owner;
+        let mut seen = BTreeSet::new();
+        while let Some(parent) = self.self_containers.get(&cursor).copied() {
+            if !seen.insert(parent) {
+                break;
             }
+            if matches!(
+                self.package.item(parent).map(|item| &item.kind),
+                Some(ItemKind::Trait(_))
+            ) {
+                let id = declaration(self.package, &self.package_identities, parent);
+                if !captures.contains(&id) {
+                    captures.push(id);
+                }
+            }
+            for parameter in &self.type_parameters[&parent] {
+                if !captures.contains(parameter) {
+                    captures.push(*parameter);
+                }
+            }
+            cursor = parent;
         }
-        Ok(captures)
+        captures
     }
 
     pub(super) fn nominal_parameter_types(
@@ -137,20 +154,14 @@ impl Checker<'_, '_> {
                         "captured value input is not yet available in this definition",
                     )
                 })?;
-            let id = self.spread_binding(span)?;
             let value = self.copy_alias_type(&value, span)?;
-            let root = n::Expr {
+            // Captures are already checked inputs, not computations to invoke
+            // while the enclosing generic definition is still symbolic.
+            return Ok(n::Expr {
                 source: source(span),
-                ty: ty.clone(),
-                kind: K::Local(id),
-            };
-            let site = Expr {
-                hir_id: hir::HirId::new(hir::OwnerId::INVALID, hir::ItemLocalId::new(id.index)),
-                span,
-                kind: H::Unit,
-            };
-            let (value, ty) = self.required_normal_input(&site, root, vec![(id, ty, value)])?;
-            return self.materialize_generator_data(value, ty, span);
+                ty,
+                kind: K::ComptimeValue(value),
+            });
         }
         let kind = if let Some(binding) = self.alias_value_bindings.get(&parameter) {
             K::Local(*binding)
@@ -815,14 +826,11 @@ impl Checker<'_, '_> {
                     let (encoding, symbol_encoding) = encoded
                         .map(|encoding| (encoding.bits, encoding.symbols))
                         .unwrap_or_default();
+                    let parameter_types = self.nominal_parameter_types(owner, span)?;
                     self.enums.insert(
                         declaration(self.package, &self.package_identities, owner),
                         n::Enum {
-                            parameter_types: self
-                                .trait_parameter_types
-                                .get(&owner)
-                                .cloned()
-                                .unwrap_or_default(),
+                            parameter_types,
                             capabilities: self
                                 .capabilities
                                 .get(&owner)
@@ -833,7 +841,11 @@ impl Checker<'_, '_> {
                                 .get(&owner)
                                 .cloned()
                                 .unwrap_or_default(),
-                            type_parameters: self.type_parameters[&owner].clone(),
+                            type_parameters: self.type_parameters[&owner]
+                                .iter()
+                                .copied()
+                                .chain(self.nominal_captures(owner, span)?)
+                                .collect(),
                             declaration: declaration(self.package, &self.package_identities, owner),
                             name: item.ident.name.to_string(),
                             variants,
@@ -855,14 +867,11 @@ impl Checker<'_, '_> {
                         }
                         fields.push((name, self.type_expr(field.ty)?));
                     }
+                    let parameter_types = self.nominal_parameter_types(owner, span)?;
                     self.structs.insert(
                         declaration(self.package, &self.package_identities, owner),
                         n::Struct {
-                            parameter_types: self
-                                .trait_parameter_types
-                                .get(&owner)
-                                .cloned()
-                                .unwrap_or_default(),
+                            parameter_types,
                             capabilities: self
                                 .capabilities
                                 .get(&owner)
@@ -873,7 +882,11 @@ impl Checker<'_, '_> {
                                 .get(&owner)
                                 .cloned()
                                 .unwrap_or_default(),
-                            type_parameters: self.type_parameters[&owner].clone(),
+                            type_parameters: self.type_parameters[&owner]
+                                .iter()
+                                .copied()
+                                .chain(self.nominal_captures(owner, span)?)
+                                .collect(),
                             declaration: declaration(self.package, &self.package_identities, owner),
                             name: item.ident.name.as_str().into(),
                             fields,

@@ -575,3 +575,279 @@ fn prepared_owned_roots_preserve_borrow_identity_across_invocations() {
             .is_err()
     );
 }
+
+#[test]
+fn residual_nominal_types_require_value_domain_authority_and_stay_unexportable() {
+    use nir::program::NormalFormArgument;
+    let symbolic = Term::Rigid {
+        declaration: id(10),
+        sort: Sort::ComptimeValue,
+    };
+    for captures in [0, 1] {
+        let mut package = package(expr(
+            Term::Primitive(P::Type),
+            K::NominalType {
+                preparations: vec![],
+                bindings: None,
+                order: None,
+                declaration: id(20),
+                arguments: vec![NormalFormArgument::Value(input())],
+            },
+        ));
+        package.newtypes.push(nir::newtypes::Newtype {
+            declaration: id(20),
+            name: "Indexed".into(),
+            type_parameters: vec![id(21)],
+            parameter_types: vec![bool_ty()],
+            capture_count: captures,
+            requirements: vec![],
+            capabilities: vec![],
+            representation: bool_ty(),
+        });
+        let expected = Value::Type(Term::Nominal {
+            declaration: id(20),
+            arguments: vec![symbolic.clone()],
+        });
+        let value = scoped(&package).invoke(id(0), vec![opaque()]).unwrap();
+        assert_eq!(value, expected);
+        assert!(
+            value
+                .clone()
+                .into_normal_term(&mut Default::default())
+                .is_err()
+        );
+        assert!(
+            value
+                .clone()
+                .into_scoped_normal_term(&mut Default::default(), &Default::default())
+                .is_err()
+        );
+        assert_eq!(
+            value
+                .into_abstract_invocation_term(
+                    &mut Default::default(),
+                    &Default::default(),
+                    &[(id(10), bool_ty())].into_iter().collect()
+                )
+                .unwrap(),
+            Term::Nominal {
+                declaration: id(20),
+                arguments: vec![symbolic.clone()]
+            }
+        );
+        assert!(
+            Interpreter::for_comptime(&package, Budget::default())
+                .unwrap()
+                .invoke(id(0), vec![opaque()])
+                .is_err()
+        );
+        package.newtypes[0].parameter_types = vec![Term::Primitive(P::Char)];
+        assert!(scoped(&package).invoke(id(0), vec![opaque()]).is_err());
+        // A prebuilt identity also passes through declaration-domain admission.
+        package.functions[0].body = expr(
+            Term::Primitive(P::Type),
+            K::TypeValue(Term::Nominal {
+                declaration: id(20),
+                arguments: vec![symbolic.clone()],
+            }),
+        );
+        assert!(scoped(&package).invoke(id(0), vec![opaque()]).is_err());
+    }
+}
+
+#[test]
+fn residual_type_lists_compose_with_aggregates_without_becoming_closed_constants() {
+    let ty = Term::Nominal {
+        declaration: id(20),
+        arguments: vec![Term::Rigid {
+            declaration: id(10),
+            sort: Sort::ComptimeValue,
+        }],
+    };
+    let types = Value::TypeList(vec![bool_ty(), ty.clone(), ty.clone()]);
+    let expected = Term::TypeListValue(vec![bool_ty(), ty.clone(), ty.clone()]);
+    let authority = [(id(10), bool_ty())].into_iter().collect();
+    for (value, expected) in [
+        (types.clone(), expected.clone()),
+        (
+            Value::Tuple(vec![Value::Type(ty.clone()), types.clone()]),
+            Term::TupleValue(vec![ty.clone(), expected.clone()]),
+        ),
+        (
+            Value::AnonymousRecord(vec![("types".into(), types)]),
+            Term::RecordValue(vec![("types".into(), expected)]),
+        ),
+    ] {
+        assert_eq!(
+            value
+                .clone()
+                .into_abstract_invocation_term(
+                    &mut Default::default(),
+                    &Default::default(),
+                    &authority
+                )
+                .unwrap(),
+            expected
+        );
+        assert!(
+            value
+                .clone()
+                .into_normal_term(&mut Default::default())
+                .is_err()
+        );
+        assert!(
+            value
+                .clone()
+                .into_scoped_normal_term(&mut Default::default(), &Default::default())
+                .is_err()
+        );
+        assert!(
+            value
+                .clone()
+                .into_abstract_invocation_term(
+                    &mut Default::default(),
+                    &Default::default(),
+                    &Default::default()
+                )
+                .is_err()
+        );
+        let mut exhausted = comptime_runtime::Budget::default();
+        exhausted.steps = 0;
+        assert!(
+            value
+                .clone()
+                .into_abstract_invocation_term(&mut exhausted, &Default::default(), &authority)
+                .is_err()
+        );
+        assert_eq!(
+            value
+                .into_abstract_invocation_term(
+                    &mut Default::default(),
+                    &Default::default(),
+                    &authority
+                )
+                .unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn residual_type_reification_rejects_value_roots_even_with_authority() {
+    let authority = [(id(10), bool_ty())].into_iter().collect();
+    for ty in [
+        Term::Bool(true),
+        Term::Rigid {
+            declaration: id(10),
+            sort: Sort::ComptimeValue,
+        },
+    ] {
+        for value in [Value::Type(ty.clone()), Value::TypeList(vec![ty])] {
+            assert!(
+                value
+                    .into_abstract_invocation_term(
+                        &mut Default::default(),
+                        &Default::default(),
+                        &authority
+                    )
+                    .is_err()
+            );
+        }
+    }
+}
+
+#[test]
+fn residual_nominal_payload_reification_keeps_indices_tags_and_closed_export_rules() {
+    let symbol = Term::Rigid {
+        declaration: id(10),
+        sort: Sort::ComptimeValue,
+    };
+    let ty = Term::Nominal {
+        declaration: id(20),
+        arguments: vec![symbol.clone()],
+    };
+    let authority = [(id(10), bool_ty())].into_iter().collect();
+    for (value, variant) in [
+        (
+            Value::Record {
+                declaration: id(20),
+                arguments: vec![symbol.clone()],
+                fields: vec![Value::Bool(true)],
+            },
+            None,
+        ),
+        (
+            Value::Variant {
+                declaration: id(20),
+                arguments: vec![symbol.clone()],
+                index: 2,
+                fields: vec![Value::Bool(true)],
+            },
+            Some(2),
+        ),
+        (
+            Value::Newtype {
+                ty: ty.clone(),
+                value: Box::new(Value::Bool(true)),
+            },
+            None,
+        ),
+    ] {
+        let expected = Term::NominalValue {
+            ty: Box::new(ty.clone()),
+            variant,
+            fields: vec![Term::Bool(true)],
+        };
+        assert_eq!(
+            value
+                .clone()
+                .into_abstract_invocation_term(
+                    &mut Default::default(),
+                    &Default::default(),
+                    &authority
+                )
+                .unwrap(),
+            expected
+        );
+        assert!(
+            value
+                .clone()
+                .into_normal_term(&mut Default::default())
+                .is_err()
+        );
+        assert!(
+            value
+                .clone()
+                .into_scoped_normal_term(&mut Default::default(), &Default::default())
+                .is_err()
+        );
+        assert!(
+            value
+                .clone()
+                .into_abstract_invocation_term(
+                    &mut Default::default(),
+                    &Default::default(),
+                    &Default::default()
+                )
+                .is_err()
+        );
+        let mut exhausted = comptime_runtime::Budget::default();
+        exhausted.steps = 0;
+        assert!(
+            value
+                .clone()
+                .into_abstract_invocation_term(&mut exhausted, &Default::default(), &authority)
+                .is_err()
+        );
+        assert_eq!(
+            value
+                .into_abstract_invocation_term(
+                    &mut Default::default(),
+                    &Default::default(),
+                    &authority
+                )
+                .unwrap(),
+            expected
+        );
+    }
+}

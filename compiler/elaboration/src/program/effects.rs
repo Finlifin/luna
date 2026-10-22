@@ -5,6 +5,7 @@ use super::*;
 
 mod handlers;
 mod inference;
+mod spreads;
 
 impl Checker<'_, '_> {
     pub(super) fn effect_row(
@@ -49,19 +50,45 @@ impl Checker<'_, '_> {
         if inputs.len() > *fuel {
             return Err(error(expr.span, "effect row formation budget exhausted"));
         }
-        let mut arguments = Vec::new();
-        for input in inputs {
-            let Arg::Positional(value) = input else {
-                return Err(error(
-                    expr.span,
-                    "effect instance requires explicit positional Type arguments",
-                ));
-            };
-            let argument = self.type_expr(value)?;
-            crate::associated::charge_projection_copy(&argument, fuel)
-                .map_err(|message| error(expr.span, message))?;
-            arguments.push(argument);
-        }
+        let direct = if matches!(head.kind, H::ResolvedDef { .. }) {
+            let owner = self.effect_head_owner(head)?;
+            matches!(
+                self.package.item(owner).map(|item| &item.kind),
+                Some(ItemKind::Effect(..) | ItemKind::EffectGroup(_))
+            )
+            .then_some(owner)
+        } else {
+            None
+        };
+        let mut arguments = if let Some(owner) = direct {
+            if matches!(
+                self.package.item(owner).map(|item| &item.kind),
+                Some(ItemKind::Effect(..))
+            ) && !self.active_signatures.contains(&owner)
+            {
+                self.ensure_signature(owner, expr.span)?;
+            }
+            let domains = self.type_parameters[&owner]
+                .iter()
+                .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
+                .collect::<Vec<_>>();
+            self.trait_clause_arguments(owner, inputs, None, expr.span, &domains)?
+        } else {
+            let mut arguments = Vec::new();
+            for input in inputs {
+                let Arg::Positional(value) = input else {
+                    return Err(error(
+                        expr.span,
+                        "effect instance requires explicit positional Type arguments",
+                    ));
+                };
+                let argument = self.type_expr(value)?;
+                crate::associated::charge_projection_copy(&argument, fuel)
+                    .map_err(|message| error(expr.span, message))?;
+                arguments.push(argument);
+            }
+            arguments
+        };
         let owner = if let H::Projection(group, member) = &head.kind {
             if !arguments.is_empty() {
                 return Err(error(
@@ -96,18 +123,12 @@ impl Checker<'_, '_> {
             if group_inputs.len() > *fuel {
                 return Err(error(expr.span, "effect row formation budget exhausted"));
             }
-            for input in group_inputs {
-                let Arg::Positional(value) = input else {
-                    return Err(error(
-                        expr.span,
-                        "effect group requires explicit positional Type arguments",
-                    ));
-                };
-                let argument = self.type_expr(value)?;
-                crate::associated::charge_projection_copy(&argument, fuel)
-                    .map_err(|message| error(expr.span, message))?;
-                arguments.push(argument);
-            }
+            let domains = self.type_parameters[&group_owner]
+                .iter()
+                .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
+                .collect::<Vec<_>>();
+            arguments =
+                self.trait_clause_arguments(group_owner, group_inputs, None, expr.span, &domains)?;
             owner
         } else {
             self.effect_head_owner(head)?
@@ -224,6 +245,12 @@ impl Checker<'_, '_> {
                 ));
             }
         }
+        if arguments
+            .iter()
+            .any(|argument| matches!(argument, Arg::Expand(_)))
+        {
+            return self.effect_request_spreads(expr, call, head, arguments, expected);
+        }
         let structural_result = self
             .structural_result_context
             .as_ref()
@@ -311,11 +338,25 @@ impl Checker<'_, '_> {
             assumptions,
             context: &self.context,
         };
-        let instance = crate::effects::instantiate(
+        let instance = crate::effects::instantiate_with_evidence(
             &metadata,
             &operation.arguments,
             &world,
             crate::ptc::Budget::default(),
+            |ty, variant, fuel| self.effect_value_fields(ty, variant, fuel),
+            |value, domain, fuel| {
+                let Term::Rigid {
+                    declaration,
+                    sort: Sort::ComptimeValue,
+                } = value
+                else {
+                    return false;
+                };
+                let Some(actual) = self.trait_input_domain(*declaration) else {
+                    return false;
+                };
+                nir::type_computations::charge_term(&actual, fuel).is_ok() && actual == *domain
+            },
         )
         .map_err(|failure| error(expr.span, failure.to_string()))?;
         let request = instance
@@ -323,7 +364,11 @@ impl Checker<'_, '_> {
             .map_err(|failure| error(expr.span, failure.to_string()))?;
         let body = n::Expr {
             source: source(expr.span),
-            ty: request.result().clone(),
+            ty: if checked.iter().any(|argument| is_never(&argument.ty)) {
+                p(P::Never)
+            } else {
+                request.result().clone()
+            },
             kind: K::EffectRequest {
                 operation: operation.clone(),
                 abi: request.abi(),
@@ -492,6 +537,10 @@ impl Checker<'_, '_> {
                 .map(|group| declaration(self.package, &self.package_identities, *group)),
             name: self.package.item(owner).unwrap().ident.name.as_str().into(),
             type_parameters: self.type_parameters[&owner].clone(),
+            parameter_types: self.type_parameters[&owner]
+                .iter()
+                .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
+                .collect(),
             signature: self.signatures[&owner].clone(),
             abi: if modifiers.is_direct_passing {
                 nir::effects::Abi::DirectPassing
@@ -503,6 +552,31 @@ impl Checker<'_, '_> {
             inline: modifiers.is_inline,
             requirements: self.requirements[&owner].clone(),
             capabilities: self.capabilities.get(&owner).cloned().unwrap_or_default(),
+        })
+    }
+
+    fn effect_value_fields(
+        &self,
+        ty: &Term,
+        variant: Option<u32>,
+        fuel: &mut usize,
+    ) -> Result<Vec<Term>, nir::NominalAdmissionError> {
+        let result =
+            nir::normal_forms::nominal_value_fields_with_lookup(ty, variant, fuel, &|id, fuel| {
+                *fuel = fuel.checked_sub(1)?;
+                use nir::normal_forms::NominalValueDeclaration as D;
+                self.structs
+                    .get(&id)
+                    .map(D::Struct)
+                    .or_else(|| self.enums.get(&id).map(D::Enum))
+                    .or_else(|| self.newtypes.get(&id).map(D::Newtype))
+            });
+        result.ok_or_else(|| {
+            if *fuel == 0 {
+                nir::NominalAdmissionError::Budget
+            } else {
+                nir::NominalAdmissionError::from("effect nominal value layout is unavailable")
+            }
         })
     }
 
@@ -524,11 +598,25 @@ impl Checker<'_, '_> {
             assumptions,
             context: &self.context,
         };
-        let instance = crate::effects::instantiate(
+        let instance = crate::effects::instantiate_with_evidence(
             metadata,
             &operation.arguments,
             &world,
             crate::ptc::Budget::default(),
+            |ty, variant, fuel| self.effect_value_fields(ty, variant, fuel),
+            |value, domain, fuel| {
+                let Term::Rigid {
+                    declaration,
+                    sort: Sort::ComptimeValue,
+                } = value
+                else {
+                    return false;
+                };
+                let Some(actual) = self.trait_input_domain(*declaration) else {
+                    return false;
+                };
+                nir::type_computations::charge_term(&actual, fuel).is_ok() && actual == *domain
+            },
         )
         .map_err(|failure| error(span, failure.to_string()))?;
         Ok(instance.signature().clone())

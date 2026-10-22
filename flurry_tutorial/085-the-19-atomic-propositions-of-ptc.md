@@ -1,20 +1,20 @@
-# Flurry 演进手记 (085)：PTC 的原子命题体系——从类型相等、子类型到 Trait 满足性与位宽关系
+# Flurry 演进手记 (085)：PTC 的原子命题体系——从类型相等、结构分类到 Trait 满足性与行关系
 
-在上一篇（084）中，我们了解了 Flurry 类型系统的逻辑约束检验机制 **PTC（Propositional Type Constraints，命题类型约束）**，看到它是如何将外层的布尔逻辑组合（`and`、`or`、`not`）与内层的领域约束规则结合起来的。
+在上一篇（084）中，我们了解了 Flurry 类型系统的逻辑约束检验机制 **PTC（Propositional Type Constraints，命题类型约束）**，看到它是如何将外层的布尔逻辑组合（`and`、`or`、`not`）与内层的类型领域规则结合起来的。
 
-无论是源码中的 `newtype` 身份区分、`Type.size_of(T) == 8`、类型模式匹配 `T match { Array<'u32, n> => ... }`、Trait 约束满足、编译期整数不等式，还是代数错误集合的包含关系，都可以归纳为五类基础的**原子约束命题（Atomic Propositions）**。
+无论是源码中的 `newtype` 身份区分、`Type.size_of(*T) == Type.size_of(usize)`、结构分类查询 `Type.predicates.is_tuple(T)`、类型模式匹配 `T match { Array<'u32, n> => ... }`、Trait 约束满足，还是错误行的包含关系，都可以归纳为基础的**类型观察项（Terms）**与**原子关系命题（Atomic Propositions）**。
 
-本篇我们将梳理“观察项（Terms）”与“原子关系命题（Atoms）”的正交设计，并按职责介绍这五大类编译期约束。
+本篇我们将梳理“观察项（Terms）”与“原子关系命题（Atoms）”的正交设计，并按职责介绍这些类型约束板块。
 
 ---
 
 ## 一、 核心设计：区分“观察项（Term）”与“原子关系命题（Atom）”
 
-在了解各类原子命题之前，首先需要明确一个设计原则：为什么类型系统不需要单独为“类型大小相等”或“字段类型相等”各自定义一套专门的比较规则？
+为什么类型系统无需单独为“类型大小相等”或“字段类型相等”各自定义一套专门的相等规则？
 
-这是因为 Flurry 将**“计算出一个编译期值或类型的观察操作（Observation Terms）”**与**“判断两个对象满足何种关系的原子命题（Relational Atoms）”**进行了正交拆分：
+这是因为 Flurry 将**“在满足前提下观察类型的某项属性（Observation Terms）”**与**“判断两个对象满足何种关系的原子命题（Relational Atoms）”**进行了正交拆分：
 
-```
+```text
   [ 表面源码表达式 ]
   Type.size_of(*InstructionOperands) == Type.size_of(usize)
   ─────────────────┬────────────────    ─────────┬─────────
@@ -23,150 +23,135 @@
                    └──────────────┬──────────────┘
                                   ▼
                 [ 底层归约出的基础相等关系命题 ]
-                同类型域相等比较：Term_1 == Term_2
+                同域相等比较：Term_1 == Term_2
 ```
 
 具体而言：
-- `Type.size_of(T)`、`Type.repr_of(T)`、提取结构体字段类型、获取编译期列表长度，都是产生数据的**观察项（Terms）**；
-- 当这些项求出结果后，判断它们是否相等直接复用最基础的**相等关系命题（`==`）**；判断它们的大小顺序直接复用**整数或位向量序关系命题（`<=`）**。
+- `Type.size_of(T)`、`Type.align_of(T)`、提取结构体字段类型、获取限定类型的载荷类型，都是带良构前提的**观察项（Terms）**；
+- 当这些项在合法定义域内形成后，判断它们是否相等直接复用最基础的**同域相等关系命题（`==`）**。
 
 ---
 
-## 二、 PTC 原子命题的五大板块
+## 二、 PTC 类型原子命题的核心板块
 
-按职责划分，Flurry 的编译期原子命题可以分为以下五大板块（共 19 种基础原子关系，详见 `docs/type/propositional-constraints/atoms.md`）：
+按职责划分，Flurry 的 PTC 原子命题围绕类型检查所需的关系展开（详见 `docs/type/propositional-constraints/atoms.md`）：
 
 ### 板块 1：相等性、类型身份与宇宙分类
 
-这一组命题负责回答“两个类型或编译期值是否相等”以及“某个类型属于哪种分类、位于哪个宇宙层级”：
+这一组命题负责回答“两个类型或观察项是否相等”以及“某个类型属于哪种结构分类、位于哪个宇宙层级”：
 
 | 约束类别 | 核心职责与语义说明 | 对应的典型源码场景 |
 | :--- | :--- | :--- |
-| **同域相等性** | 在同一类型域下，判断两个编译期项或类型 `a` 与 `b` 是否严格相等 | `T == u32`、`Type.size_of(T) == 8`、`newtype` 与底层原类型不等（`!=`） |
-| **结构分类判断** | 判断类型 `T` 是否属于特定的结构分类（如 `struct`、`enum`、`tuple`、`pointer`、`function` 等） | `Type.predicates.is_tuple(Itself)`、`Type.predicates.is_struct(T)` |
-| **宇宙层级归属** | 判断类型 `T` 所属的宇宙层级（如运行期值宇宙 $U_0$、编译期元宇宙 $U_1$ 等） | 检查某类型能否落地为运行期存储，或仅限编译期使用 |
-| **类型限定符检查** | 判断类型 `T` 是否携带特定的类型限定符或视图修饰（如 `const` 等） | 检查只读限定或特定修饰规则 |
+| **同域相等性** | 在同一逻辑域下，判断两个类型或观察项 `a` 与 `b` 是否语义相等 | `Word == u32`、`RegisterId != u32`、`Type.size_of(*T) == Type.size_of(usize)` |
+| **类型结构分类** | 判断类型 `T` 是否属于已定义的类型分类（如 `tuple`、`struct`、`enum`、`pointer` 等） | `Type.predicates.is_tuple(Tuple<u32, u32>)` |
+| **宇宙层级归属** | 判断类型 `T` 所属的宇宙层级（如运行期值宇宙 $U_0$、编译期元宇宙 $U_1$） | 检查某类型能否作为运行期存储类型或仅限编译期使用 |
+| **限定类型检查** | 判断类型 `T` 是否具有指定的限定修饰（如 optional `?`、error `!`、effect `#`、closure `%`、reachability `&`） | 检查限定类型结构并提取其内部载荷类型 |
 
-### 板块 2：结构成员与模式匹配
+### 板块 2：结构槽位与类型模式匹配
 
-这一组命题用于支撑结构反射（第 076 篇）与类型/编译期值模式匹配（第 083 篇）：
-
-| 约束类别 | 核心职责与语义说明 | 对应的典型源码场景 |
-| :--- | :--- | :--- |
-| **结构槽位存在性** | 判断复合类型 `T` 是否拥有指定的结构槽位（具名字段、元组位置索引或枚举分支） | 结构化反射检查、具名字段存在性验证 |
-| **Normal-Form 头形态** | 判断保留了 Normal-Form 头的类型或项，其最外层构造器头与元数形态是否匹配 | 检查某类型是否由 `Array<...>`、`Tuple<...>` 或 `Box<...>` 构造 |
-| **模式匹配满足性** | 判断目标类型或编译期值 `x` 是否匹配模式 `p` | `T match { Array<'u32, length> => ... }`、`x is Pattern` |
-
-### 板块 3：类型关系、Trait 契约与物理定长性
-
-这一组命题连接了渐进类型兼容性（第 079 篇）、子类型转换、Trait 系统以及物理布局边界：
+这一组命题用于支撑结构成员检查与类型模式匹配（第 083 篇）：
 
 | 约束类别 | 核心职责与语义说明 | 对应的典型源码场景 |
 | :--- | :--- | :--- |
-| **渐进描述兼容** | 判断阶段化类型描述之间是否兼容（对称但不具有传递性） | 定义期检查 `Any` 或 `defer Pick(flag)` 的传递与赋值合法性 |
-| **子类型关系** | 判断类型 `A` 是否为类型 `B` 的子类型（如 `never` 到任意类型、精化子类型到基础类型等） | 分支汇合、`never` 向上转型、精化类型窄化与宽化 |
-| **Trait 实现满足性** | 在当前模块可见的一致性规则下，判断主体是否实现了指定 Trait 契约 | 泛型 `where T :- Clone`、`T :- Copy` 等 Trait 约束求解 |
-| **非编译期定长判定** | 在目标平台布局配置下，判断类型 `T` 的物理大小是否依赖运行期值信息 | `Type.predicates.is_not_sized(T)`（其否定形式即为编译期定长） |
+| **结构槽位存在性** | 判断类型 `T` 是否存在指定的字段、元组位置或枚举变体槽位 | 验证成员投影与解构操作的结构前提 |
+| **Normal-Form 头形态** | 判断保留了 Normal-Form 头的类型对象是否具有指定的构造来源头 | 检查某类型是否由 `Array<...>`、`Tuple<...>` 或 `Identity<...>` 构造 |
+| **模式匹配满足性** | 判断受检对象 `x` 是否匹配模式 `p`，并在成功时产出局部绑定证据 | `T is Array<'u32, length>`、`T matches ...` |
 
-### 板块 4：编译期整数算术与定宽位向量关系
+### 板块 3：类型关系、Trait 契约与固定大小表示
 
-这一组命题支撑张量维度计算、步长对齐与底层定宽位操作：
-
-| 约束类别 | 核心职责与语义说明 | 对应的典型源码场景 |
-| :--- | :--- | :--- |
-| **任意精度整数序** | 编译期数学整数（`Integer`）上的小于等于关系 $a \le b$（结合 `==` 与 `not` 可表达 `<, >, >=`） | `0 <= index and index + 1 < length` |
-| **整数模同余关系** | 数学整数模同余关系 $a \equiv r \pmod m$（$m > 0$），用于整除与对齐检查 | 检查缓冲区大小或偏移量是否为 16 / 64 字节的整数倍 |
-| **定宽无符号序** | 宽度为 `w` 比特的定宽位向量（`BitVec<w>` / 无符号整数）上的无符号序关系 $a \le_u b$ | `u8`、`u32`、`usize` 及 `BitVec<w>` 的无符号边界比较 |
-| **定宽有符号序** | 宽度为 `w` 比特的定宽位向量（有符号整数）上的补码有符号序关系 $a \le_s b$ | `i8`、`i32`、`isize` 的有符号边界比较 |
-
-### 板块 5：行集合关系与自定义谓词调用
-
-最后一组命题处理行多态（如错误集 `!Err`）以及开发者自定义的 `comptime predicate`：
+这一组命题连接了渐进类型相容性（第 079 篇）、子类型关系、Trait 系统以及物理表示定长性：
 
 | 约束类别 | 核心职责与语义说明 | 对应的典型源码场景 |
 | :--- | :--- | :--- |
-| **行成员包含** | 判断结构行、枚举行或错误行集合 `R` 是否包含指定标签项 | 检查枚举或错误集中是否含有某成员 |
-| **错误行子集** | 判断**错误行（Error Row）** `R` 是否为错误行 `S` 的子集 | 错误传播 `!SmallErr` 自动向上拓宽为 `!LargeErr` |
-| **错误行不相交** | 判断两个**错误行** `R` 与 `S` 是否互不相交（无重叠分支） | 组合独立错误集或拆分处理部分错误分支 |
-| **自定义谓词调用** | 调用开发者定义的 `comptime predicate` | 调用自定义谓词如 `valid_slot(index, limit)` |
+| **部分信息相容** | 判断含未知部分的类型描述（如 `Any`）之间是否相容（缺乏传递性） | 定义期检查含 `Any` 或未决描述的接口相容性 |
+| **方向性子类型** | 判断类型 `A` 是否为类型 `B` 的子类型（不从一般类型转换自动推导） | `never` 转型、精化类型到基础类型的子类型关系 |
+| **Trait 实现满足性** | 在合法实现环境下，判断主体是否满足指定的 Trait 实例 | 泛型 `where T :- Copy`、`T :- Clone` 等约束检查 |
+| **值相关大小判定** | 在目标配置下，判断合法表示类型 `T` 的大小是否还依赖运行期值信息 | `not Type.predicates.is_not_sized(T)`（表示具有编译期固定大小） |
 
-> **说明：为什么错误行子集与不相交约束专门针对错误结果（`!Err`），而不直接套用于代数效应（`#Eff`）？**
-> 错误结果（`!Err`）与局部代数效应（`#Eff`）具有不同的语义和 ABI：错误返回是值层面的联合体分派，天然支持错误集合的包含拓宽与不相交拆分；而代数效应是词法作用域内的能力协议，通过处理器证据传递（函数签名不添加 `handles` 子句），因此两者的类型约束规则是分离的。
+### 板块 4：行集合关系与类型谓词调用
+
+这一组命题处理行多态（如错误行 `!Err` 与效应行 `#Eff`）以及开发者定义的 `comptime predicate`：
+
+| 约束类别 | 核心职责与语义说明 | 对应的典型源码场景 |
+| :--- | :--- | :--- |
+| **行成员包含** | 判断错误行或效应行 `R` 是否包含指定标签 `l` | 检查错误集或效应行中是否含有某成员 |
+| **错误行子集与彼此分离** | 判断唯一错误行 `R` 是否为错误行 `S` 的子集，或两错误行是否无共同标签 | 错误传播 `!SmallErr` 拓宽为 `!LargeErr`，以及错误集拆分处理 |
+| **可执行类型谓词** | 调用稳定的 `comptime predicate` 并按定义展开或执行 | 调用自定义类型谓词如 `is_supported_element(T)` |
+
+> **说明：为什么行子集关系专门针对错误行（`!Err`），而不直接作为效应行（`#Eff`）的通用子集公理？**
+> 错误结果（`!Err`）中的标签集合是唯一标签集，天然支持子集包含与彼此分离拆分；而代数效应（`#Eff`）采用词法作用域标签路由，同名效应标签的嵌套出现次序（Occurrence）决定了捕获到哪一层 Handler，因此效应嵌入必须保留具体的路由证据，无法只靠一个布尔子集结论丢掉路由信息。
 
 ---
 
-## 三、 综合示例：在一段代码中组合多种编译期约束
+## 三、 综合示例：在一段代码中观察多类类型命题
 
-下面我们通过一段指令集寄存器与操作数校验代码（参考 `docs/type/propositional-constraints/atoms.md`），观察类型相等、布局查询、结构分类、定长性判定与自定义算术谓词如何在同一段代码中协同工作：
+下面我们通过一段数据声明与编译期检查代码（源自 `docs/type/propositional-constraints/atoms.md`），观察类型等式、`newtype` 身份区分、结构分类、固定大小性质以及指针布局观察如何在同一段代码中工作：
 
 ```flurry
--- 透明别名 vs 独立名义身份 newtype
-typealias Word = u32;
-newtype RegisterId = Word;
+use std.prelude.*;
 
--- 指令操作数结构体
+typealias Word = u32;
+newtype RegisterId = u32;
+
 struct InstructionOperands {
-    dst: RegisterId,
-    src: RegisterId,
+    destination: RegisterId,
+    sources: Tuple<u32, u32>,
 }
 
--- 自定义编译期谓词（内部由两个整数序关系合取组成）
-comptime predicate valid_slot(index: Integer, limit: Integer) {
-    0 <= index and index < limit
+comptime predicate is_word_or_float(T: Type) {
+    T == u32 or T == f32
+}
+
+comptime {
+    -- 1. 类型相等与 newtype 名义身份区分
+    assumes Word == u32;
+    assumes RegisterId != u32;
+
+    -- 2. 类型结构分类查询
+    assumes Type.predicates.is_tuple(Tuple<u32, u32>);
+    assumes not Type.predicates.is_tuple(u32);
+
+    -- 3. 固定大小表示性质与指针大小观察
+    assumes not Type.predicates.is_not_sized(InstructionOperands);
+    assumes Type.size_of(*InstructionOperands) == Type.size_of(usize);
+
+    -- 4. 自定义类型谓词
+    assumes is_word_or_float(Word);
+    assumes not is_word_or_float(RegisterId);
 }
 
 test {
-    let pair: Tuple<RegisterId, Word> = (RegisterId(1), 7u32);
-
-    -- 1. 类型相等性与 newtype 名义身份区分
-    assumes Word == u32;
-    assumes RegisterId != Word;
-
-    -- 2. 布局观察项 Type.size_of / Type.repr_of 的相等比较
-    assumes Type.size_of(RegisterId) == Type.size_of(Word);
-    assumes Type.repr_of(RegisterId) == Type.repr_of(Word);
-    assumes Type.size_of(InstructionOperands) == 8;
-    assumes Type.size_of(*InstructionOperands) == Type.size_of(usize);
-
-    -- 3. 结构分类与编译期定长性检查
-    assumes Type.predicates.is_tuple(pair'type);
-    assumes not Type.predicates.is_not_sized(InstructionOperands);
-
-    -- 4. 自定义谓词与编译期整数边界检查
-    assumes valid_slot(2, 4);
-    assumes not valid_slot(4, 4);
+    let operands = InstructionOperands {
+        destination: 1u32.as(RegisterId),
+        sources: (2u32, 3u32),
+    }
+    let (left, right) = operands.sources;
+    println("sources: {}, {}", left, right);
+    println("operand storage: {}", Type.size_of(InstructionOperands));
 }
 ```
 
-如果尝试将一个不满足 `valid_slot` 边界条件的常量赋给精化类型，编译期会直接拒绝：
-
-```flurry
--- ❌ 编译期拒绝：valid_slot(4, 4) 不满足 `4 < 4`
-comptime {
-    let bad_slot: refines { valid_slot(itself, 4) } Integer = 4;
-}
-```
+需要注意：如果将布局观察应用到无从适用的纯编译期类型（如 `Type` 自身），编译器会先报告观察前提错误（IllFormed），而不会用 `is_not_sized` 的真或假掩盖前提错误。
 
 ---
 
 ## 四、 本篇小结
 
-| 原子命题板块 | 涵盖的核心能力 |
+| 类型命题板块 | 涵盖的核心能力 |
 | :--- | :--- |
-| **相等与宇宙分类** | 同域相等（`==`）、结构分类（`Type.predicates.is_*`）、宇宙层级归属、类型限定符 |
-| **结构与模式匹配** | 结构槽位存在性、Normal-Form 头形态匹配、类型与编译期值模式匹配（`match` / `is`） |
-| **关系、Trait 与定长** | 渐进兼容、子类型关系、Trait 满足性（`:-`）、编译期定长性判定 |
-| **算术与位向量** | 任意精度整数序（`<=`）、整数模同余对齐、定宽无符号/有符号位向量序 |
-| **行集合与谓词调用** | 行成员包含、错误行子集与不相交、自定义 `comptime predicate` 调用 |
+| **相等与分类** | 同域相等（`==`）、类型分类（`Type.predicates.is_*`）、宇宙归属、限定类型观察 |
+| **结构与类型模式** | 槽位存在性、Normal-Form 头形态观察、类型模式匹配（`is` / `matches`） |
+| **关系、Trait 与定长** | 渐进相容、方向性子类型、Trait 实现满足性（`:-`）、固定大小表示判定（`is_not_sized`） |
+| **行集合与类型谓词** | 行成员包含、错误行子集与彼此分离、自定义 `comptime predicate` |
 
 ---
 
 ## 五、 下一篇预告
 
-我们已经了解了 PTC 支持的各类原子命题。在实际编写泛型或编译期逻辑时，我们通常不希望在每个局部位置都重复编写显式的类型转换或契约声明。当我们写下条件分支——例如：
+在实际编写采用 `ordinary` 检查的运行时泛型函数（`fn`）时，我们经常会使用 `inline if` 对类型条件进行分支判断，例如：
+- `inline if T == u32 { ... }`
 - `inline if T is do { Array<'u32, length> => ... }`
-- `inline if value > 0 { ... }`
 
-进入分支后，编译器是如何自动将分支条件纳入当前作用域的已知事实，从而缩小类型或数值范围的？离开分支或遇到提前 `return` 时，这些局部事实又遵循怎样的作用域规则？
+为什么在运行时函数中需要使用 `inline if`，而在 `comptime fn` 中直接使用普通控制流？进入 `inline if` 分支后，PTC 是如何把分支上的类型条件转化为当前分支的局部类型事实的？离开分支或遇到提前 `return` 时，这些局部类型事实又遵循怎样的作用域规则？
 
-下一篇 **《Flurry 演进手记 (086)：分支中的流敏感类型——Occurrence Typing 与局部条件窄化》**，我们将探讨控制流与类型约束的结合。
+下一篇 **《Flurry 演进手记 (086)：分支中的流敏感类型——Occurrence Typing 与局部类型命题窄化》**，我们将探讨控制流与类型命题的结合。

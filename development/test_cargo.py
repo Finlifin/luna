@@ -31,10 +31,10 @@ class CargoCacheTests(unittest.TestCase):
 
     def test_pressure_cleans_packages_before_full_cache(self):
         runner = cargo.Runner(Path("/repo"), Path("/tmp/test-target"))
-        runner.pressure = Mock(side_effect=[True, True])
+        runner.pressure = Mock(side_effect=[True, True, True])
         runner.clean = Mock()
         runner.reclaim()
-        self.assertEqual(runner.clean.call_args_list, [unittest.mock.call(), unittest.mock.call(full=True)])
+        self.assertEqual(runner.clean.call_args_list, [unittest.mock.call(packages=("luna",)), unittest.mock.call(packages=("elaboration",)), unittest.mock.call(full=True)])
 
     def run_fake_build(self, outcomes):
         temporary = tempfile.TemporaryDirectory()
@@ -58,7 +58,23 @@ class CargoCacheTests(unittest.TestCase):
         runner.pressure = Mock(side_effect=[True, False])
         runner.clean = Mock()
         runner.reclaim()
-        runner.clean.assert_called_once_with()
+        runner.clean.assert_called_once_with(packages=("luna",))
+
+    def test_second_cleanup_keeps_dependency_cache(self):
+        runner = cargo.Runner(Path("/repo"), Path("/tmp/test-target"))
+        runner.pressure = Mock(side_effect=[True, True, False])
+        runner.clean = Mock()
+        runner.reclaim()
+        self.assertEqual(runner.clean.call_args_list,
+                         [unittest.mock.call(packages=("luna",)),
+                          unittest.mock.call(packages=("elaboration",))])
+
+    def test_no_pressure_keeps_all_build_outputs(self):
+        runner = cargo.Runner(Path("/repo"), Path("/tmp/test-target"))
+        runner.pressure = Mock(return_value=False)
+        runner.clean = Mock()
+        runner.reclaim()
+        runner.clean.assert_not_called()
 
     def test_storage_failure_recovers_in_the_running_process(self):
         runner, status = self.run_fake_build([(101, True), (0, False)])

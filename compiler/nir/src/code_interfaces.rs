@@ -229,12 +229,88 @@ impl CodeFunctionSignature {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PatternFunctionSignature {
+    /// Method-local clause domains in declaration order; Type domains bind
+    /// types, all other domains bind comptime values.
+    pub clause_domains: Vec<Term>,
+    pub inputs: Vec<(LocalId, CodeInput)>,
+    pub output: PatternCodeInterface,
+}
+
+impl fmt::Display for PatternFunctionSignature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("(pattern-function-signature (clauses")?;
+        for domain in &self.clause_domains {
+            write!(f, " (domain {domain})")?;
+        }
+        f.write_str(") (inputs")?;
+        for (binding, input) in &self.inputs {
+            write!(f, " (input {binding} {input})")?;
+        }
+        write!(f, ") (output {}))", self.output)
+    }
+}
+
+impl PatternFunctionSignature {
+    pub fn charge(&self, fuel: &mut usize) -> Result<(), type_computations::Error> {
+        for domain in &self.clause_domains {
+            type_computations::charge_term(domain, fuel)?;
+        }
+        *fuel = fuel
+            .checked_sub(self.inputs.len())
+            .ok_or(type_computations::Error::Budget)?;
+        for (_, input) in &self.inputs {
+            match input {
+                CodeInput::Data(ty) => type_computations::charge_term(ty, fuel)?,
+                CodeInput::Code(interface) => interface.charge(fuel)?,
+                CodeInput::Pattern(interface) => interface.charge(fuel)?,
+            }
+        }
+        self.output.charge(fuel)
+    }
+
+    /// Apply a declaration's completed substitution to every input and result.
+    /// The data/code distinction and all contextual identities are preserved.
+    pub fn try_map_types<E>(
+        &self,
+        mut transform: impl FnMut(&Term) -> Result<Term, E>,
+    ) -> Result<Self, E> {
+        let inputs = self
+            .inputs
+            .iter()
+            .map(|(binding, input)| {
+                let input = match input {
+                    CodeInput::Data(ty) => CodeInput::Data(transform(ty)?),
+                    CodeInput::Pattern(interface) => {
+                        CodeInput::Pattern(interface.try_map_types(&mut transform)?)
+                    }
+                    CodeInput::Code(interface) => {
+                        CodeInput::Code(interface.try_map_types(&mut transform)?)
+                    }
+                };
+                Ok((*binding, input))
+            })
+            .collect::<Result<_, E>>()?;
+        Ok(Self {
+            clause_domains: self
+                .clause_domains
+                .iter()
+                .map(&mut transform)
+                .collect::<Result<_, E>>()?,
+            inputs,
+            output: self.output.try_map_types(transform)?,
+        })
+    }
+}
+
 /// Interface members with code results retain their contextual signature;
 /// ordinary callable consumers must request an ordinary type explicitly.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MethodSignature {
     Callable(Term),
     Generator(CodeFunctionSignature),
+    PatternGenerator(PatternFunctionSignature),
 }
 impl From<Term> for MethodSignature {
     fn from(ty: Term) -> Self {
@@ -246,6 +322,7 @@ impl fmt::Display for MethodSignature {
         match self {
             Self::Callable(ty) => ty.fmt(f),
             Self::Generator(signature) => signature.fmt(f),
+            Self::PatternGenerator(signature) => signature.fmt(f),
         }
     }
 }
@@ -255,16 +332,26 @@ impl PartialEq<Term> for MethodSignature {
     }
 }
 impl MethodSignature {
+    pub fn clause_domains(&self) -> Option<&[Term]> {
+        match self {
+            Self::Callable(_) => None,
+            Self::Generator(signature) => Some(&signature.clause_domains),
+            Self::PatternGenerator(signature) => Some(&signature.clause_domains),
+        }
+    }
+
     pub fn ordinary(&self) -> Result<&Term, crate::TypeError> {
         match self {
             Self::Callable(ty) => Ok(ty),
-            Self::Generator(_) => Err(crate::TypeError::ContextualCodeNotCallable),
+            Self::Generator(_) | Self::PatternGenerator(_) => {
+                Err(crate::TypeError::ContextualCodeNotCallable)
+            }
         }
     }
     pub fn is_comptime_callable(&self) -> bool {
         match self {
             Self::Callable(ty) => ty.is_comptime_callable(),
-            Self::Generator(_) => true,
+            Self::Generator(_) | Self::PatternGenerator(_) => true,
         }
     }
     pub fn callable_signature(&self) -> Result<&Term, crate::TypeError> {
@@ -277,6 +364,9 @@ impl MethodSignature {
         Ok(match self {
             Self::Callable(ty) => Self::Callable(transform(ty)?),
             Self::Generator(signature) => Self::Generator(signature.try_map_types(transform)?),
+            Self::PatternGenerator(signature) => {
+                Self::PatternGenerator(signature.try_map_types(transform)?)
+            }
         })
     }
     pub fn instantiate_types(
@@ -325,9 +415,10 @@ impl CodeInput {
 impl MethodSignature {
     /// Visit semantic type dependencies without erasing signature categories.
     pub fn type_terms(&self) -> impl Iterator<Item = &Term> {
-        let (ordinary, code) = match self {
-            Self::Callable(ty) => (Some(ty), None),
-            Self::Generator(signature) => (None, Some(signature)),
+        let (ordinary, code, pattern) = match self {
+            Self::Callable(ty) => (Some(ty), None, None),
+            Self::Generator(signature) => (None, Some(signature), None),
+            Self::PatternGenerator(signature) => (None, None, Some(signature)),
         };
         ordinary
             .into_iter()
@@ -343,6 +434,19 @@ impl MethodSignature {
                     )
                     .chain(signature.output.context.values())
                     .chain(std::iter::once(&signature.output.result))
+            }))
+            .chain(pattern.into_iter().flat_map(|signature| {
+                signature
+                    .clause_domains
+                    .iter()
+                    .chain(
+                        signature
+                            .inputs
+                            .iter()
+                            .flat_map(|(_, input)| input.type_terms()),
+                    )
+                    .chain(std::iter::once(&signature.output.subject))
+                    .chain(signature.output.outputs.values())
             }))
     }
 }

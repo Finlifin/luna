@@ -111,16 +111,20 @@ fn local_identity(
             }
             // Opaque applications expose neither the resulting nominal head
             // nor ownership through their inputs. Never unfold a local factory.
-            Term::Computation { .. }
+            Term::ErrorResult { .. }
+            | Term::Computation { .. }
             | Term::NormalForm { .. }
             | Term::AssociatedType { .. }
             | Term::Rigid { .. }
             | Term::Bound { .. }
             | Term::Hole { .. }
-            | Term::Closure { .. } => {
+            | Term::Closure { .. }
+            | Term::ContextualClosure { .. } => {
                 return Err(Error::Ownership(OwnershipError::OpenBeforeLocalIdentity));
             }
-            Term::ClosureSnapshot { .. }
+            Term::ClosureContextType
+            | Term::ClosureContextValue(_)
+            | Term::ClosureSnapshot { .. }
             | Term::Primitive(_)
             | Term::FunctionValue { .. }
             | Term::Unit

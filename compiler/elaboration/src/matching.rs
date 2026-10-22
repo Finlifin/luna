@@ -170,6 +170,158 @@ fn decompose(
             }
         }
         (
+            Term::ContextualClosure {
+                context: a,
+                signature: sa,
+            },
+            Term::ContextualClosure {
+                context: b,
+                signature: sb,
+            },
+        ) => {
+            decompose(
+                a,
+                b,
+                arguments,
+                actual_arguments,
+                nesting,
+                depth + 1,
+                fuel,
+                limit,
+                context,
+                scope,
+                work,
+            )?;
+            decompose(
+                sa,
+                sb,
+                arguments,
+                actual_arguments,
+                nesting,
+                depth + 1,
+                fuel,
+                limit,
+                context,
+                scope,
+                work,
+            )?;
+        }
+        (
+            Term::ContextualClosure {
+                context: environment,
+                signature,
+            },
+            actual,
+        ) if matches!(
+            actual,
+            Term::Closure { .. } | Term::Function { .. } | Term::ComptimeFunction(_)
+        ) =>
+        {
+            let (fields, body) = match actual {
+                Term::Closure {
+                    environment,
+                    signature,
+                } => (environment.as_slice(), signature.as_ref()),
+                body => (&[][..], body),
+            };
+            *fuel = fuel
+                .checked_sub(fields.len())
+                .ok_or(MatchError::BudgetExhausted)?;
+            let supplied = Term::ClosureContextValue(fields.to_vec());
+            decompose(
+                environment,
+                &supplied,
+                arguments,
+                actual_arguments,
+                nesting,
+                depth + 1,
+                fuel,
+                limit,
+                context,
+                scope,
+                work,
+            )?;
+            decompose(
+                signature,
+                body,
+                arguments,
+                actual_arguments,
+                nesting,
+                depth + 1,
+                fuel,
+                limit,
+                context,
+                scope,
+                work,
+            )?;
+        }
+        (
+            template,
+            Term::ContextualClosure {
+                context: environment,
+                signature,
+            },
+        ) if matches!(
+            template,
+            Term::Closure { .. } | Term::Function { .. } | Term::ComptimeFunction(_)
+        ) =>
+        {
+            let (fields, body) = match template {
+                Term::Closure {
+                    environment,
+                    signature,
+                } => (environment.as_slice(), signature.as_ref()),
+                body => (&[][..], body),
+            };
+            *fuel = fuel
+                .checked_sub(fields.len())
+                .ok_or(MatchError::BudgetExhausted)?;
+            let supplied = Term::ClosureContextValue(fields.to_vec());
+            decompose(
+                &supplied,
+                environment,
+                arguments,
+                actual_arguments,
+                nesting,
+                depth + 1,
+                fuel,
+                limit,
+                context,
+                scope,
+                work,
+            )?;
+            decompose(
+                body,
+                signature,
+                arguments,
+                actual_arguments,
+                nesting,
+                depth + 1,
+                fuel,
+                limit,
+                context,
+                scope,
+                work,
+            )?;
+        }
+        (Term::ClosureContextValue(a), Term::ClosureContextValue(b)) if a.len() == b.len() => {
+            for (a, b) in a.iter().zip(b) {
+                decompose(
+                    a,
+                    b,
+                    arguments,
+                    actual_arguments,
+                    nesting,
+                    depth + 1,
+                    fuel,
+                    limit,
+                    context,
+                    scope,
+                    work,
+                )?;
+            }
+        }
+        (
             Term::Computation {
                 effects: a,
                 result: ar,

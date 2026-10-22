@@ -139,6 +139,12 @@ fn normalize(
         Term::Tuple(items) => Term::Tuple(many(items, fuel)?),
         Term::TupleValue(items) => Term::TupleValue(many(items, fuel)?),
         Term::TypeListValue(items) => Term::TypeListValue(many(items, fuel)?),
+        Term::ClosureContextValue(items) => Term::ClosureContextValue(many(items, fuel)?),
+        Term::ContextualClosure { context, signature } => Term::contextual_closure(
+            normalize(context, values, fuel, depth + 1)?,
+            normalize(signature, values, fuel, depth + 1)?,
+        )
+        .map_err(|_| ErrorKind::Type)?,
         Term::TypeListConcat(items) => Term::type_list_concat(many(items, fuel)?),
         Term::Record(fields) => {
             if fields.len() > *fuel {

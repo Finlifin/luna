@@ -20,6 +20,7 @@ fn declaration(parameters: Vec<Term>, result: Term) -> Declaration {
         group: None,
         name: "read".into(),
         type_parameters: vec![],
+        parameter_types: vec![],
         signature: Term::Function {
             parameters: parameters
                 .into_iter()

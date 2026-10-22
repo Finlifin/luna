@@ -383,6 +383,27 @@ impl Checker<'_, '_> {
                     pending.push(left);
                     pending.push(right);
                 }
+                H::ErrorQualifiedType(errors, result) => {
+                    pending.push(errors);
+                    pending.push(result);
+                }
+                H::ErrorHandle {
+                    value,
+                    before,
+                    arms,
+                    after,
+                } => {
+                    pending.push(value);
+                    for arm in before
+                        .iter()
+                        .copied()
+                        .chain(arms.iter())
+                        .chain(after.iter().copied())
+                    {
+                        pending.extend(arm.guard);
+                        pending.push(arm.body);
+                    }
+                }
                 H::Range { start, end, .. } => {
                     pending.extend(*start);
                     pending.extend(*end);
@@ -407,6 +428,7 @@ impl Checker<'_, '_> {
                 | H::Ref(value)
                 | H::Deref(value)
                 | H::ErrorNew(value)
+                | H::ErrorPropagate(value)
                 | H::OptionPropagate(value)
                 | H::EffectRequest(value)
                 | H::Assumes(value)
@@ -2007,11 +2029,9 @@ impl Checker<'_, '_> {
                 let context = self.context.clone();
                 self.loops.push(local(value.hir_id));
                 let checked = (|| {
+                    self.immutable.extend(pattern_binding_ids(pat));
                     let pattern =
                         self.with_staged_input(true, |this| this.pattern(pat, &p(P::Integer)))?;
-                    if !self.pattern_exhaustive(&pattern, &p(P::Integer)) {
-                        return Err(error(pat.span, "inline range pattern must be irrefutable"));
-                    }
                     let mut body_locals = locals.clone();
                     for (id, ty) in &self.locals {
                         body_locals.insert(*id, D::Known(ty.clone()));
@@ -3527,6 +3547,7 @@ impl Checker<'_, '_> {
         self.loops.push(identity);
         let checked = (|| {
             let mut bodies_diverge = true;
+            let mut patterns_irrefutable = true;
             for ty in elements {
                 self.required_steps = self.required_steps.checked_sub(1).ok_or_else(|| {
                     error(expr.span, "tuple iteration description budget exhausted")
@@ -3535,24 +3556,15 @@ impl Checker<'_, '_> {
                 self.open_staged_locals = staged.clone();
                 self.immutable = immutable.clone();
                 self.context = context.clone();
+                self.immutable.extend(pattern_binding_ids(pat));
                 let index = self
                     .with_staged_input(true, |this| this.pattern(index_source, &p(P::Integer)))?;
-                if !self.pattern_exhaustive(&index, &p(P::Integer)) {
-                    return Err(error(
-                        index_source.span,
-                        "tuple_enumerate index pattern must be irrefutable",
-                    ));
-                }
+                patterns_irrefutable &= self.pattern_exhaustive(&index, &p(P::Integer));
                 for id in self.locals.keys().filter(|id| !saved.contains_key(id)) {
                     self.open_staged_locals.insert(*id);
                 }
                 let element = self.pattern(element_source, &ty)?;
-                if !self.pattern_exhaustive(&element, &ty) {
-                    return Err(error(
-                        element_source.span,
-                        "tuple_enumerate element pattern must be irrefutable",
-                    ));
-                }
+                patterns_irrefutable &= self.pattern_exhaustive(&element, &ty);
                 for (pattern, is_staged) in [(&index, true), (&element, false)] {
                     let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
                     let before = fuel;
@@ -3589,7 +3601,11 @@ impl Checker<'_, '_> {
             // element body diverges and none can break/continue this loop.
             // Transfers to enclosing loops remain visible to their own probe.
             let result = D::Known(p(
-                if guard.is_none() && bodies_diverge && !self.open_loop_transfers[&identity].any() {
+                if patterns_irrefutable
+                    && guard.is_none()
+                    && bodies_diverge
+                    && !self.open_loop_transfers[&identity].any()
+                {
                     P::Never
                 } else {
                     P::Void
@@ -3752,7 +3768,15 @@ impl Checker<'_, '_> {
         // calls inside handlers or other wrappers retain symbolic staged
         // inputs just like direct calls described by the specialized paths.
         let saved_call = std::mem::replace(&mut self.describing_open_call, true);
-        let value = self.expr(expr, expected);
+        let context = self
+            .structural_result_context
+            .as_ref()
+            .filter(|(id, _)| *id == expr.hir_id && expected.is_none())
+            .map(|(_, context)| context.clone());
+        let value = match context {
+            Some(context) => self.input_context_expression(expr, &context),
+            None => self.expr(expr, expected),
+        };
         self.describing_open_call = saved_call;
         let value = value.map_err(|mut failure| {
             if failure.message == "local binding is unavailable in this scope" {
@@ -4065,8 +4089,11 @@ impl Checker<'_, '_> {
         &mut self,
         owner: OwnerId,
         target: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+        structural: Option<&crate::calls::InputContext>,
         args: &[Arg<'_>],
         checked: &mut BTreeMap<usize, (hir::HirId, n::Expr)>,
+        packets: &mut BTreeMap<usize, n::Expr>,
         span: Span,
     ) -> Result<Option<crate::calls::CallCandidate>, Error> {
         let Some(definition) = self.open_functions.get(&owner).cloned() else {
@@ -4093,22 +4120,23 @@ impl Checker<'_, '_> {
                 ty: self.instantiate_input_types(ty, &all, &template, span)?,
             });
         }
-        let (result, target) = match &definition.result {
+        let (result, target, known_result) = match &definition.result {
             Annotation::Known(ty) => (
                 self.instantiate_input_types(ty, &all, &template, span)?,
                 target,
+                true,
             ),
             // Private inference signature only, as in open clause inference.
-            _ => (p(P::Void), None),
+            _ => (p(P::Void), None, false),
         };
-        let (result, target) = if result
+        let (result, target, known_result) = if result
             .substitution_parameters()
             .map_err(|e| error(span, e.to_string()))?
             .is_empty()
         {
-            (result, target)
+            (result, target, known_result)
         } else {
-            (p(P::Void), None)
+            (p(P::Void), None, false)
         };
         let scheme = crate::calls::Scheme {
             parameter_sorts: self
@@ -4154,18 +4182,23 @@ impl Checker<'_, '_> {
         else {
             unreachable!()
         };
-        self.infer_spread_inputs_with_staging(
+        self.infer_routed_packet_inputs(
             &scheme,
             actual,
             args,
             Some(sig.params),
             0,
             target,
-            None,
-            None,
-            None,
+            partial.filter(|_| known_result),
+            structural.filter(|_| known_result),
+            &definition
+                .parameters
+                .iter()
+                .map(|(sort, _)| sig.modifiers.is_comptime || *sort != Sort::Runtime)
+                .collect::<Vec<_>>(),
             span,
             checked,
+            packets,
             true,
         )
         .map(Some)
@@ -4247,6 +4280,12 @@ impl Checker<'_, '_> {
             _ => None,
         };
         let mut checked = BTreeMap::new();
+        let mut packets = BTreeMap::new();
+        let result_context = self
+            .structural_result_context
+            .as_ref()
+            .filter(|(id, _)| *id == expr.hir_id)
+            .map(|(_, context)| context.clone());
         let candidate = if infer_clauses {
             let saved = std::mem::replace(&mut self.describing_open_spread, true);
             let saved_returns = if matches!(returns, Some(D::Any)) && self.result.is_none() {
@@ -4258,7 +4297,16 @@ impl Checker<'_, '_> {
                 None
             };
             let candidate = self.with_open_reachability(false, expr.span, |this| {
-                this.open_spread_candidate(owner, target, args, &mut checked, expr.span)
+                this.open_spread_candidate(
+                    owner,
+                    target,
+                    None,
+                    result_context.as_ref(),
+                    args,
+                    &mut checked,
+                    &mut packets,
+                    expr.span,
+                )
             });
             self.describing_open_spread = saved;
             if let Some(saved) = saved_returns {
@@ -4275,24 +4323,25 @@ impl Checker<'_, '_> {
         for (slot, (_, annotation)) in definition.parameters.iter().enumerate() {
             types.push(match &candidate {
                 Some(candidate) => candidate
-                    .parameter_type(slot)
+                    .parameter_input_context(slot)
                     .map_err(|e| call_inference_error(expr.span, e))?,
                 None => match annotation {
-                    Annotation::Known(ty) => {
-                        Some(self.specialize_open_clause_type(owner, ty, expr.span)?)
-                    }
-                    _ => None,
+                    Annotation::Known(ty) => crate::calls::InputContext::Known(
+                        self.specialize_open_clause_type(owner, ty, expr.span)?,
+                    ),
+                    _ => crate::calls::InputContext::Unknown,
                 },
             });
         }
         let Some(inputs) =
-            self.spread_parameter_context(types, Some(sig.params), &stages, args, expr.span)?
+            self.spread_parameter_input_context(types, Some(sig.params), &stages, args, expr.span)?
         else {
             return Ok(None);
         };
         let types = inputs.into_iter().map(|(ty, _)| ty).collect::<Vec<_>>();
+        let widths = self.checked_packet_widths(&packets, expr.span)?;
         let (contexts, partial_contexts) =
-            self.spread_partial_packet_contexts(args, &types, expr.span)?;
+            self.spread_input_packet_contexts_with_widths(args, &types, expr.span, &widths)?;
         self.required_steps = self
             .required_steps
             .checked_sub(self.open_loop_transfers.len() as u64)
@@ -4314,7 +4363,7 @@ impl Checker<'_, '_> {
             &vec![false; args.len()],
             Some(&partial_contexts),
             checked,
-            BTreeMap::new(),
+            packets,
             |this, flat, preparations, _| {
                 // Producer probing cannot make source control flow reachable.
                 // Observe the checked producers at their actual input positions.
@@ -4590,6 +4639,11 @@ impl Checker<'_, '_> {
         expected: Option<&D>,
         depth: usize,
     ) -> Result<D, Error> {
+        let result_context = self
+            .structural_result_context
+            .as_ref()
+            .filter(|(id, _)| *id == expr.hir_id)
+            .map(|(_, context)| context.clone());
         let signature = self
             .signatures
             .get(&owner)
@@ -4671,6 +4725,11 @@ impl Checker<'_, '_> {
                 &scope,
             )
             .map_err(|e| call_inference_error(expr.span, e))?;
+        if let Some(context) = &result_context {
+            initial
+                .constrain_result_context(context, crate::ptc::Budget::default())
+                .map_err(|e| call_inference_error(expr.span, e))?;
+        }
         let mut diverges = default_diverges;
         let mut resolved_defaults = BTreeMap::new();
         self.settle_function_defaults(
@@ -4698,11 +4757,11 @@ impl Checker<'_, '_> {
                 if checked[route.parameter] {
                     continue;
                 }
-                let hint = match initial
+                let input_context = initial
                     .parameter_input_context(route.parameter)
-                    .map_err(|e| call_inference_error(expr.span, e))?
-                {
-                    crate::calls::InputContext::Known(ty) => Some(D::Known(ty)),
+                    .map_err(|e| call_inference_error(expr.span, e))?;
+                let hint = match &input_context {
+                    crate::calls::InputContext::Known(ty) => Some(D::Known(ty.clone())),
                     _ => None,
                 };
                 let input = route.expression(expr);
@@ -4717,6 +4776,9 @@ impl Checker<'_, '_> {
                     })?;
                 let saved_transfers =
                     std::mem::replace(&mut self.open_loop_transfers, incoming_transfers.clone());
+                let saved_context = self
+                    .structural_result_context
+                    .replace((input.hir_id, input_context));
                 let attempt = self.describe_open_expression(
                     &input,
                     &mut attempt_locals,
@@ -4724,6 +4786,7 @@ impl Checker<'_, '_> {
                     hint.as_ref(),
                     depth + 1,
                 );
+                self.structural_result_context = saved_context;
                 let transfers = std::mem::replace(&mut self.open_loop_transfers, saved_transfers);
                 let description = match attempt {
                     Ok(description) => description,
@@ -4759,6 +4822,11 @@ impl Checker<'_, '_> {
                         &scope,
                     )
                     .map_err(|e| call_inference_error(expr.span, e))?;
+                if let Some(context) = &result_context {
+                    initial
+                        .constrain_result_context(context, crate::ptc::Budget::default())
+                        .map_err(|e| call_inference_error(expr.span, e))?;
+                }
                 self.settle_function_defaults(
                     owner,
                     &generic,
@@ -5847,6 +5915,11 @@ impl Checker<'_, '_> {
             None
         };
         let has_result = result.is_some();
+        let result_context = self
+            .structural_result_context
+            .as_ref()
+            .filter(|(id, _)| *id == expr.hir_id && has_result)
+            .map(|(_, context)| context.clone());
         let domains: Vec<_> = parameters
             .iter()
             .map(|parameter| parameter.ty.clone())
@@ -5920,6 +5993,11 @@ impl Checker<'_, '_> {
                     &scope,
                 )
                 .map_err(|e| call_inference_error(expr.span, e))?;
+            if let Some(context) = &result_context {
+                candidate
+                    .constrain_result_context(context, crate::ptc::Budget::default())
+                    .map_err(|e| call_inference_error(expr.span, e))?;
+            }
             for (slot, values) in &property_values {
                 if values.is_empty() {
                     continue;

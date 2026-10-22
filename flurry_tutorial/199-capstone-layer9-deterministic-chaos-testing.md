@@ -1,6 +1,6 @@
-# Flurry 演进手记 (199)：终极实战第九层（全链路仿真验收）：用 `template test` 与虚拟效应 Handler 跑通确定性故障注入
+# Flurry 演进手记 (199)：综合实战第九层（全链路仿真验收）：用 `template test` 与虚拟效应 Handler 跑通确定性故障注入
 
-欢迎来到 **Orion 异构流式信号处理与遥测引擎** 终极实战的最后一层——**Layer 9（全链路确定性混沌测试与验收层）**。
+欢迎来到 **Orion 异构流式信号处理与遥测引擎** 综合实战的最后一层——**Layer 9（全链路确定性混沌测试与验收层）**。
 
 在前面的八篇手记（第 191～198 篇）中，我们自底向上搭建了完整的八层引擎架构：
 - **Layer 1 ～ 3**：零拷贝跨元素 `BitVec` 协议帧解码、`&reachability` 分片环形队列、`verified fn` 与 `outcomes` 读写分离证明；
@@ -8,7 +8,7 @@
 - **Layer 6 ～ 8**：代数效应与前后置 `catch` 容错流水线、`atomic` STM 指标汇总、以及 `derive fn` + `dyn Trait` 声明式插件外壳。
 
 现在，我们要对整套 Orion 引擎执行最严苛的工业级全链路验收：
-**不依赖真实的物理射电望远镜、不启动真实的睡眠定时器、不发往真实的网络套接字，而是在纯内存的确定性沙箱中，向流水线精确注入“GPU 瞬态忙”、“紧急信标脉冲”与“重负载并发汇总”，并验证每一个生命周期钩子、每一次故障降级、每一条告警计数都 100% 符合数学预期。**
+**独立于真实的物理射电望远镜、不启动真实的睡眠定时器、不发往真实的网络套接字，而是在纯内存的确定性沙箱中，向流水线精确注入“GPU 瞬态忙”、“紧急信标脉冲”与“重负载并发汇总”，并验证每一个生命周期钩子、每一次故障降级、每一条告警计数都 100% 符合数学预期。**
 
 ```
 +=============================================================================+
@@ -24,7 +24,7 @@
 +=============================================================================+
 ```
 
-今天，我们就用第 078 篇与 `docs/functions/templates.md` 确立的 **`template test` 上下文模态测试夹具（Contextual Test Templates）** 配合 **虚拟代数效应处理器（Virtual Effect Handlers）**，完成 Orion 引擎的终极合拢。
+今天，我们就用第 078 篇与 `docs/functions/templates.md` 确立的 **`template test` 上下文模态测试夹具（Contextual Test Templates）** 配合 **虚拟代数效应处理器（Virtual Effect Handlers）**，完成 Orion 引擎的完整合拢。
 
 ---
 
@@ -33,7 +33,7 @@
 在传统测试框架中，测试夹具（Test Fixture）通常靠 `setUp()` 和 `tearDown()` 两个割裂的回调函数，把共享状态塞进全局变量或测试类的成员变量里。这种模式在系统级测试中有三大问题背景：
 1. **无法包裹控制流与效应处理器（Cannot Wrap Handlers）**：代数效应处理器 `handle { ... } do { ... }` 或局部资源作用域必须像洋葱一样**从外向内包裹**整个测试主体。用割裂的 `beforeEach` 根本无法在 `beforeEach` 里打开一个 `handle` 块、等到 `afterEach` 再去关闭它。
 2. **可达性与栈资源无法安全传递**：如果夹具初始化了一块带局部可达性约束的分片环形缓冲区，全局变量根本无法合法持有它的局部借用；
-3. **卫生性失控（Hygiene Leakage）**：如果用传统的无类型宏去拼接测试代码，测试用例很容易不小心读写到夹具内部用来计数的私有审计变量，导致测试自欺欺人地“假通过”。
+3. **卫生性失控（Hygiene Leakage）**：如果用传统的无类型宏去拼接测试代码，测试用例很容易偶有疏忽读写到夹具内部用来计数的私有审计变量，导致测试自欺欺人地“假通过”。
 
 ---
 
@@ -86,7 +86,7 @@ template test with_orion_chaos_sandbox
 where
     body: < env: *OrionTestEnv |- void >,
 {
-    -- 模板私有审计变量：测试主体 ~<body> 绝对无法看见或篡改它。
+    -- 模板私有审计变量：测试主体 ~<body> 完全无法看见或篡改它。
     let internal_canary: u64 = 0xDEADBEEF;
 
     var sandbox_env = OrionTestEnv {
@@ -124,7 +124,7 @@ where
 
 ## 三、 实战第二步：用 `test ... use` 实例化正常流与混沌故障注入测试
 
-有了 `with_orion_chaos_sandbox` 模板，编写全链路验收用例变得极其清爽。我们来实例化两个互相独立的测试：
+有了 `with_orion_chaos_sandbox` 模板，编写全链路验收用例变得干净利落。我们来实例化两个互相独立的测试：
 1. `test normal_telemetry_flow`：验证正常信号帧解码、FIR 滤波与指标累加，零故障重试、零误报；
 2. `test chaos_gpu_busy_and_urgent_beacon`：模拟 GPU 瞬态繁忙触发重试（推进虚拟时钟并记录节点 42 的故障遥测），随后注入高能紧急信标帧触发外部告警。
 
@@ -181,8 +181,8 @@ test chaos_gpu_busy_and_urgent_beacon use with_orion_chaos_sandbox {
 ```
 
 注意这两个测试用例运行时的美妙特性：
-- 它们不需要等待哪怕 1 毫秒的真实操作系统定时器（`virtual_ticks` 纯内存自增）；
-- `normal_telemetry_flow` 和 `chaos_gpu_busy_and_urgent_beacon` 各自拥有完全独立的 `sandbox_env` 栈实例，哪怕并行跑一万次也绝对不会互相污染状态。
+- 它们无需等待哪怕 1 毫秒的真实操作系统定时器（`virtual_ticks` 纯内存自增）；
+- `normal_telemetry_flow` 和 `chaos_gpu_busy_and_urgent_beacon` 各自拥有完全独立的 `sandbox_env` 栈实例，哪怕并行跑一万次亦免于互相污染状态。
 
 ---
 
@@ -190,10 +190,10 @@ test chaos_gpu_busy_and_urgent_beacon use with_orion_chaos_sandbox {
 
 如果某个编写测试用例的程序员知道 `with_orion_chaos_sandbox` 模板内部有一个局部变量 `internal_canary`，试图在 `test ... use` 的代码块里直接读取或修改 `internal_canary`，会发生什么？
 
-因为 `where body: < env: *OrionTestEnv |- void >` 只向 `body` 的上下文暴露了 `env`，`internal_canary` 不在上下文契约中，CMTT 类型检查器会编译期拒绝：
+因为 `where body: < env: *OrionTestEnv |- void >` 只向 `body` 的上下文暴露了 `env`，`internal_canary` 不在上下文契约中，CMTT 类型检查器会编译期报错：
 
 ```flurry
--- ❌ 拒绝例：测试主体企图访问未在模板上下文 `< env: ... >` 中暴露的模板私有变量
+-- ❌ 负例：测试主体企图访问未在模板上下文 `< env: ... >` 中暴露的模板私有变量
 test hygiene_breach_attempt use with_orion_chaos_sandbox {
     -- 编译错误：Unbound identifier `internal_canary` in contextual block `body`:
     -- template `with_orion_chaos_sandbox` only provides context `< env: *OrionTestEnv >`.

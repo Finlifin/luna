@@ -1079,7 +1079,95 @@ pub(in crate::program) fn expand_quote_functions(
         }
     }
     output.functions = functions;
+    adapt_ordinary_quote_methods(output, next, fuel)?;
     expand_retained_quote_functions(output, next, fuel)
+}
+
+/// An ordinary trait contract promises a callable entry, even when its chosen
+/// implementation was written as a quote function. Give that entry a distinct
+/// identity; the original remains code evidence and cannot escape as a pointer.
+/// Copying the checked body preserves its argument frame, contracts and return
+/// boundary. Nested quote calls are expanded by the normal retained-code pass.
+fn adapt_ordinary_quote_methods(
+    output: &mut n::Package,
+    next: &mut u32,
+    fuel: &mut u64,
+) -> Result<(), Error> {
+    let mut adapters = BTreeMap::new();
+    for implementation in &mut output.implementations {
+        let Some(interface) = implementation.interface else {
+            continue;
+        };
+        let Some(contract) = output
+            .traits
+            .iter()
+            .find(|item| item.declaration == interface)
+        else {
+            continue;
+        };
+        for (name, body) in &mut implementation.methods {
+            if !contract
+                .methods
+                .iter()
+                .any(|method| method.name == *name && !method.is_quote)
+            {
+                continue;
+            }
+            let Some(template) = output
+                .quote_templates
+                .iter()
+                .find(|template| template.declaration == *body)
+            else {
+                continue;
+            };
+            if let Some(adapter) = adapters.get(body) {
+                *body = *adapter;
+                continue;
+            }
+            let mut remaining = usize::try_from(*fuel).unwrap_or(usize::MAX);
+            let charged = nir::visit::expressions(template, &mut remaining, |expr, remaining| {
+                nir::type_computations::charge_term(&expr.ty, remaining).map_err(|e| e.to_string())
+            });
+            *fuel = remaining as u64;
+            charged.map_err(|message| error(at(template.body.source), message))?;
+            let id = DeclarationId {
+                package: u64::MAX - 7,
+                local: *next,
+            };
+            *next = next.checked_add(1).ok_or_else(|| {
+                error(
+                    at(template.body.source),
+                    "quote adapter identity space exhausted",
+                )
+            })?;
+            if output
+                .functions
+                .iter()
+                .any(|function| function.declaration == id)
+            {
+                return Err(error(
+                    at(template.body.source),
+                    "quote adapter identity collision",
+                ));
+            }
+            let mut adapter = template.clone();
+            adapter.declaration = id;
+            adapter.name = format!("{}::callable", template.name);
+            output.functions.push(adapter);
+            if let Some(parameters) = output
+                .function_parameters
+                .iter()
+                .find(|parameters| parameters.declaration == *body)
+            {
+                let mut parameters = parameters.clone();
+                parameters.declaration = id;
+                output.function_parameters.push(parameters);
+            }
+            adapters.insert(*body, id);
+            *body = id;
+        }
+    }
+    Ok(())
 }
 
 /// Expand checked direct applications using retained NIR templates. The

@@ -2326,3 +2326,178 @@ fn normal_form_type_list_requirements_keep_the_collected_input_kind() {
         assert!(compile_with_protocols(&invalid, &protocols).is_err());
     }
 }
+
+#[test]
+fn generic_invocation_transports_residual_nominal_type_lists() {
+    let source = format!(
+        "{TYPE}
+        pure comptime fn List<T>->Type {{T}}
+        newtype Indexed<value:bool> = bool;
+        newtype Tagged<value:.char'builtin> = bool;
+        comptime fn TaggedType()->Type {{Tagged<'x'>}}
+        comptime fn pack(value:bool)->List<Type> {{[Indexed<value>,Indexed<value>]}}
+        comptime fn pass(values:List<Type>)->List<Type> {{values}}
+        comptime fn pass_packet(values:(List<Type>,))->(List<Type>,) {{values}}"
+    );
+    let package = execution_support::compile_with_source_bindings(
+        &source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            meta_list: Some("input::List"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let parameter = nir::DeclarationId {
+        package: 99,
+        local: 1,
+    };
+    let domain = nir::Term::Primitive(nir::Primitive::Bool);
+    let authority = [(parameter, domain.clone())];
+    let opaque = Value::AbstractValue {
+        declaration: parameter,
+        ty: domain,
+    };
+    let mut vm = Interpreter::for_comptime(&package, Budget::default())
+        .unwrap()
+        .with_abstract_value_parameters(&authority)
+        .unwrap();
+    let value = vm.invoke(id(&package, "pack"), vec![opaque]).unwrap();
+    let Value::TypeList(elements) = &value else {
+        panic!("type list")
+    };
+    assert_eq!(elements.len(), 2);
+    assert_eq!(elements[0], elements[1]);
+    assert!(
+        matches!(&elements[0],nir::Term::Nominal {arguments,..} if arguments==&vec![nir::Term::Rigid {declaration:parameter,sort:nir::Sort::ComptimeValue}])
+    );
+    assert_eq!(
+        vm.invoke(id(&package, "pass"), vec![value.clone()])
+            .unwrap(),
+        value
+    );
+    assert!(
+        Interpreter::for_comptime(&package, Budget::default())
+            .unwrap()
+            .invoke(id(&package, "pass"), vec![value.clone()])
+            .is_err()
+    );
+    let tagged = package
+        .newtypes
+        .iter()
+        .find(|item| item.name == "Tagged")
+        .unwrap()
+        .declaration;
+    let forged = Value::TypeList(vec![nir::Term::Nominal {
+        declaration: tagged,
+        arguments: vec![nir::Term::Rigid {
+            declaration: parameter,
+            sort: nir::Sort::ComptimeValue,
+        }],
+    }]);
+    assert!(
+        vm.invoke(
+            id(&package, "pass_packet"),
+            vec![Value::Tuple(vec![forged.clone()])]
+        )
+        .is_err()
+    );
+    assert!(vm.invoke(id(&package, "pass"), vec![forged]).is_err());
+    assert_eq!(
+        vm.invoke(
+            id(&package, "pass_packet"),
+            vec![Value::Tuple(vec![value.clone()])]
+        )
+        .unwrap(),
+        Value::Tuple(vec![value.clone()])
+    );
+    assert_eq!(
+        vm.invoke(id(&package, "pass"), vec![value.clone()])
+            .unwrap(),
+        value
+    );
+    assert!(
+        value
+            .clone()
+            .into_normal_term(&mut Default::default())
+            .is_err()
+    );
+    assert!(
+        value
+            .into_abstract_invocation_term(
+                &mut Default::default(),
+                &Default::default(),
+                &authority.into_iter().collect()
+            )
+            .is_ok()
+    );
+    let concrete = vm
+        .invoke(id(&package, "pack"), vec![Value::Bool(true)])
+        .unwrap();
+    assert!(concrete.into_normal_term(&mut Default::default()).is_ok());
+}
+
+#[test]
+fn residual_normal_form_value_arguments_keep_heads_and_domain_evidence() {
+    let package = compile(&format!(
+        "{TYPE}
+        pure comptime fn Indexed<T,value:T>->Type {{T}}
+        comptime fn Build(value:bool)->Type {{Indexed<bool,value>}}
+        comptime fn pass(value:Type)->Type {{value}}"
+    ));
+    let parameter = nir::DeclarationId {
+        package: 99,
+        local: 1,
+    };
+    let domain = nir::Term::Primitive(nir::Primitive::Bool);
+    let authority = [(parameter, domain.clone())];
+    let opaque = Value::AbstractValue {
+        declaration: parameter,
+        ty: domain.clone(),
+    };
+    let mut vm = Interpreter::for_comptime(&package, Budget::default())
+        .unwrap()
+        .with_abstract_value_parameters(&authority)
+        .unwrap();
+    let value = vm.invoke(id(&package, "Build"), vec![opaque]).unwrap();
+    let head = id(&package, "Indexed");
+    let symbolic = nir::Term::Rigid {
+        declaration: parameter,
+        sort: nir::Sort::ComptimeValue,
+    };
+    assert_eq!(
+        value,
+        Value::Type(nir::Term::NormalForm {
+            head,
+            sort: nir::Sort::Type,
+            arguments: vec![domain, symbolic.clone()]
+        })
+    );
+    assert_eq!(
+        vm.invoke(id(&package, "pass"), vec![value.clone()])
+            .unwrap(),
+        value
+    );
+    assert!(
+        value
+            .clone()
+            .into_normal_term(&mut Default::default())
+            .is_err()
+    );
+    let forged = Value::Type(nir::Term::NormalForm {
+        head,
+        sort: nir::Sort::Type,
+        arguments: vec![nir::Term::Primitive(nir::Primitive::Char), symbolic],
+    });
+    assert!(vm.invoke(id(&package, "pass"), vec![forged]).is_err());
+    assert_eq!(
+        vm.invoke(id(&package, "pass"), vec![value.clone()])
+            .unwrap(),
+        value
+    );
+    assert!(!calls(&package, &vm).iter().any(|name| name == "Indexed"));
+    let concrete = vm
+        .invoke(id(&package, "Build"), vec![Value::Bool(true)])
+        .unwrap();
+    assert!(concrete.into_normal_term(&mut Default::default()).is_ok());
+}

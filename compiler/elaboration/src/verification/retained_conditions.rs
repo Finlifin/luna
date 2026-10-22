@@ -2,6 +2,101 @@
 //! Every referenced scalar identity must still denote its original value.
 use super::*;
 
+#[cfg(test)]
+mod bounded_exclusion_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_holes_survive_copy_and_common_join_but_not_write_or_unproved_branch() {
+        let mut limits = Limits::default();
+        let mut initial = Facts::default();
+        let place = PlaceId { owner: 1, local: 0 };
+        let range = || {
+            Interval::new(
+                Integer::from_i128(-2),
+                Integer::from_i128(2),
+                &mut Limits::default(),
+            )
+            .unwrap()
+        };
+        let value = initial.assign(place, range()).unwrap();
+        let excluded = Condition::Compare {
+            value,
+            relation: Comparison::NotEqual,
+            constant: Integer::zero(),
+        };
+        let mut checked = initial.fork(&mut limits).unwrap();
+        checked.assume(&excluded, true, &mut limits).unwrap();
+        let proof = checked
+            .prove_condition(&excluded, true, &mut limits)
+            .unwrap();
+        let copied = checked.fork(&mut limits).unwrap();
+        proof.replay(&copied, &mut limits).unwrap();
+        let common = checked.join(&copied, &mut limits).unwrap();
+        common
+            .prove_condition(&excluded, true, &mut limits)
+            .unwrap();
+        let optional = checked.join(&initial, &mut limits).unwrap();
+        assert!(
+            optional
+                .prove_condition(&excluded, true, &mut limits)
+                .is_err()
+        );
+        assert!(proof.replay(&optional, &mut limits).is_err());
+        checked.assign(place, range()).unwrap();
+        assert!(proof.replay(&checked, &mut limits).is_err());
+        let current = Condition::Compare {
+            value: checked.value(place).unwrap(),
+            relation: Comparison::NotEqual,
+            constant: Integer::zero(),
+        };
+        assert!(
+            checked
+                .prove_condition(&current, true, &mut limits)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn unequal_bounded_booleans_refine_both_concrete_cases() {
+        for bit in [0, 1] {
+            let mut limits = Limits::default();
+            let mut facts = Facts::default();
+            let range = Interval::new(Integer::zero(), Integer::from_u128(1), &mut limits).unwrap();
+            let left = facts
+                .assign(PlaceId { owner: 1, local: 0 }, range.clone())
+                .unwrap();
+            let right = facts.assign(PlaceId { owner: 1, local: 1 }, range).unwrap();
+            let equal = Condition::PolynomialCompare {
+                left: Polynomial::variable(left, &mut limits).unwrap(),
+                relation: Comparison::Equal,
+                right: Polynomial::variable(right, &mut limits).unwrap(),
+            };
+            facts
+                .assume(&Condition::Not(Box::new(equal.clone())), true, &mut limits)
+                .unwrap();
+            facts.prove_condition(&equal, false, &mut limits).unwrap();
+            facts
+                .assume(
+                    &Condition::Compare {
+                        value: left,
+                        relation: Comparison::Equal,
+                        constant: Integer::from_u128(bit),
+                    },
+                    true,
+                    &mut limits,
+                )
+                .unwrap();
+            let opposite = Condition::Compare {
+                value: right,
+                relation: Comparison::Equal,
+                constant: Integer::from_u128(1 - bit),
+            };
+            facts.prove_condition(&opposite, true, &mut limits).unwrap();
+        }
+    }
+}
+
 impl Condition {
     // These are pure mathematical conditions over already evaluated values;
     // commutativity here never changes executable short-circuit ordering.
@@ -109,6 +204,45 @@ impl Condition {
     }
 }
 impl Facts {
+    /// Revisit retained Boolean premises after new branch constraints arrive.
+    /// Callers operate on private frames, so exhaustion cannot publish a
+    /// partially refined program state.
+    pub(super) fn propagate_retained_conditions(
+        &mut self,
+        limits: &mut Limits,
+    ) -> Result<(), Unknown> {
+        if self.conditions.is_empty() || !self.is_reachable() {
+            return Ok(());
+        }
+        let retained = self.copy_conditions(limits)?;
+        // Bypass the "already known" shortcut while deriving new arithmetic
+        // consequences. Every saved premise is current and already established.
+        self.conditions.clear();
+        // A bounded number of sweeps handles implication chains without
+        // requiring nonlinear bounds to converge. Every derived fact remains
+        // valid when this incomplete propagation stops before a fixed point.
+        for _ in 0..retained.len().saturating_add(1) {
+            let before = self.fork(limits)?;
+            for (premise, truth) in &retained {
+                self.assume_inner(premise, *truth, 0, limits)?;
+                if !self.is_reachable() {
+                    break;
+                }
+            }
+            if !self.is_reachable()
+                || (self.current == before.current
+                    && self.inequalities == before.inequalities
+                    && self.conditions == before.conditions)
+            {
+                break;
+            }
+            limits.step(1)?;
+        }
+        for (premise, truth) in retained {
+            self.remember_condition(&premise, truth, limits)?;
+        }
+        Ok(())
+    }
     pub(super) fn known_condition(
         &self,
         condition: &Condition,
@@ -159,12 +293,52 @@ impl Facts {
         truth: bool,
         limits: &mut Limits,
     ) -> Result<(), Unknown> {
+        self.remember_condition_at(condition, truth, limits, 0)
+    }
+    fn remember_condition_at(
+        &mut self,
+        condition: &Condition,
+        truth: bool,
+        limits: &mut Limits,
+        depth: usize,
+    ) -> Result<(), Unknown> {
+        limits.step(1)?;
+        if depth >= 128 {
+            return Err(Unknown::ConditionDepthLimit);
+        }
         if !self.reachable {
             return Ok(());
         }
+        // Retain only the unresolved logical choice. A true conjunction (or
+        // false disjunction) has already established both operands separately.
+        match condition {
+            Condition::Not(inner) => {
+                return self.remember_condition_at(inner, !truth, limits, depth + 1);
+            }
+            Condition::And(a, b) if truth => {
+                self.remember_condition_at(a, true, limits, depth + 1)?;
+                return self.remember_condition_at(b, true, limits, depth + 1);
+            }
+            Condition::Or(a, b) if !truth => {
+                self.remember_condition_at(a, false, limits, depth + 1)?;
+                return self.remember_condition_at(b, false, limits, depth + 1);
+            }
+            _ => {}
+        }
+        // Finite intervals and polynomial inequalities can encode equality
+        // and ordered comparisons, but not a hole in a bounded domain. Keep
+        // disequality even for bounded values so joins and frame transfers do
+        // not erase the checked choice (left < right or left > right).
+        let disequality = match condition {
+            Condition::Compare { relation, .. } | Condition::PolynomialCompare { relation, .. } => {
+                (if truth { *relation } else { relation.negated() }) == super::Comparison::NotEqual
+            }
+            _ => false,
+        };
         if let Condition::Compare { value, .. } = condition {
             match self.bound(*value, limits) {
-                Ok(_) => return Ok(()),
+                Ok(_) if !disequality => return Ok(()),
+                Ok(_) => {}
                 Err(Unknown::MissingBound(_)) => {}
                 Err(e) => return Err(e),
             }
@@ -174,7 +348,8 @@ impl Facts {
                 left.interval_enclosure(self, limits),
                 right.interval_enclosure(self, limits),
             ) {
-                (Ok(_), Ok(_)) => return Ok(()),
+                (Ok(_), Ok(_)) if !disequality => return Ok(()),
+                (Ok(_), Ok(_)) => {}
                 (Err(Unknown::MissingBound(_)), Ok(_) | Err(Unknown::MissingBound(_)))
                 | (Ok(_), Err(Unknown::MissingBound(_))) => {}
                 (Err(e), _) | (_, Err(e)) => return Err(e),

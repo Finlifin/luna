@@ -1,23 +1,23 @@
 # Flurry 演进手记 (043)：当对象内部指向自己——自引用结构（Self-Reference）的移动与安全锚定
 
-在 [上一篇 (042)](./042-partial-moves-and-reinitialization.md) 中，我们学会了对结构体进行部分移出与重新初始化。当时我们留了一个让无数系统程序员头皮发麻的悬念：**如果一个结构体的某个字段，指向了同一个结构体里的另一个字段（即自引用结构，Self-Referential Struct），会发生什么？**
+在 [上一篇 (042)](./042-partial-moves-and-reinitialization.md) 中，我们学会了对结构体进行部分移出与重新初始化。当时我们留了一个系统编程中的经典问题：**如果一个结构体的某个字段，指向了同一个结构体里的另一个字段（即自引用结构，Self-Referential Struct），会发生什么？**
 
-在开发我们的零拷贝 `RingBuffer` 和协议帧解析器时，这个需求简直无处不在：
+在开发我们的零拷贝 `RingBuffer` 和协议帧解析器时，这个需求随处可见：
 - 我们希望把**原始数据缓冲区（Owner）**和**当前解析出来的切片视图（View / Cursor）**打包在同一个结构体里，方便在流水线各个阶段之间传递；
 - 或者在构建侵入式环形链表节点时，节点里既有内联的数据字段 `value`，又有一个指向上游或自身字段的指针 `pointer`。
 
 如果你在 Rust 里干过这件事，你一定经历过这样的难题：
-1. 哪怕你的切片指向的是 `String` 或 `Vec` 在**堆上**分配的内存（按值移动 `String` 根本不会改变堆内存的地址。），Rust 的借用检查器也无法区分“指向栈上描述符”和“指向堆上缓冲区”，一律严禁你把 `storage: String` 和 `view: &str` 装进同一个结构体按值移动；
-2. 为了写出自引用结构，你不得不引入复杂的 `Pin<&mut Self>`、`PhantomPinned` 和一堆 `unsafe` 裸指针转换。
+1. 哪怕你的切片指向的是 `String` 或 `Vec` 在**堆上**分配的内存（按值移动 `String` 根本维持原状而无改于堆内存的地址。），Rust 的借用检查器也无法区分“指向栈上描述符”和“指向堆上缓冲区”，一律严禁你把 `storage: String` 和 `view: &str` 装进同一个结构体按值移动；
+2. 为了写出自引用结构，你严禁免于引入复杂的 `Pin<&mut Self>`、`PhantomPinned` 和一堆 `unsafe` 裸指针转换。
 
-为什么 Flurry 不需要发明 `Pin` 这种打补丁式的语法机制，就能把自引用结构管得既灵活又滴水不漏？
+为什么 Flurry 无需发明 `Pin` 这种打补丁式的语法机制，就能把自引用结构管得既灵活又滴水不漏？
 秘密就在于：Flurry 的移动与可达性分析，**精确区分了“指向独立外部/堆分配的视图”与“指向对象内联字段的指针”**（详见 `docs/resource-management/moves-and-initialization.md`）。
 
 让我们从一段把这两种情况混为一谈的 初始代码开始。
 
 ---
 
-## 一、 两种截然不同的“自己指自己”
+## 一、 两种迥然各异的“自己指自己”
 
 来看看工程师在设计零拷贝数据包时写下的两个自引用结构体：
 
@@ -75,7 +75,7 @@ fn pass_packet(packet: TextPacket) -> TextPacket {
 ```
 
 真相大白。
-`view` 指向的根本不是 `storage` 在栈上的那几个字节描述符，而是 `storage` 所拥有的**外部独立字符分配（Heap Allocation）**。
+`view` 指向的根本并非 `storage` 在栈上的那几个字节描述符，而是 `storage` 所拥有的**外部独立字符分配（Heap Allocation）**。
 当 `TextPacket` 从 `make_packet` 按值移动到 `pass_packet` 再移动到 `test` 时：
 1. 移动的只是栈上的两个描述符（`storage` 和 `view`）；
 2. 底层的字符分配稳稳地呆在原地，连半个字节都没有挪动过。
@@ -92,20 +92,20 @@ fn take_storage(packet: TextPacket) -> String {
     packet.storage
 }
 
--- ❌ 编译期直接拒绝。
+-- ❌ 编译期直接报错。
 -- 函数 2：只返回 view，却把 owner (storage) 留在函数里销毁。
 fn take_view(packet: TextPacket) -> str {
     packet.view
 }
 ```
 
-为什么 `take_storage` 合法，而 `take_view` 被编译期拒绝？
+为什么 `take_storage` 合法，而 `take_view` 被编译期报错？
 因为在函数退出时，编译器严格按照以下顺序记账（详见 `docs/resource-management/moves-and-initialization.md`）：
 1. **先转交返回值**；
 2. **再对函数内剩余未移出的局部责任执行清理（Drop）**；
 3. **最后核验返回值所依赖的目标在清理之后是否依然存活有效**。
 
-在 `take_storage` 中，字符分配的拥有权跟着 `packet.storage` 一起交给了返回值，留在函数里的残余 `packet.view` 只是平凡清理（不释放字符），所以返回值 100% 有效；
+在 `take_storage` 中，字符分配的拥有权跟着 `packet.storage` 一起交给了返回值，留在函数里的残余 `packet.view` 只是平凡清理（暂缓释放字符），所以返回值 100% 有效；
 而在 `take_view` 中，你试图把 `packet.view` 返回出去，却把真正的金主 `packet.storage` 留在了函数内部。一旦函数退出，`packet.storage` 就会被自动清理并释放堆上的 `"hello"`，导致返回的 `str` 瞬间变成悬垂视图——编译器在静态出口检查时一举将其拦截。
 
 ---
@@ -118,7 +118,7 @@ fn take_view(packet: TextPacket) -> str {
 如果有人写下这样的代码，试图在函数里把 `local.pointer` 指向 `local.value.ref`，再把 `local` 按值返回出去：
 
 ```flurry
--- ❌ 编译期直接拒绝。
+-- ❌ 编译期直接报错。
 struct InlineLink {
     value: i32,
     pointer: ?*i32,
@@ -128,7 +128,7 @@ fn escape_inline() -> InlineLink {
     let local = InlineLink { value: 7i32, pointer: null }
     -- 让 pointer 指向 local 自己的内联字段 value
     local.pointer = local.value.ref;
-    -- 错误：按值移动不会自动把 pointer 修复为指向新位置。
+    -- 错误：按值移动免于自动把 pointer 修复为指向新位置。
     -- local.pointer 依然指向当前即将销毁的栈槽 local.value。
     local
 }
@@ -149,8 +149,8 @@ fn escape_inline() -> InlineLink {
 ```
 
 看清楚了吗？
-**移动（Move）只转移值的字节表示与责任，它绝不会自动重写或修复指针对内联字段的指向。**
-即使底层的代码生成器（如 LLVM）在某个优化等级下碰巧触发了返回值优化（RVO / NRVO），省掉了栈拷贝，Flurry 的语言规范也明确规定：**普通返回优化绝不作为源程序合法性的依据。** 只要语义上发生了按值移动，内联字段的原地址就会在源作用域结束时失效。
+**移动（Move）只转移值的字节表示与责任，它免于自动重写或修复指针对内联字段的指向。**
+即使底层的代码生成器（如 LLVM）在某个优化等级下碰巧触发了返回值优化（RVO / NRVO），省掉了栈拷贝，Flurry 的语言规范也明确规定：**普通返回优化免作为源程序合法性的依据。** 只要语义上发生了按值移动，内联字段的原地址就会在源作用域结束时失效。
 
 那么，在 Flurry 中，我们该如何**安全地使用内联自引用结构**？
 答案是：**在最终承载它的宿主作用域中就地锚定（Anchor in Place），并在建立内联自引用后通过指针 `*InlineLink` 访问它，不再按值搬移整个结构体。**
@@ -215,8 +215,8 @@ test {
 
 总结这三兄弟的精确分工：
 1. **`Self`（首字母大写）**：永远指向**当前词法所属的类型**（或 `trait` / `impl` 的实现主体），比如在 `struct RingCounter` 内部，`Self` 就是 `RingCounter`。
-2. **`Itself`（首字母大写）**：指向**最内层类型约束正在检查的那个目标类型**。比如在参数 `meta: refines { Type.predicates.is_tuple(Itself) } Any` 中，`Itself` 指的是调用者传给 `meta` 的具体类型（而不是外层的 `RingCounter`。）。
-3. **`itself`（全小写）**：指向**当前值级精化约束正在检查的那个具体值对象**（或在成员签名中作为 `*itself` 接收者关系槽）。注意：当只有类型级要求（没有实际运行时值对象）时，只能用 `Itself`，不能把 `Itself` 改成小写的 `itself` 当作普通变量去读。
+2. **`Itself`（首字母大写）**：指向**最内层类型约束正在检查的那个目标类型**。比如在参数 `meta: refines { Type.predicates.is_tuple(Itself) } Any` 中，`Itself` 指的是调用者传给 `meta` 的具体类型（而非外层的 `RingCounter`。）。
+3. **`itself`（全小写）**：指向**当前值级精化约束正在检查的那个具体值对象**（或在成员签名中作为 `*itself` 接收者关系槽）。注意：当只有类型级要求（没有实际运行时值对象）时，只能用 `Itself`，禁止将 `Itself` 改成小写的 `itself` 当作普通变量去读。
 
 来看看它们协同工作的完整代码示例：
 
@@ -248,7 +248,7 @@ test {
     let res = c2.with_tuple_meta((1u32, true));
     assumes res == 11u32;
 
-    -- ❌ 如果写 `c2.with_tuple_meta(42u32);`，编译器会编译期拒绝，因为 `u32` 不是元组。
+    -- ❌ 如果写 `c2.with_tuple_meta(42u32);`，编译器会编译期报错，因为 `u32` 并非元组。
 }
 ```
 
@@ -261,9 +261,9 @@ test {
 | 概念 / 构造 | 核心行为与编译器规则 | 为什么比传统方案更优雅？ |
 | :--- | :--- | :--- |
 | **指向堆分配的自引用 (`TextPacket`)** | 移动结构体只搬移栈描述符，不搬移底层堆内存，按值返回**合法** | 无需像 Rust 那样因借用检查器限制而被迫引入 `Pin` 或第三方库 |
-| **部分移出堆 Owner (`take_view`)** | 若只返回 `view` 而将 `storage` 留在函数内清理，静态**拒绝** | 出口检查自动在执行剩余 `Drop` 后核验返回值的依赖有效性 |
-| **指向内联字段的自引用 (`InlineLink`)** | 移动不自动重写内联指针；禁止将指向局部内联字段的对象按值返回 | 在宿主栈帧原位锚定并通过 `*InlineLink` 读写即可，安全且零运行时开销 |
-| **`Self` vs `Itself` vs `itself`** | `Self` 指词法所属类型；`Itself` 指最内层受检类型；`itself` 指当前受检值 | 在嵌套类型约束与精化类型中指代永远明确，绝不发生内外层混淆 |
+| **部分移出堆 Owner (`take_view`)** | 若只返回 `view` 而将 `storage` 留在函数内清理，静态**报错** | 出口检查自动在执行剩余 `Drop` 后核验返回值的依赖有效性 |
+| **指向内联字段的自引用 (`InlineLink`)** | 移动非自动重写内联指针；禁止将指向局部内联字段的对象按值返回 | 在宿主栈帧原位锚定并通过 `*InlineLink` 读写即可，安全且零运行时开销 |
+| **`Self` vs `Itself` vs `itself`** | `Self` 指词法所属类型；`Itself` 指最内层受检类型；`itself` 指当前受检值 | 在嵌套类型约束与精化类型中指代永远明确，免于发生内外层混淆 |
 
 ### 下一篇预告
 
