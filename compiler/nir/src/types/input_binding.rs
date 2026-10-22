@@ -97,6 +97,10 @@ impl FunctionInputBinding {
         };
         fn wrap(original: &Term, specialized: Term) -> Term {
             match original {
+                Term::ContextualClosure { context, signature } => Term::ContextualClosure {
+                    context: context.clone(),
+                    signature: Box::new(wrap(signature, specialized)),
+                },
                 Term::Closure {
                     environment,
                     signature,

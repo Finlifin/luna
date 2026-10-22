@@ -7,6 +7,13 @@ use lex::TokenKind;
 impl Parser<'_> {
     pub fn try_statement_or_definition(&mut self) -> ParseResult {
         self.scoped(|p| {
+            // An unnamed callable signature is a type expression, including
+            // when it is the final expression of a block.
+            if p.peek(&[TokenKind::Fn, TokenKind::LParen])
+                || p.peek(&[TokenKind::Comptime, TokenKind::Fn, TokenKind::LParen])
+            {
+                return p.try_expr_statement();
+            }
             let token = p.peek_next_token();
             match token.kind {
                 // statements
@@ -675,7 +682,7 @@ impl Parser<'_> {
             }
 
             let arms = p.try_multi_with_bracket(
-                &[Rule::semicolon("case arm", |p| p.try_case_arm())],
+                &[Rule::comma("case arm", |p| p.try_case_arm())],
                 (TokenKind::LBrace, TokenKind::RBrace),
             )?;
 
@@ -846,10 +853,10 @@ impl Parser<'_> {
         self.scoped_with_expected_prefix(TokenKind::Catch.as_ref(), |p| {
             p.eat_tokens(1);
 
-            let id = p.try_id()?;
+            let id = p.try_pattern()?;
             if id == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected an identifier after 'catch'".to_string(),
+                    "Expected a pattern after 'catch'".to_string(),
                     p.peek_next_token().kind,
                     p.next_token_span(),
                 ));

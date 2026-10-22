@@ -859,6 +859,8 @@ pub enum ExprKind {
     /// Construct a callable signature from computed parameter types.
     FunctionType {
         comptime: bool,
+        /// One flag per input; its computed domain determines Type vs value sort.
+        comptime_parameters: Vec<bool>,
         parameters: Vec<Expr>,
     },
     /// Replace a callable signature's result, preserving its invocation phase.
@@ -942,8 +944,8 @@ pub enum ExprKind {
     /// Internal call preparation. Statements are fresh Let bindings or plain
     /// tuple LetPattern unpackings, evaluated in source order without creating
     /// full-expression temporary scopes.
-    /// The result is a normalized call, variant construction or deterministically
-    /// expanded call block; temporaries keep the surrounding
+    /// The result is a normalized call, variant construction, effect request or
+    /// deterministically expanded call block; temporaries keep the surrounding
     /// expression lifetime. Unlike Block, this node is transparent to the
     /// result expression's TemporaryEnd boundary.
     CallPreparation {
@@ -1607,6 +1609,7 @@ pub struct RuntimeCleanupAccess {
     pub write: bool,
     pub read_value: bool,
     pub ty: Term,
+    pub conditions: std::collections::BTreeMap<usize, Vec<(Vec<usize>, usize)>>,
 }
 impl fmt::Display for RuntimeCleanupAccess {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1630,9 +1633,21 @@ impl fmt::Display for RuntimeCleanupAccess {
         for (owner, index) in &self.fields {
             write!(f, " (field {owner} {index})")?;
         }
+        f.write_str(")")?;
+        for (stage, guards) in &self.conditions {
+            write!(f, " (conditions (stage {stage})")?;
+            for (path, tag) in guards {
+                f.write_str(" (guard (fields")?;
+                for field in path {
+                    write!(f, " {field}")?;
+                }
+                write!(f, ") (variant {tag}))")?;
+            }
+            f.write_str(")")?;
+        }
         write!(
             f,
-            ") (write {}) (read-value {}) (type {}))",
+            " (write {}) (read-value {}) (type {}))",
             self.write, self.read_value, self.ty
         )
     }
@@ -2855,9 +2870,17 @@ impl fmt::Display for ExprKind {
             }
             Self::FunctionType {
                 comptime,
+                comptime_parameters,
                 parameters,
             } => {
-                write!(f, "(function-type-value (comptime {comptime}) (parameters")?;
+                write!(
+                    f,
+                    "(function-type-value (comptime {comptime}) (parameter-stages"
+                )?;
+                for staged in comptime_parameters {
+                    write!(f, " {staged}")?;
+                }
+                f.write_str(") (parameters")?;
                 for parameter in parameters {
                     write!(f, " {parameter}")?;
                 }
@@ -3450,6 +3473,10 @@ impl Term {
         let mut terms = vec![self];
         while let Some(term) = terms.pop() {
             match term {
+                Term::ErrorResult { errors, result } => {
+                    terms.push(result);
+                    terms.extend(errors);
+                }
                 Term::Computation { effects, result } => {
                     terms.push(result);
                     for operation in effects {
@@ -3468,6 +3495,7 @@ impl Term {
                 Term::Nominal { arguments, .. }
                 | Term::NormalForm { arguments, .. }
                 | Term::Tuple(arguments)
+                | Term::ClosureContextValue(arguments)
                 | Term::TypeListValue(arguments)
                 | Term::TypeListConcat(arguments)
                 | Term::TupleValue(arguments) => terms.extend(arguments),
@@ -3482,6 +3510,10 @@ impl Term {
                 Term::Function { parameters, result } => {
                     terms.extend(parameters.iter().map(|p| &p.ty));
                     terms.push(result);
+                }
+                Term::ContextualClosure { context, signature } => {
+                    terms.push(context);
+                    terms.push(signature);
                 }
                 Term::Closure {
                     environment,
@@ -3852,7 +3884,13 @@ pub fn checkable_predicate(expression: &Expr) -> bool {
             | ExprKind::FloatBinary {
                 left: a, right: b, ..
             } => pending.extend([a.as_ref(), b.as_ref()]),
-            ExprKind::Tuple(fields) => pending.extend(fields),
+            // Staging reconstructs immutable aggregate inputs inside each
+            // contract scope. These nodes only assemble data; calls, writes,
+            // and cleanup remain rejected when visiting their children.
+            ExprKind::Tuple(fields)
+            | ExprKind::Record { fields, .. }
+            | ExprKind::AnonymousRecord { fields }
+            | ExprKind::Variant { fields, .. } => pending.extend(fields),
             ExprKind::Match { value, arms } => {
                 pending.push(value);
                 for arm in arms {
@@ -4076,6 +4114,32 @@ pub fn bit_writeback_error(
 
 /// Current pointer interpreter subset: representation reads/writes whose Copy
 /// behavior is intrinsic. Nominal ownership transfer needs resource evidence.
+/// Bounded shape check for scalar-only observation values. Product types
+/// still require separate Copy evidence; their structure does not grant
+/// copying or authorize user-defined cleanup inside a failed candidate.
+pub fn scalar_observation_shape(ty: &Term) -> bool {
+    let mut pending = vec![ty];
+    let mut remaining = 4096usize;
+    while let Some(ty) = pending.pop() {
+        let Some(next) = remaining.checked_sub(1) else {
+            return false;
+        };
+        remaining = next;
+        match ty {
+            Term::Primitive(crate::Primitive::Void) => {}
+            Term::Primitive(_) if intrinsic_pointer_value(ty) => {}
+            Term::Tuple(fields) if fields.len().saturating_add(pending.len()) <= remaining => {
+                pending.extend(fields)
+            }
+            Term::Record(fields) if fields.len().saturating_add(pending.len()) <= remaining => {
+                pending.extend(fields.iter().map(|(_, ty)| ty))
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
 pub fn intrinsic_pointer_value(ty: &Term) -> bool {
     matches!(
         ty,

@@ -9,6 +9,9 @@ impl Walker<'_> {
         match owner {
             nir::program::FieldOwner::Nominal(id) => self.nominal_fields(ty, id, None),
             nir::program::FieldOwner::Anonymous => {
+                if let Some(fields) = self.tuple_field_types(ty)? {
+                    return Ok(fields);
+                }
                 let Term::Record(fields) = ty else {
                     return Err(Reason::InvalidSignature);
                 };
@@ -24,11 +27,17 @@ impl Walker<'_> {
         index: usize,
         state: &mut State,
     ) -> Result<Value, Reason> {
-        let types = self.place_fields(ty, nir::program::FieldOwner::Anonymous)?;
+        let actual_type = base.nominal_type.as_deref().unwrap_or(ty);
+        let kind = if self.tuple_field_types(actual_type)?.is_some() {
+            AggregateKind::Tuple
+        } else {
+            AggregateKind::AnonymousRecord
+        };
+        let types = self.place_fields(actual_type, nir::program::FieldOwner::Anonymous)?;
         let field_type = types.get(index).ok_or(Reason::InvalidSignature)?;
         let projection = base.projection.clone();
         let mut result = if let Some(fields) = base.fields {
-            if base.aggregate_kind != Some(AggregateKind::AnonymousRecord) {
+            if base.aggregate_kind != Some(kind) {
                 return Err(Reason::InvalidSignature);
             }
             fields
@@ -38,12 +47,7 @@ impl Walker<'_> {
         } else {
             self.unknown_value(field_type)?
         };
-        self.project_component(
-            state,
-            &mut result,
-            projection,
-            (AggregateKind::AnonymousRecord, index),
-        )?;
+        self.project_component(state, &mut result, projection, (kind, index))?;
         Ok(result)
     }
     pub(super) fn read_record_field(
@@ -157,14 +161,29 @@ impl Walker<'_> {
     ) -> Result<(), Reason> {
         let transfer = self.prepare_copy(&value, state)?;
         let root = place(target.root);
-        let path = record_path(&target.fields);
         self.limits.step(target.fields.len().saturating_add(1))?;
-        state.invalidate_paths(Some(root), &path, self.limits)?;
         let Some(old) = state.aggregates.get(&root) else {
+            state.invalidate_paths(Some(root), &[], self.limits)?;
             state.facts.invalidate(root)?;
             return Ok(());
         };
+        let mut ty = old.nominal_type.clone().ok_or(Reason::Unsupported)?;
+        let mut path = Vec::new();
+        for (owner, index) in &target.fields {
+            let kind = if *owner == nir::program::FieldOwner::Anonymous
+                && self.tuple_field_types(&ty)?.is_some()
+            {
+                AggregateKind::Tuple
+            } else {
+                field_owner_kind(*owner)
+            };
+            let fields = self.place_fields(&ty, *owner)?;
+            let next = fields.get(*index).ok_or(Reason::InvalidSignature)?;
+            ty = std::sync::Arc::new(next.clone());
+            path.push((kind, *index));
+        }
         let mut updated = old.snapshot(self.limits, 0)?;
+        state.invalidate_paths(Some(root), &path, self.limits)?;
         let replacement = value.snapshot(self.limits, 0)?;
         self.replace_field(&mut updated, &path, replacement, 0)?;
         state.facts.invalidate(root)?;
@@ -193,7 +212,8 @@ impl Walker<'_> {
             return Ok(());
         };
         let types = match kind {
-            AggregateKind::AnonymousRecord => {
+            AggregateKind::EnumTag(_) => return Err(Reason::InvalidSignature),
+            AggregateKind::AnonymousRecord | AggregateKind::Tuple => {
                 let ty = base.nominal_type.as_ref().ok_or(Reason::Unsupported)?;
                 Some(self.place_fields(ty, nir::program::FieldOwner::Anonymous)?)
             }
@@ -201,7 +221,10 @@ impl Walker<'_> {
                 let ty = base.nominal_type.as_ref().ok_or(Reason::Unsupported)?;
                 Some(self.nominal_fields(ty, *declaration, None)?)
             }
-            _ => None,
+            AggregateKind::Variant(declaration, variant) => {
+                let ty = base.nominal_type.as_ref().ok_or(Reason::Unsupported)?;
+                Some(self.nominal_fields(ty, *declaration, Some(*variant))?)
+            }
         };
         if base.aggregate_kind.is_some_and(|actual| actual != *kind) {
             return Err(Reason::InvalidSignature);

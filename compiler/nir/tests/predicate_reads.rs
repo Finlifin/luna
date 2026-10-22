@@ -378,3 +378,78 @@ fn captured_predicate_data_preserves_identity_and_rejects_malformed_payloads() {
         assert!(nir::contracts::remap_predicate(&mut invalid, &BTreeMap::new()).is_err());
     }
 }
+
+#[test]
+fn reconstructed_aggregate_predicates_reject_effectful_fields() {
+    let declaration = nir::DeclarationId {
+        package: 1,
+        local: 9,
+    };
+    let nominal = Term::Nominal {
+        declaration,
+        arguments: vec![],
+    };
+    let pure = expr(boolean(), K::Literal(Literal::Bool(true)));
+    let call = expr(
+        boolean(),
+        K::Call {
+            callee: Box::new(expr(
+                Term::Function {
+                    parameters: vec![],
+                    result: Box::new(boolean()),
+                },
+                K::Function(declaration),
+            )),
+            arguments: vec![],
+            parameter_bindings: vec![],
+        },
+    );
+    let write = expr(
+        Term::Primitive(P::Void),
+        K::WritePointer {
+            pointer: Box::new(pointer()),
+            value: Box::new(pure.clone()),
+        },
+    );
+    for (field, accepted) in [(pure.clone(), true), (call, false), (write, false)] {
+        for aggregate in [
+            expr(
+                nominal.clone(),
+                K::Record {
+                    declaration,
+                    fields: vec![field.clone()],
+                },
+            ),
+            expr(
+                nominal.clone(),
+                K::Variant {
+                    declaration,
+                    index: 0,
+                    fields: vec![field.clone()],
+                },
+            ),
+            expr(
+                Term::Record(vec![("flag".into(), boolean())]),
+                K::AnonymousRecord {
+                    fields: vec![field.clone()],
+                },
+            ),
+            expr(Term::Tuple(vec![boolean()]), K::Tuple(vec![field.clone()])),
+        ] {
+            let predicate = expr(
+                boolean(),
+                K::Block {
+                    statements: vec![expr(
+                        Term::Primitive(P::Void),
+                        K::Let {
+                            binding: LocalId { owner: 1, index: 0 },
+                            value: Box::new(aggregate),
+                        },
+                    )],
+                    result: Some(Box::new(pure.clone())),
+                },
+            );
+            assert_eq!(checkable_predicate(&predicate), accepted, "{predicate}");
+        }
+    }
+}

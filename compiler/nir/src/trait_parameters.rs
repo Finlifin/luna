@@ -38,6 +38,14 @@ impl Term {
                 continue;
             }
             match value {
+                Self::ClosureContextValue(fields) => {
+                    if fields.len() > remaining.saturating_sub(pending.len())
+                        || fields.iter().any(|field| field.sort() != Sort::Type)
+                    {
+                        return false;
+                    }
+                    pending.extend(fields.iter().map(|field| (field, depth + 1)));
+                }
                 Self::RecordValue(fields) => {
                     if fields.len() > remaining.saturating_sub(pending.len()) {
                         return false;
@@ -637,6 +645,29 @@ pub fn validate_record_index_with(
 }
 
 impl crate::program::Package {
+    /// Recover declaration sorts for substitution, including legacy Type-only
+    /// binders without explicit domain metadata. Supplied values are not evidence.
+    pub fn declaration_binders(
+        &self,
+        parameters: &[crate::DeclarationId],
+        fuel: &mut usize,
+    ) -> Result<Vec<DeclarationParameter>, String> {
+        *fuel = fuel
+            .checked_sub(parameters.len())
+            .ok_or("declaration binder budget exhausted")?;
+        if parameters.is_empty() {
+            return Ok(vec![]);
+        }
+        let sorts = self.declaration_parameter_sorts(fuel)?;
+        Ok(parameters
+            .iter()
+            .map(|id| DeclarationParameter {
+                declaration: *id,
+                sort: sorts.get(id).copied().unwrap_or(Sort::Type),
+            })
+            .collect())
+    }
+
     /// Sort evidence inherited from trait, nominal and impl declarations, keyed by stable binder
     /// identity. Never infer a binder's sort from a supplied argument.
     pub fn declaration_parameter_sorts(

@@ -737,3 +737,51 @@ fn captured_nominal_payload_domains_use_layout_evidence() {
     }
     assert!(completed);
 }
+
+#[test]
+fn captured_value_admission_requires_independent_evidence_after_domain_substitution() {
+    let definition = Newtype {
+        declaration: id(30),
+        name: "Captured".into(),
+        type_parameters: vec![id(31), id(32)],
+        parameter_types: vec![
+            Term::Rigid {
+                declaration: id(32),
+                sort: Sort::Type,
+            },
+            Term::Primitive(Primitive::Type),
+        ],
+        capture_count: 1,
+        requirements: vec![],
+        capabilities: vec![],
+        representation: Term::Primitive(Primitive::Bool),
+    };
+    let value = Term::Rigid {
+        declaration: id(40),
+        sort: Sort::ComptimeValue,
+    };
+    let arguments = vec![value.clone(), Term::Primitive(Primitive::Bool)];
+    let check = |args: &[Term], fuel: &mut usize| {
+        definition.validate_completed_arguments_with_evidence(
+            args,
+            fuel,
+            |_, _, _| Err("no aggregate layout".into()),
+            |input, domain, _| input == &value && domain == &Term::Primitive(Primitive::Bool),
+        )
+    };
+    assert!(check(&arguments, &mut 10000).is_ok());
+    assert!(
+        definition
+            .validate_completed_arguments(&arguments, &mut 10000)
+            .is_err()
+    );
+    assert!(
+        check(
+            &[value.clone(), Term::Primitive(Primitive::Char)],
+            &mut 10000
+        )
+        .is_err()
+    );
+    assert!(check(&arguments, &mut 0).is_err());
+    assert!(check(&arguments, &mut 10000).is_ok());
+}

@@ -13,12 +13,20 @@ impl Checker<'_, '_> {
         arm: &hir::pattern::PatternArm<'_>,
         value: &n::Expr,
     ) -> Result<n::Pattern, Error> {
+        self.with_generator_pattern_inputs(arm.span, |this| this.match_arm_pattern(arm, value))
+    }
+
+    pub(in crate::program::cmtt) fn with_generator_pattern_inputs<T>(
+        &mut self,
+        span: Span,
+        check: impl FnOnce(&mut Self) -> Result<T, Error>,
+    ) -> Result<T, Error> {
         // Guards observe current cells at execution time, including writes
         // performed by earlier failed candidates. Preserve only Type evidence.
         self.required_steps = self
             .required_steps
             .checked_sub(self.generator_data.len() as u64)
-            .ok_or_else(|| error(arm.span, "generator guard environment budget exhausted"))?;
+            .ok_or_else(|| error(span, "generator guard environment budget exhausted"))?;
         let mut saved = BTreeMap::new();
         for (id, data) in &mut self.generator_data {
             if self.immutable.contains(id)
@@ -30,7 +38,7 @@ impl Checker<'_, '_> {
             }
             saved.insert(*id, data.take());
         }
-        let result = self.match_arm_pattern(arm, value);
+        let result = check(self);
         self.generator_data.extend(saved);
         result
     }
@@ -41,10 +49,11 @@ impl Checker<'_, '_> {
         subject: &Expr<'_>,
         arms: &[hir::pattern::PatternArm<'_>],
         interface: Option<&Interface>,
+        result_context: Option<&crate::calls::InputContext>,
         depth: usize,
     ) -> Result<Arc<ExpressionCode>, Error> {
         let codes = self.generator_match(site, subject, arms, None, |this, _, body| {
-            this.code_value(body, interface, depth + 1)
+            this.code_value_in_context(body, interface, result_context, depth + 1)
         })?;
         let mut result: Option<Arc<ExpressionCode>> = None;
         for code in codes {
@@ -63,10 +72,22 @@ impl Checker<'_, '_> {
         subject: &Expr<'_>,
         arms: &[hir::pattern::PatternArm<'_>],
         expected: Option<&Term>,
+        body: impl FnMut(&mut Self, usize, &Expr<'_>) -> Result<T, Error>,
+    ) -> Result<Vec<T>, Error> {
+        self.generator_match_with_binding_mutability(site, subject, arms, expected, false, body)
+    }
+
+    pub(in crate::program::cmtt) fn generator_match_with_binding_mutability<T>(
+        &mut self,
+        site: &Expr<'_>,
+        subject: &Expr<'_>,
+        arms: &[hir::pattern::PatternArm<'_>],
+        expected: Option<&Term>,
+        mutable_bindings: bool,
         mut body: impl FnMut(&mut Self, usize, &Expr<'_>) -> Result<T, Error>,
     ) -> Result<Vec<T>, Error> {
         self.generator_scope(site.span, |this| {
-            this.generator_match_inner(site, subject, arms, expected, &mut body)
+            this.generator_match_inner(site, subject, arms, expected, mutable_bindings, &mut body)
         })
     }
 
@@ -76,6 +97,7 @@ impl Checker<'_, '_> {
         subject: &Expr<'_>,
         arms: &[hir::pattern::PatternArm<'_>],
         expected: Option<&Term>,
+        mutable_bindings: bool,
         body: &mut impl FnMut(&mut Self, usize, &Expr<'_>) -> Result<T, Error>,
     ) -> Result<Vec<T>, Error> {
         let value = if self.checking_code_generator {
@@ -102,11 +124,27 @@ impl Checker<'_, '_> {
                 self.materialize_generator_data(value, ty, subject.span)?
             }
         };
+        self.generator_match_prepared(site, subject, arms, value, mutable_bindings, body)
+    }
+
+    /// Match an already evaluated data packet without evaluating its source a
+    /// second time. Live values remain in the caller's generator state frame.
+    pub(in crate::program::cmtt) fn generator_match_prepared<T>(
+        &mut self,
+        site: &Expr<'_>,
+        subject: &Expr<'_>,
+        arms: &[hir::pattern::PatternArm<'_>],
+        value: n::Expr,
+        mutable_bindings: bool,
+        body: &mut impl FnMut(&mut Self, usize, &Expr<'_>) -> Result<T, Error>,
+    ) -> Result<Vec<T>, Error> {
         let mut checked = Vec::new();
         let mut results = Vec::new();
         for (index, arm) in arms.iter().enumerate() {
             let (prepared, code) = self.generator_scope(arm.span, |this| {
-                this.immutable.extend(pattern_binding_ids(&arm.pat));
+                if !mutable_bindings {
+                    this.immutable.extend(pattern_binding_ids(&arm.pat));
+                }
                 let pattern = this.generator_arm_pattern(arm, &value)?;
                 let bindings = pattern_bindings(&arm.pat)?
                     .into_values()
@@ -318,7 +356,9 @@ impl Checker<'_, '_> {
                     };
                 this.locals.insert(*id, ty.clone());
                 this.generator_data.insert(*id, Some(snapshot));
-                this.immutable.insert(*id);
+                if !mutable_bindings {
+                    this.immutable.insert(*id);
+                }
             }
             this.under_matched_pattern_type_facts(&pattern, &value, arms[index].span, |this| {
                 body(this, index, arms[index].body)

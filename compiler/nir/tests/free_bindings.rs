@@ -420,3 +420,36 @@ fn pattern_code_evidence_binds_only_declared_success_outputs() {
         "{dump}"
     );
 }
+
+#[test]
+fn symbolic_code_reads_respect_guard_scope_and_keep_external_dependencies() {
+    use std::collections::{BTreeMap, BTreeSet};
+    let dependencies = BTreeMap::from([(id(9), BTreeSet::from([id(1), id(2)]))]);
+    let arm = MatchArm {
+        pattern: P::Binding {
+            binding: id(1),
+            inner: Box::new(P::Wild),
+        },
+        guard: Some(local(9)),
+        body: local(1),
+    };
+    let free =
+        nir::free_bindings::collect_arm_with_dependencies(&arm, &dependencies, &mut 1000).unwrap();
+    assert_eq!(free, BTreeSet::from([id(2)]));
+    let value = expr(K::Tuple(vec![
+        expr(K::Match {
+            value: Box::new(local(3)),
+            arms: vec![arm],
+        }),
+        local(9),
+    ]));
+    let free =
+        nir::free_bindings::collect_with_dependencies(&value, &dependencies, &mut 1000).unwrap();
+    assert_eq!(free, BTreeSet::from([id(1), id(2), id(3)]));
+    assert!(nir::free_bindings::collect_with_dependencies(&value, &dependencies, &mut 0).is_err());
+    let cycle = BTreeMap::from([
+        (id(9), BTreeSet::from([id(8)])),
+        (id(8), BTreeSet::from([id(9)])),
+    ]);
+    assert!(nir::free_bindings::collect_with_dependencies(&local(9), &cycle, &mut 1000).is_err());
+}

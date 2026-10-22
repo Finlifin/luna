@@ -398,6 +398,60 @@ fn generic_member_constants_splice_the_selected_container_value() {
 }
 
 #[test]
+fn nested_member_constants_splice_all_parent_inputs_without_cross_instance_reuse() {
+    let inputs = Inputs::new();
+    let provider = inputs.package(2, "provider", "typealias Type=.Type'builtin;
+        pub trait Conversion {assoc RuntimeTarget:Type;fn splice(comptime data:Self)->RuntimeTarget;}
+        impl Conversion for bool {assoc RuntimeTarget:Type=bool;fn splice(comptime data:bool)->bool {data}}
+        pub trait Allowed {} impl Allowed for bool {}
+        pub struct Outer where T:-Allowed,enabled:bool {
+            pub struct Middle where U {
+                pub struct Leaf {pub const FLAG=enabled and T==U;}
+            }
+        }");
+    let app = inputs.package(
+        1,
+        "app",
+        "use support.Outer;
+        fn entry()->bool {
+            Outer<bool,true>.Middle<bool>.Leaf.FLAG and
+            not Outer<bool,false>.Middle<bool>.Leaf.FLAG and
+            not Outer<bool,true>.Middle<.char'builtin>.Leaf.FLAG
+        }",
+    );
+    let packages = [app, provider];
+    let Artifact::Nir(program) = packages::compile_with_splice(
+        &packages,
+        &[dependency(1, "support", 2)],
+        1,
+        None,
+        "provider::Conversion",
+    )
+    .unwrap() else {
+        panic!("NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret_in_package(&program, 1001, "entry", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    std::fs::write(
+        &packages[0].entry,
+        "use support.Outer;fn entry()->bool {Outer<.u8'builtin,false>.Middle<bool>.Leaf.FLAG}",
+    )
+    .unwrap();
+    assert!(
+        packages::compile_with_splice(
+            &packages,
+            &[dependency(1, "support", 2)],
+            1,
+            None,
+            "provider::Conversion"
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn automatic_splice_uses_provider_identity_across_package_boundaries() {
     let input = Inputs::new();
     let app = input.package(7, "app",

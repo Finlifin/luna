@@ -691,6 +691,14 @@ impl Display for ExprKind<'_> {
             Self::Ref(value) => form!(f, "ref", "value" => value),
             Self::Deref(value) => form!(f, "deref", "value" => value),
             Self::ErrorNew(value) => form!(f, "error-new", "value" => value),
+            Self::ErrorPropagate(value) => form!(f, "error-propagate", "value" => value),
+            Self::ErrorHandle {
+                value,
+                before,
+                arms,
+                after,
+            } => form!(f, "error-handle", "value" => value,
+                "before" => Maybe(*before), "arms" => List(arms), "after" => Maybe(*after)),
             Self::Closure(params, ret, body) => {
                 form!(f, "closure", "params" => List(params), "return-type" => Maybe(*ret), "body" => body)
             }
@@ -733,7 +741,9 @@ impl Display for ExprKind<'_> {
                 form!(f, "ty-fn-arrow", "params" => params, "return-type" => ret)
             }
             Self::ReachabilityType => form!(f, "reachability-type"),
-            Self::ErrorQualifiedType => form!(f, "error-qualified-type"),
+            Self::ErrorQualifiedType(errors, result) => {
+                form!(f, "error-qualified-type", "errors" => errors, "result" => result)
+            }
             Self::EffectQualifiedType(effects, result) => {
                 form!(f, "effect-qualified-type", "effects" => effects, "result" => result)
             }

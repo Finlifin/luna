@@ -14,7 +14,7 @@ pub(super) struct FieldPath {
     pub root: PlaceId,
     pub fields: Vec<Component>,
 }
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct Projection {
     pub(super) root_version: ValueId,
     pub(super) path: FieldPath,
@@ -129,6 +129,20 @@ impl Walker<'_> {
         self.local_value_at(state, place(local))
     }
     pub(super) fn local_value_at(&mut self, state: &State, root: PlaceId) -> Result<Value, Reason> {
+        if let Some(value) = state.aggregates.get(&root) {
+            if let Some((frame, projection)) = &value.immutable_projection {
+                if *frame == state.frame
+                    && state.frozen.contains_key(&projection.path.root)
+                    && state.facts.value(projection.path.root) == Some(projection.root_version)
+                {
+                    self.limits
+                        .step(projection.path.fields.len().saturating_add(1))?;
+                    let mut value = value.snapshot(self.limits, 0)?;
+                    value.projection = Some(projection.clone());
+                    return Ok(value);
+                }
+            }
+        }
         let mut result = state
             .aggregates
             .get(&root)
@@ -166,6 +180,26 @@ impl Walker<'_> {
                     Err(Unknown::MissingBound(_)) => None,
                     Err(e) => return Err(e.into()),
                 };
+                if matches!(path.fields.last(), Some((AggregateKind::EnumTag(_), _))) {
+                    continue;
+                }
+                // Alternative payload observations are meaningful only under
+                // their tag. Keep their facts, but never reconstruct an unknown
+                // enum snapshot as one arbitrarily chosen variant.
+                let mut cursor = Some(&result);
+                let mut compatible = true;
+                for (kind, slot) in &path.fields {
+                    if matches!(kind, AggregateKind::Variant(..))
+                        && cursor.and_then(|value| value.aggregate_kind) != Some(*kind)
+                    {
+                        compatible = false;
+                        break;
+                    }
+                    cursor = cursor.and_then(|value| value.fields.as_ref()?.get(*slot));
+                }
+                if !compatible {
+                    continue;
+                }
                 self.replace_field(
                     &mut result,
                     &path.fields,

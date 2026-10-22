@@ -240,11 +240,18 @@ fn charge_node(root: Node<'_>, steps: &mut u64, rewrite: bool) -> Result<(), Cop
                         }
                         0
                     }
+                    K::FunctionType {
+                        parameters,
+                        comptime_parameters,
+                        ..
+                    } => {
+                        charge_width(steps, parameters.len())?;
+                        charge_width(steps, comptime_parameters.len())?;
+                        work.extend(parameters.iter().map(|e| (Node::Expr(e), depth + 1)));
+                        0
+                    }
                     K::TypeList(items)
                     | K::TupleType(items)
-                    | K::FunctionType {
-                        parameters: items, ..
-                    }
                     | K::Tuple(items)
                     | K::AnonymousRecord { fields: items }
                     | K::Record { fields: items, .. }

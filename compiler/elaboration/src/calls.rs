@@ -25,6 +25,9 @@ pub struct Argument {
 pub struct CallableContext {
     pub comptime: bool,
     pub environment: Option<Vec<Option<Term>>>,
+    /// Environment extent is unresolved; None alone denotes an ordinary
+    /// environment-free callable. This is candidate-local information only.
+    pub open_environment: bool,
     pub parameters: Vec<Option<Term>>,
     pub result: Option<Term>,
     /// Used only while the result is incomplete; shares the candidate context budget.
@@ -349,6 +352,9 @@ impl Scheme {
             relations.push((contextual_result.clone(), I::Stable(expected.clone())));
         }
         if let Some(partial) = partial.filter(|_| !defer_effect_context) {
+            if partial.open_environment && partial.environment.is_some() {
+                return Err(Error::InvalidSignature);
+            }
             let mut components = Vec::new();
             for known in partial
                 .parameters
@@ -382,17 +388,26 @@ impl Scheme {
                 result: Box::new(slot(partial.parameters.len())),
             }
             .with_comptime_phase(partial.comptime);
-            let template = if let Some(environment) = &partial.environment {
-                Term::Closure {
-                    environment: (0..environment.len())
-                        .map(|index| Term::Bound {
-                            depth: 0,
-                            index: partial.parameters.len() + 1 + index,
-                            sort: Sort::Type,
-                        })
-                        .collect(),
-                    signature: Box::new(template),
-                }
+            let template = if partial.open_environment {
+                let index = components.len();
+                components.push(I::Meta(root.fresh(Sort::ComptimeValue)));
+                Term::contextual_closure(
+                    Term::Bound {
+                        depth: 0,
+                        index,
+                        sort: Sort::ComptimeValue,
+                    },
+                    template,
+                )?
+            } else if let Some(environment) = &partial.environment {
+                let fields = (0..environment.len())
+                    .map(|index| Term::Bound {
+                        depth: 0,
+                        index: partial.parameters.len() + 1 + index,
+                        sort: Sort::Type,
+                    })
+                    .collect();
+                Term::contextual_closure(Term::ClosureContextValue(fields), template)?
             } else {
                 template
             };
@@ -649,6 +664,9 @@ impl CallCandidate {
                         .collect::<Result<_, _>>()?,
                 )),
                 InputContext::Callable(callable) => {
+                    if callable.open_environment && callable.environment.is_some() {
+                        return Err(Error::InvalidSignature);
+                    }
                     let mut component = |ty: &Option<Term>, nesting| {
                         leaf(ty.as_ref(), engine, components, nesting, fuel)
                     };
@@ -674,14 +692,23 @@ impl CallCandidate {
                         result: Box::new(result),
                     }
                     .with_comptime_phase(callable.comptime);
-                    Ok(if let Some(environment) = &callable.environment {
-                        Term::Closure {
-                            environment: environment
-                                .iter()
-                                .map(|ty| leaf(ty.as_ref(), engine, components, nesting, fuel))
-                                .collect::<Result<_, _>>()?,
-                            signature: Box::new(signature),
-                        }
+                    Ok(if callable.open_environment {
+                        let index = components.len();
+                        components.push(I::Meta(engine.fresh(Sort::ComptimeValue)));
+                        Term::contextual_closure(
+                            Term::Bound {
+                                depth: nesting,
+                                index,
+                                sort: Sort::ComptimeValue,
+                            },
+                            signature,
+                        )?
+                    } else if let Some(environment) = &callable.environment {
+                        let fields = environment
+                            .iter()
+                            .map(|ty| leaf(ty.as_ref(), engine, components, nesting, fuel))
+                            .collect::<Result<_, _>>()?;
+                        Term::contextual_closure(Term::ClosureContextValue(fields), signature)?
                     } else {
                         signature
                     })
@@ -1082,6 +1109,7 @@ impl CallCandidate {
                 component(&parameter.ty)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let mut open_environment = false;
         let environment = if let Term::Closure { environment, .. } = &template {
             Some(
                 environment
@@ -1097,6 +1125,60 @@ impl CallCandidate {
                     })
                     .collect::<Result<Vec<_>, _>>()?,
             )
+        } else if let Term::ContextualClosure { context, .. } = &template {
+            let term = match &arguments {
+                Some(arguments) => I::Instantiate {
+                    template: context.as_ref().clone(),
+                    arguments: arguments.clone(),
+                },
+                None => I::Stable(context.as_ref().clone()),
+            };
+            match self.engine.inspect(&term).map_err(Error::Obligations)? {
+                I::Stable(Term::ClosureContextValue(fields)) => {
+                    Some(fields.into_iter().map(Some).collect())
+                }
+                I::Instantiate {
+                    template: Term::ClosureContextValue(fields),
+                    arguments,
+                } => Some(
+                    fields
+                        .into_iter()
+                        .map(|template| {
+                            self.inspect_component(I::Instantiate {
+                                template,
+                                arguments: arguments.clone(),
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+                I::Meta(_)
+                | I::Stable(
+                    Term::Bound {
+                        sort: Sort::ComptimeValue,
+                        ..
+                    }
+                    | Term::Rigid {
+                        sort: Sort::ComptimeValue,
+                        ..
+                    }
+                    | Term::NormalForm {
+                        sort: Sort::ComptimeValue,
+                        ..
+                    },
+                )
+                | I::Instantiate {
+                    template:
+                        Term::NormalForm {
+                            sort: Sort::ComptimeValue,
+                            ..
+                        },
+                    ..
+                } => {
+                    open_environment = true;
+                    None
+                }
+                _ => return Err(Error::InvalidSignature),
+            }
         } else {
             None
         };
@@ -1120,6 +1202,7 @@ impl CallCandidate {
         Ok(Some(CallableContext {
             comptime,
             environment,
+            open_environment,
             parameters,
             result: result_type,
             result_context,

@@ -114,9 +114,16 @@ impl Checker<'_, '_> {
         let mut code_signature = None;
         let saved_contract_mode = std::mem::replace(&mut self.checking_method_contract, true);
         let program = (|| {
+            if self.is_pattern_generator(owner) {
+                let (signature, program) = self.pattern_method_contract(owner, item.span)?;
+                code_signature = Some(nir::code_interfaces::MethodSignature::PatternGenerator(
+                    signature,
+                ));
+                return Ok(program);
+            }
             if self.is_code_generator(owner) {
                 let (signature, program) = self.code_method_contract(owner, item.span)?;
-                code_signature = Some(signature);
+                code_signature = Some(nir::code_interfaces::MethodSignature::Generator(signature));
                 return Ok(program);
             }
             let ty = self
@@ -175,7 +182,7 @@ impl Checker<'_, '_> {
                 .is_some_and(|p| matches!(p.ty.kind, TyParamKind::Itself { is_ref: false })),
             name: item.ident.name.to_string(),
             signature: if let Some(signature) = code_signature {
-                nir::code_interfaces::MethodSignature::Generator(signature)
+                signature
             } else {
                 self.callable_type(
                     owner,
@@ -348,7 +355,8 @@ impl Checker<'_, '_> {
                 }
                 _ => continue,
             };
-            let parameters = self.type_parameters[&owner].clone();
+            let mut parameters = self.type_parameters[&owner].clone();
+            parameters.extend(self.nominal_capture_ids(owner));
             let requirements = self.requirements[&owner].clone();
             let interface_arguments = instance
                 .as_ref()
@@ -532,12 +540,6 @@ impl Checker<'_, '_> {
             if let Some(interface) = interface {
                 for contract in &traits[&interface].methods {
                     if let Some(actual) = supplied.get(&contract.name) {
-                        if actual.is_quote && !contract.is_quote {
-                            return Err(error(
-                                item.span,
-                                "quote implementation of an ordinary trait contract requires callable adaptation, which is not yet implemented",
-                            ));
-                        }
                         if contract.is_quote && !actual.is_quote {
                             return Err(error(
                                 item.span,
@@ -561,17 +563,15 @@ impl Checker<'_, '_> {
                                 "method generic parameter count does not match its trait contract",
                             ));
                         }
-                        if let (
-                            nir::code_interfaces::MethodSignature::Generator(expected),
-                            nir::code_interfaces::MethodSignature::Generator(supplied),
-                        ) = (&contract.signature, &actual.signature)
-                        {
-                            if expected.clause_domains.len() != contract.type_parameters.len()
-                                || supplied.clause_domains.len() != actual.type_parameters.len()
+                        if let (Some(expected), Some(supplied)) = (
+                            contract.signature.clause_domains(),
+                            actual.signature.clause_domains(),
+                        ) {
+                            if expected.len() != contract.type_parameters.len()
+                                || supplied.len() != actual.type_parameters.len()
                                 || expected
-                                    .clause_domains
                                     .iter()
-                                    .zip(&supplied.clause_domains)
+                                    .zip(supplied)
                                     .any(|(a, b)| (*a == p(P::Type)) != (*b == p(P::Type)))
                             {
                                 return Err(error(
@@ -588,29 +588,30 @@ impl Checker<'_, '_> {
                                 .chain(contract.type_parameters.iter().enumerate().map(
                                     |(slot, id)| {
                                         nir::DeclarationParameter {
-                                        declaration: *id,
-                                        sort: match &contract.signature {
-                                            nir::code_interfaces::MethodSignature::Generator(
-                                                signature,
-                                            ) if signature
-                                                .clause_domains
-                                                .get(slot)
-                                                .is_some_and(|domain| *domain != p(P::Type)) =>
-                                            {
-                                                Sort::ComptimeValue
-                                            }
-                                            _ => {
-                                                if self
-                                                    .trait_input_domain(*id)
-                                                    .is_some_and(|domain| domain != p(P::Type))
+                                            declaration: *id,
+                                            sort: match &contract.signature {
+                                                signature
+                                                    if signature
+                                                        .clause_domains()
+                                                        .and_then(|domains| domains.get(slot))
+                                                        .is_some_and(|domain| {
+                                                            *domain != p(P::Type)
+                                                        }) =>
                                                 {
                                                     Sort::ComptimeValue
-                                                } else {
-                                                    Sort::Type
                                                 }
-                                            }
-                                        },
-                                    }
+                                                _ => {
+                                                    if self
+                                                        .trait_input_domain(*id)
+                                                        .is_some_and(|domain| domain != p(P::Type))
+                                                    {
+                                                        Sort::ComptimeValue
+                                                    } else {
+                                                        Sort::Type
+                                                    }
+                                                }
+                                            },
+                                        }
                                     },
                                 ))
                                 .collect();
@@ -620,12 +621,11 @@ impl Checker<'_, '_> {
                                 Term::Rigid {
                                     declaration: *id,
                                     sort: match &actual.signature {
-                                        nir::code_interfaces::MethodSignature::Generator(
-                                            signature,
-                                        ) if signature
-                                            .clause_domains
-                                            .get(slot)
-                                            .is_some_and(|domain| *domain != p(P::Type)) =>
+                                        signature
+                                            if signature
+                                                .clause_domains()
+                                                .and_then(|domains| domains.get(slot))
+                                                .is_some_and(|domain| *domain != p(P::Type)) =>
                                         {
                                             Sort::ComptimeValue
                                         }
@@ -805,6 +805,21 @@ impl Checker<'_, '_> {
                                     Formula::False
                                 }
                             }
+                            (
+                                MethodSignature::PatternGenerator(expected),
+                                MethodSignature::PatternGenerator(actual),
+                            ) => {
+                                if signatures::equivalent_pattern(
+                                    &context,
+                                    expected,
+                                    actual,
+                                    Budget::default(),
+                                ) {
+                                    Formula::True
+                                } else {
+                                    Formula::False
+                                }
+                            }
                             _ => Formula::False,
                         };
                         if !matches!(context.prove(goal, Budget::default()), Outcome::Entailed(_)) {
@@ -831,7 +846,7 @@ impl Checker<'_, '_> {
                                 ));
                             }
                         }
-                        if matches!(actual.signature, MethodSignature::Generator(_)) {
+                        if actual.signature.clause_domains().is_some() {
                             self.check_code_method_preconditions(
                                 contract,
                                 actual,
@@ -861,11 +876,12 @@ impl Checker<'_, '_> {
                 inherent_index
                     .insert(
                         crate::implementation::InherentHead {
-                            parameter_types: self
-                                .trait_parameter_types
-                                .get(&owner)
-                                .cloned()
-                                .unwrap_or_default(),
+                            parameter_types: parameters
+                                .iter()
+                                .map(|id| {
+                                    self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type))
+                                })
+                                .collect(),
                             declaration: declaration(self.package, &self.package_identities, owner),
                             subject: subject.clone(),
                             type_parameters: parameters.clone(),
@@ -966,11 +982,10 @@ impl Checker<'_, '_> {
             }
             implementations.push(n::Implementation {
                 associated_initializers: vec![],
-                parameter_types: self
-                    .trait_parameter_types
-                    .get(&owner)
-                    .cloned()
-                    .unwrap_or_default(),
+                parameter_types: parameters
+                    .iter()
+                    .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
+                    .collect(),
                 associated,
                 interface_arguments: interface_arguments.clone(),
                 capabilities: self.capabilities[&owner].clone(),
@@ -1506,7 +1521,7 @@ impl Checker<'_, '_> {
                     .then_some(owner)
             })
             .unwrap();
-        if self.is_code_generator(owner) {
+        if self.is_code_generator(owner) || self.is_pattern_generator(owner) {
             return Err(error(
                 span,
                 "code generator method invocation requires code-method dispatch, which is not yet implemented",
@@ -1702,6 +1717,7 @@ impl Checker<'_, '_> {
             arguments: self
                 .declaration_binders(owner)
                 .into_iter()
+                .chain(self.input_binders(&self.nominal_capture_ids(owner)))
                 .map(|parameter| Term::Rigid {
                     declaration: parameter.declaration,
                     sort: parameter.sort,
@@ -1752,6 +1768,8 @@ impl Checker<'_, '_> {
                                     | ItemKind::FnDeclaration(_)
                                     | ItemKind::TypeAlias(..)
                                     | ItemKind::Newtype(..)
+                                    | ItemKind::Struct(_)
+                                    | ItemKind::Enum(_)
                                     | ItemKind::Const(..)
                             )
                         ) {

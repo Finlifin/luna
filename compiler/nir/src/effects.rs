@@ -96,11 +96,18 @@ pub struct Declaration {
     pub group: Option<DeclarationId>,
     pub name: String,
     pub type_parameters: Vec<DeclarationId>,
+    /// Declaration domains in telescope order; empty preserves legacy Type inputs.
+    pub parameter_types: Vec<Term>,
     pub signature: Term,
     pub abi: Abi,
     pub inline: bool,
     pub requirements: Vec<crate::program::TypePredicate>,
     pub capabilities: Vec<crate::program::TraitRequirement>,
+}
+impl Declaration {
+    pub fn parameter_binders(&self) -> Result<Vec<crate::DeclarationParameter>, crate::TypeError> {
+        crate::declaration_parameters(&self.type_parameters, &self.parameter_types)
+    }
 }
 impl fmt::Display for Declaration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -113,6 +120,10 @@ impl fmt::Display for Declaration {
         f.write_str(") (type-parameters")?;
         for parameter in &self.type_parameters {
             write!(f, " {parameter}")?;
+        }
+        f.write_str(") (parameter-types")?;
+        for domain in &self.parameter_types {
+            write!(f, " {domain}")?;
         }
         write!(
             f,

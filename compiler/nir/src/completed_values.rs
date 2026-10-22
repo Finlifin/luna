@@ -19,6 +19,7 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), &'static str> {
         }
         charge(fuel, 1)?;
         let width = match ty {
+            Term::ErrorResult { errors, .. } => errors.len().saturating_add(1),
             Term::Computation { effects, .. } => {
                 charge(fuel, effects.len())?;
                 effects.iter().fold(1usize, |width, operation| {
@@ -31,9 +32,11 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), &'static str> {
             | Term::FunctionValue { arguments, .. }
             | Term::NormalForm { arguments, .. }
             | Term::Tuple(arguments)
+            | Term::ClosureContextValue(arguments)
             | Term::TypeListValue(arguments)
             | Term::TypeListConcat(arguments)
             | Term::TupleValue(arguments) => arguments.len(),
+            Term::ContextualClosure { .. } => 2,
             Term::Closure { environment, .. } => environment.len().saturating_add(1),
             Term::Function { parameters, .. } => parameters.len().saturating_add(1),
             Term::NominalValue { fields, .. } => fields.len().saturating_add(1),
@@ -44,6 +47,10 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), &'static str> {
         charge(fuel, width)?;
         let mut children = Vec::new();
         match ty {
+            Term::ErrorResult { errors, result } => {
+                children.push(result.as_ref());
+                children.extend(errors);
+            }
             Term::Computation { effects, result } => {
                 children.push(result.as_ref());
                 for operation in effects {
@@ -61,9 +68,14 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), &'static str> {
             | Term::FunctionValue { arguments, .. }
             | Term::NormalForm { arguments, .. }
             | Term::Tuple(arguments)
+            | Term::ClosureContextValue(arguments)
             | Term::TypeListValue(arguments)
             | Term::TypeListConcat(arguments)
             | Term::TupleValue(arguments) => children.extend(arguments),
+            Term::ContextualClosure { context, signature } => {
+                children.push(context);
+                children.push(signature);
+            }
             Term::Closure {
                 environment,
                 signature,

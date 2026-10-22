@@ -1930,3 +1930,41 @@ fn proposition_validation_is_bounded_and_does_not_establish_the_goal() {
         Err(ValidationError::BudgetExhausted)
     ));
 }
+
+#[test]
+fn closure_context_input_budget_failure_does_not_poison_later_proofs() {
+    let context = Context::default();
+    let fields = Term::ClosureContextValue(vec![ty(P::U8); 64]);
+    let contextual = Term::contextual_closure(
+        Term::NormalForm {
+            head: DeclarationId {
+                package: 1,
+                local: 77,
+            },
+            sort: nir::Sort::ComptimeValue,
+            arguments: vec![fields.clone()],
+        },
+        Term::Function {
+            parameters: vec![],
+            result: Box::new(ty(P::Bool)),
+        },
+    )
+    .unwrap();
+    for input in [head(7, vec![fields]), contextual] {
+        let proposition = eq(input.clone(), input);
+        assert!(matches!(
+            context.prove(
+                proposition.clone(),
+                Budget {
+                    steps: 8,
+                    max_depth: 128
+                }
+            ),
+            Outcome::Unknown {
+                reason: UnknownReason::BudgetExhausted,
+                ..
+            }
+        ));
+        proved(&context, proposition);
+    }
+}

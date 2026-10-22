@@ -361,7 +361,7 @@ struct Planner<'a, 'w> {
     fuel: &'a mut usize,
     pointers: Option<PointerMemory<'a>>,
     retired: Vec<Place>,
-    variant_layouts: std::collections::BTreeMap<Place, Vec<Term>>,
+    variant_layouts: std::collections::BTreeMap<Place, super::access::VariantLayout>,
 }
 impl Planner<'_, '_> {
     fn shape(&mut self, binding: &AcquiredCleanup, depth: usize) -> Result<Shape, String> {
@@ -431,7 +431,13 @@ impl Planner<'_, '_> {
             layout.push(field.ty.clone());
         }
         step(self.fuel, tree.place.fields.len())?;
-        let previous = self.variant_layouts.insert(tree.place.clone(), layout);
+        let previous = self.variant_layouts.insert(
+            tree.place.clone(),
+            super::access::VariantLayout {
+                index,
+                fields: layout,
+            },
+        );
         self.qualified_path.extend([VARIANT_PATH, index]);
         let result = self.variant_children_with_layout(fields, state, tree, depth, steps);
         self.qualified_path.truncate(self.qualified_path.len() - 2);

@@ -481,6 +481,7 @@ fn acquired_cleanup_footprints_are_keyed_validated_and_displayed() {
                 parameter: 0,
                 input_fields: vec![],
                 through: vec![],
+                conditions: Default::default(),
                 fields: vec![],
                 write: true,
                 read_value: true,
@@ -1438,13 +1439,21 @@ fn compile(source: &str) -> nir::program::Package {
     compile_in(source, 0)
 }
 fn compile_in(source: &str, identity: u64) -> nir::program::Package {
+    compile_in_with_resources(source, identity, None, None)
+}
+fn compile_in_with_resources(
+    source: &str,
+    identity: u64,
+    copy: Option<&str>,
+    drop: Option<&str>,
+) -> nir::program::Package {
     let path = std::env::temp_dir().join(format!(
         "luna-resources-{}-{}.fl",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::write(&path, source).unwrap();
-    let artifact = frontend::compile_in_package(
+    let artifact = frontend::compile_in_package_with_source_protocols(
         &Options {
             input: path.clone(),
             emit: Emit::Nir,
@@ -1459,6 +1468,12 @@ fn compile_in(source: &str, identity: u64) -> nir::program::Package {
             optional_type: None,
         },
         identity,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            copy,
+            drop,
+            ..Default::default()
+        },
     );
     std::fs::remove_file(path).unwrap();
     let Artifact::Nir(package) = artifact.unwrap_or_else(|error| panic!("{source}: {error:?}"))
@@ -4912,6 +4927,7 @@ fn memory_argument_dump_distinguishes_known_alternatives_from_unknown() {
                     parameter,
                     input_fields: vec![],
                     through: vec![],
+                    conditions: Default::default(),
                     fields: vec![],
                 })
                 .collect(),
@@ -13694,6 +13710,74 @@ fn conditional_variant_patterns_do_not_erase_unknown_pointer_sources() {
 }
 
 #[test]
+fn conditional_effect_memory_tracks_forwarded_pointer_results() {
+    use elaboration::verification::memory;
+    let package = compile(
+        "effect relay(p:*bool)->*bool;
+        fn subject(p:*bool)->#relay *bool {relay(p)#}
+        fn forward(p:*bool)->#relay *bool {subject(p)}
+        fn leak()->#relay *bool {var flag=true;relay(flag.ref)#}",
+    );
+    let operation = &package.effects[0];
+    let input = memory::EffectInput {
+        parameter_accesses: Default::default(),
+        copy_parameters: Default::default(),
+        operation: nir::effects::Operation {
+            declaration: operation.declaration,
+            arguments: vec![],
+        },
+        abi: operation.abi,
+        signature: operation.signature.clone(),
+        forwarded_parameters: Some(std::collections::BTreeSet::from([0])),
+    };
+    for name in ["subject", "forward"] {
+        let function = package.functions.iter().find(|f| f.name == name).unwrap();
+        let infer = |input: memory::EffectInput, fuel: &mut usize| {
+            memory::infer_with_effect_inputs(
+                &package,
+                function.declaration,
+                &[],
+                &Default::default(),
+                &Default::default(),
+                &[input],
+                fuel,
+            )
+        };
+        let summary = infer(input.clone(), &mut 100_000).unwrap();
+        let targets = summary.result_targets.as_ref().unwrap();
+        assert!(
+            summary
+                .accesses
+                .iter()
+                .all(|access| !access.read_value && !access.write)
+        );
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets.iter().next().unwrap().parameter, 0);
+        assert!(summary.to_string().contains("(forwarded-parameters 0)"));
+        let mut wrong = input.clone();
+        wrong.forwarded_parameters = None;
+        assert!(infer(wrong, &mut 100_000).is_err());
+        let mut wrong = input.clone();
+        wrong.forwarded_parameters = Some(std::collections::BTreeSet::from([1]));
+        assert!(infer(wrong, &mut 100_000).is_err());
+        assert!(infer(input.clone(), &mut 0).is_err());
+        assert_eq!(summary, infer(input.clone(), &mut 100_000).unwrap());
+    }
+    let leak = package.functions.iter().find(|f| f.name == "leak").unwrap();
+    let failure = memory::infer_with_effect_inputs(
+        &package,
+        leak.declaration,
+        &[],
+        &Default::default(),
+        &Default::default(),
+        &[input],
+        &mut 100_000,
+    )
+    .unwrap_err();
+    assert!(failure.contains("escape"), "{failure}");
+}
+
+#[test]
 fn conditional_effect_memory_preserves_footprints_and_premises() {
     use elaboration::verification::memory;
     let package = compile(
@@ -13708,6 +13792,9 @@ fn conditional_effect_memory_preserves_footprints_and_premises() {
         .unwrap();
     let operation = &package.effects[0];
     let input = memory::EffectInput {
+        parameter_accesses: Default::default(),
+        copy_parameters: Default::default(),
+        forwarded_parameters: None,
         operation: nir::effects::Operation {
             declaration: operation.declaration,
             arguments: vec![],
@@ -13774,6 +13861,9 @@ fn conditional_effect_memory_checks_instance_identity_and_routing() {
         .map(|p| {
             let arguments = vec![nir::Term::Primitive(p)];
             memory::EffectInput {
+                parameter_accesses: Default::default(),
+                copy_parameters: Default::default(),
+                forwarded_parameters: None,
                 operation: nir::effects::Operation {
                     declaration: operation.declaration,
                     arguments: arguments.clone(),
@@ -13850,6 +13940,9 @@ fn conditional_effect_memory_does_not_erase_pointer_delivery() {
             .unwrap();
         let operation = &package.effects[0];
         let input = memory::EffectInput {
+            parameter_accesses: Default::default(),
+            copy_parameters: Default::default(),
+            forwarded_parameters: None,
             operation: nir::effects::Operation {
                 declaration: operation.declaration,
                 arguments: vec![],
@@ -13900,6 +13993,9 @@ fn conditional_effect_closure_memory_retains_virtual_capture_accesses() {
         let definition = &definitions[0];
         let operation = &package.effects[0];
         let input = memory::EffectInput {
+            parameter_accesses: Default::default(),
+            copy_parameters: Default::default(),
+            forwarded_parameters: None,
             operation: nir::effects::Operation {
                 declaration: operation.declaration,
                 arguments: vec![],
@@ -13984,6 +14080,9 @@ fn conditional_effect_closure_memory_orders_parameters_before_captures_and_rejec
         .unwrap();
         let operation = &package.effects[0];
         let input = memory::EffectInput {
+            parameter_accesses: Default::default(),
+            copy_parameters: Default::default(),
+            forwarded_parameters: None,
             operation: nir::effects::Operation {
                 declaration: operation.declaration,
                 arguments: vec![],
@@ -14073,6 +14172,9 @@ fn conditional_effect_data_delivery_preserves_argument_reads_and_rejects_hidden_
             .unwrap();
         let operation = &package.effects[0];
         let input = memory::EffectInput {
+            parameter_accesses: Default::default(),
+            copy_parameters: Default::default(),
+            forwarded_parameters: None,
             operation: nir::effects::Operation {
                 declaration: operation.declaration,
                 arguments: vec![],
@@ -15474,4 +15576,477 @@ fn prepared_code_absence_requires_a_variant_guarded_callable_leaf() {
     }
     assert!(infer(&inputs, 0).is_err());
     assert_eq!(summary, infer(&inputs, 100_000).unwrap());
+}
+
+#[test]
+fn conditional_pointer_result_ranges_use_current_tags_and_pointee_values() {
+    use elaboration::verification::{Limits, flow};
+    for (initial, update, expected, proven) in [
+        ("Choice.left(a.ref)", "", 7, true),
+        ("Choice.right(b.ref)", "", 19, true),
+        (
+            "Choice.left(a.ref)",
+            "choice=Choice.right(b.ref);",
+            19,
+            true,
+        ),
+        (
+            "Choice.left(a.ref)",
+            "choice=Choice.right(b.ref);",
+            7,
+            false,
+        ),
+        ("Choice.left(a.ref)", "a=23;", 23, true),
+        ("Choice.left(a.ref)", "a=23;", 7, false),
+        (
+            "if flag {Choice.left(a.ref)} else {Choice.right(b.ref)}",
+            "",
+            7,
+            false,
+        ),
+    ] {
+        let package = compile(&format!(
+            "typealias Byte=.u8'builtin;
+            enum Choice {{left(*Byte),right(*Byte)}}
+            fn pick(p:*Choice)->*Byte {{p.* match {{.left(x)=>x,.right(x)=>x}}}}
+            fn relay(p:*Choice)->*Byte {{pick(p)}}
+            fn run(flag:bool) {{var a:Byte=7;let b:Byte=19;var choice={initial};
+                {update} let result=relay(choice.ref);assumes result.* == {expected};}}"
+        ));
+        let run = package.functions.iter().find(|f| f.name == "run").unwrap();
+        let report = flow::analyze_in_package(&package, run, &mut Limits::default()).unwrap();
+        let check = report.points.last().unwrap().check_input.as_ref();
+        assert_eq!(
+            check.is_some_and(|check| check.prove(&mut Limits::default()).is_ok()),
+            proven,
+            "{initial}; {update}; expected {expected}: {report}"
+        );
+    }
+}
+
+#[test]
+fn conditional_return_addresses_survive_retagging_but_not_stale_value_proofs() {
+    use elaboration::verification::{Limits, flow};
+    for (operation, expected, proven) in [
+        ("choice=Choice.right(b.ref);", 7, true),
+        ("choice=Choice.right(b.ref);", 19, false),
+        ("result.* = 23;", 23, true),
+        ("result.* = 23;", 7, false),
+        ("a=23;", 23, true),
+        ("a=23;", 7, false),
+        ("change(result);", 7, false),
+        ("choice=Choice.right(b.ref);change(result);", 7, false),
+        ("choice=Choice.right(b.ref);b=23;", 7, true),
+    ] {
+        let package = compile(&format!(
+            "typealias Byte=.u8'builtin;
+            enum Choice {{left(*Byte),right(*Byte)}}
+            fn pick(p:*Choice)->*Byte {{p.* match {{.left(x)=>x,.right(x)=>x}}}}
+            fn change(p:*Byte) {{p.* = 23;}}
+            fn run() {{var a:Byte=7;var b:Byte=19;var choice=Choice.left(a.ref);
+                let result=pick(choice.ref);{operation}assumes result.* == {expected};}}"
+        ));
+        let run = package.functions.iter().find(|f| f.name == "run").unwrap();
+        let report = flow::analyze_in_package(&package, run, &mut Limits::default()).unwrap();
+        assert_eq!(
+            report
+                .points
+                .last()
+                .unwrap()
+                .check_input
+                .as_ref()
+                .is_some_and(|check| check.prove(&mut Limits::default()).is_ok()),
+            proven,
+            "{operation}; {expected}: {report}"
+        );
+    }
+}
+
+#[test]
+fn conditional_return_ranges_compose_nested_payloads_and_loaded_roots() {
+    use elaboration::verification::{Limits, flow};
+    for (declarations, initializer, pick) in [
+        (
+            "enum Outer {left(Choice),right(Choice)}",
+            "Outer.left(Choice.left(a.ref))",
+            "p.* match {.left(c)=>c match {.left(x)=>x,.right(x)=>x},.right(c)=>c match {.left(x)=>x,.right(x)=>x}}",
+        ),
+        (
+            "enum Outer {left(Choice),right(Choice)}",
+            "Outer.right(Choice.right(b.ref))",
+            "p.* match {.left(c)=>c match {.left(x)=>x,.right(x)=>x},.right(c)=>c match {.left(x)=>x,.right(x)=>x}}",
+        ),
+        (
+            "enum Outer {left(*Choice),right(*Choice)}",
+            "Outer.left(choice.ref)",
+            "p.* match {.left(c)=>c.* match {.left(x)=>x,.right(x)=>x},.right(c)=>c.* match {.left(x)=>x,.right(x)=>x}}",
+        ),
+        (
+            "struct Outer {choice:Choice}",
+            "Outer {choice:Choice.left(a.ref)}",
+            "p.choice.* match {.left(x)=>x,.right(x)=>x}",
+        ),
+    ] {
+        let selected = if initializer.contains("b.ref") { 19 } else { 7 };
+        for expected in [7, 19] {
+            let package = compile(&format!(
+                "typealias Byte=.u8'builtin;enum Choice {{left(*Byte),right(*Byte)}}
+                {declarations} fn pick(p:*Outer)->*Byte {{{pick}}}
+                fn relay(p:*Outer)->*Byte {{pick(p)}}
+                fn run() {{let a:Byte=7;let b:Byte=19;let choice=Choice.left(a.ref);
+                    let outer={initializer};let result=relay(outer.ref);assumes result.* == {expected};}}"
+            ));
+            let run = package.functions.iter().find(|f| f.name == "run").unwrap();
+            let report = flow::analyze_in_package(&package, run, &mut Limits::default()).unwrap();
+            assert_eq!(
+                report
+                    .points
+                    .last()
+                    .unwrap()
+                    .check_input
+                    .as_ref()
+                    .is_some_and(|check| check.prove(&mut Limits::default()).is_ok()),
+                expected == selected,
+                "{initializer}; {expected}: {report}"
+            );
+        }
+    }
+}
+
+#[test]
+fn conditional_loop_writes_preserve_only_invariant_address_dependencies() {
+    use elaboration::verification::{Limits, flow};
+    for (body, proven) in [
+        ("pick(choice.ref).* = 23;", true),
+        ("relay(choice.ref).* = 23;", true),
+        ("choice=Choice.right(b.ref);pick(choice.ref).* = 23;", false),
+        ("pick(choice.ref).* = 23;choice=Choice.right(b.ref);", false),
+    ] {
+        let package = compile(&format!(
+            "typealias Byte=.u8'builtin;enum Choice {{left(*Byte),right(*Byte)}}
+            fn pick(p:*Choice)->*Byte {{p.* match {{.left(x)=>x,.right(x)=>x}}}}
+            fn relay(p:*Choice)->*Byte {{pick(p)}}
+            fn run(flag:bool) {{var a:Byte=7;var b:Byte=19;let other=b.ref;
+                var choice=Choice.left(a.ref);var again=true;
+                while flag {{{body} if not again {{break;}} again=false;}}
+                assumes other.* == 19;}}"
+        ));
+        let run = package.functions.iter().find(|f| f.name == "run").unwrap();
+        let report = flow::analyze_in_package(&package, run, &mut Limits::default()).unwrap();
+        assert_eq!(
+            report
+                .points
+                .last()
+                .unwrap()
+                .check_input
+                .as_ref()
+                .is_some_and(|check| check.prove(&mut Limits::default()).is_ok()),
+            proven,
+            "{body}: {report}"
+        );
+    }
+}
+
+#[test]
+fn conditional_scalar_writers_and_default_factories_preserve_loop_footprints() {
+    use elaboration::verification::{Limits, flow};
+    for (body, proven) in [
+        ("write_choice(choice.ref);", true),
+        ("write_choice_return(choice.ref).* = 24;", true),
+        ("wrap(choice.ref).target.* = 24;", true),
+        ("write_default(choice.ref);", true),
+        ("pick_handle(handle.ref).* = 24;", true),
+        (
+            "choice=Choice.right(b.ref);pick_handle(handle.ref).* = 24;",
+            false,
+        ),
+        (
+            "handle=Handle.some(other_choice.ref);pick_handle(handle.ref).* = 24;",
+            false,
+        ),
+        (
+            "choice=Choice.right(b.ref);write_choice(choice.ref);",
+            false,
+        ),
+        (
+            "write_choice(choice.ref);choice=Choice.right(b.ref);",
+            false,
+        ),
+        (
+            "choice=Choice.right(b.ref);write_default(choice.ref);",
+            false,
+        ),
+    ] {
+        let package = compile_in_with_resources(&format!(
+            "trait Duplicate {{}} trait Retire {{fn drop(*self);}} typealias Byte=.u8'builtin;enum Choice {{left(*Byte),right(*Byte)}}
+            impl Duplicate for Choice {{}}
+            struct Link {{target:*Byte}} enum Handle {{some(*Choice)}} impl Duplicate for Handle {{}}
+            fn pick(p:*Choice)->*Byte {{p.* match {{.left(x)=>x,.right(x)=>x}}}}
+            fn pick_handle(h:*Handle)->*Byte {{h.* match {{.some(p)=>pick(p)}}}}
+            fn wrap(p:*Choice)->Link {{Link {{target:pick(p)}}}}
+            fn write_choice(p:*Choice) {{pick(p).* = 23;}}
+            fn write_choice_return(p:*Choice)->*Byte {{let result=pick(p);result.* = 23;result}}
+            fn write_default(p:*Choice,.target:*Byte=pick(p)) {{target.* = 23;}}
+            fn run(flag:bool) {{var a:Byte=7;var b:Byte=19;let other=b.ref;
+                var choice=Choice.left(a.ref);let other_choice=Choice.right(b.ref);
+                var handle=Handle.some(choice.ref);var again=true;
+                while flag {{{body} if not again {{break;}} again=false;}}
+                assumes other.* == 19;}} fn execute() {{run(true);}}"
+        ),0,Some("Duplicate"),Some("Retire"));
+        let executed = luna::execution::interpret_with_protocols(
+            &package,
+            "execute",
+            "Duplicate",
+            "Retire",
+            1_000_000,
+        );
+        if proven {
+            assert!(executed.is_ok(), "{body}: {executed:?}");
+        } else {
+            assert!(
+                executed.unwrap_err().contains("ProgramContractRejected"),
+                "{body}: expected a failing runtime check"
+            );
+        }
+        let run = package.functions.iter().find(|f| f.name == "run").unwrap();
+        let report = flow::analyze_in_package(&package, run, &mut Limits::default()).unwrap();
+        assert_eq!(
+            report
+                .points
+                .last()
+                .unwrap()
+                .check_input
+                .as_ref()
+                .is_some_and(|check| check.prove(&mut Limits::default()).is_ok()),
+            proven,
+            "{body}: {report}"
+        );
+    }
+}
+
+#[test]
+fn conditional_loop_dependencies_exclude_unrelated_sibling_fields() {
+    use elaboration::verification::{Limits, flow};
+    for (field_ty, initial, replacement, read) in [
+        (
+            "Choice",
+            "Choice.left(a.ref)",
+            "Choice.right(b.ref)",
+            "p.choice.*",
+        ),
+        ("*Choice", "choice.ref", "other_choice.ref", "p.choice.*.*"),
+    ] {
+        for (body, proven) in [
+            ("holder.count=24;pick(holder.ref).* = 23;".to_owned(), true),
+            (
+                "touch(holder.ref);pick(holder.ref).* = 23;".to_owned(),
+                true,
+            ),
+            ("pick(holder.ref).* = 23;holder.count=24;".to_owned(), true),
+            (
+                format!("holder.choice={replacement};pick(holder.ref).* = 23;"),
+                false,
+            ),
+            (
+                format!("pick(holder.ref).* = 23;holder.choice={replacement};"),
+                false,
+            ),
+            (
+                format!("holder=Holder {{choice:{replacement},count:24}};pick(holder.ref).* = 23;"),
+                false,
+            ),
+        ] {
+            let package = compile_in_with_resources(
+                &format!(
+                    "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+                typealias Byte=.u8'builtin;enum Choice {{left(*Byte),right(*Byte)}}
+                impl Duplicate for Choice {{}}
+                struct Holder {{choice:{field_ty},count:Byte}}
+                fn pick(p:*Holder)->*Byte {{{read} match {{.left(x)=>x,.right(x)=>x}}}}
+                fn touch(p:*Holder) {{p.count.* = 24;}}
+                fn run(flag:bool) {{var a:Byte=7;var b:Byte=19;let other=b.ref;
+                    var choice=Choice.left(a.ref);let other_choice=Choice.right(b.ref);
+                    var holder=Holder {{choice:{initial},count:0}};var again=true;
+                    while flag {{{body} if not again {{break;}} again=false;}}
+                    assumes other.* == 19;}}
+                fn execute() {{run(true);}}"
+                ),
+                0,
+                Some("Duplicate"),
+                Some("Retire"),
+            );
+            let run = package.functions.iter().find(|f| f.name == "run").unwrap();
+            let report = flow::analyze_in_package(&package, run, &mut Limits::default()).unwrap();
+            assert_eq!(
+                report
+                    .points
+                    .last()
+                    .unwrap()
+                    .check_input
+                    .as_ref()
+                    .is_some_and(|check| check.prove(&mut Limits::default()).is_ok()),
+                proven,
+                "{field_ty}; {body}: {report}"
+            );
+            let executed = luna::execution::interpret_with_protocols(
+                &package,
+                "execute",
+                "Duplicate",
+                "Retire",
+                1_000_000,
+            );
+            if proven {
+                assert!(executed.is_ok(), "{body}: {executed:?}");
+            } else {
+                let error = executed.unwrap_err();
+                assert!(error.contains("ProgramContractRejected"), "{body}: {error}");
+            }
+        }
+    }
+}
+
+#[test]
+fn tuple_pointer_slots_cross_calls_without_losing_snapshot_or_write_identity() {
+    use elaboration::verification::{Limits, flow};
+    for (ty, pattern, first, second) in [
+        ("(Byte,*Byte)", "(_,target)", "(0,a.ref)", "(1,b.ref)"),
+        (
+            "((Byte,*Byte),bool)",
+            "((_,target),_)",
+            "((0,a.ref),true)",
+            "((1,b.ref),false)",
+        ),
+    ] {
+        for record in [false, true] {
+            for expected in [23, 7] {
+                let (parameter, read, initial, replacement, address) = if record {
+                    (
+                        "*Holder".to_owned(),
+                        "p.payload.*".to_owned(),
+                        format!("Holder {{payload:{first}}}"),
+                        format!("payload.payload={second};"),
+                        "payload.ref",
+                    )
+                } else {
+                    (
+                        format!("*({ty})"),
+                        "p.*".to_owned(),
+                        first.to_owned(),
+                        format!("payload={second};"),
+                        "payload.ref",
+                    )
+                };
+                let extra_copy = if ty == "(Byte,*Byte)" {
+                    String::new()
+                } else {
+                    format!("impl Duplicate for {ty} {{}}")
+                };
+                let binding_ty = if record { "Holder" } else { ty };
+                let package = compile_in_with_resources(&format!(
+                    "trait Duplicate {{}} trait Retire {{fn drop(*self);}} typealias Byte=.u8'builtin;
+                    impl Duplicate for (Byte,*Byte) {{}} {extra_copy}
+                    struct Holder {{payload:{ty}}}
+                    fn pick(p:{parameter})->*Byte {{let {pattern}={read};target}}
+                    fn relay(p:{parameter})->*Byte {{pick(p)}}
+                    fn run() {{var a:Byte=7;var b:Byte=19;var payload:{binding_ty}={initial};
+                        let saved=relay({address});{replacement}
+                        let current=relay({address});current.* = 23;
+                        assumes saved.* == 7;assumes current.* == {expected};}}"
+                ),0,Some("Duplicate"),Some("Retire"));
+                let run = package.functions.iter().find(|f| f.name == "run").unwrap();
+                let report =
+                    flow::analyze_in_package(&package, run, &mut Limits::default()).unwrap();
+                for (check, proven) in report.points.iter().zip([true, expected == 23]) {
+                    assert_eq!(
+                        check
+                            .check_input
+                            .as_ref()
+                            .is_some_and(|check| check.prove(&mut Limits::default()).is_ok()),
+                        proven,
+                        "{ty}; record={record}; expected={expected}: {report}"
+                    );
+                }
+                assert_eq!(report.points.len(), 2, "{report}");
+                let result = luna::execution::interpret_with_protocols(
+                    &package,
+                    "run",
+                    "Duplicate",
+                    "Retire",
+                    1_000_000,
+                );
+                if expected == 23 {
+                    assert!(result.is_ok(), "{result:?}");
+                } else {
+                    let error = result.unwrap_err();
+                    assert!(error.contains("ProgramContractRejected"), "{error}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn completed_aggregate_constants_supply_field_facts_without_sharing_mutable_storage() {
+    use elaboration::verification::{Limits, flow};
+    for (declaration, ty, initial, extract, replace, correct) in [
+        (
+            "",
+            "(Byte,Byte)",
+            "(7,19)",
+            "let (left,right)=value;",
+            "value=(23,29);",
+            "left==7 and right==19",
+        ),
+        (
+            "",
+            "((Byte,bool),Byte)",
+            "((7,true),19)",
+            "let ((left,flag),right)=value;",
+            "value=((23,false),29);",
+            "left==7 and flag and right==19",
+        ),
+        (
+            "struct Pair {left:Byte,right:Byte}",
+            "Pair",
+            "Pair {left:7,right:19}",
+            "let left=value.left;let right=value.right;",
+            "value.left=23;",
+            "left==7 and right==19",
+        ),
+        (
+            "enum Choice {none,pair(Byte,Byte)}",
+            "Choice",
+            "Choice.pair(7,19)",
+            "let (left,right):(Byte,Byte)=value match {.none=>(0,0),.pair(a,b)=>(a,b)};",
+            "value=Choice.none;",
+            "left==7 and right==19",
+        ),
+    ] {
+        for truth in [true, false] {
+            let condition = if truth {
+                correct.to_owned()
+            } else {
+                format!("not ({correct})")
+            };
+            let package = compile(&format!(
+                "typealias Byte=.u8'builtin;{declaration} const seed:{ty}={initial};
+                comptime fn run() {{var value:{ty}=seed;{extract}{replace}assumes {condition};}}"
+            ));
+            let run = package.functions.iter().find(|f| f.name == "run").unwrap();
+            let report = flow::analyze_in_package(&package, run, &mut Limits::default()).unwrap();
+            let check = report.points.last().unwrap().check_input.as_ref();
+            assert_eq!(
+                check.is_some_and(|c| c.prove(&mut Limits::default()).is_ok()),
+                truth,
+                "{ty}; {condition}: {report}"
+            );
+            let result = luna::invocation::invoke(&package, "run", 1_000_000);
+            if truth {
+                assert!(result.is_ok(), "{result:?}");
+            } else {
+                let error = result.unwrap_err();
+                assert!(error.contains("ProgramContractRejected"), "{error}");
+            }
+        }
+    }
 }

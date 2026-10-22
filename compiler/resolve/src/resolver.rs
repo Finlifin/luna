@@ -173,6 +173,79 @@ impl<'a> Resolver<'a> {
         Ok(Resolution::from_binding(&binding))
     }
 
+    /// Locate a unique trait member for early pattern-output names. This does
+    /// not establish the receiver's trait capability or substitute any types.
+    pub fn pattern_trait_member(
+        &self,
+        container: DefId,
+        name: Symbol,
+        requester: ScopeId,
+        span: rustc_span::Span,
+    ) -> Option<DefId> {
+        use crate::binding::BindingKind;
+        use std::collections::BTreeSet;
+        let mut pending = vec![container];
+        let mut seen = BTreeSet::new();
+        let mut members = BTreeSet::new();
+        while let Some(container) = pending.pop() {
+            if !seen.insert(container) {
+                continue;
+            }
+            if seen.len() > 4096 {
+                return None;
+            }
+            let scope_id = self.find_scope_for_def(container)?;
+            let scope = self.scope_tree().get(scope_id)?;
+            if scope.kind != crate::scope::ScopeKind::TraitBody {
+                return None;
+            }
+            if scope.items.get_direct(name).is_some() {
+                let BindingKind::Definition(member, _) = self
+                    .resolve_member(container, name, requester, span)
+                    .ok()?
+                    .kind
+                else {
+                    return None;
+                };
+                members.insert(member);
+                continue;
+            }
+            for path in scope.trait_parent_paths.as_ref()? {
+                let (head, _) = path.first()?;
+                // Use the declaration telescope, never the caller's ribs.
+                let mut binding = None;
+                for parent in self.scope_tree().ancestors(scope_id) {
+                    if parent.items.ambiguous_glob(*head) {
+                        return None;
+                    }
+                    if let Some(found) = self.lookup_in_scope(*head, parent.id) {
+                        binding = Some(found);
+                        break;
+                    }
+                }
+                let BindingKind::Definition(mut parent, _) = binding?.kind else {
+                    return None;
+                };
+                for (segment, at) in path.iter().skip(1) {
+                    let BindingKind::Definition(next, _) = self
+                        .resolve_member(parent, *segment, scope_id, *at)
+                        .ok()?
+                        .kind
+                    else {
+                        return None;
+                    };
+                    parent = next;
+                }
+                pending.push(parent);
+            }
+        }
+        if members.len() == 1 {
+            members.into_iter().next()
+        } else {
+            None
+        }
+    }
+
     /// Resolve accessible candidates for a type container not yet known to the
     /// elaborator. Inspect each ADT scope directly instead of repeatedly scanning
     /// the scope tree through `find_scope_for_def`.

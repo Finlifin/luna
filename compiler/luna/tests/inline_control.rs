@@ -4676,7 +4676,6 @@ fn tuple_enumeration_keeps_purity_checks_for_filtered_bodies() {
     for source in [
         "pure fn bad(comptime enabled:bool,values:(bool,bool),pointer:*bool)->bool {inline for (index,element) if enabled in values'tuple_enumerate {pointer.* = element;}true} fn run(pointer:*bool)->bool {bad(false,(true,false),pointer)}",
         "fn take(value:bool) {} fn bad(values:(bool,bool)) {inline for (index,element) if false in values'tuple_enumerate {take(7);}}",
-        "fn bad(values:(bool,bool)) {inline for (index,true) in values'tuple_enumerate {}}",
     ] {
         assert!(compile(source).is_err(), "{source}");
     }
@@ -4928,7 +4927,6 @@ fn open_inline_range_pattern_descriptions_do_not_invoke_computations() {
     for source in [
         "fn runtime(value:bool)->bool {value} fn unused(comptime count:.Integer'builtin) {inline for (index and runtime(true) is next) in 0..count {}}",
         "fn unused(comptime count:.Integer'builtin,flag:bool) {inline for (index and flag is next) in 0..count {}}",
-        "fn unused(comptime count:.Integer'builtin) {inline for 0 in 0..count {}}",
         "pure fn bad(comptime count:.Integer'builtin,pointer:*bool) {inline for (_ as index) if false in 0..count {pointer.* = false;}} fn run(pointer:*bool) {bad(0,pointer);}",
     ] {
         assert!(compile(source).is_err(), "{source}");
@@ -5781,5 +5779,255 @@ fn inline_conditions_work_in_initializers_and_call_arguments() {
                 .unwrap(),
             Value::Bool(value)
         );
+    }
+}
+
+#[test]
+fn inline_ranges_filter_refutable_patterns_before_guard_invocation() {
+    let package = compile(
+        "comptime fn never()->bool {never()}
+        fn visit() {}
+        fn run()->bool {inline for (1 or 3) in 0..5 {visit();} true}
+        fn skipped()->bool {inline for 9 if never() in 0..3 {visit();} true}
+        fn bound()->bool {inline for (1 as index) in 0..3 {
+            inline if index==1 {visit();}
+        } true}",
+    )
+    .unwrap();
+    for (entry, visits) in [("run", 2), ("skipped", 0), ("bound", 1)] {
+        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        assert_eq!(
+            vm.invoke(support::id(&package, entry), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            support::calls(&package, &vm)
+                .iter()
+                .filter(|name| *name == "visit")
+                .count(),
+            visits
+        );
+    }
+}
+
+#[test]
+fn filtered_inline_ranges_keep_control_flow_and_skip_unselected_invocations() {
+    let package = compile(
+        "comptime fn never()->bool {never()}
+        fn visit() {}
+        fn run()->bool {
+            inline for:scan ((1 or 3 or 4) as index) in 0..6 {
+                inline if index==1 {continue scan;}
+                visit();
+                break scan;
+            }
+            true
+        }
+        fn transform()->bool {inline for (index and index==2 is true) in 0..4 {visit();} true}
+        fn skipped()->bool {inline for 9 in 0..3 {inline if never() {visit();}} true}
+        fn empty()->bool {inline for 9 if never() in 0..0 {visit();} true}",
+    )
+    .unwrap();
+    for (entry, visits) in [("run", 1), ("transform", 1), ("skipped", 0), ("empty", 0)] {
+        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        assert_eq!(
+            vm.invoke(support::id(&package, entry), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            support::calls(&package, &vm)
+                .iter()
+                .filter(|name| *name == "visit")
+                .count(),
+            visits
+        );
+    }
+}
+
+#[test]
+fn filtered_inline_ranges_still_check_unselected_bodies_and_guard_phases() {
+    for source in [
+        "fn run(){inline for 9 in 0..3 {let wrong:bool=3;}}",
+        "fn run(flag:bool){inline for 9 if flag in 0..3 {}}",
+        "fn run(flag:bool){let alias=flag;inline for 9 if alias in 0..3 {}}",
+        "fn runtime()->bool {true} fn run(){inline for 9 if runtime() in 0..3 {}}",
+        "fn run(flag:bool){inline for (i and flag is true) in 0..0 {}}",
+    ] {
+        assert!(compile(source).is_err(), "{source}");
+    }
+}
+
+#[test]
+fn open_inline_ranges_filter_patterns_and_preserve_definition_checks() {
+    let package = compile(
+        "pure fn walk(comptime count:.Integer'builtin)->bool {
+            var selected=false;
+            inline for (1 as index) if index==1 in 0..count {selected=true;}
+            selected
+        }
+        fn yes()->bool {walk(3)} fn no()->bool {walk(1)}",
+    )
+    .unwrap();
+    for (entry, expected) in [("yes", true), ("no", false)] {
+        assert_eq!(
+            luna::execution::interpret(&package, entry, 1_000_000).unwrap(),
+            Value::Bool(expected)
+        );
+        luna::instantiation::instantiate(&package, entry, 200_000).unwrap();
+    }
+    let invalid = "pure fn bad(comptime count:.Integer'builtin,p:*bool) {
+        inline for 9 in 0..count {p.* = false;}
+    } fn run(p:*bool){bad(0,p);}";
+    assert!(compile(invalid).is_err());
+}
+
+#[test]
+fn skipped_range_guards_accept_comptime_function_inputs() {
+    for guard in ["flag", "alias"] {
+        let source = format!(
+            "comptime fn choose(flag:bool)->bool {{
+                var alias=flag;
+                inline for 9 if {guard} in 0..3 {{}}
+                flag
+            }}"
+        );
+        let package = compile(&source).unwrap();
+        for flag in [true, false] {
+            let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+            assert_eq!(
+                vm.invoke(support::id(&package, "choose"), vec![Value::Bool(flag)])
+                    .unwrap(),
+                Value::Bool(flag)
+            );
+        }
+    }
+}
+
+#[test]
+fn tuple_enumeration_filters_refutable_comptime_indices() {
+    let package = compile(
+        "comptime fn never()->bool {never()}
+        fn visit(value:bool)->bool {value}
+        fn run()->bool {
+            var answer=false;
+            inline for (1,value) in (false,true,false)'tuple_enumerate {answer=visit(value);}
+            answer
+        }
+        fn skipped()->bool {
+            inline for (9,value) if never() in (false,true)'tuple_enumerate {visit(value);}
+            true
+        }",
+    )
+    .unwrap();
+    for (entry, visits) in [("run", 1), ("skipped", 0)] {
+        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        assert_eq!(
+            vm.invoke(support::id(&package, entry), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            support::calls(&package, &vm)
+                .iter()
+                .filter(|name| *name == "visit")
+                .count(),
+            visits
+        );
+    }
+}
+
+#[test]
+fn open_tuple_index_filters_preserve_phases_and_completion() {
+    let package = compile("pure fn select(comptime enabled:bool,values:(bool,bool,bool))->bool {
+            var answer=false;
+            inline for ((0 or 2) as index,value) if enabled in values'tuple_enumerate {answer=answer or value;}
+            answer
+        }
+        fn yes()->bool {select(true,(false,false,true))}
+        fn no()->bool {select(true,(false,true,false))}
+        fn disabled()->bool {select(false,(true,true,true))}").unwrap();
+    for (entry, expected) in [("yes", true), ("no", false), ("disabled", false)] {
+        assert_eq!(
+            luna::execution::interpret(&package, entry, 1_000_000).unwrap(),
+            Value::Bool(expected)
+        );
+    }
+    for source in [
+        "fn run(flag:bool){inline for (9,value) if flag in (true,false)'tuple_enumerate {}}",
+        "fn run(){inline for (9,value) if value in (true,false)'tuple_enumerate {}}",
+        "fn run(){inline for (9,value) in (true,false)'tuple_enumerate {let wrong:bool=3;}}",
+        "fn missing(comptime enabled:bool,values:(bool,bool))->bool {inline for (9,value) in values'tuple_enumerate {return value;}}",
+        "pure fn bad(comptime enabled:bool,p:*bool){inline for (9,value) in (true,false)'tuple_enumerate {p.* = value;}}",
+    ] {
+        assert!(compile(source).is_err(), "{source}");
+    }
+}
+
+#[test]
+fn tuple_enumeration_filters_runtime_elements() {
+    let package = compile(
+        "fn visit() {}
+        fn select(values:(bool,bool,bool))->bool {
+            inline for (_,true) in values'tuple_enumerate {visit();}
+            true
+        }
+        fn run()->bool {select((false,true,true))}",
+    )
+    .unwrap();
+    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(support::id(&package, "run"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        support::calls(&package, &vm)
+            .iter()
+            .filter(|name| *name == "visit")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn tuple_runtime_pattern_observations_execute_once_per_reached_element() {
+    let package = compile("fn visit() {} fn observe(value:bool)->bool {value}
+        fn select(comptime enabled:bool,values:(bool,bool,bool))->bool {
+            inline for (_, (value and observe(value) is true)) if enabled in values'tuple_enumerate {visit();}
+            true
+        }
+        fn run()->bool {select(true,(false,true,true))}
+        fn skipped()->bool {select(false,(false,true,true))}").unwrap();
+    for (entry, observes, visits) in [("run", 3, 2), ("skipped", 0, 0)] {
+        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        assert_eq!(
+            vm.invoke(support::id(&package, entry), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        let calls = support::calls(&package, &vm);
+        assert_eq!(
+            calls.iter().filter(|name| *name == "observe").count(),
+            observes
+        );
+        assert_eq!(calls.iter().filter(|name| *name == "visit").count(), visits);
+    }
+    for source in [
+        "fn missing(comptime enabled:bool,values:(bool,bool))->bool {inline for (_,true) in values'tuple_enumerate {return true;}}",
+        "fn missing(values:(bool,bool))->bool {inline for (_,true) in values'tuple_enumerate {return true;}}",
+        "pure fn bad(comptime enabled:bool,p:*bool){inline for (_,true) in (false,false)'tuple_enumerate {p.* = true;}}",
+    ] {
+        assert!(compile(source).is_err(), "{source}");
+    }
+}
+
+#[test]
+fn iteration_bindings_cannot_be_assigned_inside_sequential_patterns() {
+    for iteration in [
+        "inline for (index and do {index=1;true} is true) in 0..2 {}",
+        "inline for ((index and do {index=1;true} is true),element) in (true,false)'tuple_enumerate {}",
+        "inline for (index,(element and do {element=false;true} is true)) in (true,false)'tuple_enumerate {}",
+    ] {
+        for signature in ["fn unused()", "fn unused(comptime enabled:bool)"] {
+            let source = format!("{signature} {{{iteration}}}");
+            assert!(compile(&source).is_err(), "{signature}: {iteration}");
+        }
     }
 }

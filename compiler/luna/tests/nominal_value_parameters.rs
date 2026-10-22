@@ -5,6 +5,415 @@ mod support;
 use comptime_interpretor::Value;
 
 #[test]
+fn scheduled_effect_execution_accepts_value_indexed_labels() {
+    for (domain, key) in [("bool", "true"), ("Key", "Key{flag:true}")] {
+        let source = format!(
+            "trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            impl Duplicate for bool {{}}
+            struct Key {{flag:bool}}
+            effect choose()->bool where key:{domain};
+            fn run()->bool {{choose<{key}>()# {{choose<{key}>()=>true,}}}}"
+        );
+        let package = support::compile(&source);
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                "run",
+                "Duplicate",
+                "Retire",
+                100_000
+            )
+            .unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn unused_effect_defaults_are_checked_at_declaration() {
+    for declaration in [
+        "effect read()->bool where .tag:bool=9;",
+        "effect enum Channel where .tag:bool=9 {read()->bool,}",
+        "effect enum Channel where .T:.Type'builtin=true {read()->bool,}",
+        "effect read()->bool where .T:.Type'builtin=true;",
+        "effect enum Channel where .tag:bool=tag {read()->bool,}",
+        "effect read()->bool where .tag:bool=tag;",
+        "effect enum Channel where .tag:bool=later,later:bool {read()->bool,}",
+        "effect read()->bool where .tag:bool=later,later:bool;",
+    ] {
+        assert!(
+            support::compile_with_protocols(declaration, &Default::default()).is_err(),
+            "{declaration}"
+        );
+    }
+}
+
+#[test]
+fn effect_dependent_value_defaults_preserve_prior_inputs() {
+    let source = "effect enum Channel where T,key:T,.copy:T=key {read()->T,}
+        fn request()->#Channel<bool,tag> bool where tag:bool {Channel<bool,tag>.read()#}
+        fn run()->bool {request<true>()# {Channel<bool,true,.copy=true>.read()=>true,}
+            and not request<false>()# {Channel<bool,false,.copy=false>.read()=>false,}}";
+    let standalone = source
+        .replace(
+            "effect enum Channel where T,key:T,.copy:T=key {read()->T,}",
+            "effect read()->T where T,key:T,.copy:T=key;",
+        )
+        .replace("Channel<", "read<")
+        .replace(".read", "");
+    for source in [source, standalone.as_str()] {
+        let package = support::compile(source);
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+        let invalid = source.replace(".copy=true", ".copy=false");
+        assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn effect_groups_inherit_value_domains_and_expand_exact_instances() {
+    let source="effect enum Channel where tag:bool {read()->bool,write(value:bool),}
+        fn request()->#Channel<tag> bool where tag:bool {Channel<tag>.write(true)#;Channel<tag>.read()#}
+        fn install()->bool where tag:bool {request<tag>()# {
+            Channel<tag>.read()=>tag,Channel<tag>.write(value)=>{},
+        }}
+        fn run()->bool {install<true>() and not install<false>()}";
+    let package = support::compile(source);
+    elaboration::verification::memory::infer_in_package(
+        &package,
+        support::id(&package, "run"),
+        &[],
+        &mut 100_000,
+    )
+    .unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    for wrong in [
+        source.replace("Channel<tag>", "Channel<9>"),
+        source.replace("Channel<tag>.read()=>tag", "Channel<false>.read()=>tag"),
+        source.replace("Channel<tag>.write(value)=>{},", ""),
+    ] {
+        assert!(support::compile_with_protocols(&wrong, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn effect_groups_admit_dependent_nominal_and_default_inputs() {
+    for source in [
+        "effect enum Channel where T,key:T {read()->T,}
+         fn run()->bool {Channel<bool,true>.read()# {Channel<bool,true>.read()=>true,}}",
+        "struct Key {flag:bool} effect enum Channel where key:Key {read()->bool,}
+         fn run()->bool {Channel<Key{flag:true}>.read()# {Channel<Key{flag:true}>.read()=>true,}}",
+        "effect enum Channel where .key:bool=true {read()->bool,}
+         fn run()->bool {Channel.read()# {Channel<.key=true>.read()=>true,}}",
+        "effect enum Channel where T,.U:.Type'builtin=T {read(value:T)->U,}
+         fn run()->bool {Channel.read(true)# {Channel<bool>.read(value)=>value,}}",
+        "struct Flag where tag:bool {value:bool}
+         effect enum Channel where tag:bool {read(value:Flag<tag>)->bool,}
+         fn run()->bool {Channel.read(Flag<true>{value:true})# {Channel<true>.read(value)=>value.value,}}",
+        "effect read()->bool where .tag:bool=true;
+         fn run()->bool {read()# {read<.tag=true>()=>true,}}",
+    ] {
+        let package=support::compile(source);
+        assert_eq!(luna::execution::interpret(&package,"run",100_000).unwrap(),Value::Bool(true),"{source}");
+    }
+}
+
+#[test]
+fn effect_group_value_inference_accepts_computed_packets() {
+    let source = "struct Flag where tag:bool {value:bool}
+        effect enum Channel where tag:bool {read(value:Flag<tag>)->bool,}
+        fn packet()->(Flag<true>,) {(Flag<true>{value:true},)}
+        fn run()->bool {Channel.read(...packet())# {Channel<true>.read(value)=>value.value,}}";
+    let package = support::compile(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    assert!(
+        support::compile_with_protocols(
+            &source.replace("Channel<true>.read(value)", "Channel<false>.read(value)"),
+            &Default::default(),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn effect_nominal_value_arguments_use_checked_payload_layouts() {
+    let source = "struct Key {flag:bool}
+        effect choose()->bool where key:Key;
+        fn run()->bool {
+            choose<Key{flag:true}>()# {choose<Key{flag:true}>()=>true,}
+                and not choose<Key{flag:false}>()# {choose<Key{flag:false}>()=>false,}
+        }";
+    let package = support::compile(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn effect_nominal_values_forward_nested_enum_and_newtype_keys() {
+    for (declarations, yes, no) in [
+        (
+            "struct Inner {flag:bool} struct Key {inner:Inner}",
+            "Key{inner:Inner{flag:true}}",
+            "Key{inner:Inner{flag:false}}",
+        ),
+        ("enum Key {none,some(bool)}", "Key.some(true)", "Key.none"),
+        ("newtype Key=bool;", "true.as(Key)", "false.as(Key)"),
+    ] {
+        let source = format!(
+            "{declarations}
+            effect choose()->bool where key:Key;
+            fn request()->#choose<key> bool where key:Key {{choose<key>()#}}
+            fn run()->bool {{request<{yes}>()# {{choose<{yes}>()=>true,}}
+                and not request<{no}>()# {{choose<{no}>()=>false,}}}}"
+        );
+        let package = support::compile(&source);
+        elaboration::verification::memory::infer_in_package(
+            &package,
+            support::id(&package, "run"),
+            &[],
+            &mut 100_000,
+        )
+        .unwrap();
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            Value::Bool(true),
+            "{declarations}"
+        );
+        let wrong = source.replace(
+            &format!("choose<{yes}>()=>true"),
+            &format!("choose<{no}>()=>true"),
+        );
+        assert!(support::compile_with_protocols(&wrong, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn effect_value_parameters_select_distinct_handlers() {
+    let source = "effect choose()->bool where tag:bool;
+        fn subject()->#[choose<true>,choose<false>] bool {
+            choose<true>()# and not choose<false>()#
+        }
+        fn run()->bool {subject()# {choose<true>()=>true,choose<false>()=>false,}}";
+    let package = support::compile(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    elaboration::verification::memory::infer_in_package(
+        &package,
+        support::id(&package, "run"),
+        &[],
+        &mut 100_000,
+    )
+    .unwrap();
+    for wrong in ["bool", "9"] {
+        assert!(
+            support::compile_with_protocols(
+                &source.replace("choose<true>", &format!("choose<{wrong}>")),
+                &Default::default()
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        support::compile_with_protocols(
+            &source.replace("choose<false>()=>false,", ""),
+            &Default::default()
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn comptime_effect_type_values_validate_unused_value_domains() {
+    let source = "typealias Type=.Type'builtin;
+        effect choose()->bool where tag:bool;
+        comptime fn Result()->Type {#choose<true> bool}";
+    let mut package = support::compile(source);
+    let entry = support::id(&package, "Result");
+    let expected = nir::Term::computation(
+        vec![nir::effects::Operation {
+            declaration: package.effects[0].declaration,
+            arguments: vec![nir::Term::Bool(true)],
+        }],
+        nir::Term::Primitive(nir::Primitive::Bool),
+    );
+    let mut vm =
+        comptime_interpretor::Interpreter::for_comptime(&package, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke(entry, vec![]).unwrap(),
+        Value::Type(expected.clone())
+    );
+    vm.validate_immutable_input(
+        &Value::Type(expected.clone()),
+        &nir::Term::Primitive(nir::Primitive::Type),
+    )
+    .unwrap();
+    drop(vm);
+    package.effects[0].parameter_types = vec![nir::Term::Primitive(nir::Primitive::U8)];
+    match comptime_interpretor::Interpreter::for_comptime(&package, Default::default()) {
+        Err(_) => {}
+        Ok(mut vm) => assert!(
+            vm.validate_immutable_input(
+                &Value::Type(expected),
+                &nir::Term::Primitive(nir::Primitive::Type)
+            )
+            .is_err()
+        ),
+    }
+}
+
+#[test]
+fn effect_value_parameters_forward_through_generic_installers() {
+    let source = "effect choose()->bool where tag:bool;
+        fn request()->#choose<tag> bool where tag:bool {choose<tag>()#}
+        fn install()->bool where tag:bool {request<tag>()# {choose<tag>()=>tag,}}
+        fn run()->bool {install<true>() and not install<false>()}";
+    let package = support::compile(source);
+    elaboration::verification::memory::infer_in_package(
+        &package,
+        support::id(&package, "run"),
+        &[],
+        &mut 100_000,
+    )
+    .unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn memoized_value_indexed_keys_keep_declaration_and_value_arguments() {
+    let package=support::compile("trait Eq {comptime fn eq(self,other:Self)->bool;}
+        trait Hash {comptime fn hash(self)->.u8'builtin;}
+        impl Eq for bool {comptime fn eq(self,other:bool)->bool {self == other}}
+        impl Hash for bool {comptime fn hash(self)->.u8'builtin {0}}
+        struct Key where tag:bool {value:bool}
+        impl Eq for Key<tag> where tag:bool {comptime fn eq(self,other:Key<tag>)->bool {self.value == other.value}}
+        impl Hash for Key<tag> where tag:bool {comptime fn hash(self)->.u8'builtin {0}}
+        pure comptime fn inspect(value:Key<tag>)->bool where tag:bool {value.value}
+        pure comptime fn staged(comptime enabled:bool,value:Key<tag>)->bool where tag:bool {if enabled {value.value} else {false}}");
+    let mut items = intrinsic::LangItems::new();
+    for (item, name) in [
+        (intrinsic::LangItem::Eq, "Eq"),
+        (intrinsic::LangItem::Hash, "Hash"),
+    ] {
+        items
+            .bind_source_traits(
+                &package,
+                &[(
+                    item,
+                    package
+                        .traits
+                        .iter()
+                        .find(|t| t.name == name)
+                        .unwrap()
+                        .declaration,
+                )],
+            )
+            .unwrap();
+    }
+    for (name, staged) in [("inspect", false), ("staged", true)] {
+        for tag in [false, true] {
+            let mut invocation = luna::memoization::Invocation::prepare(
+                &package,
+                &items,
+                support::id(&package, name),
+                vec![nir::Term::Bool(tag)],
+                8,
+                Default::default(),
+            )
+            .unwrap();
+            let mut context = comptime_executor::Context::new(100_000);
+            for (value, reused) in [(false, false), (true, false), (false, true), (true, true)] {
+                let input = Value::Record {
+                    declaration: package.structs[0].declaration,
+                    arguments: vec![nir::Term::Bool(tag)],
+                    fields: vec![Value::Bool(value)],
+                };
+                let inputs = if staged {
+                    vec![Value::Bool(true), input]
+                } else {
+                    vec![input]
+                };
+                let outcome = invocation.invoke(inputs, &mut context).unwrap();
+                assert_eq!(*outcome.value, Value::Bool(value));
+                assert_eq!(outcome.reused, reused);
+            }
+            let foreign = Value::Record {
+                declaration: package.structs[0].declaration,
+                arguments: vec![nir::Term::Bool(!tag)],
+                fields: vec![Value::Bool(true)],
+            };
+            let inputs = if staged {
+                vec![Value::Bool(true), foreign]
+            } else {
+                vec![foreign]
+            };
+            assert!(invocation.invoke(inputs, &mut context).is_err());
+            assert_eq!(invocation.cached_results(), 2);
+        }
+    }
+}
+
+#[test]
+fn value_indexed_drop_methods_preserve_selected_arguments() {
+    let source = "trait Duplicate {} trait Retire {fn drop(*self);}
+        impl Duplicate for bool {} impl Duplicate for *T where T {}
+        struct Flag where tag:bool {result:*bool}
+        impl Retire for Flag<tag> where tag:bool {fn drop(*self) {self.result.*.* = tag;}}
+        fn run()->bool {
+            var yes=false;var no=true;
+            do {let first=Flag<true>{result:yes.ref};let second=Flag<false>{result:no.ref};};
+            yes and not no
+        }";
+    for contract in ["", " where ensures self.result.*.* == tag"] {
+        let source = source.replace(
+            "fn drop(*self) {self.result",
+            &format!("fn drop(*self){contract} {{self.result"),
+        );
+        // Explicit premises allow frontend checking; cleanup planning must
+        // still preserve and reject its currently unsupported postcondition.
+        let source = if contract.is_empty() {
+            source
+        } else {
+            source.replace(
+                "self.result.*.* = tag;",
+                "self.result.*.* = tag; assumes self.result.*.* == tag;",
+            )
+        };
+        let package = support::compile(&source);
+        let result = luna::execution::interpret_with_protocols(
+            &package,
+            "run",
+            "Duplicate",
+            "Retire",
+            100_000,
+        );
+        if contract.is_empty() {
+            assert_eq!(result.unwrap(), Value::Bool(true));
+        } else {
+            assert!(
+                result
+                    .unwrap_err()
+                    .contains("cleanup program specification obligations are not discharged")
+            );
+        }
+    }
+}
+
+#[test]
 fn struct_value_parameters_keep_distinct_nominal_identities() {
     let source = "struct Flag where tag:bool {value:bool}
         fn read(value:Flag<true>)->bool {value.value}
@@ -4775,6 +5184,50 @@ fn ordinary_function_clause_domains_depend_on_prior_value_indices() {
 }
 
 #[test]
+fn generic_effect_memory_preserves_value_indexed_operation_labels() {
+    let source = "struct Flag where enabled:bool {}
+        effect echo(value:T)->T where T;
+        fn read(value:Flag<flag>)->bool where flag:bool {flag}
+        fn subject()->#[echo<Flag<flag>>] bool where flag:bool {
+            read(echo(Flag<flag>{})#)
+        }
+        fn yes()->bool {subject<true>()# {echo<Flag<true>>(value)=>value,}}
+        fn no()->bool {subject<false>()# {echo<Flag<false>>(value)=>value,}}
+        fn handled()->bool where flag:bool {subject<flag>()# {echo<Flag<flag>>(value)=>value,}}
+        fn nested_yes()->bool {handled<true>()}
+        fn nested_no()->bool {handled<false>()}";
+    let package = support::compile(source);
+    for (entry, expected) in [
+        ("yes", true),
+        ("no", false),
+        ("nested_yes", true),
+        ("nested_no", false),
+    ] {
+        elaboration::verification::memory::infer_in_package(
+            &package,
+            support::id(&package, entry),
+            &[],
+            &mut 100_000,
+        )
+        .unwrap();
+        assert_eq!(
+            luna::execution::interpret(&package, entry, 100_000).unwrap(),
+            Value::Bool(expected)
+        );
+    }
+    assert!(
+        support::compile_with_protocols(
+            &source.replace(
+                "echo<Flag<true>>(value)=>value",
+                "echo<Flag<false>>(value)=>value"
+            ),
+            &Default::default()
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn effect_requests_preserve_value_indexed_type_instance_identity() {
     let source = "struct Flag where enabled:bool {}
         effect echo(value:T)->T where T;
@@ -4871,4 +5324,597 @@ fn forwarded_value_clauses_wait_for_default_type_domains() {
     ] {
         assert!(support::compile_with_protocols(&wrong, &Default::default()).is_err());
     }
+}
+
+#[test]
+fn abstract_comptime_parameters_bind_dependent_arguments_and_results() {
+    use comptime_interpretor::{Budget, Interpreter};
+    use nir::{DeclarationId, Primitive, Sort, Term};
+    for (kind, definition) in [
+        (0, "struct Token where enabled:bool {}"),
+        (1, "enum Token where enabled:bool {unit}"),
+        (2, "newtype Token<enabled:bool> = bool;"),
+    ] {
+        let source=format!("{definition}
+            comptime fn keep(comptime enabled:bool,value:Token<enabled>)->Token<enabled> {{value}}
+            comptime fn forward(comptime enabled:bool,value:Token<enabled>)->Token<enabled> {{keep(enabled,value)}}");
+        let package = support::compile(&source);
+        let parameter = DeclarationId {
+            package: 99,
+            local: 1,
+        };
+        let domain = Term::Primitive(Primitive::Bool);
+        let symbolic = Term::Rigid {
+            declaration: parameter,
+            sort: Sort::ComptimeValue,
+        };
+        let token = match kind {
+            0 => {
+                package
+                    .structs
+                    .iter()
+                    .find(|s| s.name == "Token")
+                    .unwrap()
+                    .declaration
+            }
+            1 => {
+                package
+                    .enums
+                    .iter()
+                    .find(|s| s.name == "Token")
+                    .unwrap()
+                    .declaration
+            }
+            _ => {
+                package
+                    .newtypes
+                    .iter()
+                    .find(|s| s.name == "Token")
+                    .unwrap()
+                    .declaration
+            }
+        };
+        let make = |argument| match kind {
+            0 => Value::Record {
+                declaration: token,
+                arguments: vec![argument],
+                fields: vec![],
+            },
+            1 => Value::Variant {
+                declaration: token,
+                arguments: vec![argument],
+                index: 0,
+                fields: vec![],
+            },
+            _ => Value::Newtype {
+                ty: Term::Nominal {
+                    declaration: token,
+                    arguments: vec![argument],
+                },
+                value: Box::new(Value::Bool(true)),
+            },
+        };
+        let value = make(symbolic);
+        let mut vm = Interpreter::for_comptime(&package, Budget::default())
+            .unwrap()
+            .with_abstract_value_parameters(&[(parameter, domain.clone())])
+            .unwrap();
+        let opaque = Value::AbstractValue {
+            declaration: parameter,
+            ty: domain,
+        };
+        for entry in ["keep", "forward"] {
+            assert_eq!(
+                vm.invoke(
+                    support::id(&package, entry),
+                    vec![opaque.clone(), value.clone()]
+                )
+                .unwrap(),
+                value
+            );
+            let concrete = make(Term::Bool(true));
+            assert!(
+                vm.invoke(
+                    support::id(&package, entry),
+                    vec![opaque.clone(), concrete.clone()]
+                )
+                .is_err()
+            );
+            assert_eq!(
+                vm.invoke(
+                    support::id(&package, entry),
+                    vec![Value::Bool(true), concrete.clone()]
+                )
+                .unwrap(),
+                concrete
+            );
+        }
+    }
+}
+
+#[test]
+fn aggregate_comptime_inputs_preserve_symbolic_leaves_in_dependent_identity() {
+    use comptime_interpretor::{Budget, Interpreter};
+    use nir::{DeclarationId, Primitive, Sort, Term};
+    let package=support::compile("struct Packet where state:(bool,bool) {}
+        comptime fn keep(comptime state:(bool,bool),value:Packet<state>)->Packet<state> {value}
+        comptime fn forward(comptime state:(bool,bool),value:Packet<state>)->Packet<state> {keep(state,value)}");
+    let parameter = DeclarationId {
+        package: 99,
+        local: 1,
+    };
+    let domain = Term::Primitive(Primitive::Bool);
+    let symbolic = Term::Rigid {
+        declaration: parameter,
+        sort: Sort::ComptimeValue,
+    };
+    let packet = package
+        .structs
+        .iter()
+        .find(|s| s.name == "Packet")
+        .unwrap()
+        .declaration;
+    let value = Value::Record {
+        declaration: packet,
+        arguments: vec![Term::TupleValue(vec![symbolic.clone(), Term::Bool(false)])],
+        fields: vec![],
+    };
+    let input = Value::Tuple(vec![
+        Value::AbstractValue {
+            declaration: parameter,
+            ty: domain.clone(),
+        },
+        Value::Bool(false),
+    ]);
+    let mut vm = Interpreter::for_comptime(&package, Budget::default())
+        .unwrap()
+        .with_abstract_value_parameters(&[(parameter, domain)])
+        .unwrap();
+    for entry in ["keep", "forward"] {
+        assert_eq!(
+            vm.invoke(
+                support::id(&package, entry),
+                vec![input.clone(), value.clone()]
+            )
+            .unwrap(),
+            value
+        );
+        let wrong = Value::Record {
+            declaration: packet,
+            arguments: vec![Term::TupleValue(vec![symbolic.clone(), Term::Bool(true)])],
+            fields: vec![],
+        };
+        assert!(
+            vm.invoke(support::id(&package, entry), vec![input.clone(), wrong])
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn nominal_comptime_inputs_bind_dependent_signatures_without_erasing_payloads() {
+    use comptime_interpretor::{Budget, Interpreter};
+    use nir::{DeclarationId, Primitive, Sort, Term};
+    for (kind, definition) in [
+        (0, "struct Key {flag:bool}"),
+        (1, "enum Key {flag(bool)}"),
+        (2, "newtype Key = bool;"),
+    ] {
+        let package=support::compile(&format!("{definition}
+            struct Packet where key:Key {{}}
+            comptime fn keep(comptime key:Key,value:Packet<key>)->Packet<key> {{value}}
+            comptime fn forward(comptime key:Key,value:Packet<key>)->Packet<key> {{keep(key,value)}}"));
+        let key = match kind {
+            0 => {
+                package
+                    .structs
+                    .iter()
+                    .find(|s| s.name == "Key")
+                    .unwrap()
+                    .declaration
+            }
+            1 => {
+                package
+                    .enums
+                    .iter()
+                    .find(|s| s.name == "Key")
+                    .unwrap()
+                    .declaration
+            }
+            _ => {
+                package
+                    .newtypes
+                    .iter()
+                    .find(|s| s.name == "Key")
+                    .unwrap()
+                    .declaration
+            }
+        };
+        let packet = package
+            .structs
+            .iter()
+            .find(|s| s.name == "Packet")
+            .unwrap()
+            .declaration;
+        let parameter = DeclarationId {
+            package: 99,
+            local: 1,
+        };
+        let domain = Term::Primitive(Primitive::Bool);
+        let key_type = Term::Nominal {
+            declaration: key,
+            arguments: vec![],
+        };
+        for symbolic in [false, true] {
+            let leaf = if symbolic {
+                Value::AbstractValue {
+                    declaration: parameter,
+                    ty: domain.clone(),
+                }
+            } else {
+                Value::Bool(true)
+            };
+            let input = match kind {
+                0 => Value::Record {
+                    declaration: key,
+                    arguments: vec![],
+                    fields: vec![leaf],
+                },
+                1 => Value::Variant {
+                    declaration: key,
+                    arguments: vec![],
+                    index: 0,
+                    fields: vec![leaf],
+                },
+                _ => Value::Newtype {
+                    ty: key_type.clone(),
+                    value: Box::new(leaf),
+                },
+            };
+            let leaf = if symbolic {
+                Term::Rigid {
+                    declaration: parameter,
+                    sort: Sort::ComptimeValue,
+                }
+            } else {
+                Term::Bool(true)
+            };
+            let make = |leaf| Value::Record {
+                declaration: packet,
+                arguments: vec![Term::NominalValue {
+                    ty: Box::new(key_type.clone()),
+                    variant: (kind == 1).then_some(0),
+                    fields: vec![leaf],
+                }],
+                fields: vec![],
+            };
+            let value = make(leaf);
+            let mut vm = Interpreter::for_comptime(&package, Budget::default())
+                .unwrap()
+                .with_abstract_value_parameters(&[(parameter, domain.clone())])
+                .unwrap();
+            for entry in ["keep", "forward"] {
+                assert_eq!(
+                    vm.invoke(
+                        support::id(&package, entry),
+                        vec![input.clone(), value.clone()]
+                    )
+                    .unwrap(),
+                    value
+                );
+                assert!(
+                    vm.invoke(
+                        support::id(&package, entry),
+                        vec![input.clone(), make(Term::Bool(false))]
+                    )
+                    .is_err()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn indexed_nominal_comptime_inputs_keep_their_own_symbolic_environment() {
+    use comptime_interpretor::{Budget, Interpreter};
+    use nir::{DeclarationId, Primitive, Sort, Term};
+    let package=support::compile("struct Key where enabled:bool {flag:bool}
+        struct Packet where enabled:bool,key:Key<enabled> {}
+        comptime fn keep(comptime enabled:bool,comptime key:Key<enabled>,value:Packet<enabled,key>)->Packet<enabled,key> {value}
+        comptime fn forward(comptime enabled:bool,comptime key:Key<enabled>,value:Packet<enabled,key>)->Packet<enabled,key> {keep(enabled,key,value)}");
+    let key = package
+        .structs
+        .iter()
+        .find(|s| s.name == "Key")
+        .unwrap()
+        .declaration;
+    let packet = package
+        .structs
+        .iter()
+        .find(|s| s.name == "Packet")
+        .unwrap()
+        .declaration;
+    let parameter = DeclarationId {
+        package: 99,
+        local: 1,
+    };
+    let domain = Term::Primitive(Primitive::Bool);
+    let symbol = Term::Rigid {
+        declaration: parameter,
+        sort: Sort::ComptimeValue,
+    };
+    let key_type = Term::Nominal {
+        declaration: key,
+        arguments: vec![symbol.clone()],
+    };
+    let key_value = Value::Record {
+        declaration: key,
+        arguments: vec![symbol.clone()],
+        fields: vec![Value::Bool(true)],
+    };
+    let key_term = Term::NominalValue {
+        ty: Box::new(key_type),
+        variant: None,
+        fields: vec![Term::Bool(true)],
+    };
+    let value = Value::Record {
+        declaration: packet,
+        arguments: vec![symbol, key_term],
+        fields: vec![],
+    };
+    let mut vm = Interpreter::for_comptime(&package, Budget::default())
+        .unwrap()
+        .with_abstract_value_parameters(&[(parameter, domain.clone())])
+        .unwrap();
+    for entry in ["keep", "forward"] {
+        assert_eq!(
+            vm.invoke(
+                support::id(&package, entry),
+                vec![
+                    Value::AbstractValue {
+                        declaration: parameter,
+                        ty: domain.clone()
+                    },
+                    key_value.clone(),
+                    value.clone()
+                ]
+            )
+            .unwrap(),
+            value
+        );
+    }
+}
+
+#[test]
+fn explicit_function_instances_accept_only_authorized_symbolic_nominal_inputs() {
+    use comptime_interpretor::{Budget, Interpreter};
+    use nir::{DeclarationId, Primitive, Sort, Term};
+    let package = support::compile(
+        "struct Key {flag:bool}
+        struct Packet where key:Key {}
+        comptime fn keep(value:Packet<key>)->Packet<key> where key:Key {value}
+        comptime fn forward(value:Packet<key>)->Packet<key> where key:Key {keep<key>(value)}
+        comptime fn choose()->bool where key:Key {if key.flag {true} else {false}}",
+    );
+    let key = package
+        .structs
+        .iter()
+        .find(|s| s.name == "Key")
+        .unwrap()
+        .declaration;
+    let packet = package
+        .structs
+        .iter()
+        .find(|s| s.name == "Packet")
+        .unwrap()
+        .declaration;
+    let parameter = DeclarationId {
+        package: 99,
+        local: 1,
+    };
+    let symbol = Term::Rigid {
+        declaration: parameter,
+        sort: Sort::ComptimeValue,
+    };
+    let input = |field| Term::NominalValue {
+        ty: Box::new(Term::Nominal {
+            declaration: key,
+            arguments: vec![],
+        }),
+        variant: None,
+        fields: vec![field],
+    };
+    let payload = |index| Value::Record {
+        declaration: packet,
+        arguments: vec![index],
+        fields: vec![],
+    };
+    let index = input(symbol);
+    let value = payload(index.clone());
+    let mut vm = Interpreter::for_comptime(&package, Budget::default())
+        .unwrap()
+        .with_abstract_value_parameters(&[(parameter, Term::Primitive(Primitive::Bool))])
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instantiated(support::id(&package, "choose"), vec![index.clone()], vec![])
+            .unwrap_err()
+            .kind,
+        comptime_interpretor::ErrorKind::AbstractValueUnresolved
+    );
+    for flag in [false, true] {
+        assert_eq!(
+            vm.invoke_instantiated(
+                support::id(&package, "choose"),
+                vec![input(Term::Bool(flag))],
+                vec![]
+            )
+            .unwrap(),
+            Value::Bool(flag)
+        );
+    }
+    for entry in ["keep", "forward"] {
+        assert_eq!(
+            vm.invoke_instantiated(
+                support::id(&package, entry),
+                vec![index.clone()],
+                vec![value.clone()]
+            )
+            .unwrap(),
+            value
+        );
+        assert!(
+            Interpreter::for_comptime(&package, Budget::default())
+                .unwrap()
+                .invoke_instantiated(
+                    support::id(&package, entry),
+                    vec![index.clone()],
+                    vec![value.clone()]
+                )
+                .is_err()
+        );
+        let wrong = input(Term::Char('x'));
+        assert!(
+            vm.invoke_instantiated(
+                support::id(&package, entry),
+                vec![wrong.clone()],
+                vec![payload(wrong)]
+            )
+            .is_err()
+        );
+        let concrete = input(Term::Bool(true));
+        assert_eq!(
+            vm.invoke_instantiated(
+                support::id(&package, entry),
+                vec![concrete.clone()],
+                vec![payload(concrete.clone())]
+            )
+            .unwrap(),
+            payload(concrete)
+        );
+    }
+}
+
+#[test]
+fn explicit_function_instances_preserve_authorized_type_parameters() {
+    use comptime_interpretor::{Budget, Interpreter};
+    use nir::{DeclarationId, Primitive, Sort, Term};
+    let package = support::compile("comptime fn Select()->.Type'builtin where T {T}");
+    let parameter = DeclarationId {
+        package: 99,
+        local: 1,
+    };
+    let ty = Term::Rigid {
+        declaration: parameter,
+        sort: Sort::Type,
+    };
+    let entry = support::id(&package, "Select");
+    let mut vm = Interpreter::for_comptime(&package, Budget::default())
+        .unwrap()
+        .with_abstract_type_parameters(&[parameter])
+        .unwrap();
+    assert_eq!(
+        vm.invoke_instantiated(entry, vec![ty.clone()], vec![])
+            .unwrap(),
+        Value::TypeParameter(parameter)
+    );
+    assert!(
+        Interpreter::for_comptime(&package, Budget::default())
+            .unwrap()
+            .invoke_instantiated(entry, vec![ty], vec![])
+            .is_err()
+    );
+    assert_eq!(
+        vm.invoke_instantiated(entry, vec![Term::Primitive(Primitive::Bool)], vec![])
+            .unwrap(),
+        Value::Type(Term::Primitive(Primitive::Bool))
+    );
+}
+
+#[test]
+fn dependent_comptime_closure_environments_preserve_symbolic_instance_identity() {
+    use comptime_interpretor::{Budget, Interpreter};
+    use nir::{DeclarationId, Primitive, Sort, Term};
+    let package=support::compile("struct Token where enabled:bool {}
+        comptime fn capture(comptime enabled:bool,value:Token<enabled>)->%{value:Token<enabled>} comptime fn()->Token<enabled> {|| value}
+        comptime fn call(comptime enabled:bool,callback:%{value:Token<enabled>} comptime fn()->Token<enabled>)->Token<enabled> {callback()}");
+    let parameter = DeclarationId {
+        package: 99,
+        local: 1,
+    };
+    let domain = Term::Primitive(Primitive::Bool);
+    let opaque = Value::AbstractValue {
+        declaration: parameter,
+        ty: domain.clone(),
+    };
+    let token = package
+        .structs
+        .iter()
+        .find(|s| s.name == "Token")
+        .unwrap()
+        .declaration;
+    let value = Value::Record {
+        declaration: token,
+        arguments: vec![Term::Rigid {
+            declaration: parameter,
+            sort: Sort::ComptimeValue,
+        }],
+        fields: vec![],
+    };
+    let mut vm = Interpreter::for_comptime(&package, Budget::default())
+        .unwrap()
+        .with_abstract_value_parameters(&[(parameter, domain)])
+        .unwrap();
+    let callback = vm
+        .invoke(
+            support::id(&package, "capture"),
+            vec![opaque.clone(), value.clone()],
+        )
+        .unwrap();
+    assert!(
+        vm.invoke(
+            support::id(&package, "call"),
+            vec![Value::Bool(true), callback.clone()]
+        )
+        .is_err()
+    );
+    assert_eq!(
+        vm.invoke(support::id(&package, "call"), vec![opaque, callback])
+            .unwrap(),
+        value
+    );
+}
+
+#[test]
+fn generic_required_type_calls_materialize_distinct_runtime_instances() {
+    let source = "struct Token where enabled:bool {pub fn active(self)->bool {enabled}}
+        comptime fn Build(enabled:bool)->.Type'builtin {Token<enabled>}
+        fn keep(value:Build(enabled))->Build(enabled) where enabled:bool {value}
+        fn run()->bool {
+            let on=keep<true>(Token<true> {});
+            let off=keep<false>(Token<false> {});
+            on.active() and not off.active()
+        }";
+    let package = support::compile(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100000).unwrap(),
+        Value::Bool(true)
+    );
+    let graph = luna::instantiation::instantiate(&package, "run", 100000).unwrap();
+    let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    let keep = support::id(&package, "keep");
+    for flag in [false, true] {
+        assert!(
+            graph
+                .functions
+                .iter()
+                .any(|instance| instance.key.declaration == keep
+                    && instance.key.arguments == vec![nir::Term::Bool(flag)])
+        );
+    }
+    let invalid = source.replace("keep<false>(Token<false>", "keep<false>(Token<true>");
+    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
 }

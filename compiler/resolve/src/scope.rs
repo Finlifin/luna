@@ -58,6 +58,8 @@ pub struct Scope {
     /// before body lowering so callers do not depend on declaration order.
     /// This is name metadata only, not a checked code interface.
     pub pattern_result_outputs: Option<Vec<(Symbol, rustc_span::Span)>>,
+    /// Syntactic parent heads. None means their source is not statically known.
+    pub trait_parent_paths: Option<Vec<Vec<(Symbol, rustc_span::Span)>>>,
     /// Direct child scope IDs.
     pub children: Vec<ScopeId>,
 }
@@ -81,6 +83,7 @@ impl Scope {
             ordered,
             items: ItemScope::new(),
             pattern_result_outputs: None,
+            trait_parent_paths: None,
             children: Vec::new(),
         }
     }
@@ -103,6 +106,7 @@ impl fmt::Debug for Scope {
             .field("owner_def", &self.owner_def)
             .field("ordered", &self.ordered)
             .field("pattern_result_outputs", &self.pattern_result_outputs)
+            .field("trait_parent_paths", &self.trait_parent_paths)
             .field("children", &self.children)
             .finish()
     }

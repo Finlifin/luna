@@ -27,6 +27,7 @@ pub mod completed_values;
 pub mod comptime_values;
 
 pub mod effects;
+pub mod error_results;
 
 pub mod free_bindings;
 pub mod preparation;
@@ -47,6 +48,7 @@ pub use nominal_parameters::{
     AdmissionError as NominalAdmissionError, binders as declaration_parameters,
     validate_completed as validate_declaration_arguments,
     validate_completed_with_layouts as validate_declaration_arguments_with_layouts,
+    validate_with_evidence as validate_declaration_arguments_with_evidence,
 };
 
 pub mod copy_budget;

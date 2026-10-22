@@ -15,7 +15,17 @@ impl Interpreter<'_> {
                 return Ok(true);
             }
         }
-        if let Term::Computation { effects, .. } = result.as_ref() {
+        if let Term::Computation { effects, result } = result.as_ref() {
+            if !effects.is_empty() {
+                if self.cleanup_value_context(result, 0, true)? {
+                    return Ok(true);
+                }
+                for parameter in parameters {
+                    if self.cleanup_value_context(&parameter.ty, 0, true)? {
+                        return Ok(true);
+                    }
+                }
+            }
             for operation in effects {
                 self.tick(None)?;
                 let required = self
@@ -47,7 +57,7 @@ impl Interpreter<'_> {
                                 .checked_sub(work + 1)
                                 .ok_or("effect cleanup contract budget exhausted")?;
                             for argument in &operation.arguments {
-                                let work = type_value_work(argument, &self.normal_forms)
+                                let work = instance_argument_work(argument, &self.normal_forms)
                                     .ok_or("effect cleanup contract budget exhausted")?;
                                 *fuel = fuel
                                     .checked_sub(work)
@@ -86,32 +96,54 @@ impl Interpreter<'_> {
         checked.map_err(|_| self.failure(ErrorKind::InvalidCallPlan, None))?;
         let mut contexts = HashMap::new();
         for (operation, signature) in signatures {
-            let Term::Function { result, .. } = signature else {
+            let Term::Function { parameters, result } = signature else {
                 return Err(self.failure(ErrorKind::InvalidCallPlan, None));
             };
-            contexts.insert(operation, self.cleanup_callable_value(&result, 0)?);
+            let mut required = self.cleanup_callable_value(&result, 0)?
+                || self.cleanup_value_context(&result, 0, true)?;
+            for parameter in &parameters {
+                required |= self.cleanup_value_context(&parameter.ty, 0, true)?;
+            }
+            contexts.insert(operation, required);
         }
         self.cleanup_effect_context = contexts;
         Ok(())
     }
     fn cleanup_callable_value(&mut self, ty: &Term, depth: usize) -> Result<bool, Error> {
+        self.cleanup_value_context(ty, depth, false)
+    }
+    fn cleanup_value_context(
+        &mut self,
+        ty: &Term,
+        depth: usize,
+        pointers_only: bool,
+    ) -> Result<bool, Error> {
         self.tick(None)?;
         if depth >= self.budget.depth {
             return Err(self.failure(ErrorKind::DepthExhausted, None));
         }
         if let Some(fields) = self.tuple_input_elements(ty) {
             for field in fields {
-                if self.cleanup_callable_value(field, depth + 1)? {
+                if self.cleanup_value_context(field, depth + 1, pointers_only)? {
                     return Ok(true);
                 }
             }
             return Ok(false);
         }
         match ty {
-            Term::Function { .. } | Term::Closure { .. } => return Ok(true),
+            Term::Pointer(_) if pointers_only => return Ok(true),
+            Term::Closure { environment, .. } if pointers_only => {
+                for field in environment {
+                    if self.cleanup_value_context(field, depth + 1, true)? {
+                        return Ok(true);
+                    }
+                }
+                return Ok(false);
+            }
+            Term::Function { .. } | Term::Closure { .. } => return Ok(!pointers_only),
             Term::Record(fields) => {
                 for (_, field) in fields {
-                    if self.cleanup_callable_value(field, depth + 1)? {
+                    if self.cleanup_value_context(field, depth + 1, pointers_only)? {
                         return Ok(true);
                     }
                 }
@@ -132,11 +164,15 @@ impl Interpreter<'_> {
                     found.ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, None))?;
                 match definition {
                     iir::NominalDefinition::Newtype(definition) => {
-                        return self.cleanup_callable_value(&definition.representation, depth + 1);
+                        return self.cleanup_value_context(
+                            &definition.representation,
+                            depth + 1,
+                            pointers_only,
+                        );
                     }
                     iir::NominalDefinition::Struct(definition) => {
                         for (_, field) in &definition.fields {
-                            if self.cleanup_callable_value(field, depth + 1)? {
+                            if self.cleanup_value_context(field, depth + 1, pointers_only)? {
                                 return Ok(true);
                             }
                         }
@@ -144,7 +180,7 @@ impl Interpreter<'_> {
                     iir::NominalDefinition::Enum(definition) => {
                         for variant in &definition.variants {
                             for field in &variant.fields {
-                                if self.cleanup_callable_value(field, depth + 1)? {
+                                if self.cleanup_value_context(field, depth + 1, pointers_only)? {
                                     return Ok(true);
                                 }
                             }
@@ -419,10 +455,11 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Vec<Term>, Error> {
         self.copy_work(arguments.len(), source)?;
         for argument in arguments {
-            let work = scoped_term_value_work_with_layouts(
+            let work = scoped_term_value_work_with_evidence(
                 argument,
                 &self.normal_forms,
                 &self.abstract_type_parameters,
+                &self.abstract_value_parameters,
                 |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
             )
             .ok_or_else(|| self.failure(ErrorKind::RepresentationSizeLimit, Some(source)))?;
@@ -540,7 +577,7 @@ impl<'a> Interpreter<'a> {
                 )
             }
             Value::Newtype { ty, value } => {
-                self.copy_type_work(ty, source)?;
+                self.copy_invocation_type_work(ty, source, preserve_identity)?;
                 Value::Newtype {
                     ty: ty.clone(),
                     value: Box::new(self.clone_representation(

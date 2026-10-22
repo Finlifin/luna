@@ -263,9 +263,12 @@ pub fn select(
         .iter()
         .find(|f| f.declaration == body)
         .ok_or("Drop selected method body is missing")?;
+    let mut binder_fuel = budget.steps;
+    let binders =
+        super::memory::memory_binders(Some(package), &function.type_parameters, &mut binder_fuel)?;
     let actual = function
         .signature
-        .instantiate_types(&function.type_parameters, &arguments)
+        .instantiate_parameters(&binders, &arguments)
         .map_err(|e| e.to_string())?;
     if function.phase != FunctionPhase::Runtime
         || actual != signature(subject.clone())
@@ -276,7 +279,7 @@ pub fn select(
     }
     for requirement in &function.requirements {
         let requirement = requirement
-            .instantiate_types(&function.type_parameters, &arguments)
+            .instantiate_parameters(&binders, &arguments)
             .map_err(|e| e.to_string())?;
         if !matches!(
             world
@@ -295,12 +298,12 @@ pub fn select(
         result_binding: function.result_binding,
         entry_snapshots: function.entry_snapshots.clone(),
     }
-    .instantiate_types(&function.type_parameters, &arguments)
+    .instantiate_parameters(&binders, &arguments)
     .map_err(|e| e.to_string())?;
     let mut capabilities: Vec<_> = function
         .capabilities
         .iter()
-        .map(|c| c.instantiate_types(&function.type_parameters, &arguments))
+        .map(|c| c.instantiate_parameters(&binders, &arguments))
         .collect::<Result<_, _>>()
         .map_err(|e| e.to_string())?;
     for capability in &trait_contract.capabilities {

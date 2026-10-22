@@ -6,7 +6,7 @@ use super::*;
 impl Checker<'_, '_> {
     // Keep incomplete aggregate evidence private to the call candidate. A
     // numeric literal with no completed target contributes no default type.
-    pub(super) fn generator_partial_input_hint(
+    pub(in crate::program::cmtt) fn generator_partial_input_hint(
         &mut self,
         value: &Expr<'_>,
         expected: Option<&Term>,

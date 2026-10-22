@@ -839,6 +839,8 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     | NodeKind::NormalFormHeadDef
                     | NodeKind::TypealiasDef
                     | NodeKind::NewtypeDef
+                    | NodeKind::StructDef
+                    | NodeKind::EnumDef
                     | NodeKind::ConstDef
                     | NodeKind::ConstDecl
                     | NodeKind::ImplDef
@@ -854,6 +856,8 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                             Some(
                                 NodeKind::TypealiasDef
                                     | NodeKind::NewtypeDef
+                                    | NodeKind::StructDef
+                                    | NodeKind::EnumDef
                                     | NodeKind::Function
                                     | NodeKind::NormalFormHeadDef
                                     | NodeKind::ConstDef
@@ -873,6 +877,8 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                                     | NodeKind::NormalFormHeadDef
                                     | NodeKind::TypealiasDef
                                     | NodeKind::NewtypeDef
+                                    | NodeKind::StructDef
+                                    | NodeKind::EnumDef
                                     | NodeKind::ConstDef
                                     | NodeKind::ConstDecl
                                     | NodeKind::ImplDef
@@ -1186,6 +1192,8 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     NodeKind::Function
                     | NodeKind::TypealiasDef
                     | NodeKind::NewtypeDef
+                    | NodeKind::StructDef
+                    | NodeKind::EnumDef
                     | NodeKind::ConstDef
                     | NodeKind::ConstDecl,
                 ) => {
@@ -1199,6 +1207,8 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                             Some(
                                 NodeKind::TypealiasDef
                                     | NodeKind::NewtypeDef
+                                    | NodeKind::StructDef
+                                    | NodeKind::EnumDef
                                     | NodeKind::Function
                                     | NodeKind::NormalFormHeadDef
                                     | NodeKind::ConstDef
@@ -1217,6 +1227,8 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                                 NodeKind::Function
                                     | NodeKind::TypealiasDef
                                     | NodeKind::NewtypeDef
+                                    | NodeKind::StructDef
+                                    | NodeKind::EnumDef
                                     | NodeKind::ConstDef
                                     | NodeKind::ConstDecl
                             )

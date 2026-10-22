@@ -8,12 +8,21 @@ use crate::verification::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+/// A payload layout is meaningful only under this cleanup branch's tag.
+pub(super) struct VariantLayout {
+    pub index: usize,
+    pub fields: Vec<Term>,
+}
+
 /// Borrowed evidence for one cleanup instant, not a persistent certificate.
 /// Every alternative in a stored pointer must satisfy the access obligation.
 #[derive(Clone, Copy)]
 pub struct PointerMemory<'a> {
     pub types: &'a BTreeMap<PlaceId, Term>,
     pub slots: &'a BTreeMap<Place, BTreeSet<Place>>,
+    /// Current tag domains and per-target qualifiers, never entry-time facts.
+    pub enum_domains: &'a BTreeMap<PlaceId, BTreeMap<Vec<usize>, BTreeSet<usize>>>,
+    pub pointer_conditions: &'a BTreeMap<Place, BTreeMap<Place, Vec<(Vec<usize>, usize)>>>,
     /// Positions already destroyed earlier in this cleanup sequence.
     pub retired: &'a [Place],
 }
@@ -89,7 +98,7 @@ pub(super) fn check_access_with_layout(
     state: &State,
     receiver: &Place,
     pointers: Option<PointerMemory<'_>>,
-    variant_layouts: &BTreeMap<Place, Vec<Term>>,
+    variant_layouts: &BTreeMap<Place, VariantLayout>,
     fuel: &mut usize,
 ) -> Result<AccessCheck, String> {
     if *fuel == 0 {
@@ -148,13 +157,14 @@ pub(super) fn check_access_with_layout(
         .iter()
         .find(|function| function.declaration == selected.method.body)
         .ok_or("captured Drop body is missing")?;
+    let binders = memory::memory_binders(Some(package), &function.type_parameters, fuel)?;
     let program = ProgramContract {
         preconditions: function.preconditions.clone(),
         postconditions: function.postconditions.clone(),
         result_binding: function.result_binding,
         entry_snapshots: function.entry_snapshots.clone(),
     }
-    .instantiate_types(&function.type_parameters, &selected.method.arguments)
+    .instantiate_parameters(&binders, &selected.method.arguments)
     .map_err(|error| error.to_string())?;
     if function.parameters != selected.parameters || program != selected.program {
         return Err("captured Drop body contract changed".into());
@@ -182,7 +192,7 @@ pub(super) fn check_access_with_layout(
         footprint
             .accesses
             .iter()
-            .any(|a| !a.target.through.is_empty())
+            .any(|a| !a.target.through.is_empty() || !a.target.conditions.is_empty())
     }) {
         if place_type(package, pointers.types, receiver, variant_layouts, fuel)? != selected.subject
         {
@@ -191,6 +201,14 @@ pub(super) fn check_access_with_layout(
     }
     let mut resolved = Vec::new();
     for access in &footprint.accesses {
+        if access
+            .target
+            .conditions
+            .keys()
+            .any(|stage| *stage > access.target.through.len())
+        {
+            return Err("Drop guard stage out of bounds".into());
+        }
         if !access.target.input_fields.is_empty() {
             return Err(
                 "Drop receiver footprint cannot originate in a by-value input field".into(),
@@ -201,8 +219,24 @@ pub(super) fn check_access_with_layout(
         }
         let mut targets = BTreeSet::from([receiver.clone()]);
         let mut ty = selected.subject.clone();
-        for fields in &access.target.through {
-            project(package, &mut ty, &mut targets, fields, fuel)?;
+        for (stage, fields) in access.target.through.iter().enumerate() {
+            let guards = access
+                .target
+                .conditions
+                .get(&stage)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let projected = project_conditional(
+                package,
+                &mut ty,
+                &mut targets,
+                fields,
+                guards,
+                pointers,
+                variant_layouts,
+                state,
+                fuel,
+            )?;
             let pointers =
                 pointers.ok_or("indirect Drop access requires stored pointer provenance")?;
             let Term::Pointer(subject) = ty else {
@@ -211,9 +245,11 @@ pub(super) fn check_access_with_layout(
             let mut loaded = BTreeSet::new();
             for slot in &targets {
                 check_retired(pointers.retired, slot, fuel)?;
-                state
-                    .require_present(slot)
-                    .map_err(|e| format!("Drop pointer slot {slot} is unavailable: {e:?}"))?;
+                if guards.is_empty() {
+                    state
+                        .require_present(slot)
+                        .map_err(|e| format!("Drop pointer slot {slot} is unavailable: {e:?}"))?;
+                }
                 let values = pointers
                     .slots
                     .get(slot)
@@ -221,6 +257,29 @@ pub(super) fn check_access_with_layout(
                     .ok_or("indirect Drop access requires stored pointer provenance")?;
                 for target in values {
                     charge(fuel, target.fields.len().saturating_add(1))?;
+                    if let Some(required) = projected.get(slot) {
+                        if let Some(conditions) = pointers
+                            .pointer_conditions
+                            .get(slot)
+                            .and_then(|entries| entries.get(target))
+                        {
+                            charge(
+                                fuel,
+                                conditions
+                                    .iter()
+                                    .map(|(path, _)| path.len() + 1)
+                                    .sum::<usize>()
+                                    .saturating_mul(required.len().saturating_add(1)),
+                            )?;
+                            if conditions.iter().any(|(path, tag)| {
+                                required
+                                    .iter()
+                                    .any(|(selected, actual)| path == selected && tag != actual)
+                            }) {
+                                continue;
+                            }
+                        }
+                    }
                     // Loading an address need not read its pointee, but its
                     // storage must still belong to the current state.
                     state.require_place(target).map_err(|e| {
@@ -237,13 +296,32 @@ pub(super) fn check_access_with_layout(
             targets = loaded;
             ty = *subject;
         }
-        project(package, &mut ty, &mut targets, &access.target.fields, fuel)?;
+        let guards = access
+            .target
+            .conditions
+            .get(&access.target.through.len())
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        project_conditional(
+            package,
+            &mut ty,
+            &mut targets,
+            &access.target.fields,
+            guards,
+            pointers,
+            variant_layouts,
+            state,
+            fuel,
+        )?;
         if ty != access.ty {
             return Err("Drop access type disagrees with receiver layout".into());
         }
         for target in &targets {
             charge(fuel, target.fields.len().saturating_add(1))?;
-            let checked = if access.read_value {
+            let checked = if !guards.is_empty() {
+                // The typed projection checked its whole containing enum.
+                Ok(())
+            } else if access.read_value {
                 if let Some(pointers) = pointers {
                     check_retired(pointers.retired, target, fuel)?;
                 }
@@ -272,6 +350,103 @@ pub(super) fn check_access_with_layout(
         footprint,
         targets: resolved,
     })
+}
+
+fn enclosing_variant_conditions(
+    place: &Place,
+    layouts: &BTreeMap<Place, VariantLayout>,
+    fuel: &mut usize,
+) -> Result<Vec<(Vec<usize>, usize)>, String> {
+    let mut conditions = Vec::new();
+    for (container, layout) in layouts {
+        charge(fuel, container.fields.len() + place.fields.len() + 1)?;
+        if container.root == place.root && place.fields.starts_with(&container.fields) {
+            conditions.push((container.fields.clone(), layout.index));
+        }
+    }
+    Ok(conditions)
+}
+
+/// Project one load stage. Conditions refer to this root, and an opaque enum's
+/// complete owner supplies availability for its conditionally existing payload.
+fn project_conditional(
+    package: &Package,
+    ty: &mut Term,
+    targets: &mut BTreeSet<Place>,
+    fields: &[(nir::program::FieldOwner, usize)],
+    guards: &[(Vec<usize>, usize)],
+    pointers: Option<PointerMemory<'_>>,
+    variant_layouts: &BTreeMap<Place, VariantLayout>,
+    state: &State,
+    fuel: &mut usize,
+) -> Result<BTreeMap<Place, Vec<(Vec<usize>, usize)>>, String> {
+    if guards.is_empty() {
+        if variant_layouts.is_empty() {
+            project(package, ty, targets, fields, fuel)?;
+            return Ok(BTreeMap::new());
+        }
+        let mut selected = BTreeMap::new();
+        for base in targets.iter() {
+            let conditions = enclosing_variant_conditions(base, variant_layouts, fuel)?;
+            if !conditions.is_empty() {
+                charge(fuel, base.fields.len() + fields.len() + 1)?;
+                let mut slot = base.clone();
+                slot.fields.extend(fields.iter().map(|(_, index)| *index));
+                selected.insert(slot, conditions);
+            }
+        }
+        project(package, ty, targets, fields, fuel)?;
+        return Ok(selected);
+    }
+    let pointers = pointers.ok_or("conditional Drop access requires a memory snapshot")?;
+    let mut traversal = memory::StorageTraversal::new(Some(package), ty, &[], fuel)?;
+    traversal.then_guarded(Some(package), fields, guards, fuel)?;
+    let mut selected = BTreeMap::new();
+    for base in targets.iter() {
+        charge(fuel, base.fields.len() + fields.len() + 1)?;
+        let domains = pointers.enum_domains.get(&base.root);
+        let inherited = enclosing_variant_conditions(base, variant_layouts, fuel)?;
+        let mut qualified = Vec::new();
+        for (depth, field) in base.fields.iter().enumerate() {
+            charge(fuel, inherited.len() + 1)?;
+            for (_, tag) in inherited.iter().filter(|(path, _)| path.len() == depth) {
+                qualified.extend([usize::MAX, *tag]);
+            }
+            qualified.push(*field);
+        }
+        charge(fuel, qualified.len().saturating_mul(guards.len()))?;
+        let activity = memory::storage_guard_activity(guards, fuel, |path, tag| {
+            let mut absolute = qualified.clone();
+            absolute.extend(path);
+            match domains.and_then(|domains| domains.get(&absolute)) {
+                Some(tags) if !tags.contains(&tag) => memory::GuardActivity::Inactive,
+                Some(tags) if tags.len() == 1 => memory::GuardActivity::Active,
+                _ => memory::GuardActivity::Conditional,
+            }
+        })?;
+        if activity == memory::GuardActivity::Inactive {
+            continue;
+        }
+        let mut owner = base.clone();
+        owner.fields.extend(&guards[0].0);
+        check_retired(pointers.retired, &owner, fuel)?;
+        state
+            .require_present(&owner)
+            .map_err(|e| format!("Drop conditional owner {owner} is unavailable: {e:?}"))?;
+        let mut absolute = inherited;
+        for (path, tag) in guards {
+            charge(fuel, base.fields.len() + path.len() + 1)?;
+            let mut container = base.fields.clone();
+            container.extend(path);
+            absolute.push((container, *tag));
+        }
+        let mut slot = base.clone();
+        slot.fields.extend(fields.iter().map(|(_, index)| *index));
+        selected.insert(slot, absolute);
+    }
+    *ty = traversal.target.ty;
+    *targets = selected.keys().cloned().collect();
+    Ok(selected)
 }
 
 fn charge(fuel: &mut usize, amount: usize) -> Result<(), String> {
@@ -318,7 +493,10 @@ fn field_type(
                 .get(index)
                 .ok_or("Drop field index is out of bounds")?
                 .1
-                .instantiate_types(&definition.type_parameters, arguments)
+                .instantiate_parameters(
+                    &definition.parameter_binders().map_err(|e| e.to_string())?,
+                    arguments,
+                )
                 .map_err(|e| e.to_string())
         }
         _ => Err("Drop field access has no aggregate layout".into()),
@@ -359,7 +537,7 @@ fn place_type(
     package: &Package,
     types: &BTreeMap<PlaceId, Term>,
     place: &Place,
-    variant_layouts: &BTreeMap<Place, Vec<Term>>,
+    variant_layouts: &BTreeMap<Place, VariantLayout>,
     fuel: &mut usize,
 ) -> Result<Term, String> {
     let ty = types
@@ -373,8 +551,9 @@ fn place_type(
             root: place.root,
             fields: place.fields[..depth].to_vec(),
         };
-        if let Some(fields) = variant_layouts.get(&prefix) {
-            let selected = fields
+        if let Some(layout) = variant_layouts.get(&prefix) {
+            let selected = layout
+                .fields
                 .get(*index)
                 .ok_or("Drop variant field index is out of bounds")?;
             memory::bound_type(selected, fuel)?;

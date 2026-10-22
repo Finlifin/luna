@@ -50,18 +50,35 @@ impl Newtype {
             &mut usize,
         ) -> Result<Vec<Term>, crate::NominalAdmissionError>,
     ) -> Result<(), crate::NominalAdmissionError> {
+        self.validate_completed_arguments_with_evidence(arguments, fuel, layout, |_, _, _| false)
+    }
+
+    /// Residual invocation may supply independent declaration-domain evidence.
+    /// Completed admission above remains closed to symbolic value inputs.
+    pub fn validate_completed_arguments_with_evidence(
+        &self,
+        arguments: &[Term],
+        fuel: &mut usize,
+        layout: impl FnMut(
+            &Term,
+            Option<u32>,
+            &mut usize,
+        ) -> Result<Vec<Term>, crate::NominalAdmissionError>,
+        declared: impl FnMut(&Term, &Term, &mut usize) -> bool,
+    ) -> Result<(), crate::NominalAdmissionError> {
         let own = self
             .type_parameters
             .len()
             .checked_sub(self.capture_count)
             .ok_or("invalid newtype capture count")?;
         if self.capture_count == 0 {
-            return crate::nominal_parameters::validate_completed_with_layouts(
+            return crate::nominal_parameters::validate_with_evidence(
                 &self.type_parameters,
                 &self.parameter_types,
                 arguments,
                 fuel,
                 layout,
+                declared,
             );
         }
         if arguments.len() != self.type_parameters.len()
@@ -97,12 +114,13 @@ impl Newtype {
             .iter()
             .map(|&i| arguments[i].clone())
             .collect::<Vec<_>>();
-        crate::nominal_parameters::validate_completed_with_layouts(
+        crate::nominal_parameters::validate_with_evidence(
             &parameters,
             &domains,
             &arguments,
             fuel,
             layout,
+            declared,
         )
     }
 

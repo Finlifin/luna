@@ -27,17 +27,46 @@ pub struct ParameterPlace {
     /// `fields` selects the final place after all these loads.
     pub through: Vec<Vec<(nir::program::FieldOwner, usize)>>,
     pub fields: Vec<(nir::program::FieldOwner, usize)>,
+    /// Payload guards by load stage; the final stage is `through.len()`.
+    pub conditions: BTreeMap<usize, Vec<(Vec<usize>, usize)>>,
 }
 impl ParameterPlace {
     fn path_cost(&self) -> usize {
         self.through.iter().fold(
-            self.fields
-                .len()
-                .saturating_add(self.input_fields.len())
-                .saturating_add(1),
+            condition_cost(&self.conditions).saturating_add(
+                self.fields
+                    .len()
+                    .saturating_add(self.input_fields.len())
+                    .saturating_add(1),
+            ),
             |cost, fields| cost.saturating_add(fields.len()).saturating_add(1),
         )
     }
+}
+fn condition_cost(conditions: &BTreeMap<usize, Vec<(Vec<usize>, usize)>>) -> usize {
+    conditions
+        .values()
+        .flatten()
+        .fold(conditions.len(), |cost, (path, _)| {
+            cost.saturating_add(path.len()).saturating_add(2)
+        })
+}
+fn display_conditions(
+    conditions: &BTreeMap<usize, Vec<(Vec<usize>, usize)>>,
+    f: &mut fmt::Formatter<'_>,
+) -> fmt::Result {
+    for (stage, guards) in conditions {
+        write!(f, " (conditions (stage {stage})")?;
+        for (path, tag) in guards {
+            f.write_str(" (guard (fields")?;
+            for field in path {
+                write!(f, " {field}")?;
+            }
+            write!(f, ") (variant {tag}))")?;
+        }
+        f.write_str(")")?;
+    }
+    Ok(())
 }
 // Internal roots never enter a published parameter footprint.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -51,6 +80,7 @@ struct PointerPlace {
     input_fields: Vec<usize>,
     through: Vec<Vec<(nir::program::FieldOwner, usize)>>,
     fields: Vec<(nir::program::FieldOwner, usize)>,
+    conditions: BTreeMap<usize, Vec<(Vec<usize>, usize)>>,
 }
 trait TargetCost {
     fn target_cost(&self) -> usize;
@@ -68,10 +98,12 @@ impl TargetCost for PointerPlace {
 impl PointerPlace {
     fn path_cost(&self) -> usize {
         self.through.iter().fold(
-            self.fields
-                .len()
-                .saturating_add(self.input_fields.len())
-                .saturating_add(1),
+            condition_cost(&self.conditions).saturating_add(
+                self.fields
+                    .len()
+                    .saturating_add(self.input_fields.len())
+                    .saturating_add(1),
+            ),
             |cost, path| cost.saturating_add(path.len()).saturating_add(1),
         )
     }
@@ -82,8 +114,40 @@ impl PointerPlace {
                     .into(),
             );
         }
-        if self.path_cost().saturating_add(suffix.path_cost()) > 128 {
+        if suffix
+            .conditions
+            .keys()
+            .any(|stage| *stage > suffix.through.len())
+        {
+            return Err("memory guard stage out of bounds".into());
+        }
+        let rebasing = self
+            .fields
+            .len()
+            .saturating_mul(suffix.conditions.get(&0).map_or(0, Vec::len));
+        if self
+            .path_cost()
+            .saturating_add(suffix.path_cost())
+            .saturating_add(rebasing)
+            > 128
+        {
             return Err("memory pointer path depth exhausted".into());
+        }
+        let stage = self.through.len();
+        for (offset, guards) in &suffix.conditions {
+            let selected = self.conditions.entry(stage + offset).or_default();
+            for (path, tag) in guards {
+                let mut prefix = if *offset == 0 {
+                    self.fields
+                        .iter()
+                        .map(|(_, index)| *index)
+                        .collect::<Vec<_>>()
+                } else {
+                    vec![]
+                };
+                prefix.extend(path);
+                selected.push((prefix, *tag));
+            }
         }
         for fields in &suffix.through {
             self.fields.extend_from_slice(fields);
@@ -107,6 +171,7 @@ impl PointerPlace {
             parameter,
             input_fields: self.input_fields,
             through: self.through,
+            conditions: self.conditions,
             fields: self.fields,
         })
     }
@@ -140,7 +205,9 @@ impl fmt::Display for PointerPlace {
         for (owner, index) in &self.fields {
             write!(f, " (field {owner} {index})")?;
         }
-        f.write_str("))")
+        f.write_str(")")?;
+        display_conditions(&self.conditions, f)?;
+        f.write_str(")")
     }
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -302,11 +369,12 @@ impl fmt::Display for CallableResult {
     }
 }
 mod effects;
-pub(crate) use effects::effect_data_layout;
+pub(crate) use effects::effect_transfer_layout;
 pub use effects::{
-    ConditionalClosureSummary, EffectInput, infer_closure_with_effect_inputs,
-    infer_with_effect_inputs,
+    ConditionalClosureSummary, EffectInput, EffectParameterAccess, HandlerParameterSummary,
+    infer_closure_with_effect_inputs, infer_handler_arm_memory, infer_with_effect_inputs,
 };
+pub(crate) use effects::{direct_handler_accesses, effect_data_layout};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Summary {
@@ -359,7 +427,9 @@ impl fmt::Display for ParameterPlace {
         for (declaration, index) in &self.fields {
             write!(f, " (field {declaration} {index})")?;
         }
-        f.write_str("))")
+        f.write_str(")")?;
+        display_conditions(&self.conditions, f)?;
+        f.write_str(")")
     }
 }
 impl fmt::Display for Access {
@@ -466,6 +536,17 @@ impl CallablePlace {
             fields: vec![],
         }
     }
+}
+// Lexicographic paths keep a subtree contiguous. Stop at its first sibling;
+// unrelated roots and later fields must not consume projection fuel.
+fn callable_subtree<'a, T>(
+    values: &'a BTreeMap<CallablePlace, T>,
+    place: &CallablePlace,
+) -> impl Iterator<Item = (&'a CallablePlace, &'a T)> {
+    let place = place.clone();
+    values.range(place.clone()..).take_while(move |(leaf, _)| {
+        leaf.binding == place.binding && leaf.fields.starts_with(&place.fields)
+    })
 }
 impl fmt::Display for CallablePlace {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -715,7 +796,7 @@ fn display_owned_path(path: &[usize], f: &mut fmt::Formatter<'_>) -> fmt::Result
     Ok(())
 }
 
-fn owned_variants(
+pub(crate) fn owned_variants(
     package: Option<&Package>,
     ty: &Term,
     fuel: &mut usize,
@@ -793,11 +874,336 @@ pub(crate) fn owned_path_type(
     }
     Ok(ty)
 }
+/// A checked storage projection. Guards name enum containers in physical
+/// coordinates relative to the supplied root, before the corresponding payload.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StorageProjection {
+    pub fields: Vec<(nir::program::FieldOwner, usize)>,
+    pub guards: Vec<(Vec<usize>, usize)>,
+    pub ty: Term,
+}
+/// Truth of a storage guard in the current program state, not a type proof.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuardActivity {
+    Active,
+    Inactive,
+    Conditional,
+}
+impl fmt::Display for GuardActivity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Active => "(guard-activity active)",
+            Self::Inactive => "(guard-activity inactive)",
+            Self::Conditional => "(guard-activity conditional)",
+        })
+    }
+}
+/// Query each enum domain with its enclosing variant selections in the path.
+/// Raw physical paths are insufficient: distinct variants can share a slot.
+/// An inactive outer guard short-circuits before touching an absent payload.
+pub fn storage_guard_activity(
+    guards: &[(Vec<usize>, usize)],
+    fuel: &mut usize,
+    mut query: impl FnMut(&[usize], usize) -> GuardActivity,
+) -> Result<GuardActivity, String> {
+    let mut activity = GuardActivity::Active;
+    for (index, (fields, tag)) in guards.iter().enumerate() {
+        let length = fields.len().saturating_add(index.saturating_mul(2));
+        if length > 128 {
+            return Err("storage guard depth exhausted".into());
+        }
+        *fuel = fuel
+            .checked_sub(length.saturating_add(1))
+            .ok_or("storage guard budget exhausted")?;
+        if index > 0 {
+            let previous = &guards[index - 1].0;
+            *fuel = fuel
+                .checked_sub(previous.len().saturating_add(1))
+                .ok_or("storage guard budget exhausted")?;
+            if previous.len() >= fields.len() || !fields.starts_with(previous) {
+                return Err("storage guards are not an ordered ancestor chain".into());
+            }
+        }
+        let mut symbolic = Vec::with_capacity(length);
+        let mut ancestors = guards[..index].iter().peekable();
+        for (depth, field) in fields.iter().enumerate() {
+            if ancestors
+                .peek()
+                .is_some_and(|(path, _)| path.len() == depth)
+            {
+                let (_, selected) = ancestors.next().unwrap();
+                symbolic.extend([VARIANT_FIELD, *selected]);
+            }
+            symbolic.push(*field);
+        }
+        match query(&symbolic, *tag) {
+            GuardActivity::Inactive => return Ok(GuardActivity::Inactive),
+            GuardActivity::Conditional => activity = GuardActivity::Conditional,
+            GuardActivity::Active => (),
+        }
+    }
+    Ok(activity)
+}
+impl StorageProjection {
+    pub fn activity(
+        &self,
+        fuel: &mut usize,
+        query: impl FnMut(&[usize], usize) -> GuardActivity,
+    ) -> Result<GuardActivity, String> {
+        storage_guard_activity(&self.guards, fuel, query)
+    }
+}
+impl fmt::Display for StorageProjection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("(storage-projection (fields")?;
+        for (owner, index) in &self.fields {
+            write!(f, " (field {owner} {index})")?;
+        }
+        f.write_str(") (guards")?;
+        for (path, tag) in &self.guards {
+            f.write_str(" (guard (fields")?;
+            for index in path {
+                write!(f, " {index}")?;
+            }
+            write!(f, ") (variant {tag}))")?;
+        }
+        write!(f, ") (type {}))", self.ty)
+    }
+}
+/// Resolve the same symbolic variant paths used by pointer input/result leaves.
+/// This describes conditional storage; it does not prove the guards hold.
+pub fn project_owned_storage(
+    package: Option<&Package>,
+    root: &Term,
+    path: &[usize],
+    fuel: &mut usize,
+) -> Result<StorageProjection, String> {
+    bound_type(root, fuel)?;
+    let mut result = StorageProjection {
+        fields: vec![],
+        guards: vec![],
+        ty: root.clone(),
+    };
+    extend_storage_projection(package, &mut result, path, fuel)?;
+    Ok(result)
+}
+impl StorageProjection {
+    /// Continue a checked projection within the same storage root. No pointer
+    /// load occurs here: guards in the suffix retain the outer field prefix.
+    /// Failure leaves the original projection unchanged; fuel remains consumed.
+    pub fn then(
+        &self,
+        package: Option<&Package>,
+        path: &[usize],
+        fuel: &mut usize,
+    ) -> Result<Self, String> {
+        bound_type(&self.ty, fuel)?;
+        let cost = self
+            .guards
+            .iter()
+            .fold(self.fields.len().saturating_add(1), |cost, (fields, _)| {
+                cost.saturating_add(fields.len()).saturating_add(1)
+            });
+        *fuel = fuel
+            .checked_sub(cost)
+            .ok_or("storage projection copy budget exhausted")?;
+        let mut result = self.clone();
+        extend_storage_projection(package, &mut result, path, fuel)?;
+        Ok(result)
+    }
+}
+/// A typed traversal across distinct pointee storage roots. Each load keeps
+/// its own root-relative guards; target guards belong only to the last root.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StorageTraversal {
+    pub loads: Vec<StorageProjection>,
+    pub target: StorageProjection,
+}
+impl StorageTraversal {
+    pub fn new(
+        package: Option<&Package>,
+        root: &Term,
+        path: &[usize],
+        fuel: &mut usize,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            loads: vec![],
+            target: project_owned_storage(package, root, path, fuel)?,
+        })
+    }
+    fn check_extension(&self, extra: usize, fuel: &mut usize) -> Result<(), String> {
+        let mut depth = self.loads.len().saturating_add(extra);
+        for projection in self.loads.iter().chain(std::iter::once(&self.target)) {
+            *fuel = fuel
+                .checked_sub(1)
+                .ok_or("storage traversal budget exhausted")?;
+            depth = depth
+                .saturating_add(projection.fields.len())
+                .saturating_add(projection.guards.len().saturating_mul(2));
+        }
+        if depth > 128 {
+            return Err("storage traversal depth exhausted".into());
+        }
+        Ok(())
+    }
+    pub fn then(
+        &mut self,
+        package: Option<&Package>,
+        path: &[usize],
+        fuel: &mut usize,
+    ) -> Result<(), String> {
+        self.check_extension(path.len(), fuel)?;
+        let next = self.target.then(package, path, fuel)?;
+        self.target = next;
+        Ok(())
+    }
+    /// Load exactly one pointer. Conditions already accumulated remain attached
+    /// to that slot, and the new projection starts at the loaded pointee root.
+    pub fn load(
+        &mut self,
+        package: Option<&Package>,
+        path: &[usize],
+        fuel: &mut usize,
+    ) -> Result<(), String> {
+        self.check_extension(path.len().saturating_add(1), fuel)?;
+        let Term::Pointer(subject) = &self.target.ty else {
+            return Err("storage traversal load is not a pointer".into());
+        };
+        let next = project_owned_storage(package, subject, path, fuel)?;
+        let slot = std::mem::replace(&mut self.target, next);
+        self.loads.push(slot);
+        Ok(())
+    }
+    /// Validate a transported physical path and its payload-existence guards.
+    /// Both are relative to the current target; enclosing conditions are kept.
+    /// This reconstructs the typed path, without asserting that any tag holds.
+    pub fn then_guarded(
+        &mut self,
+        package: Option<&Package>,
+        fields: &[(nir::program::FieldOwner, usize)],
+        guards: &[(Vec<usize>, usize)],
+        fuel: &mut usize,
+    ) -> Result<(), String> {
+        let length = fields.len().saturating_add(guards.len().saturating_mul(2));
+        self.check_extension(length, fuel)?;
+        *fuel = fuel
+            .checked_sub(length.saturating_add(1))
+            .ok_or("transported storage path budget exhausted")?;
+        let mut previous_depth = None;
+        for (container, _) in guards {
+            *fuel = fuel
+                .checked_sub(container.len().saturating_add(1))
+                .ok_or("transported storage guard budget exhausted")?;
+            if container.len() >= fields.len()
+                || previous_depth.is_some_and(|depth| depth >= container.len())
+                || !container
+                    .iter()
+                    .copied()
+                    .eq(fields.iter().take(container.len()).map(|(_, index)| *index))
+            {
+                return Err(
+                    "transported storage guards do not select an ordered payload path".into(),
+                );
+            }
+            previous_depth = Some(container.len());
+        }
+        let mut path = Vec::with_capacity(length);
+        let mut conditions = guards.iter().peekable();
+        for (depth, (_, index)) in fields.iter().enumerate() {
+            if conditions
+                .peek()
+                .is_some_and(|(container, _)| container.len() == depth)
+            {
+                let (_, tag) = conditions.next().unwrap();
+                path.extend([VARIANT_FIELD, *tag]);
+            }
+            path.push(*index);
+        }
+        let next = self.target.then(package, &path, fuel)?;
+        if next.fields[self.target.fields.len()..] != *fields {
+            return Err("storage projection field owner mismatch".into());
+        }
+        self.target = next;
+        Ok(())
+    }
+}
+impl fmt::Display for StorageTraversal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("(storage-traversal (loads")?;
+        for slot in &self.loads {
+            write!(f, " (load {slot})")?;
+        }
+        write!(f, ") (target {}))", self.target)
+    }
+}
+
+fn extend_storage_projection(
+    package: Option<&Package>,
+    result: &mut StorageProjection,
+    path: &[usize],
+    fuel: &mut usize,
+) -> Result<(), String> {
+    if result
+        .fields
+        .len()
+        .saturating_add(result.guards.len().saturating_mul(2))
+        .saturating_add(path.len())
+        > 128
+    {
+        return Err("storage projection depth exhausted".into());
+    }
+    let mut cursor = 0;
+    while cursor < path.len() {
+        *fuel = fuel
+            .checked_sub(result.fields.len() + 1)
+            .ok_or("storage projection budget exhausted")?;
+        if path[cursor] == VARIANT_FIELD {
+            let tail = path
+                .get(cursor + 1..cursor + 3)
+                .ok_or("incomplete storage variant path")?;
+            let Term::Nominal { declaration, .. } = &result.ty else {
+                return Err("storage variant owner is not nominal".into());
+            };
+            let owner = nir::program::FieldOwner::Nominal(*declaration);
+            let selected = owned_variants(package, &result.ty, fuel)?
+                .get(tail[0])
+                .and_then(|variant| variant.fields.get(tail[1]))
+                .cloned()
+                .ok_or("storage variant field index out of bounds")?;
+            result.guards.push((
+                result.fields.iter().map(|(_, index)| *index).collect(),
+                tail[0],
+            ));
+            result.fields.push((owner, tail[1]));
+            result.ty = selected;
+            cursor += 3;
+        } else {
+            let owner = if tuple_fields(package, &result.ty).is_some()
+                || matches!(result.ty, Term::Record(_))
+            {
+                nir::program::FieldOwner::Anonymous
+            } else if let Term::Nominal { declaration, .. } = &result.ty {
+                nir::program::FieldOwner::Nominal(*declaration)
+            } else {
+                return Err("storage field owner is not established".into());
+            };
+            result.ty = owned_path_type(package, &result.ty, &[path[cursor]], fuel)?;
+            result.fields.push((owner, path[cursor]));
+            cursor += 1;
+        }
+    }
+    Ok(())
+}
+
 fn result_callable_bottom(
     package: Option<&Package>,
     ty: &Term,
     fuel: &mut usize,
 ) -> Result<BTreeMap<Vec<usize>, CallableResult>, String> {
+    let ty = match ty {
+        Term::Computation { result, .. } => result,
+        ty => ty,
+    };
     owned_callable_bottom(package, ty, fuel, false)
 }
 // Mutation tracking must also visit environment-bearing callable leaves. They
@@ -952,6 +1358,10 @@ pub(crate) fn code_result_bottom(
     ty: &Term,
     fuel: &mut usize,
 ) -> Result<CodeFields, String> {
+    let ty = match ty {
+        Term::Computation { result, .. } => result,
+        ty => ty,
+    };
     Ok(owned_callable_bottom(package, ty, fuel, true)?
         .into_keys()
         .map(|path| (path, CodeResult::NoReturn))
@@ -1340,7 +1750,7 @@ pub(crate) fn readable_representation(
     ty: &Term,
     fuel: &mut usize,
 ) -> Result<bool, String> {
-    storage_representation(package, ty, fuel, true, true)
+    storage_representation(package, ty, fuel, true, true, false)
 }
 
 /// Whether captured storage can be replaced using pointer-leaf exit evidence.
@@ -1362,7 +1772,15 @@ pub(crate) fn data_representation(
     ty: &Term,
     fuel: &mut usize,
 ) -> Result<bool, String> {
-    storage_representation(package, ty, fuel, false, false)
+    storage_representation(package, ty, fuel, false, false, false)
+}
+
+pub(crate) fn copy_readable_representation(
+    package: Option<&Package>,
+    ty: &Term,
+    fuel: &mut usize,
+) -> Result<bool, String> {
+    storage_representation(package, ty, fuel, true, true, true)
 }
 
 fn storage_representation(
@@ -1371,6 +1789,7 @@ fn storage_representation(
     fuel: &mut usize,
     pointer: bool,
     code: bool,
+    nested_pointers: bool,
 ) -> Result<bool, String> {
     fn walk(
         package: Option<&Package>,
@@ -1379,6 +1798,7 @@ fn storage_representation(
         depth: usize,
         pointer: bool,
         code: bool,
+        nested_pointers: bool,
     ) -> Result<bool, String> {
         if depth >= 128 {
             return Err("read representation depth exhausted".into());
@@ -1389,7 +1809,15 @@ fn storage_representation(
         }
         if let Some(fields) = tuple_fields(package, ty) {
             for field in fields {
-                if !walk(package, field, fuel, depth + 1, false, code)? {
+                if !walk(
+                    package,
+                    field,
+                    fuel,
+                    depth + 1,
+                    pointer && nested_pointers,
+                    code,
+                    nested_pointers,
+                )? {
                     return Ok(false);
                 }
             }
@@ -1415,7 +1843,15 @@ fn storage_representation(
                     let value = definition
                         .representation_budgeted(arguments, &[], fuel)
                         .map_err(|e| e.to_string())?;
-                    return walk(Some(package), &value, fuel, depth + 1, pointer, code);
+                    return walk(
+                        Some(package),
+                        &value,
+                        fuel,
+                        depth + 1,
+                        pointer,
+                        code,
+                        nested_pointers,
+                    );
                 }
                 if let Some(definition) = package
                     .structs
@@ -1444,13 +1880,21 @@ fn storage_representation(
             _ => return Ok(false),
         };
         for field in fields {
-            if !walk(package, &field, fuel, depth + 1, false, code)? {
+            if !walk(
+                package,
+                &field,
+                fuel,
+                depth + 1,
+                pointer && nested_pointers,
+                code,
+                nested_pointers,
+            )? {
                 return Ok(false);
             }
         }
         Ok(true)
     }
-    walk(package, ty, fuel, 0, pointer, code)
+    walk(package, ty, fuel, 0, pointer, code, nested_pointers)
 }
 
 pub(crate) fn require_pointer_free_owned(
@@ -1555,6 +1999,7 @@ impl<'a> Infer<'a> {
                     root: PointerRoot::Parameter(parameter),
                     input_fields: fields,
                     through: vec![],
+                    conditions: BTreeMap::new(),
                     fields: vec![],
                 }])),
             );
@@ -1846,6 +2291,7 @@ impl<'a> Infer<'a> {
                                         root: PointerRoot::Parameter(input.parameter),
                                         input_fields,
                                         through: vec![],
+                                        conditions: BTreeMap::new(),
                                         fields: vec![],
                                     }])),
                                 );
@@ -2755,7 +3201,7 @@ impl<'a> Infer<'a> {
         }
         let mut values = BTreeMap::new();
         if let Some(place) = self.callable_place(expr)? {
-            for (leaf, keys) in &self.environment.local_candidates {
+            for (leaf, keys) in callable_subtree(&self.environment.local_candidates, &place) {
                 *self.fuel = self
                     .fuel
                     .checked_sub(leaf.fields.len() + keys.len() + 1)
@@ -2942,7 +3388,12 @@ impl<'a> Infer<'a> {
             | K::If { .. }
             | K::Match { .. }
             | K::Call { .. }
-            | K::NewtypeConvert(_) => {
+            | K::NewtypeConvert(_)
+            | K::ReadPointer(_)
+            | K::EffectRequest { .. }
+            | K::EffectComputation { .. }
+            | K::EffectRun { .. }
+            | K::EffectHandle { .. } => {
                 let key = self.callable_results.get(&(expr as *const Expr as usize));
                 if let Some(key) = key {
                     key.charge(self.fuel)?;
@@ -3004,7 +3455,7 @@ impl<'a> Infer<'a> {
         }
         if let Some(place) = self.callable_place(expr)? {
             let mut values = BTreeMap::new();
-            for (leaf, key) in &self.environment.callees {
+            for (leaf, key) in callable_subtree(&self.environment.callees, &place) {
                 *self.fuel = self
                     .fuel
                     .checked_sub(leaf.fields.len() + 1)
@@ -3813,6 +4264,7 @@ impl<'a> Infer<'a> {
                     },
                     input_fields: vec![],
                     through: vec![],
+                    conditions: BTreeMap::new(),
                     fields: vec![],
                 }
             }
@@ -3961,7 +4413,14 @@ impl<'a> Infer<'a> {
             }
             K::ReadPointer(_) => Ok(None),
             K::Return(_) => Ok(Some(BTreeSet::new())),
-            K::Call { .. } | K::Match { .. } | K::If { .. } | K::NewtypeConvert(_) => {
+            K::EffectHandle { .. }
+            | K::EffectRequest { .. }
+            | K::EffectRun { .. }
+            | K::EffectComputation { .. }
+            | K::Call { .. }
+            | K::Match { .. }
+            | K::If { .. }
+            | K::NewtypeConvert(_) => {
                 let targets = self
                     .expression_results
                     .get(&(expr as *const Expr as usize))
@@ -4060,8 +4519,20 @@ impl<'a> Infer<'a> {
             if *owner != binding {
                 return Err("local pointer load storage identity mismatch".into());
             }
-            let path: Vec<_> = first.iter().map(|(_, index)| *index).collect();
-            let ty = owned_path_type(self.package, root, &path, self.fuel)?;
+            let guards = target.conditions.get(&0).map(Vec::as_slice).unwrap_or(&[]);
+            let mut traversal = StorageTraversal::new(self.package, root, &[], self.fuel)?;
+            traversal.then_guarded(self.package, first, guards, self.fuel)?;
+            let ty = traversal.target.ty;
+            let mut path = Vec::new();
+            for (depth, (_, index)) in first.iter().enumerate() {
+                for (_, tag) in guards
+                    .iter()
+                    .filter(|(container, _)| container.len() == depth)
+                {
+                    path.extend([VARIANT_FIELD, *tag]);
+                }
+                path.push(*index);
+            }
             if !self.local_pointer_value(&ty)? {
                 return Err("local pointer load requires a pointer slot".into());
             }
@@ -4086,6 +4557,12 @@ impl<'a> Infer<'a> {
                 parameter: 0,
                 input_fields: vec![],
                 through: remaining.to_vec(),
+                conditions: target
+                    .conditions
+                    .iter()
+                    .filter(|(stage, _)| **stage > 0)
+                    .map(|(stage, guards)| (stage - 1, guards.clone()))
+                    .collect(),
                 fields: target.fields.clone(),
             };
             for mut origin in loaded {
@@ -4119,13 +4596,14 @@ impl<'a> Infer<'a> {
                 if *owner != binding {
                     return Err("local memory storage identity mismatch".into());
                 }
-                let path = target
-                    .fields
-                    .iter()
-                    .map(|(_, index)| *index)
-                    .collect::<Vec<_>>();
-                let actual = owned_path_type(self.package, root, &path, self.fuel)?;
-                if actual != ty {
+                let mut traversal = StorageTraversal::new(self.package, root, &[], self.fuel)?;
+                traversal.then_guarded(
+                    self.package,
+                    &target.fields,
+                    target.conditions.get(&0).map(Vec::as_slice).unwrap_or(&[]),
+                    self.fuel,
+                )?;
+                if traversal.target.ty != ty {
                     return Err("local memory access type mismatch".into());
                 }
                 continue;
@@ -4169,7 +4647,9 @@ impl<'a> Infer<'a> {
         Ok(Some(self.resolve_local_loads(targets)?))
     }
     fn merge_pointer_field_return(&mut self, value: &Expr) -> Result<(), String> {
-        if matches!(value.ty, Term::Closure { .. })
+        let ty = self.ty(&value.ty)?;
+        let ty = self.effect_completion(&ty)?;
+        if matches!(ty, Term::Closure { .. })
             && self
                 .local_candidates_for(value)?
                 .is_some_and(|ids| ids.is_empty())
@@ -4177,15 +4657,11 @@ impl<'a> Infer<'a> {
             return Ok(());
         }
         if matches!(
-            value.ty,
-            Term::Primitive(_)
-                | Term::Pointer(_)
-                | Term::Function { .. }
-                | Term::Computation { .. }
+            ty,
+            Term::Primitive(_) | Term::Pointer(_) | Term::Function { .. }
         ) {
             return Ok(());
         }
-        let ty = self.ty(&value.ty)?;
         if intrinsic_pointer_value(&ty) || self.local_pointer_value(&ty)? {
             return Ok(());
         }
@@ -4458,9 +4934,7 @@ impl<'a> Infer<'a> {
         }
     }
     fn guard_value_type(ty: &Term) -> bool {
-        matches!(ty, Term::Primitive(_)) && intrinsic_pointer_value(ty)
-            || matches!(ty, Term::Primitive(Primitive::Void))
-            || matches!(ty, Term::Function { .. })
+        nir::program::scalar_observation_shape(ty) || matches!(ty, Term::Function { .. })
     }
     fn walk_guard(&mut self, expr: &'a Expr, depth: usize) -> Result<(), String> {
         // Validation does not execute or install code evidence. The normal
@@ -4533,7 +5007,20 @@ impl<'a> Infer<'a> {
     }
     fn check_guard(&mut self, expr: &'a Expr, depth: usize) -> Result<(), String> {
         self.step(depth)?;
-        if matches!(expr.kind, K::Block { .. }) && self.package.is_some() {
+        let mut constructed = false;
+        if self.package.is_some() && !matches!(expr.kind, K::Block { .. }) {
+            nir::visit::expression_pruned(expr, self.fuel, |node, _| {
+                if constructed || matches!(node.kind, K::Closure { .. }) {
+                    return Ok(false);
+                }
+                constructed = matches!(
+                    node.kind,
+                    K::Tuple(_) | K::AnonymousRecord { .. } | K::Record { .. } | K::Variant { .. }
+                );
+                Ok(!constructed)
+            })?;
+        }
+        if (matches!(expr.kind, K::Block { .. }) || constructed) && self.package.is_some() {
             super::observation_region::check(expr, self.package.unwrap(), self.fuel).map_err(
                 |reason| format!("memory guard requires read-only observation: {reason}"),
             )?;
@@ -4914,12 +5401,308 @@ impl<'a> Infer<'a> {
         }
         Ok(())
     }
+    // Snapshot maps and guarded projection temporaries belong only to reads,
+    // not to every recursive AST frame (including deeply inlined control flow).
+    #[inline(never)]
+    fn walk_read_pointer(
+        &mut self,
+        expr: &'a Expr,
+        pointer: &'a Expr,
+        depth: usize,
+    ) -> Result<(), String> {
+        let ty = self.ty(&expr.ty)?;
+        if !copy_readable_representation(self.package, &ty, self.fuel)? {
+            return Err("owned read requires a richer contract".into());
+        }
+        self.walk(pointer, depth + 1)?;
+        let targets = self.target(pointer, depth + 1)?;
+        let layout = symbolic_pointer_fields(self.package, &ty, self.fuel)?;
+        if !self.local_pointer_value(&ty)? && !layout.is_empty() {
+            let mut loaded = BTreeMap::new();
+            for path in layout.keys() {
+                let mut combined = Some(BTreeSet::new());
+                for target in &targets {
+                    self.step(target.path_cost().saturating_add(path.len()))?;
+                    let values = match target.root {
+                        PointerRoot::Local { binding, .. } if target.through.is_empty() => {
+                            let mut fields: Vec<_> =
+                                target.fields.iter().map(|(_, index)| *index).collect();
+                            fields.extend(path);
+                            self.environment
+                                .field_pointers
+                                .get(&CallablePlace { binding, fields })
+                                .cloned()
+                                .flatten()
+                        }
+                        _ => {
+                            let projection =
+                                project_owned_storage(self.package, &ty, path, self.fuel)?;
+                            let mut slot = target.clone();
+                            let prefix: Vec<_> =
+                                slot.fields.iter().map(|(_, index)| *index).collect();
+                            if !projection.guards.is_empty() {
+                                let guards = slot.conditions.entry(slot.through.len()).or_default();
+                                for (path, tag) in projection.guards {
+                                    let mut rebased = prefix.clone();
+                                    rebased.extend(path);
+                                    guards.push((rebased, tag));
+                                }
+                            }
+                            slot.fields.extend(projection.fields);
+                            self.record_access(
+                                BTreeSet::from([slot.clone()]),
+                                false,
+                                true,
+                                projection.ty,
+                            )?;
+                            slot.through.push(std::mem::take(&mut slot.fields));
+                            Some(BTreeSet::from([slot]))
+                        }
+                    };
+                    if let (Some(accumulated), Some(values)) = (&mut combined, values) {
+                        self.target_work(&values)?;
+                        accumulated.extend(values);
+                    } else {
+                        combined = None;
+                    }
+                }
+                loaded.insert(path.clone(), combined);
+            }
+            self.aggregate_pointers
+                .insert(expr as *const Expr as usize, loaded);
+        }
+        if !owned_callable_bottom(self.package, &ty, self.fuel, true)?.is_empty() {
+            let mut code = None;
+            let mut named = None;
+            for target in &targets {
+                self.step(target.path_cost())?;
+                let mut local_fields = BTreeMap::new();
+                let mut named_fields = BTreeMap::new();
+                if let PointerRoot::Local { binding, .. } = target.root {
+                    if target.through.is_empty() {
+                        let prefix: Vec<_> =
+                            target.fields.iter().map(|(_, index)| *index).collect();
+                        let subtree = CallablePlace {
+                            binding,
+                            fields: prefix.clone(),
+                        };
+                        for (place, candidates) in
+                            callable_subtree(&self.environment.local_candidates, &subtree)
+                        {
+                            *self.fuel = self
+                                .fuel
+                                .checked_sub(place.fields.len() + candidates.len() + 1)
+                                .ok_or("loaded code snapshot budget exhausted")?;
+                            if place.binding == binding {
+                                if let Some(path) = place.fields.strip_prefix(prefix.as_slice()) {
+                                    local_fields.insert(path.to_vec(), candidates.clone());
+                                }
+                            }
+                        }
+                        for (place, candidates) in
+                            callable_subtree(&self.environment.callees, &subtree)
+                        {
+                            *self.fuel = self
+                                .fuel
+                                .checked_sub(place.fields.len() + 1)
+                                .ok_or("loaded callable snapshot budget exhausted")?;
+                            if place.binding == binding {
+                                if let Some(path) = place.fields.strip_prefix(prefix.as_slice()) {
+                                    candidates.charge(self.fuel)?;
+                                    named_fields.insert(path.to_vec(), candidates.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                code = Some(match code {
+                    Some(previous) => self.join_local_fields(previous, local_fields)?,
+                    None => local_fields,
+                });
+                named = Some(match named {
+                    Some(previous) => self.join_callee_fields(previous, named_fields)?,
+                    None => named_fields,
+                });
+            }
+            self.local_code_fields
+                .insert(expr as *const Expr as usize, code.unwrap_or_default());
+            let named = named.unwrap_or_default();
+            if let Some(result) = named.get(&vec![]) {
+                result.charge(self.fuel)?;
+                self.callable_results
+                    .insert(expr as *const Expr as usize, result.clone());
+            }
+            self.aggregate_callees
+                .insert(expr as *const Expr as usize, named);
+        }
+        self.record_access(targets, false, true, ty)?;
+        Ok(())
+    }
     fn walk(&mut self, expr: &'a Expr, depth: usize) -> Result<(), String> {
         self.step(depth)?;
         self.note_owned_cleanup(&expr.ty)?;
         if let Some(error) = nir::program::pointer_operation_error(expr) {
             return Err(error.into());
         }
+        match &expr.kind {
+            K::Block { .. } | K::CallPreparation { .. } | K::If { .. } => {
+                self.walk_control(expr, depth)
+            }
+            K::Match { value, arms } => self.walk_match(expr, value, arms, depth + 1),
+            K::ReadPointer(pointer) => self.walk_read_pointer(expr, pointer, depth),
+            _ => self.walk_operation(expr, depth),
+        }
+    }
+    #[inline(never)]
+    fn walk_control(&mut self, expr: &'a Expr, depth: usize) -> Result<(), String> {
+        match &expr.kind {
+            K::Block { statements, result } | K::CallPreparation { statements, result } => {
+                let mut live = true;
+                for statement in statements {
+                    self.walk(statement, depth + 1)?;
+                    if super::pattern_facts::cannot_complete(statement, self.fuel, 0)? {
+                        live = false;
+                        break;
+                    }
+                }
+                let mut key = if live {
+                    CallableResult::Unknown
+                } else {
+                    CallableResult::NoReturn
+                };
+                if let Some(result) = result.as_ref().filter(|_| live) {
+                    self.walk(result, depth + 1)?;
+                    if matches!(self.ty(&expr.ty)?, Term::Function { .. }) {
+                        key = self.callee_key(result)?;
+                    }
+                    let values = self.value_callees(result)?;
+                    self.aggregate_callees
+                        .insert(expr as *const Expr as usize, values);
+                    let fields = self.local_fields_for(result)?;
+                    self.local_code_fields
+                        .insert(expr as *const Expr as usize, fields);
+                    let closures = self.local_candidates_for(result)?;
+                    self.local_code_results
+                        .insert(expr as *const Expr as usize, closures);
+                }
+                self.callable_results
+                    .insert(expr as *const Expr as usize, key);
+            }
+            K::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                self.walk(condition, depth + 1)?;
+                let before = self.save_environment()?;
+                let known = self.known_bool(condition, 0)?;
+                let pointer_result = self.local_pointer_value(&expr.ty)?;
+                let callable_result = matches!(
+                    self.ty(&expr.ty)?,
+                    Term::Function { .. } | Term::Closure { .. }
+                );
+                let mut callable = CallableResult::NoReturn;
+                let mut closures = Some(BTreeSet::new());
+                let mut results = Some(BTreeSet::new());
+                let mut continuation = None;
+                let mut aggregate = None;
+                let mut pointers = None;
+                let mut local_fields = None;
+                // Capture each result while its branch environment is active.
+                // A returning branch contributes accesses/explicit returns, but
+                // cannot change the environment after this conditional.
+                for (selected, branch) in [
+                    (true, Some(then_branch.as_ref())),
+                    (false, else_branch.as_deref()),
+                ] {
+                    if known.is_some_and(|value| value != selected) {
+                        continue;
+                    }
+                    self.environment = self.clone_environment(&before)?;
+                    if let Some(branch) = branch {
+                        self.walk(branch, depth + 1)?;
+                        if super::pattern_facts::cannot_complete(branch, self.fuel, 0)? {
+                            continue;
+                        }
+                        if pointer_result {
+                            let targets = self.optional_target(branch, depth + 1)?;
+                            results = self.join_targets(results, targets)?;
+                        }
+                    }
+                    if callable_result {
+                        let key = match branch {
+                            Some(branch) => self.callee_key(branch)?,
+                            None => CallableResult::Unknown,
+                        };
+                        self.join_callee_result(&mut callable, key)?;
+                        let next = if let Some(branch) = branch {
+                            self.local_candidates_for(branch)?
+                        } else {
+                            None
+                        };
+                        closures = self.join_local_candidates(closures, next)?;
+                    }
+                    let fields = if let Some(branch) = branch {
+                        self.pointer_fields_for(branch)?
+                    } else {
+                        BTreeMap::new()
+                    };
+                    pointers = Some(if let Some(previous) = pointers {
+                        self.join_pointer_fields(previous, fields)?
+                    } else {
+                        fields
+                    });
+                    let fields = if let Some(branch) = branch {
+                        self.local_fields_for(branch)?
+                    } else {
+                        BTreeMap::new()
+                    };
+                    local_fields = Some(if let Some(previous) = local_fields {
+                        self.join_local_fields(previous, fields)?
+                    } else {
+                        fields
+                    });
+                    let fields = if let Some(branch) = branch {
+                        self.value_callees(branch)?
+                    } else {
+                        BTreeMap::new()
+                    };
+                    aggregate = Some(if let Some(previous) = aggregate {
+                        self.join_callee_fields(previous, fields)?
+                    } else {
+                        fields
+                    });
+                    let environment = self.save_environment()?;
+                    continuation = Some(if let Some(previous) = continuation {
+                        self.join_environment(previous, environment)?
+                    } else {
+                        environment
+                    });
+                }
+                self.aggregate_pointers
+                    .insert(expr as *const Expr as usize, pointers.unwrap_or_default());
+                self.local_code_fields.insert(
+                    expr as *const Expr as usize,
+                    local_fields.unwrap_or_default(),
+                );
+                self.local_code_results
+                    .insert(expr as *const Expr as usize, closures);
+                self.aggregate_callees
+                    .insert(expr as *const Expr as usize, aggregate.unwrap_or_default());
+                self.callable_results
+                    .insert(expr as *const Expr as usize, callable);
+                self.environment = continuation.unwrap_or(before);
+                self.expression_results.insert(
+                    expr as *const Expr as usize,
+                    if pointer_result { results } else { None },
+                );
+            }
+            _ => unreachable!("control dispatcher"),
+        }
+        Ok(())
+    }
+    #[inline(never)]
+    fn walk_operation(&mut self, expr: &'a Expr, depth: usize) -> Result<(), String> {
         match &expr.kind {
             K::AddressOf(value) => {
                 self.local_address(value, depth + 1)?;
@@ -5205,15 +5988,7 @@ impl<'a> Infer<'a> {
                 self.local_code_fields
                     .insert(expr as *const Expr as usize, projected);
             }
-            K::ReadPointer(pointer) => {
-                let ty = self.ty(&expr.ty)?;
-                if !readable_representation(self.package, &ty, self.fuel)? {
-                    return Err("owned read requires a richer contract".into());
-                }
-                self.walk(pointer, depth + 1)?;
-                let target = self.target(pointer, depth + 1)?;
-                self.record_access(target, false, true, ty)?;
-            }
+            K::ReadPointer(pointer) => self.walk_read_pointer(expr, pointer, depth)?,
             K::BitWritePointer {
                 pointer,
                 selections,
@@ -6040,146 +6815,8 @@ impl<'a> Infer<'a> {
                     self.set_pointer(place.root, targets)?;
                 }
             }
-            K::Block { statements, result } | K::CallPreparation { statements, result } => {
-                let mut live = true;
-                for statement in statements {
-                    self.walk(statement, depth + 1)?;
-                    if super::pattern_facts::cannot_complete(statement, self.fuel, 0)? {
-                        live = false;
-                        break;
-                    }
-                }
-                let mut key = if live {
-                    CallableResult::Unknown
-                } else {
-                    CallableResult::NoReturn
-                };
-                if let Some(result) = result.as_ref().filter(|_| live) {
-                    self.walk(result, depth + 1)?;
-                    if matches!(self.ty(&expr.ty)?, Term::Function { .. }) {
-                        key = self.callee_key(result)?;
-                    }
-                    let values = self.value_callees(result)?;
-                    self.aggregate_callees
-                        .insert(expr as *const Expr as usize, values);
-                    let fields = self.local_fields_for(result)?;
-                    self.local_code_fields
-                        .insert(expr as *const Expr as usize, fields);
-                    let closures = self.local_candidates_for(result)?;
-                    self.local_code_results
-                        .insert(expr as *const Expr as usize, closures);
-                }
-                self.callable_results
-                    .insert(expr as *const Expr as usize, key);
-            }
-            K::If {
-                condition,
-                then_branch,
-                else_branch,
-            } => {
-                self.walk(condition, depth + 1)?;
-                let before = self.save_environment()?;
-                let known = self.known_bool(condition, 0)?;
-                let pointer_result = self.local_pointer_value(&expr.ty)?;
-                let callable_result = matches!(
-                    self.ty(&expr.ty)?,
-                    Term::Function { .. } | Term::Closure { .. }
-                );
-                let mut callable = CallableResult::NoReturn;
-                let mut closures = Some(BTreeSet::new());
-                let mut results = Some(BTreeSet::new());
-                let mut continuation = None;
-                let mut aggregate = None;
-                let mut pointers = None;
-                let mut local_fields = None;
-                // Capture each result while its branch environment is active.
-                // A returning branch contributes accesses/explicit returns, but
-                // cannot change the environment after this conditional.
-                for (selected, branch) in [
-                    (true, Some(then_branch.as_ref())),
-                    (false, else_branch.as_deref()),
-                ] {
-                    if known.is_some_and(|value| value != selected) {
-                        continue;
-                    }
-                    self.environment = self.clone_environment(&before)?;
-                    if let Some(branch) = branch {
-                        self.walk(branch, depth + 1)?;
-                        if super::pattern_facts::cannot_complete(branch, self.fuel, 0)? {
-                            continue;
-                        }
-                        if pointer_result {
-                            let targets = self.optional_target(branch, depth + 1)?;
-                            results = self.join_targets(results, targets)?;
-                        }
-                    }
-                    if callable_result {
-                        let key = match branch {
-                            Some(branch) => self.callee_key(branch)?,
-                            None => CallableResult::Unknown,
-                        };
-                        self.join_callee_result(&mut callable, key)?;
-                        let next = if let Some(branch) = branch {
-                            self.local_candidates_for(branch)?
-                        } else {
-                            None
-                        };
-                        closures = self.join_local_candidates(closures, next)?;
-                    }
-                    let fields = if let Some(branch) = branch {
-                        self.pointer_fields_for(branch)?
-                    } else {
-                        BTreeMap::new()
-                    };
-                    pointers = Some(if let Some(previous) = pointers {
-                        self.join_pointer_fields(previous, fields)?
-                    } else {
-                        fields
-                    });
-                    let fields = if let Some(branch) = branch {
-                        self.local_fields_for(branch)?
-                    } else {
-                        BTreeMap::new()
-                    };
-                    local_fields = Some(if let Some(previous) = local_fields {
-                        self.join_local_fields(previous, fields)?
-                    } else {
-                        fields
-                    });
-                    let fields = if let Some(branch) = branch {
-                        self.value_callees(branch)?
-                    } else {
-                        BTreeMap::new()
-                    };
-                    aggregate = Some(if let Some(previous) = aggregate {
-                        self.join_callee_fields(previous, fields)?
-                    } else {
-                        fields
-                    });
-                    let environment = self.save_environment()?;
-                    continuation = Some(if let Some(previous) = continuation {
-                        self.join_environment(previous, environment)?
-                    } else {
-                        environment
-                    });
-                }
-                self.aggregate_pointers
-                    .insert(expr as *const Expr as usize, pointers.unwrap_or_default());
-                self.local_code_fields.insert(
-                    expr as *const Expr as usize,
-                    local_fields.unwrap_or_default(),
-                );
-                self.local_code_results
-                    .insert(expr as *const Expr as usize, closures);
-                self.aggregate_callees
-                    .insert(expr as *const Expr as usize, aggregate.unwrap_or_default());
-                self.callable_results
-                    .insert(expr as *const Expr as usize, callable);
-                self.environment = continuation.unwrap_or(before);
-                self.expression_results.insert(
-                    expr as *const Expr as usize,
-                    if pointer_result { results } else { None },
-                );
+            K::Block { .. } | K::CallPreparation { .. } | K::If { .. } => {
+                unreachable!("control dispatcher")
             }
             K::Return(value) => {
                 if let Some(value) = value {
@@ -6298,14 +6935,17 @@ struct Round {
     complete_calls: bool,
     code: Vec<PreparedCode>,
     previous: HashMap<MemoryInstance, Summary>,
-    current: HashMap<MemoryInstance, Summary>,
     queue: Vec<MemoryInstance>,
-    discovered: HashSet<MemoryInstance>,
+    discovered: HashMap<MemoryInstance, usize>,
+    pending: std::collections::VecDeque<usize>,
+    scheduled: BTreeSet<usize>,
+    dependents: BTreeMap<usize, BTreeSet<usize>>,
+    active: Option<usize>,
 }
 
 // Binder sorts come from declarations, never from the supplied values. A
 // package-free monomorphic summary has no extra value-parameter evidence.
-fn memory_binders(
+pub(super) fn memory_binders(
     package: Option<&Package>,
     parameters: &[DeclarationId],
     fuel: &mut usize,
@@ -6561,30 +7201,6 @@ fn validate_cleanup_access(
     access: &nir::program::RuntimeCleanupAccess,
     fuel: &mut usize,
 ) -> Result<(), String> {
-    fn project(
-        package: &Package,
-        mut ty: Term,
-        path: &[(nir::program::FieldOwner, usize)],
-        fuel: &mut usize,
-    ) -> Result<Term, String> {
-        for (owner, index) in path {
-            let valid = match (&ty, owner) {
-                (Term::Nominal { declaration, .. }, nir::program::FieldOwner::Nominal(actual)) => {
-                    declaration == actual
-                }
-                (Term::Record(_), nir::program::FieldOwner::Anonymous) => true,
-                (_, nir::program::FieldOwner::Anonymous) => {
-                    tuple_fields(Some(package), &ty).is_some()
-                }
-                _ => false,
-            };
-            if !valid {
-                return Err("cleanup footprint field owner mismatch".into());
-            }
-            ty = owned_path_type(Some(package), &ty, &[*index], fuel)?;
-        }
-        Ok(ty)
-    }
     let Term::Function { parameters, .. } = signature.callable_signature() else {
         return Err("cleanup footprint lacks a callable signature".into());
     };
@@ -6592,15 +7208,43 @@ fn validate_cleanup_access(
         .get(access.parameter)
         .ok_or("cleanup footprint parameter is missing")?;
     let input = owned_path_type(Some(package), &parameter.ty, &access.input_fields, fuel)?;
-    let (_, mut ty) = pointer_representation(Some(package), &input, fuel)?
+    let (_, ty) = pointer_representation(Some(package), &input, fuel)?
         .ok_or("cleanup footprint input is not a pointer")?;
-    for path in &access.through {
-        let Term::Pointer(subject) = project(package, ty, path, fuel)? else {
-            return Err("cleanup footprint load is not a pointer".into());
-        };
-        ty = *subject;
+    let mut traversal = StorageTraversal::new(Some(package), &ty, &[], fuel)?;
+    if access
+        .conditions
+        .keys()
+        .any(|stage| *stage > access.through.len())
+    {
+        return Err("cleanup guard stage out of bounds".into());
     }
-    if project(package, ty, &access.fields, fuel)? != access.ty {
+    for (stage, path) in access.through.iter().enumerate() {
+        traversal.then_guarded(
+            Some(package),
+            path,
+            access
+                .conditions
+                .get(&stage)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+            fuel,
+        )?;
+        if !matches!(traversal.target.ty, Term::Pointer(_)) {
+            return Err("cleanup footprint load is not a pointer".into());
+        }
+        traversal.load(Some(package), &[], fuel)?;
+    }
+    traversal.then_guarded(
+        Some(package),
+        &access.fields,
+        access
+            .conditions
+            .get(&access.through.len())
+            .map(Vec::as_slice)
+            .unwrap_or(&[]),
+        fuel,
+    )?;
+    if traversal.target.ty != access.ty {
         return Err("cleanup footprint target type mismatch".into());
     }
     Ok(())
@@ -6628,85 +7272,94 @@ fn infer_context(
         fuel,
         &mut round,
     )?;
-    loop {
-        let mut index = 0;
-        while index < round.queue.len() {
-            effects::charge_inputs(&round.queue[index].effects, fuel)?;
-            let key = round.queue[index].clone();
-            let (function, body_arguments) = package
-                .runtime_body(key.instance.declaration, &key.instance.arguments)
-                .ok_or("memory summary function is missing")?;
-            let prepared = key
-                .prepared
-                .iter()
-                .map(|(input, ids)| {
-                    let values = ids.iter().map(|id| round.code[*id].clone()).collect();
-                    (input.clone(), values)
-                })
-                .collect();
-            let context = effects::copy_inputs(&key.effects, fuel)?;
-            let previous_effects = std::mem::replace(&mut round.effects, context);
-            let result = infer_body(
-                function,
-                body_arguments,
-                &key.inputs,
-                &prepared,
-                Some(package),
-                fuel,
-                &mut round,
-            );
-            round.effects = previous_effects;
-            let mut summary = result?;
-            summary.arguments = key.instance.arguments.clone();
-            if let Some(instance) = package.runtime_instances.iter().find(|instance| {
-                instance.declaration == key.instance.declaration
-                    && instance.arguments == key.instance.arguments
-            }) {
-                for access in &instance.cleanup_accesses {
-                    let cost = access.through.iter().fold(
-                        access
-                            .input_fields
-                            .len()
-                            .saturating_add(access.fields.len())
-                            .saturating_add(1),
-                        |cost, path| cost.saturating_add(path.len()).saturating_add(1),
-                    );
-                    *fuel = fuel
-                        .checked_sub(cost)
-                        .ok_or("cleanup footprint import budget exhausted")?;
-                    bound_type(&access.ty, fuel)?;
-                    validate_cleanup_access(package, &summary.signature, access, fuel)?;
-                    summary.accesses.push(Access {
-                        target: ParameterPlace {
-                            parameter: access.parameter,
-                            input_fields: access.input_fields.clone(),
-                            through: access.through.clone(),
-                            fields: access.fields.clone(),
-                        },
-                        ty: access.ty.clone(),
-                        write: access.write,
-                        read_value: access.read_value,
-                    });
+    while let Some(index) = round.pending.pop_front() {
+        round.scheduled.remove(&index);
+        round.active = Some(index);
+        effects::charge_inputs(&round.queue[index].effects, fuel)?;
+        let key = round.queue[index].clone();
+        let (function, body_arguments) = package
+            .runtime_body(key.instance.declaration, &key.instance.arguments)
+            .ok_or("memory summary function is missing")?;
+        let prepared = key
+            .prepared
+            .iter()
+            .map(|(input, ids)| {
+                let values = ids.iter().map(|id| round.code[*id].clone()).collect();
+                (input.clone(), values)
+            })
+            .collect();
+        let context = effects::copy_inputs(&key.effects, fuel)?;
+        let previous_effects = std::mem::replace(&mut round.effects, context);
+        let result = infer_body(
+            function,
+            body_arguments,
+            &key.inputs,
+            &prepared,
+            Some(package),
+            fuel,
+            &mut round,
+        );
+        round.effects = previous_effects;
+        let mut summary = result?;
+        summary.arguments = key.instance.arguments.clone();
+        if let Some(instance) = package.runtime_instances.iter().find(|instance| {
+            instance.declaration == key.instance.declaration
+                && instance.arguments == key.instance.arguments
+        }) {
+            for access in &instance.cleanup_accesses {
+                let cost = access.through.iter().fold(
+                    access
+                        .input_fields
+                        .len()
+                        .saturating_add(access.fields.len())
+                        .saturating_add(1),
+                    |cost, path| cost.saturating_add(path.len()).saturating_add(1),
+                );
+                *fuel = fuel
+                    .checked_sub(cost)
+                    .ok_or("cleanup footprint import budget exhausted")?;
+                bound_type(&access.ty, fuel)?;
+                validate_cleanup_access(package, &summary.signature, access, fuel)?;
+                summary.accesses.push(Access {
+                    target: ParameterPlace {
+                        parameter: access.parameter,
+                        input_fields: access.input_fields.clone(),
+                        through: access.through.clone(),
+                        conditions: access.conditions.clone(),
+                        fields: access.fields.clone(),
+                    },
+                    ty: access.ty.clone(),
+                    write: access.write,
+                    read_value: access.read_value,
+                });
+            }
+        }
+
+        if summary.accesses.len() > *fuel {
+            return Err("memory summary budget exhausted".into());
+        }
+        *fuel -= summary.accesses.len();
+        summary.accesses.sort_by_cached_key(ToString::to_string);
+        summary.accesses.dedup();
+        round.active = None;
+        if round.previous.get(&key) != Some(&summary) {
+            round.previous.insert(key, summary);
+            if let Some(dependents) = round.dependents.get(&index) {
+                *fuel = fuel
+                    .checked_sub(dependents.len())
+                    .ok_or("memory dependency scheduling budget exhausted")?;
+                for dependent in dependents {
+                    if round.scheduled.insert(*dependent) {
+                        round.pending.push_back(*dependent);
+                    }
                 }
             }
-
-            if summary.accesses.len() > *fuel {
-                return Err("memory summary budget exhausted".into());
-            }
-            *fuel -= summary.accesses.len();
-            summary.accesses.sort_by_cached_key(ToString::to_string);
-            summary.accesses.dedup();
-            round.current.insert(key, summary);
-            index += 1;
         }
-        if round.current == round.previous {
-            return round
-                .current
-                .remove(&round.queue[0])
-                .ok_or("missing root memory summary".into());
-        }
-        round.previous = std::mem::take(&mut round.current);
     }
+    round
+        .previous
+        .remove(&round.queue[0])
+        .ok_or("missing root memory summary".into())
 }
 // Type keys are walked iteratively before recursive cloning/substitution. This
 // is a structural work limit, not a type proposition or normalization step.
@@ -6718,6 +7371,13 @@ pub(crate) fn bound_type(ty: &Term, fuel: &mut usize) -> Result<(), String> {
         }
         *fuel -= 1;
         match ty {
+            Term::ErrorResult { errors, result } => {
+                if errors.len().saturating_add(1) > *fuel {
+                    return Err("memory summary type budget exhausted".into());
+                }
+                pending.push((result, depth + 1));
+                pending.extend(errors.iter().map(|ty| (ty, depth + 1)));
+            }
             Term::Computation { effects, result } => {
                 *fuel = fuel
                     .checked_sub(effects.len())
@@ -6848,8 +7508,25 @@ fn derive(
         inputs: inputs.clone(),
         prepared: prepared_ids,
     };
-    if round.discovered.insert(key.clone()) {
-        round.queue.push(key.clone());
+    let index = match round.discovered.get(&key) {
+        Some(index) => *index,
+        None => {
+            let index = round.queue.len();
+            round.discovered.insert(key.clone(), index);
+            round.queue.push(key.clone());
+            round.pending.push_back(index);
+            round.scheduled.insert(index);
+            index
+        }
+    };
+    // Record dependencies even when the callee still has only a bottom summary.
+    // Revisit callers only after a consumed summary changes. Old edges remain
+    // conservative when later iterations discover different callable targets.
+    if let Some(caller) = round.active {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or("memory dependency budget exhausted")?;
+        round.dependents.entry(index).or_default().insert(caller);
     }
     if let Some(summary) = round.previous.get(&key) {
         effects::charge_inputs(&summary.effect_inputs, fuel)?;
@@ -7146,6 +7823,7 @@ fn infer_body(
                     root: PointerRoot::Parameter(index),
                     input_fields: vec![],
                     through: vec![],
+                    conditions: BTreeMap::new(),
                     fields: vec![],
                 }])),
             );
@@ -7165,14 +7843,15 @@ fn infer_body(
         infer.merge_callable_field_return(&function.body)?;
         infer.merge_pointer_field_return(&function.body)?;
     }
-    let pointer_result = infer.local_pointer_value(result)?;
-    if completes && pointer_result && infer.local_pointer_value(&function.body.ty)? {
+    let pointer_result = infer.local_pointer_value(&result_view)?;
+    let body_ty = infer.ty(&function.body.ty)?;
+    let body_completion = infer.effect_completion(&body_ty)?;
+    if completes && pointer_result && infer.local_pointer_value(&body_completion)? {
         let targets = infer.optional_target(&function.body, 0)?;
         infer.merge_return(targets)?;
     }
-    let callable_result = matches!(result.as_ref(), Term::Function { .. });
-    if completes && callable_result && matches!(infer.ty(&function.body.ty)?, Term::Function { .. })
-    {
+    let callable_result = matches!(result_view, Term::Function { .. });
+    if completes && callable_result && matches!(body_completion, Term::Function { .. }) {
         let key = infer.callee_key(&function.body)?;
         infer.callable_returns.join(&key, infer.fuel)?;
     }
@@ -7194,6 +7873,7 @@ fn infer_body(
                         root: PointerRoot::Parameter(target.parameter),
                         input_fields: target.input_fields.clone(),
                         through: target.through.clone(),
+                        conditions: target.conditions.clone(),
                         fields: target.fields.clone(),
                     });
                 }
@@ -7425,6 +8105,7 @@ pub fn infer_argument(
                     root: PointerRoot::Parameter(*slot),
                     input_fields: vec![],
                     through: vec![],
+                    conditions: BTreeMap::new(),
                     fields: vec![],
                 }])),
             );
@@ -7890,6 +8571,19 @@ fn validate_borrowed_capture_storage<'a>(
                             "captured pointer rebinding requires an environment writeback contract"
                                 .into(),
                         );
+                    }
+                }
+                K::ReadPointer(pointer) => {
+                    // A syntactic address consumed immediately by a load never
+                    // publishes an alias to the capture cell. Resource checking
+                    // separately proves Copy permission and storage validity.
+                    if let K::AddressOf(value) = &pointer.kind {
+                        if value.ty == expr.ty
+                            && copy_readable_representation(package, &expr.ty, fuel)?
+                        {
+                            pending.push(value);
+                            return Ok(false);
+                        }
                     }
                 }
                 K::AddressOf(value) => {
@@ -8401,6 +9095,7 @@ fn infer_closure_pass(
                     root: PointerRoot::Parameter(index),
                     input_fields: vec![],
                     through: vec![],
+                    conditions: BTreeMap::new(),
                     fields: vec![],
                 }])),
             );
@@ -8439,8 +9134,10 @@ fn infer_closure_pass(
         infer.merge_code_field_return(body)?;
         infer.merge_pointer_field_return(body)?;
     }
-    let pointer_result = infer.local_pointer_value(result)?;
-    if completes && pointer_result && infer.local_pointer_value(&body.ty)? {
+    let pointer_result = infer.local_pointer_value(&completion)?;
+    let body_ty = infer.ty(&body.ty)?;
+    let body_completion = infer.effect_completion(&body_ty)?;
+    if completes && pointer_result && infer.local_pointer_value(&body_completion)? {
         let targets = infer.optional_target(body, 0)?;
         infer.merge_return(targets)?;
     }
@@ -8678,12 +9375,14 @@ mod pointer_root_tests {
             root: PointerRoot::Parameter(0),
             input_fields: vec![],
             through: vec![],
+            conditions: BTreeMap::new(),
             fields: vec![(nir::program::FieldOwner::Anonymous, 1)],
         };
         let nested = PointerPlace {
             root: PointerRoot::Parameter(0),
             input_fields: vec![1],
             through: vec![],
+            conditions: BTreeMap::new(),
             fields: vec![],
         };
         assert_eq!(BTreeSet::from([direct.clone(), nested.clone()]).len(), 2);
@@ -8704,6 +9403,7 @@ mod pointer_root_tests {
                 parameter: 3,
                 input_fields: vec![],
                 through: vec![vec![]],
+                conditions: BTreeMap::new(),
                 fields: vec![(nir::program::FieldOwner::Anonymous, 2)],
             })
             .unwrap();
@@ -8718,6 +9418,54 @@ mod pointer_root_tests {
     }
 
     #[test]
+    fn conditional_paths_rebase_only_the_first_loaded_root() {
+        let field = |index| (nir::program::FieldOwner::Anonymous, index);
+        let base = PointerPlace {
+            root: PointerRoot::Parameter(0),
+            input_fields: vec![],
+            through: vec![vec![field(2)]],
+            fields: vec![field(3)],
+            conditions: BTreeMap::from([(0, vec![(vec![], 1)])]),
+        };
+        let suffix = ParameterPlace {
+            parameter: 0,
+            input_fields: vec![],
+            through: vec![vec![field(0)]],
+            fields: vec![field(1)],
+            conditions: BTreeMap::from([(0, vec![(vec![], 2)]), (1, vec![(vec![], 4)])]),
+        };
+        let mut actual = base.clone();
+        actual.append_path(&suffix).unwrap();
+        assert_eq!(
+            actual.conditions,
+            BTreeMap::from([
+                (0, vec![(vec![], 1)]),
+                (1, vec![(vec![3], 2)]),
+                (2, vec![(vec![], 4)])
+            ])
+        );
+        assert_eq!(
+            actual.through,
+            vec![vec![field(2)], vec![field(3), field(0)]]
+        );
+        assert_eq!(actual.fields, vec![field(1)]);
+        let mut invalid = suffix;
+        invalid.conditions.insert(2, vec![(vec![], 9)]);
+        let mut unchanged = base.clone();
+        assert!(unchanged.append_path(&invalid).is_err());
+        assert_eq!(unchanged, base);
+        let exported = actual.external().unwrap();
+        assert!(
+            exported
+                .to_string()
+                .contains("(conditions (stage 1) (guard (fields 3) (variant 2)))")
+        );
+        let mut different = exported.clone();
+        different.conditions.get_mut(&1).unwrap()[0].1 = 7;
+        assert_eq!(BTreeSet::from([exported, different]).len(), 2);
+    }
+
+    #[test]
     fn local_roots_are_distinct_from_parameter_slots_and_cannot_publish() {
         let local = PointerPlace {
             root: PointerRoot::Local {
@@ -8726,12 +9474,14 @@ mod pointer_root_tests {
             },
             input_fields: vec![],
             through: vec![],
+            conditions: BTreeMap::new(),
             fields: vec![],
         };
         let parameter = PointerPlace {
             root: PointerRoot::Parameter(1),
             input_fields: vec![],
             through: vec![],
+            conditions: BTreeMap::new(),
             fields: vec![],
         };
         assert_eq!(BTreeSet::from([local.clone(), parameter.clone()]).len(), 2);
@@ -8749,6 +9499,7 @@ mod pointer_root_tests {
                 parameter: 0,
                 input_fields: vec![],
                 through: vec![],
+                conditions: BTreeMap::new(),
                 fields: vec![(nir::program::FieldOwner::Anonymous, 2)],
             })
             .unwrap();

@@ -710,6 +710,7 @@ impl Checker<'_, '_> {
         callee: &Expr<'_>,
         arguments: &[Arg<'_>],
         expected: Option<&Interface>,
+        result_context: Option<&crate::calls::InputContext>,
     ) -> Result<Arc<ExpressionCode>, Error> {
         self.with_code_method_callee(callee, |this, callee, receiver| {
             let inputs = receiver
@@ -717,7 +718,7 @@ impl Checker<'_, '_> {
                 .map(Arg::Positional)
                 .chain(arguments.iter().cloned())
                 .collect::<Vec<_>>();
-            this.invoke_property_generator_target(site, callee, &inputs, expected)
+            this.invoke_property_generator_target(site, callee, &inputs, expected, result_context)
         })
     }
 
@@ -727,9 +728,17 @@ impl Checker<'_, '_> {
         callee: &Expr<'_>,
         arguments: &[Arg<'_>],
         expected: Option<&Interface>,
+        result_context: Option<&crate::calls::InputContext>,
     ) -> Result<Arc<ExpressionCode>, Error> {
         if !arguments.iter().any(|arg| matches!(arg, Arg::Named(..))) {
-            return self.invoke_generator_with_plan(site, callee, arguments, expected, None);
+            return self.invoke_generator_with_plan(
+                site,
+                callee,
+                arguments,
+                expected,
+                result_context,
+                None,
+            );
         }
         let owner = self
             .generator_owner(callee)
@@ -813,7 +822,14 @@ impl Checker<'_, '_> {
             ));
         };
         self.with_generator_properties(site, arguments, *collector, |this, inputs| {
-            this.invoke_generator_with_plan(site, callee, inputs, expected, Some(type_plan))
+            this.invoke_generator_with_plan(
+                site,
+                callee,
+                inputs,
+                expected,
+                result_context,
+                Some(type_plan),
+            )
         })
     }
 
@@ -863,6 +879,7 @@ impl Checker<'_, '_> {
         callee: &Expr<'_>,
         arguments: &[Arg<'_>],
         expected: Option<&Interface>,
+        result_context: Option<&crate::calls::InputContext>,
     ) -> Result<Arc<ExpressionCode>, Error> {
         self.with_code_method_callee(callee, |this, callee, receiver| {
             let inputs = receiver
@@ -870,7 +887,7 @@ impl Checker<'_, '_> {
                 .map(Arg::Positional)
                 .chain(arguments.iter().cloned())
                 .collect::<Vec<_>>();
-            this.invoke_generator_with_plan(site, callee, &inputs, expected, None)
+            this.invoke_generator_with_plan(site, callee, &inputs, expected, result_context, None)
         })
     }
 
@@ -880,19 +897,28 @@ impl Checker<'_, '_> {
         callee: &Expr<'_>,
         arguments: &[Arg<'_>],
         expected: Option<&Interface>,
+        result_context: Option<&crate::calls::InputContext>,
         type_plan: Option<GeneratorTypePlan>,
     ) -> Result<Arc<ExpressionCode>, Error> {
         if arguments
             .iter()
             .any(|argument| matches!(argument, Arg::Expand(_)))
         {
-            return self.invoke_spread_generator(site, callee, arguments, expected, type_plan);
+            return self.invoke_spread_generator(
+                site,
+                callee,
+                arguments,
+                expected,
+                result_context,
+                type_plan,
+            );
         }
         self.invoke_code_generator_inputs(
             site,
             callee,
             arguments,
             expected,
+            result_context,
             &mut spreads::SpreadPlan::default(),
             type_plan,
         )
@@ -904,6 +930,7 @@ impl Checker<'_, '_> {
         callee: &Expr<'_>,
         arguments: &[Arg<'_>],
         expected: Option<&Interface>,
+        result_context: Option<&crate::calls::InputContext>,
         packets: &mut spreads::SpreadPlan<'_>,
         prepared_types: Option<GeneratorTypePlan>,
     ) -> Result<Arc<ExpressionCode>, Error> {
@@ -1090,7 +1117,7 @@ impl Checker<'_, '_> {
         let mut hinted = if parameters.is_empty() {
             None
         } else {
-            let candidate = self.generator_call_candidate(
+            let candidate = self.generator_call_candidate_with_result_context(
                 owner,
                 &parameters,
                 &mut type_plan,
@@ -1101,6 +1128,7 @@ impl Checker<'_, '_> {
                 &evidence,
                 &partial,
                 expected_type.as_ref(),
+                result_context,
                 site.span,
             )?;
             input_contexts = (0..planned.inputs.len())
@@ -1176,7 +1204,7 @@ impl Checker<'_, '_> {
                 }
             }
             if learned {
-                let candidate = self.generator_call_candidate(
+                let candidate = self.generator_call_candidate_with_result_context(
                     owner,
                     &parameters,
                     &mut type_plan,
@@ -1187,6 +1215,7 @@ impl Checker<'_, '_> {
                     &evidence,
                     &partial,
                     expected_type.as_ref(),
+                    result_context,
                     site.span,
                 )?;
                 input_contexts = (0..planned.inputs.len())
@@ -1288,7 +1317,16 @@ impl Checker<'_, '_> {
                             "data packet cannot supply pattern code evidence",
                         ));
                     }
-                    let code = self.pattern_input_value(argument, interface)?;
+                    let subject = (!parameters
+                        .iter()
+                        .any(|id| interface.subject.mentions_rigid(*id)))
+                    .then_some(&interface.subject);
+                    let partial = match &input_contexts[route.parameter] {
+                        context @ (crate::calls::InputContext::Tuple(_)
+                        | crate::calls::InputContext::Known(_)) => Some(context),
+                        _ => None,
+                    };
+                    let code = self.pattern_input_value(argument, interface, subject, partial)?;
                     let ty = Term::Tuple(
                         std::iter::once(code.subject.clone())
                             .chain(code.outputs.values().map(|(_, ty)| ty.clone()))
@@ -1308,7 +1346,16 @@ impl Checker<'_, '_> {
                         .any(|id| interface.result.mentions_rigid(*id));
                     let mut expected = interface.clone();
                     expected.infer_context = true;
-                    let code = self.code_value(argument, known.then_some(&expected), 0)?;
+                    let partial_result = match &input_contexts[route.parameter] {
+                        crate::calls::InputContext::Tuple(fields) => fields.first(),
+                        _ => None,
+                    };
+                    let code = self.code_value_in_context(
+                        argument,
+                        known.then_some(&expected),
+                        partial_result,
+                        0,
+                    )?;
                     let ty = Term::Tuple(
                         std::iter::once(code.result.clone())
                             .chain(code.context.values().cloned())
@@ -1377,11 +1424,7 @@ impl Checker<'_, '_> {
                             argument.span,
                         )?
                     } else if self.checking_code_generator {
-                        let value = match context {
-                            Some(context) => self.input_context_expression(argument, context)?,
-                            None => self.expr(argument, expected)?,
-                        };
-                        self.validate_generator_data(&value, argument.span)?;
+                        let value = self.check_generator_data_input(argument, expected, context)?;
                         (Argument::Data(None), value.ty)
                     } else {
                         let (value, ty) =
@@ -1439,7 +1482,7 @@ impl Checker<'_, '_> {
                 evidence[route.parameter] = Some(ty);
             }
             if !parameters.is_empty() {
-                let candidate = self.generator_call_candidate(
+                let candidate = self.generator_call_candidate_with_result_context(
                     owner,
                     &parameters,
                     &mut type_plan,
@@ -1450,6 +1493,7 @@ impl Checker<'_, '_> {
                     &evidence,
                     &partial,
                     expected_type.as_ref(),
+                    result_context,
                     site.span,
                 )?;
                 input_contexts = (0..planned.inputs.len())
@@ -1552,7 +1596,7 @@ impl Checker<'_, '_> {
         } else {
             // This tuple is an internal inference product, never a Flurry Tuple
             // constructor or an erased code value. Context evidence stays in values.
-            let mut candidate = self.generator_call_candidate(
+            let mut candidate = self.generator_call_candidate_with_result_context(
                 owner,
                 &parameters,
                 &mut type_plan,
@@ -1563,6 +1607,7 @@ impl Checker<'_, '_> {
                 &actual,
                 &partial,
                 expected_type.as_ref(),
+                result_context,
                 site.span,
             )?;
             if !self.settle_function_defaults(
@@ -1687,7 +1732,8 @@ impl Checker<'_, '_> {
     fn generator_default(&mut self, value: &Expr<'_>, input: &Input) -> Result<Argument, Error> {
         match input {
             Input::Pattern(interface) => {
-                let code = self.pattern_input_value(value, interface)?;
+                let code =
+                    self.pattern_input_value(value, interface, Some(&interface.subject), None)?;
                 self.ascribe_pattern_input(&code, interface, value.span)?;
                 Ok(Argument::Pattern(code))
             }
@@ -2319,13 +2365,14 @@ impl Checker<'_, '_> {
         &mut self,
         block: &hir::Block<'_>,
         interface: Option<&Interface>,
+        result_context: Option<&crate::calls::InputContext>,
         depth: usize,
     ) -> Result<Arc<ExpressionCode>, Error> {
         self.generator_scope(block.span, |this| {
             let mut loops = Vec::new();
             let mut control = Control::Next;
             for statement in block.stmts {
-                let next = this.generator_statement(statement, interface, depth + 1, &mut loops)?;
+                let next = this.generator_statement(statement, interface, result_context, depth + 1, &mut loops)?;
                 if this.checking_code_generator {
                     control = this.sequence_generator_control(control, next, statement.span)?;
                 } else {
@@ -2362,9 +2409,9 @@ impl Checker<'_, '_> {
                     || matches!(control_expr.kind, H::When(arms) if !arms.iter().any(|arm| arm.cond.is_none()))
                     || matches!(control_expr.kind, H::Match(..) | H::When(..)) && !this.code_producer(value)
                 {
-                    this.generator_statement(value, interface, depth + 1, &mut loops)?
+                    this.generator_statement(value, interface, result_context, depth + 1, &mut loops)?
                 } else {
-                    Control::Return(this.code_value(value, interface, depth + 1)?)
+                    Control::Return(this.code_value_in_context(value, interface, result_context, depth + 1)?)
                 };
                 if !this.checking_code_generator {
                     return match tail {
@@ -2545,7 +2592,15 @@ impl Checker<'_, '_> {
                 } else {
                     self.generator_data_expression(value, expected.as_ref())?
                 };
-                if !local_const && self.generator_value_needs_live_storage(&data, value.span)? {
+                let simple_binding = matches!(
+                    decl.pattern.kind,
+                    hir::pattern::PatternKind::Binding(_, _, None)
+                        | hir::pattern::PatternKind::Wild
+                );
+                if !local_const
+                    && (!simple_binding
+                        || self.generator_value_needs_live_storage(&data, value.span)?)
+                {
                     return self.bind_live_generator_pattern(decl, data, ty);
                 }
                 let materialized = if local_const {
@@ -2834,65 +2889,81 @@ impl Checker<'_, '_> {
         value: comptime_interpretor::Value,
         ty: Term,
     ) -> Result<(), Error> {
-        if !decl.mutable {
-            self.immutable.extend(pattern_binding_ids(&decl.pattern));
-        }
-        let pattern = self.pattern(&decl.pattern, &ty)?;
-        if !self.pattern_exhaustive(&pattern, &ty) {
-            return Err(error(
-                decl.span,
-                "refutable generator let pattern requires a diverging else branch",
-            ));
-        }
-        let bindings = pattern_bindings(&decl.pattern)?
-            .into_values()
-            .map(|id| (id, self.locals[&id].clone()))
-            .collect::<Vec<_>>();
         let input = self.spread_binding(decl.span)?;
-        let packet_type = self.tuple_value_type(
-            bindings.iter().map(|(_, ty)| ty.clone()).collect(),
-            decl.span,
-        )?;
-        let root = n::Expr {
+        let marker = n::Expr {
             source: source(decl.span),
-            ty: packet_type.clone(),
-            kind: K::Block {
-                statements: vec![n::Expr {
-                    source: source(decl.span),
-                    ty: p(P::Void),
-                    kind: K::LetPattern {
-                        pattern,
-                        value: Box::new(n::Expr {
-                            source: source(decl.span),
-                            ty: ty.clone(),
-                            kind: K::Local(input),
-                        }),
-                        guard: None,
-                        otherwise: None,
-                    },
-                }],
-                result: Some(Box::new(n::Expr {
-                    source: source(decl.span),
-                    ty: packet_type,
-                    kind: K::Tuple(
-                        bindings
-                            .iter()
-                            .map(|(id, ty)| n::Expr {
-                                source: source(decl.span),
-                                ty: ty.clone(),
-                                kind: K::Local(*id),
-                            })
-                            .collect(),
-                    ),
-                })),
-            },
+            ty: ty.clone(),
+            kind: K::Local(input),
         };
-        self.generator_data.insert(input, None);
-        let checked = self.validate_generator_data(&root, decl.span);
+        self.locals.insert(input, ty.clone());
+        self.generator_data.insert(input, Some(marker.clone()));
+        self.generator_cells.insert(
+            input,
+            (marker.clone(), comptime_interpretor::Storage::new(value)),
+        );
+        let mut bindings = Vec::new();
+        // Check and execute embedded pattern computations in the same frame
+        // as surrounding construction data. Even a scalar initializer may
+        // produce a live pointer or mutate an outer binding during matching.
+        let result = self.generator_data_frame_with(decl.init.unwrap(), |this| {
+            if !decl.mutable {
+                this.immutable.extend(pattern_binding_ids(&decl.pattern));
+            }
+            let pattern = this.pattern(&decl.pattern, &ty)?;
+            if !this.pattern_exhaustive(&pattern, &ty) {
+                return Err(error(
+                    decl.span,
+                    "refutable generator let pattern requires a diverging else branch",
+                ));
+            }
+            bindings = pattern_bindings(&decl.pattern)?
+                .into_values()
+                .map(|id| (id, this.locals[&id].clone()))
+                .collect();
+            let packet_type = this.tuple_value_type(
+                bindings.iter().map(|(_, ty)| ty.clone()).collect(),
+                decl.span,
+            )?;
+            Ok(n::Expr {
+                source: source(decl.span),
+                ty: packet_type.clone(),
+                kind: K::Block {
+                    statements: vec![n::Expr {
+                        source: source(decl.span),
+                        ty: p(P::Void),
+                        kind: K::LetPattern {
+                            pattern,
+                            value: Box::new(marker),
+                            guard: None,
+                            otherwise: None,
+                        },
+                    }],
+                    result: Some(Box::new(n::Expr {
+                        source: source(decl.span),
+                        ty: packet_type,
+                        kind: K::Tuple(
+                            bindings
+                                .iter()
+                                .map(|(id, ty)| n::Expr {
+                                    source: source(decl.span),
+                                    ty: ty.clone(),
+                                    kind: K::Local(*id),
+                                })
+                                .collect(),
+                        ),
+                    })),
+                },
+            })
+        });
+        self.locals.remove(&input);
         self.generator_data.remove(&input);
-        checked?;
-        let (values, _) =
-            self.required_live_input(decl.init.unwrap(), root, vec![], vec![(input, ty, value)])?;
+        self.generator_cells.remove(&input);
+        let (values, _) = result?.ok_or_else(|| {
+            error(
+                decl.span,
+                "live generator pattern requires a completed invocation",
+            )
+        })?;
         let comptime_interpretor::Value::Tuple(values) = values else {
             return Err(error(
                 decl.span,

@@ -2,6 +2,49 @@
 use super::*;
 
 impl Walker<'_> {
+    fn division_ranges(
+        &mut self,
+        dividend: &Interval,
+        divisor: &Interval,
+        excludes_zero: bool,
+    ) -> Result<(Interval, Interval), Unknown> {
+        if !excludes_zero
+            || divisor.upper.is_negative()
+            || (!divisor.lower.is_negative() && !divisor.lower.is_zero())
+        {
+            return dividend.div_rem_trunc(divisor, self.limits);
+        }
+        // A checked nonzero premise describes two intervals when the divisor
+        // can have either sign. Enclose each component, then join the results;
+        // do not silently assume a rounding policy or a sign for the source.
+        let mut ranges = Vec::new();
+        if divisor.lower.is_negative() {
+            ranges.push(Interval::new(
+                self.limits.integer(&divisor.lower)?,
+                Integer::from_i128(-1),
+                self.limits,
+            )?);
+        }
+        if !divisor.upper.is_negative() && !divisor.upper.is_zero() {
+            ranges.push(Interval::new(
+                Integer::from_u128(1),
+                self.limits.integer(&divisor.upper)?,
+                self.limits,
+            )?);
+        }
+        let mut result: Option<(Interval, Interval)> = None;
+        for range in ranges {
+            let (quotient, remainder) = dividend.div_rem_trunc(&range, self.limits)?;
+            result = Some(match result {
+                None => (quotient, remainder),
+                Some((q, r)) => (
+                    hull(&q, &quotient, self.limits)?,
+                    hull(&r, &remainder, self.limits)?,
+                ),
+            });
+        }
+        result.ok_or(Unknown::InsufficientBounds)
+    }
     #[inline(never)]
     pub(super) fn integer_expression(
         &mut self,
@@ -28,6 +71,30 @@ impl Walker<'_> {
             K::IntegerBinary { op, left, right } => {
                 let a = self.child(left, state, depth)?;
                 let b = self.child(right, state, depth)?;
+                let excludes_zero =
+                    if matches!(op, IntegerOp::DivideTrunc | IntegerOp::RemainderTrunc)
+                        && b.range.as_ref().is_some_and(|range| {
+                            (range.lower.is_negative() || range.lower.is_zero())
+                                && !range.upper.is_negative()
+                        })
+                    {
+                        if let Some(divisor) = b.polynomial(self.limits)? {
+                            let condition = Condition::PolynomialCompare {
+                                left: divisor,
+                                relation: C::NotEqual,
+                                right: Polynomial::constant(Integer::zero(), self.limits)?,
+                            };
+                            state
+                                .facts
+                                .prove_condition(&condition, true, self.limits)
+                                .and_then(|proof| proof.replay(&state.facts, self.limits))
+                                .is_ok()
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
                 // A nonnegative dividend bounds both its unsigned quotient
                 // and remainder. Keep only current-version evidence: evaluating
                 // the divisor may have mutated the dividend's original place.
@@ -81,8 +148,9 @@ impl Walker<'_> {
                         )?,
                         IntegerOp::Multiply => a.multiply(&b, self.limits)?,
                         IntegerOp::DivideTrunc | IntegerOp::RemainderTrunc => {
-                            let (quotient, remainder) =
-                                a.div_rem_trunc(&b, self.limits).map_err(|error| {
+                            let (quotient, remainder) = self
+                                .division_ranges(&a, &b, excludes_zero)
+                                .map_err(|error| {
                                     if error == Unknown::InsufficientBounds {
                                         Reason::MissingDivisionProof
                                     } else {

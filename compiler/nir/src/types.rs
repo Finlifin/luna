@@ -149,6 +149,11 @@ pub struct AssociatedTypeOrigin {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Term {
     Primitive(Primitive),
+    /// Error labels are complete Type instances, independent of effect entries.
+    ErrorResult {
+        errors: Vec<Term>,
+        result: Box<Term>,
+    },
     /// Scoped effect occurrences in order. Repetition records handler layers,
     /// not the number of requests. Use `computation` to join nested prefixes.
     Computation {
@@ -174,6 +179,17 @@ pub enum Term {
         head: DeclarationId,
         sort: Sort,
         arguments: Vec<Term>,
+    },
+    /// Domain of ordered closure contexts, distinct from Type and type lists.
+    ClosureContextType,
+    /// A completed context's capture types in semantic order. Ordinary capture
+    /// values are carried by closures, not by this type-level context value.
+    ClosureContextValue(Vec<Term>),
+    /// Stable context binder applied to a callable type. No inference metas
+    /// live here; substitution completes this into Closure or an empty body.
+    ContextualClosure {
+        context: Box<Term>,
+        signature: Box<Term>,
     },
     /// Structural closure environment; values and body identity are not type identity.
     Closure {
@@ -261,6 +277,29 @@ pub enum Term {
 }
 
 impl Term {
+    /// Coalesce exact repeated labels and nested qualifiers without unfolding
+    /// opaque heads. Semantic label equality is resolved by elaboration.
+    pub fn error_result(mut errors: Vec<Term>, mut result: Term) -> Self {
+        while let Self::ErrorResult {
+            errors: inner,
+            result: output,
+        } = result
+        {
+            errors.extend(inner);
+            result = *output;
+        }
+        let mut seen = std::collections::HashSet::new();
+        errors.retain(|label| seen.insert(label.clone()));
+        if errors.is_empty() {
+            result
+        } else {
+            Self::ErrorResult {
+                errors,
+                result: Box::new(result),
+            }
+        }
+    }
+
     /// Free runtime object identities retained by this type expression.
     /// Contextual code must either substitute these consistently or keep an
     /// explicit unsupported obligation; shape equality alone cannot erase them.
@@ -276,6 +315,10 @@ impl Term {
         let mut pending = vec![self];
         while let Some(term) = pending.pop() {
             match term {
+                Self::ErrorResult { errors, result } => {
+                    pending.extend(errors);
+                    pending.push(*result);
+                }
                 Self::Computation { effects, result } => {
                     pending.push(*result);
                     for operation in effects {
@@ -294,6 +337,7 @@ impl Term {
                 | Self::Nominal { arguments, .. }
                 | Self::Tuple(arguments)
                 | Self::TupleValue(arguments)
+                | Self::ClosureContextValue(arguments)
                 | Self::TypeListValue(arguments)
                 | Self::TypeListConcat(arguments) => pending.extend(arguments),
                 Self::Record(fields) | Self::RecordValue(fields) => {
@@ -315,7 +359,12 @@ impl Term {
                     pending.push(*result);
                     pending.extend(parameters.into_iter().map(|parameter| parameter.ty));
                 }
-                Self::Primitive(_)
+                Self::ContextualClosure { context, signature } => {
+                    pending.push(*context);
+                    pending.push(*signature);
+                }
+                Self::ClosureContextType
+                | Self::Primitive(_)
                 | Self::Hole { .. }
                 | Self::Bound { .. }
                 | Self::Rigid { .. }
@@ -405,14 +454,16 @@ impl Term {
     pub fn callable_signature(&self) -> &Term {
         match self {
             Self::ComptimeFunction(signature) => signature,
-            Self::Closure { signature, .. } => signature.callable_signature(),
+            Self::Closure { signature, .. } | Self::ContextualClosure { signature, .. } => {
+                signature.callable_signature()
+            }
             _ => self,
         }
     }
     pub fn is_comptime_callable(&self) -> bool {
         match self {
             Self::ComptimeFunction(_) => true,
-            Self::Closure { signature, .. } => {
+            Self::Closure { signature, .. } | Self::ContextualClosure { signature, .. } => {
                 matches!(signature.as_ref(), Self::ComptimeFunction(_))
             }
             _ => false,
@@ -438,7 +489,9 @@ impl Term {
                     *target = Box::new(result);
                     return Some(self);
                 }
-                Self::Closure { signature, .. } | Self::ComptimeFunction(signature) => {
+                Self::Closure { signature, .. }
+                | Self::ContextualClosure { signature, .. }
+                | Self::ComptimeFunction(signature) => {
                     current = signature;
                 }
                 _ => return None,
@@ -536,6 +589,7 @@ impl Term {
             Self::Runtime(_) => Sort::Runtime,
             Self::NominalValue { .. }
             | Self::TupleValue(_)
+            | Self::ClosureContextValue(_)
             | Self::TypeListValue(_)
             | Self::TypeListConcat(_)
             | Self::RecordValue(_)
@@ -553,6 +607,49 @@ impl Term {
             | Self::Integer(_)
             | Self::Value { .. } => Sort::ComptimeValue,
             _ => Sort::Type,
+        }
+    }
+
+    /// Complete structural context qualification without evaluating any
+    /// normal-form head or changing capture order / runtime identities.
+    pub fn contextual_closure(context: Term, signature: Term) -> Result<Term, TypeError> {
+        if !matches!(signature, Term::Function { .. } | Term::ComptimeFunction(_)) {
+            return Err(TypeError::InvalidClosureSignature);
+        }
+        match context {
+            Self::ClosureContextValue(environment) => {
+                for ty in &environment {
+                    require_sort(ty, Sort::Type)?;
+                }
+                if environment.is_empty() {
+                    Ok(signature)
+                } else {
+                    Ok(Self::Closure {
+                        environment,
+                        signature: Box::new(signature),
+                    })
+                }
+            }
+            context @ (Self::Bound {
+                sort: Sort::ComptimeValue,
+                ..
+            }
+            | Self::Rigid {
+                sort: Sort::ComptimeValue,
+                ..
+            }
+            | Self::Hole {
+                sort: Sort::ComptimeValue,
+                ..
+            }
+            | Self::NormalForm {
+                sort: Sort::ComptimeValue,
+                ..
+            }) => Ok(Self::ContextualClosure {
+                context: Box::new(context),
+                signature: Box::new(signature),
+            }),
+            _ => Err(TypeError::InvalidClosureContext),
         }
     }
 
@@ -860,6 +957,9 @@ impl Term {
                 .collect::<Result<Vec<_>, _>>()
         };
         Ok(match self {
+            Self::ErrorResult { errors, result } => {
+                Self::error_result(many(errors, leaf)?, result.rewrite(nesting, leaf)?)
+            }
             Self::Computation { effects, result } => Self::computation(
                 effects
                     .iter()
@@ -908,6 +1008,11 @@ impl Term {
                 sort: *sort,
                 arguments: many(arguments, leaf)?,
             },
+            Self::ClosureContextValue(fields) => Self::ClosureContextValue(many(fields, leaf)?),
+            Self::ContextualClosure { context, signature } => Self::contextual_closure(
+                context.rewrite(nesting, leaf)?,
+                signature.rewrite(nesting, leaf)?,
+            )?,
             Self::Closure {
                 environment,
                 signature,
@@ -1013,6 +1118,7 @@ pub enum TypeError {
     UnboundRuntime(RuntimeId),
     BinderDepthOverflow,
     InvalidClosureSignature,
+    InvalidClosureContext,
     DuplicateRecordField(String),
     InvalidNominalValueType,
     InvalidComptimeFunctionSignature,
@@ -1024,6 +1130,7 @@ impl fmt::Display for TypeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ContextualCodeNotCallable => f.write_str("contextual code signature requires code-method elaboration, not ordinary callable erasure"),
+            Self::InvalidClosureContext => f.write_str("closure qualification requires a closure context"),
             Self::InvalidTypeListComponent => {
                 f.write_str("type-list concatenation requires list operands")
             }
@@ -1276,6 +1383,15 @@ impl TypeRef {
 
 fn collect_runtime_dependencies(term: &Term, result: &mut BTreeSet<RuntimeId>) {
     match term {
+        Term::ErrorResult {
+            errors,
+            result: output,
+        } => {
+            for error in errors {
+                collect_runtime_dependencies(error, result);
+            }
+            collect_runtime_dependencies(output, result);
+        }
         Term::Computation {
             effects,
             result: output,
@@ -1303,6 +1419,7 @@ fn collect_runtime_dependencies(term: &Term, result: &mut BTreeSet<RuntimeId>) {
         | Term::FunctionValue { arguments, .. }
         | Term::NormalForm { arguments, .. }
         | Term::Tuple(arguments)
+        | Term::ClosureContextValue(arguments)
         | Term::TypeListValue(arguments)
         | Term::TypeListConcat(arguments)
         | Term::TupleValue(arguments) => {
@@ -1320,6 +1437,10 @@ fn collect_runtime_dependencies(term: &Term, result: &mut BTreeSet<RuntimeId>) {
             for (_, ty) in fields {
                 collect_runtime_dependencies(ty, result);
             }
+        }
+        Term::ContextualClosure { context, signature } => {
+            collect_runtime_dependencies(context, result);
+            collect_runtime_dependencies(signature, result);
         }
         Term::Closure {
             environment,
@@ -1342,7 +1463,8 @@ fn collect_runtime_dependencies(term: &Term, result: &mut BTreeSet<RuntimeId>) {
             }
             collect_runtime_dependencies(output, result);
         }
-        Term::Primitive(_)
+        Term::ClosureContextType
+        | Term::Primitive(_)
         | Term::Hole { .. }
         | Term::Bound { .. }
         | Term::Rigid { .. }
@@ -1387,6 +1509,12 @@ fn validate(
     core: bool,
 ) -> Result<(), TypeError> {
     match term {
+        Term::ErrorResult { errors, result } => {
+            for ty in errors.iter().chain(std::iter::once(result.as_ref())) {
+                require_sort(ty, Sort::Type)?;
+                validate(ty, holes, frames, allow_free, core)?;
+            }
+        }
         Term::Computation { effects, result } => {
             require_sort(result, Sort::Type)?;
             validate(result, holes, frames, allow_free, core)?;
@@ -1448,6 +1576,44 @@ fn validate(
             })();
             frames.pop();
             checked?;
+        }
+        Term::ClosureContextValue(fields) => {
+            for ty in fields {
+                require_sort(ty, Sort::Type)?;
+                validate(ty, holes, frames, allow_free, core)?;
+            }
+        }
+        Term::ContextualClosure { context, signature } => {
+            if !matches!(
+                signature.as_ref(),
+                Term::Function { .. } | Term::ComptimeFunction(_)
+            ) {
+                return Err(TypeError::InvalidClosureSignature);
+            }
+            if !matches!(
+                context.as_ref(),
+                Term::ClosureContextValue(_)
+                    | Term::Bound {
+                        sort: Sort::ComptimeValue,
+                        ..
+                    }
+                    | Term::Rigid {
+                        sort: Sort::ComptimeValue,
+                        ..
+                    }
+                    | Term::Hole {
+                        sort: Sort::ComptimeValue,
+                        ..
+                    }
+                    | Term::NormalForm {
+                        sort: Sort::ComptimeValue,
+                        ..
+                    }
+            ) {
+                return Err(TypeError::InvalidClosureContext);
+            }
+            validate(context, holes, frames, allow_free, core)?;
+            validate(signature, holes, frames, allow_free, core)?;
         }
         Term::Closure {
             environment,
@@ -1639,6 +1805,13 @@ impl fmt::Display for Parameter {
 impl fmt::Display for Term {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ErrorResult { errors, result } => {
+                f.write_str("(error-result-type (errors")?;
+                for error in errors {
+                    write!(f, " {error}")?;
+                }
+                write!(f, ") (result {result}))")
+            }
             Self::Computation { effects, result } => {
                 f.write_str("(computation-type (effects")?;
                 for operation in effects {
@@ -1677,6 +1850,16 @@ impl fmt::Display for Term {
                 list(f, arguments)?;
                 f.write_str("))")
             }
+            Self::ClosureContextType => f.write_str("(closure-context-type)"),
+            Self::ClosureContextValue(fields) => {
+                f.write_str("(closure-context (fields ")?;
+                list(f, fields)?;
+                f.write_str("))")
+            }
+            Self::ContextualClosure { context, signature } => write!(
+                f,
+                "(contextual-closure (context {context}) (signature {signature}))"
+            ),
             Self::Closure {
                 environment,
                 signature,

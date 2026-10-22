@@ -327,6 +327,12 @@ fn loop_may_transfer(
                     return Ok(false);
                 }
                 K::Match { value, arms } => {
+                    // The subject runs before every pattern and guard. Even
+                    // executable/unknown patterns are unreachable if it exits.
+                    if is_never(&value.ty) {
+                        pending.push(value);
+                        return Ok(false);
+                    }
                     *fuel = fuel
                         .checked_sub(arms.len().saturating_add(1))
                         .ok_or("loop completion budget exhausted")?;
@@ -482,6 +488,126 @@ mod tests {
         assert_eq!(
             loop_may_complete(&body, n::LocalId { owner: 1, index: 3 }, &mut 10),
             Ok(false)
+        );
+    }
+
+    #[test]
+    fn divergent_match_subject_excludes_pattern_guard_and_arm_transfers() {
+        let identity = n::LocalId { owner: 1, index: 2 };
+        let node = |kind| n::Expr {
+            ty: p(P::Never),
+            source: n::SourceRange { start: 0, end: 0 },
+            kind,
+        };
+        for (subject, breaks, continues) in [
+            (node(K::Return(Some(Box::new(literal(true))))), false, false),
+            (node(K::Break(identity)), true, false),
+            (node(K::Continue(identity)), false, true),
+        ] {
+            // Executable patterns deliberately prevent literal classification.
+            // Neither their effects nor the subsequent guard/body can run.
+            for unreachable in [K::Break(identity), K::Continue(identity)] {
+                let body = node(K::Match {
+                    value: Box::new(subject.clone()),
+                    arms: vec![n::MatchArm {
+                        pattern: n::Pattern::Guard {
+                            pattern: Box::new(n::Pattern::Wild),
+                            condition: Box::new(node(unreachable.clone())),
+                        },
+                        guard: Some(node(unreachable.clone())),
+                        body: node(unreachable),
+                    }],
+                });
+                assert_eq!(loop_may_complete(&body, identity, &mut 100), Ok(breaks));
+                assert_eq!(loop_may_continue(&body, identity, &mut 100), Ok(continues));
+                assert!(loop_may_complete(&body, identity, &mut 0).is_err());
+            }
+        }
+    }
+}
+
+/// Loop desugaring wraps condition tests, exits and scopes in one source span.
+/// Give those synthetic nodes separate identities for runtime cleanup, keeping
+/// the explicit shared boundary of a discarded Void expression intact.
+pub(super) fn freshen_loop_sites(
+    body: &mut n::Expr,
+    original: n::SourceRange,
+    sources: &mut Vec<n::ExpansionSource>,
+    fuel: &mut usize,
+) -> Result<(), String> {
+    let mut shared_sites = BTreeSet::new();
+    nir::visit::expression_mut_pruned(body, fuel, |node, fuel| {
+        if node.source != original {
+            return Ok(shared_sites.contains(&(node.source.start, node.source.end)));
+        }
+        let index = u32::try_from(sources.len()).map_err(|_| "loop source space exhausted")?;
+        sources.push(n::ExpansionSource {
+            original,
+            site: original,
+        });
+        let fresh = n::SourceRange::generated(index);
+        let mut current = node;
+        loop {
+            let shared_discard = current.shares_discard_temporary_boundary();
+            current.source = fresh;
+            if !shared_discard {
+                break;
+            }
+            shared_sites.insert((fresh.start, fresh.end));
+            *fuel = fuel
+                .checked_sub(1)
+                .ok_or("loop discard source budget exhausted")?;
+            let K::Discard(value) = &mut current.kind else {
+                unreachable!()
+            };
+            current = value;
+        }
+        Ok(true)
+    })
+}
+
+#[cfg(test)]
+mod synthetic_loop_sites_tests {
+    use super::*;
+    #[test]
+    fn loop_sites_preserve_shared_discard_chains_and_source_provenance() {
+        let original = n::SourceRange { start: 3, end: 40 };
+        let node = |kind| n::Expr {
+            source: original,
+            ty: p(P::Void),
+            kind,
+        };
+        let statement = node(K::Discard(Box::new(node(K::Discard(Box::new(node(
+            K::Unit,
+        )))))));
+        let body = node(K::Block {
+            statements: vec![statement],
+            result: None,
+        });
+        assert!(freshen_loop_sites(&mut body.clone(), original, &mut vec![], &mut 1).is_err());
+        let mut body = body;
+        let mut sources = vec![];
+        freshen_loop_sites(&mut body, original, &mut sources, &mut 1000).unwrap();
+        let K::Block { statements, .. } = &body.kind else {
+            unreachable!()
+        };
+        let first = &statements[0];
+        let K::Discard(second) = &first.kind else {
+            unreachable!()
+        };
+        let K::Discard(value) = &second.kind else {
+            unreachable!()
+        };
+        assert_ne!(body.source, first.source);
+        assert_eq!(first.source, second.source);
+        assert_eq!(second.source, value.source);
+        assert!(first.shares_discard_temporary_boundary());
+        assert!(second.shares_discard_temporary_boundary());
+        assert_eq!(sources.len(), 2);
+        assert!(
+            sources
+                .iter()
+                .all(|source| source.original == original && source.site == original)
         );
     }
 }

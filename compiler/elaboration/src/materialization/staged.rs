@@ -484,3 +484,142 @@ impl Builder<'_> {
             .collect()
     }
 }
+
+// Inline argument frames retain ordinary evaluation order. A named template
+// reference itself has no runtime evaluation, storage or environment, so its
+// immutable aliases can be substituted before specializing the exposed calls.
+// Do not propagate through writes, address-taking or closure capture.
+pub(super) fn forward_template_aliases(
+    expression: &mut n::Expr,
+    next: &mut u32,
+    sources: &mut Vec<n::ExpansionSource>,
+    fuel: &mut usize,
+) -> Result<(), String> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut unavailable = BTreeSet::new();
+    let mut declarations = Vec::new();
+    iir::visit::expression_pruned(expression, fuel, |expr, fuel| {
+        if matches!(
+            expr.kind,
+            K::Assign { .. } | K::AddressOf(_) | K::Closure { .. }
+        ) {
+            unavailable.extend(nir::free_bindings::collect(expr, fuel)?);
+            return Ok(false);
+        }
+        if let K::Let { binding, value } = &expr.kind {
+            if matches!(value.ty.callable_signature(), Term::Function { parameters, .. }
+                if parameters.iter().any(|p| p.sort != nir::Sort::Runtime))
+                && matches!(
+                    value.kind,
+                    K::Function(_)
+                        | K::FunctionInstance { .. }
+                        | K::TraitMethod { .. }
+                        | K::Local(_)
+                        | K::If { .. }
+                        | K::Match { .. }
+                        | K::Block { .. }
+                        | K::CallPreparation { .. }
+                )
+            {
+                let mut remaining = *fuel as u64;
+                nir::copy_budget::charge_expression(value, &mut remaining)
+                    .map_err(|_| "template alias collection budget exhausted")?;
+                *fuel = remaining as usize;
+                declarations.push((*binding, value.as_ref().clone()));
+            }
+        }
+        Ok(true)
+    })?;
+    let mut values = BTreeMap::new();
+    let mut selections = BTreeMap::new();
+    loop {
+        let mut changed = false;
+        for (binding, initializer) in &declarations {
+            *fuel = fuel
+                .checked_sub(1)
+                .ok_or("template alias budget exhausted")?;
+            if unavailable.contains(binding) || values.contains_key(binding) {
+                continue;
+            }
+            if matches!(
+                initializer.kind,
+                K::If { .. } | K::Match { .. } | K::Block { .. } | K::CallPreparation { .. }
+            ) {
+                let mut remaining = *fuel as u64;
+                nir::copy_budget::charge_expression(initializer, &mut remaining)
+                    .map_err(|_| "template selection alias budget exhausted")?;
+                *fuel = remaining as usize;
+                let mut candidate = initializer.clone();
+                iir::visit::expression_mut_pruned(&mut candidate, fuel, |expr, fuel| {
+                    if matches!(expr.kind, K::Closure { .. }) {
+                        return Ok(false);
+                    }
+                    if let K::Local(binding) = expr.kind {
+                        if let Some(value) = values.get(&binding) {
+                            let mut remaining = *fuel as u64;
+                            nir::copy_budget::charge_expression(value, &mut remaining)
+                                .map_err(|_| "template selection alias copy budget exhausted")?;
+                            *fuel = remaining as usize;
+                            let source = expr.source;
+                            *expr = value.clone();
+                            expr.source = source;
+                        }
+                    }
+                    Ok(true)
+                })?;
+                if let Some((selection, dispatch)) =
+                    super::conditional_calls::freeze_template_selection(
+                        &candidate, next, sources, fuel,
+                    )?
+                {
+                    selections.insert(*binding, selection);
+                    values.insert(*binding, dispatch);
+                    changed = true;
+                }
+                continue;
+            }
+            let value = if let K::Local(source) = initializer.kind {
+                let Some(value) = values.get(&source) else {
+                    continue;
+                };
+                value
+            } else {
+                initializer
+            };
+            let mut remaining = *fuel as u64;
+            nir::copy_budget::charge_expression(value, &mut remaining)
+                .map_err(|_| "template alias copy budget exhausted")?;
+            *fuel = remaining as usize;
+            values.insert(*binding, value.clone());
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
+    }
+    iir::visit::expression_mut_pruned(expression, fuel, |expr, fuel| {
+        if matches!(expr.kind, K::Closure { .. }) {
+            return Ok(false);
+        }
+        if let K::Local(binding) = expr.kind {
+            if let Some(value) = values.get(&binding) {
+                let mut remaining = *fuel as u64;
+                nir::copy_budget::charge_expression(value, &mut remaining)
+                    .map_err(|_| "template alias copy budget exhausted")?;
+                *fuel = remaining as usize;
+                let source = expr.source;
+                *expr = value.clone();
+                expr.source = source;
+            }
+        } else if let K::Let { binding, .. } = expr.kind {
+            if values.contains_key(&binding) {
+                if let Some(selection) = selections.remove(&binding) {
+                    *expr = selection;
+                } else {
+                    expr.kind = K::Unit;
+                }
+            }
+        }
+        Ok(true)
+    })
+}

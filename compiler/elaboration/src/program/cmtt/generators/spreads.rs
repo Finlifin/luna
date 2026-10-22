@@ -69,6 +69,7 @@ impl Checker<'_, '_> {
         callee: &Expr<'_>,
         arguments: &[Arg<'_>],
         expected: Option<&Interface>,
+        result_context: Option<&crate::calls::InputContext>,
         type_plan: Option<GeneratorTypePlan>,
     ) -> Result<Arc<ExpressionCode>, Error> {
         let owner = self
@@ -76,7 +77,15 @@ impl Checker<'_, '_> {
             .ok_or_else(|| error(site.span, "expected a code generator"))?;
         self.ensure_code_generator(owner, site.span)?;
         self.with_generator_spreads(owner, site.span, arguments, |this, inputs, plan| {
-            this.invoke_code_generator_inputs(site, callee, inputs, expected, plan, type_plan)
+            this.invoke_code_generator_inputs(
+                site,
+                callee,
+                inputs,
+                expected,
+                result_context,
+                plan,
+                type_plan,
+            )
         })
     }
 

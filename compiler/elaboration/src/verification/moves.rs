@@ -103,6 +103,7 @@ pub struct PendingValue {
 }
 #[derive(Clone, Debug)]
 struct PendingFrame {
+    conditions: BTreeMap<u64, ValueConditions>,
     origins: BTreeMap<u64, ValueOrigins>,
     source: SourceRange,
     values: Vec<PendingValue>,
@@ -451,8 +452,13 @@ fn group_owned_callables<'a>(
     Ok(grouped)
 }
 
+type PointerTargetGuards = BTreeMap<Place, Vec<(Vec<usize>, usize)>>;
+type ValuePointerGuards = BTreeMap<Vec<usize>, PointerTargetGuards>;
+
 struct PatternPreparation<'a> {
     origins: &'a ValueOrigins,
+    pointer_guards: ValuePointerGuards,
+    selected_pointer_variants: Vec<VariantSelection>,
     domains: EnumDomains,
     callables: BTreeMap<Vec<usize>, Callable>,
     transfers: Vec<Vec<usize>>,
@@ -1093,8 +1099,11 @@ pub struct Report {
     /// kind. Missing slots are not proof of pointer freedom; consult the exit
     /// state and layout. Targets remain in this invocation's coordinate system.
     pub captured_pointer_exits: Vec<BTreeMap<Place, BTreeSet<Place>>>,
+    pub captured_pointer_guard_exits: Vec<BTreeMap<Place, PointerTargetGuards>>,
     pub failed_capture_pointer_exits: Vec<BTreeMap<Place, BTreeSet<Place>>>,
+    pub failed_capture_pointer_guard_exits: Vec<BTreeMap<Place, PointerTargetGuards>>,
     pub effect_capture_pointer_exits: Vec<BTreeMap<Place, BTreeSet<Place>>>,
+    pub effect_capture_pointer_guard_exits: Vec<BTreeMap<Place, PointerTargetGuards>>,
     /// Work charged by the outer analysis entry point, including nested summaries.
     pub entry_steps_used: usize,
     pub failed_exits: Vec<State>,
@@ -1313,6 +1322,41 @@ impl fmt::Display for Report {
                 f.write_str(")")?;
             }
         }
+        for (name, exits) in [
+            (
+                "captured-pointer-guard-exits",
+                &self.captured_pointer_guard_exits,
+            ),
+            (
+                "failed-capture-pointer-guard-exits",
+                &self.failed_capture_pointer_guard_exits,
+            ),
+            (
+                "effect-capture-pointer-guard-exits",
+                &self.effect_capture_pointer_guard_exits,
+            ),
+        ] {
+            write!(f, ") ({name}")?;
+            for captures in exits {
+                f.write_str(" (captures")?;
+                for (slot, entries) in captures {
+                    write!(f, " (slot {slot}")?;
+                    for (target, conditions) in entries {
+                        write!(f, " (target {target}")?;
+                        for (path, tag) in conditions {
+                            f.write_str(" (condition (fields")?;
+                            for field in path {
+                                write!(f, " {field}")?;
+                            }
+                            write!(f, ") (variant {tag}))")?;
+                        }
+                        f.write_str(")")?;
+                    }
+                    f.write_str(")")?;
+                }
+                f.write_str(")")?;
+            }
+        }
         f.write_str(") (failed-exits")?;
         for exit in &self.failed_exits {
             write!(f, " {exit}")?;
@@ -1512,14 +1556,20 @@ impl Report {
             .append(&mut other.captured_enum_exits);
         self.captured_pointer_exits
             .append(&mut other.captured_pointer_exits);
+        self.captured_pointer_guard_exits
+            .append(&mut other.captured_pointer_guard_exits);
         self.failed_capture_enum_exits
             .append(&mut other.failed_capture_enum_exits);
         self.effect_capture_enum_exits
             .append(&mut other.effect_capture_enum_exits);
         self.failed_capture_pointer_exits
             .append(&mut other.failed_capture_pointer_exits);
+        self.failed_capture_pointer_guard_exits
+            .append(&mut other.failed_capture_pointer_guard_exits);
         self.effect_capture_pointer_exits
             .append(&mut other.effect_capture_pointer_exits);
+        self.effect_capture_pointer_guard_exits
+            .append(&mut other.effect_capture_pointer_guard_exits);
         self.failed_exits.append(&mut other.failed_exits);
         self.effect_exits.append(&mut other.effect_exits);
         self.lexical_returns.append(&mut other.lexical_returns);
@@ -1618,8 +1668,14 @@ struct ResidualLayout {
     remaining: State,
     variants: Vec<VariantSelection>,
 }
+#[derive(Clone, Debug, Default, PartialEq)]
+struct ValueConditions {
+    domains: EnumDomains,
+    pointers: ValuePointerGuards,
+}
 #[derive(Clone, Debug, PartialEq)]
 struct ActiveTemporary {
+    conditions: ValueConditions,
     alternatives: Vec<ResidualLayout>,
     origins: ValueOrigins,
     variants: Vec<VariantSelection>,
@@ -1669,7 +1725,10 @@ struct Flow {
     stable_handler_slots: BTreeSet<PlaceId>,
     // Complete enclosing body scan for frames without a function exit contract.
     // Shared by branches, never inferred from the path currently being checked.
-    pointer_slot_mutations: Option<std::sync::Arc<BTreeSet<PlaceId>>>,
+    pointer_slot_mutations: Option<std::sync::Arc<BTreeSet<Place>>>,
+    // Optional necessary conditions for individual physical-slot candidates.
+    // Missing metadata never authorizes excluding a target.
+    pointer_guards: BTreeMap<Place, PointerTargetGuards>,
     state: State,
     roots: BTreeSet<PlaceId>,
     order: Vec<PlaceId>,
@@ -1684,6 +1743,7 @@ struct Flow {
     // Callable leaves of the value currently being delivered, relative to its root.
     value_callables: BTreeMap<Vec<usize>, Callable>,
     value_variants: EnumDomains,
+    value_pointer_guards: ValuePointerGuards,
     enum_domains: BTreeMap<PlaceId, EnumDomains>,
     effect_mutable_roots: BTreeSet<PlaceId>,
     pointers: BTreeMap<Place, BTreeSet<Place>>,
@@ -1758,6 +1818,10 @@ pub struct EffectResultInput {
     abi: nir::effects::Abi,
     signature: Term,
     values: Vec<std::sync::Arc<HandlerReturnValue>>,
+    /// Every normal completion transfers one of these complete input operands.
+    forwarded_parameters: Option<BTreeSet<usize>>,
+    copy_parameters: BTreeSet<usize>,
+    parameter_accesses: BTreeSet<super::memory::EffectParameterAccess>,
 }
 
 /// Copy a bounded set of shared handler-result snapshots for plan publication.
@@ -1773,10 +1837,36 @@ pub fn copy_effect_inputs(
 }
 
 impl EffectResultInput {
+    fn memory_input(
+        &self,
+        fuel: &mut usize,
+        source: SourceRange,
+    ) -> Result<super::memory::EffectInput, Error> {
+        self.charge(fuel, source)?;
+        Ok(super::memory::EffectInput {
+            operation: self.operation.clone(),
+            abi: self.abi,
+            signature: self.signature.clone(),
+            forwarded_parameters: self.forwarded_parameters.clone(),
+            copy_parameters: self.copy_parameters.clone(),
+            parameter_accesses: self.parameter_accesses.clone(),
+        })
+    }
     fn charge(&self, fuel: &mut usize, source: SourceRange) -> Result<(), Error> {
         *fuel = fuel
-            .checked_sub(self.values.len() + 1)
+            .checked_sub(
+                self.values
+                    .len()
+                    .saturating_add(1)
+                    .saturating_add(self.forwarded_parameters.as_ref().map_or(0, BTreeSet::len))
+                    .saturating_add(self.copy_parameters.len()),
+            )
             .ok_or_else(|| error(source, "effect result premise budget exhausted"))?;
+        for access in &self.parameter_accesses {
+            *fuel = fuel
+                .checked_sub(access.input_fields.len().saturating_add(1))
+                .ok_or_else(|| error(source, "effect parameter access copy budget exhausted"))?;
+        }
         crate::associated::charge_projection_copy(&self.signature, fuel)
             .map_err(|e| error(source, e))?;
         for argument in &self.operation.arguments {
@@ -1795,6 +1885,20 @@ impl fmt::Display for EffectResultInput {
         )?;
         for value in &self.values {
             write!(f, " {value}")?;
+        }
+        f.write_str(") (forwarded-parameters")?;
+        if let Some(parameters) = &self.forwarded_parameters {
+            for parameter in parameters {
+                write!(f, " {parameter}")?;
+            }
+        }
+        f.write_str(") (copy-inputs")?;
+        for parameter in &self.copy_parameters {
+            write!(f, " {parameter}")?;
+        }
+        f.write_str(") (parameter-accesses")?;
+        for access in &self.parameter_accesses {
+            write!(f, " {access}")?;
         }
         f.write_str("))")
     }
@@ -1827,7 +1931,7 @@ struct Analyzer<'a, F, G> {
     next_generation: u64,
     next_borrowed_pointer: u32,
     next_borrowed_scope: u64,
-    borrowed_pointees: BTreeMap<(u64, Place), (PlaceId, Term)>,
+    borrowed_pointees: BTreeMap<(u64, Place, Vec<(Vec<usize>, usize)>), (PlaceId, Term)>,
     temporary_scope: TemporaryScope,
     temporary_scope_id: u64,
     next_sequence: u64,
@@ -2149,11 +2253,22 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             .ok_or_else(|| error(source, "cleanup sequence exhausted"))?;
         Ok(sequence)
     }
+    fn value_conditions(
+        &mut self,
+        flow: &Flow,
+        source: SourceRange,
+    ) -> Result<ValueConditions, Error> {
+        Ok(ValueConditions {
+            domains: copy_enum_domains(&flow.value_variants, &mut self.fuel, source)?,
+            pointers: self.copy_value_pointer_guards(&flow.value_pointer_guards, source)?,
+        })
+    }
     fn retain_temporary(
         &mut self,
         description: TemporaryCleanup,
         state: State,
         origins: ValueOrigins,
+        conditions: ValueConditions,
         flow: &mut Flow,
     ) -> Result<(), Error> {
         self.acquire_cleanup(&description.ty, description.source)?;
@@ -2161,6 +2276,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         flow.temporaries.insert(
             id,
             ActiveTemporary {
+                conditions,
                 alternatives: vec![],
                 origins,
                 variants: vec![],
@@ -2205,7 +2321,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             )
             .map_err(|e| error(source, format!("temporary shape: {e:?}")))?;
         self.report.temporaries.push(description.clone());
-        self.retain_temporary(description, state, origins, flow)
+        let conditions = self.value_conditions(flow, source)?;
+        self.retain_temporary(description, state, origins, conditions, flow)
     }
     fn temporary_action(
         &mut self,
@@ -2313,6 +2430,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             state,
             variants,
             &temporary.origins,
+            &temporary.conditions,
             flow,
             retired,
             source,
@@ -2325,6 +2443,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         remaining: &State,
         variants: &[VariantSelection],
         origins: &ValueOrigins,
+        conditions: &ValueConditions,
         flow: &Flow,
         retired: &[Place],
         source: SourceRange,
@@ -2385,6 +2504,51 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 targets.clone(),
             );
         }
+        let mut enum_domains = BTreeMap::new();
+        for (root, domains) in &flow.enum_domains {
+            enum_domains.insert(*root, copy_enum_domains(domains, &mut self.fuel, source)?);
+        }
+        enum_domains.insert(
+            place.root,
+            copy_enum_domains(&conditions.domains, &mut self.fuel, source)?,
+        );
+        let mut pointer_conditions = BTreeMap::new();
+        for (slot, entries) in &flow.pointer_guards {
+            for (target, guards) in entries {
+                self.fuel = self
+                    .fuel
+                    .checked_sub(slot.fields.len() + target.fields.len() + 1)
+                    .ok_or_else(|| {
+                        error(source, "temporary condition snapshot budget exhausted")
+                    })?;
+                for (path, _) in guards {
+                    self.fuel = self.fuel.checked_sub(path.len() + 1).ok_or_else(|| {
+                        error(source, "temporary condition snapshot budget exhausted")
+                    })?;
+                }
+            }
+            pointer_conditions.insert(slot.clone(), entries.clone());
+        }
+        for (fields, entries) in &conditions.pointers {
+            for (target, guards) in entries {
+                self.fuel = self
+                    .fuel
+                    .checked_sub(fields.len() + target.fields.len() + 1)
+                    .ok_or_else(|| error(source, "retained pointer condition budget exhausted"))?;
+                for (path, _) in guards {
+                    self.fuel = self.fuel.checked_sub(path.len() + 1).ok_or_else(|| {
+                        error(source, "retained pointer condition budget exhausted")
+                    })?;
+                }
+            }
+            pointer_conditions.insert(
+                Place {
+                    root: place.root,
+                    fields: fields.clone(),
+                },
+                entries.clone(),
+            );
+        }
         let plan = policy
             .plan_with_memory(
                 ty,
@@ -2394,6 +2558,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 Some(super::drop::PointerMemory {
                     types: &types,
                     slots: &slots,
+                    enum_domains: &enum_domains,
+                    pointer_conditions: &pointer_conditions,
                     retired,
                 }),
                 &mut self.fuel,
@@ -2575,6 +2741,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             super::drop::PointerMemory {
                 types: &flow.types,
                 slots: &flow.pointers,
+                enum_domains: &flow.enum_domains,
+                pointer_conditions: &flow.pointer_guards,
                 retired: &possible_retired,
             },
             &variants,
@@ -2661,12 +2829,19 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         .find_map(|frame| frame.origins.get(&value.sequence))
                         .cloned()
                         .unwrap_or_default();
+                    let conditions = self
+                        .pending
+                        .iter()
+                        .find_map(|frame| frame.conditions.get(&value.sequence))
+                        .cloned()
+                        .unwrap_or_default();
                     action = self.plan_retained_action(
                         action,
                         &ty,
                         &state,
                         &[],
                         &origins,
+                        &conditions,
                         flow,
                         &retired,
                         source,
@@ -2705,6 +2880,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         run: impl FnOnce(&mut Self) -> Result<T, Error>,
     ) -> Result<T, Error> {
         self.pending.push(PendingFrame {
+            conditions: BTreeMap::new(),
             origins: BTreeMap::new(),
             source,
             values: vec![],
@@ -2733,6 +2909,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 self.pointer_work(targets, expr.source)?;
             }
             let sequence = self.sequence(expr.source)?;
+            let conditions = self.value_conditions(flow, expr.source)?;
+            self.pending
+                .last_mut()
+                .expect("active preparation frame")
+                .conditions
+                .insert(sequence, conditions);
             self.pending
                 .last_mut()
                 .expect("active preparation frame")
@@ -2877,7 +3059,13 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
     ) -> Result<(), Error> {
         // These are conditional validity premises, not local acquisitions.
         // Every caller must discharge the complete body-derived footprint.
-        for ((scope, slot), (pointee, subject)) in &self.borrowed_pointees {
+        for ((scope, slot, guards), (pointee, subject)) in &self.borrowed_pointees {
+            for (path, _) in guards {
+                self.fuel = self
+                    .fuel
+                    .checked_sub(path.len() + 1)
+                    .ok_or_else(|| error(source, "borrowed condition budget exhausted"))?;
+            }
             self.fuel = self
                 .fuel
                 .checked_sub(slot.fields.len().saturating_add(1))
@@ -2896,6 +3084,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     .declare(*pointee, &shape, true, &mut self.fuel)
                     .map_err(|e| error(source, format!("borrowed premise join shape: {e:?}")))?;
                 flow.types.insert(*pointee, subject.clone());
+            }
+            if !guards.is_empty() {
+                continue;
             }
             flow.pointers.entry(slot.clone()).or_insert_with(|| {
                 BTreeSet::from([Place {
@@ -2923,10 +3114,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let needs_completion =
             self.borrowed_pointees
                 .iter()
-                .any(|((scope, slot), (pointee, _))| {
+                .any(|((scope, slot, guards), (pointee, _))| {
                     *scope == right.borrowed_scope
                         && (!right.types.contains_key(pointee)
-                            || !right.pointers.contains_key(slot))
+                            || (guards.is_empty() && !right.pointers.contains_key(slot)))
                 });
         let completed_right;
         let right = if needs_completion {
@@ -3037,6 +3228,22 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 domains.insert(*root, joined);
             }
         }
+        for (slot, guards) in &mut left.pointer_guards {
+            let mut retained = BTreeMap::new();
+            for (target, conditions) in guards.iter() {
+                self.charge_pointer_conditions(conditions, source)?;
+                if right
+                    .pointer_guards
+                    .get(slot)
+                    .and_then(|entries| entries.get(target))
+                    == Some(conditions)
+                {
+                    retained.insert(target.clone(), conditions.clone());
+                }
+            }
+            *guards = retained;
+        }
+        left.pointer_guards.retain(|_, guards| !guards.is_empty());
         left.callable_fields = fields;
         left.enum_domains = domains;
         for (id, temporary) in &mut left.temporaries {
@@ -3049,6 +3256,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         || temporary.locals_before != other.locals_before
                         || temporary.variants != other.variants
                         || temporary.origins != other.origins
+                        || temporary.conditions != other.conditions
                     {
                         return Err(error(source, "temporary identity has inconsistent state"));
                     }
@@ -3411,6 +3619,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             ));
         }
         let origins = self.evaluate_value_origins(base, flow, depth + 1)?;
+        let parent_conditions = self.value_conditions(flow, expr.source)?;
         if !flow.live {
             return Ok(BTreeMap::new());
         }
@@ -3424,6 +3633,40 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 selected_callables.insert(leaf[path.len()..].to_vec(), callable);
             }
         }
+        let mut selected_guards = ValuePointerGuards::new();
+        for (slot, entries) in std::mem::take(&mut flow.value_pointer_guards) {
+            self.fuel = self
+                .fuel
+                .checked_sub(slot.len().saturating_add(1))
+                .ok_or_else(|| {
+                    error(
+                        expr.source,
+                        "temporary pointer guard projection budget exhausted",
+                    )
+                })?;
+            let Some(relative) = slot.strip_prefix(path.as_slice()) else {
+                continue;
+            };
+            let mut projected = PointerTargetGuards::new();
+            for (target, conditions) in entries {
+                self.charge_pointer_conditions(&conditions, expr.source)?;
+                let conditions: Vec<_> = conditions
+                    .into_iter()
+                    .filter_map(|(condition, tag)| {
+                        condition
+                            .strip_prefix(path.as_slice())
+                            .map(|rest| (rest.to_vec(), tag))
+                    })
+                    .collect();
+                if !conditions.is_empty() {
+                    projected.insert(target, conditions);
+                }
+            }
+            if !projected.is_empty() {
+                selected_guards.insert(relative.to_vec(), projected);
+            }
+        }
+        flow.value_pointer_guards = selected_guards;
         flow.value_callable = selected_callables.get(&vec![]).cloned();
         flow.value_callables = selected_callables;
         flow.value_variants = std::mem::take(&mut flow.value_variants)
@@ -3474,6 +3717,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             },
             state.clone(),
             origins.clone(),
+            parent_conditions,
             flow,
         )?;
         self.report.temporary_owners.push(TemporaryOwner {
@@ -4101,14 +4345,17 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 "callable result requires a concrete runtime function",
             ));
         }
+        let binders =
+            super::memory::memory_binders(Some(package), &original.type_parameters, &mut self.fuel)
+                .map_err(|e| error(source, e))?;
         let mut function = original.clone();
         let instantiate = |expr: &Expr| {
-            expr.instantiate_types(&original.type_parameters, body_arguments)
+            expr.instantiate_parameters(&binders, body_arguments)
                 .map_err(|e| error(source, format!("callable result instantiation: {e}")))
         };
         function.signature = original
             .signature
-            .instantiate_types(&original.type_parameters, body_arguments)
+            .instantiate_parameters(&binders, body_arguments)
             .map_err(|e| error(source, format!("callable result signature: {e}")))?;
         if function.signature.callable_signature() != callee.ty.callable_signature() {
             return Err(error(source, "callable result signature mismatch"));
@@ -4549,7 +4796,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         depth: usize,
     ) -> Result<Option<BTreeSet<Place>>, Error> {
         self.call_temporary_with_origins(expr, callee, arguments, parameter_bindings, flow, depth)
-            .map(|(pointer, _)| pointer)
+            .map(|(pointer, _, _)| pointer)
     }
 
     fn call_temporary_with_origins(
@@ -4560,11 +4807,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         parameter_bindings: &[LocalId],
         flow: &mut Flow,
         depth: usize,
-    ) -> Result<(Option<BTreeSet<Place>>, ValueOrigins), Error> {
+    ) -> Result<(Option<BTreeSet<Place>>, ValueOrigins, ValuePointerGuards), Error> {
         let origins = self.evaluate_value_origins(callee, flow, depth + 1)?;
         if !flow.live {
-            return Ok((None, BTreeMap::new()));
+            return Ok((None, BTreeMap::new(), BTreeMap::new()));
         }
+        let guards = std::mem::take(&mut flow.value_pointer_guards);
         let callable = flow.value_callable.take().ok_or_else(|| {
             error(
                 callee.source,
@@ -4595,22 +4843,33 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             origins.clone(),
             callee.source,
         )?;
+        self.install_pointer_guards(
+            flow,
+            &Place {
+                root: id,
+                fields: vec![],
+            },
+            guards,
+            callee.source,
+        )?;
         self.store_callable(flow, id, callable, callee.source)?;
         let callable = flow.callables[&id].clone();
         self.report.callee_temporaries.push((id, callee.source));
         let mut pointer_result = None;
         let mut result_origins = BTreeMap::new();
+        let mut result_guards = BTreeMap::new();
         if !callable.alternatives.is_empty() {
-            (pointer_result, result_origins) = self.call_named_candidates_with_origins(
-                expr,
-                &callable,
-                arguments,
-                parameter_bindings,
-                flow,
-                depth + 1,
-            )?;
+            (pointer_result, result_origins, result_guards) = self
+                .call_named_candidates_with_origins(
+                    expr,
+                    &callable,
+                    arguments,
+                    parameter_bindings,
+                    flow,
+                    depth + 1,
+                )?;
         } else if matches!(callable.definition.kind, K::Closure { .. }) {
-            (pointer_result, result_origins) = self.call_closure_with_origins(
+            (pointer_result, result_origins, result_guards) = self.call_closure_with_origins(
                 id,
                 &callable,
                 arguments,
@@ -4652,6 +4911,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 pointer_result = self.evaluate_pointer_value(&resolved, flow, depth + 1)?;
             } else {
                 result_origins = self.evaluate_value_origins(&resolved, flow, depth + 1)?;
+                result_guards = std::mem::take(&mut flow.value_pointer_guards);
             }
         }
         let result = flow.value_callable.clone();
@@ -4674,10 +4934,19 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     &mut self.fuel,
                 )
                 .map_err(|e| error(expr.source, format!("temporary callee transfer: {e:?}")))?;
+            let callee_place = Place {
+                root: id,
+                fields: vec![],
+            };
+            let conditions = ValueConditions {
+                domains: self.stored_enum_domains(flow, &callee_place, expr.source)?,
+                pointers: self.stored_pointer_guards(&callee_place, flow, expr.source)?,
+            };
             self.remove_local(flow, id, expr.source)?;
             flow.temporaries.insert(
                 identity,
                 ActiveTemporary {
+                    conditions,
                     alternatives: vec![],
                     origins,
                     variants: vec![],
@@ -4695,7 +4964,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             );
         }
         flow.value_callable = result;
-        Ok((pointer_result, result_origins))
+        Ok((pointer_result, result_origins, result_guards))
     }
     fn call_closure(
         &mut self,
@@ -4707,7 +4976,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         depth: usize,
     ) -> Result<Option<BTreeSet<Place>>, Error> {
         self.call_closure_with_origins(binding, callable, arguments, flow, source, depth)
-            .map(|(pointer, _)| pointer)
+            .map(|(pointer, _, _)| pointer)
     }
     fn call_closure_with_origins(
         &mut self,
@@ -4717,7 +4986,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         flow: &mut Flow,
         source: SourceRange,
         depth: usize,
-    ) -> Result<(Option<BTreeSet<Place>>, ValueOrigins), Error> {
+    ) -> Result<(Option<BTreeSet<Place>>, ValueOrigins, ValuePointerGuards), Error> {
         if self.fuel == 0 || depth > 128 {
             return Err(error(
                 source,
@@ -4747,15 +5016,19 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 .map_err(|reason| error(source, reason))?
                 .is_none()
         {
-            super::memory::conditional_pointer_storage_paths(self.package, result, &mut self.fuel)
+            super::memory::pointer_input_layout(self.package, result, &mut self.fuel)
                 .map_err(|reason| error(source, reason))?
+                .into_iter()
+                .map(|leaf| (leaf.input_fields.clone(), leaf))
+                .collect()
         } else {
             BTreeMap::new()
         };
         let mut result_origins: ValueOrigins = result_paths
             .values()
-            .map(|path| (path.clone(), BTreeSet::new()))
+            .map(|leaf| (leaf.storage_fields.clone(), BTreeSet::new()))
             .collect();
+        let mut result_guards = ValuePointerGuards::new();
         let mut memory = !result_paths.is_empty()
             || flow.memory_exposed
             || super::memory::pointer_representation(self.package, result, &mut self.fuel)
@@ -4785,7 +5058,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let Some(prepared) =
             self.prepare_closure_arguments(callable, arguments, flow, source, depth)?
         else {
-            return Ok((None, BTreeMap::new()));
+            return Ok((None, BTreeMap::new(), BTreeMap::new()));
         };
         memory |= prepared.pointers.values().any(|fields| !fields.is_empty());
         // Arguments can mutate state. Do not resurrect a callable moved while
@@ -4938,16 +5211,15 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     Err(reason) => return Err(error(source, reason)),
                 };
                 if let Some(footprint) = footprint {
-                    for (path, storage) in &result_paths {
+                    for (path, leaf) in &result_paths {
+                        let storage = &leaf.storage_fields;
                         self.fuel = self
                             .fuel
                             .checked_sub(path.len() + storage.len() + 1)
                             .ok_or_else(|| {
                                 error(source, "closure result provenance budget exhausted")
                             })?;
-                        let actual = result_origins
-                            .get_mut(storage)
-                            .expect("validated result path");
+                        let mut actual = BTreeSet::new();
                         if let Some(Some(targets)) = footprint.pointer_fields.get(path) {
                             for target in targets {
                                 if let Some(mapped) = self.map_memory_target(
@@ -4964,6 +5236,16 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         } else {
                             actual.insert(unknown_pointer_target());
                         }
+                        self.record_result_pointer_guards(
+                            &mut result_guards,
+                            leaf,
+                            &actual,
+                            source,
+                        )?;
+                        result_origins
+                            .get_mut(storage)
+                            .expect("validated result path")
+                            .extend(actual);
                     }
                     self.memory_accesses(
                         &footprint.accesses,
@@ -5033,7 +5315,15 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         } else {
             flow.live = false;
         }
-        Ok((if memory { result_targets } else { None }, result_origins))
+        result_guards.retain(|_, entries| {
+            entries.retain(|_, conditions| !conditions.is_empty());
+            !entries.is_empty()
+        });
+        Ok((
+            if memory { result_targets } else { None },
+            result_origins,
+            result_guards,
+        ))
     }
     // Mixed sets use the same completed argument frame as closure candidates.
     // Any pointer footprint has already been checked against actual targets.
@@ -5119,15 +5409,40 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             for argument in arguments {
                 let callable = callable_source(&argument.value, flow, &mut this.fuel)?;
                 let origins = this.evaluate_value_origins(&argument.value, flow, depth + 1)?;
-                argument_pointers.insert(
-                    argument.parameter,
-                    this.memory_input_targets(
+                let mut symbolic = this.memory_input_targets(
+                    &argument.value.ty,
+                    &origins,
+                    &flow.value_variants,
+                    source,
+                )?;
+                // Guard projection only refines existing pointer targets.
+                // Whole generic/ownership-only arguments have no such targets;
+                // asking for their layout here would prematurely require a
+                // concrete instantiation without adding any memory evidence.
+                let layout = if symbolic.values().any(|targets| !targets.is_empty()) {
+                    super::memory::pointer_input_layout(
+                        this.package,
                         &argument.value.ty,
-                        &origins,
-                        &flow.value_variants,
-                        source,
-                    )?,
-                );
+                        &mut this.fuel,
+                    )
+                    .map_err(|reason| error(source, reason))?
+                } else {
+                    vec![]
+                };
+                for leaf in &layout {
+                    if let Some(actual) = symbolic.get_mut(&leaf.input_fields) {
+                        if !actual.is_empty() {
+                            *actual = this.guarded_request_targets(
+                                &argument.value,
+                                leaf,
+                                actual,
+                                flow,
+                                true,
+                            )?;
+                        }
+                    }
+                }
+                argument_pointers.insert(argument.parameter, symbolic);
                 let callable = flow.value_callable.clone().or(callable);
                 if !flow.live {
                     break;
@@ -5214,6 +5529,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         captures: &[nir::program::Capture],
         report: &Report,
         snapshots: &[BTreeMap<Place, BTreeSet<Place>>],
+        guard_snapshots: &[BTreeMap<Place, PointerTargetGuards>],
         exit_states: impl Iterator<Item = &'b State> + Clone,
         inputs: &MemoryTargets,
         flow: &mut Flow,
@@ -5222,12 +5538,19 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let Some(package) = self.package else {
             return Ok(());
         };
+        if snapshots.len() != guard_snapshots.len() {
+            return Err(error(
+                source,
+                "capture guard snapshots disagree with pointer exits",
+            ));
+        }
         if snapshots.is_empty() {
             return Ok(());
         }
         let mut restored: BTreeMap<Place, BTreeSet<Place>> = BTreeMap::new();
         let mut counts: BTreeMap<Place, usize> = BTreeMap::new();
-        for snapshot in snapshots {
+        let mut restored_guards = BTreeMap::<Place, PointerTargetGuards>::new();
+        for (snapshot, guards) in snapshots.iter().zip(guard_snapshots) {
             self.fuel = self
                 .fuel
                 .checked_sub(1)
@@ -5275,13 +5598,20 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     ));
                 }
                 *counts.entry(destination.clone()).or_default() += 1;
-                let mapped = restored.entry(destination).or_default();
+                let mapped = restored.entry(destination.clone()).or_default();
+                let mapped_guards = restored_guards.entry(destination).or_default();
                 self.pointer_work(targets, source)?;
                 for target in targets {
                     if *target == unknown_pointer_target()
                         || *target == invalidated_pointer_target()
                     {
                         mapped.insert(target.clone());
+                        self.merge_pointer_conditions(
+                            mapped_guards,
+                            &BTreeSet::from([target.clone()]),
+                            &[],
+                            source,
+                        )?;
                         continue;
                     }
                     let (origin, ty) =
@@ -5299,12 +5629,21 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             "captured pointer writeback pointee type mismatch",
                         ));
                     }
-                    match self.map_memory_target(&origin, inputs, flow, source)? {
-                        Some(targets) => mapped.extend(targets),
-                        None => {
-                            mapped.insert(unknown_pointer_target());
+                    let mut conditions = vec![];
+                    if let Some(original) = guards.get(slot).and_then(|entries| entries.get(target))
+                    {
+                        self.charge_pointer_conditions(original, source)?;
+                        for (path, tag) in original {
+                            let mut rebased = vec![index];
+                            rebased.extend(path);
+                            conditions.push((rebased, *tag));
                         }
                     }
+                    let targets = self
+                        .map_memory_target(&origin, inputs, flow, source)?
+                        .unwrap_or_else(|| BTreeSet::from([unknown_pointer_target()]));
+                    self.merge_pointer_conditions(mapped_guards, &targets, &conditions, source)?;
+                    mapped.extend(targets);
                 }
             }
         }
@@ -5334,6 +5673,11 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             }
             if counts.get(slot).copied().unwrap_or(0) != needed {
                 targets.insert(unknown_pointer_target());
+                // Missing exit evidence introduces an unconditional unknown,
+                // even if another exit mapped a conditional source to it.
+                if let Some(entries) = restored_guards.get_mut(slot) {
+                    entries.remove(&unknown_pointer_target());
+                }
             }
         }
         // Retired capture slots lose their old provenance. Target availability
@@ -5343,7 +5687,17 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             .checked_sub(flow.pointers.len())
             .ok_or_else(|| error(source, "capture pointer replacement budget exhausted"))?;
         flow.pointers.retain(|slot, _| slot.root != binding);
+        self.fuel = self
+            .fuel
+            .checked_sub(flow.pointer_guards.len())
+            .ok_or_else(|| error(source, "capture guard invalidation budget exhausted"))?;
+        flow.pointer_guards.retain(|slot, _| slot.root != binding);
         flow.pointers.extend(restored);
+        restored_guards.retain(|_, entries| {
+            entries.retain(|_, conditions| !conditions.is_empty());
+            !entries.is_empty()
+        });
+        flow.pointer_guards.extend(restored_guards);
         Ok(())
     }
 
@@ -5670,7 +6024,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         self.persistent_roots = outer_persistent;
         self.captured_roots = outer_captured_callables;
         result?;
-        if invocation.captured_pointer_exits.len() != invocation.exits.len()
+        if invocation.captured_pointer_guard_exits.len() != invocation.exits.len()
+            || invocation.failed_capture_pointer_guard_exits.len() != invocation.failed_exits.len()
+            || invocation.effect_capture_pointer_guard_exits.len() != invocation.effect_exits.len()
+            || invocation.captured_pointer_exits.len() != invocation.exits.len()
             || invocation.failed_capture_pointer_exits.len() != invocation.failed_exits.len()
             || invocation.effect_capture_pointer_exits.len() != invocation.effect_exits.len()
             || invocation.failed_capture_enum_exits.len() != invocation.failed_exits.len()
@@ -5736,6 +6093,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 captures,
                 &invocation,
                 &invocation.failed_capture_pointer_exits,
+                &invocation.failed_capture_pointer_guard_exits,
                 invocation.failed_exits.iter(),
                 &cleanup_targets,
                 &mut failed_flow,
@@ -5788,6 +6146,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 captures,
                 &invocation,
                 &invocation.effect_capture_pointer_exits,
+                &invocation.effect_capture_pointer_guard_exits,
                 invocation.effect_exits.iter().map(|(_, state)| state),
                 &cleanup_targets,
                 &mut escaped_flow,
@@ -5843,6 +6202,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             captures,
             &invocation,
             &invocation.captured_pointer_exits,
+            &invocation.captured_pointer_guard_exits,
             invocation.exits.iter(),
             &cleanup_targets,
             flow,
@@ -5927,6 +6287,11 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             }
             origins
         };
+        let pointer_guards = if ignored_place.is_some() {
+            BTreeMap::new()
+        } else {
+            self.copy_value_pointer_guards(&flow.value_pointer_guards, source)?
+        };
         let known = known_pattern_with_domains(
             pattern,
             value,
@@ -5942,10 +6307,11 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             let outer_report = std::mem::take(&mut self.report);
             let outer_observations = self.candidate_observations.replace(Report::default());
             if ignored_place.is_none() {
-                self.bind_pattern(
+                self.bind_pattern_with_pointer_guards(
                     pattern,
                     &value.ty,
                     &origins,
+                    &pointer_guards,
                     &mut candidate,
                     source,
                     &mut vec![],
@@ -6043,12 +6409,11 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         result
     }
     fn observation_value_type(&mut self, ty: &Term, source: SourceRange) -> Result<bool, Error> {
-        Ok(
-            matches!(ty, Term::Primitive(_)) && nir::program::intrinsic_pointer_value(ty)
-                || matches!(ty, Term::Primitive(nir::Primitive::Void))
-                || matches!(ty, Term::Function { .. })
-                    && (self.delivery)(ty).map_err(|e| error(source, e))? == Delivery::Copy,
-        )
+        Ok(nir::program::scalar_observation_shape(ty)
+            && (!matches!(ty, Term::Tuple(_) | Term::Record(_))
+                || (self.delivery)(ty).map_err(|e| error(source, e))? == Delivery::Copy)
+            || matches!(ty, Term::Function { .. })
+                && (self.delivery)(ty).map_err(|e| error(source, e))? == Delivery::Copy)
     }
     fn check_guard_arguments(
         &mut self,
@@ -6267,7 +6632,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 if owned_observation || matches!(node.kind, K::Closure { .. }) {
                     return Ok(false);
                 }
-                owned_observation = matches!(&node.kind, K::Call { arguments, .. }
+                owned_observation = matches!(node.kind, K::Tuple(_) | K::AnonymousRecord { .. } | K::Record { .. } | K::Variant { .. })
+                    || matches!(&node.kind, K::Call { arguments, .. }
                     if arguments.iter().any(|argument| matches!(argument.value.ty,
                         Term::Nominal { .. } | Term::Record(_) | Term::Tuple(_) | Term::NormalForm { .. })))
                     || matches!(node.kind, K::Field { .. } | K::AnonymousField { .. })
@@ -6882,6 +7248,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         depth: usize,
     ) -> Result<ValueOrigins, Error> {
         let origins = self.evaluate_value_origins(value, flow, depth + 1)?;
+        let pointer_guards = self.copy_value_pointer_guards(&flow.value_pointer_guards, source)?;
         if !flow.live {
             return Ok(BTreeMap::new());
         }
@@ -6911,10 +7278,11 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             // observation. Their cleanup/decomposition records commit only
             // along the successful candidate path.
             let outer_observations = self.candidate_observations.replace(Report::default());
-            self.bind_pattern(
+            self.bind_pattern_with_pointer_guards(
                 pattern,
                 &value.ty,
                 &origins,
+                &pointer_guards,
                 &mut branch,
                 arm.body.source,
                 &mut vec![],
@@ -6960,6 +7328,23 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     guards: guards.iter().map(|g| (*g).clone()).collect(),
                     exit: Some(branch.state.clone()),
                 });
+                let result_guards = if let Some(merged) = &result_origins {
+                    let previous = continuation.as_ref().expect("live result continuation");
+                    self.join_result_pointer_guards(
+                        &previous.value_pointer_guards,
+                        merged,
+                        &branch.value_pointer_guards,
+                        &arm_origins,
+                        source,
+                        Some((
+                            &arm.body.ty,
+                            &previous.value_variants,
+                            &branch.value_variants,
+                        )),
+                    )?
+                } else {
+                    self.copy_value_pointer_guards(&branch.value_pointer_guards, source)?
+                };
                 if let Some(merged) = &mut result_origins {
                     let previous = continuation.as_ref().expect("live result continuation");
                     self.join_value_origins(
@@ -6978,6 +7363,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 } else {
                     continuation = Some(branch);
                 }
+                continuation
+                    .as_mut()
+                    .expect("live continuation")
+                    .value_pointer_guards = result_guards;
             } else {
                 report.arms.push(MatchArmReport {
                     pattern: pattern.clone(),
@@ -7031,6 +7420,32 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         path: &mut Vec<usize>,
         depth: usize,
     ) -> Result<(), Error> {
+        self.bind_pattern_with_pointer_guards(
+            pattern,
+            ty,
+            origins,
+            &BTreeMap::new(),
+            flow,
+            source,
+            path,
+            depth,
+        )
+    }
+    fn bind_pattern_with_pointer_guards(
+        &mut self,
+        pattern: &Pattern,
+        ty: &Term,
+        origins: &ValueOrigins,
+        pointer_guards: &ValuePointerGuards,
+        flow: &mut Flow,
+        source: SourceRange,
+        path: &mut Vec<usize>,
+        depth: usize,
+    ) -> Result<(), Error> {
+        let subject_conditions = ValueConditions {
+            domains: copy_enum_domains(&flow.value_variants, &mut self.fuel, source)?,
+            pointers: self.copy_value_pointer_guards(pointer_guards, source)?,
+        };
         // The delivered subject precedes bindings acquired from it. This
         // anchor matters on return from an arm: bindings retire before the
         // retained subject, just as on ordinary match completion.
@@ -7063,6 +7478,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         for (index, candidate) in candidates.iter().enumerate() {
             let mut preparation = PatternPreparation {
                 origins,
+                pointer_guards: self.copy_value_pointer_guards(pointer_guards, source)?,
+                selected_pointer_variants: vec![],
                 domains: flow.value_variants.clone(),
                 callables: flow.value_callables.clone(),
                 transfers: vec![],
@@ -7214,6 +7631,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             flow.temporaries.insert(
                 identity,
                 ActiveTemporary {
+                    conditions: subject_conditions,
                     alternatives: layouts,
                     origins: origins.clone(),
                     variants,
@@ -7593,6 +8011,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 // retain their targets; binders never subtract subject fields.
                 let mut computed = PatternPreparation {
                     origins: &origins,
+                    pointer_guards: BTreeMap::new(),
+                    selected_pointer_variants: vec![],
                     domains: BTreeMap::new(),
                     callables,
                     transfers: vec![],
@@ -7758,6 +8178,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 }
                 self.declare(flow, binding, ty, source)?;
                 let mut origins = BTreeMap::new();
+                let mut bound_guards = ValuePointerGuards::new();
                 for (leaf, targets) in preparation.origins {
                     self.fuel = self
                         .fuel
@@ -7765,7 +8186,67 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         .ok_or_else(|| error(source, "pattern origin budget exhausted"))?;
                     if leaf.starts_with(path) {
                         self.pointer_work(targets, source)?;
-                        origins.insert(leaf[path.len()..].to_vec(), targets.clone());
+                        let mut selected = BTreeSet::new();
+                        let mut selected_guards = PointerTargetGuards::new();
+                        for target in targets {
+                            let guards = preparation
+                                .pointer_guards
+                                .get(leaf)
+                                .and_then(|entries| entries.get(target));
+                            let mut excluded = false;
+                            if let Some(guards) = guards {
+                                for (guard, tag) in guards {
+                                    for variant in &preparation.selected_pointer_variants {
+                                        self.fuel = self
+                                            .fuel
+                                            .checked_sub(guard.len() + variant.fields.len() + 1)
+                                            .ok_or_else(|| {
+                                                error(
+                                                    source,
+                                                    "pattern pointer guard budget exhausted",
+                                                )
+                                            })?;
+                                        if guard == &variant.fields && *tag != variant.index {
+                                            excluded = true;
+                                        }
+                                    }
+                                }
+                            }
+                            if excluded {
+                                continue;
+                            }
+                            selected.insert(target.clone());
+                            if let Some(guards) = guards {
+                                let mut projected = vec![];
+                                for (guard, tag) in guards {
+                                    self.fuel = self.fuel.checked_sub(guard.len() + 1).ok_or_else(
+                                        || {
+                                            error(
+                                                source,
+                                                "pattern pointer guard projection budget exhausted",
+                                            )
+                                        },
+                                    )?;
+                                    if let Some(relative) = guard.strip_prefix(path.as_slice()) {
+                                        projected.push((relative.to_vec(), *tag));
+                                    }
+                                }
+                                if !projected.is_empty() {
+                                    selected_guards.insert(target.clone(), projected);
+                                }
+                            }
+                        }
+                        if selected.is_empty() && !targets.is_empty() {
+                            return Err(error(
+                                source,
+                                "selected pattern payload has no established pointer source",
+                            ));
+                        }
+                        let relative = leaf[path.len()..].to_vec();
+                        if !selected_guards.is_empty() {
+                            bound_guards.insert(relative.clone(), selected_guards);
+                        }
+                        origins.insert(relative, selected);
                     }
                 }
                 self.install_value_origins(
@@ -7777,6 +8258,15 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     origins,
                     source,
                 )?;
+                for (fields, guards) in bound_guards {
+                    flow.pointer_guards.insert(
+                        Place {
+                            root: root(binding),
+                            fields,
+                        },
+                        guards,
+                    );
+                }
                 let mut leaves = BTreeMap::new();
                 for (leaf, callable) in &preparation.callables {
                     self.fuel = self
@@ -7949,6 +8439,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 let qualified_domains =
                     std::mem::replace(&mut preparation.domains, selected_domains);
                 let qualified = std::mem::replace(&mut preparation.callables, selected);
+                preparation
+                    .selected_pointer_variants
+                    .push(VariantSelection {
+                        fields: path.clone(),
+                        index: *index,
+                    });
                 let result = self.bind_fields(
                     fields,
                     &variant.fields,
@@ -7958,6 +8454,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     preparation,
                     depth,
                 );
+                preparation.selected_pointer_variants.pop();
                 preparation.callables = qualified;
                 preparation.domains = qualified_domains;
                 return result;
@@ -8060,6 +8557,11 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         flow.callables.remove(&id);
         flow.callable_fields.retain(|place, _| place.root != id);
         flow.enum_domains.remove(&id);
+        self.fuel = self
+            .fuel
+            .checked_sub(flow.pointer_guards.len())
+            .ok_or_else(|| error(source, "retired pointer guard budget exhausted"))?;
+        flow.pointer_guards.retain(|slot, _| slot.root != id);
         // Retired local identities may be reused by a later loop iteration.
         // Neither an old pointer nor an alias to its slot revives with it.
         flow.pointers.retain(|binding, _| binding.root != id);
@@ -8213,6 +8715,34 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         Ok(())
     }
 
+    fn capture_pointer_guard_snapshot(
+        &mut self,
+        flow: &Flow,
+        pointers: &BTreeMap<Place, BTreeSet<Place>>,
+        source: SourceRange,
+    ) -> Result<BTreeMap<Place, PointerTargetGuards>, Error> {
+        let mut snapshot = BTreeMap::new();
+        for (slot, targets) in pointers {
+            self.pointer_work(targets, source)?;
+            self.fuel = self
+                .fuel
+                .checked_sub(slot.fields.len().saturating_add(1))
+                .ok_or_else(|| error(source, "capture guard snapshot budget exhausted"))?;
+            if let Some(entries) = flow.pointer_guards.get(slot) {
+                let mut retained = PointerTargetGuards::new();
+                for target in targets {
+                    if let Some(conditions) = entries.get(target) {
+                        self.charge_pointer_conditions(conditions, source)?;
+                        retained.insert(target.clone(), conditions.clone());
+                    }
+                }
+                if !retained.is_empty() {
+                    snapshot.insert(slot.clone(), retained);
+                }
+            }
+        }
+        Ok(snapshot)
+    }
     fn capture_pointer_snapshot(
         &mut self,
         flow: &Flow,
@@ -8299,14 +8829,22 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         self.cleanup_exit(flow, locals, 0, 0, source, reason)?;
         self.incomplete_exit(source, 0);
         let capture_pointers = self.capture_pointer_snapshot(flow, source)?;
+        let capture_guards =
+            self.capture_pointer_guard_snapshot(flow, &capture_pointers, source)?;
         let capture_domains = self.capture_enum_snapshot(flow, source)?;
         if reason == CleanupReason::PredicateFailure {
+            self.report
+                .failed_capture_pointer_guard_exits
+                .push(capture_guards);
             self.report.failed_capture_enum_exits.push(capture_domains);
             self.report
                 .failed_capture_pointer_exits
                 .push(capture_pointers);
             self.report.failed_exits.push(flow.state.clone());
         } else {
+            self.report
+                .captured_pointer_guard_exits
+                .push(capture_guards);
             self.report.captured_pointer_exits.push(capture_pointers);
             self.report.exits.push(flow.state.clone());
             self.report.callable_exits.push(callable_result);
@@ -8401,6 +8939,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         };
         let callable = callable_source(value, flow, &mut self.fuel)?;
         let origins = self.evaluate_value_origins(value, flow, depth + 1)?;
+        let pointer_guards =
+            self.copy_value_pointer_guards(&flow.value_pointer_guards, expr.source)?;
         let callable = flow.value_callable.clone().or(callable);
         if flow.live {
             let leaves = flow.value_callables.clone();
@@ -8432,6 +8972,15 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 origins,
                 expr.source,
             )?;
+            for (fields, guards) in pointer_guards {
+                flow.pointer_guards.insert(
+                    Place {
+                        root: root(*binding),
+                        fields,
+                    },
+                    guards,
+                );
+            }
             if let Some(callable) = callable {
                 self.store_callable(flow, root(*binding), callable, expr.source)?;
             }
@@ -8555,7 +9104,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         depth: usize,
     ) -> Result<Option<BTreeSet<Place>>, Error> {
         self.call_named_candidates_with_origins(expr, callable, arguments, bindings, flow, depth)
-            .map(|(pointer, _)| pointer)
+            .map(|(pointer, _, _)| pointer)
     }
 
     fn call_named_candidates_with_origins(
@@ -8566,7 +9115,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         bindings: &[LocalId],
         flow: &mut Flow,
         depth: usize,
-    ) -> Result<(Option<BTreeSet<Place>>, ValueOrigins), Error> {
+    ) -> Result<(Option<BTreeSet<Place>>, ValueOrigins, ValuePointerGuards), Error> {
         if arguments.iter().any(|a| a.is_default) {
             return Err(error(
                 expr.source,
@@ -8596,7 +9145,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         target.source = expr.source;
         let mut prepared_callables = vec![];
         let mut prepared_enums = vec![];
-        let (result, summary, origins) = self.memory_call(
+        let (result, summary, origins, guards) = self.memory_call(
             &target,
             arguments,
             bindings,
@@ -8608,7 +9157,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             depth + 1,
         )?;
         let Some(summary) = summary else {
-            return Ok((result, origins));
+            return Ok((result, origins, guards));
         };
         flow.value_callable = if flow.live && matches!(expr.ty, Term::Function { .. }) {
             let definitions = match &summary.callable_result {
@@ -8720,6 +9269,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             scalar_result
         };
         (flow.value_callables, flow.value_variants) = result_fields.unwrap_or_default();
+        self.refine_absent_result_payloads(&expr.ty, &origins, &guards, flow, expr.source)?;
         let mut candidates = vec![];
         for candidate in std::iter::once(&callable.definition).chain(&callable.alternatives) {
             super::memory::bound_type(&candidate.ty, &mut self.fuel)
@@ -8730,7 +9280,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             source: expr.source,
             candidates,
         });
-        Ok((result, origins))
+        Ok((result, origins, guards))
     }
     fn memory_candidate_summary(
         &mut self,
@@ -8937,7 +9487,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             .fuel
             .checked_sub(1)
             .ok_or_else(|| error(source, "borrowed pointer premise budget exhausted"))?;
-        let key = (flow.borrowed_scope, slot.clone());
+        let key = (flow.borrowed_scope, slot.clone(), vec![]);
         let pointee = if let Some((id, previous)) = self.borrowed_pointees.get(&key) {
             if previous != subject.as_ref() {
                 return Err(error(source, "borrowed pointer premise changed type"));
@@ -8972,6 +9522,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 .map_err(|e| error(source, format!("borrowed pointer shape: {e:?}")))?;
             flow.types.insert(pointee, *subject);
         }
+        flow.pointer_guards.remove(slot);
         flow.pointers.insert(
             slot.clone(),
             BTreeSet::from([Place {
@@ -8980,6 +9531,72 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             }]),
         );
         Ok(())
+    }
+    /// Separate validity premises for distinct enum payloads sharing one slot.
+    /// They never become unconditional entries in flow.pointers.
+    fn borrowed_guarded_contents(
+        &mut self,
+        flow: &mut Flow,
+        base: &Place,
+        fields: &[(nir::program::FieldOwner, usize)],
+        guards: &[(Vec<usize>, usize)],
+        subject: &Term,
+        source: SourceRange,
+    ) -> Result<Option<BTreeSet<Place>>, Error> {
+        if !matches!(base.root.owner, x if x == u64::MAX - 1 || x == u64::MAX - 2 || x == u64::MAX - 4)
+        {
+            return Ok(None);
+        }
+        let mut slot = base.clone();
+        slot.fields.extend(fields.iter().map(|(_, index)| *index));
+        let mut absolute = Vec::new();
+        for (path, tag) in guards {
+            self.charge_pointer_conditions(guards, source)?;
+            let mut prefix = base.fields.clone();
+            prefix.extend(path);
+            absolute.push((prefix, *tag));
+        }
+        super::memory::bound_type(subject, &mut self.fuel).map_err(|e| error(source, e))?;
+        let key = (flow.borrowed_scope, slot, absolute);
+        let pointee = if let Some((id, previous)) = self.borrowed_pointees.get(&key) {
+            if previous != subject {
+                return Err(error(source, "conditional borrowed premise changed type"));
+            }
+            *id
+        } else {
+            let local = self.next_borrowed_pointer;
+            self.next_borrowed_pointer = local
+                .checked_add(1)
+                .ok_or_else(|| error(source, "borrowed identity exhausted"))?;
+            let id = PlaceId {
+                owner: u64::MAX - 4,
+                local,
+            };
+            self.borrowed_pointees.insert(key, (id, subject.clone()));
+            id
+        };
+        if !flow.types.contains_key(&pointee) {
+            let shape = (self.shape)(subject).map_err(|e| error(source, e))?;
+            flow.state
+                .declare(pointee, &shape, true, &mut self.fuel)
+                .map_err(|e| error(source, format!("conditional borrowed shape: {e:?}")))?;
+            flow.types.insert(pointee, subject.clone());
+        }
+        if self.report.borrowed_roots.contains_key(&base.root) {
+            self.report.borrowed_roots.insert(
+                pointee,
+                BorrowedRoot::GuardedIndirect {
+                    base: base.clone(),
+                    fields: fields.to_vec(),
+                    guards: guards.to_vec(),
+                    pointee: subject.clone(),
+                },
+            );
+        }
+        Ok(Some(BTreeSet::from([Place {
+            root: pointee,
+            fields: vec![],
+        }])))
     }
     fn declare_input_field_borrows(
         &mut self,
@@ -8997,7 +9614,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             .map_err(|reason| error(source, reason))?;
         for leaf in paths {
             let input = leaf.input_fields;
-            let storage = leaf.storage_fields;
+            let storage = leaf.storage_fields.clone();
             if input.is_empty() || !actual.contains_key(&input) {
                 continue;
             }
@@ -9028,6 +9645,16 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 })
                 .or_default()
                 .extend(borrowed.iter().cloned());
+            if !leaf.guards.is_empty() {
+                self.charge_pointer_conditions(&leaf.guards, source)?;
+                flow.pointer_guards
+                    .entry(Place {
+                        root: root(binding),
+                        fields: leaf.storage_fields.clone(),
+                    })
+                    .or_default()
+                    .insert(borrowed.iter().next().unwrap().clone(), leaf.guards);
+            }
             targets.insert(input, borrowed);
             flow.memory_exposed = true;
         }
@@ -9062,7 +9689,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             }
             let place = Place {
                 root: binding,
-                fields: std::iter::once(index).chain(leaf.storage_fields).collect(),
+                fields: std::iter::once(index)
+                    .chain(leaf.storage_fields.iter().copied())
+                    .collect(),
             };
             if require_present {
                 // Payload fields are opaque until the matching tag is selected.
@@ -9081,7 +9710,37 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             }
             if let Some(targets) = flow.pointers.get(&place) {
                 self.pointer_work(targets, source)?;
-                inputs.insert(leaf.input_fields, targets.clone());
+                let mut selected = BTreeSet::new();
+                for target in targets {
+                    let conditions = flow
+                        .pointer_guards
+                        .get(&place)
+                        .and_then(|entries| entries.get(target));
+                    let mut excluded = false;
+                    if let Some(conditions) = conditions {
+                        for (path, tag) in conditions {
+                            self.charge_pointer_conditions(&leaf.guards, source)?;
+                            for (guard, required) in &leaf.guards {
+                                if path.first() == Some(&index)
+                                    && path[1..] == guard[..]
+                                    && tag != required
+                                {
+                                    excluded = true;
+                                }
+                            }
+                        }
+                    }
+                    if !excluded {
+                        selected.insert(target.clone());
+                    }
+                }
+                if selected.is_empty() && !targets.is_empty() {
+                    return Err(error(
+                        source,
+                        "captured payload has no compatible pointer origin",
+                    ));
+                }
+                inputs.insert(leaf.input_fields, selected);
             } else if require_present {
                 return Err(error(
                     source,
@@ -9106,6 +9765,56 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             .map_err(|reason| error(source, reason))?;
         origins::bind_input_origins(&layout, origins, domains, &mut self.fuel, source)
     }
+    fn guarded_memory_projection(
+        &mut self,
+        base: &Place,
+        fields: &[(nir::program::FieldOwner, usize)],
+        guards: &[(Vec<usize>, usize)],
+        flow: &Flow,
+        source: SourceRange,
+    ) -> Result<Option<(Place, Term)>, Error> {
+        let root = flow
+            .types
+            .get(&base.root)
+            .ok_or_else(|| error(source, "conditional memory root type missing"))?;
+        let ty = self.field_type(root, &base.fields, source)?;
+        let mut traversal =
+            super::memory::StorageTraversal::new(self.package, &ty, &[], &mut self.fuel)
+                .map_err(|reason| error(source, reason))?;
+        traversal
+            .then_guarded(self.package, fields, guards, &mut self.fuel)
+            .map_err(|reason| error(source, reason))?;
+        let domains = self.stored_enum_domains(flow, base, source)?;
+        let activity = super::memory::storage_guard_activity(
+            guards,
+            &mut self.fuel,
+            |path, tag| match domains.get(path) {
+                Some(tags) if !tags.contains(&tag) => super::memory::GuardActivity::Inactive,
+                Some(tags) if tags.len() == 1 => super::memory::GuardActivity::Active,
+                _ => super::memory::GuardActivity::Conditional,
+            },
+        )
+        .map_err(|reason| error(source, reason))?;
+        if activity == super::memory::GuardActivity::Inactive {
+            return Ok(None);
+        }
+        // Enums are opaque ownership nodes until a pattern opens their payload.
+        // A typed guarded projection is readable when its enclosing enum is whole;
+        // do not invent an unconditional physical payload node in ownership state.
+        if let Some((container, _)) = guards.first() {
+            let mut owner = base.clone();
+            owner.fields.extend(container);
+            flow.state.require_present(&owner).map_err(|reason| {
+                error(
+                    source,
+                    format!("conditional memory owner unavailable: {reason:?}"),
+                )
+            })?;
+        }
+        let mut place = base.clone();
+        place.fields.extend(fields.iter().map(|(_, index)| *index));
+        Ok(Some((place, traversal.target.ty)))
+    }
     fn map_memory_target(
         &mut self,
         target: &super::memory::ParameterPlace,
@@ -9120,27 +9829,99 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             return Ok(None);
         };
         self.pointer_work(candidates, source)?;
+        if target
+            .conditions
+            .keys()
+            .any(|stage| *stage > target.through.len())
+        {
+            return Err(error(source, "memory guard stage out of bounds"));
+        }
+        for guards in target.conditions.values() {
+            self.charge_pointer_conditions(guards, source)?;
+        }
         let mut targets = candidates.clone();
-        for fields in &target.through {
+        for (stage, fields) in target.through.iter().enumerate() {
+            let guards = target
+                .conditions
+                .get(&stage)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
             let mut loaded = BTreeSet::new();
             for mut place in targets {
                 self.fuel = self
                     .fuel
                     .checked_sub(fields.len().saturating_add(1))
                     .ok_or_else(|| error(source, "pointer provenance budget exhausted"))?;
-                place.fields.extend(fields.iter().map(|(_, index)| *index));
-                flow.state.require_present(&place).map_err(|reason| {
-                    error(
-                        source,
-                        format!("memory pointer slot unavailable: {reason:?}"),
-                    )
-                })?;
-                self.borrowed_pointer_contents(flow, &place, source)?;
-                let Some(pointees) = flow.pointers.get(&place) else {
+                let base = place.clone();
+                let expected = if guards.is_empty() {
+                    place.fields.extend(fields.iter().map(|(_, index)| *index));
+                    None
+                } else {
+                    let Some((projected, ty)) =
+                        self.guarded_memory_projection(&base, fields, guards, flow, source)?
+                    else {
+                        continue;
+                    };
+                    place = projected;
+                    let Term::Pointer(subject) = ty else {
+                        return Err(error(source, "conditional memory load is not a pointer"));
+                    };
+                    Some(subject)
+                };
+                if guards.is_empty() {
+                    flow.state.require_present(&place).map_err(|reason| {
+                        error(
+                            source,
+                            format!("memory pointer slot unavailable: {reason:?}"),
+                        )
+                    })?;
+                }
+                let borrowed;
+                let pointees = if let Some(subject) = &expected {
+                    borrowed = self
+                        .borrowed_guarded_contents(flow, &base, fields, guards, subject, source)?;
+                    borrowed.as_ref().or_else(|| flow.pointers.get(&place))
+                } else {
+                    self.borrowed_pointer_contents(flow, &place, source)?;
+                    flow.pointers.get(&place)
+                };
+                let Some(pointees) = pointees else {
                     return Ok(None);
                 };
                 self.pointer_work(pointees, source)?;
-                loaded.extend(pointees.iter().cloned());
+                for pointee in pointees {
+                    if let Some(conditions) = flow
+                        .pointer_guards
+                        .get(&place)
+                        .and_then(|entries| entries.get(pointee))
+                    {
+                        self.charge_pointer_conditions(conditions, source)?;
+                        let mut excluded = false;
+                        for (path, tag) in guards {
+                            let mut absolute = base.fields.clone();
+                            absolute.extend(path);
+                            if conditions
+                                .iter()
+                                .any(|(other, actual)| *other == absolute && actual != tag)
+                            {
+                                excluded = true;
+                                break;
+                            }
+                        }
+                        if excluded {
+                            continue;
+                        }
+                    }
+                    if let Some(expected) = &expected {
+                        let actual = flow.types.get(&pointee.root).ok_or_else(|| {
+                            error(source, "conditional pointer target type missing")
+                        })?;
+                        if self.field_type(actual, &pointee.fields, source)? != **expected {
+                            return Err(error(source, "conditional pointer target type mismatch"));
+                        }
+                    }
+                    loaded.insert(pointee.clone());
+                }
             }
             targets = loaded;
         }
@@ -9150,9 +9931,23 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 .fuel
                 .checked_sub(target.fields.len())
                 .ok_or_else(|| error(source, "pointer provenance budget exhausted"))?;
-            place
-                .fields
-                .extend(target.fields.iter().map(|(_, index)| *index));
+            let guards = target
+                .conditions
+                .get(&target.through.len())
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            if guards.is_empty() {
+                place
+                    .fields
+                    .extend(target.fields.iter().map(|(_, index)| *index));
+            } else {
+                let Some((projected, _)) =
+                    self.guarded_memory_projection(&place, &target.fields, guards, flow, source)?
+                else {
+                    continue;
+                };
+                place = projected;
+            }
             result.insert(place);
         }
         Ok(Some(result))
@@ -9169,7 +9964,15 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 .map_memory_target(&access.target, targets, flow, source)?
                 .ok_or_else(|| error(source, "memory call target is not established"))?;
             for target in targets {
-                let checked = if access.read_value {
+                let guarded = access
+                    .target
+                    .conditions
+                    .get(&access.target.through.len())
+                    .is_some_and(|guards| !guards.is_empty());
+                let checked = if guarded {
+                    // map_memory_target checked the complete containing enum.
+                    Ok(())
+                } else if access.read_value {
                     flow.state.require_present(&target)
                 } else {
                     flow.state.require_place(&target)
@@ -9206,6 +10009,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             Option<BTreeSet<Place>>,
             Option<super::memory::Summary>,
             ValueOrigins,
+            ValuePointerGuards,
         ),
         Error,
     > {
@@ -9359,15 +10163,32 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 } else {
                     // Snapshot in source order, before later argument effects.
                     origins = this.evaluate_value_origins(&argument.value, flow, depth + 1)?;
-                    targets.insert(
-                        argument.parameter,
-                        this.memory_input_targets(
-                            &argument.value.ty,
-                            &origins,
-                            &flow.value_variants,
-                            source,
-                        )?,
-                    );
+                    let mut symbolic = this.memory_input_targets(
+                        &argument.value.ty,
+                        &origins,
+                        &flow.value_variants,
+                        source,
+                    )?;
+                    let layout = super::memory::pointer_input_layout(
+                        this.package,
+                        &argument.value.ty,
+                        &mut this.fuel,
+                    )
+                    .map_err(|reason| error(source, reason))?;
+                    for leaf in &layout {
+                        if let Some(actual) = symbolic.get_mut(&leaf.input_fields) {
+                            if !actual.is_empty() {
+                                *actual = this.guarded_request_targets(
+                                    &argument.value,
+                                    leaf,
+                                    actual,
+                                    flow,
+                                    true,
+                                )?;
+                            }
+                        }
+                    }
+                    targets.insert(argument.parameter, symbolic);
                     if !flow.live {
                         return Ok(());
                     }
@@ -9496,7 +10317,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             }
         }
         if !flow.live {
-            return Ok((None, None, BTreeMap::new()));
+            return Ok((None, None, BTreeMap::new(), BTreeMap::new()));
         }
         let summary = match self.memory_candidate_summary(
             callee,
@@ -9514,7 +10335,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 // Preserve the obligation for invocation without inventing an
                 // access summary or a returned pointer target.
                 self.report.deferred_calls.push(source);
-                return Ok((None, None, BTreeMap::new()));
+                return Ok((None, None, BTreeMap::new(), BTreeMap::new()));
             }
             Err(failure) => return Err(failure),
         };
@@ -9532,7 +10353,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             }
         }
         if !flow.live {
-            return Ok((None, Some(summary), BTreeMap::new()));
+            return Ok((None, Some(summary), BTreeMap::new(), BTreeMap::new()));
         }
         let mut origins = BTreeMap::new();
         let Term::Function { result, .. } = summary.signature.callable_signature() else {
@@ -9541,19 +10362,23 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let storage_paths = if summary.pointer_fields.is_empty() {
             BTreeMap::new()
         } else {
-            super::memory::conditional_pointer_storage_paths(
+            super::memory::pointer_input_layout(
                 self.package,
                 completion_type(result),
                 &mut self.fuel,
             )
             .map_err(|reason| error(source, reason))?
+            .into_iter()
+            .map(|leaf| (leaf.input_fields.clone(), leaf))
+            .collect()
         };
+        let mut result_guards = ValuePointerGuards::new();
         for (path, results) in &summary.pointer_fields {
             self.fuel = self
                 .fuel
                 .checked_sub(path.len() + 1)
                 .ok_or_else(|| error(source, "memory result field budget exhausted"))?;
-            let storage = storage_paths
+            let leaf = storage_paths
                 .get(path)
                 .ok_or_else(|| error(source, "memory result field layout mismatch"))?;
             let mut actual = BTreeSet::new();
@@ -9568,13 +10393,18 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             } else {
                 actual.insert(unknown_pointer_target());
             }
+            self.record_result_pointer_guards(&mut result_guards, leaf, &actual, source)?;
             origins
-                .entry(storage.clone())
+                .entry(leaf.storage_fields.clone())
                 .or_insert_with(BTreeSet::new)
                 .extend(actual);
         }
+        result_guards.retain(|_, entries| {
+            entries.retain(|_, conditions| !conditions.is_empty());
+            !entries.is_empty()
+        });
         let Some(results) = &summary.result_targets else {
-            return Ok((None, Some(summary), origins));
+            return Ok((None, Some(summary), origins, result_guards));
         };
         let mut all = BTreeSet::new();
         for target in results {
@@ -9584,7 +10414,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 all.insert(unknown_pointer_target());
             }
         }
-        Ok((Some(all), Some(summary), origins))
+        Ok((Some(all), Some(summary), origins, result_guards))
     }
     fn pointer_work(
         &mut self,
@@ -9683,6 +10513,379 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             )),
         }
     }
+    fn charge_pointer_conditions(
+        &mut self,
+        guards: &[(Vec<usize>, usize)],
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        for (path, _) in guards {
+            self.fuel = self
+                .fuel
+                .checked_sub(path.len() + 1)
+                .ok_or_else(|| error(source, "pointer condition budget exhausted"))?;
+        }
+        Ok(())
+    }
+    fn merge_pointer_conditions(
+        &mut self,
+        guarded: &mut PointerTargetGuards,
+        actual: &BTreeSet<Place>,
+        conditions: &[(Vec<usize>, usize)],
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        self.pointer_work(actual, source)?;
+        for target in actual {
+            self.charge_pointer_conditions(conditions, source)?;
+            match guarded.entry(target.clone()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(conditions.to_vec());
+                }
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    // One actual target can occur under multiple return tags.
+                    // Retain only conditions necessary for every occurrence.
+                    let mut common = vec![];
+                    for condition in entry.get() {
+                        self.charge_pointer_conditions(conditions, source)?;
+                        if conditions.contains(condition) {
+                            common.push(condition.clone());
+                        }
+                    }
+                    entry.insert(common);
+                }
+            }
+        }
+        Ok(())
+    }
+    /// A completely mapped, empty result leaf cannot contain a live pointer.
+    /// Recover the excluded payload tag so later by-value calls do not turn
+    /// established absence back into unknown pointer provenance.
+    fn refine_absent_result_payloads(
+        &mut self,
+        ty: &Term,
+        origins: &ValueOrigins,
+        qualifiers: &ValuePointerGuards,
+        flow: &mut Flow,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        let layout =
+            super::memory::pointer_input_layout(self.package, completion_type(ty), &mut self.fuel)
+                .map_err(|reason| error(source, reason))?;
+        for leaf in layout {
+            let Some(targets) = origins.get(&leaf.storage_fields) else {
+                continue;
+            };
+            let mut absent = true;
+            for target in targets {
+                let Some(conditions) = qualifiers
+                    .get(&leaf.storage_fields)
+                    .and_then(|entries| entries.get(target))
+                else {
+                    absent = false;
+                    break;
+                };
+                self.charge_pointer_conditions(conditions, source)?;
+                self.fuel = self
+                    .fuel
+                    .checked_sub(
+                        conditions
+                            .len()
+                            .saturating_mul(leaf.guards.len())
+                            .saturating_add(target.fields.len()),
+                    )
+                    .ok_or_else(|| error(source, "absent result correlation budget exhausted"))?;
+                let excluded = conditions.iter().any(|(path, tag)| {
+                    leaf.guards
+                        .iter()
+                        .any(|(selected, actual)| selected == path && actual != tag)
+                });
+                if !excluded {
+                    absent = false;
+                    break;
+                }
+            }
+            if !absent {
+                continue;
+            }
+            let Some(marker) = leaf
+                .input_fields
+                .iter()
+                .rposition(|field| *field == VARIANT_PATH)
+            else {
+                continue;
+            };
+            let path = &leaf.input_fields[..marker];
+            let tag = leaf.input_fields[marker + 1];
+            let owner = self.field_type(completion_type(ty), path, source)?;
+            let variants = super::memory::owned_variants(self.package, &owner, &mut self.fuel)
+                .map_err(|reason| error(source, reason))?;
+            self.fuel = self
+                .fuel
+                .checked_sub(variants.len() + path.len() + 1)
+                .ok_or_else(|| error(source, "absent result domain budget exhausted"))?;
+            let mut allowed = flow
+                .value_variants
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| (0..variants.len()).collect());
+            allowed.remove(&tag);
+            if !allowed.is_empty() {
+                flow.value_variants.insert(path.to_vec(), allowed);
+            }
+        }
+        Ok(())
+    }
+    fn record_result_pointer_guards(
+        &mut self,
+        guards: &mut ValuePointerGuards,
+        leaf: &super::memory::PointerInputLeaf,
+        actual: &BTreeSet<Place>,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        self.merge_pointer_conditions(
+            guards.entry(leaf.storage_fields.clone()).or_default(),
+            actual,
+            &leaf.guards,
+            source,
+        )
+    }
+    fn join_result_pointer_guards(
+        &mut self,
+        left: &ValuePointerGuards,
+        left_origins: &ValueOrigins,
+        right: &ValuePointerGuards,
+        right_origins: &ValueOrigins,
+        source: SourceRange,
+        domains: Option<(&Term, &EnumDomains, &EnumDomains)>,
+    ) -> Result<ValuePointerGuards, Error> {
+        let mut joined = ValuePointerGuards::new();
+        if left.is_empty() && right.is_empty() {
+            return Ok(joined);
+        }
+        let layout = match domains {
+            Some((ty, _, _)) => {
+                super::memory::pointer_input_layout(self.package, ty, &mut self.fuel)
+                    .map_err(|reason| error(source, reason))?
+            }
+            None => vec![],
+        };
+        for (own, own_origins, other, other_origins, other_domains) in [
+            (
+                left,
+                left_origins,
+                right,
+                right_origins,
+                domains.map(|(_, _, right)| right),
+            ),
+            (
+                right,
+                right_origins,
+                left,
+                left_origins,
+                domains.map(|(_, left, _)| left),
+            ),
+        ] {
+            for (slot, entries) in own {
+                self.fuel = self
+                    .fuel
+                    .checked_sub(slot.len().saturating_add(1))
+                    .ok_or_else(|| error(source, "result pointer guard join budget exhausted"))?;
+                for (target, conditions) in entries {
+                    self.charge_pointer_conditions(conditions, source)?;
+                    if !own_origins
+                        .get(slot)
+                        .is_some_and(|targets| targets.contains(target))
+                    {
+                        continue;
+                    }
+                    let other_targets = other_origins.get(slot);
+                    if other_targets.is_none() {
+                        // Missing metadata is normally unknown. Only a complete
+                        // layout plus excluded tags proves this physical slot
+                        // absent; overlapping leaves must all be excluded.
+                        let mut absent = false;
+                        if let Some(domains) = other_domains {
+                            for leaf in &layout {
+                                self.fuel = self
+                                    .fuel
+                                    .checked_sub(leaf.storage_fields.len() + 1)
+                                    .ok_or_else(|| {
+                                        error(source, "absent pointer slot budget exhausted")
+                                    })?;
+                                if &leaf.storage_fields != slot {
+                                    continue;
+                                }
+                                let activity = super::memory::storage_guard_activity(
+                                    &leaf.guards,
+                                    &mut self.fuel,
+                                    |path, tag| match domains.get(path) {
+                                        Some(tags) if !tags.contains(&tag) => {
+                                            super::memory::GuardActivity::Inactive
+                                        }
+                                        Some(tags) if tags.len() == 1 => {
+                                            super::memory::GuardActivity::Active
+                                        }
+                                        _ => super::memory::GuardActivity::Conditional,
+                                    },
+                                )
+                                .map_err(|reason| error(source, reason))?;
+                                absent = activity == super::memory::GuardActivity::Inactive;
+                                if !absent {
+                                    break;
+                                }
+                            }
+                        }
+                        if !absent {
+                            continue;
+                        }
+                    }
+                    let retained = if other_targets.is_some_and(|targets| targets.contains(target))
+                    {
+                        let Some(other_conditions) =
+                            other.get(slot).and_then(|entries| entries.get(target))
+                        else {
+                            continue;
+                        };
+                        let mut common = vec![];
+                        for condition in conditions {
+                            self.charge_pointer_conditions(other_conditions, source)?;
+                            if other_conditions.contains(condition) {
+                                common.push(condition.clone());
+                            }
+                        }
+                        common
+                    } else {
+                        conditions.clone()
+                    };
+                    if !retained.is_empty() {
+                        joined
+                            .entry(slot.clone())
+                            .or_default()
+                            .insert(target.clone(), retained);
+                    }
+                }
+            }
+        }
+        Ok(joined)
+    }
+
+    fn copy_value_pointer_guards(
+        &mut self,
+        guards: &ValuePointerGuards,
+        source: SourceRange,
+    ) -> Result<ValuePointerGuards, Error> {
+        for (path, entries) in guards {
+            self.fuel = self
+                .fuel
+                .checked_sub(path.len() + 1)
+                .ok_or_else(|| error(source, "pointer guard path budget exhausted"))?;
+            for (target, conditions) in entries {
+                self.fuel = self
+                    .fuel
+                    .checked_sub(target.fields.len() + 1)
+                    .ok_or_else(|| error(source, "pointer guard target budget exhausted"))?;
+                self.charge_pointer_conditions(conditions, source)?;
+            }
+        }
+        Ok(guards.clone())
+    }
+    fn value_pointer_guards(
+        &mut self,
+        value: &Expr,
+        flow: &Flow,
+        source: SourceRange,
+    ) -> Result<ValuePointerGuards, Error> {
+        let Some(place) = expression_place(value) else {
+            return Ok(BTreeMap::new());
+        };
+        self.stored_pointer_guards(&place, flow, source)
+    }
+    fn stored_pointer_guards(
+        &mut self,
+        place: &Place,
+        flow: &Flow,
+        source: SourceRange,
+    ) -> Result<ValuePointerGuards, Error> {
+        let mut result = BTreeMap::new();
+        for (slot, entries) in flow
+            .pointer_guards
+            .range(place.clone()..)
+            .take_while(|(slot, _)| slot.root == place.root)
+        {
+            self.fuel = self
+                .fuel
+                .checked_sub(slot.fields.len() + 1)
+                .ok_or_else(|| error(source, "pointer guard extraction budget exhausted"))?;
+            let Some(relative) = slot.fields.strip_prefix(place.fields.as_slice()) else {
+                continue;
+            };
+            let mut projected = BTreeMap::new();
+            for (target, conditions) in entries {
+                self.charge_pointer_conditions(conditions, source)?;
+                let guards: Vec<_> = conditions
+                    .iter()
+                    .filter_map(|(path, tag)| {
+                        path.strip_prefix(place.fields.as_slice())
+                            .map(|path| (path.to_vec(), *tag))
+                    })
+                    .collect();
+                if !guards.is_empty() {
+                    projected.insert(target.clone(), guards);
+                }
+            }
+            if !projected.is_empty() {
+                result.insert(relative.to_vec(), projected);
+            }
+        }
+        Ok(result)
+    }
+
+    /// Qualifiers belong to the assigned value. Rebase both storage slots and
+    /// tag paths under the destination, never the pointee's address.
+    fn install_pointer_guards(
+        &mut self,
+        flow: &mut Flow,
+        destination: &Place,
+        guards: ValuePointerGuards,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        for (fields, entries) in guards {
+            self.fuel = self
+                .fuel
+                .checked_sub(
+                    destination
+                        .fields
+                        .len()
+                        .saturating_add(fields.len())
+                        .saturating_add(1),
+                )
+                .ok_or_else(|| error(source, "pointer guard installation budget exhausted"))?;
+            let mut slot = destination.clone();
+            slot.fields.extend(fields);
+            let mut installed = PointerTargetGuards::new();
+            for (target, conditions) in entries {
+                let mut rebased = Vec::with_capacity(conditions.len());
+                for (fields, tag) in conditions {
+                    self.fuel = self
+                        .fuel
+                        .checked_sub(
+                            destination
+                                .fields
+                                .len()
+                                .saturating_add(fields.len())
+                                .saturating_add(1),
+                        )
+                        .ok_or_else(|| error(source, "pointer guard rebasing budget exhausted"))?;
+                    let mut path = destination.fields.clone();
+                    path.extend(fields);
+                    rebased.push((path, tag));
+                }
+                installed.insert(target, rebased);
+            }
+            flow.pointer_guards.insert(slot, installed);
+        }
+        Ok(())
+    }
+
     fn forget_pointer_subtree(
         &mut self,
         flow: &mut Flow,
@@ -9694,6 +10897,13 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             .checked_sub(flow.pointers.len())
             .ok_or_else(|| error(source, "pointer storage budget exhausted"))?;
         flow.pointers.retain(|slot, _| {
+            slot.root != destination.root || !slot.fields.starts_with(&destination.fields)
+        });
+        self.fuel = self
+            .fuel
+            .checked_sub(flow.pointer_guards.len())
+            .ok_or_else(|| error(source, "pointer guard invalidation budget exhausted"))?;
+        flow.pointer_guards.retain(|slot, _| {
             slot.root != destination.root || !slot.fields.starts_with(&destination.fields)
         });
         Ok(())
@@ -9736,16 +10946,222 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+    fn read_aggregate_origins(
+        &mut self,
+        expr: &Expr,
+        pointer: &Expr,
+        flow: &mut Flow,
+        depth: usize,
+    ) -> Result<ValueOrigins, Error> {
+        let targets = self.evaluate_pointer_value(pointer, flow, depth + 1)?;
+        if !flow.live {
+            return Ok(BTreeMap::new());
+        }
+        let targets = targets
+            .ok_or_else(|| error(expr.source, "aggregate read needs established storage"))?;
+        if !super::memory::copy_readable_representation(self.package, &expr.ty, &mut self.fuel)
+            .map_err(|reason| error(expr.source, reason))?
+            || (self.delivery)(&expr.ty).map_err(|reason| error(expr.source, reason))?
+                != Delivery::Copy
+        {
+            return Err(error(
+                expr.source,
+                "aggregate pointer read requires checked Copy permission",
+            ));
+        }
+        let layout = super::memory::pointer_input_layout(self.package, &expr.ty, &mut self.fuel)
+            .map_err(|reason| error(expr.source, reason))?;
+        let mut merged: Option<(
+            ValueOrigins,
+            ValuePointerGuards,
+            EnumDomains,
+            BTreeMap<Vec<usize>, Callable>,
+        )> = None;
+        for target in &targets {
+            flow.state.require_present(target).map_err(|reason| {
+                error(
+                    expr.source,
+                    format!("aggregate read target unavailable: {reason:?}"),
+                )
+            })?;
+            let actual = flow
+                .types
+                .get(&target.root)
+                .ok_or_else(|| error(expr.source, "aggregate read target type missing"))?;
+            if owned_field_type(
+                self.package,
+                actual,
+                &target.fields,
+                &mut self.fuel,
+                expr.source,
+            )? != expr.ty
+            {
+                return Err(error(expr.source, "aggregate read target type mismatch"));
+            }
+            let domains = self.stored_enum_domains(flow, target, expr.source)?;
+            let code = self.stored_code(flow, target, expr.source)?;
+            let mut guards = self.stored_pointer_guards(target, flow, expr.source)?;
+            let mut origins = ValueOrigins::new();
+            for leaf in &layout {
+                self.fuel = self
+                    .fuel
+                    .checked_sub(
+                        target
+                            .fields
+                            .len()
+                            .saturating_add(leaf.storage_fields.len())
+                            .saturating_add(1),
+                    )
+                    .ok_or_else(|| error(expr.source, "aggregate read origin budget exhausted"))?;
+                let mut slot = target.clone();
+                slot.fields.extend(&leaf.storage_fields);
+                let activity = super::memory::storage_guard_activity(
+                    &leaf.guards,
+                    &mut self.fuel,
+                    |path, tag| match domains.get(path) {
+                        Some(tags) if !tags.contains(&tag) => {
+                            super::memory::GuardActivity::Inactive
+                        }
+                        Some(tags) if tags.len() == 1 => super::memory::GuardActivity::Active,
+                        _ => super::memory::GuardActivity::Conditional,
+                    },
+                )
+                .map_err(|reason| error(expr.source, reason))?;
+                let values = if activity == super::memory::GuardActivity::Inactive {
+                    BTreeSet::new()
+                } else if let Some(values) = flow.pointers.get(&slot) {
+                    self.pointer_work(values, expr.source)?;
+                    values.clone()
+                } else if !leaf.guards.is_empty() {
+                    let projection = super::memory::project_owned_storage(
+                        self.package,
+                        &expr.ty,
+                        &leaf.input_fields,
+                        &mut self.fuel,
+                    )
+                    .map_err(|reason| error(expr.source, reason))?;
+                    let Term::Pointer(subject) = &projection.ty else {
+                        return Err(error(expr.source, "aggregate pointer leaf type mismatch"));
+                    };
+                    match self.borrowed_guarded_contents(
+                        flow,
+                        target,
+                        &projection.fields,
+                        &leaf.guards,
+                        subject,
+                        expr.source,
+                    )? {
+                        Some(values) => {
+                            self.merge_pointer_conditions(
+                                guards.entry(leaf.storage_fields.clone()).or_default(),
+                                &values,
+                                &leaf.guards,
+                                expr.source,
+                            )?;
+                            values
+                        }
+                        None => BTreeSet::from([unknown_pointer_target()]),
+                    }
+                } else {
+                    BTreeSet::from([unknown_pointer_target()])
+                };
+                origins
+                    .entry(leaf.storage_fields.clone())
+                    .or_default()
+                    .extend(values);
+            }
+            if let Some((previous, previous_guards, previous_domains, previous_code)) = &mut merged
+            {
+                *previous_guards = self.join_result_pointer_guards(
+                    previous_guards,
+                    previous,
+                    &guards,
+                    &origins,
+                    expr.source,
+                    Some((&expr.ty, previous_domains, &domains)),
+                )?;
+                self.join_value_origins(
+                    &expr.ty,
+                    previous,
+                    previous_domains,
+                    &origins,
+                    &domains,
+                    expr.source,
+                )?;
+                *previous_code = join_guarded_callables(
+                    previous_code,
+                    &code,
+                    previous_domains,
+                    &domains,
+                    &mut self.fuel,
+                    expr.source,
+                )?;
+                *previous_domains =
+                    join_enum_domains(previous_domains, &domains, &mut self.fuel, expr.source)?;
+            } else {
+                merged = Some((origins, guards, domains, code));
+            }
+        }
+        let (origins, guards, domains, code) = merged.unwrap_or_default();
+        flow.value_pointer_guards = guards;
+        flow.value_variants = domains;
+        flow.value_callables = code;
+        flow.value_callable = flow.value_callables.get(&vec![]).cloned();
+        Ok(origins)
+    }
+
     fn evaluate_value_origins(
         &mut self,
         expr: &Expr,
         flow: &mut Flow,
         depth: usize,
     ) -> Result<ValueOrigins, Error> {
+        let place_guards = self.value_pointer_guards(expr, flow, expr.source)?;
+        flow.value_pointer_guards.clear();
         flow.value_callable = None;
         flow.value_callables.clear();
         flow.value_variants.clear();
         let origins = self.evaluate_value_origins_inner(expr, flow, depth)?;
+        if expression_place(expr).is_some() {
+            flow.value_pointer_guards = place_guards;
+        } else if !matches!(
+            &expr.kind,
+            K::Tuple(_)
+                | K::AnonymousRecord { .. }
+                | K::Record { .. }
+                | K::Variant { .. }
+                | K::Field { .. }
+                | K::AnonymousField { .. }
+                | K::NewtypeConvert(_)
+                | K::Snapshot(_)
+                | K::Call { .. }
+                | K::Closure { .. }
+                | K::EffectRequest { .. }
+                | K::EffectHandle { .. }
+                | K::EffectComputation { .. }
+                | K::EffectRun { .. }
+                | K::ReadPointer(_)
+                | K::If {
+                    else_branch: Some(_),
+                    ..
+                }
+                | K::Match { .. }
+                | K::Block {
+                    result: Some(_),
+                    ..
+                }
+                | K::CallPreparation {
+                    result: Some(_),
+                    ..
+                }
+        ) {
+            // Nested evaluation may leave operand evidence behind. Only paths
+            // which explicitly transport the result can publish that evidence.
+            flow.value_pointer_guards.clear();
+        }
+        if !flow.live {
+            flow.value_pointer_guards.clear();
+        }
         if matches!(expr.ty, Term::Pointer(_)) {
             flow.value_variants.clear();
         }
@@ -9788,7 +11204,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         parameter_bindings: &[LocalId],
         flow: &mut Flow,
         depth: usize,
-    ) -> Result<ValueOrigins, Error> {
+    ) -> Result<(ValueOrigins, ValuePointerGuards), Error> {
         if !matches!(
             callee.kind,
             K::Local(_) | K::Function(_) | K::FunctionInstance { .. }
@@ -9802,14 +11218,15 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     flow,
                     depth + 1,
                 )
-                .map(|(_, origins)| origins);
+                .map(|(_, origins, guards)| (origins, guards));
         }
         if matches!(callee.kind, K::Local(_)) {
             // Resolve identity before evaluating arguments, but still consume the
             // original callable exactly once under the ordinary resource rules.
             if let Some(resolved) = self.indirect_named_call(expr, flow) {
                 self.expr(callee, flow, depth + 1)?;
-                return self.evaluate_value_origins(&resolved, flow, depth + 1);
+                let origins = self.evaluate_value_origins(&resolved, flow, depth + 1)?;
+                return Ok((origins, std::mem::take(&mut flow.value_pointer_guards)));
             }
             let K::Local(binding) = callee.kind else {
                 unreachable!()
@@ -9829,7 +11246,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         expr.source,
                         depth + 1,
                     )
-                    .map(|(_, origins)| origins);
+                    .map(|(_, origins, guards)| (origins, guards));
             }
             let callable = flow
                 .callables
@@ -9844,7 +11261,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 })?;
             self.expr(callee, flow, depth + 1)?;
             if !flow.live {
-                return Ok(BTreeMap::new());
+                return Ok((BTreeMap::new(), BTreeMap::new()));
             }
             return self
                 .call_named_candidates_with_origins(
@@ -9855,11 +11272,11 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     flow,
                     depth + 1,
                 )
-                .map(|(_, origins)| origins);
+                .map(|(_, origins, guards)| (origins, guards));
         }
         let mut prepared_callables = vec![];
         let mut prepared_enums = vec![];
-        let (_, _, origins) = self.memory_call(
+        let (_, _, origins, guards) = self.memory_call(
             callee,
             arguments,
             parameter_bindings,
@@ -9879,7 +11296,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 flow,
             )?;
         }
-        Ok(origins)
+        self.refine_absent_result_payloads(&expr.ty, &origins, &guards, flow, expr.source)?;
+        Ok((origins, guards))
     }
 
     fn evaluate_value_origins_inner(
@@ -9928,8 +11346,13 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     result_inputs.push(input);
                 }
             }
-            let memory_inputs =
-                self.installed_effect_memory_inputs(handlers, outer, flow, expr.source)?;
+            let memory_inputs = self.installed_effect_memory_inputs(
+                handlers,
+                outer,
+                &result_inputs,
+                flow,
+                expr.source,
+            )?;
             self.fuel = self
                 .fuel
                 .checked_sub(flow.effect_mutable_roots.len())
@@ -9999,6 +11422,22 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             self.effect_memory_inputs = previous_memory;
             self.effect_result_inputs = previous_results;
             return result;
+        }
+        if let K::EffectRequest {
+            abi,
+            signature,
+            arguments,
+            ..
+        } = &expr.kind
+        {
+            return self.effect_request_resources(
+                expr,
+                *abi,
+                signature,
+                arguments,
+                flow,
+                depth + 1,
+            );
         }
         // Transparent evaluation boundaries must run before pointer handling:
         // a run can deliver a borrowed pointer or a closure with provenance.
@@ -10102,6 +11541,32 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             }
             let direction = conversion.direction();
             let origins = remap(origins, direction, &mut self.fuel, expr.source)?;
+            let mut guards = remap(
+                std::mem::take(&mut flow.value_pointer_guards),
+                direction,
+                &mut self.fuel,
+                expr.source,
+            )?;
+            for entries in guards.values_mut() {
+                for conditions in entries.values_mut() {
+                    self.charge_pointer_conditions(conditions, expr.source)?;
+                    for (path, _) in conditions {
+                        match direction {
+                            nir::newtypes::Direction::Wrap => path.insert(0, 0),
+                            nir::newtypes::Direction::Unwrap => {
+                                if path.first() != Some(&0) {
+                                    return Err(error(
+                                        expr.source,
+                                        "invalid newtype pointer guard",
+                                    ));
+                                }
+                                path.remove(0);
+                            }
+                        }
+                    }
+                }
+            }
+            flow.value_pointer_guards = guards;
             flow.value_callables = remap(
                 std::mem::take(&mut flow.value_callables),
                 direction,
@@ -10129,25 +11594,37 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             return self.evaluate_value_origins(value, flow, depth + 1);
         }
         if matches!(expr.kind, K::Call { .. } | K::ReadPointer(_))
-            && !matches!(expr.ty, Term::Pointer(_))
+            && !matches!(completion_type(&expr.ty), Term::Pointer(_))
         {
-            if let Some((pointer_depth, _)) =
-                super::memory::pointer_representation(self.package, &expr.ty, &mut self.fuel)
-                    .map_err(|reason| error(expr.source, reason))?
+            if let Some((pointer_depth, _)) = super::memory::pointer_representation(
+                self.package,
+                completion_type(&expr.ty),
+                &mut self.fuel,
+            )
+            .map_err(|reason| error(expr.source, reason))?
             {
-                return Ok(self
-                    .evaluate_pointer_value(expr, flow, depth + 1)?
+                let targets = self.evaluate_pointer_value(expr, flow, depth + 1)?;
+                flow.value_pointer_guards.clear();
+                return Ok(targets
                     .map(|targets| BTreeMap::from([(vec![0; pointer_depth], targets)]))
                     .unwrap_or_default());
             }
         }
-        if matches!(expr.ty, Term::Pointer(_)) {
-            return Ok(self
-                .evaluate_pointer_value(expr, flow, depth + 1)?
+        if matches!(completion_type(&expr.ty), Term::Pointer(_)) {
+            let targets = self.evaluate_pointer_value(expr, flow, depth + 1)?;
+            flow.value_pointer_guards.clear();
+            return Ok(targets
                 .map(|targets| BTreeMap::from([(vec![], targets)]))
                 .unwrap_or_default());
         }
         match &expr.kind {
+            K::ReadPointer(pointer)
+                if !super::memory::pointer_input_layout(self.package, &expr.ty, &mut self.fuel)
+                    .map_err(|reason| error(expr.source, reason))?
+                    .is_empty() =>
+            {
+                self.read_aggregate_origins(expr, pointer, flow, depth + 1)
+            }
             K::Call {
                 callee,
                 arguments,
@@ -10155,26 +11632,32 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             } if self.package.is_some()
                 && !matches!(callee.kind, K::TraitMethod { .. })
                 && matches!(
-                    expr.ty,
+                    completion_type(&expr.ty),
                     Term::Tuple(_)
                         | Term::Record(_)
                         | Term::Nominal { .. }
                         | Term::NormalForm { .. }
                         | Term::Closure { .. }
                 )
-                && self.storage_inputs_are_closed(&expr.ty, expr.source)?
-                && !super::memory::pointer_input_layout(self.package, &expr.ty, &mut self.fuel)
-                    .map_err(|reason| error(expr.source, reason))?
-                    .is_empty() =>
+                && self.storage_inputs_are_closed(completion_type(&expr.ty), expr.source)?
+                && !super::memory::pointer_input_layout(
+                    self.package,
+                    completion_type(&expr.ty),
+                    &mut self.fuel,
+                )
+                .map_err(|reason| error(expr.source, reason))?
+                .is_empty() =>
             {
-                self.evaluate_named_pointer_aggregate(
+                let (origins, guards) = self.evaluate_named_pointer_aggregate(
                     expr,
                     callee,
                     arguments,
                     parameter_bindings,
                     flow,
                     depth,
-                )
+                )?;
+                flow.value_pointer_guards = guards;
+                Ok(origins)
             }
             K::Closure { .. } => {
                 flow.constructed_capture_origins.clear();
@@ -10197,6 +11680,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 let mut origins = BTreeMap::new();
                 let mut callables = BTreeMap::new();
                 let mut domains = EnumDomains::new();
+                let mut pointer_guards = ValuePointerGuards::new();
                 if let K::Variant { index, .. } = &expr.kind {
                     domains.insert(vec![], BTreeSet::from([*index]));
                 }
@@ -10204,6 +11688,22 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     let children = this.evaluate_value_origins(field, flow, depth + 1)?;
                     if !flow.live {
                         return Ok(BTreeMap::new());
+                    }
+                    for (mut slot, mut entries) in std::mem::take(&mut flow.value_pointer_guards) {
+                        this.fuel = this
+                            .fuel
+                            .checked_sub(slot.len().saturating_add(1))
+                            .ok_or_else(|| {
+                                error(expr.source, "constructed pointer guard budget exhausted")
+                            })?;
+                        slot.insert(0, index);
+                        for conditions in entries.values_mut() {
+                            this.charge_pointer_conditions(conditions, expr.source)?;
+                            for (path, _) in conditions {
+                                path.insert(0, index);
+                            }
+                        }
+                        pointer_guards.insert(slot, entries);
                     }
                     for (path, tags) in std::mem::take(&mut flow.value_variants) {
                         this.fuel = this
@@ -10246,11 +11746,22 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             .ok_or_else(|| error(expr.source, "value origin budget exhausted"))?;
                         let mut nested = vec![index];
                         nested.extend(path);
+                        if let K::Variant { index: tag, .. } = &expr.kind {
+                            this.pointer_work(&targets, expr.source)?;
+                            let entries = pointer_guards.entry(nested.clone()).or_default();
+                            for target in &targets {
+                                entries
+                                    .entry(target.clone())
+                                    .or_default()
+                                    .push((vec![], *tag));
+                            }
+                        }
                         origins.insert(nested, targets);
                     }
                 }
                 flow.value_callables = callables;
                 flow.value_variants = domains;
+                flow.value_pointer_guards = pointer_guards;
                 Ok(origins)
             }),
             K::Block { statements, result } | K::CallPreparation { statements, result } => {
@@ -10317,6 +11828,18 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 let right_origins = self.evaluate_value_origins(other, &mut right, depth + 1)?;
                 match (flow.live, right.live) {
                     (true, true) => {
+                        let result_guards = self.join_result_pointer_guards(
+                            &flow.value_pointer_guards,
+                            &left_origins,
+                            &right.value_pointer_guards,
+                            &right_origins,
+                            expr.source,
+                            Some((
+                                completion_type(&expr.ty),
+                                &flow.value_variants,
+                                &right.value_variants,
+                            )),
+                        )?;
                         self.join_value_origins(
                             completion_type(&expr.ty),
                             &mut left_origins,
@@ -10326,6 +11849,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             expr.source,
                         )?;
                         self.join_flow(flow, &right, expr.source)?;
+                        flow.value_pointer_guards = result_guards;
                         Ok(left_origins)
                     }
                     (false, true) => {
@@ -10369,6 +11893,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 self.expr(expr, flow, depth + 1)?;
                 if expression_place(expr).is_some() {
                     flow.value_callables = leaves;
+                } else {
+                    flow.value_pointer_guards.clear();
                 }
                 Ok(origins)
             }
@@ -10393,9 +11919,13 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         if let Some(message) = nir::program::pointer_operation_error(expr) {
             return Err(error(expr.source, message));
         }
-        if super::memory::pointer_representation(self.package, &expr.ty, &mut self.fuel)
-            .map_err(|reason| error(expr.source, reason))?
-            .is_some()
+        if super::memory::pointer_representation(
+            self.package,
+            completion_type(&expr.ty),
+            &mut self.fuel,
+        )
+        .map_err(|reason| error(expr.source, reason))?
+        .is_some()
         {
             match &expr.kind {
                 K::NewtypeConvert(_) => {
@@ -10619,7 +12149,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     }
                     let mut prepared_callables = vec![];
                     let mut prepared_enums = vec![];
-                    let (result, _, _) = self.memory_call(
+                    let (result, _, _, _) = self.memory_call(
                         callee,
                         arguments,
                         parameter_bindings,
@@ -11030,6 +12560,16 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 self.evaluate_pointer_value(expr, flow, depth + 1)?;
             }
             K::ReadPointer(pointer) => {
+                if !super::memory::pointer_input_layout(self.package, &expr.ty, &mut self.fuel)
+                    .map_err(|reason| error(source, reason))?
+                    .is_empty()
+                    && super::memory::pointer_representation(self.package, &expr.ty, &mut self.fuel)
+                        .map_err(|reason| error(source, reason))?
+                        .is_none()
+                {
+                    self.read_aggregate_origins(expr, pointer, flow, depth + 1)?;
+                    return Ok(());
+                }
                 let target = self.evaluate_pointer_value(pointer, flow, depth + 1)?;
                 if !flow.live {
                     return Ok(());
@@ -11190,6 +12730,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     return Err(error(source, "closure capture count mismatch"));
                 }
                 let mut capture_origins = BTreeMap::new();
+                let mut capture_guards = ValuePointerGuards::new();
                 let mut construction = Callable {
                     choices: vec![],
                     enum_captures: Default::default(),
@@ -11228,6 +12769,24 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         let origins = this.evaluate_value_origins(value, flow, depth + 1)?;
                         if !flow.live {
                             return Ok(());
+                        }
+                        for (mut path, mut entries) in
+                            std::mem::take(&mut flow.value_pointer_guards)
+                        {
+                            this.fuel = this
+                                .fuel
+                                .checked_sub(path.len().saturating_add(1))
+                                .ok_or_else(|| {
+                                    error(source, "capture pointer guard budget exhausted")
+                                })?;
+                            path.insert(0, slot);
+                            for conditions in entries.values_mut() {
+                                this.charge_pointer_conditions(conditions, source)?;
+                                for (path, _) in conditions {
+                                    path.insert(0, slot);
+                                }
+                            }
+                            capture_guards.insert(path, entries);
                         }
                         let callable = flow.value_callable.clone().or(callable);
                         let fields = flow.value_callables.clone();
@@ -11421,6 +12980,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     self.capture_storage_domains(captures, &construction.enum_captures, source)?;
                 flow.value_callable = Some(construction);
                 flow.constructed_capture_origins = capture_origins;
+                flow.value_pointer_guards = capture_guards;
             }
             K::Let { .. } => {
                 self.in_temporary_scope(
@@ -11595,6 +13155,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     flow,
                     |this, flow| {
                         let origins = this.evaluate_value_origins(value, flow, depth + 1)?;
+                        let pointer_guards =
+                            this.copy_value_pointer_guards(&flow.value_pointer_guards, source)?;
                         let callable = flow.value_callable.clone().or(callable);
                         if flow.live {
                             if target.fields.is_empty() {
@@ -11616,6 +13178,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                                 super::drop::PointerMemory {
                                     types: &flow.types,
                                     slots: &flow.pointers,
+                                    enum_domains: &flow.enum_domains,
+                                    pointer_conditions: &flow.pointer_guards,
                                     retired: &[],
                                 },
                                 &variants,
@@ -11640,6 +13204,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                                 source,
                             )?;
                             this.install_value_origins(flow, &destination, origins, source)?;
+                            this.install_pointer_guards(
+                                flow,
+                                &destination,
+                                pointer_guards,
+                                source,
+                            )?;
                             for (place, availability) in flow
                                 .state
                                 .replace_with_budget(&destination, &mut this.fuel)
@@ -12224,6 +13794,11 @@ fn analyze_with_shapes<'a>(
     if function.phase != FunctionPhase::Runtime {
         return Err(error(source, "move analysis requires a runtime function"));
     }
+    let mut fuel = fuel;
+    let mut effect_memory_inputs = Vec::new();
+    for input in &effect_result_inputs {
+        effect_memory_inputs.push(input.memory_input(&mut fuel, source)?);
+    }
     let mut analyzer = Analyzer {
         cleanup,
         package,
@@ -12232,7 +13807,7 @@ fn analyze_with_shapes<'a>(
         effect_return_enabled: false,
         effect_return_values: vec![],
         effect_loop_targets: BTreeSet::new(),
-        effect_memory_inputs: vec![],
+        effect_memory_inputs,
         effect_result_inputs,
         handler_completions: vec![],
         rejection: super::rejection::Cache::new(package),
@@ -12481,6 +14056,18 @@ fn analyze_with_shapes<'a>(
         )?;
         for (path, targets) in roots {
             for target in targets {
+                // This is a conditional borrowed-input premise, just like a
+                // direct pointer parameter. The caller still establishes the
+                // actual target and footprint; scalar storage cannot hide a
+                // handler-induced ownership or pointer-provenance transition.
+                if matches!(premise.pointee, Term::Primitive(_))
+                    && nir::program::intrinsic_pointer_value(&premise.pointee)
+                    && (analyzer.delivery)(&premise.pointee)
+                        .map_err(|reason| error(source, reason))?
+                        == Delivery::Copy
+                {
+                    flow.effect_borrows.insert(target.root);
+                }
                 analyzer.report.borrowed_roots.insert(
                     target.root,
                     BorrowedRoot::Parameter {
@@ -13169,6 +14756,35 @@ pub fn infer_callable_memory(
 ) -> Result<super::memory::Summary, String> {
     infer_callable_memory_with_effects(package, declaration, arguments, inputs, &[], fuel, source)
 }
+/// Preserve the installer's checked effect premises when publishing a
+/// call-specific cleanup footprint for a borrowed helper.
+pub fn infer_callable_memory_with_effect_context(
+    package: &Package,
+    declaration: nir::DeclarationId,
+    arguments: &[Term],
+    inputs: &[CallableParameter],
+    effects: &[EffectResultInput],
+    fuel: &mut usize,
+    source: SourceRange,
+) -> Result<super::memory::Summary, String> {
+    let mut memory_inputs = Vec::new();
+    for input in effects {
+        memory_inputs.push(
+            input
+                .memory_input(fuel, source)
+                .map_err(|e| e.to_string())?,
+        );
+    }
+    infer_callable_memory_with_effects(
+        package,
+        declaration,
+        arguments,
+        inputs,
+        &memory_inputs,
+        fuel,
+        source,
+    )
+}
 fn infer_callable_memory_with_effects(
     package: &Package,
     declaration: nir::DeclarationId,
@@ -13185,9 +14801,10 @@ fn infer_callable_memory_with_effects(
     for argument in arguments {
         super::memory::bound_type(argument, fuel)?;
     }
+    let binders = super::memory::memory_binders(Some(package), &function.type_parameters, fuel)?;
     let signature = function
         .signature
-        .instantiate_types(&function.type_parameters, body_arguments)
+        .instantiate_parameters(&binders, body_arguments)
         .map_err(|e| e.to_string())?;
     let Term::Function { parameters, .. } = signature.callable_signature() else {
         return Err("memory callee lacks a signature".into());
@@ -13985,7 +15602,7 @@ fn contains_return_evidence(
     source: SourceRange,
     depth: usize,
 ) -> Result<bool, Error> {
-    contains_return_evidence_kind(package, ty, fuel, source, depth, true)
+    contains_return_evidence_kind(package, ty, fuel, source, depth, true, false)
 }
 fn contains_callable_value(
     package: Option<&Package>,
@@ -13994,7 +15611,27 @@ fn contains_callable_value(
     source: SourceRange,
     depth: usize,
 ) -> Result<bool, Error> {
-    contains_return_evidence_kind(package, ty, fuel, source, depth, false)
+    contains_return_evidence_kind(package, ty, fuel, source, depth, false, false)
+}
+
+fn contains_effect_value(
+    package: Option<&Package>,
+    ty: &Term,
+    fuel: &mut usize,
+    source: SourceRange,
+    depth: usize,
+) -> Result<bool, Error> {
+    Ok(contains_callable_value(package, ty, fuel, source, depth)?
+        || contains_pointer_value(package, ty, fuel, source, depth)?)
+}
+fn contains_pointer_value(
+    package: Option<&Package>,
+    ty: &Term,
+    fuel: &mut usize,
+    source: SourceRange,
+    depth: usize,
+) -> Result<bool, Error> {
+    contains_return_evidence_kind(package, ty, fuel, source, depth, false, true)
 }
 
 // Code identities and enum tags both require a contextual return summary.
@@ -14005,6 +15642,7 @@ fn contains_return_evidence_kind(
     source: SourceRange,
     depth: usize,
     include_tags: bool,
+    pointers_only: bool,
 ) -> Result<bool, Error> {
     if *fuel == 0 || depth >= 128 {
         return Err(error(source, "callable result layout budget exhausted"));
@@ -14012,15 +15650,39 @@ fn contains_return_evidence_kind(
     *fuel -= 1;
     if let Some(fields) = nir::normal_forms::tuple_fields(package, ty) {
         for field in fields {
-            if contains_return_evidence_kind(package, field, fuel, source, depth + 1, include_tags)?
-            {
+            if contains_return_evidence_kind(
+                package,
+                field,
+                fuel,
+                source,
+                depth + 1,
+                include_tags,
+                pointers_only,
+            )? {
                 return Ok(true);
             }
         }
         return Ok(false);
     }
     match ty {
-        Term::Function { .. } | Term::Closure { .. } => return Ok(true),
+        Term::Pointer(_) if pointers_only => return Ok(true),
+        Term::Closure { environment, .. } if pointers_only => {
+            for field in environment {
+                if contains_return_evidence_kind(
+                    package,
+                    field,
+                    fuel,
+                    source,
+                    depth + 1,
+                    false,
+                    true,
+                )? {
+                    return Ok(true);
+                }
+            }
+            return Ok(false);
+        }
+        Term::Function { .. } | Term::Closure { .. } => return Ok(!pointers_only),
         Term::Tuple(fields) => {
             for field in fields {
                 if contains_return_evidence_kind(
@@ -14030,6 +15692,7 @@ fn contains_return_evidence_kind(
                     source,
                     depth + 1,
                     include_tags,
+                    pointers_only,
                 )? {
                     return Ok(true);
                 }
@@ -14044,6 +15707,7 @@ fn contains_return_evidence_kind(
                     source,
                     depth + 1,
                     include_tags,
+                    pointers_only,
                 )? {
                     return Ok(true);
                 }
@@ -14069,6 +15733,7 @@ fn contains_return_evidence_kind(
                     source,
                     depth + 1,
                     include_tags,
+                    pointers_only,
                 );
             }
             if let Some(definition) =
@@ -14090,6 +15755,7 @@ fn contains_return_evidence_kind(
                             source,
                             depth + 1,
                             false,
+                            pointers_only,
                         )? {
                             return Ok(true);
                         }
@@ -14121,6 +15787,7 @@ fn contains_return_evidence_kind(
                     source,
                     depth + 1,
                     include_tags,
+                    pointers_only,
                 )? {
                     return Ok(true);
                 }
@@ -14205,9 +15872,11 @@ fn validate_callable_input(
         for argument in arguments {
             super::memory::bound_type(argument, fuel).map_err(|e| error(expr.source, e))?;
         }
+        let binders = super::memory::memory_binders(package, &function.type_parameters, fuel)
+            .map_err(|e| error(expr.source, e))?;
         let signature = function
             .signature
-            .instantiate_types(&function.type_parameters, body_arguments)
+            .instantiate_parameters(&binders, body_arguments)
             .map_err(|_| {
                 error(
                     expr.source,
@@ -14477,6 +16146,133 @@ fn callable_source_depth(
 #[cfg(test)]
 mod record_shape_tests {
     use super::*;
+    #[test]
+    fn sealed_effect_parameter_access_survives_callable_memory_bridge() {
+        let source = SourceRange { start: 0, end: 1 };
+        let boolean = Term::Primitive(nir::Primitive::Bool);
+        let pointer = Term::Pointer(Box::new(boolean.clone()));
+        let declaration = nir::DeclarationId {
+            package: 0,
+            local: 1,
+        };
+        let effect = nir::DeclarationId {
+            package: 0,
+            local: 2,
+        };
+        let operation = nir::effects::Operation {
+            declaration: effect,
+            arguments: vec![],
+        };
+        let parameter = LocalId { owner: 1, index: 0 };
+        let parameters = vec![nir::Parameter {
+            sort: nir::Sort::Runtime,
+            ty: pointer.clone(),
+        }];
+        let signature = Term::Function {
+            parameters: parameters.clone(),
+            result: Box::new(boolean.clone()),
+        };
+        let computation = Term::Computation {
+            effects: vec![operation.clone()],
+            result: Box::new(boolean.clone()),
+        };
+        let mut package = Package::default();
+        package.effects.push(nir::effects::Declaration {
+            declaration: effect,
+            group: None,
+            name: "touch".into(),
+            type_parameters: vec![],
+            parameter_types: vec![],
+            signature: signature.clone(),
+            abi: nir::effects::Abi::Direct,
+            inline: false,
+            requirements: vec![],
+            capabilities: vec![],
+        });
+        package.functions.push(Function {
+            phase: FunctionPhase::Runtime,
+            inline: false,
+            pure: false,
+            preconditions: vec![],
+            postconditions: vec![],
+            result_binding: None,
+            entry_snapshots: vec![],
+            capabilities: vec![],
+            requirements: vec![],
+            type_parameters: vec![],
+            declaration,
+            name: "subject".into(),
+            parameters: vec![parameter],
+            defaults: vec![],
+            signature: Term::Function {
+                parameters,
+                result: Box::new(computation.clone()),
+            },
+            body: Expr {
+                source,
+                ty: computation,
+                kind: K::EffectComputation {
+                    effects: vec![operation.clone()],
+                    body: Box::new(Expr {
+                        source,
+                        ty: boolean,
+                        kind: K::EffectRequest {
+                            operation: operation.clone(),
+                            abi: nir::effects::Abi::Direct,
+                            allowed_index: 0,
+                            signature: Box::new(signature.clone()),
+                            arguments: vec![Expr {
+                                source,
+                                ty: pointer,
+                                kind: K::Local(parameter),
+                            }],
+                        },
+                    }),
+                },
+            },
+        });
+        // Unit-level checked evidence exercises the bridge independently of
+        // source installer derivation, which remains a separate prerequisite.
+        let mut evidence = EffectResultInput {
+            slot: 0,
+            operation,
+            abi: nir::effects::Abi::Direct,
+            signature,
+            values: vec![],
+            forwarded_parameters: None,
+            copy_parameters: BTreeSet::from([0]),
+            parameter_accesses: BTreeSet::from([super::super::memory::EffectParameterAccess {
+                parameter: 0,
+                input_fields: vec![],
+                read_value: true,
+                write: true,
+            }]),
+        };
+        let infer = |evidence: &EffectResultInput, fuel: &mut usize| {
+            infer_callable_memory_with_effect_context(
+                &package,
+                declaration,
+                &[],
+                &[],
+                std::slice::from_ref(evidence),
+                fuel,
+                source,
+            )
+        };
+        assert!(infer(&evidence, &mut 0).is_err());
+        let summary = infer(&evidence, &mut 100_000).unwrap();
+        assert_eq!(summary.accesses.len(), 1);
+        assert_eq!(summary.accesses[0].target.parameter, 0);
+        assert!(summary.accesses[0].read_value && summary.accesses[0].write);
+        assert!(
+            evidence
+                .to_string()
+                .contains("(parameter-accesses (parameter-access")
+        );
+        evidence.parameter_accesses.clear();
+        assert!(infer(&evidence, &mut 100_000).unwrap().accesses.is_empty());
+    }
+
     #[test]
     fn enum_domains_join_only_under_established_guards() {
         let source = SourceRange { start: 0, end: 0 };

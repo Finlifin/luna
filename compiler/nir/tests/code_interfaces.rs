@@ -414,3 +414,54 @@ fn pattern_input_interfaces_preserve_category_names_and_type_dependencies() {
     assert!(dump.contains("(pattern (pattern-interface"), "{dump}");
     assert!(dump.contains("value\\\"\\n"), "{dump}");
 }
+
+#[test]
+fn pattern_method_signatures_preserve_output_category_names_and_type_identity() {
+    use nir::code_interfaces::{
+        CodeInput, MethodSignature, PatternCodeInterface, PatternFunctionSignature,
+    };
+    let parameter = DeclarationId {
+        package: 1,
+        local: 3,
+    };
+    let ty = Term::Rigid {
+        declaration: parameter,
+        sort: Sort::Type,
+    };
+    let signature = PatternFunctionSignature {
+        clause_domains: vec![Term::Primitive(Primitive::Type)],
+        inputs: vec![(LocalId { owner: 2, index: 1 }, CodeInput::Data(ty.clone()))],
+        output: PatternCodeInterface {
+            subject: ty.clone(),
+            outputs: BTreeMap::from([("value\"\n".into(), ty)]),
+        },
+    };
+    assert_eq!(signature.charge(&mut 0), Err(Error::Budget));
+    signature.charge(&mut 1000).unwrap();
+    let method = MethodSignature::PatternGenerator(signature);
+    assert_eq!(
+        method.ordinary(),
+        Err(nir::TypeError::ContextualCodeNotCallable)
+    );
+    assert!(method.is_comptime_callable());
+    assert_eq!(method.type_terms().count(), 4);
+    let concrete = Term::NormalForm {
+        head: DeclarationId {
+            package: 1,
+            local: 9,
+        },
+        sort: Sort::Type,
+        arguments: vec![Term::Primitive(Primitive::Bool)],
+    };
+    let MethodSignature::PatternGenerator(specialized) = method
+        .instantiate_types(&[parameter], &[concrete.clone()])
+        .unwrap()
+    else {
+        panic!("lost pattern signature")
+    };
+    assert_eq!(specialized.output.subject, concrete);
+    assert_eq!(specialized.output.outputs["value\"\n"], concrete);
+    let dump = specialized.to_string();
+    assert!(dump.starts_with("(pattern-function-signature"));
+    assert!(dump.contains("value\\\"\\n"), "{dump}");
+}

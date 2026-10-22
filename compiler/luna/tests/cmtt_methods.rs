@@ -6,6 +6,354 @@ use comptime_interpretor::Value;
 use support::run_iir as run;
 
 #[test]
+fn trait_pattern_method_results_use_success_output_context() {
+    let source = "trait Make {fn make()->Self;} impl Make for bool {fn make()->bool {true}}
+        trait Builder {comptime fn pattern()-><bool -| value:T> where T :- Make;}
+        struct Flag {} impl Builder for Flag {
+            comptime fn pattern()-><bool -| value:T> where T :- Make {'<(_ and T.as(Make).make() is value)>}
+        }
+        fn run()->bool {const p:<bool -| value:bool> = Flag.as(Builder).pattern();false match {~<p> => value,_ => false}}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn trait_code_method_pattern_parameters_supply_partial_subject_context() {
+    let source = "comptime fn pair(seed:B)-><(A,B) -| left:A,right:B> where A,B {'<(left,right)>}
+        trait Builder {comptime fn build(code:<(bool,T) -| left:bool,right:T>)-><|-bool> where T;}
+        struct Flag {} impl Builder for Flag {
+            comptime fn build(input:<(bool,T) -| left:bool,right:T>)-><|-bool> where T {'(true)}
+        }
+        fn run()->bool {~<Flag.as(Builder).build(pair('a'))>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn trait_expression_methods_supply_subject_context_to_pattern_producers() {
+    let source = "comptime fn binding()-><T -| value:T> where T {'<value>}
+        trait Builder {comptime fn build(code:<bool -| value:bool>)-><|-bool>;}
+        struct Flag {} impl Builder for Flag {
+            comptime fn build(input:<bool -| value:bool>)-><|-bool> {'(true match {~<input> => value,_ => false})}
+        }
+        fn run()->bool {~<Flag.as(Builder).build(binding())>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn inherited_pattern_outputs_follow_forward_generic_and_diamond_contracts() {
+    let source = "fn run()->bool {const p=Flag.as(Child).pattern();let ~<p> = true;value}
+        trait Parent where T {comptime fn pattern()-><T -| value:T> {'<value>}}
+        trait Left :- Parent<bool> {} trait Right :- Parent<bool> {}
+        trait Child :- Left + Right {}
+        struct Flag {} impl Parent<bool> for Flag {} impl Left for Flag {} impl Right for Flag {} impl Child for Flag {}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let shadowed = source.replace("const p=", "let Parent=false;const p=");
+    assert_eq!(run(&shadowed, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("impl Child for Flag {}", "");
+    let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(
+        failure.contains("interface") || failure.contains("trait"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn inherited_pattern_outputs_do_not_merge_distinct_member_origins() {
+    let source = "trait Left {comptime fn pattern()-><bool -| value:bool> {'<value>}}
+        trait Right {comptime fn pattern()-><bool -| value:bool> {'<value>}}
+        trait Child :- Left + Right {}
+        struct Flag {} impl Left for Flag {} impl Right for Flag {} impl Child for Flag {}
+        fn run()->bool {let ~[value=value]<Flag.as(Child).pattern()> = true;value}";
+    let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(!failure.contains("parsing failed"), "{failure}");
+}
+
+#[test]
+fn automatic_pattern_method_outputs_do_not_supply_implementation_evidence() {
+    let source = "trait Rule {comptime fn pattern()-><bool -| value:bool>;}
+        struct Flag {}
+        fn run()->bool {let ~<Flag.as(Rule).pattern()> = true;value}";
+    let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(
+        failure.contains("requested code method interface is not established"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn trait_pattern_method_outputs_follow_public_declarations_without_annotations() {
+    let source = "fn run()->bool {
+            const p=Flag.as(Rule).pattern();let ~<p> = true;value
+        }
+        trait Rule {comptime fn pattern()-><bool -| value:bool>;}
+        struct Flag {} impl Rule for Flag {comptime fn pattern()-><bool -| value:bool> {'<value>}}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let direct = source.replace(
+        "const p=Flag.as(Rule).pattern();let ~<p>",
+        "let ~<Flag.as(Rule).pattern()>",
+    );
+    assert_eq!(run(&direct, "run", vec![]), Value::Bool(true));
+    let renamed = source.replace(
+        "let ~<p> = true;value",
+        "let ~[value=selected]<p> = true;selected",
+    );
+    assert_eq!(run(&renamed, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn generic_trait_pattern_method_outputs_survive_receiver_selection() {
+    let source = "trait Rule where T {comptime fn pattern(self)-><T -| value:T>;}
+        struct Flag {} impl Rule<bool> for Flag {comptime fn pattern(self)-><bool -| value:bool> {'<value>}}
+        fn run()->bool {const p=Flag {}.as(Rule<bool>).pattern();let ~<p> = true;value}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn static_container_pattern_method_outputs_need_no_repeated_interface() {
+    let source = "struct Flag {comptime fn pattern()-><bool -| value:bool> {'<value>}}
+        fn run()->bool {const p=Flag.pattern();let ~<p> = true;value}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn pattern_lambda_methods_use_public_routing_and_selected_callbacks() {
+    let source = "trait Rule {comptime fn pattern(value:bool,lambda action:comptime fn(bool)->bool)-><bool -| value:bool>;}
+        struct Flag {} impl Rule for Flag {
+            comptime fn pattern(input:bool,callback:comptime fn(bool)->bool)-><bool -| value:bool> {
+                let expected=callback(input);'<value if value == expected>
+            }
+        }
+        fn run()->bool {const p:<bool -| value:bool> = Flag.as(Rule).pattern(false) do {not _0};
+            true match {~<p> => value,_ => false}}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn pattern_expression_inputs_pass_through_inherent_and_trait_methods() {
+    let source = "trait Rule {comptime fn pattern(guard_code:<x:bool|-bool>)-><bool -| value:bool>;}
+    struct Flag {} impl Rule for Flag {
+        comptime fn pattern(input:<item:bool|-bool>)-><bool -| value:bool> {'<value if ~[item=value]<input>>}
+    }
+    impl Flag {
+        comptime fn pattern(guard_code:<x:bool|-bool>)-><bool -| value:bool> {Flag.as(Rule).pattern(guard_code)}
+    }
+    fn run()->bool {const guard_code:<x:bool|-bool> = '(x);const p:<bool -| value:bool> = Flag.pattern(guard_code);
+        true match {~<p> => value,_ => false}}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn trait_pattern_methods_keep_live_receivers_and_single_evaluation() {
+    let source = "trait Rule {comptime fn pattern(*self,flag:bool)-><bool -| value:bool>;}
+        struct Flag {state:bool} impl Rule for Flag {
+            comptime fn pattern(*self,enabled:bool)-><bool -| value:bool> {
+                self.*.state=enabled;'<value>
+            }
+        }
+        comptime fn next(state:*bool)->bool {let before=state.*;state.* = not before;before}
+        comptime fn emit()-><|-bool> {
+            var flag=Flag {state:false};var tick=true;
+            const p:<bool -| value:bool> = flag.as(Rule).pattern(next(tick.ref));
+            let changed=flag.state;let once=not tick;'(changed and once and (true match {~<p> => value,_ => false}))
+        }
+        fn run()->bool {~<emit()>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("~<p> => value,_ => false", "~<p> => value");
+    let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(failure.contains("non-exhaustive"), "{failure}");
+}
+
+#[test]
+fn trait_pattern_methods_check_public_contracts_and_refinement() {
+    let source = "trait Rule {comptime fn pattern(flag:bool)-><bool -| value:bool> where requires flag;}
+        struct Flag {} impl Rule for Flag {
+            comptime fn pattern(enabled:bool)-><bool -| value:bool> {'<value>}
+        }
+        fn run()->bool {const p:<bool -| value:bool> = Flag.as(Rule).pattern(true);let ~<p> = true;value}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    for contract in ["requires", "ensures"] {
+        let invalid = source
+            .replace("requires", contract)
+            .replace(".pattern(true)", ".pattern(false)");
+        let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+        assert!(failure.contains("condition"), "{failure}");
+    }
+    let strengthened = source.replace("where requires flag;", ";").replace(
+        "bool> {'<value>}",
+        "bool> where requires enabled {'<value>}",
+    );
+    let failure = support::compile_with_protocols(&strengthened, &Default::default()).unwrap_err();
+    assert!(failure.contains("precondition"), "{failure}");
+}
+
+#[test]
+fn trait_pattern_methods_specialize_value_clauses_and_abstract_forwarders() {
+    let source = "trait Rule {
+        comptime fn pattern()-><bool -| value:bool> where enabled:bool;
+    }
+    struct Flag {} impl Rule for Flag {
+        comptime fn pattern()-><bool -| value:bool> where selected:bool {'<value if value == selected>}
+    }
+    comptime fn forward()-><bool -| value:bool> where T :- Rule, flag:bool {T.as(Rule).pattern<flag>()}
+    fn run()->bool {const p:<bool -| value:bool> = forward<Flag,true>();true match {~<p> => value,_ => false}}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn trait_pattern_methods_accept_abstract_self_receiver() {
+    let source = "trait Rule {comptime fn pattern(self)-><bool -| value:bool>;}
+        struct Flag {flag:bool} impl Rule for Flag {
+            comptime fn pattern(self)-><bool -| value:bool> {let flag=self.flag;'<value if value == flag>}
+        }
+        fn run()->bool {const p:<bool -| value:bool> = Flag {flag:true}.as(Rule).pattern();
+            true match {~<p> => value,_ => false}}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn trait_pattern_methods_select_bodies_and_public_defaults() {
+    let source = "trait Rule {comptime fn pattern(.flag:bool=true)-><bool -| value:bool>;}
+        struct Flag {} impl Rule for Flag {
+            comptime fn pattern(.enabled:bool=false)-><bool -| value:bool> {'<value if value == enabled>}
+        }
+        fn run()->bool {const p:<bool -| value:bool> = Flag.as(Rule).pattern();
+            true match {~<p> => value,_ => false}}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let explicit = source
+        .replace(".pattern()", ".pattern(.flag=false)")
+        .replace("true match", "false match")
+        .replace("=> value", "=> not value");
+    assert_eq!(run(&explicit, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn trait_pattern_methods_support_default_bodies_and_forwarding() {
+    let source = "trait Rule {
+        comptime fn pattern()-><bool -| value:bool>;
+        comptime fn forwarded()-><bool -| value:bool> {Self.as(Rule).pattern()}
+    }
+    struct Flag {} impl Rule for Flag {
+        comptime fn pattern()-><bool -| value:bool> {'<value>}
+    }
+    fn run()->bool {const p:<bool -| value:bool> = Flag.as(Rule).forwarded();let ~<p> = true;value}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn trait_pattern_methods_preserve_input_code_and_generic_subjects() {
+    let source = "trait Rule where T {
+        comptime fn pattern(code:<T -| value:T>)-><T -| value:T>;
+    }
+    struct Flag where T {} impl Rule<T> for Flag<T> where T {
+        comptime fn pattern(input:<T -| value:T>)-><T -| value:T> {input}
+    }
+    fn run()->bool {const p:<bool -| value:bool> = Flag<bool>.as(Rule<bool>).pattern('<value>);
+        let ~<p> = true;value}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn trait_pattern_methods_reject_incompatible_success_interfaces() {
+    for output in [
+        "<bool -| other:bool>",
+        "<.char'builtin -| value:.char'builtin>",
+    ] {
+        let source = format!(
+            "trait Rule {{comptime fn pattern()-><bool -| value:bool>;}}
+            struct Flag {{}} impl Rule for Flag {{comptime fn pattern()->{output} {{'<value>}}}}
+            fn run()->bool {{true}}"
+        );
+        let failure = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(
+            failure.contains("does not match its trait signature"),
+            "{failure}"
+        );
+    }
+}
+
+#[test]
+fn pattern_method_requirements_use_the_selected_container_arguments() {
+    let source = "struct Rule where T {
+        comptime fn pattern()-><T -| value:T> where requires T == bool {'<value>}
+    }
+    fn run()->bool {const p:<bool -| value:bool> = Rule<bool>.pattern();let ~<p> = true;value}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("Rule<bool>.pattern()", "Rule<.char'builtin>.pattern()");
+    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+}
+
+#[test]
+fn inherent_pattern_methods_support_static_and_value_receivers() {
+    let source="struct Rule {flag:bool} impl Rule {
+        comptime fn fixed()-><bool -| value:bool> {'<true as value>}
+        comptime fn pattern(self)-><bool -| value:bool> {let flag=self.flag;'<value if value == flag>}
+    }
+    fn run()->bool {
+        const p:<bool -| value:bool> = Rule.fixed();
+        const q:<bool -| value:bool> = Rule {flag:false}.pattern();
+        (true match {~<p> => value,_ => false}) and (false match {~<q> => not value,_ => false})
+    }";
+    let package = support::compile(source);
+    assert!(
+        package
+            .functions
+            .iter()
+            .all(|function| function.name != "pattern" && function.name != "fixed")
+    );
+    assert!(package.implementations.iter().all(|implementation| {
+        implementation
+            .methods
+            .iter()
+            .all(|(name, _)| name != "pattern" && name != "fixed")
+    }));
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let implicit = source
+        .replace("const p:<bool -| value:bool>", "const p")
+        .replace("~<p>", "~[value=value]<p>");
+    assert_eq!(run(&implicit, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn inherent_pattern_methods_capture_container_types_and_values() {
+    let source = "struct Rule where T,enabled:bool {
+        comptime fn pattern()-><T -| value:T> {if enabled {'<value>} else {'<value>}}
+    }
+    fn run()->bool {
+        const p:<bool -| value:bool> = Rule<bool,true>.pattern();
+        const q:<.char'builtin -| value:.char'builtin> = Rule<.char'builtin,false>.pattern();
+        let ~<p> = true;let flag=value;let ~<q> = 'a';flag and value == 'a'
+    }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn inherent_pattern_reference_receivers_keep_mutation_and_contracts() {
+    let source = "struct Rule {flag:bool} impl Rule {
+        comptime fn pattern(*self)-><bool -| value:bool> where ensures self.*.flag {
+            self.*.flag=true;'<value>
+        }
+    }
+    comptime fn emit()-><|-bool> {
+        var rule=Rule {flag:false};const p:<bool -| value:bool> = rule.pattern();
+        let changed=rule.flag;'(changed and (true match {~<p> => value}))
+    }
+    fn run()->bool {~<emit()>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn inherent_pattern_methods_preserve_access_and_stage_boundaries() {
+    for source in [
+        "mod hidden {pub struct Rule {private comptime fn pattern()-><bool -| value:bool> {'<value>}}}
+         fn run()->bool {const p:<bool -| value:bool> = hidden.Rule.pattern();let ~<p> = true;value}",
+        "struct Rule {flag:bool} impl Rule {comptime fn pattern(self)-><bool -| value:bool> {'<value>}}
+         fn run(rule:Rule)->bool {const p:<bool -| value:bool> = rule.pattern();let ~<p> = true;value}",
+    ] {
+        let failure=support::compile_with_protocols(source,&Default::default()).unwrap_err();
+        assert!(!failure.contains("parsing failed"),"{failure}");
+    }
+}
+
+#[test]
 fn trait_code_methods_accept_pattern_code_inputs() {
     let source = "trait Builder {
         comptime fn build(p:<bool -| value:bool>)-><input:bool|-bool>;
@@ -1688,4 +2036,230 @@ fn generic_code_method_contracts_preserve_associated_instances() {
     );
     let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
     assert!(failure.contains("precondition"), "{failure}");
+}
+
+#[test]
+fn discarded_trait_pattern_calls_keep_selection_and_mutation() {
+    let source="trait Builder {comptime fn touch(count:*.u8'builtin)-><bool -| value:bool>;}
+        struct Host {} impl Builder for Host {
+            comptime fn touch(input:*.u8'builtin)-><bool -| value:bool> {assumes input.* < 255;input.* += 1;'<value>}
+        }
+        comptime fn emit()-><|-bool> {
+            var count:.u8'builtin=0;
+            Host.as(Builder).touch(count.ref);
+            let correct=count==1;'(correct)
+        }
+        fn run()->bool {~<emit()>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn expression_method_results_receive_partial_result_context() {
+    let source="trait Builder {comptime fn pair(seed:B)-><x:A |-(A,B)> where A,B;}
+        struct Host {} impl Builder for Host {
+            comptime fn pair(seed:B)-><x:A |-(A,B)> where A,B {'((x,seed))}
+        }
+        comptime fn accepts(code:<x:bool |-(bool,T)>)-><|-bool> where T {'(true)}
+        fn run()->bool {~<accepts(if true {Host.as(Builder).pair('a')} else {Host.as(Builder).pair('b')})>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn generator_refutable_tuple_filters_preserve_live_aliases_and_failed_writes() {
+    for (pattern, guard, body, expected) in [
+        (
+            "(1,pointer)",
+            "",
+            "pointer.* = true;",
+            "not first and second",
+        ),
+        (
+            "(index,pointer if do {pointer.* = not pointer.*;false})",
+            "",
+            "pointer.* = false;",
+            "not first and second",
+        ),
+        (
+            "(9,pointer)",
+            "if do {pointer.* = true;true}",
+            "pointer.* = true;",
+            "not first and not second",
+        ),
+        (
+            "((0 or 1) as index,pointer)",
+            "",
+            "pointer.* = true;continue;",
+            "first and second",
+        ),
+    ] {
+        let source = format!("comptime fn build()-><|-bool> {{
+            var first=false;var second=false;
+            inline for {pattern} {guard} in (first.ref,second.ref,first.ref)'tuple_enumerate {{ {body} }}
+            let result={expected};'(result)
+        }} fn run()->bool {{~<build()>}}");
+        assert_eq!(
+            support::run_iir(&source, "run", vec![]),
+            Value::Bool(true),
+            "{pattern}"
+        );
+    }
+}
+
+#[test]
+fn generator_range_pattern_failure_keeps_state_and_live_aliases() {
+    for pattern in [
+        "(index if do {flag=not flag;false})",
+        "(index and do {pointer.* = not pointer.*;false} is true)",
+    ] {
+        let source = format!(
+            "comptime fn build()-><|-bool> {{
+            var flag=false;let pointer=flag.ref;
+            inline for {pattern} in 0..3 {{flag=false;}}
+            '(flag)
+        }} fn run()->bool {{~<build()>}}"
+        );
+        assert_eq!(
+            support::run_iir(&source, "run", vec![]),
+            Value::Bool(true),
+            "{pattern}"
+        );
+    }
+}
+
+#[test]
+fn generator_range_patterns_export_live_pointers_and_keep_candidate_effects() {
+    let source = "comptime fn build()-><|-bool> {
+        var flag=false;
+        inline for (index and flag.ref is pointer) in 0..3 {
+            pointer.* = not pointer.*;
+        }
+        '(flag)
+    } fn run()->bool {~<build()>}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    let source = "comptime fn build()-><|-bool> {
+        var flag=false;var visits=0;
+        inline for ((index if do {flag=not flag;false}) or index) in 0..3 {
+            visits += 1;
+        }
+        let result=flag and visits == 3;'(result)
+    } fn run()->bool {~<build()>}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn generator_range_pattern_guard_and_body_observe_current_state_in_order() {
+    let source = "comptime fn build()-><|-bool> {
+        var flag=false;var guards=0;var visits=0;
+        inline for (index if do {flag=not flag;flag})
+            if do {guards += 1;flag} in 0..3 {
+            visits += 1;
+        }
+        let result=flag and guards == 2 and visits == 2;'(result)
+    } fn run()->bool {~<build()>}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn generator_var_else_mutability_applies_during_matching() {
+    for pattern in [
+        "value if do {value=true;true}",
+        "(value and do {value=true;true} is true)",
+    ] {
+        let source = format!(
+            "comptime fn build()-><|-bool> {{
+            var {pattern}=false else {{return '(false);}};
+            '(value)
+        }} fn run()->bool {{~<build()>}}"
+        );
+        assert_eq!(
+            support::run_iir(&source, "run", vec![]),
+            Value::Bool(true),
+            "{pattern}"
+        );
+        let immutable = source.replace("var ", "let ");
+        assert!(support::compile_with_protocols(&immutable, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn generator_var_else_failure_discards_candidate_bindings_but_keeps_writes() {
+    let source = "comptime fn build()-><|-bool> {
+        let value=false;var touched=false;
+        var value if do {value=true;touched=value;false} = false
+            else {let result=touched and not value;return '(result);};
+        '(false)
+    } fn run()->bool {~<build()>}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    let source = "comptime fn build()-><|-bool> {
+        var touched=false;
+        var ((value and do {value=true;touched=value;false} is true) or value) = false
+            else {return '(false);};
+        let result=touched and not value;'(result)
+    } fn run()->bool {~<build()>}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn generator_var_else_rebinding_preserves_pointer_targets() {
+    let source = "comptime fn build()-><|-bool> {
+        var first=false;var second=false;
+        var pointer if do {pointer=second.ref;true} = first.ref
+            else {return '(false);};
+        pointer.* = true;
+        let result=not first and second;'(result)
+    } fn run()->bool {~<build()>}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn generator_irrefutable_bindings_share_pattern_computation_state() {
+    for declaration in [
+        "let (value and do {flag=true;flag} is observed)=false;",
+        "let (pointer and do {pointer.* = true;flag} is observed)=flag.ref;",
+        "let (value and flag.ref is pointer)=false;pointer.* = true;let observed=flag;",
+        "var (value and do {value=true;flag=value;value} is observed)=false;",
+    ] {
+        let source = format!(
+            "comptime fn build()-><|-bool> {{
+            var flag=false;{declaration}
+            let result=flag and observed;'(result)
+        }} fn run()->bool {{~<build()>}}"
+        );
+        assert_eq!(
+            support::run_iir(&source, "run", vec![]),
+            Value::Bool(true),
+            "{declaration}"
+        );
+    }
+}
+
+#[test]
+fn generator_irrefutable_tuple_patterns_share_state_and_export_pointers() {
+    for (pattern, body) in [
+        (
+            "(1,(value and flag.ref is pointer))",
+            "pointer.* = not pointer.*;",
+        ),
+        (
+            "(index,(value and do {flag=not flag;true} is observed))",
+            "",
+        ),
+        (
+            "(index,(value and flag.ref is pointer))",
+            "pointer.* = not pointer.*;",
+        ),
+    ] {
+        let source = format!(
+            "comptime fn build()-><|-bool> {{
+            var flag=false;
+            inline for {pattern} in (true,false,true)'tuple_enumerate {{{body}}}
+            '(flag)
+        }} fn run()->bool {{~<build()>}}"
+        );
+        assert_eq!(
+            support::run_iir(&source, "run", vec![]),
+            Value::Bool(true),
+            "{pattern}"
+        );
+    }
 }

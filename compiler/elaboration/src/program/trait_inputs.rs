@@ -106,13 +106,16 @@ impl Checker<'_, '_> {
     ) -> Result<Term, Error> {
         let mut binders = Vec::new();
         let mut values = Vec::new();
+        // Members can inherit the same declaration parameter. A substitution
+        // telescope contains that identity once, regardless of its owners.
+        let mut seen = BTreeSet::new();
         for owner in self.trait_parameter_types.keys() {
             let self_binder = nir::DeclarationParameter {
                 declaration: declaration(self.package, &self.package_identities, *owner),
                 sort: Sort::Type,
             };
             for binder in std::iter::once(self_binder).chain(self.declaration_binders(*owner)) {
-                if !domain.mentions_rigid(binder.declaration) {
+                if !seen.insert(binder.declaration) || !domain.mentions_rigid(binder.declaration) {
                     continue;
                 }
                 if let Some(value) = self.alias_substitution.get(&binder.declaration) {

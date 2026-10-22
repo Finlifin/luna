@@ -14,6 +14,65 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         &self,
         value: &hir::Expr<'_>,
     ) -> Option<Vec<hir::common::Ident>> {
+        use hir::ExprKind as H;
+        let mut pending = vec![(value, true)];
+        let mut found: Option<Vec<hir::common::Ident>> = None;
+        let mut fuel = 4096usize;
+        while let Some((value, result)) = pending.pop() {
+            fuel = fuel.checked_sub(1)?;
+            match &value.kind {
+                H::Return(Some(value)) => pending.push((value, true)),
+                H::InlineControl(value) => pending.push((value, result)),
+                H::Semi(value) => pending.push((value, false)),
+                H::Block(block) | H::Loop(block) | H::For { body: block, .. } => {
+                    for statement in block.stmts {
+                        pending.push((statement, false));
+                    }
+                    if let Some(tail) = block.expr {
+                        pending.push((tail, result));
+                    }
+                }
+                H::If(_, yes, no) => {
+                    for statement in yes.stmts {
+                        pending.push((statement, false));
+                    }
+                    if let Some(tail) = yes.expr {
+                        pending.push((tail, result));
+                    }
+                    if let Some(no) = no {
+                        pending.push((no, result));
+                    }
+                }
+                H::When(arms) => pending.extend(arms.iter().map(|arm| (arm.body, result))),
+                H::Match(_, arms) => pending.extend(arms.iter().map(|arm| (arm.body, result))),
+                _ if result => {
+                    let Some(outputs) = self.pattern_expression_leaf_outputs(value) else {
+                        continue;
+                    };
+                    if let Some(first) = &found {
+                        let names = |items: &[hir::common::Ident]| {
+                            items
+                                .iter()
+                                .map(|item| item.name.as_str().to_string())
+                                .collect::<std::collections::BTreeSet<_>>()
+                        };
+                        if names(first) != names(&outputs) {
+                            return None;
+                        }
+                    } else {
+                        found = Some(outputs);
+                    }
+                }
+                _ => {}
+            }
+        }
+        found
+    }
+
+    fn pattern_expression_leaf_outputs(
+        &self,
+        value: &hir::Expr<'_>,
+    ) -> Option<Vec<hir::common::Ident>> {
         match &value.kind {
             hir::ExprKind::ResolvedLocal(_, id) | hir::ExprKind::ResolvedFnParam(_, id) => {
                 self.pattern_code_outputs.get(id).cloned()
@@ -31,8 +90,43 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     hir::ExprKind::NFApplication(head, _) => head,
                     _ => callee,
                 };
-                let hir::ExprKind::ResolvedDef { def_id, .. } = callee.kind else {
-                    return None;
+                let def_id = match callee.kind {
+                    hir::ExprKind::ResolvedDef { def_id, .. } => def_id,
+                    hir::ExprKind::Projection(base, name) => {
+                        if let Some(member) = self.package.member_projections.get(&callee.hir_id) {
+                            *member
+                        } else {
+                            // An explicit trait view names the public contract.
+                            // Resolve unique inherited origins before body lowering;
+                            // implementation selection and type checking occur later.
+                            let hir::ExprKind::Cast(_, interface) = base.kind else {
+                                return None;
+                            };
+                            let interface = match interface.kind {
+                                hir::ExprKind::NFApplication(head, _) => head,
+                                _ => interface,
+                            };
+                            let hir::ExprKind::ResolvedDef {
+                                def_id: interface, ..
+                            } = interface.kind
+                            else {
+                                return None;
+                            };
+                            let scope = self.resolver.find_scope_for_def(interface)?;
+                            if self.resolver.scope_tree().get(scope)?.kind
+                                != resolve::scope::ScopeKind::TraitBody
+                            {
+                                return None;
+                            }
+                            self.resolver.pattern_trait_member(
+                                interface,
+                                name.name,
+                                self.file_scope,
+                                name.span,
+                            )?
+                        }
+                    }
+                    _ => return None,
                 };
                 // The declaration scan precedes all body lowering, including
                 // bodies in other files. Use its names even when the callee's
@@ -113,6 +207,19 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     hir_id: self.next_hir_id(),
                     span,
                     kind: PatternKind::CodeSplice(self.arena.alloc_expr(operand), outputs),
+                }
+            }
+            NodeKind::ErrorOkPattern | NodeKind::ErrorPattern => {
+                let inner = self.lower_pattern(children[0]);
+                let inner = self.arena.alloc_pattern(inner);
+                Pattern {
+                    hir_id: self.next_hir_id(),
+                    span,
+                    kind: if kind == NodeKind::ErrorOkPattern {
+                        PatternKind::ErrorOk(inner)
+                    } else {
+                        PatternKind::ErrorErr(inner)
+                    },
                 }
             }
             NodeKind::OptionSomePattern => {
@@ -586,7 +693,10 @@ fn pattern_output_names(pattern: &Pattern<'_>) -> Vec<hir::common::Ident> {
                 pending.extend(*inner);
             }
             PatternKind::Then(first, _, next) => pending.extend([*first, *next]),
-            PatternKind::Guard(inner, _) | PatternKind::OptionSome(inner) => pending.push(inner),
+            PatternKind::Guard(inner, _)
+            | PatternKind::OptionSome(inner)
+            | PatternKind::ErrorOk(inner)
+            | PatternKind::ErrorErr(inner) => pending.push(inner),
             PatternKind::Tuple(fields)
             | PatternKind::List(fields, _)
             | PatternKind::AppTuple(_, fields) => pending.extend(*fields),

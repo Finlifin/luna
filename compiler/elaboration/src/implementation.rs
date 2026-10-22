@@ -111,6 +111,7 @@ impl Key {
                 ),
                 Term::NominalValue { .. }
                 | Term::NormalForm { .. }
+                | Term::ClosureContextValue(_)
                 | Term::TypeListValue(_)
                 | Term::TypeListConcat(_)
                 | Term::TupleValue(_)
@@ -142,6 +143,7 @@ impl Key {
                             Term::NormalForm { arguments, .. }
                             | Term::Nominal { arguments, .. }
                             | Term::Tuple(arguments)
+                            | Term::ClosureContextValue(arguments)
                             | Term::TypeListValue(arguments)
                             | Term::TypeListConcat(arguments)
                             | Term::TupleValue(arguments) => {
@@ -173,6 +175,7 @@ impl Key {
                             // implementation index contract yet. Do not prune it.
                             Term::Function { .. }
                             | Term::Closure { .. }
+                            | Term::ContextualClosure { .. }
                             | Term::Computation { .. } => {
                                 return Ok(Key::Wildcard);
                             }

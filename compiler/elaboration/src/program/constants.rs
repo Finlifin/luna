@@ -991,10 +991,11 @@ impl Checker<'_, '_> {
                 .package
                 .item(parent)
                 .is_some_and(|item| matches!(item.kind, ItemKind::Struct(_) | ItemKind::Enum(_)))
-            && self
+            && (self
                 .type_parameters
                 .get(&parent)
                 .is_some_and(|parameters| !parameters.is_empty())
+                || !self.nominal_capture_ids(parent).is_empty())
         {
             if self.active_constants.len() >= 64 || !self.active_constants.insert(owner) {
                 return Err(error(

@@ -757,9 +757,18 @@ pub fn machine_arithmetic_functions(
                             );
                         }
                         K::FunctionType {
-                            parameters: fields, ..
+                            parameters,
+                            comptime_parameters,
+                            ..
+                        } => {
+                            if parameters.len() != comptime_parameters.len() {
+                                return Err(error(
+                                    "function type parameter stages must match domains",
+                                ));
+                            }
+                            work.extend(parameters.iter().map(|e| Work::Expr(e, false, ct)));
                         }
-                        | K::TypeList(fields)
+                        K::TypeList(fields)
                         | K::TupleType(fields)
                         | K::Tuple(fields)
                         | K::Record { fields, .. }
@@ -1023,12 +1032,15 @@ pub fn machine_arithmetic_functions(
                                 if !result.as_ref().is_some_and(|value| {
                                     matches!(
                                         value.kind,
-                                        K::Call { .. } | K::Variant { .. } | K::Block { .. }
+                                        K::Call { .. }
+                                            | K::Variant { .. }
+                                            | K::EffectRequest { .. }
+                                            | K::Block { .. }
                                     )
                                 }) {
                                     return Err(fail(
                                         expr.source,
-                                        "call preparation requires a normalized call, variant or expanded call block",
+                                        "call preparation requires a normalized call, variant or expanded call block, or an effect request",
                                     ));
                                 }
                             }
@@ -1153,6 +1165,33 @@ fn comptime_storage(
         return Ok(false);
     }
     let children: Vec<T> = match ty {
+        T::ClosureContextType | T::ClosureContextValue(_) => return Ok(true),
+        // Generic declarations retain a scoped context parameter. Concrete
+        // instantiation substitutes it and checks the actual capture storage.
+        // Unscoped or computed contexts cannot establish a runtime layout.
+        T::ContextualClosure { context, signature } => {
+            let scoped = match context.as_ref() {
+                T::Bound {
+                    sort: crate::Sort::ComptimeValue,
+                    ..
+                } => context.check_scope(frames).is_ok(),
+                T::Rigid {
+                    declaration,
+                    sort: crate::Sort::ComptimeValue,
+                } => {
+                    package
+                        .declaration_parameter_domains(&mut 100_000)
+                        .map_err(|_| ())?
+                        .get(declaration)
+                        == Some(&T::ClosureContextType)
+                }
+                _ => false,
+            };
+            if !scoped {
+                return Err(());
+            }
+            vec![(**signature).clone()]
+        }
         T::Primitive(P::Integer | P::Float | P::Type) | T::ComptimeFunction(_) => return Ok(true),
         T::Tuple(items) => items.clone(),
         T::Record(fields) => fields.iter().map(|(_, ty)| ty.clone()).collect(),

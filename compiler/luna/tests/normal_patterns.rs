@@ -4,6 +4,96 @@ mod execution_support;
 use execution_support::{compile, compile_with_protocols};
 
 #[test]
+fn nested_member_defaults_use_selected_parent_type_and_value_inputs() {
+    let source = "typealias Type=.Type'builtin;typealias Byte=.u8'builtin;
+        newtype Indexed<T,value:T> = bool;
+        struct Outer where T,value:T {
+            pub struct Inner where .other:T=value {
+                pub typealias Result<.copy:T=other> = Indexed<T,copy>;
+            }
+        }
+        comptime fn Build(value:Byte)->Type {Outer<Byte,value>.Inner<>.Result}
+        comptime fn Seven()->Type {Build(7)}
+        comptime fn Nine()->Type {Build(9)}
+        comptime fn ExpectedSeven()->Type {Indexed<Byte,7>}
+        comptime fn ExpectedNine()->Type {Indexed<Byte,9>}";
+    let package = compile(source);
+    for (entry, expected) in [("Seven", "ExpectedSeven"), ("Nine", "ExpectedNine")] {
+        assert_eq!(
+            luna::invocation::invoke(&package, entry, 100_000).unwrap(),
+            luna::invocation::invoke(&package, expected, 100_000).unwrap()
+        );
+    }
+    assert!(
+        compile_with_protocols(
+            &source.replace(".Inner<>.Result", ".Inner<.other=false>.Result"),
+            &Default::default()
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn dynamic_nominal_member_projection_preserves_arithmetic_checks() {
+    let source = "typealias Type=.Type'builtin;typealias Byte=.u8'builtin;
+        struct Holder where key:Byte {pub typealias Payload=bool;}
+        typealias Alias<key:Byte> = Holder<key>;
+        comptime fn Build(key:Byte)->Type {
+            if key < 255 {Alias<key + 1>.Payload} else {.char'builtin}
+        }
+        comptime fn Hit()->Type {Build(254)}
+        comptime fn Boundary()->Type {Build(255)}";
+    for source in [
+        source.to_owned(),
+        source.replace("struct Holder where key:Byte {", "enum Holder where key:Byte {empty,"),
+        source.replace("pub typealias Payload=bool;", "pub struct Inner where inner:Byte {pub typealias Payload=bool;}")
+            .replace(".Payload}", ".Inner<key>.Payload}"),
+        source.replace("struct Holder", "struct Other where outer:Byte,inner:Byte {pub typealias Payload=bool;} struct Holder")
+            .replacen("struct Holder where key:Byte {pub typealias Payload=bool;}", "struct Holder where key:Byte {pub typealias Inner<inner:Byte> = Other<key,inner>;}", 1)
+            .replace(".Payload}", ".Inner<key>.Payload}"),
+    ] {
+        let package = compile(&source);
+        for (entry, expected) in [("Hit", nir::Primitive::Bool), ("Boundary", nir::Primitive::Char)] {
+            assert_eq!(luna::invocation::invoke(&package,entry,100_000).unwrap(),
+                Value::Type(nir::Term::Primitive(expected)));
+        }
+        let error = compile_with_protocols(&source.replace("key < 255", "true"), &Default::default()).unwrap_err();
+        assert!(error.contains("machine arithmetic range is not proven"), "{error}");
+    }
+}
+
+#[test]
+fn dynamic_member_inputs_execute_once_before_checked_arithmetic() {
+    let package = compile(
+        "typealias Type=.Type'builtin;typealias Byte=.u8'builtin;
+        struct Holder where T {pub typealias Payload=T;}
+        typealias Alias<T> = Holder<T>;
+        comptime fn choose(count:*Byte)->Type {count.* = 254;bool}
+        comptime fn Run()->Byte {
+            var count:Byte=0;
+            let selected=Alias<choose(count.ref)>.Payload;
+            if count < 255 {count + 1} else {0}
+        }",
+    );
+    let mut vm =
+        comptime_interpretor::Interpreter::for_comptime(&package, Default::default()).unwrap();
+    let run = package
+        .functions
+        .iter()
+        .find(|f| f.name == "Run")
+        .unwrap()
+        .declaration;
+    let choose = package
+        .functions
+        .iter()
+        .find(|f| f.name == "choose")
+        .unwrap()
+        .declaration;
+    assert_eq!(vm.invoke(run, vec![]).unwrap(), Value::UnsignedInteger(255));
+    assert_eq!(vm.events().iter().filter(|event| matches!(event,comptime_interpretor::Event::EnterFunction(id) if *id == choose)).count(),1);
+}
+
+#[test]
 fn wrapped_type_patterns_form_later_normal_value_domains() {
     let prefix = "typealias Type=.Type'builtin; typealias Bool=bool; typealias Byte=.u8'builtin; typealias Alias=Bool;
         pure comptime fn Box<T,value:T>->Type {T}";
@@ -455,4 +545,511 @@ fn normal_record_defaults_follow_evaluated_value_prefixes_once() {
         execution_support::calls(&package, &vm),
         vec!["Run", "enabled"]
     );
+}
+
+#[test]
+fn boolean_type_guards_contextualize_normal_form_value_patterns() {
+    for guard in [
+        "if enabled {Kind == bool} else {bool == Kind}",
+        "if Kind == bool {true} else {false}",
+        "(Kind == bool) == true",
+        "false == (Kind != bool)",
+        "(Kind == bool) != false",
+        "bool == Kind",
+        "Kind == bool and enabled",
+        "enabled and bool == Kind",
+        "(Kind == bool and enabled) or (bool == Kind and not enabled)",
+        "not (not (Kind == bool))",
+        "Kind == bool or false",
+        "not (Kind != bool or not enabled)",
+        "not (Kind != bool and Kind != bool)",
+    ] {
+        let source = format!(
+            "typealias Type=.Type'builtin;
+            pure comptime fn Box<T,value:T>->Type {{T}}
+            comptime fn Inspect(input:Type,enabled:bool)->bool {{
+                input match {{Box<(Kind if {guard}),item> => item,_ => false}}
+            }}
+            comptime fn Hit()->bool {{Inspect(Box<bool,true>,true)}}
+            comptime fn Miss()->bool {{Inspect(Box<.u8'builtin,9>,true)}}
+            comptime fn DisabledMiss()->bool {{Inspect(Box<.u8'builtin,9>,false)}}"
+        );
+        let package = compile(&source);
+        for (entry, expected) in [("Hit", true), ("Miss", false), ("DisabledMiss", false)] {
+            assert_eq!(
+                luna::invocation::invoke(&package, entry, 100_000).unwrap(),
+                Value::Bool(expected),
+                "{guard}"
+            );
+        }
+    }
+}
+
+#[test]
+fn type_guard_evidence_rejects_alternative_domains_and_effectful_observation() {
+    for guard in [
+        "if enabled {Kind == bool} else {Kind == .u8'builtin}",
+        "if enabled {Kind == bool} else {true}",
+        "(Kind == bool) == enabled",
+        "(Kind == bool) == (Kind == bool)",
+        "Kind == bool or enabled",
+        "Kind == bool or Kind == .u8'builtin",
+        "not (Kind == bool)",
+        "Kind == bool and unknown()",
+        "do {Kind=bool;true} and Kind == bool",
+    ] {
+        let source = format!(
+            "typealias Type=.Type'builtin;
+            pure comptime fn Box<T,value:T>->Type {{T}}
+            comptime fn unknown()->bool {{unknown()}}
+            comptime fn Inspect(input:Type,enabled:bool)->bool {{
+                input match {{Box<(Kind if {guard}),item> => item,_ => false}}
+            }}"
+        );
+        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(
+            error.contains("dependent normal-form value patterns"),
+            "{guard}: {error}"
+        );
+    }
+}
+
+#[test]
+fn boolean_value_guards_form_dependent_normal_parameter_domains() {
+    for (guard, selected) in [
+        ("if enabled {flag} else {false}", true),
+        ("if flag {false} else {true}", false),
+        ("flag", true),
+        ("not flag", false),
+        ("flag == true", true),
+        ("false == flag", false),
+        ("flag and enabled", true),
+        ("not (flag or not enabled)", false),
+        ("(flag and enabled) or (flag and not enabled)", true),
+    ] {
+        let source=format!("typealias Type=.Type'builtin;
+            struct Config where enabled:bool {{value:bool}}
+            pure comptime fn Packet<enabled:bool,value:Config<enabled>>->Type {{bool}}
+            pure comptime fn accepts(value:Config<{selected}>)->bool {{value.value}}
+            comptime fn Inspect(input:Type,enabled:bool)->bool {{
+                input match {{Packet<(flag if {guard}),item> => accepts(item),_=>false}}
+            }}
+            comptime fn Hit()->bool {{Inspect(Packet<{selected},Config<{selected}>{{value:true}}>,true)}}
+            comptime fn Miss()->bool {{Inspect(Packet<{},Config<{}>{{value:true}}>,true)}}",!selected,!selected);
+        let package = compile(&source);
+        for (entry, expected) in [("Hit", true), ("Miss", false)] {
+            assert_eq!(
+                luna::invocation::invoke(&package, entry, 100_000).unwrap(),
+                Value::Bool(expected),
+                "{guard}"
+            );
+        }
+    }
+}
+
+#[test]
+fn boolean_value_guards_do_not_guess_domains_or_invoke_code() {
+    for guard in [
+        "if enabled {flag} else {not flag}",
+        "if enabled {flag} else {true}",
+        "enabled",
+        "flag or enabled",
+        "flag == enabled",
+        "not (flag and false)",
+        "flag and not flag",
+        "flag and unknown()",
+        "do {flag=true;true}",
+    ] {
+        let source = format!(
+            "typealias Type=.Type'builtin;
+            struct Config where enabled:bool {{value:bool}}
+            pure comptime fn Packet<enabled:bool,value:Config<enabled>>->Type {{bool}}
+            comptime fn unknown()->bool {{unknown()}}
+            comptime fn Inspect(input:Type,enabled:bool)->bool {{
+                input match {{Packet<(flag if {guard}),item> => item.value,_=>false}}
+            }}"
+        );
+        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(
+            error.contains("dependent normal-form value patterns"),
+            "{guard}: {error}"
+        );
+    }
+}
+
+#[test]
+fn exact_scalar_guards_form_dependent_normal_parameter_domains() {
+    for (domain, value, other) in [
+        (".u8'builtin", "7", "8"),
+        (".i16'builtin", "-7", "8"),
+        (".Integer'builtin", "700", "800"),
+        (".char'builtin", "'a'", "'b'"),
+        (".Symbol'builtin", ".ready", ".waiting"),
+        (".str'builtin", "\"ready\"", "\"waiting\""),
+    ] {
+        for guard in [
+            format!("if allowed {{ key == {value} }} else {{ {value} == key }}"),
+            format!("(key == {value}) == true"),
+            format!("false == (key != {value})"),
+            format!("key == {value}"),
+            format!("{value} == key"),
+            format!("key == {value} and allowed"),
+            format!("(key == {value} and allowed) or ({value} == key and not allowed)"),
+        ] {
+            let source=format!("typealias Type=.Type'builtin;
+                struct Config where key:{domain} {{value:bool}}
+                pure comptime fn Packet<key:{domain},value:Config<key>>->Type {{bool}}
+                pure comptime fn accepts(value:Config<{value}>)->bool {{value.value}}
+                comptime fn inspect(input:Type,allowed:bool)->bool {{
+                    input match {{Packet<(key if {guard}),item> => accepts(item),_=>false}}
+                }}
+                comptime fn Hit()->bool {{inspect(Packet<{value},Config<{value}>{{value:true}}>,true)}}
+                comptime fn Miss()->bool {{inspect(Packet<{other},Config<{other}>{{value:true}}>,true)}}");
+            let package = compile(&source);
+            for (entry, expected) in [("Hit", true), ("Miss", false)] {
+                assert_eq!(
+                    luna::invocation::invoke(&package, entry, 100_000).unwrap(),
+                    Value::Bool(expected),
+                    "{domain}: {guard}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn scalar_guard_evidence_preserves_unknown_and_float_identity_boundaries() {
+    for (domain, guard) in [
+        (".u8'builtin", "if allowed {key == 7} else {key == 8}"),
+        (".u8'builtin", "if allowed {key == 7} else {true}"),
+        (".u8'builtin", "if allowed {key == 7} else {unknown()}"),
+        (".u8'builtin", "(key == 7) == allowed"),
+        (".u8'builtin", "(key == 7) == (key == 7)"),
+        (".u8'builtin", "(key == 7) == false"),
+        (".u8'builtin", "key == 7 or key == 8"),
+        (".u8'builtin", "key != 7"),
+        (".u8'builtin", "key == 7 or allowed"),
+        (".u8'builtin", "key == 7 and unknown()"),
+        (".u8'builtin", "do {key=7;true} and key == 7"),
+        (".f32'builtin", "key == 0.0"),
+        (".f64'builtin", "0.0 == key"),
+        (".Float'builtin", "key == 0.0"),
+    ] {
+        let source = format!(
+            "typealias Type=.Type'builtin;
+            struct Config where key:{domain} {{value:bool}}
+            pure comptime fn Packet<key:{domain},value:Config<key>>->Type {{bool}}
+            comptime fn unknown()->bool {{unknown()}}
+            comptime fn inspect(input:Type,allowed:bool)->bool {{
+                input match {{Packet<(key if {guard}),item> => item.value,_=>false}}
+            }}"
+        );
+        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(
+            error.contains("dependent normal-form value patterns"),
+            "{domain}, {guard}: {error}"
+        );
+    }
+}
+
+#[test]
+fn mixed_domain_guard_comparisons_preserve_existing_identity_evidence() {
+    for (domain, condition, good, bad) in [
+        (".Integer'builtin", "limit > 1", "2", "0"),
+        (".u8'builtin", "limit == 2", "2", "0"),
+        (".char'builtin", "limit == 'a'", "'a'", "'b'"),
+        (".f32'builtin", "limit > 0.0", "1.0", "0.0"),
+        (".Symbol'builtin", "limit == .ready", ".ready", ".waiting"),
+        (
+            ".str'builtin",
+            "limit == \"ready\"",
+            "\"ready\"",
+            "\"waiting\"",
+        ),
+    ] {
+        let source=format!("typealias Type=.Type'builtin;
+            pure comptime fn Box<T,value:T>->Type {{T}}
+            struct Config where flag:bool {{value:bool}}
+            pure comptime fn Packet<flag:bool,value:Config<flag>>->Type {{bool}}
+            struct Sized where key:.u8'builtin {{value:bool}}
+            pure comptime fn Layout<key:.u8'builtin,value:Sized<key>>->Type {{bool}}
+            comptime fn inspectType(input:Type,limit:{domain})->bool {{
+                input match {{Box<(Kind if Kind == bool and {condition}),item> => item,_=>false}}
+            }}
+            comptime fn inspectValue(input:Type,limit:{domain})->bool {{
+                input match {{Packet<(flag if flag and {condition}),item> => item.value,_=>false}}
+            }}
+            comptime fn inspectScalar(input:Type,limit:{domain})->bool {{
+                input match {{Layout<(key if key == 7 and {condition}),item> => item.value,_=>false}}
+            }}
+            comptime fn Hit()->bool {{inspectType(Box<bool,true>,{good}) and inspectValue(Packet<true,Config<true>{{value:true}}>,{good}) and inspectScalar(Layout<7,Sized<7>{{value:true}}>,{good})}}
+            comptime fn Miss()->bool {{inspectType(Box<bool,true>,{bad}) or inspectValue(Packet<true,Config<true>{{value:true}}>,{bad}) or inspectScalar(Layout<7,Sized<7>{{value:true}}>,{bad})}}");
+        let package = compile(&source);
+        for (entry, expected) in [("Hit", true), ("Miss", false)] {
+            assert_eq!(
+                luna::invocation::invoke(&package, entry, 100_000).unwrap(),
+                Value::Bool(expected),
+                "{domain}: {condition}"
+            );
+        }
+    }
+}
+
+#[test]
+fn mixed_guard_unknown_comparisons_do_not_create_identity_or_hide_effects() {
+    for guard in [
+        "Kind == bool or limit > 0",
+        "(Kind == bool) == (limit > 0)",
+        "Kind == bool and observe() > 0",
+        "Kind == bool and do {Kind=.u8'builtin;1} > 0",
+    ] {
+        let source = format!(
+            "typealias Type=.Type'builtin;
+            pure comptime fn Box<T,value:T>->Type {{T}}
+            comptime fn observe()->.Integer'builtin {{observe()}}
+            comptime fn inspect(input:Type,limit:.Integer'builtin)->bool {{
+                input match {{Box<(Kind if {guard}),item> => item,_=>false}}
+            }}"
+        );
+        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(
+            error.contains("dependent normal-form value patterns"),
+            "{guard}: {error}"
+        );
+    }
+    for guard in ["flag or limit > 0", "flag and observe() > 0"] {
+        let source = format!(
+            "typealias Type=.Type'builtin;
+            struct Config where flag:bool {{value:bool}}
+            pure comptime fn Packet<flag:bool,value:Config<flag>>->Type {{bool}}
+            comptime fn observe()->.Integer'builtin {{observe()}}
+            comptime fn inspect(input:Type,limit:.Integer'builtin)->bool {{
+                input match {{Packet<(flag if {guard}),item> => item.value,_=>false}}
+            }}"
+        );
+        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(
+            error.contains("dependent normal-form value patterns"),
+            "{guard}: {error}"
+        );
+    }
+}
+
+#[test]
+fn bitvector_equality_guards_preserve_exact_width_and_value_identity() {
+    for (width, value, other) in [
+        (0, "0", "0"),
+        (1, "1", "0"),
+        (8, "165", "166"),
+        (65, "18446744073709551616", "0"),
+        (129, "340282366920938463463374607431768211456", "0"),
+    ] {
+        for guard in [
+            format!("key == {value}"),
+            format!("{value} == key"),
+            format!("allowed and key == {value}"),
+        ] {
+            let source=format!("typealias Type=.Type'builtin;typealias Bits=.BitVec'builtin<{width}>;
+                struct Config where key:Bits {{value:bool}}
+                pure comptime fn Packet<key:Bits,value:Config<key>>->Type {{bool}}
+                pure comptime fn accepts(value:Config<{value}>)->bool {{value.value}}
+                comptime fn inspect(input:Type,allowed:bool)->bool {{
+                    input match {{Packet<(key if {guard}),item> => accepts(item),_=>false}}
+                }}
+                comptime fn Hit()->bool {{inspect(Packet<{value},Config<{value}>{{value:true}}>,true)}}
+                comptime fn Other()->bool {{inspect(Packet<{other},Config<{other}>{{value:true}}>,true)}}");
+            let package = compile(&source);
+            for (entry, expected) in [("Hit", true), ("Other", width == 0)] {
+                assert_eq!(
+                    luna::invocation::invoke(&package, entry, 100_000).unwrap(),
+                    Value::Bool(expected),
+                    "{width}: {guard}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn bitvector_guard_evidence_checks_widths_and_unknown_inputs() {
+    let prefix = "typealias Type=.Type'builtin;typealias Bits=.BitVec'builtin<8>;
+        struct Config where key:Bits {value:bool}
+        pure comptime fn Packet<key:Bits,value:Config<key>>->Type {bool}
+        comptime fn produce()->Bits {produce()}";
+    for guard in [
+        "key == 7 or key == 8",
+        "key != 7",
+        "key == produce()",
+        "do {key=7;true} and key == 7",
+    ] {
+        let source = format!(
+            "{prefix} comptime fn inspect(input:Type)->bool {{
+            input match {{Packet<(key if {guard}),item> => item.value,_=>false}}
+        }}"
+        );
+        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(
+            error.contains("dependent normal-form value patterns"),
+            "{guard}: {error}"
+        );
+    }
+    let wrong_width = format!(
+        "{prefix}
+        pure comptime fn other()->.BitVec'builtin<4> {{7}}
+        comptime fn Bad()->Type {{Packet<other(),Config<7>{{value:true}}>}}"
+    );
+    assert!(compile_with_protocols(&wrong_width, &Default::default()).is_err());
+    assert!(
+        compile_with_protocols(
+            &wrong_width.replace("builtin<4>", "builtin<8>"),
+            &Default::default()
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn computed_scalar_guard_constants_form_exact_dependent_domains() {
+    for (domain, expression, expected) in [
+        (".u8'builtin", "3 + 4", "7"),
+        (".i16'builtin", "-(3 + 4)", "-7"),
+        (".Integer'builtin", "350 * 2", "700"),
+        (".BitVec'builtin<8>", "not 90", "165"),
+        (".BitVec'builtin<8>", "160 or 5", "165"),
+        (".BitVec'builtin<65>", "not 0", "36893488147419103231"),
+    ] {
+        let source=format!("typealias Type=.Type'builtin;typealias Key={domain};
+            struct Config where key:Key {{value:bool}}
+            pure comptime fn Packet<key:Key,value:Config<key>>->Type {{bool}}
+            pure comptime fn accepts(value:Config<{expected}>)->bool {{value.value}}
+            comptime fn inspect(input:Type)->bool {{
+                input match {{Packet<(key if key == ({expression})),item> => accepts(item),_=>false}}
+            }}
+            comptime fn Hit()->bool {{inspect(Packet<{expected},Config<{expected}>{{value:true}}>)}}
+            comptime fn Miss()->bool {{inspect(Packet<0,Config<0>{{value:true}}>)}}");
+        let package = compile_with_protocols(&source, &Default::default())
+            .unwrap_or_else(|error| panic!("{domain}: {expression}: {error}"));
+        for (entry, expected) in [("Hit", true), ("Miss", false)] {
+            assert_eq!(
+                luna::invocation::invoke(&package, entry, 100_000).unwrap(),
+                Value::Bool(expected),
+                "{domain}: {expression}"
+            );
+        }
+    }
+}
+
+#[test]
+fn computed_guard_evidence_preserves_checked_arithmetic() {
+    let prefix = "typealias Type=.Type'builtin;typealias Byte=.u8'builtin;
+        struct Config where key:Byte {value:bool}
+        pure comptime fn Packet<key:Byte,value:Config<key>>->Type {bool}";
+    // The final mathematical result is seven, but the original first addition
+    // overflows. Extracting a witness must not replace executable checking.
+    let source = format!(
+        "{prefix}
+        comptime fn inspect(input:Type)->bool {{input match {{
+            Packet<(key if key == ((255 + 1) - 249)),item> => item.value,_=>false
+        }}}}"
+    );
+    let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+    assert!(
+        error.contains("machine arithmetic range is not proven"),
+        "{error}"
+    );
+    for expression in ["produce() + 0", "do {key=7;7} + 0", "255 + 1"] {
+        let source = format!(
+            "{prefix}
+            comptime fn produce()->Byte {{produce()}}
+            comptime fn inspect(input:Type)->bool {{input match {{
+                Packet<(key if key == ({expression})),item> => item.value,_=>false
+            }}}}"
+        );
+        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(
+            error.contains("dependent normal-form value patterns"),
+            "{expression}: {error}"
+        );
+    }
+}
+
+#[test]
+fn normal_form_pattern_ranges_require_successful_guard_evidence() {
+    let prefix = "typealias Type=.Type'builtin;typealias Byte=.u8'builtin;
+        pure comptime fn Tag<key:Byte>->Type {bool}";
+    let source = format!(
+        "{prefix}
+        comptime fn inspect(input:Type)->Byte {{input match {{
+            Tag<(key if key < 255)> => key + 1,_=>0
+        }}}}
+        comptime fn Hit()->Byte {{inspect(Tag<254>)}}
+        comptime fn Miss()->Byte {{inspect(Tag<255>)}}
+        comptime fn Other()->Byte {{inspect(bool)}}"
+    );
+    let package = compile(&source);
+    for (entry, expected) in [("Hit", 255), ("Miss", 0), ("Other", 0)] {
+        assert_eq!(
+            luna::invocation::invoke(&package, entry, 100_000).unwrap(),
+            Value::UnsignedInteger(expected)
+        );
+    }
+    let error = compile_with_protocols(&source.replace("key < 255", "true"), &Default::default())
+        .unwrap_err();
+    assert!(
+        error.contains("machine arithmetic range is not proven"),
+        "{error}"
+    );
+}
+
+#[test]
+fn normal_form_failed_guard_effects_reach_the_fallback_proof() {
+    let source = "typealias Type=.Type'builtin;typealias Byte=.u8'builtin;
+        pure comptime fn Tag<key:Byte>->Type {bool}
+        comptime fn inspect(input:Type)->Byte {
+            var count:Byte=0;
+            input match {
+                Tag<(key if do {count=254;false})> => 0,
+                _=>count + 1
+            }
+        }
+        comptime fn Hit()->Byte {inspect(Tag<7>)}
+        comptime fn Other()->Byte {inspect(bool)}";
+    let package = compile(source);
+    for (entry, expected) in [("Hit", 255), ("Other", 1)] {
+        assert_eq!(
+            luna::invocation::invoke(&package, entry, 100_000).unwrap(),
+            Value::UnsignedInteger(expected)
+        );
+    }
+    let error = compile_with_protocols(
+        &source.replace("count=254", "count=255"),
+        &Default::default(),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("machine arithmetic range is not proven"),
+        "{error}"
+    );
+}
+
+#[test]
+fn tuple_type_patterns_support_checked_arm_arithmetic() {
+    let package = compile(
+        "typealias Type=.Type'builtin;typealias Byte=.u8'builtin;
+        comptime fn inspect(input:Type, count:Byte)->Byte {
+            input match {
+                ((_,_),_) if count < 255 => count + 1,
+                _=>0
+            }
+        }
+        comptime fn Hit()->Byte {inspect(((bool,bool),bool),254)}
+        comptime fn Boundary()->Byte {inspect(((bool,bool),bool),255)}
+        comptime fn Other()->Byte {inspect(bool,254)}",
+    );
+    for (entry, expected) in [("Hit", 255), ("Boundary", 0), ("Other", 0)] {
+        assert_eq!(
+            luna::invocation::invoke(&package, entry, 100_000).unwrap(),
+            Value::UnsignedInteger(expected)
+        );
+    }
 }

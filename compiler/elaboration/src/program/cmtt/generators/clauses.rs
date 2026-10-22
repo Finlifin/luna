@@ -36,6 +36,27 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         span: Span,
     ) -> Result<crate::calls::CallCandidate, Error> {
+        self.generator_call_candidate_with_result_context(
+            owner, parameters, plan, pending, deferred, completed, base, evidence, partial,
+            expected, None, span,
+        )
+    }
+
+    pub(in crate::program::cmtt) fn generator_call_candidate_with_result_context(
+        &mut self,
+        owner: OwnerId,
+        parameters: &[DeclarationId],
+        plan: &mut [Term],
+        pending: &[(usize, Vec<DeclarationId>)],
+        deferred: &[usize],
+        completed: &mut CompletedDefaults,
+        base: &crate::calls::Scheme,
+        evidence: &[Option<Term>],
+        partial: &[crate::calls::InputContext],
+        expected: Option<&Term>,
+        expected_context: Option<&crate::calls::InputContext>,
+        span: Span,
+    ) -> Result<crate::calls::CallCandidate, Error> {
         let domains = self.trait_domains(owner)?;
         let all = self.type_parameters[&owner].clone();
         loop {
@@ -101,7 +122,8 @@ impl Checker<'_, '_> {
                 )
                 .map_err(|e| call_inference_error(span, e))?;
             let Term::Function {
-                parameters: inputs, ..
+                parameters: inputs,
+                result,
             } = scheme.signature.callable_signature()
             else {
                 unreachable!()
@@ -113,6 +135,13 @@ impl Checker<'_, '_> {
                 {
                     candidate
                         .constrain_parameter_context(index, context, crate::ptc::Budget::default())
+                        .map_err(|e| call_inference_error(span, e))?;
+                }
+            }
+            if !unavailable.iter().any(|id| result.mentions_rigid(*id)) {
+                if let Some(context) = expected_context {
+                    candidate
+                        .constrain_result_context(context, crate::ptc::Budget::default())
                         .map_err(|e| call_inference_error(span, e))?;
                 }
             }

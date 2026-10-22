@@ -67,6 +67,7 @@ fn constructing_callable_types_preserves_phase_order_and_parameter_types() {
                     p(P::Type),
                     K::FunctionType {
                         comptime,
+                        comptime_parameters: vec![false],
                         parameters: vec![call(1)],
                     },
                 )),
@@ -117,6 +118,7 @@ fn malformed_signatures_fail_before_result_evaluation_and_recover() {
             p(P::Type),
             K::FunctionType {
                 comptime: false,
+                comptime_parameters: vec![false],
                 parameters: vec![expr(
                     p(P::Bool),
                     K::Literal(nir::program::Literal::Bool(true)),
@@ -127,6 +129,7 @@ fn malformed_signatures_fail_before_result_evaluation_and_recover() {
             p(P::Bool),
             K::FunctionType {
                 comptime: false,
+                comptime_parameters: vec![],
                 parameters: vec![],
             },
         ),
@@ -162,6 +165,7 @@ fn computed_signature_specialization_is_budgeted_and_preserves_its_template() {
                 p(P::Type),
                 K::FunctionType {
                     comptime: true,
+                    comptime_parameters: vec![false; 16],
                     parameters: vec![value(rigid.clone()); 16],
                 },
             )),
@@ -248,5 +252,98 @@ fn result_replacement_preserves_captured_environment_and_callable_phase() {
                 ),
             })
         );
+    }
+}
+
+#[test]
+fn parameter_stages_are_independent_of_callable_phase_and_survive_rewriting() {
+    for comptime in [false, true] {
+        let body = expr(
+            p(P::Type),
+            K::FunctionType {
+                comptime,
+                comptime_parameters: vec![true, true, false],
+                parameters: vec![call(1), call(2), call(1)],
+            },
+        );
+        assert!(
+            body.to_string()
+                .contains("(parameter-stages true true false)")
+        );
+        let copy = body.instantiate_types(&[], &[]).unwrap();
+        assert_eq!(copy, body);
+        let package = Package {
+            functions: vec![
+                function(0, copy),
+                function(1, value(p(P::Bool))),
+                function(2, value(p(P::Type))),
+            ],
+            ..Default::default()
+        };
+        nir::phases::validate(&package).unwrap();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        assert_eq!(
+            vm.invoke(id(0), vec![]).unwrap(),
+            Value::Type(
+                Term::Function {
+                    parameters: vec![
+                        nir::Parameter {
+                            sort: Sort::ComptimeValue,
+                            ty: p(P::Bool)
+                        },
+                        nir::Parameter {
+                            sort: Sort::Type,
+                            ty: p(P::Type)
+                        },
+                        nir::Parameter {
+                            sort: Sort::Runtime,
+                            ty: p(P::Bool)
+                        },
+                    ],
+                    result: Box::new(p(P::Void)),
+                }
+                .with_comptime_phase(comptime)
+            )
+        );
+        let entered: Vec<_> = vm
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                Event::EnterFunction(id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(entered, vec![id(0), id(1), id(2), id(1)]);
+    }
+}
+
+#[test]
+fn malformed_parameter_stage_vectors_fail_before_domain_calls() {
+    for stages in [vec![], vec![true, false]] {
+        let package = Package {
+            functions: vec![
+                function(
+                    0,
+                    expr(
+                        p(P::Type),
+                        K::FunctionType {
+                            comptime: true,
+                            comptime_parameters: stages,
+                            parameters: vec![call(1)],
+                        },
+                    ),
+                ),
+                function(1, value(p(P::Bool))),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            nir::phases::validate(&package).unwrap_err().message,
+            "function type parameter stages must match domains"
+        );
+        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        assert_eq!(vm.invoke(id(0), vec![]).unwrap_err().kind, ErrorKind::Type);
+        assert!(!vm.events().contains(&Event::EnterFunction(id(1))));
+        assert_eq!(vm.invoke(id(1), vec![]).unwrap(), Value::Type(p(P::Bool)));
     }
 }

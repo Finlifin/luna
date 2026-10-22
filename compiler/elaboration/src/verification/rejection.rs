@@ -17,17 +17,24 @@ struct Instance {
     arguments: Arc<[Term]>,
 }
 #[derive(Clone)]
-struct Substitution<'a> {
-    parameters: &'a [DeclarationId],
+struct Substitution {
+    parameters: Arc<[nir::DeclarationParameter]>,
     arguments: Arc<[Term]>,
     argument_cost: usize,
 }
-impl<'a> Substitution<'a> {
+impl Substitution {
     fn new(
-        parameters: &'a [DeclarationId],
+        parameters: &[DeclarationId],
+        sorts: &BTreeMap<DeclarationId, nir::Sort>,
         arguments: Arc<[Term]>,
         fuel: &mut usize,
     ) -> Result<Self, &'static str> {
+        if parameters.len() != arguments.len() {
+            return Err("invalid rejection declaration arguments");
+        }
+        *fuel = fuel
+            .checked_sub(parameters.len())
+            .ok_or("rejection binder budget exhausted")?;
         let mut argument_cost = 0;
         for argument in arguments.iter() {
             let before = *fuel;
@@ -35,6 +42,16 @@ impl<'a> Substitution<'a> {
                 .map_err(|_| "rejection type budget exhausted")?;
             argument_cost = argument_cost.max(before - *fuel);
         }
+        let parameters: Arc<[_]> = parameters
+            .iter()
+            .map(|declaration| nir::DeclarationParameter {
+                declaration: *declaration,
+                sort: sorts.get(declaration).copied().unwrap_or(nir::Sort::Type),
+            })
+            .collect();
+        Term::Tuple(vec![])
+            .instantiate_parameters(&parameters, &arguments)
+            .map_err(|_| "invalid rejection declaration arguments")?;
         Ok(Self {
             parameters,
             arguments,
@@ -53,7 +70,7 @@ impl<'a> Substitution<'a> {
             .checked_sub(cost)
             .ok_or("rejection substitution budget exhausted")?;
         let result = ty
-            .instantiate_types(self.parameters, &self.arguments)
+            .instantiate_parameters(&self.parameters, &self.arguments)
             .map_err(|_| "invalid rejection type substitution")?;
         super::memory::bound_type(&result, fuel).map_err(|_| "rejection type budget exhausted")?;
         Ok(result)
@@ -61,7 +78,7 @@ impl<'a> Substitution<'a> {
 }
 fn instance(
     callee: &Expr,
-    context: Option<&Substitution<'_>>,
+    context: Option<&Substitution>,
     fuel: &mut usize,
 ) -> Result<Option<Instance>, &'static str> {
     let (declaration, arguments) = match &callee.kind {
@@ -88,8 +105,8 @@ fn instance(
     }))
 }
 enum Work<'a> {
-    Expr(&'a Expr, Substitution<'a>),
-    Pattern(&'a Pattern, Substitution<'a>),
+    Expr(&'a Expr, Substitution),
+    Pattern(&'a Pattern, Substitution),
     Function(Instance),
 }
 
@@ -180,7 +197,11 @@ impl<'a> Cache<'a> {
             }
             self.definitions = Some(definitions);
         }
+        let sorts = package
+            .declaration_parameter_sorts(fuel)
+            .map_err(|_| "invalid rejection declaration metadata or exhausted budget")?;
         let (result, visited) = scan(
+            &sorts,
             self.definitions.as_ref().unwrap(),
             &self.completed,
             root.clone(),
@@ -212,6 +233,7 @@ fn cleanup_rejection(
 }
 
 fn scan<'a>(
+    sorts: &BTreeMap<DeclarationId, nir::Sort>,
     definitions: &BTreeMap<DeclarationId, &'a Function>,
     completed: &HashMap<Instance, bool>,
     root: Instance,
@@ -243,8 +265,12 @@ fn scan<'a>(
                 {
                     return Ok((true, visited));
                 }
-                let context =
-                    Substitution::new(&function.type_parameters, id.arguments.clone(), fuel)?;
+                let context = Substitution::new(
+                    &function.type_parameters,
+                    sorts,
+                    id.arguments.clone(),
+                    fuel,
+                )?;
                 // Parameter ownership is acquired even when the body never
                 // reads the parameter. Its exit cleanup can run user code.
                 if let Term::Function { parameters, .. } = function.signature.callable_signature() {
@@ -755,6 +781,66 @@ mod tests {
             arguments: vec![],
             parameter_bindings: vec![],
         })
+    }
+
+    #[test]
+    fn context_inputs_use_declared_sorts_and_keep_cleanup_cache_separate() {
+        let signature = function(99, expr(K::Unit)).signature;
+        let context = Term::contextual_closure(
+            Term::Rigid {
+                declaration: id(10),
+                sort: nir::Sort::ComptimeValue,
+            },
+            signature,
+        )
+        .unwrap();
+        let mut f = generic_function(0, 10, expr(K::Unit));
+        let Term::Function { parameters, .. } = &mut f.signature else {
+            unreachable!()
+        };
+        parameters.push(nir::Parameter {
+            sort: nir::Sort::Runtime,
+            ty: context,
+        });
+        let package = Package {
+            functions: vec![f],
+            function_parameters: vec![nir::function_parameters::Declaration {
+                declaration: id(0),
+                parameters: vec![id(10)],
+                domains: vec![Term::ClosureContextType],
+            }],
+            ..Default::default()
+        };
+        let mut cache = Cache::new(Some(&package));
+        assert!(
+            cache
+                .may_reject(
+                    &generic_callee(0, vec![Term::Primitive(Primitive::Bool)]),
+                    &mut 1000
+                )
+                .is_err()
+        );
+        let mut calls = 0;
+        for captured in [false, true, false, true] {
+            let argument = Term::ClosureContextValue(if captured {
+                vec![Term::Primitive(Primitive::Bool)]
+            } else {
+                vec![]
+            });
+            let rejects = cache
+                .may_reject_with_cleanup(
+                    &generic_callee(0, vec![argument]),
+                    &mut 1000,
+                    &mut |ty, _| {
+                        calls += 1;
+                        assert!(matches!(ty, Term::Function { .. } | Term::Closure { .. }));
+                        Ok(matches!(ty, Term::Closure { .. }))
+                    },
+                )
+                .unwrap();
+            assert_eq!(rejects, captured);
+        }
+        assert_eq!(calls, 2);
     }
 
     #[test]

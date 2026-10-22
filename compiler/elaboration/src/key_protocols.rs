@@ -251,9 +251,12 @@ pub fn select(
     if functions.next().is_some() {
         return Err("comptime key function identity is duplicated".into());
     }
+    let mut binder_fuel = budget.steps;
+    let method_binders =
+        package.declaration_binders(&function.type_parameters, &mut binder_fuel)?;
     let signature = function
         .signature
-        .instantiate_types(&function.type_parameters, &arguments)
+        .instantiate_parameters(&method_binders, &arguments)
         .map_err(|e| e.to_string())?;
     let Ok(Term::ComptimeFunction(expected)) = contract.signature.ordinary() else {
         unreachable!()
@@ -267,7 +270,7 @@ pub fn select(
     }
     for requirement in &function.requirements {
         let predicate = requirement
-            .instantiate_types(&function.type_parameters, &arguments)
+            .instantiate_parameters(&method_binders, &arguments)
             .map_err(|e| e.to_string())?;
         if !matches!(
             world
@@ -284,13 +287,13 @@ pub fn select(
         result_binding: function.result_binding,
         entry_snapshots: function.entry_snapshots.clone(),
     }
-    .instantiate_types(&function.type_parameters, &arguments)
+    .instantiate_parameters(&method_binders, &arguments)
     .map_err(|e| e.to_string())?;
     let mut capabilities = contract.capabilities.clone();
     for capability in &function.capabilities {
         capabilities.push(
             capability
-                .instantiate_types(&function.type_parameters, &arguments)
+                .instantiate_parameters(&method_binders, &arguments)
                 .map_err(|e| e.to_string())?,
         );
     }

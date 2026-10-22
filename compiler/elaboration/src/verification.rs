@@ -5,6 +5,7 @@ pub mod copy;
 mod differences;
 mod division;
 pub mod drop;
+mod effect_transfer;
 pub mod effect_usage;
 pub mod flow;
 pub mod memory;
@@ -452,6 +453,7 @@ impl Facts {
         let mut next = self.fork(limits)?;
         next.assume_inner(condition, truth, 0, limits)?;
         next.remember_condition(condition, truth, limits)?;
+        next.propagate_retained_conditions(limits)?;
         *self = next;
         Ok(())
     }
@@ -475,6 +477,32 @@ impl Facts {
                 self.reachable = false;
             }
             return Ok(());
+        }
+        // Interval truth can eliminate inactive disjuncts before allocating
+        // their fork/join states. This is especially important for tag-qualified
+        // payload contracts, whose other variants are impossible in this arm.
+        match condition.truth_by_enclosure(self, limits, depth) {
+            Ok(Some(actual)) => {
+                self.reachable &= actual == truth;
+                return Ok(());
+            }
+            Ok(None) | Err(Unknown::MissingBound(_)) => {}
+            Err(error) => return Err(error),
+        }
+        if let Condition::And(a, b) | Condition::Or(a, b) = condition {
+            let identity = matches!(condition, Condition::And(..));
+            for (operand, remainder) in [(a.as_ref(), b.as_ref()), (b.as_ref(), a.as_ref())] {
+                match operand.truth_by_enclosure(self, limits, depth + 1) {
+                    Ok(Some(actual)) if actual == identity => {
+                        // Conditions are mathematical, already-evaluated facts.
+                        // Discarding a neutral known operand cannot reorder a
+                        // source effect, and avoids an impossible fork/join.
+                        return self.assume_inner(remainder, truth, depth + 1, limits);
+                    }
+                    Ok(_) | Err(Unknown::MissingBound(_)) => {}
+                    Err(error) => return Err(error),
+                }
+            }
         }
         match condition {
             Condition::Bool(value) => {

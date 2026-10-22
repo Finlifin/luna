@@ -49,7 +49,7 @@
 显式执行已完成的 comptime 入口：`python3 -B development/cargo.py run -p luna -- development/examples/computed-environment-types.fl --invoke-comptime run_comptime`。结果输出为 S-expression；可用 `--output value.lisp` 保存。`--fuel 100000` 控制本次 invocation 的步数预算（不替代前端自身预算），深度限制为 128。入口使用唯一函数名，不提供命令行实参；有必填参数或泛型参数时写一个具体的无参 wrapper，全默认参数的函数直接复用语言调用计划。`--invoke-comptime` 与 `--emit` 互斥。
 
 
-用户已授权自主清理编译缓存。入口在构建前后检查 2 GiB target 大小上限及 2 GiB 文件系统余量，优先 `cargo clean -p elaboration -p luna`，仍有压力则清理该 target 的全部生成产物；不触碰源码、Cargo.lock 或 registry 下载缓存。文件系统可用量不能反映全部配额，因此同时限制 target 大小。构建日志出现存储配额错误时，当前仍在运行的沙箱进程直接清理、最多重试一次；普通测试/编译失败保留退出码，不通过重试掩盖。构建与清理共用维护锁，不能与直接 Cargo 命令并发运行。生成的 target 产物是可回收缓存，需保留的 dump/报告应输出到 target 外。
+用户已授权自主清理编译缓存。入口在构建前后检查 2 GiB target 大小上限及 2 GiB 文件系统余量，先 `cargo clean -p luna`，压力解除就保留 elaboration 编译缓存；仍有压力再清理 elaboration，最后才清理该 target 的全部生成产物；不触碰源码、Cargo.lock 或 registry 下载缓存。文件系统可用量不能反映全部配额，因此同时限制 target 大小。构建日志出现存储配额错误时，当前仍在运行的沙箱进程直接清理、最多重试一次；普通测试/编译失败保留退出码，不通过重试掩盖。构建与清理共用维护锁，不能与直接 Cargo 命令并发运行。生成的 target 产物是可回收缓存，需保留的 dump/报告应输出到 target 外。
 
 配额错误触发的恢复会在包级清理后继续完整清理受管 target，不依赖文件系统剩余量判断，避免隐藏配额使重试仍无空间。日常容量检查仍优先保留依赖缓存。2026-10-09，在 `/home/fin/luna` 执行 `python3 -B -m unittest discover -s development -p test_cargo.py`，9 项通过；实际执行 `python3 -B development/cargo.py clean -p elaboration -p luna`，退出 0，回收 75 个文件、384.2 MiB，全程在沙箱内，无需额外授权。
 

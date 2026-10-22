@@ -9,6 +9,12 @@ pub enum BorrowedRoot {
         input_fields: Vec<usize>,
         pointee: Term,
     },
+    GuardedIndirect {
+        base: Place,
+        fields: Vec<(nir::program::FieldOwner, usize)>,
+        guards: Vec<(Vec<usize>, usize)>,
+        pointee: Term,
+    },
     Indirect {
         slot: Place,
         pointee: Term,
@@ -25,6 +31,26 @@ impl fmt::Display for BorrowedRoot {
                 write!(f, "(parameter-origin (parameter {parameter}) (input-fields")?;
                 for field in input_fields {
                     write!(f, " {field}")?;
+                }
+                write!(f, ") (pointee {pointee}))")
+            }
+            Self::GuardedIndirect {
+                base,
+                fields,
+                guards,
+                pointee,
+            } => {
+                write!(f, "(guarded-indirect-origin (base {base}) (fields")?;
+                for (owner, index) in fields {
+                    write!(f, " (field {owner} {index})")?;
+                }
+                f.write_str(") (guards")?;
+                for (path, tag) in guards {
+                    f.write_str(" (guard (fields")?;
+                    for field in path {
+                        write!(f, " {field}")?;
+                    }
+                    write!(f, ") (variant {tag}))")?;
                 }
                 write!(f, ") (pointee {pointee}))")
             }
@@ -71,10 +97,37 @@ pub(super) fn project_origin(
                     parameter: *parameter,
                     input_fields: input_fields.clone(),
                     through: vec![],
+                    conditions: Default::default(),
                     fields: vec![],
                 },
                 pointee.clone(),
             )
+        }
+        BorrowedRoot::GuardedIndirect {
+            base,
+            fields,
+            guards,
+            pointee,
+        } => {
+            let (mut target, ty) = project_origin(report, package, base, fuel, depth + 1)?
+                .ok_or("conditional cleanup origin lacks a parameter root")?;
+            let mut traversal = memory::StorageTraversal::new(Some(package), &ty, &[], fuel)?;
+            traversal.then_guarded(Some(package), fields, guards, fuel)?;
+            if !matches!(&traversal.target.ty, Term::Pointer(actual) if actual.as_ref() == pointee)
+            {
+                return Err("conditional cleanup origin pointee disagrees with slot".into());
+            }
+            let prefix: Vec<_> = target.fields.iter().map(|(_, index)| *index).collect();
+            let selected = target.conditions.entry(target.through.len()).or_default();
+            for (path, tag) in guards {
+                charge(fuel, prefix.len() + path.len() + 1)?;
+                let mut container = prefix.clone();
+                container.extend(path);
+                selected.push((container, *tag));
+            }
+            target.fields.extend(fields);
+            target.through.push(std::mem::take(&mut target.fields));
+            (target, pointee.clone())
         }
         BorrowedRoot::Indirect { slot, pointee } => {
             let (mut target, ty) = project_origin(report, package, slot, fuel, depth + 1)?

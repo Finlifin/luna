@@ -528,6 +528,12 @@ fn visit_expanded_term(
             Ok(())
         };
         match term {
+            Term::ErrorResult { errors, result } => {
+                push(result.as_ref())?;
+                for error in errors {
+                    push(error)?;
+                }
+            }
             Term::Computation { effects, result } => {
                 push(result.as_ref())?;
                 for effect in effects {
@@ -550,11 +556,16 @@ fn visit_expanded_term(
             | Term::NormalForm { arguments, .. }
             | Term::Tuple(arguments)
             | Term::TupleValue(arguments)
+            | Term::ClosureContextValue(arguments)
             | Term::TypeListValue(arguments)
             | Term::TypeListConcat(arguments) => {
                 for argument in arguments {
                     push(argument)?;
                 }
+            }
+            Term::ContextualClosure { context, signature } => {
+                push(context)?;
+                push(signature)?;
             }
             Term::Closure {
                 environment,

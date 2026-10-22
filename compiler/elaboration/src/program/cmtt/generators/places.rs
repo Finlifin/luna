@@ -4,7 +4,7 @@
 use super::*;
 
 impl Checker<'_, '_> {
-    pub(super) fn read_generator_cell(
+    pub(in crate::program::cmtt) fn read_generator_cell(
         &mut self,
         cell: &comptime_interpretor::Storage,
         span: Span,
@@ -343,7 +343,26 @@ impl Checker<'_, '_> {
         self.generator_data_expression_in_context(value, expected, None)
     }
 
-    pub(super) fn generator_data_expression_in_context(
+    /// Data inputs to either generator category are checked at comptime even
+    /// when the invocation occurs while constructing a runtime quote.
+    pub(in crate::program::cmtt) fn check_generator_data_input(
+        &mut self,
+        value: &Expr<'_>,
+        expected: Option<&Term>,
+        context: Option<&crate::calls::InputContext>,
+    ) -> Result<n::Expr, Error> {
+        let previous = std::mem::replace(&mut self.in_required_comptime, true);
+        let checked = match context {
+            Some(context) => self.input_context_expression(value, context),
+            None => self.expr(value, expected),
+        };
+        self.in_required_comptime = previous;
+        let checked = checked?;
+        self.validate_generator_data(&checked, value.span)?;
+        Ok(checked)
+    }
+
+    pub(in crate::program::cmtt) fn generator_data_expression_in_context(
         &mut self,
         value: &Expr<'_>,
         expected: Option<&Term>,

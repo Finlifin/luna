@@ -399,13 +399,16 @@ impl<'h> Checker<'_, 'h> {
     pub(super) fn type_clause_params(&self, owner: OwnerId) -> Vec<hir::clause::ClauseParam<'h>> {
         match &self.package.item(owner).unwrap().kind {
             ItemKind::Trait(def) => def.clause_params.to_vec(),
+            ItemKind::EffectGroup(group) => group.clause_params.to_vec(),
             ItemKind::Struct(def) => def.clause_params.to_vec(),
             ItemKind::Enum(def) => def.clause_params.to_vec(),
             ItemKind::Impl(def) => def.clause_params.to_vec(),
             ItemKind::TypeAlias(_, clauses, _) | ItemKind::Newtype(_, clauses, _) => {
                 clauses.to_vec()
             }
-            ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) => sig.clause_params.to_vec(),
+            ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) | ItemKind::Effect(sig, _) => {
+                sig.clause_params.to_vec()
+            }
             _ => Vec::new(),
         }
     }
@@ -553,7 +556,7 @@ impl<'h> Checker<'_, 'h> {
             self.alias_substitution = saved_substitution.clone();
             self.alias_value_bindings = saved_bindings.clone();
             self.normal_default_bindings = saved_normal_bindings.clone();
-            let prepared_arguments = arguments.clone();
+            let mut prepared_arguments = arguments.clone();
             let body = if let ItemKind::TypeAlias(value, ..) =
                 &self.package.item(owner).unwrap().kind
             {
@@ -600,6 +603,14 @@ impl<'h> Checker<'_, 'h> {
                 let mut arguments = arguments;
                 if !normal_head {
                     let captures = self.nominal_capture_expressions(owner, span)?;
+                    let captures = captures
+                        .into_iter()
+                        .map(|capture| self.bind_type_input(capture, &mut statements, span))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    // Member projection consumes the complete container
+                    // telescope, including its lexical environment. Reuse
+                    // these expressions; do not evaluate captures again.
+                    prepared_arguments.extend(captures.iter().cloned());
                     terms.extend(captures.iter().filter_map(|capture| match &capture.kind {
                         K::TypeValue(ty) => Some(ty.clone()),
                         _ => None,

@@ -2100,3 +2100,279 @@ fn captured_integer_facts_check_domains_budgets_and_symbolic_inputs() {
         flow::Reason::MissingMachineProof,
     );
 }
+
+#[test]
+fn retained_implications_activate_after_branch_selection_and_replay_safely() {
+    use elaboration::verification::{Comparison as C, Condition as Q};
+    let mut limits = Limits::default();
+    let mut facts = Facts::default();
+    let (tag, _) = variable(&mut facts, 0, 0, 1, &mut limits);
+    let (middle, _) = variable(&mut facts, 1, 0, 1, &mut limits);
+    let (payload, _) = variable(&mut facts, 2, 0, 255, &mut limits);
+    let selected = Q::Compare {
+        value: tag,
+        relation: C::Equal,
+        constant: Integer::from_u128(1),
+    };
+    let ready = Q::Compare {
+        value: middle,
+        relation: C::Equal,
+        constant: Integer::from_u128(1),
+    };
+    let bounded = Q::Compare {
+        value: payload,
+        relation: C::LessEqual,
+        constant: Integer::from_u128(19),
+    };
+    let implication = |a: Q, b: Q| Q::Or(Box::new(Q::Not(Box::new(a))), Box::new(b));
+    // Deliberately reverse the dependency order to require repeated propagation.
+    facts
+        .assume(
+            &implication(ready.clone(), bounded.clone()),
+            true,
+            &mut limits,
+        )
+        .unwrap();
+    facts
+        .assume(&implication(selected.clone(), ready), true, &mut limits)
+        .unwrap();
+    let before = facts.fork(&mut limits).unwrap();
+    assert!(before.prove_condition(&bounded, true, &mut limits).is_err());
+    facts.assume(&selected, true, &mut limits).unwrap();
+    let proof = facts.prove_condition(&bounded, true, &mut limits).unwrap();
+    proof.replay(&facts, &mut limits).unwrap();
+    assert!(proof.replay(&before, &mut limits).is_err());
+    let mut changed = facts.fork(&mut limits).unwrap();
+    changed.assign(payload.place, interval(0, 255)).unwrap();
+    assert!(proof.replay(&changed, &mut limits).is_err());
+    let new_query = Q::Compare {
+        value: changed.value(payload.place).unwrap(),
+        relation: C::LessEqual,
+        constant: Integer::from_u128(19),
+    };
+    assert!(
+        changed
+            .prove_condition(&new_query, true, &mut limits)
+            .is_err()
+    );
+    let mut retagged = facts.fork(&mut limits).unwrap();
+    retagged.assign(tag.place, interval(0, 1)).unwrap();
+    assert!(proof.replay(&retagged, &mut limits).is_err());
+    // Refinement already established a bound on the unchanged payload. A
+    // later tag write does not undo that historical fact about its value.
+    retagged
+        .prove_condition(&bounded, true, &mut limits)
+        .unwrap();
+    let mut unselected = before.fork(&mut limits).unwrap();
+    let new_tag = unselected.assign(tag.place, interval(0, 1)).unwrap();
+    let new_selected = Q::Compare {
+        value: new_tag,
+        relation: C::Equal,
+        constant: Integer::from_u128(1),
+    };
+    unselected.assume(&new_selected, true, &mut limits).unwrap();
+    assert!(
+        unselected
+            .prove_condition(&bounded, true, &mut limits)
+            .is_err()
+    );
+    let saved = facts.to_string();
+    let mut exhausted = Limits::default();
+    exhausted.arithmetic.steps = 0;
+    assert!(
+        facts
+            .prove_condition(&bounded, true, &mut exhausted)
+            .is_err()
+    );
+    assert_eq!(saved, facts.to_string());
+}
+
+#[test]
+fn conditional_proofs_agree_with_exhaustive_boolean_models() {
+    use elaboration::verification::{Comparison as C, Condition as Q};
+    for premises in 0u8..8 {
+        let mut limits = Limits::default();
+        let mut facts = Facts::default();
+        let ids = (0..3)
+            .map(|local| variable(&mut facts, local, 0, 1, &mut limits).0)
+            .collect::<Vec<_>>();
+        let bit = |index: usize| Q::Compare {
+            value: ids[index],
+            relation: C::Equal,
+            constant: Integer::from_u128(1),
+        };
+        let clauses = [
+            Q::Or(Box::new(Q::Not(Box::new(bit(0)))), Box::new(bit(1))),
+            Q::Or(Box::new(Q::Not(Box::new(bit(1)))), Box::new(bit(2))),
+            Q::Or(Box::new(bit(0)), Box::new(bit(2))),
+        ];
+        for (index, clause) in clauses.iter().enumerate() {
+            if premises & (1 << index) != 0 {
+                facts.assume(clause, true, &mut limits).unwrap();
+            }
+        }
+        for selected in [false, true] {
+            let mut branch = facts.fork(&mut limits).unwrap();
+            branch.assume(&bit(0), selected, &mut limits).unwrap();
+            let models = (0u8..8)
+                .filter(|model| {
+                    let a = model & 1 != 0;
+                    let b = model & 2 != 0;
+                    let c = model & 4 != 0;
+                    a == selected
+                        && (premises & 1 == 0 || !a || b)
+                        && (premises & 2 == 0 || !b || c)
+                        && (premises & 4 == 0 || a || c)
+                })
+                .collect::<Vec<_>>();
+            for index in 0..3 {
+                for truth in [false, true] {
+                    let proof = branch.prove_condition(&bit(index), truth, &mut Limits::default());
+                    if let Ok(proof) = proof {
+                        assert!(
+                            models
+                                .iter()
+                                .all(|model| (model & (1 << index) != 0) == truth),
+                            "premises={premises} branch={selected} query={index}/{truth}"
+                        );
+                        proof.replay(&branch, &mut Limits::default()).unwrap();
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn checked_nonzero_division_preserves_both_signs_and_machine_obligations() {
+    use elaboration::verification::flow;
+    use nir::program::{
+        Expr, ExprKind as K, Function, FunctionPhase, IntegerOp, Literal, LocalId, Place,
+        SourceRange,
+    };
+    use nir::{DeclarationId, Parameter, Primitive, Sort, Term};
+    let ty = Term::Primitive(Primitive::I8);
+    let divisor = LocalId { owner: 1, index: 0 };
+    let expression = |kind, ty| Expr {
+        kind,
+        ty,
+        source: SourceRange { start: 0, end: 1 },
+    };
+    let literal = |value| expression(K::Literal(Literal::SignedInteger(value)), ty.clone());
+    let function = |op, numerator, checked, overwrite| {
+        let mut statements = vec![];
+        if checked {
+            let condition = expression(
+                K::IntegerBinary {
+                    op: IntegerOp::NotEqual,
+                    left: Box::new(expression(K::Local(divisor), ty.clone())),
+                    right: Box::new(literal(0)),
+                },
+                Term::Primitive(Primitive::Bool),
+            );
+            statements.push(expression(
+                K::CheckPredicate(Box::new(condition)),
+                Term::Primitive(Primitive::Void),
+            ));
+        }
+        if overwrite {
+            statements.push(expression(
+                K::Assign {
+                    place: Place {
+                        root: divisor,
+                        fields: vec![],
+                    },
+                    value: Box::new(literal(0)),
+                },
+                Term::Primitive(Primitive::Void),
+            ));
+        }
+        Function {
+            declaration: DeclarationId {
+                package: 1,
+                local: 1,
+            },
+            name: "checked_division".into(),
+            phase: FunctionPhase::Runtime,
+            inline: false,
+            pure: false,
+            signature: Term::Function {
+                parameters: vec![Parameter {
+                    sort: Sort::Runtime,
+                    ty: ty.clone(),
+                }],
+                result: Box::new(ty.clone()),
+            },
+            parameters: vec![divisor],
+            type_parameters: vec![],
+            defaults: vec![],
+            preconditions: vec![],
+            postconditions: vec![],
+            result_binding: None,
+            entry_snapshots: vec![],
+            capabilities: vec![],
+            requirements: vec![],
+            body: expression(
+                K::Block {
+                    statements,
+                    result: Some(Box::new(expression(
+                        K::IntegerBinary {
+                            op,
+                            left: Box::new(literal(numerator)),
+                            right: Box::new(expression(K::Local(divisor), ty.clone())),
+                        },
+                        ty.clone(),
+                    ))),
+                },
+                ty.clone(),
+            ),
+        }
+    };
+    for op in [IntegerOp::DivideTrunc, IntegerOp::RemainderTrunc] {
+        for numerator in [-127, -7, 0, 7, 127] {
+            let input = function(op, numerator, true, false);
+            let report = flow::analyze(&input, &mut Limits::default())
+                .unwrap_or_else(|error| panic!("{op:?}/{numerator}: {error}"));
+            let range = report
+                .points
+                .iter()
+                .rev()
+                .find(|point| point.kind == flow::PointKind::Arithmetic(op))
+                .and_then(|point| point.range.as_ref())
+                .unwrap();
+            // Exhaust all machine divisors, independently of the abstract transfer.
+            for denominator in -128i128..=127 {
+                if denominator == 0 {
+                    continue;
+                }
+                let value = Integer::from_i128(if op == IntegerOp::DivideTrunc {
+                    numerator / denominator
+                } else {
+                    numerator % denominator
+                });
+                assert!(range.lower() <= &value && &value <= range.upper());
+            }
+            let mut exhausted = Limits::default();
+            exhausted.arithmetic.steps = 0;
+            assert!(flow::analyze(&input, &mut exhausted).is_err());
+            assert!(flow::analyze(&input, &mut Limits::default()).is_ok());
+        }
+        for (checked, overwrite) in [(false, false), (true, true)] {
+            assert_eq!(
+                flow::analyze(&function(op, 7, checked, overwrite), &mut Limits::default())
+                    .err()
+                    .unwrap()
+                    .reason,
+                flow::Reason::MissingDivisionProof
+            );
+        }
+        // MIN % -1 also needs the quotient to fit the machine kernel.
+        assert_eq!(
+            flow::analyze(&function(op, -128, true, false), &mut Limits::default())
+                .err()
+                .unwrap()
+                .reason,
+            flow::Reason::MissingMachineProof
+        );
+    }
+}

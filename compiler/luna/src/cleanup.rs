@@ -426,7 +426,8 @@ pub fn prepare_source(
                         instance.key.declaration,
                         &instance.key.arguments,
                         fuel,
-                    )?;
+                    )
+                    .map_err(|reason| format!("borrowed helper {}: {reason}", function.name))?;
                     if &footprint.signature != function.signature.callable_signature() {
                         return Err(
                             "borrowed helper signature disagrees with memory footprint".into()
@@ -490,6 +491,7 @@ pub fn prepare_source(
                             parameter: access.target.parameter,
                             input_fields: access.target.input_fields,
                             through: access.target.through,
+                            conditions: access.target.conditions,
                             fields: access.target.fields,
                             ty: access.ty,
                             write: access.write,
@@ -849,11 +851,12 @@ pub fn prepare_source(
                         }
                     }
                     if !borrows.is_empty() || !fields.is_empty() {
-                        let footprint = moves::infer_callable_memory(
+                        let footprint = moves::infer_callable_memory_with_effect_context(
                             package,
                             key.declaration,
                             &key.arguments,
                             &call.callables,
+                            &call.effects,
                             fuel,
                             call.source,
                         )?;
@@ -1113,8 +1116,15 @@ pub fn prepare_source(
                             != 1
                         {
                             return Err(format!(
-                                "cleanup site has no unique runtime boundary in {} at {}..{} ({boundary:?})",
-                                function.name, site.source.start, site.source.end
+                                "cleanup site has no unique runtime boundary in {} at {}..{} ({boundary:?}, {} matches)",
+                                function.name,
+                                site.source.start,
+                                site.source.end,
+                                hooks
+                                    .iter()
+                                    .filter(|(source, kind)| *source == site.source
+                                        && *kind == boundary)
+                                    .count()
                             ));
                         }
                         let mut methods = vec![];

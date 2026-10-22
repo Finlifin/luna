@@ -445,6 +445,10 @@ impl Normalizer<'_, '_, '_> {
         }
         self.spend(1)?;
         Ok(match term {
+            Term::ErrorResult { errors, result } => Term::error_result(
+                self.many(errors, depth + 1)?,
+                self.normalize(result, depth + 1)?,
+            ),
             Term::Computation { effects, result } => {
                 self.spend(effects.len())?;
                 let operations = effects
@@ -766,6 +770,11 @@ pub(crate) fn charge_projection_copy(term: &Term, fuel: &mut usize) -> Result<()
     let mut pending = vec![term];
     while let Some(term) = pending.pop() {
         let cost = match term {
+            Term::ErrorResult { errors, result } => {
+                pending.push(result);
+                pending.extend(errors);
+                0
+            }
             Term::Computation { effects, result } => {
                 pending.push(result);
                 for operation in effects {

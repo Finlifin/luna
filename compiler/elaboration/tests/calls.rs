@@ -739,6 +739,7 @@ fn partial_result_shape_passes_through_a_generic_identity() {
     let context = elaboration::calls::CallableContext {
         comptime: false,
         environment: None,
+        open_environment: false,
         result_context: None,
         parameters: vec![Some(primitive(P::Bool))],
         result: None,
@@ -785,6 +786,7 @@ fn inspecting_candidate_context_cannot_export_a_conflicting_call() {
     let context = elaboration::calls::CallableContext {
         comptime: false,
         environment: None,
+        open_environment: false,
         result_context: None,
         parameters: vec![Some(primitive(P::Bool))],
         result: Some(primitive(P::Char)),
@@ -815,6 +817,7 @@ fn pending_context_does_not_hide_an_independent_type_conflict() {
     let partial = elaboration::calls::CallableContext {
         comptime: false,
         environment: None,
+        open_environment: false,
         result_context: None,
         parameters: vec![Some(primitive(P::Bool))],
         result: None,
@@ -839,6 +842,7 @@ fn partial_comptime_closure_context_preserves_environment_and_phase() {
     let scheme = scheme(vec![generic(0)], generic(0), 1);
     let context = elaboration::calls::CallableContext {
         comptime: true,
+        open_environment: false,
         environment: Some(vec![Some(primitive(P::Bool)), None]),
         result_context: None,
         parameters: vec![Some(primitive(P::Bool))],
@@ -1663,4 +1667,337 @@ fn unknown_nominal_value_contexts_keep_their_sort_across_calls() {
             .and_then(|_| wrong.finish().map(|_| ()))
             .is_err()
     );
+}
+
+fn open_environment_scheme() -> Scheme {
+    let callback = Term::contextual_closure(
+        Term::Bound {
+            depth: 1,
+            index: 0,
+            sort: Sort::ComptimeValue,
+        },
+        Term::Function {
+            parameters: vec![],
+            result: Box::new(Term::Bound {
+                depth: 2,
+                index: 1,
+                sort: Sort::Type,
+            }),
+        },
+    )
+    .unwrap();
+    Scheme {
+        parameter_sorts: vec![Sort::ComptimeValue, Sort::Type],
+        type_parameters: 2,
+        signature: Term::Function {
+            parameters: vec![Parameter {
+                sort: Sort::Runtime,
+                ty: callback,
+            }],
+            result: Box::new(generic(1)),
+        },
+    }
+}
+
+#[test]
+fn open_closure_environments_infer_empty_and_captured_contexts() {
+    let scheme = open_environment_scheme();
+    for fields in [
+        vec![],
+        vec![primitive(P::Bool)],
+        vec![primitive(P::Char), primitive(P::Bool)],
+    ] {
+        let callback = Term::contextual_closure(
+            Term::ClosureContextValue(fields.clone()),
+            Term::Function {
+                parameters: vec![],
+                result: Box::new(primitive(P::U8)),
+            },
+        )
+        .unwrap();
+        let candidate = scheme
+            .infer_types(&[callback.clone()], None, Budget::default())
+            .unwrap();
+        let complete = candidate.finish().unwrap();
+        assert_eq!(
+            complete.type_arguments,
+            vec![Term::ClosureContextValue(fields), primitive(P::U8)]
+        );
+        let Term::Function { parameters, .. } = &complete.signature else {
+            panic!("lost signature")
+        };
+        assert_eq!(parameters[0].ty, callback);
+        assert_eq!(complete.result, primitive(P::U8));
+    }
+}
+
+#[test]
+fn open_environment_partial_context_survives_higher_order_identity() {
+    use elaboration::calls::{CallableContext, InputContext};
+    let identity = scheme(vec![generic(0)], generic(0), 1);
+    let partial = CallableContext {
+        comptime: false,
+        environment: None,
+        open_environment: true,
+        parameters: vec![Some(primitive(P::Bool))],
+        result: None,
+        result_context: None,
+    };
+    let candidate = identity
+        .infer_contextual_types(
+            &[None],
+            None,
+            Some(&partial),
+            &Default::default(),
+            Budget::default(),
+        )
+        .unwrap();
+    let forwarded = candidate.parameter_callable_context(0).unwrap().unwrap();
+    assert!(forwarded.open_environment);
+    assert_eq!(forwarded.parameters, partial.parameters);
+    assert!(candidate.finish().is_err());
+    for environment in [vec![], vec![primitive(P::U8)]] {
+        let actual = Term::contextual_closure(
+            Term::ClosureContextValue(environment),
+            Term::Function {
+                parameters: vec![Parameter {
+                    sort: Sort::Runtime,
+                    ty: primitive(P::Bool),
+                }],
+                result: Box::new(primitive(P::Char)),
+            },
+        )
+        .unwrap();
+        let complete = identity
+            .infer_contextual_types(
+                &[Some(actual.clone())],
+                None,
+                Some(&partial),
+                &Default::default(),
+                Budget::default(),
+            )
+            .unwrap()
+            .finish()
+            .unwrap();
+        assert_eq!(complete.result, actual);
+        let mut candidate = identity
+            .infer_partial_types(&[Some(actual.clone())], None, Budget::default())
+            .unwrap();
+        candidate
+            .constrain_result_context(&InputContext::Callable(partial.clone()), Budget::default())
+            .unwrap();
+        assert_eq!(candidate.finish().unwrap().result, actual);
+    }
+}
+
+#[test]
+fn open_environment_rejections_do_not_change_an_existing_candidate() {
+    use elaboration::calls::{CallableContext, InputContext};
+    let identity = scheme(vec![generic(0)], generic(0), 1);
+    let actual = Term::contextual_closure(
+        Term::ClosureContextValue(vec![primitive(P::Char)]),
+        Term::Function {
+            parameters: vec![],
+            result: Box::new(primitive(P::Bool)),
+        },
+    )
+    .unwrap();
+    let mut candidate = identity
+        .infer_partial_types(&[Some(actual.clone())], None, Budget::default())
+        .unwrap();
+    let before = candidate.engine().to_string();
+    let bad = CallableContext {
+        comptime: false,
+        environment: Some(vec![]),
+        open_environment: true,
+        parameters: vec![],
+        result: None,
+        result_context: None,
+    };
+    assert!(
+        candidate
+            .constrain_result_context(&InputContext::Callable(bad), Budget::default())
+            .is_err()
+    );
+    assert_eq!(candidate.engine().to_string(), before);
+    let partial = CallableContext {
+        comptime: false,
+        environment: None,
+        open_environment: true,
+        parameters: vec![],
+        result: None,
+        result_context: None,
+    };
+    assert!(
+        candidate
+            .constrain_result_context(
+                &InputContext::Callable(partial.clone()),
+                Budget {
+                    steps: 0,
+                    ..Default::default()
+                }
+            )
+            .is_err()
+    );
+    assert_eq!(candidate.engine().to_string(), before);
+    candidate
+        .constrain_result_context(&InputContext::Callable(partial), Budget::default())
+        .unwrap();
+    assert_eq!(candidate.finish().unwrap().result, actual);
+}
+
+#[test]
+fn open_environment_keeps_shared_context_shape_and_phase_obligations() {
+    let mut shared = open_environment_scheme();
+    let Term::Function { parameters, .. } = &mut shared.signature else {
+        unreachable!()
+    };
+    parameters.push(parameters[0].clone());
+    let callback = |fields: Vec<Term>, ct| {
+        Term::contextual_closure(
+            Term::ClosureContextValue(fields),
+            Term::Function {
+                parameters: vec![],
+                result: Box::new(primitive(P::Bool)),
+            }
+            .with_comptime_phase(ct),
+        )
+        .unwrap()
+    };
+    let first = callback(vec![primitive(P::Bool), primitive(P::Char)], false);
+    for second in [
+        callback(vec![], false),
+        callback(vec![primitive(P::Char), primitive(P::Bool)], false),
+        callback(vec![primitive(P::Bool), primitive(P::Char)], true),
+    ] {
+        assert!(
+            shared
+                .infer_types(&[first.clone(), second], None, Budget::default())
+                .and_then(|candidate| candidate.finish())
+                .is_err()
+        );
+    }
+    let complete = shared
+        .infer_types(&[first.clone(), first], None, Budget::default())
+        .unwrap()
+        .finish()
+        .unwrap();
+    assert_eq!(
+        complete.type_arguments[0],
+        Term::ClosureContextValue(vec![primitive(P::Bool), primitive(P::Char)])
+    );
+}
+
+#[test]
+fn open_environment_can_forward_a_caller_context_without_capturing_its_binders() {
+    let callback = Term::contextual_closure(
+        Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: Sort::ComptimeValue,
+        },
+        Term::Function {
+            parameters: vec![],
+            result: Box::new(primitive(P::Bool)),
+        },
+    )
+    .unwrap();
+    let caller = vec![Parameter {
+        sort: Sort::ComptimeValue,
+        ty: Term::ClosureContextType,
+    }];
+    let instance = open_environment_scheme()
+        .infer_scoped_types(
+            &[Some(callback.clone())],
+            None,
+            &Default::default(),
+            Budget::default(),
+            &caller,
+        )
+        .unwrap()
+        .finish()
+        .unwrap();
+    assert_eq!(
+        instance.type_arguments,
+        vec![
+            Term::Bound {
+                depth: 0,
+                index: 0,
+                sort: Sort::ComptimeValue
+            },
+            primitive(P::Bool)
+        ]
+    );
+    instance
+        .signature
+        .check_scope(&[vec![Sort::ComptimeValue]])
+        .unwrap();
+    assert!(instance.signature.check_scope(&[]).is_err());
+}
+
+#[test]
+fn ordinary_callable_context_still_rejects_nonempty_capture_storage() {
+    use elaboration::calls::CallableContext;
+    let identity = scheme(vec![generic(0)], generic(0), 1);
+    let partial = CallableContext {
+        comptime: false,
+        environment: None,
+        open_environment: false,
+        parameters: vec![],
+        result: None,
+        result_context: None,
+    };
+    let actual = Term::Closure {
+        environment: vec![primitive(P::Bool)],
+        signature: Box::new(Term::Function {
+            parameters: vec![],
+            result: Box::new(primitive(P::Bool)),
+        }),
+    };
+    assert!(
+        identity
+            .infer_contextual_types(
+                &[Some(actual)],
+                None,
+                Some(&partial),
+                &Default::default(),
+                Budget::default()
+            )
+            .and_then(|candidate| candidate.finish())
+            .is_err()
+    );
+}
+
+#[test]
+fn open_environment_preserves_partially_known_fixed_capture_fields() {
+    use elaboration::calls::{CallableContext, InputContext};
+    let mut relay = open_environment_scheme();
+    let Term::Function { parameters, result } = &mut relay.signature else {
+        unreachable!()
+    };
+    *result = Box::new(parameters[0].ty.clone());
+    let mut candidate = relay
+        .infer_partial_types(&[None], None, Budget::default())
+        .unwrap();
+    candidate
+        .constrain_result_context(
+            &InputContext::Callable(CallableContext {
+                comptime: false,
+                environment: Some(vec![Some(primitive(P::Char)), None]),
+                open_environment: false,
+                parameters: vec![],
+                result: Some(primitive(P::Bool)),
+                result_context: None,
+            }),
+            Budget::default(),
+        )
+        .unwrap();
+    let context = candidate.parameter_callable_context(0).unwrap().unwrap();
+    assert!(!context.open_environment);
+    assert_eq!(
+        context.environment,
+        Some(vec![Some(primitive(P::Char)), None])
+    );
+    assert_eq!(context.result, Some(primitive(P::Bool)));
+    assert!(candidate.finish().is_err());
 }
