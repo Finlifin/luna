@@ -151,7 +151,7 @@ where
     if dims.is_empty() {
         T
     } else {
-        struct {
+        struct TensorStorage {
             const ElementType: Type = T;
             const SHAPE: meta.List<usize> = dims;
             const RANK: usize = dims.len();
@@ -160,6 +160,7 @@ where
 
             data: Array<T, flat_element_count(dims)>,
         }
+        TensorStorage
     }
 }
 

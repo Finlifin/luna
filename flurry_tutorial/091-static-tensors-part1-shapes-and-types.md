@@ -75,12 +75,13 @@ where
         -- 0 阶张量直接退化为标量类型 T。
         T
     } else {
-        -- 并非空形状：构造持有连续元素存储的张量结构类型
-        struct {
+        -- 并非空形状：先用标准 struct 定义声明结构类型（或使用类型 Builder API），再返回该类型
+        struct TensorStorage {
             const ElementType: Type = T;
             const SHAPE: meta.List<usize> = dims;
             const RANK: usize = dims.len();
         }
+        TensorStorage
     }
 }
 ```

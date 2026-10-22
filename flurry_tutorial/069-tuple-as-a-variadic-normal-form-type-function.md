@@ -134,10 +134,11 @@ pure comptime fn WithFlagTuple(T: Type) -> Type {
 -- 2. 我们甚至可以自己定义带变参类型列表的 Normal-Form 类型构造器。
 -- 比如定义一个将固定主输出 A 与任意个辅助输出 ...elements 打包的算子包类型：
 pure comptime fn MultiHeadPack<A, ...elements: meta.List<Type>> -> Type {
-    struct {
+    struct MultiHeadPackRepr {
         primary: A,
         auxiliaries: Tuple<...elements>,
     }
+    MultiHeadPackRepr
 }
 ```
 
@@ -162,9 +163,10 @@ pure comptime fn CopiedPack<
     .copy: T = value,
     ...elements: meta.List<Type>
 > -> Type {
-    struct {
+    struct CopiedPackRepr {
         head_tail: Tuple<T, ...elements>,
     }
+    CopiedPackRepr
 }
 ```
 
