@@ -2,16 +2,16 @@
 
 在上一回（075）中，我们用 `Tuple<...Es: meta.List<Type>>` 为静态形状张量引擎 `Tensor<T, .dims = s>` 构建了维度与通道的编译期类型包，让多路异构张量通道能够放进同一个带有 Normal-Form 头身份的元组容器中。
 
-现在，我们的张量引擎来到了与硬件零拷贝 DMA（Direct Memory Access）控制器的交界处。DMA 控制器可不认识什么高雅的 `Type` 或 `SamplePair`——它只认冷酷的物理事实：
+现在，我们的张量引擎来到了与硬件零拷贝 DMA（Direct Memory Access）控制器的交界处。DMA 控制器可未识什么高雅的 `Type` 或 `SamplePair`——它只认冷酷的物理事实：
 1. 一个数据元素的底层存储究竟占多少字节（`size_of`）？
 2. 某个结构体或枚举的底层编码长什么样（`repr_of`）？
 3. 当我们为一个张量元素挂上链表指针或动态切片视图时，哪些类型的大小在编译期是确定的，哪些又依赖于运行期信息？
 
-如果像 C/C++ 那样混用宏和手写 `sizeof` 偏移计算，不仅极易在跨平台时踩中对齐（Alignment）与字段重排的暗坑，还会破坏类型身份的边界。今天，我们就来揭开 Flurry **结构反射（Structural Reflection）与内存布局查询（Layout Queries）** 的面纱，看看如何在 `U_1` 编译期宇宙里安全、精确地透视任何类型的骨骼。
+如果像 C/C++ 那样混用宏和手写 `sizeof` 偏移计算，非但容易在跨平台时踩中对齐（Alignment）与字段重排的暗坑，还会破坏类型身份的边界。今天，我们就来揭开 Flurry **结构反射（Structural Reflection）与内存布局查询（Layout Queries）** 的面纱，看看如何在 `U_1` 编译期宇宙里安全、精确地透视任何类型的骨骼。
 
 ---
 
-## 一、 问题背景与设计思路：为什么不能把“类型结构”和“物理字节”混为一谈？
+## 一、 问题背景与设计思路：为什么禁止将“类型结构”和“物理字节”混为一谈？
 
 在设计张量 DMA 缓冲描述符时，最容易犯的第一个直觉错误，就是假定“只要我知道一个 `struct` 有哪些字段，我就天然知道它在内存里占几个字节、字段按什么顺序排列”：
 
@@ -96,7 +96,7 @@ test {
 ```
 
 > **🔍 语法小贴士：为什么 `storage_bytes` 要用 `quote value: Any`？**
-> 回顾第 072 回，如果参数写成普通运行期参数 `value: T`，调用 `storage_bytes(pair)` 就会涉及到运行期值的传递或所有权移动；而写成 `quote value: Any` 时，`storage_bytes` 是一个 `pure comptime fn`，它在编译期接住 `pair` 的 AST 节点，通过 `value'type` 提取出它的静态类型 `SamplePair`，直接算出 `8usize` 替换在调用点，运行期连半条指令都不会产生。
+> 回顾第 072 回，如果参数写成普通运行期参数 `value: T`，调用 `storage_bytes(pair)` 就会涉及到运行期值的传递或所有权移动；而写成 `quote value: Any` 时，`storage_bytes` 是一个 `pure comptime fn`，它在编译期接住 `pair` 的 AST 节点，通过 `value'type` 提取出它的静态类型 `SamplePair`，直接算出 `8usize` 替换在调用点，运行期连半条指令都免生。
 
 ---
 
@@ -114,9 +114,9 @@ test {
   [ 合法：通过指针间接引用 (struct Link) ]
   +------------------+------------------+
   | value: u32 (4B)  | next: ?*Link (8B)| ---> 指针本身大小固定等于 usize。
-  +------------------+------------------+      不需要展开目标 Link 的大小即可封顶。
+  +------------------+------------------+      无需展开目标 Link 的大小即可封顶。
 
-  [ 非法：按值直接内联自引用 (struct InvalidLink) ]
+  [ 并非法：按值直接内联自引用 (struct InvalidLink) ]
   +-------------------------------------+
   | next: InvalidLink                   |
   |   +---------------------------------+
@@ -141,10 +141,10 @@ test {
 }
 ```
 
-如果有人不小心漏写了 `*`，试图按值内联自身：
+如果有人偶有疏忽漏写了 `*`，试图按值内联自身：
 
 ```flurry
--- ❌ 编译期直接拒绝：按值递归包含自身，形成无法收敛的非法物理布局环（Layout Cycle）
+-- ❌ 编译期直接报错：按值递归包含自身，形成无法收敛的非法物理布局环（Layout Cycle）
 struct InvalidLink {
     next: InvalidLink,
 }
@@ -152,12 +152,12 @@ struct InvalidLink {
 
 ### 3.2 `Type.predicates.is_not_sized(T)` 到底是什么意思？
 
-在查阅 `Type.predicates` 时，你会看到一个谓词叫 `Type.predicates.is_not_sized(T)`。千万不要按字面把它误解成“这个类型坏掉了”或者“编译器还没来得及算它的大小”。
+在查阅 `Type.predicates` 时，你会看到一个谓词叫 `Type.predicates.is_not_sized(T)`。千万切勿按字面把它误解成“这个类型坏掉了”或者“编译器还没来得及算它的大小”。
 
 > **💡 核心心智模型：`is_not_sized` = 大小依赖运行期信息**
-> 在 Flurry 中，`Type.predicates.is_not_sized(T)` 的精确语义是：**该类型的完整物理大小取决于运行期值信息（Runtime Value Information），因此不存在单一的、与运行期实例无关的编译期常数大小**（例如长度由运行期变量决定的动态视图类型）。
+> 在 Flurry 中，`Type.predicates.is_not_sized(T)` 的精确语义是：**该类型的完整物理大小取决于运行期值信息（Runtime Value Information），因此未存单一的、与运行期实例无关的编译期常数大小**（例如长度由运行期变量决定的动态视图类型）。
 > - 对于 `SamplePair`、`u32`、`*SamplePair`、`Link` 这类编译期大小固定的类型，`Type.predicates.is_not_sized(T)` 为 `false`。
-> - 对于非法递归的 `InvalidLink`，它根本不是合法的类型定义，直接报错拒绝，而不是返回 `is_not_sized == true`。
+> - 对于非法递归的 `InvalidLink`，它根本不是合法的类型定义，直接报错，而非返回 `is_not_sized == true`。
 
 ```flurry
 test {
@@ -172,9 +172,9 @@ test {
 
 当我们在张量引擎里用反射检查两个通道的类型是否相同时，必须搞清楚：**在 Flurry 的 `Type` 宇宙里，什么时候 `A == B` 为真？**
 
-Flurry 对 `struct` / `enum` / `union` 采用严格的**名义类型身份（Nominal Type Identity）**，同时提供了三种截然不同的类型复用与构造手段：
+Flurry 对 `struct` / `enum` / `union` 采用严格的**名义类型身份（Nominal Type Identity）**，同时提供了三种迥然各异的类型复用与构造手段：
 
-1. **`typealias`（透明别名）**：不创建新身份，也不改变布局。`CustomerId == UserId` 为 `true`。
+1. **`typealias`（透明别名）**：不创建新身份，也维持原状而未改布局。`CustomerId == UserId` 为 `true`。
 2. **`newtype`（独立身份包装）**：复用底层物理表示（`Type.size_of` 与 `Type.repr_of` 保持一致），但**创立全新的类型身份**。`ArchivedUserId == UserId` 为 `false`。
 3. **`pure comptime fn` 类型工厂**：由于纯编译期函数具有确定性记忆化（Memoization），用**相同输入**调用同一个纯类型工厂，得到的 `Type` 具有**完全相同的类型身份**；用不同输入调用则产生不同类型。
 
@@ -244,6 +244,6 @@ test {
 
 既然默认情况下，编译器为了对齐性能**不承诺** `struct` 字段按源码顺序排列，也不承诺 `enum` 一定用 `u8` 作为判别子（Tag），那么当我们的张量 DMA 描述符必须严丝合缝地贴合硬件寄存器手册（要求紧凑无填充 `packed`、指定底层判别子类型 `base_type u8`、或者指定 C ABI 调用约定）时，该怎么告诉编译器？
 
-更进一步，在其他语言里，属性（Attribute，如 Rust 的 `#[repr(C)]` 或 C++ 的 `[[...]]`）往往是一套游离在类型系统之外的“特权宏语法”，既不能赋给变量，也很难用普通函数组合。如果**属性本身就是正经的编译期 `Object` 值**呢？
+更进一步，在其他语言里，属性（Attribute，如 Rust 的 `#[repr(C)]` 或 C++ 的 `[[...]]`）往往是一套游离在类型系统之外的“特权宏语法”，既无法赋给变量，也很难用普通函数组合。如果**属性本身就是正经的编译期 `Object` 值**呢？
 
 下一回 **《Flurry 演进手记 (077)：元数据也是正经的编译期对象——^expr 属性系统、.id expr 配置与 attrs 包》**，我们将用统一的 `^expr` 与 `.id expr` 为 DMA 硬件描述符定制精确到比特的元数据。

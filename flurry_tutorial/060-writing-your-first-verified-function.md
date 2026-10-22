@@ -1,6 +1,6 @@
 # Flurry 演进手记 (060)：写出第一段经过数学证明的代码——predicate 与 verified fn 实战
 
-> **系列导读**：在上一期（059）中，我们厘清了 Flurry 的安全光谱：普通安全代码提供全量静态检查、显式契约证明与循环安全兜底；`unsafe` 局部接管底层责任；而 `verified fn` 则彻底禁止运行时安全兜底，要求所有契约、边界、别名与终止性全部在编译期完成数学证明。今天，我们将亲手为 `RingBuffer` 编写第一段真正的 `verified fn`，并解锁把复杂逻辑契约模块化复用的核心机制——**程序验证谓词（`predicate`）**与**循环不变量（`invariant`）**。
+> **系列导读**：在上一期（059）中，我们厘清了 Flurry 的安全光谱：普通安全代码提供全量静态检查、显式契约证明与循环安全兜底；`unsafe` 局部接管底层责任；而 `verified fn` 则禁止运行时安全兜底，要求所有契约、边界、别名与终止性全部在编译期完成数学证明。今天，我们将亲手为 `RingBuffer` 编写第一段真正的 `verified fn`，并解锁把复杂逻辑契约模块化复用的核心机制——**程序验证谓词（`predicate`）**与**循环不变量（`invariant`）**。
 
 ---
 
@@ -36,7 +36,7 @@ where
 看着这段签名，你立刻会发现两个严重问题：
 
 1. **契约重复与膨胀**：几乎每一个操作 `RingBuffer` 的函数，都要在 `requires` 和 `ensures` 里重复写一遍 `buf.head.* < 8usize and buf.tail.* < 8usize and buf.len.* <= 8usize` 以及 `(buf.head.* + buf.len.*) % 8usize == buf.tail.*`。
-2. **普通函数无法直接放进验证逻辑**：你可能会想：“我写一个 `fn is_valid(buf: *RingBuffer) -> bool` 不就行了吗？”但在程序验证器眼里，普通 `fn` 是一个带有执行控制流和栈帧的黑盒调用，除非把它的后置条件再写一遍，否则验证器并不能像展开逻辑公式一样透明地推理它。
+2. **普通函数无法直接放进验证逻辑**：你可能会想：“我写一个 `fn is_valid(buf: *RingBuffer) -> bool` 不就行了吗？”但在程序验证器眼里，普通 `fn` 是一个带有执行控制流和栈帧的黑盒调用，除非把它的后置条件再写一遍，否则验证器并无法像展开逻辑公式一样透明地推理它。
 
 我们需要一种**专门属于程序验证层、没有运行时开销、能被证明器直接作为数学命题展开**的逻辑构件。
 
@@ -52,7 +52,7 @@ where
 predicate id(parameter*) (-> expr)? clauses? block
 ```
 
-如果不写返回类型 `-> expr`，`predicate` 默认返回 `bool`。让我们用 `predicate` 把 `RingBuffer` 的结构合法性提取出来，整理如下：
+如果省略返回类型 `-> expr`，`predicate` 默认返回 `bool`。让我们用 `predicate` 把 `RingBuffer` 的结构合法性提取出来，整理如下：
 
 ```flurry
 -- 定义 RingBuffer 的结构合法性谓词（默认返回 bool）
@@ -78,14 +78,14 @@ where
 
 ### ⚠️ 核心边界辨析：`predicate` vs `comptime predicate`
 
-在阅读或编写 Flurry 代码时，有一条**绝对不能混淆的架构红线**：
+在阅读或编写 Flurry 代码时，有一条**无法混淆的架构红线**：
 
 | 维度 | `comptime predicate`（PTC 层） | `predicate`（程序验证层） |
 | :--- | :--- | :--- |
 | **所属层次** | **证明论式类型检查（PTC）** | **程序验证层（Program Verification）** |
 | **处理对象** | 只处理**编译期类型命题**与编译期常量约束（如 `N > 0usize`、类型等价与 trait 约束） | 处理**运行时程序状态、内存布局、指针可达性与资源规格**（如 `buf.len.* <= 8usize`、`read<target>`） |
-| **关键字前缀** | 必须带 `comptime` | **不加 `comptime`。** |
-| **运行期开销** | 零（纯类型检查期消解） | 零（纯静态验证期消解，不生成机器码） |
+| **关键字前缀** | 必须带 `comptime` | **省略 `comptime`。** |
+| **运行期开销** | 零（纯类型检查期消解） | 零（纯静态验证期消解，免于生成机器码） |
 
 ```text
 [ 代码源码 ]
@@ -99,7 +99,7 @@ where
 
 ---
 
-## 三、当 `verified fn` 遇上循环：为什么编译器拒绝了你的 `while`？
+## 三、当 `verified fn` 遇上循环：为什么编译器报错拦截的 `while`？
 
 刚才的 `discard_n` 只是修改了两个标量字段，没有循环。现在我们要实现真正的槽位清理并求和函数 `drain_and_sum`：它要在一个 `while` 循环里，逐个读取从 `head` 开始的 `count` 个元素、把原槽位清零、累加总和，并推进 `head`。
 
@@ -119,7 +119,7 @@ where
         decreases count - step;
 
         let idx = (buf.head.* + step) % 8usize;
-        -- ❌ 编译期直接拒绝。
+        -- ❌ 编译期直接报错。
         -- 在循环体第 N 次迭代中，没有循环不变量证明 buf.head.* < 8usize 或 step <= count，
         -- 更无法在循环退出后证明 valid_ring(buf) 依然成立。
         acc = acc + buf.slots.*[idx];
@@ -136,7 +136,7 @@ where
 
 ### 数学归纳法与循环不变量（Loop Invariant）
 
-在形式化验证中，编译器**不会**把循环展开一万次去检查（如果 `count` 是运行期参数，也根本无法展开）。相反，证明器把整个循环看作一次**数学归纳法证明**：
+在形式化验证中，编译器**免除**把循环展开一万次去检查（如果 `count` 是运行期参数，也根本无法展开）。相反，证明器把整个循环看作一次**数学归纳法证明**：
 
 ```text
           [ 进入循环前 (Entry) ]
@@ -213,8 +213,8 @@ where
 
 看看这段 进阶代码是如何严丝合缝地通过编译器验证的：
 1. **进入循环前**：由 `requires` 可知 `0 <= count <= buf.len.*` 且 `valid_ring(buf)` 成立，全部 4 条 `invariant` 在 `step = 0usize` 时自动得证。
-2. **循环体内**：`idx = (buf.head + step) % 8usize` 的结果天然在 `[0, 8)` 区间内，因此 `buf.slots[idx]` 的读写不需要任何运行期边界检查指令；修改 `buf.slots[idx]` 不改变 `head`、`tail` 和 `len`，因此 `valid_ring(buf)` 在迭代末尾依然保持成立；`acc + buf.slots[idx]` 使用显式回绕加法，天然无算术溢出风险。
-3. **退出循环后**：`step <= count` 结合退出条件 `not (step < count)` 推出 `step == count`。随后更新 `buf.head` 和 `buf.len`，由于 `(buf.head'old + count + (buf.len'old - count)) % 8usize == (buf.head'old + buf.len'old) % 8usize == buf.tail`，后置条件 `valid_ring(buf)` 完美得证。
+2. **循环体内**：`idx = (buf.head + step) % 8usize` 的结果天然在 `[0, 8)` 区间内，因此 `buf.slots[idx]` 的读写无需任何运行期边界检查指令；修改 `buf.slots[idx]` 维持原状而未改 `head`、`tail` 和 `len`，因此 `valid_ring(buf)` 在迭代末尾依然保持成立；`acc + buf.slots[idx]` 使用显式回绕加法，天然无算术溢出风险。
+3. **退出循环后**：`step <= count` 结合退出条件 `not (step < count)` 推出 `step == count`。随后更新 `buf.head` 和 `buf.len`，由于 `(buf.head'old + count + (buf.len'old - count)) % 8usize == (buf.head'old + buf.len'old) % 8usize == buf.tail`，后置条件 `valid_ring(buf)` 良好得证。
 
 ---
 
@@ -235,6 +235,6 @@ where
 ```flurry
 invariant buf.head.* == (buf.head.*)'old and buf.len.* == (buf.len.*)'old;
 ```
-为什么我们在循环里明明只写了 `buf.slots[idx] = 0i32`，却还要告诉证明器 `buf.head` 和 `buf.len` 没有变？如果一个结构体有 20 个字段，或者函数同时接收了两个指针 `first: *i32` 和 `second: *i32`，我们岂不是要写满屏的 `x == x'old`（即著名的**框架问题 Frame Problem**）？更进一步，如果函数可能中途返回错误 `!RingError`，正常分支和错误分支修改的内存状态截然不同，又该如何精确刻画？
+为什么我们在循环里明明只写了 `buf.slots[idx] = 0i32`，却还要告诉证明器 `buf.head` 和 `buf.len` 没有变？如果一个结构体有 20 个字段，或者函数同时接收了两个指针 `first: *i32` 和 `second: *i32`，我们岂不是要写满屏的 `x == x'old`（即著名的**框架问题 Frame Problem**）？更进一步，如果函数可能中途返回错误 `!RingError`，正常分支和错误分支修改的内存状态迥然各异，又该如何精确刻画？
 
 下一期 **《Flurry 演进手记 (061)：用 Outcome Separation Logic 刻画状态转移——where outcomes 子句详解》**，我们将揭开 Flurry 形式化验证引擎的皇冠明珠——**结果分离逻辑（Outcome Separation Logic）**与 `where outcomes` 内存脚印契约。

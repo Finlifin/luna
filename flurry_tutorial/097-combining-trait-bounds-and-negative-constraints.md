@@ -1,6 +1,6 @@
 # Flurry 演进手记 (097)：组合多个 Trait 约束——where T :- A + B 正向约束与 requires 否定约束
 
-> **系列导读**：在上一期（096）中，我们用 `trait`、`assoc` 和 `impl` 为遥测传感器立下了第一份名义能力契约。但在真实工程中，能力从来不是孤立存在的：一个遥测上报器往往要求传感器既具备读取能力（`Reading`），又具备身份命名能力（`Named`）；而一个高层次的诊断接口 `Report` 本身就建立在 `Reading` 与 `Named` 的基础之上。更进一步，为了保障系统安全，我们有时还需要明确排除某些标记（例如拒绝任何标记为 `Disabled` 的故障传感器进入生产流水线）。今天，我们将深入探索 Flurry 如何用 `:-` 与 `+` 表达**正向能力组合**，以及为什么**否定约束**必须交给 `requires` 子句由 PTC 严密证明。
+> **系列导读**：在上一期（096）中，我们用 `trait`、`assoc` 和 `impl` 为遥测传感器立下了第一份名义能力契约。但在真实工程中，能力素非孤立存在的：一个遥测上报器往往要求传感器既具备读取能力（`Reading`），又具备身份命名能力（`Named`）；而一个高层次的诊断接口 `Report` 本身就建立在 `Reading` 与 `Named` 的基础之上。更进一步，为了保障系统安全，我们有时还需要明确排除某些标记（例如排斥接收任何标记为 `Disabled` 的故障传感器进入生产流水线）。今天，我们将深入探索 Flurry 如何用 `:-` 与 `+` 表达**正向能力组合**，以及为什么**否定约束**必须交给 `requires` 子句由 PTC 严密证明。
 
 ---
 
@@ -105,9 +105,9 @@ test {
 ```
 
 请牢记这三条关于 `+` 组合的核心语义边界：
-1. **逐项独立兑现，绝不偷懒**：如果把上面 `impl Named for Meter` 删掉，哪怕你在 `impl Report for Meter` 里面手写了一个 `fn name(*self) -> str`，编译器也会**直接拒绝**。因为提供子接口里的同名方法，不会自动替你创建父接口 `Named` 的实现证据。
-2. **保留各自声明身份，不按书写顺序赋优先级**：`Reading + Named` 和 `Named + Reading` 完全等价。如果两个接口碰巧有同名方法，书写在前面的不会自动覆盖后面的，调用时使用 `.as(Trait)` 显式指明来源即可。
-3. **支持带实参的完整接口实例**：`+` 号两边不仅可以是简单的接口名，还可以是带参数的完整接口实例，例如 `where T :- Encode<.json> + Encode<.binary> + Named`。
+1. **逐项独立兑现，不偷懒**：如果把上面 `impl Named for Meter` 删掉，哪怕你在 `impl Report for Meter` 里面手写了一个 `fn name(*self) -> str`，编译器也会**直接报错**。因为提供子接口里的同名方法，免于自动替你创建父接口 `Named` 的实现证据。
+2. **保留各自声明身份，不按书写顺序赋优先级**：`Reading + Named` 和 `Named + Reading` 完全等价。如果两个接口碰巧有同名方法，书写在前面的免于自动覆盖后面的，调用时使用 `.as(Trait)` 显式指明来源即可。
+3. **支持带实参的完整接口实例**：`+` 号两边非但可以是简单的接口名，还可以是带参数的完整接口实例，例如 `where T :- Encode<.json> + Encode<.binary> + Named`。
 
 ### 💡 语法辨析：声明并约束类型变量的两种等价写法
 
@@ -146,8 +146,8 @@ where
 
 这时候，很多初学者会下意识地想：“既然正向约束写在 `:-` 后面，那我直接写 `where T :- Reading + Named + not Disabled` 不就行了吗？”
 
-**绝对不行。** 在 Flurry 中，这是一条明确的语法与语义边界：
-> **`trait D :- ...` 和 `where T :- ...` 这两个 `:-` 位置专门用于正向能力组合（提供方法与关联项来源）；任何否定要求（如要求类型未实现某接口、或两个类型不相等）必须写进子句的 `requires` 中。**
+**行之难通。** 在 Flurry 中，这是一条明确的语法与语义边界：
+> **`trait D :- ...` 和 `where T :- ...` 这两个 `:-` 位置专门用于正向能力组合（提供方法与关联项来源）；任何否定要求（如要求类型未实现某接口、或两个类型互异）必须写进子句的 `requires` 中。**
 
 让我们看看 正确的写法，以及编译器是如何在编译期拦截 `BrokenSensor` 的：
 
@@ -184,19 +184,19 @@ where
 
 test {
     let meter = Meter { value: 8u32 }
-    -- ✅ Meter 实现了 Reading 和 Named，且证明不满足 Disabled，编译通过。
+    -- ✅ Meter 实现了 Reading 和 Named，且证明违背 Disabled，编译通过。
     show_enabled(meter.ref);
 
     let broken = BrokenSensor { code: 404u32 }
-    -- ❌ 编译期直接拒绝。
+    -- ❌ 编译期直接报错。
     -- BrokenSensor 实现了 Disabled，违反了 requires not (T :- Disabled)。
     -- show_enabled(broken.ref);
 }
 ```
 
-### ⚠️ 深度揭秘：在编译器眼里，“没找到实现”不等于“证明了不实现”
+### ⚠️ 深度揭秘：在编译器眼里，“没找到实现”有别于“证明了不实现”
 
-为什么 Flurry 要把 `requires not (T :- Disabled)` 单独交给 PTC 的否定查询引擎处理，而不是简单地在正向查找失败时返回 `true`？
+为什么 Flurry 要把 `requires not (T :- Disabled)` 单独交给 PTC 的否定查询引擎处理，而非简单地在正向查找失败时返回 `true`？
 
 想象下面这个场景：如果有一个泛型中转函数 `forward_unverified`，它只声明了 `where T :- Reading + Named`，**并没有**声明 `requires not (T :- Disabled)`，却试图在函数体内部直接调用 `show_enabled(value)`：
 
@@ -204,10 +204,10 @@ test {
 fn forward_unverified(value: *T) -> void
 where T :- Reading + Named
 {
-    -- ❌ 编译期直接拒绝。
+    -- ❌ 编译期直接报错。
     -- 在 forward_unverified 内部，T 只是一个尚未具体化的抽象类型参数。
-    -- 虽然当前上下文中“找不到 T 实现 Disabled 的正向证据”，
-    -- 但“未找到 / 仍未决（Pending）”绝不等于“已证明 not (T :- Disabled)”。
+    -- 虽然当前上下文中“无从寻获 T 实现 Disabled 的正向证据”，
+    -- 但“未找到 / 仍未决（Pending）”有别于“已证明 not (T :- Disabled)”。
     show_enabled(value);
 }
 ```
@@ -216,7 +216,7 @@ where T :- Reading + Named
 [ PTC 对 (T :- Disabled) 的三种判定状态 ]
   ├── 1. 已成立 (Proven True)     ──► 如 BrokenSensor：明确存在 impl Disabled
   ├── 2. 仍未决 (Pending / Open)  ──► 如未加否定约束的泛型参数 T：未来实例化时可能变成 BrokenSensor。
-  └── 3. 已排除 (Proven False)    ──► 如 Meter（结合包一致性规则证明绝不可能实现 Disabled）
+  └── 3. 已排除 (Proven False)    ──► 如 Meter（结合包一致性规则证明不可能实现 Disabled）
                                       或当前泛型上下文已显式携带 requires not (T :- Disabled) 证据。
 ```
 
@@ -228,10 +228,10 @@ where T :- Reading + Named
 
 | 需求场景 | 标准语法 | 核心规则与避坑指南 |
 | :--- | :--- | :--- |
-| **父接口组合（Supertraits）** | `trait Sub :- A + B { ... }` | 实现 `Sub` 前必须分别提供 `A` 和 `B` 的有效实现；不可靠同名方法自动生成父接口实现 |
+| **父接口组合（Supertraits）** | `trait Sub :- A + B { ... }` | 实现 `Sub` 前必须分别提供 `A` 和 `B` 的有效实现；隐患重重同名方法自动生成父接口实现 |
 | **泛型多接口正向约束** | `where T :- A + B` | 声明 `T` 并要求其同时满足 `A` 与 `B`（支持带参接口如 `Encode<.json>`） |
 | **显式类型命题写法** | `where T, requires T :- A + B` | 与 `where T :- A + B` 等价；切忌写成非法的 `where T requires A` |
-| **否定 Trait 约束** | `where T :- A, requires not (T :- B)` | 否定要求必须放进 `requires` 子句；需具备真实排除证明，“查询未决”不能翻转成否定证明 |
+| **否定 Trait 约束** | `where T :- A, requires not (T :- B)` | 否定要求必须放进 `requires` 子句；需具备真实排除证明，“查询未决”无法翻转成否定证明 |
 
 ---
 

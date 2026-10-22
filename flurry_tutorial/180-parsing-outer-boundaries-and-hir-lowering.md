@@ -3,8 +3,8 @@
 在[上一篇（第 179 篇）](./179-inside-the-compiler-pipeline-phases-overview.md)中，我们梳理了 Flurry 从定义期检查到调用点实例化的阶段边界。
 
 今天，我们来解决编写复杂表达式和声明时经常遇到的三个语法与语义问题：
-1. **多属性前缀链（Multi-Attribute Prefix）**：当我们在声明、列表元素或函数实参前连续挂载多个属性 `^attr1 ^attr2 expr` 时，它们按什么顺序生效？会不会导致被修饰的实参求值多次？
-2. **控制流条件与花括号边界**：Flurry 的 `if` / `while` / `for` 条件不需要外层圆括号，同时又支持 `Flag { enabled: true }` 构造与 `.data { value: _ }` 模式。当条件表达式里包含花括号时，什么时候必须加圆括号 `(...)`？
+1. **多属性前缀链（Multi-Attribute Prefix）**：当我们在声明、列表元素或函数实参前连续挂载多个属性 `^attr1 ^attr2 expr` 时，它们按什么顺序生效？是否会导致被修饰的实参求值多次？
+2. **控制流条件与花括号边界**：Flurry 的 `if` / `while` / `for` 条件无需外层圆括号，同时又支持 `Flag { enabled: true }` 构造与 `.data { value: _ }` 模式。当条件表达式里包含花括号时，什么时候必须加圆括号 `(...)`？
 3. **链式后缀视图（Chained Take Views）**：当我们连续使用单引号视图（如 `value'bitvec'type`）或调用硬件原语 `tag'intrinsic(args).as(T)` 时，后缀链遵循怎样的结合规则？
 
 ---
@@ -111,12 +111,12 @@ fn is_empty(message: Message) -> bool {
         └── `(` 内允许 `.data { value: _ }`┘  └── `)` 外 `{ true }` 归属 if 分支
 ```
 
-### 3. 拒绝例：在未加圆括号的 `if` 条件顶层直接写 `{ ... }` 模式
+### 3. 负例：在未加圆括号的 `if` 条件顶层直接写 `{ ... }` 模式
 
-如果在 `if` 条件顶层不加圆括号，直接写出 `.data { value: _ }` 并紧跟 `{ true }`，第一个 `{ value: _ }` 会被视为 `if` 分支体的开始，从而导致语法错误：
+如果在 `if` 条件顶层省略圆括号，直接写出 `.data { value: _ }` 并紧跟 `{ true }`，第一个 `{ value: _ }` 会被视为 `if` 分支体的开始，从而导致语法错误：
 
 ```flurry
--- ❌ 编译期语法拒绝：未加圆括号导致花括号边界冲突
+-- ❌ 编译期语法报错：未加圆括号导致花括号边界冲突
 fn broken_unparenthesized_block_in_if(message: Message) -> bool {
     if message matches .data { value: _ } {
         true
@@ -159,7 +159,7 @@ pure comptime fn InspectViews(value: u32) -> Type {
        └──▶ 第 3 步：... .as(f32)                   (紧邻指定输出类型为 f32)
 ```
 
-如果拼写了未定义的视图名（例如 `value'unknown_view`），会在语法与视图检查阶段被立即拦截，不会与普通的结构体字段访问混淆。
+如果拼写了未定义的视图名（例如 `value'unknown_view`），会在语法与视图检查阶段被立即拦截，免与普通的结构体字段访问混淆。
 
 ---
 

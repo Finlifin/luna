@@ -5,7 +5,7 @@
 从本篇（第 179 篇）开始到第 189 篇，我们将系统梳理 **Flurry 语言的核心语义规则如何协同工作**。
 在一门支持第一类类型（First-Class Types）与编译期计算（`comptime`）的语言中，理解“什么在定义阶段检查、什么在调用点实例化时计算、什么保留到运行时执行”至关重要：
 - 为什么有些类型函数在定义泛型函数时还没算出具体类型，却能通过定义期类型检查？
-- 为什么两个互相递归的普通函数 `is_even` 和 `is_odd` 不需要编译期求值就能通过检查，但如果把运行期 `bool` 传给返回 `Type` 的函数就会被拒绝？
+- 为什么两个互相递归的普通函数 `is_even` 和 `is_odd` 无需编译期求值就能通过检查，但如果把运行期 `bool` 传给返回 `Type` 的函数就会报错？
 - 编译期类型计算与运行时依赖类型之间的边界究竟在哪里？
 
 本篇我们将通过一段依赖类型代码，梳理从定义检查到具体实例化的完整阶段模型。
@@ -28,7 +28,7 @@ fn keep_selected(comptime wide: bool, value: defer SelectType(wide)) -> SelectTy
 ```
 
 观察 `keep_selected` 的签名：参数 `value` 的类型是 `defer SelectType(wide)`，返回类型也是 `SelectType(wide)`。
-1. 在检查 `keep_selected` 的**函数定义**时，`wide` 只是一个抽象的编译期布尔形参，此时还不知道它是 `true` 还是 `false`。但类型检查器已经可以验证：`SelectType(wide)` 返回的是合法的 `Type`，且函数体返回的 `value` 与声明的返回类型 `SelectType(wide)` 一致。
+1. 在检查 `keep_selected` 的**函数定义**时，`wide` 只是一个抽象的编译期布尔形参，此时还无从得知它是 `true` 还是 `false`。但类型检查器已经可以验证：`SelectType(wide)` 返回的是合法的 `Type`，且函数体返回的 `value` 与声明的返回类型 `SelectType(wide)` 一致。
 2. 而在某个具体的**调用点** `keep_selected(true, 42)` 上，为了检查字面量 `42` 是否匹配 `value` 的类型，编译期求值会先根据第一个实参 `true` 计算出 `SelectType(true) == u64`，再以 `u64` 作为期望类型检查第二个实参 `42`。
 
 因此，在 Flurry 中，**类型推导与编译期求值是按需交织推进的**。
@@ -50,7 +50,7 @@ fn keep_selected(comptime wide: bool, value: defer SelectType(wide)) -> SelectTy
                      │
                      ▼
   [ 3. 调用点实例化 (Instantiation) ] ◀──▶ [ 代入具体 comptime 实参完成类型归约 ]
-    为具体调用代入 wide = true，将 SelectType(true) 彻底归约为 u64
+    为具体调用代入 wide = true，将 SelectType(true) 归约为 u64
                      │
                      ▼
   [ 4. 目标能力与安全契约检查 ]
@@ -78,7 +78,7 @@ fn keep_selected(comptime wide: bool, value: defer SelectType(wide)) -> SelectTy
 
 ```flurry
 pure comptime fn SelectType(wide: bool) -> Type {
-    inline if wide { u64 } else { u32 }
+    if wide { u64 } else { u32 }
 }
 
 fn keep_selected(comptime wide: bool, value: defer SelectType(wide)) -> SelectType(wide) {
@@ -103,7 +103,7 @@ pub fn demo() -> u64 {
           │
           ▼
   [ 步骤 3：归约延迟的参数与返回类型 ]
-    - 既然 `wide = true` 已知，计算 `SelectType(true)`，走 `inline if` 的 `true` 分支得到 `u64`。
+    - 既然 `wide = true` 已知，计算 `SelectType(true)`，走 `if` 的 `true` 分支得到 `u64`。
           │
           ▼
   [ 步骤 4：完成实参检查与实例生成 ]
@@ -114,11 +114,11 @@ pub fn demo() -> u64 {
 
 ---
 
-## 四、 两个关键边界：普通互递归 vs 非法运行期类型构造
+## 四、 两个关键边界：普通互递归 vs 并非法运行期类型构造
 
-理解了定义期检查与编译期求值的分工，就能明白为什么下面两段代码会有截然不同的结果：
+理解了定义期检查与编译期求值的分工，就能明白为什么下面两段代码会有迥然各异的结果：
 
-### 1. 普通互递归函数不需要在编译期展开函数体
+### 1. 普通互递归函数无需在编译期展开函数体
 
 ```flurry
 fn is_even(n: u32) -> bool {
@@ -130,21 +130,21 @@ fn is_odd(n: u32) -> bool {
 }
 ```
 
-在检查 `is_even` 的函数体时，它调用了 `is_odd(n - 1)`。此时不需要执行 `is_odd` 的函数体，因为 `is_odd` 已经显式声明了参数类型 `u32` 和返回类型 `bool`。类型检查只需核对签名契约即可通过，不会因为互递归而陷入编译期死循环。
+在检查 `is_even` 的函数体时，它调用了 `is_odd(n - 1)`。此时无需执行 `is_odd` 的函数体，因为 `is_odd` 已经显式声明了参数类型 `u32` 和返回类型 `bool`。类型检查只需核对签名契约即可通过，免因互递归而陷入编译期死循环。
 
-### 2. 拒绝例：不能把运行期变量传给编译期类型构造函数
+### 2. 负例：禁止将运行期变量传给编译期类型构造函数
 
-如果去掉 `keep_selected` 参数里的 `comptime` 修饰，试图在运行期根据动态输入决定返回 `u64` 还是 `u32`，会在阶段检查时被直接拒绝：
+如果去掉 `keep_selected` 参数里的 `comptime` 修饰，试图在运行期根据动态输入决定返回 `u64` 还是 `u32`，会在阶段检查时被直接报错：
 
 ```flurry
 pure comptime fn SelectType(wide: bool) -> Type {
-    inline if wide { u64 } else { u32 }
+    if wide { u64 } else { u32 }
 }
 
--- ❌ 编译期拒绝：runtime_wide 没有标注 comptime，是运行期才产生的 bool
+-- ❌ 编译期报错：runtime_wide 没有标注 comptime，是运行期才产生的 bool
 fn broken_runtime_type_factory(runtime_wide: bool) -> SelectType(runtime_wide) {
     -- 返回类型位置要求在编译期确定具体的物理类型布局，
-    -- 不能将运行期布尔值 runtime_wide 传给 pure comptime fn SelectType。
+    -- 禁止将运行期布尔值 runtime_wide 传给 pure comptime fn SelectType。
     0
 }
 ```
@@ -159,8 +159,8 @@ fn broken_runtime_type_factory(runtime_wide: bool) -> SelectType(runtime_wide) {
 | :--- | :--- | :--- |
 | **定义期检查** | 验证函数与类型定义在符号层面自洽，保留依赖 `comptime` 形参的类型表达式 | 在编写泛型库时即可发现定义内部的逻辑与类型错误 |
 | **按需交织求值** | 遇到具体 `comptime` 实参时立即计算类型函数（如 `SelectType(true)`） | 支持参数类型依赖前序 `comptime` 参数的灵活签名 |
-| **调用点实例化** | 代入具体编译期实参后，所有类型的 `comptime` 部分必须彻底归约完毕 | 消除运行时类型分派开销，生成确定的目标机器码 |
-| **阶段隔离边界** | 普通运行期变量不能直接流入 `comptime` 类型构造位置（除非使用 `lift` 依赖类型） | 保证每个运行时值的内存布局与调用约定在编译期完全确定 |
+| **调用点实例化** | 代入具体编译期实参后，所有类型的 `comptime` 部分必须归约完毕 | 消除运行时类型分派开销，生成确定的目标机器码 |
+| **阶段隔离边界** | 普通运行期变量禁止直接流入 `comptime` 类型构造位置（除非使用 `lift` 依赖类型） | 保证每个运行时值的内存布局与调用约定在编译期完全确定 |
 
 ---
 

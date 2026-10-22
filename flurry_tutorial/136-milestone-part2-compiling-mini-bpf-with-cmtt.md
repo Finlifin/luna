@@ -7,16 +7,16 @@
 1. 如何写一个纯编译期代码生成器 `compile_atoms`，在满足 **CMTT 单洞规则（Single-Hole Constraint）** 的前提下，把一组 `Array<FilterAtom, n>` 规则逐层包裹成一段开放表达式代码 **`< pkt: Packet |- bool >`**？
 2. 如何结合 **`< Packet -| ... >` 模式代码**、**Quoted Arm（`quote fn ... (case pattern)`）** 与第五卷的 **`BitVec<8>` 位向量代数**，直接从匹配成功的数据包中提取负载长度或路由动作？
 
-让我们立刻动手，把编译期的 `FilterAtom` 规则树彻底变成零解释器开销的原生机器码。
+让我们立刻动手，把编译期的 `FilterAtom` 规则树变成零解释器开销的原生机器码。
 
 ---
 
-## 一、 问题背景与设计思路：为什么不能在同一个 Quote 里写 `'(~<left> and ~<right>)`？
+## 一、 问题背景与设计思路：为什么禁止于同一个 Quote 里写 `'(~<left> and ~<right>)`？
 
 当我们要把一串 `FilterAtom` 组合成一个合取（`and`）表达式代码 `< pkt: Packet |- bool >` 时，初学者最容易写出的 初始代码是这样的：
 
 ```flurry
--- ❌ 传统踩中 CMTT 单洞红线（编译期直接拒绝：）：
+-- ❌ 传统踩中 CMTT 单洞红线（编译期直接报错：）：
 -- 试图在同一个 quote 主体里同时塞进两个 splice（~<left> 和 ~<right>）。
 pure comptime fn bad_combine_and(
     left: < pkt: Packet |- bool >,
@@ -28,7 +28,7 @@ pure comptime fn bad_combine_and(
 
 ### 1.1 回顾 CMTT 的“单洞链构造多步程序”法则
 
-为什么 Flurry 要拒绝在同一个 `'(...)` 里写两个 `~<...>`？
+为什么 Flurry 要禁止在同一个 `'(...)` 里写两个 `~<...>`？
 因为我们在第 121 回和 `docs/cmtt/quotation-and-stages.md` 中学过：**每段 Quote 的运行期主体至多允许一个代码接入点（Single Hole）**，以此保证上下文替换、控制流汇合与资源生命周期的线性可组合性。
 
 那怎么用“每次只有一个洞”的 Quote 拼出包含 $N$ 个条件合取的复杂过滤程序呢？
@@ -153,7 +153,7 @@ test {
 请仔细观察 `accepts_https_syn`：
 - `rules` 数组和 `compile_filter_chain(rules)` 全部在 `const` 编译期阶段执行完毕；
 - 编译期常量 `expected`、`mask`、`limit` 被合法物化（Materialize）进了生成的运行期比较指令中；
-- 在生成的目标机器码里，根本不存在 `FilterAtom` 枚举，也不存在 `while` 循环——只有 4 次紧挨着的寄存器比较指令。
+- 在生成的目标机器码里，全然无存 `FilterAtom` 枚举，也未存 `while` 循环——只有 4 次紧挨着的寄存器比较指令。
 
 ---
 
@@ -168,7 +168,7 @@ test {
 ```
   incoming_pkt  ──►  ~<pattern> : < Packet -| port: u16, len: u16 >
                          │
-                         ├─ 若匹配失败：不产生 port 和 len，直接跳过本分支。
+                         ├─ 若匹配失败：免生 port 和 len，直接跳过本分支。
                          │
                          └─ 若匹配成功：导出新鲜绑定 { port: u16, len: u16 }
                                               │
@@ -230,7 +230,7 @@ test {
 如果有人在编写 `body` 代码时，试图引用一个模式 `< Packet -| port: u16, len: u16 >` 根本没有导出的绑定名字（比如 `secret_key`），且接入位置也没有提供该绑定，会发生什么？
 
 ```flurry
--- ❌ 编译期直接拒绝：body 接口要求 < secret_key: u16 |- u16 >，
+-- ❌ 编译期直接报错：body 接口要求 < secret_key: u16 |- u16 >，
 -- 但配对的模式只导出了 (port, len)，缺失的上下文绑定无法凭空产生。
 fn reject_missing_pattern_binding(pkt: Packet) -> u16 {
     const pat: < Packet -| port: u16, len: u16 > =
@@ -251,8 +251,8 @@ fn reject_missing_pattern_binding(pkt: Packet) -> u16 {
 | 阶段 | 输入载体 | 核心技术栈 | 输出产物 | 性能与安全收益 |
 | :--- | :--- | :--- | :--- | :--- |
 | **里程碑（上）135** | 声明式 DSL 源码 | `@define_macro2` (PEG) + `@define_macro1` | 强类型 `FilterRule` / `FilterAtom` 编译期数据 | 语法错误与类型越界在编译期双重拦截 |
-| **里程碑（下）136** | `Array<FilterAtom, n>` | CMTT `< pkt: Packet \|- bool >` 单洞链循环包裹 + `BitVec<8>` | 零循环、零分支表的原生内联布尔表达式 | 彻底消除运行期 AST 解释器开销 |
-| **字段提取扩展** | 运行期 `Packet` | CMTT 模式代码 `< Packet -\| port, len >` + `quote fn (case ...)` | 定向绑定传递的原生 `match` 分支 | 匹配失败路径绝不泄露未初始化绑定 |
+| **里程碑（下）136** | `Array<FilterAtom, n>` | CMTT `< pkt: Packet \|- bool >` 单洞链循环包裹 + `BitVec<8>` | 零循环、零分支表的原生内联布尔表达式 | 消除运行期 AST 解释器开销 |
+| **字段提取扩展** | 运行期 `Packet` | CMTT 模式代码 `< Packet -\| port, len >` + `quote fn (case ...)` | 定向绑定传递的原生 `match` 分支 | 匹配失败路径不泄露未初始化绑定 |
 
 ---
 
@@ -261,7 +261,7 @@ fn reject_missing_pattern_binding(pkt: Packet) -> u16 {
 我们的 Mini-BPF 编译器已经能把声明式规则编译成飞快的原生代码了。
 
 但是，所有写过编译器或自动机生成器的工程师心里都有一团挥之不去的阴影：
-**“我怎么敢 100% 确信我写的 CMTT 代码生成器 `compile_filter_chain` 或状态机组装器 `build_step`，对所有边界输入（空输入、回边循环、重叠转移边、末尾拒绝状态）生成出来的原生代码，都跟标准参考规范分毫不差？”**
+**“我怎么敢 100% 确信我写的 CMTT 代码生成器 `compile_filter_chain` 或状态机组装器 `build_step`，对所有边界输入（空输入、回边循环、重叠转移边、末尾报错状态）生成出来的原生代码，都跟标准参考规范分分毫无差？”**
 
 如果我们为 20 种不同的协议自动机分别手写 20 套重复的初始化、状态追踪、日志记录与边界断言代码，测试文件很快就会变成难以维护的复制粘贴泥潭。
 还记得我们在 `docs/functions/templates.md` 里见过的 **`template fn`** 和 **`template test`** 吗？

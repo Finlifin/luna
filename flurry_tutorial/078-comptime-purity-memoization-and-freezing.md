@@ -3,8 +3,8 @@
 在上一回（077）和第 076 回中，我们见识了 `pure comptime fn` 在类型工厂、反射和属性计算中的威力。特别是当我们在张量引擎里写下 `Tensor<f32, .dims = s>` 或 `SelectType(wide)` 时，整个类型系统的正确性都建立在一个基石之上：**同样的编译期输入，必须产生稳定、可复用的编译期类型结果**。
 
 但是，一旦编译期支持图灵完备的任意代码执行，魔盒也就随之打开了：
-1. 如果一个 `comptime fn` 每次调用都返回不同的结果，或者中途报错、耗尽步数限制（Step Limit），类型缓存岂不是会彻底错乱？
-2. 为什么同样是 `pure comptime fn`，用尖括号声明的 `Identity<T>` 和用圆括号声明的 `SelectType(wide)` 在类型相等性上表现得截然不同？
+1. 如果一个 `comptime fn` 每次调用都返回不同的结果，或者中途报错、耗尽步数限制（Step Limit），类型缓存岂不是会错乱？
+2. 为什么同样是 `pure comptime fn`，用尖括号声明的 `Identity<T>` 和用圆括号声明的 `SelectType(wide)` 在类型相等性上表现得迥然各异？
 3. 当一个函数签名中包含依赖编译期参数的延后类型表达式（如 `defer SelectType(wide)`）时，定义期检查与调用点实例化是如何分工并保持隔离的？
 
 今天，我们就来拆解 Flurry 编译期计算的三大支柱：**纯度契约与记忆化（Memoization）**、**Normal-Form 头保留**、以及 **分阶段类型规约与独立实例化**。
@@ -17,8 +17,8 @@
 
 ```flurry
 -- 缺乏纯度与构造器头契约时的隐患：
--- 问题 1：如果不保证纯度与确定性缓存，两次调用 SelectType(true) 可能造出两个不相等的类型。
--- 问题 2：如果把包装类型 Identity<u32> 当成普通调用直接展开成 u32，名义包装和类型模式匹配将彻底失效。
+-- 问题 1：如果不保证纯度与确定性缓存，两次调用 SelectType(true) 可能造出两个互异的类型。
+-- 问题 2：如果把包装类型 Identity<u32> 当成普通调用直接展开成 u32，名义包装和类型模式匹配将失效。
 ```
 
 为了解决这些问题，Flurry 在编译期宇宙设立了清晰的契约。
@@ -31,11 +31,11 @@
 
 在 Flurry 中，当你给编译期函数标上 `pure comptime fn` 时，你向编译器立下了一份**确定性纯度契约**：对于相等的编译期输入，该函数的结果必然唯一确定，编译器可以安全地对它进行**结果记忆化（Memoization）与类型身份复用**。
 
-为了让这份缓存绝对可靠，编译器内部执行四条严密规则：
+为了让这份缓存完全可靠，编译器内部执行四条严密规则：
 1. **输入可比较与可哈希**：只有当所有实参在编译期都已完全确定，且满足编译期相等（`Eq`）与哈希（`Hash`）契约时，才启用记忆化查找。
-2. **哈希碰撞二次核验**：缓存命中绝不仅仅看 Hash 值相等，遇到相同 Hash 桶时必须执行结构化的编译期相等性（`Eq`）比对，彻底杜绝因哈希碰撞张冠李戴。
-3. **非纯操作隔离**：不带 `pure` 的普通 `comptime fn`（可能在局部做非确定性操作或过程式构造）每次按调用语义求值，绝不混入纯类型身份缓存。
-4. **失败与超预算绝不缓存为成功**：如果一次编译期求值因为诊断错误、未就绪的外部依赖或**步数/内存预算耗尽（Budget Exhaustion）**而中断，编译器**绝不会**把半成品状态写进成功缓存。
+2. **哈希碰撞二次核验**：缓存命中非止看 Hash 值相等，遇到相同 Hash 桶时必须执行结构化的编译期相等性（`Eq`）比对，避免因哈希碰撞张冠李戴。
+3. **非纯操作隔离**：未带 `pure` 的普通 `comptime fn`（可能在局部做非确定性操作或过程式构造）每次按调用语义求值，不混入纯类型身份缓存。
+4. **失败与超预算不缓存为成功**：如果一次编译期求值因为诊断错误、未就绪的外部依赖或**步数/内存预算耗尽（Budget Exhaustion）**而中断，编译器**免除**把半成品状态写进成功缓存。
 
 ### 2.2 核心规则对比：`SelectType(wide)` 立即规约 vs `Identity<T>` 保留头
 
@@ -51,12 +51,12 @@
   因此：SelectType(true) == i64  (完全相等。)
 
   [ Normal-Form 头构造器：Identity<u32> ]
-  输入 u32 就绪 ──► 检查契约与类型合法性 ──► 保留 Identity<...> 构造器头，绝不展开消除。
+  输入 u32 就绪 ──► 检查契约与类型合法性 ──► 保留 Identity<...> 构造器头，维持未展开态消除。
   因此：Identity<u32> != u32     (头不同，类型不等。)
 ```
 
-> **💡 核心心智模型：Normal Form 的头绝不展开。**
-> 为什么 `pure comptime fn Identity<T: Type> -> Type { T }` 明明函数体返回了 `T`，`Identity<u32>` 却**不等于** `u32`（甚至 `Identity<Identity<u32>> != Identity<u32>`）？
+> **💡 核心心智模型：Normal Form 的头维持未展开态。**
+> 为什么 `pure comptime fn Identity<T: Type> -> Type { T }` 明明函数体返回了 `T`，`Identity<u32>` 却**有别于** `u32`（甚至 `Identity<Identity<u32>> != Identity<u32>`）？
 > 因为尖括号 `<...>` 声明的是一个**正規形式类型构造器头（Normal-Form Head）**（就像 `Tuple<...>`、`Array<T, n>` 一样）。它的函数体描述的是其内部结构或底层承载关系，但它的外部类型身份永远保留 `Identity<...>` 这个头。如果编译器手欠把头展开丢掉，后续的类型模式匹配（`083` 回）和抽象类型边界就会全面崩塌。
 
 让我们在代码中同时验证这两条规律：
@@ -81,7 +81,7 @@ test normal_form_head_vs_ordinary_comptime_call {
     assumes SelectType(false) == i32;
     assumes SelectType(true) == i64;
 
-    -- 尖括号调用保留 Normal-Form 头：同参相等，但绝不等于裸 T 或嵌套层数不同的自身。
+    -- 尖括号调用保留 Normal-Form 头：同参相等，但有别于裸 T 或嵌套层数不同的自身。
     assumes Identity<u32> == Identity<u32>;
     assumes Identity<u32> != u32;
     assumes Identity<Identity<u32>> != Identity<u32>;
@@ -91,7 +91,7 @@ test normal_form_head_vs_ordinary_comptime_call {
 如果有人误以为 `Identity<u32>` 会像 `typealias` 或 `SelectType` 那样自动剥壳，试图把 `u32` 直接当成 `Identity<u32>` 混为一谈：
 
 ```flurry
--- ❌ 编译期直接拒绝：Identity<u32> 保留 Normal-Form 头，不会因函数体返回 T 就自动与 u32 相等
+-- ❌ 编译期直接报错：Identity<u32> 保留 Normal-Form 头，不会因函数体返回 T 就自动与 u32 相等
 comptime {
     let SameTypeProof: refines { Itself == u32 } Type = Identity<u32>;
 }
@@ -113,8 +113,8 @@ fn keep_selected(
 ```
 
 请观察 `keep_selected` 的两个阶段：
-1. **定义阶段（Normalization）**：在还没有调用者传入具体 `wide` 时，形参 `wide` 是一个符号绑定。由于标记了 `defer SelectType(wide)`，该函数不会在定义点强行对未知的 `wide` 展开分支，而是验证参数 `value` 与返回值的类型都是基于同一个 `wide` 的 `SelectType(wide)`，并将这一稳定的接口契约保存下来。
-2. **调用阶段（Instantiation）**：每次调用 `keep_selected` 时，都会根据当次传入的编译期实参（`false` 或 `true`）独立完成 `SelectType(wide)` 的求值，不同调用实例之间完全隔离、互不干扰：
+1. **定义阶段（Normalization）**：在还没有调用者传入具体 `wide` 时，形参 `wide` 是一个符号绑定。由于标记了 `defer SelectType(wide)`，该函数免于在定义点强行对未知的 `wide` 展开分支，而是验证参数 `value` 与返回值的类型都是基于同一个 `wide` 的 `SelectType(wide)`，并将这一稳定的接口契约保存下来。
+2. **调用阶段（Instantiation）**：每次调用 `keep_selected` 时，都会根据当次传入的编译期实参（`false` 或 `true`）独立完成 `SelectType(wide)` 的求值，不同调用实例之间完全隔离、互无扰于：
 
 ```flurry
 test staged_defer_evaluation_and_instantiation {
@@ -137,7 +137,7 @@ test staged_defer_evaluation_and_instantiation {
 | 核心概念 | 语法 / 机制表现 | 语义规则与工程保障 |
 | :--- | :--- | :--- |
 | **纯编译期函数** | `pure comptime fn F(...)` | 承诺相同输入产生确定性相同结果；要求实参满足编译期 `Eq` 与 `Hash` 才启用记忆化 |
-| **失败不入缓存** | 诊断错误 / 步数预算耗尽 | 任何求值失败或超预算中断绝不写入成功缓存，防止后续查询读到残损结果 |
+| **失败不入缓存** | 诊断错误 / 步数预算耗尽 | 任何求值失败或超预算中切断省略入成功缓存，防止后续查询读到残损结果 |
 | **Normal-Form 头** | `pure comptime fn H<T> -> Type` | 尖括号 `<...>` 构造器永远保留头身份，`Identity<T> != T` |
 | **延后类型计算** | `defer SelectType(wide)` | 在定义期保留为依赖 `wide` 的合法残余计算，待 `wide` 具象化后再规约 |
 | **独立实例化** | 调用点代入具体 `comptime` 实参 | 每次调用根据当次编译期实参独立完成类型规约，不同调用实例间完全隔离 |

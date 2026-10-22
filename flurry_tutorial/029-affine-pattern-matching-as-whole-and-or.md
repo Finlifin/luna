@@ -1,6 +1,6 @@
 # Flurry 演进手记 (029)：既要检查字段又要搬走整个包——仿射类型的 as whole 与 or 模式所有权汇合
 
-在 [上一篇 (028)](./028-chained-matching-with-and-is-and-observation-blocks.md) 的结尾，我们抛出了一个让许多系统程序员头皮发麻的场景：**当模式匹配遇上不可随意复制的仿射类型（Affine Type / Once 资源）时，怎么做到既能检查或提取字段，又不把整个对象拆碎？**
+在 [上一篇 (028)](./028-chained-matching-with-and-is-and-observation-blocks.md) 的结尾，我们抛出了一个系统编程中常见的棘手场景：**当模式匹配遇上不可随意复制的仿射类型（Affine Type / Once 资源）时，怎么做到既能检查或提取字段，又不把整个对象拆碎？**
 
 来看我们固件里的真实需求：
 我们有一个泛型数据包 `Packet<T>`，里面包含一个布尔标志 `ready: bool` 和一个载荷 `payload: T`：
@@ -13,7 +13,7 @@ struct Packet where T {
 注意：这里的载荷 `T` 可能是一个**独占的硬件 DMA 授权票据 `Ticket`（没有实现 `Copy`，只能使用一次）**。
 
 现在，我们需要实现三个操作：
-1. **看一眼标志就整体移交**：用模式匹配检查 `packet` 的 `ready` 是不是 `true`，如果是，就把**完整的 `Packet<T>` 原封不动地移交（Move）返回**；
+1. **看一眼标志就整体移交**：用模式匹配检查 `packet` 的 `ready` 是否 `true`，如果是，就把**完整的 `Packet<T>` 维持原貌地移交（Move）返回**；
 2. **抽出 `Copy` 字段的同时整体移交**：把 `ready` 布尔值提取出来绑定到变量 `ready`，同时还要把**完整的 `Packet<T>`** 绑定到变量 `whole` 一并移交出去。
 3. **在 `or` 模式的不同位置汇合仿射资源**：当匹配一个包含多个 `Ticket` 的元组或枚举时，比如 `(true, item, _) or (false, _, item)`，第一个候选移走第 1 张票据，第二个候选移走第 2 张票据，**那个被 `_` 忽略的剩余票据由谁来负责销毁？**
 
@@ -23,7 +23,7 @@ struct Packet where T {
 
 ## 一、 拆开了就装不回去的痛苦
 
-如果我们不知道整体绑定模式 `as`，或者带着“一旦在模式里写了 `{ ready: true }` 就把结构体拆散了”的旧观念去写代码，写出来的 传统要么得手动把拆散的字段重新装回一个新的 `Packet`，要么在提取字段后发现原对象已经残缺不全（Partially Moved）了：
+如果我们无从得知整体绑定模式 `as`，或者带着“一旦在模式里写了 `{ ready: true }` 就把结构体拆散了”的旧观念去写代码，写出来的 传统要么得手动把拆散的字段重新装回一个新的 `Packet`，要么在提取字段后发现原对象已经残缺不全（Partially Moved）了：
 
 ```flurry
 use std.prelude.*;
@@ -54,16 +54,16 @@ fn retain(packet: Packet<T>) -> Packet<T> where T {
 
 在 Flurry 中，模式后缀 **`as name`** 允许你在匹配左侧模式的同时，将**整个被匹配的值**绑定到 `name`。
 
-这里有两条极其精妙的所有权核心规则（详见 `docs/control-flow/pattern-matching/index.md` §观察模式与整体绑定的所有权）：
+这里有两条精巧的所有权核心规则（详见 `docs/control-flow/pattern-matching/index.md` §观察模式与整体绑定的所有权）：
 
-1. **纯观察不消耗所有权**：当左侧模式只检查字面量、变体标签或用 `_` 忽略字段（没有导出内部字段绑定）时，它根本不会索取内部字段的所有权。因此 `{ ready: true } as whole` 匹配成功时，直接将完整的仿射对象 `Packet<T>` 移动给 `whole`。
+1. **纯观察零消耗所有权**：当左侧模式只检查字面量、变体标签或用 `_` 忽略字段（没有导出内部字段绑定）时，它根本不会索取内部字段的所有权。因此 `{ ready: true } as whole` 匹配成功时，直接将完整的仿射对象 `Packet<T>` 移动给 `whole`。
 2. **额外绑定 `Copy` 字段可与整体移动共存**：那如果我们在左侧写了 `{ ready } as whole`，既要把 `ready` 绑定出来，又要把整个 `Packet<T>` 移交给 `whole` 呢？
    只要被额外绑定的字段 `ready` 具备 **`Copy` 能力**（如 `bool`、`u32`），编译器就会**先复制一份 `ready` 字段的值，同时把完好无损的整个仿射对象 `Packet<T>` 移动给 `whole`**。
 
 下面对比合法的“`Copy` 字段复制 + 整体移动”与非法的“仿射字段重叠索取”：
 
 ```text
-  Packet<T> (仿射对象，其中 ready: bool 是 Copy，payload: T 是非 Copy 仿射资源)
+  Packet<T> (仿射对象，其中 ready: bool 是 Copy，payload: T 是并非 Copy 仿射资源)
   ┌──────────────────┬─────────────────────────────┐
   │ ready: bool      │ payload: T (Once / Affine)  │
   └────────┬─────────┴──────────────┬──────────────┘
@@ -72,10 +72,10 @@ fn retain(packet: Packet<T>) -> Packet<T> where T {
            ├──► 复制一份 bool 交给 `ready`
            └──► 整個 Packet<T> 完好无损，整体 Move 交给 `whole`。
 
-  [场景 B] let { payload: item } as whole = packet;  (❌ 编译期直接拒绝。)
-                                    ├──► 试图把非 Copy 的 payload 移给 `item`
+  [场景 B] let { payload: item } as whole = packet;  (❌ 编译期直接报错。)
+                                    ├──► 试图把并非 Copy 的 payload 移给 `item`
                                     └──► 又试图把包含 payload 的完整 Packet 移给 `whole`
-                                         💥 一份独占资源不能掰成两半交出两次。
+                                         💥 一份独占资源无法掰成两半交出两次。
 ```
 
 来看看用 `as whole` 写出的 改进代码有多么清爽：
@@ -97,7 +97,7 @@ fn retain(packet: Packet<T>) -> Packet<T> where T {
 }
 
 -- 2. 复制 Copy 字段 `ready`，同时把完整的仿射对象 `Packet<T>` 移交给 `whole`。
---    注意：这里只要求 ready 的 bool 类型可 Copy，完全不要求 T 实现 Copy。
+--    注意：这里只要求 ready 的 bool 类型可 Copy，完全切勿求 T 实现 Copy。
 fn inspect_ready(packet: Packet<T>) -> Tuple<bool, Packet<T>> where T {
     let { ready } as whole = packet;
     (ready, whole)
@@ -105,7 +105,7 @@ fn inspect_ready(packet: Packet<T>) -> Tuple<bool, Packet<T>> where T {
 ```
 
 ```flurry
--- ❌ 编译期直接拒绝：不能在把非 Copy 载荷绑给 item 的同时，又用 as whole 拿走整个 Packet。
+-- ❌ 编译期直接报错：禁止于把并非 Copy 载荷绑给 item 的同时，又用 as whole 拿走整个 Packet。
 fn bad_overlap_move(packet: Packet<T>) -> Tuple<T, Packet<T>> where T {
     let { payload: item } as whole = packet;
     (item, whole)
@@ -130,7 +130,7 @@ fn unpack(packet: Packet<T>) -> T where T {
 }
 ```
 
-这很容易理解。但如果两个 `or` 分支**从不同的字段位置、甚至是不同的枚举变体中**移出那张不可复制的 `Ticket` 呢？
+这很容易理解。但如果两个 `or` 分支**素无同的字段位置、甚至是不同的枚举变体中**移出那张唯一无二的 `Ticket` 呢？
 
 来看看这段代码：
 
@@ -195,7 +195,7 @@ test {
 - 如果是通过左边候选 `(true, item, _)` 进来的，`pair` 里已经移空了的是第 1 张票，**还留在原地等着被 `Drop` 的是第 2 张票（`#2`）**；
 - 如果是通过右边候选 `(false, _, item)` 进来的，`pair` 里已经移空了的是第 2 张票，**还留在原地等着被 `Drop` 的是第 1 张票（`#1`）**。
 
-编译器是怎么保证既**不会漏掉那个被 `_` 忽略的 `Ticket`（造成内存/资源泄漏）**，又**不会把已经移交给 `item` 的那个 `Ticket` 重复销毁两次（Double Free）**的？
+编译器是怎么保证既**免漏掉那个被 `_` 忽略的 `Ticket`（造成内存/资源泄漏）**，又**免将已经移交给 `item` 的那个 `Ticket` 重复销毁两次（Double Free）**的？
 
 如下所示，揭秘 Flurry 所有权检查器的“动态残余清理计划（Residual Cleanup Plan）”：
 
@@ -242,7 +242,7 @@ fn inspect_both(value: Tuple<bool, Ticket, Ticket>) {
 - 如果命中第一候选 `(true, first, second)`：绑定建立次序是 `first` $\to$ `second`，因此退出时**先清理 `second`，再清理 `first`**。
 - 如果命中第二候选 `(false, second, first)`：绑定建立次序是 `second` $\to$ `first`，因此退出时**先清理 `first`，再清理 `second`**。
 
-编译器绝不会因为把变量名合并到了同一个分支体，就篡改你每个候选真实的绑定声明次序。而且如果两个绑定之间存在析构依赖（比如其中一个的 `Drop` 需要访问另一个），编译器会强制检查**所有可能命中的候选清理次序**都必须满足内存安全依赖。
+编译器免因把变量名合并到了同一个分支体，就篡改你每个候选真实的绑定声明次序。而且如果两个绑定之间存在析构依赖（比如其中一个的 `Drop` 需要访问另一个），编译器会强制检查**所有可能命中的候选清理次序**都必须满足内存安全依赖。
 
 ---
 
@@ -251,7 +251,7 @@ fn inspect_both(value: Tuple<bool, Ticket, Ticket>) {
 | 模式组合场景 | 写法示例 | 所有权与清理语义 |
 | :--- | :--- | :--- |
 | **纯观察 + 整体移动** | `{ ready: true } as whole` | 内部只检查条件不拿走所有权，成功后将完整仿射对象移交给 `whole` |
-| **`Copy` 字段 + 整体移动** | `{ ready } as whole` | 复制 `Copy` 字段给 `ready`，同时将完整仿射对象移交给 `whole`（不要求载荷 `T` 可 `Copy`） |
+| **`Copy` 字段 + 整体移动** | `{ ready } as whole` | 复制 `Copy` 字段给 `ready`，同时将完整仿射对象移交给 `whole`（切勿求载荷 `T` 可 `Copy`） |
 | **`or` 跨位置提取仿射值** | `(true, item, _) or (false, _, item)` | 守卫成功后提交选中字段的移动；剩余未移出的字段按实际命中的候选精准清理 |
 | **`or` 逆序绑定汇合** | `(true, a, b) or (false, b, a)` | 保留实际成功候选的绑定取得次序，退出分支时严格按该候选的逆序执行 `Drop` |
 

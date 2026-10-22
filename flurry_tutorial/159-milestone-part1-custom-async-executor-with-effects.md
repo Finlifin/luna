@@ -38,7 +38,7 @@
 +-------------------------------------------------------------------------+
 |  ⚠️ 核心不变量：                                                        |
 |  “完成唤醒（Resume）”与“超时取消（Cancel）”争用同一份唯一恢复权 K1      |
-|  绝不允许把 K1 按位复制成两份同时塞进就绪队列和取消队列                 |
+|  并不允许把 K1 按位复制成两份同时塞进就绪队列和取消队列                 |
 +-------------------------------------------------------------------------+
 ```
 
@@ -50,7 +50,7 @@
 - 采集任务每完成一步采样，就调用一次协作让出效应 `Scheduler.yield_tick(cost)#` 汇报本次消耗的配额，或者调用 `Scheduler.emit_sample(val)#` 吐出采样数据；
 - 调度器维护一个剩余配额计数器 `remaining_budget`：
   - 只要 `remaining_budget >= cost`，调度器扣除配额并执行 `resume;`（尾切换恢复任务继续运行）；
-  - 一旦 `remaining_budget < cost`（配额耗尽超时。），调度器打印超时告警，并**直接退出分支而不调用 `resume`**——此时 Flurry 的放弃协议自动接管，沿着挂起栈精准析构任务内部持有的硬件通道锁 `ChannelGuard`，确保零资源泄漏。
+  - 一旦 `remaining_budget < cost`（配额耗尽超时。），调度器打印超时告警，并**直接退出分支而跳过调用 `resume`**——此时 Flurry 的放弃协议自动接管，沿着挂起栈精准析构任务内部持有的硬件通道锁 `ChannelGuard`，确保零资源泄漏。
 
 让我们用 `effect enum`（见 `docs/grammar/syntax` 第 364 行：`effect enum id clauses? { effect_variant* }`）把这组调度操作优雅地组织起来，并写出完整的调度器：
 
@@ -117,7 +117,7 @@ test {
                 -- 配额充足：尾切换恢复采集协程继续执行。
                 resume;
             } else {
-                -- 配额耗尽。记录超时标志，且【不执行 resume】。
+                -- 配额耗尽。记录超时标志，且【跳过执行 resume】。
                 -- 离开本分支时，continuation 自动执行放弃协议（Abandonment Protocol），
                 -- 挂起栈内的 `guard: ChannelGuard` 立即触发 Drop 输出 "released channel 7"。
                 stats.timed_out = true;
@@ -133,7 +133,7 @@ test {
     -- budget exhausted, cancelling task
     -- released channel 7
     -- sum=300, rem=5, timeout=true
-    -- （注意："harvest finished all rounds" 绝不会执行，但 ChannelGuard 100% 被安全释放。）
+    -- （注意："harvest finished all rounds" 跳过执行，但 ChannelGuard 100% 被安全释放。）
     println("sum={}, rem={}, timeout={}", stats.sample_sum, stats.remaining_budget, stats.timed_out);
 }
 ```
@@ -147,7 +147,7 @@ test {
 
 ## 阶段三：融合 `async effect` 并发子任务扇出（Fan-Out）与协作式收集
 
-在网关的实际运行中，单个协程内部不仅要按步进配额运行，还会通过 `async effect` 同时向多个硬件探头扇出（Fan-out）异步校准请求，再用 `.await` 收集结果。
+在网关的实际运行中，单个协程内部非但要按步进配额运行，还会通过 `async effect` 同时向多个硬件探头扇出（Fan-out）异步校准请求，再用 `.await` 收集结果。
 
 让我们把 `async effect probe_channel(ch: u32) -> !ProbeErr u32` 与我们的协作式配额调度器叠加在一起（多提示符栈的威力在此刻尽显无疑。）：
 
@@ -185,7 +185,7 @@ fn fanout_dual_probes(ch1: u32, ch2: u32) -> #[probe_channel, CoopSched] !ProbeE
 如果我们在编写外围执行器包装函数时，只消去了 `CoopSched`，却忘了消去 `probe_channel`（或者反过来），编译器会通过效应行检查当场提醒我们：
 
 ```flurry
--- ❌ 编译期直接拒绝。
+-- ❌ 编译期直接报错。
 -- 函数体内只用 `# { ... }` 处理了 `CoopSched`，
 -- 尚未处理 `probe_channel` 异步效应，返回类型卻漏写了 `#[probe_channel]`。
 fn bad_incomplete_executor() -> !ProbeErr u32 {
@@ -202,8 +202,8 @@ fn bad_incomplete_executor() -> !ProbeErr u32 {
 
 | 执行器核心能力 | Flurry 实现机制 | 工程与安全收益 |
 | :--- | :--- | :--- |
-| **协作式挂起与步进** | `effect enum CoopSched` + `catch continuation` + `resume;` | 尾切换恢复开销极低，无需将业务逻辑拆碎成手写状态机 |
-| **配额耗尽超时取消** | 分支内不调用 `resume` 直接退出，自动触发放弃协议（Abandonment） | 沿隐藏中止通道逐帧执行挂起栈上的 `Drop`（如释放 `ChannelGuard`），零资源泄漏 |
+| **协作式挂起与步进** | `effect enum CoopSched` + `catch continuation` + `resume;` | 尾切换恢复开销很低，无需将业务逻辑拆碎成手写状态机 |
+| **配额耗尽超时取消** | 分支内跳过调用 `resume` 直接退出，自动触发放弃协议（Abandonment） | 沿隐藏中止通道逐帧执行挂起栈上的 `Drop`（如释放 `ChannelGuard`），零资源泄漏 |
 | **异步扇出与汇聚** | 连续调用 `probe_channel(ch)#` 登记子工作，随后分别 `.await!` | 请求即启动并发子工作，结构化范围兜底任务归属，错误行与效应行正交组合 |
 
 ---

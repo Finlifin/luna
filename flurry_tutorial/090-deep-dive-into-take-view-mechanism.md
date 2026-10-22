@@ -18,13 +18,13 @@
 - `self'get_field(name)`：在反射与派生代码中按字段名访问成员；
 - `op'intrinsic(args).as(T)`：调用底层硬件内建指令。
 
-为什么 Flurry 要专门设计借鉴自 Ada 属性语法的 **`expr'id`（Take View，取视图）** 机制，而不是直接用普通点号 `expr.type`、`expr.bitvec`，或者设计一堆全局自由函数 `typeof(expr)`、`bitvec_of(expr)`？
+为什么 Flurry 要专门设计借鉴自 Ada 属性语法的 **`expr'id`（Take View，取视图）** 机制，而非直接用普通点号 `expr.type`、`expr.bitvec`，或者设计一堆全局自由函数 `typeof(expr)`、`bitvec_of(expr)`？
 
 ### 1. 避免与用户自定义字段或方法发生命名冲突
 
 如果使用普通点号 `.type` 或 `.tag_name` 来表达语言级元查询：
 - 一旦用户自己定义了一个网络包结构体 `struct Packet { type: u8, tag_name: String }`，那么 `pkt.type` 究竟是访问结构体的 `type` 字段，还是查询 `pkt` 的静态类型 `Packet`？
-- 通过将普通成员访问固定在 `.`（点号），而将语言级内置视角切换固定在 `'`（单引号），两套命名空间完全正交：用户的结构体可以自由命名任何字段（包括 `type`、`bitvec`、`old`），永远不会遮蔽或冲突于语言级视图操作。
+- 通过将普通成员访问固定在 `.`（点号），而将语言级内置视角切换固定在 `'`（单引号），两套命名空间完全正交：用户的结构体可以自由命名任何字段（包括 `type`、`bitvec`、`old`），永免遮蔽或冲突于语言级视图操作。
 
 ### 2. 保持从左到右的后缀链式阅读体验
 
@@ -126,41 +126,41 @@ test take_view_family_showcase {
 
 ---
 
-## 四、 边界与编译期拒绝：Take View 的三条严格契约
+## 四、 边界与编译期报错：Take View 的三条严格契约
 
 Take View 是语言定义的封闭特性集合（Closed Set of Language Operations），不开放给用户随意捏造未知的 `'custom_view`，且每个视图严格检查其目标类型与位置合法性：
 
-### 1. 拒绝未定义的视图名称
+### 1. 报错未定义的视图名称
 
 ```flurry
--- [编译期拒绝示例 1] 未知的 Take View 名称
+-- [编译期负例 1] 未知的 Take View 名称
 -- fn reject_unknown_view(x: u32) -> u32 {
---     -- 编译错误：`not_a_real_view` 不是已定义的语言视图操作
+--     -- 编译错误：`not_a_real_view` 并非已定义的语言视图操作
 --     x'not_a_real_view
 -- }
 ```
 
-### 2. 拒绝在非后置条件上下文中使用 `'old`
+### 2. 禁止在并非后置条件上下文中使用 `'old`
 
-`'old` 专门用于在函数后置契约 `ensures` 中指代函数入口状态，不能出现在普通函数体或前置条件 `requires` 中：
+`'old` 专门用于在函数后置契约 `ensures` 中指代函数入口状态，无法出现在普通函数体或前置条件 `requires` 中：
 
 ```flurry
--- [编译期拒绝示例 2] 在普通函数体中使用 'old
+-- [编译期负例 2] 在普通函数体中使用 'old
 -- fn reject_old_in_body(x: i32) -> i32 {
 --     -- 编译错误：`'old` 视图仅允许出现在 `ensures` 后置条件子句中
 --     x'old + 1
 -- }
 ```
 
-### 3. 拒绝对不可写右值视图执行原位赋值
+### 3. 禁止对只读右值视图执行原位赋值
 
-当使用 `'bitvec` 进行位切片写回 `target'bitvec[lo..hi] = val` 时，`target` 必须是一个可修改的存储位置（`var` 变量或解引用指针），不能是不可变绑定 `let` 或临时算术表达式：
+当使用 `'bitvec` 进行位切片写回 `target'bitvec[lo..hi] = val` 时，`target` 必须是一个可修改的存储位置（`var` 变量或解引用指针），无法是不可变绑定 `let` 或临时算术表达式：
 
 ```flurry
--- [编译期拒绝示例 3] 对不可变 let 绑定的 'bitvec 视图做切片写回
+-- [编译期负例 3] 对不可变 let 绑定的 'bitvec 视图做切片写回
 -- fn reject_immutable_bitvec_writeback() -> void {
 --     let frozen_byte: u8 = 0x12u8;
---     -- 编译错误：`frozen_byte` 是不可变绑定，不能对其 `'bitvec` 视图执行原地切片赋值
+--     -- 编译错误：`frozen_byte` 是不可变绑定，无法对其 `'bitvec` 视图执行原地切片赋值
 --     frozen_byte'bitvec[0..4] = 0xF;
 -- }
 ```
@@ -171,7 +171,7 @@ Take View 是语言定义的封闭特性集合（Closed Set of Language Operatio
 
 | Take View 语法 | 语义分类 | 核心用途与静态契约 |
 | :--- | :--- | :--- |
-| **`expr'type`** | 编译期类型查询 | 获取表达式的静态类型，不产生运行期副作用 |
+| **`expr'type`** | 编译期类型查询 | 获取表达式的静态类型，免生运行期副作用 |
 | **`expr'bitvec`** | 位向量表示视图 | 将定宽标量视为 `BitVec<n>`；当主语为可写位置时支持原位位段写回 |
 | **`expr'tag_name`** | 枚举标签提取 | 获取枚举值当前活跃变体的字符串名称（`str`） |
 | **`expr'tuple_enumerate`** | 元组带下标展开 | 配合 `inline for` 在编译期获取 `(index, element)` 对 |

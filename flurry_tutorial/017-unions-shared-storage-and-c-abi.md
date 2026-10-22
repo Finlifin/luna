@@ -10,7 +10,7 @@
 1. 如果用普通的带载荷枚举 `enum TaggedSlot { integer(i32), real(f32) }`，为了在运行时记住“当前存的到底是 `i32` 还是 `f32`”，编译器必须在 4 字节数据之外**额外分配一个判别标签（Tag）**。加上对齐填充，它的大小会变成 8 字节——直接把 C 语言的 4 字节硬件描述符布局撑爆。
 2. 如果想用 `.discrete_tag true` 的零额外开销枚举呢？也不行。因为 `i32` 和 `f32` 几乎占满了全部 $2^{32}$ 种比特组合，它们在位模式上**完全重叠，根本没有互斥的空闲比特（Niche）可以用来区分彼此**。
 
-当判别信息保存在外部（比如另一个硬件寄存器里），而当前这 4 个字节必须**分毫不差地共享同一块物理内存**时，Flurry 的 **`union`（联合体）** 登场了（详见 `docs/type/user-defined-types/unions.md`）。
+当判别信息保存在外部（比如另一个硬件寄存器里），而当前这 4 个字节必须**准确无误地共享同一块物理内存**时，Flurry 的 **`union`（联合体）** 登场了（详见 `docs/type/user-defined-types/unions.md`）。
 
 ---
 
@@ -20,7 +20,7 @@
 
 ### 安全但占用了额外空间的 `enum`
 
-在一般业务逻辑里，只要不需要强行塞进外部无标签的 4 字节槽位，你永远应该首选 `enum`：
+在一般业务逻辑里，只要无需强行塞进外部无标签的 4 字节槽位，你永远应该首选 `enum`：
 
 ```flurry
 use std.prelude.*;
@@ -68,7 +68,7 @@ union Number {
   │  0 = integer │   (对齐填充)  │  [ i32 ]  或  [ f32 ]        │
   │  1 = real    │              │                              │
   └──────────────┴──────────────┴──────────────────────────────┘
-   ▲ 每次 match 时，编译器先检查 Tag，绝不可能把 f32 错当成 i32 读出来。
+   ▲ 每次 match 时，编译器先检查 Tag，难以把 f32 错当成 i32 读出来。
 
   [ union Number ] —— 没有门牌号的“共享单间” (严格 4 Bytes, C ABI!)
   ┌────────────────────────────────────────────────────────────┐
@@ -87,7 +87,7 @@ union Number {
 >    当你写 `var slot = Number.integer(12);` 时，你只是把一个合法的 `i32` 放进了 4 字节槽位里，没有任何歧义，因此在普通安全代码中就可以直接构造。但是，一旦构造完成，由于 `union` 自身不保存标签，**除构造以外的任何 `union` 实例操作（如通过指针覆写共享存储、解释读取成员）都必须放在 `unsafe` 作用域或 `unsafe fn` 中**，由程序员为“当前存储里的位模式确实对应哪个成员”立下军令状。
 
 ```flurry
--- ❌ 编译期直接拒绝：union 没有内置判别标签，不能像 enum 那样在安全代码里直接 match
+-- ❌ 编译期直接报错：union 没有内置判别标签，无法像 enum 那样在安全代码里直接 match
 fn bad_match(slot: Number) {
     slot match {
         .integer(v) => println("{}", v),
@@ -98,7 +98,7 @@ fn bad_match(slot: Number) {
 
 ---
 
-## 二、 核心问题——为什么给 `union` 赋值绝不自动调用旧成员的 `Drop`？
+## 二、 核心问题——为什么给 `union` 赋值非自动调用旧成员的 `Drop`？
 
 现在，把安全带系紧。我们要触碰系统编程语言里最容易踩爆的地雷之一：**当 `union` 遇上资源清理（`Drop`）和覆盖赋值时，会发生什么？**
 
@@ -108,15 +108,15 @@ fn bad_match(slot: Number) {
 2. **自动调用 `old_val` 的 `Drop` 清理旧资源**；
 3. 把 `new_val` 写入 `x`。
 
-那么问题来了：如果 `slot` 是一个指向 `union` 的指针 `*Number`，或者一个 `union` 变量，当我们执行 **`slot.* = Number.real(1.5);`** 时，编译器会不会自动帮我们调用旧成员的 `Drop`？
+那么问题来了：如果 `slot` 是一个指向 `union` 的指针 `*Number`，或者一个 `union` 变量，当我们执行 **`slot.* = Number.real(1.5);`** 时，编译器是否会自动帮我们调用旧成员的 `Drop`？
 
-**绝对不会。在 Flurry 中，`union` 赋值被明确规定为“绝不隐式执行旧成员的 `Drop`”。**
+**不会。在 Flurry 中，`union` 赋值被明确规定为“不隐式执行旧成员的 `Drop`”。**
 
 为什么？下面来看看如果编译器隐式去调 `Drop` 会发生什么内存安全问题：
 
 ```text
   假设 union PacketUnion 包含两个成员：
-    - raw_id:   u64          (纯数字，比如 0x0000_0000_0000_1234，不需要 Drop)
+    - raw_id:   u64          (纯数字，比如 0x0000_0000_0000_1234，无需 Drop)
     - buf_ptr:  OwnedBuffer  (持有堆内存指针，Drop 时会调用 free(ptr) 释放内存。)
 
   此时共享存储里放的是：PacketUnion.raw_id(0x1234)
@@ -126,8 +126,8 @@ fn bad_match(slot: Number) {
                           │
       现在执行赋值：slot.* = PacketUnion.buf_ptr(new_buf);
                           ▼
-  ❓ 编译器灵魂发问：“我要不要在写入 new_buf 之前，把旧值 Drop 掉？”
-     - 如果按 raw_id (u64) 处理：什么都不用做。
+  ❓ 编译器灵魂发问：“我要切勿在写入 new_buf 之前，把旧值 Drop 掉？”
+     - 如果按 raw_id (u64) 处理：什么都无须做。
      - 如果按 buf_ptr (OwnedBuffer) 处理：把整数 0x1234 当成堆指针传给 free(0x1234) ──► 💥 当场段错误崩溃。
      - 可是 union 里根本没有 Tag。编译器在运行时怎么可能知道里面之前装的是 raw_id 还是 buf_ptr？
 ```
@@ -137,7 +137,7 @@ fn bad_match(slot: Number) {
 
 因此，Flurry 在语言规范（`docs/type/user-defined-types/unions.md` 与 `docs/resource-management/bindings.md`）中划下了一条清晰的红线：
 - **普通绑定赋值**：编译器知道确切类型（或 `enum` 自带运行时标签），自动执行旧值 `Drop`。
-- **`union` 共享存储赋值**：**不自动插入旧成员析构。** 如果旧成员持有需要清理的资源，程序员必须在覆写 `union` 之前，根据外部状态显式完成旧成员资源的移出或清理；然后才能在 `unsafe` 块中覆写共享存储。
+- **`union` 共享存储赋值**：**非自动插入旧成员析构。** 如果旧成员持有需要清理的资源，程序员必须在覆写 `union` 之前，根据外部状态显式完成旧成员资源的移出或清理；然后才能在 `unsafe` 块中覆写共享存储。
 
 来看看遵循这一契约的标准 进阶代码：
 
@@ -151,7 +151,7 @@ union Number {
 
 -- 构造以外的 union 实例操作（包括整体替换和成员读取/写入）均要求 unsafe
 unsafe fn replace_with_real(slot: *Number, value: f32) {
-    -- 直接以 f32 成员的位表示替换共享存储，不触发任何隐式旧成员 Drop
+    -- 直接以 f32 成员的位表示替换共享存储，免于触发任何隐式旧成员 Drop
     slot.* = Number.real(value);
 }
 
@@ -177,7 +177,7 @@ test {
 ```
 
 ```flurry
--- ❌ 编译期直接拒绝：在非 unsafe 函数中直接读取或写入已构造的 union 实例成员
+-- ❌ 编译期直接报错：在并非 unsafe 函数中直接读取或写入已构造的 union 实例成员
 fn bad_access(slot: *Number) -> i32 {
     slot.* = Number.real(3.14);
     slot.integer.*
@@ -192,7 +192,7 @@ fn bad_access(slot: *Number) -> i32 {
 当然不。系统编程的最佳实践，永远是**把 `union` 关进一个小型封装结构体里，用外部寄存器或状态位作为判别依据，向业务层暴露 100% 安全的接口**。
 
 同时，还要谨记 `docs/type/user-defined-types/unions.md` 中的另一条核心规则：
-> **“进入 `unsafe` 也不能凭空授予任意位串作为任意成员值的合法性。”**
+> **“进入 `unsafe` 亦无法凭空授予任意位串作为任意成员值的合法性。”**
 
 比如你在 `union` 里放了一个布尔成员 `flag: bool`（合法位模式只有 `0` 和 `1`）和一个字节成员 `raw: u8`。如果你先写入了 `raw(255)`，就算钻进 `unsafe` 块里把它当成 `bool` 读出来，那也是违反类型表示契约的非法行为。
 
@@ -249,7 +249,7 @@ test {
 看看 `DmaCalibrationDesc`：
 1. 底层 `CalibrationPayload` 严格保持 C ABI 的 4 字节 `union` 布局，可以直接映射给 C 驱动或硬件 DMA 寄存器；
 2. 每次切换活跃成员时，`switch_to_scale` 负责同时更新 `self.is_float.*` 和 `self.payload.*`，将 `unsafe` 锁死在底层封装内部；
-3. 外部调用者只需要调用 `from_offset`、`from_scale` 和 `switch_to_scale`，连一个 `unsafe` 关键字都不用写。
+3. 外部调用者只需要调用 `from_offset`、`from_scale` 和 `switch_to_scale`，连一个 `unsafe` 关键字都省去书写。
 
 ---
 
@@ -261,7 +261,7 @@ test {
 | :--- | :--- | :--- | :--- |
 | **普通 `enum`** | 编译器自动管理 Tag + 载荷 | 95% 的高层业务逻辑与状态机 | 100% 安全 `match`；覆盖赋值自动清理旧变体 |
 | **定宽模式 `enum`** (`.base_type` + `.discrete_tag`) | 零额外 Tag，靠变体间的互斥比特位模式判别 | 协议报文、指令集解码（如 RISC-V）、紧凑标志位 | 编译期证明变体互斥；100% 安全构造与匹配 |
-| **`union`** | 严格 C ABI 共享存储，**无内置 Tag** | 对接 C 语言 `union`、由外部状态位决定含义的硬件寄存器 | 构造安全，其余实例操作需 `unsafe`；**赋值绝不自动触发旧成员 `Drop`** |
+| **`union`** | 严格 C ABI 共享存储，**无内置 Tag** | 对接 C 语言 `union`、由外部状态位决定含义的硬件寄存器 | 构造安全，其余实例操作需 `unsafe`；**赋值非自动触发旧成员 `Drop`** |
 
 ---
 
@@ -280,7 +280,7 @@ typealias TimeoutMs = u32;
 ```
 结果昨天晚上联调时，同事在调用 `configure_dma(dev: DeviceId, ch: ChannelIndex, timeout: TimeoutMs)` 时，手滑写成了 `configure_dma(dev_id, 5000, ch_idx)`——**把 5000 毫秒的超时当成通道号传了进去，把通道号 2 当成了 2 毫秒超时。**
 
-更要命的是，编译器居然**一声不吭地编译通过了**。
-为什么 `typealias` 拦不住这种张冠李戴的低级错误？如果我们想要创造一个**底层机器表示 100% 还是 `u32`（零运行时开销），但在类型系统里拥有绝对独立身份、甚至连 `u32` 的方法都不会随便暴露出来的全新类型**，该用什么？
+更要命的是，编译器却**一声不吭地编译通过了**。
+为什么 `typealias` 拦不住这种张冠李戴的低级错误？如果我们想要创造一个**底层机器表示 100% 还是 `u32`（零运行时开销），但在类型系统里拥有完全独立身份、甚至连 `u32` 的方法都免随便暴露出来的全新类型**，该用什么？
 
-在下一篇 **《Flurry 演进手记 (018)：同样是 u32，凭什么不能混用——newtype 独立类型身份与 typealias 透明别名》** 中，我们将用 `newtype` 和 `.as(View)` 类型视角彻底终结“基本类型参数传错位置”的难题。
+在下一篇 **《Flurry 演进手记 (018)：同样是 u32，凭什么禁止混用——newtype 独立类型身份与 typealias 透明别名》** 中，我们将用 `newtype` 和 `.as(View)` 类型视角终结“基本类型参数传错位置”的难题。

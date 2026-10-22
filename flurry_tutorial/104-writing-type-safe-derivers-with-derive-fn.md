@@ -1,19 +1,19 @@
 # Flurry 演进手记 (104)：告别黑盒过程宏派生——用纯语言级 derive fn 编写类型安全的自动派生器
 
-> **系列导读**：在上一期（103）中，我们了解了参数 Elaboration 与收集协议如何帮我们消除调用端的繁琐样板。今天，我们要解决**定义端**常见的样板代码问题——**接口自动派生（Trait Derivation）**。在日常开发遥测与张量引擎时，我们有成百上千个结构体需要实现 `FormatLabel`、`Serialize`、`Eq`、`Hash` 等接口。为什么在其他语言中写一个自定义 `#[derive(...)]` 过程宏如此痛苦？Flurry 又是如何用一等公民语法 **`derive fn`** 将自动派生彻底拉回纯语言级、类型安全的轨道上的？让我们马上揭晓。
+> **系列导读**：在上一期（103）中，我们了解了参数 Elaboration 与收集协议如何帮我们消除调用端的繁琐样板。今天，我们要解决**定义端**常见的样板代码问题——**接口自动派生（Trait Derivation）**。在日常开发遥测与张量引擎时，我们有成百上千个结构体需要实现 `FormatLabel`、`Serialize`、`Eq`、`Hash` 等接口。为什么在其他语言中写一个自定义 `#[derive(...)]` 过程宏如此痛苦？Flurry 又是如何用一等公民语法 **`derive fn`** 将自动派生拉回纯语言级、类型安全的轨道上的？让我们马上揭晓。
 
 ---
 
 ## 一、传统过程宏的问题：传统方案的“无类型 Token 拼接问题”
 
 如果你在 Rust 中写过自定义的 `#[derive(MySerialize)]`，你一定经历过以下四重折磨：
-1. **工程割裂**：你不能在当前代码文件里直接写派生器，必须专门新建一个独立的 `proc-macro` Cargo 包；
-2. **丧失类型与语义视角**：你的派生宏拿到的只是一串语法记号流（`TokenStream`）。你根本不知道某个字段的类型究竟实现了什么接口、它的内存对齐是多少，只能像做字符串拼接一样盲目生成代码；
+1. **工程割裂**：你禁止于当前代码文件里直接写派生器，必须专门新建一个独立的 `proc-macro` Cargo 包；
+2. **丧失类型与语义视角**：你的派生宏拿到的只是一串语法记号流（`TokenStream`）。你根本无从得知某个字段的类型究竟实现了什么接口、它的内存对齐是多少，只能像做字符串拼接一样盲目生成代码；
 3. **参数传递靠发明“属性黑话”**：如果你想给派生器传一个配置参数，你得自己解析 `#[my_trait(prefix = "foo", rename_all = "camelCase")]` 这种非标准属性语法；
-4. **报错犹如天书**：一旦派生生成的代码不满足某个接口契约，编译器报错往往直接糊在 `#[derive(...)]` 那一行宏调用上，调试时连生成了什么代码都看不见。
+4. **报错犹如天书**：一旦派生生成的代码违背某个接口契约，编译器报错往往直接糊在 `#[derive(...)]` 那一行宏调用上，调试时连生成了什么代码都看不见。
 
 在 Flurry 中，设计者问了一个关键问题：
-> **既然 Flurry 已经拥有了强大的双层类型理论（2LTT）和编译期类型反射，为什么“生成一个 Trait 实现”不能直接写成语言里的一等公民函数？**
+> **既然 Flurry 已经拥有了强大的双层类型理论（2LTT）和编译期类型反射，为什么“生成一个 Trait 实现”禁止直接写成语言里的一等公民函数？**
 
 ---
 
@@ -21,14 +21,14 @@
 
 在 Flurry 中，自动派生器（Deriver）被正式定义为一种名为 **`derive fn`** 的编译时实现生成策略，而应用派生则使用独立的 **`derive Trait for Type`** 声明。
 
-让我们看看它们清晰无比的语法结构：
+让我们看看它们清晰明确的语法结构：
 
 ```text
 deriver_def -> derive fn id (parameter*)? for expr clauses? { (assoc_decl | definition | statement)* }
 derive_def  -> comptime? derive expr for expr clauses?
 ```
 
-在 `derive fn` 的花括号内部，你写的不是字符串拼接，也不是晦涩的语法树节点构造，而是**直接就像写普通 `impl` 一样，写出目标 Trait 所需的关联项（`assoc`）和方法（`fn`）**。在其中，目标主体类型自动绑定为 **`Self`**。
+在 `derive fn` 的花括号内部，你写的不是字符串拼接，亦非晦涩的语法树节点构造，而是**直接就像写普通 `impl` 一样，写出目标 Trait 所需的关联项（`assoc`）和方法（`fn`）**。在其中，目标主体类型自动绑定为 **`Self`**。
 
 让我们先写一个最直观的 示例：为参数化格式标签接口 `FormatLabel<format>` 编写一个名为 `json_label` 的派生器，并用 `.use(json_label)` 应用到结构体 `Record` 上：
 
@@ -65,9 +65,9 @@ test {
 ### ⚠️ 核心阶段辨析：生成器在编译期运行 $\neq$ 生成的方法在编译期运行
 
 初学者第一次看到 `derive fn` 时，很容易产生一个疑问：
-“既然 `derive fn` 是在编译期执行的生成器，那它里面写的 `fn label(*self) -> str` 会不会变成 `comptime fn`？”
+“既然 `derive fn` 是在编译期执行的生成器，那它里面写的 `fn label(*self) -> str` 是否会变成 `comptime fn`？”
 
-**绝对不会。** 请牢记这条核心原则：
+**并非如此。** 请牢记这条核心原则：
 > **Deriver 的生成逻辑运行在编译期（Comptime），但普通 `derive` 生成出来的依然是 Trait 的默认运行期相（Runtime Phase）实现。**
 > 只有当你显式写 **`comptime derive ...`** 时，才会针对接口中带有 **`^comptime_phase`** 属性的成员生成 Comptime 相的实现（等同于生成 `comptime impl`）。
 
@@ -77,14 +77,14 @@ test {
 
 如果我们的遥测系统需要为不同的结构体派生自定义的标签前缀或配置文本，在 Flurry 里还需要像 Rust 那样去解析字符串属性宏吗？
 
-**完全不需要。** 因为 `derive fn` 本身就是一个函数，它可以**直接声明形参**。
-`derive fn` 的形参遵循与 `comptime fn` 完全相同的规则：这些参数作为**编译期输入**服务于实现代码的生成过程，而**不会**变成生成的每个运行期方法的额外运行期参数。
+**全然无须。** 因为 `derive fn` 本身就是一个函数，它可以**直接声明形参**。
+`derive fn` 的形参遵循与 `comptime fn` 完全相同的规则：这些参数作为**编译期输入**服务于实现代码的生成过程，而**免除**变成生成的每个运行期方法的额外运行期参数。
 
 ```flurry
 -- 带形参的派生器：text 是生成器的编译时输入。
 derive fn label_from_text(text: str) for FormatLabel<.text> {
     -- 生成的 label 方法签名依然是 fn(*self) -> str，
-    -- 调用 record.label<.text>() 时不需要再传一次 text。
+    -- 调用 record.label<.text>() 时无需再传一次 text。
     fn label(*self) -> str {
         text
     }
@@ -160,23 +160,23 @@ struct GyroPacket {
 derive WireTag.use(fixed_wire_tag(42u32)) for GyroPacket;
 
 -- ❌ 若写 derive WireTag.use(fixed_wire_tag(0u32)) for GyroPacket;
--- 编译期直接拒绝：违反派生器自身的 requires code > 0u32 前置契约。
+-- 编译期直接报错：违反派生器自身的 requires code > 0u32 前置契约。
 ```
 
 ---
 
-## 四、铁面无私的守门人：为什么 `derive` 绝不是绕过检查的“后门”？
+## 四、铁面无私的守门人：为什么 `derive` 并非绕过检查的“后门”？
 
 在很多支持宏的语言里，宏生成的代码常常享有某种“法外特权”，或者报错位置混乱不堪。
 而在 Flurry 中，有一条铁打的原则：
-> **派生器（Deriver）不能以“生成代码”的名义跳过任何一项普通 `impl` 检查。生成物必须先通过包归属（Orphan Rules）、重叠冲突（Coherence）、关联项完整性、方法契约（`requires`/`ensures`/`outcomes`）以及阶段（Phase）的全套验证，才能成为可被依赖的事实。**
+> **派生器（Deriver）无法以“生成代码”的名义跳过任何一项普通 `impl` 检查。生成物必须先通过包归属（Orphan Rules）、重叠冲突（Coherence）、关联项完整性、方法契约（`requires`/`ensures`/`outcomes`）以及阶段（Phase）的全套验证，才能成为可被依赖的事实。**
 
 举个例子：如果某个 `derive fn` 粗心地写错了返回类型，或者漏写了一个没有默认值的必需方法，编译器在 `derive Trait for Type` 处会**同时展示三个精确的诊断锚点**：
 1. `derive` 的使用点；
 2. 所选 `derive fn` 策略的定义点；
 3. 生成物中未能满足契约的具体成员。
 
-而且，一旦派生检查失败，编译器会立即干净地回退，**绝不在符号表里留下“半份残缺的实现”**去引发后续连环报错。
+而且，一旦派生检查失败，编译器会立即干净地回退，**不在符号表里留下“半份残缺的实现”**去引发后续连环报错。
 
 ---
 
@@ -201,6 +201,6 @@ derive WireTag.use(fixed_wire_tag(42u32)) for GyroPacket;
 在 Flurry 中：
 - 如何用 **`^attrs.derivation.default`**（或通过 `use attrs.derivation.default as ...` 取别名）将一个 `derive fn` 注册为某个接口的默认派生策略？
 - 哪些包有资格注册默认派生策略？
-- 如果一个人先后用**两个不同的策略**（比如 `json_label` 和 `compact_json_label`）为同一个 `Record` 派生了两次 `FormatLabel<.json>`，编译器会因为“策略名字不同”而放行吗？
+- 如果一个人先后用**两个各异的策略**（比如 `json_label` 和 `compact_json_label`）为同一个 `Record` 派生了两次 `FormatLabel<.json>`，编译器会因为“策略名字不同”而放行吗？
 
 下一期 **《Flurry 演进手记 (105)：具名派生策略与默认策略——^attrs.derivation.default 与 derive Trait for Type》**，我们将完成本批次的压轴拼图。

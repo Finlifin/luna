@@ -1,6 +1,6 @@
 # Flurry 演进手记 (166)：当 `resume` 附带 `while` 守卫——条件恢复与状态机驱动
 
-> **阅读指南**：在上一回（第 165 回）结尾，我们发现了 `docs/grammar/syntax` 与 `docs/algebraic-effect-and-delimited-continuation/algebraic-effect.md` 中的一颗语法明珠：`resume_statement -> resume expr? (while expr)?`。在第一卷第 014 回里，我们见识过 `return x while cond;` 和 `break while cond;` 如何消除深层 `if` 缩进。今天，当后缀 `while` 守卫遇上代数效应的核心语句 **`resume`** 时，会发生怎样奇妙的化学反应？在直接处理（Direct Handler）和捕获处理（Capturing Handler）中，当 `while` 守卫不成立、未触发 `resume` 时，控制流与挂起栈的资源清理分别遵循什么规则？让我们一探究竟。
+> **阅读指南**：在上一回（第 165 回）结尾，我们发现了 `docs/grammar/syntax` 与 `docs/algebraic-effect-and-delimited-continuation/algebraic-effect.md` 中的一颗语法明珠：`resume_statement -> resume expr? (while expr)?`。在第一卷第 014 回里，我们见识过 `return x while cond;` 和 `break while cond;` 如何消除深层 `if` 缩进。今天，当后缀 `while` 守卫遇上代数效应的核心语句 **`resume`** 时，会发生怎样奇妙的化学反应？在直接处理（Direct Handler）和捕获处理（Capturing Handler）中，当 `while` 守卫未能成立、未触发 `resume` 时，控制流与挂起栈的资源清理分别遵循什么规则？让我们一探究竟。
 
 ---
 
@@ -11,7 +11,7 @@
 
 ### 传统 `if { resume ...; }` 带来的视觉噪音
 
-如果不用后缀 `while` 守卫，一个拥有三档动态策略的 Handler 分支写出来是这样的：
+如果无须后缀 `while` 守卫，一个拥有三档动态策略的 Handler 分支写出来是这样的：
 
 ```flurry
 -- 在 Handler 分支里堆叠多层 if { resume ...; }
@@ -38,10 +38,10 @@ scale(value) => {
 resume_statement -> resume expr? (while expr)?
 ```
 
-它的执行语义极其直观：
+它的执行语义十分直观：
 1. 当控制流到达 `resume val while cond;` 时，先判断守卫条件 `cond`（类型为 `bool`）；
 2. **若 `cond` 为 `true`**：计算 `val`，立即将其作为本次效应操作的结果交付给请求点，并**当场结束当前这一个 Handler 分支的执行**。
-3. **若 `cond` 为 `false`**：不执行 `resume`（也不提前结束分支），控制流平缓地继续执行该 Handler 分支里的下一条语句。
+3. **若 `cond` 为 `false`**：跳过执行 `resume`（也不提前结束分支），控制流平缓地继续执行该 Handler 分支里的下一条语句。
 4. 对于返回 `void` 的效应操作，还可以省略结果表达式，直接写 **`resume while cond;`**。
 
 下面来看清 `resume val while cond;` 在直接处理与捕获处理两条路径上的控制流走向：
@@ -104,7 +104,7 @@ test {
 
 ---
 
-## 三、 配额看门狗熔断：当捕获分支中 `while` 守卫不成立时，挂起栈如何安全清理？
+## 三、 配额看门狗熔断：当捕获分支中 `while` 守卫未能成立时，挂起栈如何安全清理？
 
 现在，让我们把 `resume ... while` 放到更具威力的 **捕获型 Handler（Capturing Handler，带 `catch continuation: builtin.Continuation`）** 中。
 
@@ -169,7 +169,7 @@ test {
 ```
 
 当然，编译器对 `resume expr? while cond;` 的类型与上下文检查也严格检查：
-1. **`resume` 语句（无论带不带 `while`）只能出现在效应 Handler 的处理分支内部**，在普通函数里写 `resume` 会被直接拒绝；
+1. **`resume` 语句（无论带未带 `while`）只能出现在效应 Handler 的处理分支内部**，在普通函数里写 `resume` 会被直接报错；
 2. **`resume` 交付的值必须与效应操作声明的返回类型 `Y` 完全一致**，且 `while` 后的守卫表达式必须是 `bool` 类型：
 
 ```flurry
@@ -180,9 +180,9 @@ fn broken_resume_guard() -> u32 {
         ask_count()#
     })# {
         ask_count() => {
-            -- ❌ 编译期直接拒绝。
-            -- 1. while 守卫条件必须是 bool 类型，不能传入整数 1u32。
-            -- 2. 若操作返回 u32，resume 必须提供 u32 结果表达式，不能无参 resume。
+            -- ❌ 编译期直接报错。
+            -- 1. while 守卫条件必须是 bool 类型，禁传入整数 1u32。
+            -- 2. 若操作返回 u32，resume 必须提供 u32 结果表达式，无法无参 resume。
             resume 42u32 while 1u32;
             0u32
         },
@@ -209,6 +209,6 @@ fn broken_resume_guard() -> u32 {
 但是，在设计一个供成百上千名外部开发者调用的大型标准库或商业 SDK 时，我们面临一个至关重要的**软件架构与模块边界问题**：
 - 我们在库模块 `parser_engine` 内部为了代码清晰，定义并使用了一个私有的代数效应 `private effect step_cursor() -> u8;`；
 - 可是，调用我们公开函数 `pub fn parse_document(text: str) -> Document` 的外部用户，根本不想知道你内部用了什么 `step_cursor` 效应。
-- 如果我们不小心把一个内部私有效应 `#step_cursor` 留在了公开函数 `pub fn` 的返回类型签名上，会发生什么？我们应该怎样在模块与包的边界上，做好**效应的隐藏、内部消去（Internal Handling）与高层效应转换**？
+- 如果我们偶有疏忽把一个内部私有效应 `#step_cursor` 留在了公开函数 `pub fn` 的返回类型签名上，会发生什么？我们应该怎样在模块与包的边界上，做好**效应的隐藏、内部消去（Internal Handling）与高层效应转换**？
 
 下一篇 **《Flurry 演进手记 (167)：跨模块与跨包边界的效应隐藏与接口封装》**，我们将结合 `docs/code-organization/visibility.md` 与 `handling-capability.md`，讲透效应系统的模块化架构之道。

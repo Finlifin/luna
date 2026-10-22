@@ -1,10 +1,10 @@
 # Flurry 演进手记 (121)：动态组装一个 `match` 表达式——Quoted Arm 与 `match { use arms }` 接入协议
 
-> **阅读指南**：在上一回（第 120 回）中，我们学会了用 `< T -| Ψ >` 构造模式代码，并在 `~<pattern> => ~<body>` 中将它与表达式代码 `< Ψ |- U >` 手动配对。但当我们在构建协议指令分发器、字节码解释器或编译器重写引擎时，往往有成百上千条匹配规则，每条规则捕获的中间变量 $\Psi_i$ 都不一样。怎样把一条规则的“模式 + 守卫 + 成功主体”紧紧锁成一个高内聚的代码组件？怎样用一行 `use rule_template` 把多条规则批量注入到 `match` 中，同时还让编译器为我们做完整的静态穷尽性检查（Exhaustiveness Check）？本篇我们将结合 `docs/cmtt/patterns-and-arms.md` 与 `docs/cmtt/quote-functions-and-templates.md`，解锁 CMTT 的第三块核心拼图——**Quoted Arm（分支代码）**。
+> **阅读指南**：在上一回（第 120 回）中，我们学会了用 `< T -| Ψ >` 构造模式代码，并在 `~<pattern> => ~<body>` 中将它与表达式代码 `< Ψ |- U >` 手动配对。但当我们在构建协议指令分发器、字节码解释器或编译器重写引擎时，往往有成百上千条匹配规则，每条规则捕获的中间变量 $\Psi_i$ 都有所差异。怎样把一条规则的“模式 + 守卫 + 成功主体”紧紧锁成一个高内聚的代码组件？怎样用一行 `use rule_template` 把多条规则批量注入到 `match` 中，同时还让编译器为我们做完整的静态穷尽性检查（Exhaustiveness Check）？本篇我们将结合 `docs/cmtt/patterns-and-arms.md` 与 `docs/cmtt/quote-functions-and-templates.md`，解锁 CMTT 的第三块核心拼图——**Quoted Arm（分支代码）**。
 
 ---
 
-## 一、 问题背景：当每条分支导出的变量各不相同时，手动配对为什么会失灵？
+## 一、 问题背景：当每条分支导出的变量各互异时，手动配对为什么会失灵？
 
 假设我们在写一个虚拟机指令执行器，指令枚举 `Operation` 有三种形式：
 - `.literal(u32)`：携带 1 个操作数；
@@ -21,14 +21,14 @@
 --   .reset 分支导出空上下文 < Operation -| >
 --   .literal(v) 分支导出 1 个变量 < Operation -| v: u32 >
 --   .add(l, r) 分支导出 2 个变量 < Operation -| l: u32, r: u32 >
---   它们的内部绑定 Ψ 完全不同。
+--   它们的内部绑定 Ψ 大相径庭。
 -- 问题 2（配对错位风险）：
---   如果把模式和主体拆开存放，万一不小心把第 1 条规则的模式和第 2 条规则的主体拼在了一起，
+--   如果把模式和主体拆开存放，万一偶有疏忽把第 1 条规则的模式和第 2 条规则的主体拼在了一起，
 --   或者企图只把主体抽出来当成闭表达式靠外部同名变量硬凑，就会直接破坏绑定来源的安全性。
 ```
 
 **核心问题**：
-对于外部的 `match` 表达式来说，它根本**不需要也不关心**某一条分支内部自己解构出了几个临时变量 $\Psi$。
+对于外部的 `match` 表达式来说，它根本**无需也漠视**某一条分支内部自己解构出了几个临时变量 $\Psi$。
 外部 `match` 关心的只有三件事：
 1. 这条分支需要的**外部上下文 $\Gamma$** 是什么？
 2. 这条分支匹配的**主语类型 $T$** 是什么？
@@ -43,7 +43,7 @@
 在 Flurry 的 CMTT 理论中，这种把“外部上下文 $\Gamma$、主语类型 $T$、模式导出的内部绑定 $\Psi$ 以及右侧成功主体 $U$”牢牢封装在一起的第 3 类代码值，就叫做 **Quoted Arm（分支代码）**，在编译器内部记作：
 $$\text{Arm}(\Gamma;\; T;\; \Psi;\; U)$$
 
-它的精妙之处在于：**模式、守卫（Guard）、成功主体与控制流出口是作为一个不可分割的整体保存的**。你不需要、也不能发明一个裸露的 `Arm<...>` 类型工厂去拆散它；相反，Flurry 直接复用了我们在第一卷学过的 **函数级模式（`case` pattern parameter）** 与 **`quote fn` / `template quote fn`** 作为 Quoted Arm 最自然、最优雅的语法载体。
+它的精妙之处在于：**模式、守卫（Guard）、成功主体与控制流出口是作为一个浑然一体的整体保存的**。你既无需、亦禁止发明一个裸露的 `Arm<...>` 类型工厂去拆散它；相反，Flurry 直接复用了我们在第一卷学过的 **函数级模式（`case` pattern parameter）** 与 **`quote fn` / `template quote fn`** 作为 Quoted Arm 最自然、最优雅的语法载体。
 
 下面来看清 `Arm(Γ; T; Ψ; U)` 是如何在内部消化掉异构绑定 $\Psi_i$，并对外暴露出统一干净的 `(Γ, T) -> U` 接口的：
 
@@ -108,7 +108,7 @@ test {
 
 ---
 
-## 三、 终极形态：`template quote fn` 与 `match { use rules }` 规则注入协议
+## 三、 最终形态：`template quote fn` 与 `match { use rules }` 规则注入协议
 
 如果我们正在开发一个大型编译器（比如 Flurry 编译器自己的重写规则库）或可扩展的协议状态机，我们往往希望：
 1. 先声明一个代表“某类匹配规则契约”的模板签名 **`template quote fn`**；
@@ -117,7 +117,7 @@ test {
 
 在 `docs/cmtt/quote-functions-and-templates.md` 中，这被称为 **Arm 接入协议（Arm Import Protocol）**。只需要在 `template quote fn` 上标注两个标准属性：
 - `^attrs.quote_fn_template.for_match_arms`：声明该模板提供 `match` 分支接入协议；
-- `^attrs.quote_fn_template.allow_non_exhaustive_instance`：允许挂载到该模板下的单条规则实例只覆盖部分模式（不必单条穷尽整个枚举）。
+- `^attrs.quote_fn_template.allow_non_exhaustive_instance`：允许挂载到该模板下的单条规则实例只覆盖部分模式（无须单条穷尽整个枚举）。
 
 ### 用 `match { use evaluate_rule }` 动态拼装穷尽匹配器
 
@@ -162,14 +162,14 @@ test {
 
 > **💡 核心心智模型：`use evaluate_rule` 的三项核心规则**
 > 1. **单条允许局部，整体必须穷尽**：`add_rule` 和 `multiply_rule` 各自都只处理了 `Operation` 的一个变体；但当它们通过 `use evaluate_rule` 注入到 `evaluate` 的 `match` 中后，加上手写的 `.literal(value) => value`，正好 100% 穷尽了 `Operation` 的全部三个变体。
-> 2. **在单洞规则中只算 1 个接入点**：哪怕 `use evaluate_rule` 背后聚合了 50 条规则分支，在外层 quote 的单洞计数器眼里，一次 `use evaluate_rule` **只计为 1 个接入点**，绝不会按最终展开的分支条数惩罚你。
-> 3. **决不靠文件枚举顺序猜重叠模式的优先级**：规则集合的来源与分派契约必须明确（例如互斥模式集合），绝不能把“哪个源文件先被编译器读到”当作重叠模式的匹配优先级。
+> 2. **在单洞规则中只算 1 个接入点**：哪怕 `use evaluate_rule` 背后聚合了 50 条规则分支，在外层 quote 的单洞计数器眼里，一次 `use evaluate_rule` **只计为 1 个接入点**，免按最终展开的分支条数惩罚你。
+> 3. **断难靠文件枚举顺序猜重叠模式的优先级**：规则集合的来源与分派契约必须明确（例如互斥模式集合），禁止将“哪个源文件先被编译器读到”当作重叠模式的匹配优先级。
 
 让我们看看如果在注入 `use evaluate_rule` 后，依然漏掉了 `.literal` 变体，或者企图在一个分支里偷用另一个分支的绑定时，编译器是如何严格把关的：
 
 ```flurry
 fn broken_evaluate(operation: Operation) -> u32 {
-    -- ❌ 编译期直接拒绝：(Non-Exhaustive Match)
+    -- ❌ 编译期直接报错：(Non-Exhaustive Match)
     -- evaluate_rule 规则集只覆盖了 .add 和 .multiply，
     -- 缺少对 Operation.literal(_) 的处理，组合后的最终 match 未满足穷尽性契约。
     operation match {
@@ -201,4 +201,4 @@ fn broken_evaluate(operation: Operation) -> u32 {
 
 当一段代码值经过了 `Any` 或 `any` 的包装，编译器在最终执行 `~<code>` 接入时，是闭着眼睛随便放行，还是依然能恢复出它底层的真实“代码见证（Code Evidence）”？如果有人异想天开地直接写一句 `~<any>`，想让编译器“随便帮我生成一段能返回 `u32` 的程序”，编译器会答应吗？
 
-下一篇 **《Flurry 演进手记 (122)：当生成的代码类型还不确定时——CMTT 中的 `Any` 与代码见证（Code Evidence）》**，我们将揭开静态通配描述与底层真实代码见证之间的厳密边界。
+下一篇 **《Flurry 演进手记 (122)：当生成的代码类型还待定时——CMTT 中的 `Any` 与代码见证（Code Evidence）》**，我们将揭开静态通配描述与底层真实代码见证之间的厳密边界。

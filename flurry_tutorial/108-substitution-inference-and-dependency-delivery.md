@@ -2,20 +2,20 @@
 
 在开发工业传感器网关与底层张量库时，我们经常遇到一个让接口设计者头疼不已的两难困境：
 
-假设我们定义了一个极其清爽的标准测量接口 `trait Measure { fn measure(*self) -> i32; }`。
-接口签名本身非常简单，不接受任何额外参数。
+假设我们定义了一个干净利落的标准测量接口 `trait Measure { fn measure(*self) -> i32; }`。
+接口签名本身非常简单，排斥接收任何额外参数。
 但是，当我们为具体的传感器读数 `Sensor` 或 `Reading` 实现 `Measure` 时，真实的工程需求来了：
 **原始硬件读数必须加上一个外部运行时校准器对象 `calibration: *Calibration` 里的偏移量 `offset`，才能算出真正的测量结果。**
-或者在张量库里，`Tensor` 的 `Clone` / `Drop` 接口签名本身不带分配器参数，但在执行时却必须访问该张量绑定的运行时内存分配器 `allocator`。
+或者在张量库里，`Tensor` 的 `Clone` / `Drop` 接口签名本身未带分配器参数，但在执行时却必须访问该张量绑定的运行时内存分配器 `allocator`。
 
 如果缺少从方法接收者反向推导环境依赖的能力，通常只能在以下两种做法中选择：
-1. **污染 Trait 签名**：被迫把 `fn measure(*self, cal: *Calibration)` 写进 `Measure` 接口里——结果那些根本不需要校准器的简单传感器也被迫陪绑传一个空指针；
+1. **污染 Trait 签名**：被迫把 `fn measure(*self, cal: *Calibration)` 写进 `Measure` 接口里——结果那些全然无需校准器的简单传感器也被迫陪绑传一个空指针；
 2. **把指针冗余塞进每个对象字段里**：逼着每个 4 字节的 `Reading` 结构体都额外存一个 8 字节的 `*Calibration` 指针字段，内存瞬间膨胀 3 倍。
 
-在 Flurry 中，我们完全不需要做这种妥协。
+在 Flurry 中，我们全然无须做这种妥协。
 因为 Flurry 的 `impl` 块允许通过 `where quote calibration: lift *Calibration` 声明**运行时依赖参数**，并通过一套严密的**替换推导（Substitution Inference）与环境交付（Environment Delivery）**机制，既能从目标类型自动恢复依赖，也能用 `reading.as(Measure)<.calibration = ...>` 显式注入环境。
 
-今天，我们就来彻底看懂这套连接类型替换与运行时环境的精妙引擎。
+今天，我们就来理解这套连接类型替换与运行时环境的精妙引擎。
 
 ---
 
@@ -29,7 +29,7 @@ struct Calibration {
 }
 
 trait Measure {
-    -- 接口保持绝对纯净。不强迫所有实现者都传 Calibration 参数
+    -- 接口保持严格纯净。不强迫所有实现者都传 Calibration 参数
     fn measure(*self) -> i32;
 }
 ```
@@ -48,7 +48,7 @@ trait Measure {
 ## 从目标类型自动恢复依赖（Target Type Substitution Recovery）
 
 还记得我们在第 073 篇学过的 `quote` 子句参数与 `lift` 吗？
-当我们在定义 `Sensor` 结构体时，写下 `where quote calibration: lift *Calibration`，`Sensor<calibration.ref>` 的类型身份里就记录了它绑定的那个运行时校准器对象的身份（Identity）——注意，它不需要把指针作为冗余物理字段塞进每个实例里，也不在编译期偷读 `offset` 的运行时内容。
+当我们在定义 `Sensor` 结构体时，写下 `where quote calibration: lift *Calibration`，`Sensor<calibration.ref>` 的类型身份里就记录了它绑定的那个运行时校准器对象的身份（Identity）——注意，它无需把指针作为冗余物理字段塞进每个实例里，也不在编译期偷读 `offset` 的运行时内容。
 
 当我们为 `Sensor<calibration>` 实现 `Measure` 时，编译器会自动完成推导：
 
@@ -195,25 +195,25 @@ fn show_calibrated(reading: *Reading, calibration: *Calibration) {
 |  • 尖括号 `<.calibration = ...>` 绑定的是**所选 impl 的开放参数**，     |
 |    它既没有修改 `Measure` Trait 的签名，也没有给 `measure()` 增加实参   |
 |  • 两次绑定 `<.calibration = first.ref>` 与 `<.calibration = second.ref>`|
-|    复用的是同一份全局 `impl`，绝不会制造两份冲突的全局实现              |
+|    复用的是同一份全局 `impl`，并不会制造两份冲突的全局实现              |
 +-------------------------------------------------------------------------+
 ```
 
 ---
 
-## 编译期安全红线：绝不靠“局部变量刚好同名”来瞎猜依赖
+## 编译期安全红线：不靠“局部变量刚好同名”来瞎猜依赖
 
-有些支持隐式参数（Implicits）的语言（如 Scala 2）会在当前作用域里随便找一个同类型或者同名的局部变量自动塞进去，导致“改了个局部变量名或者多引进了一个变量，代码行为就悄悄变了”的恐怖维护问题。
+有些支持隐式参数（Implicits）的语言（如 Scala 2）会在当前作用域里随便找一个同类型或者同名的局部变量自动塞进去，导致“改了个局部变量名或者多引进了一个变量，代码行为就悄悄变了”的棘手维护问题。
 
 在 Flurry 中，`docs/type/substitution-inference.md` 立下了一条核心规则：
-> **没有来源的依赖保留为开放参数，调用能力交付前必须显式补齐；作用域中恰好存在一个同类型或同名对象，绝不是合法补齐依据。**
+> **没有来源的依赖保留为开放参数，调用能力交付前必须显式补齐；作用域中恰好存在一个同类型或同名对象，不是合法补齐依据。**
 
-来看这个被编译器编译期拒绝的经典负例：
+来看这个被编译器编译期报错的经典负例：
 
 ```flurry
--- ❌ 编译期直接拒绝。
+-- ❌ 编译期直接报错。
 -- 哪怕当前函数的参数名就叫 `calibration`，类型也是 `*Calibration`，
--- 编译器也绝不会靠“变量同名或同类型”去自动猜测开放参数绑定。
+-- 编译器亦免于靠“变量同名或同类型”去自动猜测开放参数绑定。
 fn missing_binding(reading: *Reading, calibration: *Calibration) -> i32 {
     reading.as(Measure).measure()
 }
@@ -225,8 +225,8 @@ fn valid_binding(reading: *Reading, calibration: *Calibration) -> i32 {
 ```
 
 此外，还要记住两条重要的生命周期与身份原则：
-1. **不能强行改绑已固定的依赖**：如果目标类型 `Sensor<cal1.ref>` 已经固定了 `cal1`，你不能用 `<.calibration = cal2.ref>` 去强行覆盖它（除非编译器能证明两者是同一个 runtime identity）。而且两个对象哪怕字段内容一模一样，也不代表它们的 runtime identity 相同。
-2. **知道是谁 $\neq$ 当前能拿到**：跨函数返回值、闭包或动态接口边界时，操作所需的环境必须真正随边界交付；如果外部环境已经销毁失效，编译器会在边界处直接拒绝，绝不会在后续使用点随便抓一个替代品顶包。
+1. **无法强行改绑已固定的依赖**：如果目标类型 `Sensor<cal1.ref>` 已经固定了 `cal1`，你禁用 `<.calibration = cal2.ref>` 去强行覆盖它（除并非编译器能证明两者是同一个 runtime identity）。而且两个对象哪怕字段内容一模一样，也不代表它们的 runtime identity 相同。
+2. **知道是谁 $\neq$ 当前能拿到**：跨函数返回值、闭包或动态接口边界时，操作所需的环境必须真正随边界交付；如果外部环境已经销毁失效，编译器会在边界处直接报错，免于在后续使用点随便抓一个替代品顶包。
 
 ---
 
@@ -236,7 +236,7 @@ fn valid_binding(reading: *Reading, calibration: *Calibration) -> i32 {
 | :--- | :--- | :--- |
 | **`impl Trait for Type<dep>`**<br>（从目标类型恢复） | 主体类型本身已携带运行时依赖参数（如 `Sensor<calibration>` 或带 allocator 的 `Tensor`） | 匹配目标类型时自动恢复替换映射 $\sigma[\text{dep}]$，无需调用方重复手写绑定 |
 | **`val.as(Trait)<.dep = obj>`**<br>（开放实现显式绑定） | 主体类型未携带该依赖（如 `Reading`），`impl` 含有未决的开放参数 | 在接口视角上显式封闭开放参数并交付环境；可保存封闭后的视角反复调用 |
-| **禁止按名/按类型盲猜** | 开放参数未从目标类型恢复、且未显式 `<.dep = ...>` 绑定 | **编译期直接拒绝。** 即使当前作用域存在同名同类型的局部变量也绝不隐式吸附 |
+| **禁止按名/按类型盲猜** | 开放参数未从目标类型恢复、且未显式 `<.dep = ...>` 绑定 | **编译期直接报错。** 即使当前作用域存在同名同类型的局部变量也不隐式吸附 |
 | **替换 $\sigma$ 与环境计划分离** | 所有携带依赖的实现调用 | 替换 $\sigma$ 确定“依赖是谁（Identity）”，环境计划（Environment Plan）确保“执行时如何合法访问它” |
 
 ---
@@ -248,10 +248,10 @@ fn valid_binding(reading: *Reading, calibration: *Calibration) -> i32 {
 
 但在动手写 `trait Encode` 的第一行代码前，我们就遇到了一个所有序列化框架都会撞上的拦路虎：
 - 当我们把传感器报文编码写入**内存固定数组 `RingBuffer`** 时，可能只会发生 `![BufferOverflowError]`，而且是纯同步操作（没有任何代数效应 `#`）；
-- 当我们把同样的报文编码写入**网络 Socket 流 `TcpStream`** 时，不仅可能发生 `![IoError, TimeoutError]`，而且每次写入还会触发异步调度效应 **`#[async_write]`**。
-- 当我们写入一个**无限增容的内存 `ByteVec`** 时，它甚至**永远不会报错（空错误行 `![ ]`）**，也没有任何效应。
+- 当我们把同样的报文编码写入**网络 Socket 流 `TcpStream`** 时，非但可能发生 `![IoError, TimeoutError]`，而且每次写入还会触发异步调度效应 **`#[async_write]`**。
+- 当我们写入一个**无限增容的内存 `ByteVec`** 时，它甚至**永免报错（空错误行 `![ ]`）**，也没有任何效应。
 
-如果我们在 `trait Encode` 的签名里把错误类型写死成 `IoError`，内存编码器就得陪着处理根本不可能发生的 `IoError`；如果写死成无错误，网络编码器又没法报错。
+如果我们在 `trait Encode` 的签名里把错误类型写死成 `IoError`，内存编码器就得陪着处理断无可能发生的 `IoError`；如果写死成无错误，网络编码器又没法报错。
 
 **怎么让同一个 Trait 方法，根据不同的实现者或底层写入流，优雅地多态化它的“错误行（`!Err`）”和“效应行（`#Eff`）”？**
 下一篇 **`109-associated-error-and-effect-rows-in-traits.md`**，我们将揭开关联项与**错误行/效应行多态（Row Polymorphism）**的强强联合。

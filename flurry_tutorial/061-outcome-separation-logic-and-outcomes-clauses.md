@@ -81,13 +81,13 @@ where
 ```
 
 1. **对被調函数内部**：编译器严格检查 `bump_right_checked` 的函数体。如果函数体里手滑写了一句 `self.left.* = 0i32;`，会产生 `write<self.left>` 效果，超出 `outcomes` 声明的上界，**编译期直接报错**。
-2. **对外部调用方**：调用方看到 `outcomes` 只触碰了 `self.right`，就能 100% 确信 `pair.left`（以及调用方持有的其他不相交变量）在调用前后**绝不可能发生任何改变**，`pair.left == 42i32` 自动跨过函数调用保留下来。
+2. **对外部调用方**：调用方看到 `outcomes` 只触碰了 `self.right`，就能 100% 确信 `pair.left`（以及调用方持有的其他彼此分离变量）在调用前后**无从发生任何改变**，`pair.left == 42i32` 自动跨过函数调用保留下来。
 
 ---
 
 ## 三、用返回 `MemoryEffect` 的 `predicate` 复用效果模式
 
-在日常编写 `outcomes` 时，`read<target> and write<target>` 是最常见的组合。我们在上一期（060）提到过，程序验证层的 `predicate` 不仅可以返回 `bool`，还可以显式指定返回类型为 **`MemoryEffect`**。
+在日常编写 `outcomes` 时，`read<target> and write<target>` 是最常见的组合。我们在上一期（060）提到过，程序验证层的 `predicate` 并非但可以返回 `bool`，还可以显式指定返回类型为 **`MemoryEffect`**。
 
 更妙的是，当 `predicate` 的返回类型是 `MemoryEffect` 时，它的裸标识符形参会自动成为 `quote id: lift Any` 的语法糖，可以直接填入 `read<...>` 和 `write<...>` 的尖括号里：
 
@@ -118,7 +118,7 @@ where
     outcomes modify(self.right)
 {
     self.right.* = self.right.* + delta;
-    -- ❌ 编译期直接拒绝。
+    -- ❌ 编译期直接报错。
     -- 产生了未在 outcomes 中声明的 write<self.left> 内存效果。
     self.left.* = 0i32;
 }
@@ -126,13 +126,13 @@ where
 
 ---
 
-## 四、突破传统借用检查器的极限：顺序别名（Sequential Aliasing）与按需分离
+## 四、超越传统借用检查器的局限：顺序别名（Sequential Aliasing）与按需分离
 
-在采用独占可变引用的语言（如 Rust）中，“可变引用不允许别名（No Mutable Aliasing）”是一条统一规则：哪怕函数内部只是**先写第一个指针，再读第二个指针**，只要传入的两个指针指向同一个变量，编译器也会静态拒绝。
+在采用独占可变引用的语言（如 Rust）中，“可变引用禁止别名（No Mutable Aliasing）”是一条统一规则：哪怕函数内部只是**先写第一个指针，再读第二个指针**，只要传入的两个指针指向同一个变量，编译器也会静态报错。
 
-而在 Flurry 中，依靠**代际可达性（`&r`）+ 内存效果（`outcomes`）+ 结果分离逻辑（OSL）**，指针天然支持安全的**顺序别名（Sequential Aliasing）**，只有在真正需要“两块内存互不干扰”时才通过契约按需证明分离。
+而在 Flurry 中，依靠**代际可达性（`&r`）+ 内存效果（`outcomes`）+ 结果分离逻辑（OSL）**，指针天然支持安全的**顺序别名（Sequential Aliasing）**，只有在真正需要“两块内存互无扰于”时才通过契约按需证明分离。
 
-让我们看两个极具代表性的对比场景：
+让我们看两个富有代表性的对比场景：
 
 ### 场景 A：允许顺序别名（先写后读同一地址完全合法）
 
@@ -148,14 +148,14 @@ where
 fn demo_sequential_aliasing() -> i32 {
     var number = 1i32;
     -- ✅ 完全合法。first 和 second 指向同一个 number，
-    -- 但 write_then_read 的契约并不要求它们分离，顺序执行先写 10 再读出 10 毫无悬念。
+    -- 但 write_then_read 的契约并切勿求它们分离，顺序执行先写 10 再读出 10 毫无悬念。
     write_then_read(number.ref, number.ref)
 }
 ```
 
 ### 场景 B：按需证明分离（当后置条件要求两者同时保持各自独立值时）
 
-如果一个函数要求执行完后同时满足 `first.* == 1i32 and second.* == 2i32`，那么当 `first` 和 `second` 指向同一块内存时，后置条件在数学上根本不可能成立（一个 `i32` 不可能既等于 1 又等于 2）。此时，我们只需在 `requires` 中加入分离前提 `first != second`：
+如果一个函数要求执行完后同时满足 `first.* == 1i32 and second.* == 2i32`，那么当 `first` 和 `second` 指向同一块内存时，后置条件在数学上断无可能成立（一个 `i32` 难以既等于 1 又等于 2）。此时，我们只需在 `requires` 中加入分离前提 `first != second`：
 
 ```flurry
 verified fn write_two_distinct(first: *i32, second: *i32) -> void
@@ -166,7 +166,7 @@ where
 {
     first.* = 1i32;
     -- 因为 requires 保证了 first != second（地址分离），
-    -- 写入 second.* 绝不会覆盖刚才写入 first.* 的 1i32。
+    -- 写入 second.* 不会覆盖刚才写入 first.* 的 1i32。
     second.* = 2i32;
 }
 
@@ -176,7 +176,7 @@ fn demo_disjoint_check() -> void {
     -- ✅ a.ref 与 b.ref 是不同栈槽，静态已知 a.ref != b.ref
     write_two_distinct(a.ref, b.ref);
 
-    -- ❌ 编译期直接拒绝。
+    -- ❌ 编译期直接报错。
     -- 传入相同的 a.ref 违反了 requires first != second 分离前置条件。
     write_two_distinct(a.ref, a.ref);
 }
@@ -187,7 +187,7 @@ fn demo_disjoint_check() -> void {
   只要存在两个 *i32 指向同一地址 ──► ❌ 无论你干什么，一律禁止。
 
 [ Flurry 的 OSL 按需分离规则 ]
-  ├── write_then_read(p, p)       ──► 不要求 p != q ──► ✅ 允许顺序别名。
+  ├── write_then_read(p, p)       ──► 切勿求 p != q ──► ✅ 允许顺序别名。
   └── write_two_distinct(p, q)    ──► requires p != q ──► 静态证明地址分离。
 ```
 
@@ -196,8 +196,8 @@ fn demo_disjoint_check() -> void {
 ## 五、在 `RingBuffer` 中实战：无伤读取与精确推入脚印
 
 回到我们的 `RingBuffer`。当我们编写 `try_push` 时，通过 `outcomes` 子句，我们可以向所有调用者作出最严密的数学承诺：
-- `peek` 只产生 `read<buf.slots>` 和 `read<buf.head>`、`read<buf.len>`，**绝不产生任何 `write` 效果**；
-- `push_unchecked` 只修改 `buf.slots`、`buf.tail` 和 `buf.len`，**绝不触碰读游标 `buf.head`**。
+- `peek` 只产生 `read<buf.slots>` 和 `read<buf.head>`、`read<buf.len>`，**零产出 `write` 效果**；
+- `push_unchecked` 只修改 `buf.slots`、`buf.tail` 和 `buf.len`，**不触碰读游标 `buf.head`**。
 
 ```flurry
 struct RingBuffer {
@@ -237,19 +237,19 @@ where
 | `where outcomes <EffectExpr>` | 函数内存效果契约 | 声明函数允许产生的内存效果上界；超出该范围的读写在编译期报错 |
 | **Frame Rule（框架法则）** | 结果分离逻辑（OSL） | 不在 `outcomes` 写脚印内的内存位置与兄弟字段，在调用前后自动保持原值不变 |
 | `predicate p(target) -> MemoryEffect` | 效果谓词定义 | 将常用的内存效果组合（如 `read<target> and write<target>`）封装复用；裸形参等价于 `quote target: lift Any` |
-| **顺序别名 vs 按需分离** | 指针与分离逻辑 | 不强制一刀切禁止可变别名；需要互不覆盖时用 `requires p != q` 或不相交内存视图证明分离 |
+| **顺序别名 vs 按需分离** | 指针与分离逻辑 | 免于强制一刀切禁止可变别名；需要互不覆盖时用 `requires p != q` 或彼此分离内存视图证明分离 |
 
 ---
 
 ## 七、下一期预告
 
-现在，我们已经能够为一阶函数写出极其严密的 `requires`、`ensures` 和 `outcomes` 契约了。
+现在，我们已经能够为一阶函数写出严谨的 `requires`、`ensures` 和 `outcomes` 契约了。
 但是，如果我们的 `RingBuffer` 提供了一个高阶批处理方法：
 ```flurry
 fn drain_with(buf: *RingBuffer, callback: %c fn(i32) -> void) -> void
 where
     c: Type.vars.Closure
 ```
-当 `drain_with` 在循环中每弹出一个元素就调用一次外部传入的 `callback(item)` 时，可怕的事情发生了：**万一这个 `callback` 的闭包环境里偷偷捕获了同一个 `buf` 的指针，并在回调里调用了 `buf.reset()` 或篡改了 `buf.head`（即重入别名破坏 Reentrancy Hazard）怎么办？** 此外，当编译器面对一个未知的高阶回调时，如何保证循环计数器不会被回调破坏？
+当 `drain_with` 在循环中每弹出一个元素就调用一次外部传入的 `callback(item)` 时，就会面临一个安全问题：**万一这个 `callback` 的闭包环境里偷偷捕获了同一个 `buf` 的指针，并在回调里调用了 `buf.reset()` 或篡改了 `buf.head`（即重入别名破坏 Reentrancy Hazard）怎么办？** 此外，当编译器面对一个未知的高阶回调时，如何保证循环计数器免遭回调破坏？
 
 下一期 **《Flurry 演进手记 (062)：高阶回调里的资源契约——当闭包遇到内存效果与可达性验证》**，我们将揭开高阶函数、闭包身份追踪与局部变量隔离在形式化验证下的协同机制。

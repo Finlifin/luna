@@ -1,10 +1,10 @@
 # Flurry 演进手记 (081)：当数组长度来自运行时变量——运行时依赖类型（Runtime Dependent Types）入门
 
-在上一回（080）中，我们用 `refines { ... }` 与 `requires / ensures` 为编译期类型和常数筑起了严密的逻辑防线。但当时我们也抛出了一个极具颠覆性的工程问题：
+在上一回（080）中，我们用 `refines { ... }` 与 `requires / ensures` 为编译期类型和常数筑起了严密的逻辑防线。但当时我们也抛出了一个富有颠覆性的工程问题：
 
 在真实的高性能张量引擎、图计算（Graph Computing）或网络协议解析器里，很多关键参数只有在**运行期（Runtime）**才能确定：
-- 从模型文件里动态读出的维度长度 `n: usize`，能不能直接放进 `Array<f32, n>` 里作为它的类型参数，从而让 `Array<T, n>` 能够统一表达静态定长数组与运行时长度依赖的数组？
-- 在使用 SOA（Struct of Arrays，数组结构体）布局管理图节点池或 DMA 缓冲池 `NodeStorage` 时，我们用轻量的 `u32` 下标代替笨重的裸指针。但怎么在编译期从类型上彻底杜绝**“张冠李戴——拿第 1 个存储池 `first_storage` 的节点下标，去访问第 2 个存储池 `second_storage`”**的恶性 Bug？
+- 从模型文件里动态读出的维度长度 `n: usize`，能否直接放进 `Array<f32, n>` 里作为它的类型参数，从而让 `Array<T, n>` 能够统一表达静态定长数组与运行时长度依赖的数组？
+- 在使用 SOA（Struct of Arrays，数组结构体）布局管理图节点池或 DMA 缓冲池 `NodeStorage` 时，我们用轻量的 `u32` 下标代替笨重的裸指针。但怎么在编译期从类型上避免**“张冠李戴——拿第 1 个存储池 `first_storage` 的节点下标，去访问第 2 个存储池 `second_storage`”**的恶性 Bug？
 
 欢迎来到 Flurry 类型系统中最令人惊叹的篇章之一：**运行时依赖类型（Runtime Dependent Types）**。今天，我们就来看看一个类型是如何在零额外内存体积膨胀的前提下，“记住”它所归属的运行期环境的。
 
@@ -12,7 +12,7 @@
 
 ## 一、 问题背景与设计思路：SOA 句柄（Handle / Index）的“张冠李戴”惨案
 
-在编写高性能计算图、游戏引擎 ECS 或编译器 AST 时，为了极致的缓存局部性（Cache Locality）和避免复杂的指针生命周期，工程师们普遍采用 **SOA + 整数句柄（`u32` Index）** 的模式。
+在编写高性能计算图、游戏引擎 ECS 或编译器 AST 时，为了高度的缓存局部性（Cache Locality）和避免复杂的指针生命周期，工程师们普遍采用 **SOA + 整数句柄（`u32` Index）** 的模式。
 
 在仅使用普通整数作为句柄的方案中，存在一个常见的工程隐患：
 
@@ -29,9 +29,9 @@ struct BadStorage {
 ```
 
 有人可能会说：“那我在每个 `NodeId` 结构体里面额外存一个指向所属 `NodeStorage` 的指针 `*NodeStorage` 不就行了？”
-**不行。** 在运行期检查指针相等不仅白白消耗 CPU 分支预测，更重要的是：把一个 8 字节的指针塞进原本只有 4 字节的 `u32` 句柄里，加上对齐填充会让每个句柄瞬间膨胀到 **16 字节**（整整大出 4 倍）。我们之所以用 SOA 和 `u32` 下标，本来就是为了省内存和装进 SIMD 寄存器，怎么能为了防呆让体积暴涨 4 倍？
+**行之难通。** 在运行期检查指针相等非但白白消耗 CPU 分支预测，更重要的是：把一个 8 字节的指针塞进原本只有 4 字节的 `u32` 句柄里，加上对齐填充会让每个句柄瞬间膨胀到 **16 字节**（整整大出 4 倍）。我们之所以用 SOA 和 `u32` 下标，本来就是为了省内存和装进 SIMD 寄存器，怎么能为了防呆让体积暴涨 4 倍？
 
-那么，能不能**让 `storage` 只活在 `NodeIndex` 的“类型与操作环境”里，而不占用 `NodeIndex` 实例本身的哪怕 1 个字节内存**？
+那么，能否**让 `storage` 只活在 `NodeIndex` 的“类型与操作环境”里，而零占用 `NodeIndex` 实例本身的哪怕 1 个字节内存**？
 
 在 Flurry 中，这正是运行时依赖类型的拿手好戏。
 
@@ -48,7 +48,7 @@ struct BadStorage {
 |                                                                         |
 |  1. 运行期值体 (Runtime Value Body) —— 真正躺在内存 / 寄存器里的字节：    |
 |     +-------------------+                                               |
-|     | index: u32 (4 字节)|  <-- 只有这一个字段  绝不内联重复存储指针        |
+|     | index: u32 (4 字节)|  <-- 只有这一个字段  不会内联重复存储指针        |
 |     +-------------------+                                               |
 |                                                                         |
 |  2. 类型与操作环境 (Type & Operation Environment) —— 编译期追踪的依附契约：|
@@ -62,7 +62,7 @@ struct BadStorage {
 1. **`NodeIndex` 在内存里有多大？** 只有 `index: u32` 的 4 字节。
 2. **为什么 `where quote storage: lift *NodeStorage` 要写 `quote` 和 `lift`？**
    - `lift *NodeStorage`：将运行期指针类型 `*NodeStorage` 提升到编译期类型描述层，说明这个依赖项在运行期是一个 `*NodeStorage` 指针；
-   - `quote storage`：表明类型参数捕获的是传入实参表达式（如 `first_storage.ref`）所锚定的**运行期稳定身份描述**，而不是在类型声明点立刻去解引用读取运行期内存。
+   - `quote storage`：表明类型参数捕获的是传入实参表达式（如 `first_storage.ref`）所锚定的**运行期稳定身份描述**，而非在类型声明点立刻去解引用读取运行期内存。
 
 ---
 
@@ -118,29 +118,29 @@ where
 ```
 
 看看 `left(*self) -> ?Self` 的返回类型设计：
-当你从一个属于 `first_storage` 的根节点调用 `.left()` 时，因为返回类型是 `?Self`，解包出来的左孩子**自动具有类型 `NodeIndex<first_storage.ref>`**。你既不需要在每次调 `.left()` 时手动传一遍 `&first_storage`，也不需要在每个 `NodeIndex` 结构体里浪费 8 字节存指针。
+当你从一个属于 `first_storage` 的根节点调用 `.left()` 时，因为返回类型是 `?Self`，解包出来的左孩子**自动具有类型 `NodeIndex<first_storage.ref>`**。你既无需在每次调 `.left()` 时手动传一遍 `&first_storage`，也无需在每个 `NodeIndex` 结构体里浪费 8 字节存指针。
 
 ---
 
 ## 四、 深入理解：运行期绑定身份（Identity）vs 内容相等性
 
 现在到了最关键的考验时刻：
-假设我们在运行期创建了两个存储池 `first_storage` 和 `second_storage`。为了测试编译器是不是真的认“身份”而不是认“长相”，我们故意把这两个存储池里的数组内容填得**一模一样**。
+假设我们在运行期创建了两个存储池 `first_storage` 和 `second_storage`。为了测试编译器是否真的认“身份”而非认“长相”，我们故意把这两个存储池里的数组内容填得**一模一样**。
 
-那么，`NodeIndex<first_storage.ref>` 和 `NodeIndex<second_storage.ref>` 是同一个类型吗？能不能把 `second_root` 赋给期待 `NodeIndex<first_storage.ref>` 的变量？
+那么，`NodeIndex<first_storage.ref>` 和 `NodeIndex<second_storage.ref>` 是同一个类型吗？能否把 `second_root` 赋给期待 `NodeIndex<first_storage.ref>` 的变量？
 
 ```
   first_storage  (栈地址 0x7ffd...10) ──► 内容: values=[10, 20, 30]
                                            类型: NodeIndex<first_storage.ref>
                                                       ║
-                                           【类型不相等。严禁混用。】
+                                           【类型互异。严禁混用。】
                                                       ║
   second_storage (栈地址 0x7ffd...40) ──► 内容: values=[10, 20, 30]
                                            类型: NodeIndex<second_storage.ref>
 ```
 
 > **💡 核心心智模型：运行时依赖类型锚定的是“运行期绑定身份（Identity）”，而非“瞬时值内容（Content）”。**
-> 哪怕 `first_storage` 和 `second_storage` 里的每一个字节在当前时刻都相等，它们也是两个独立的运行期绑定实例。因此 `NodeIndex<first_storage.ref>` 与 `NodeIndex<second_storage.ref>` 是**完全不同的静态类型**。
+> 哪怕 `first_storage` 和 `second_storage` 里的每一个字节在当前时刻都相等，它们也是两个独立的运行期绑定实例。因此 `NodeIndex<first_storage.ref>` 与 `NodeIndex<second_storage.ref>` 是**大相径庭的静态类型**。
 
 让我们通过测试代码验证这一性质：
 
@@ -179,7 +179,7 @@ test runtime_dependent_node_index_safety {
         }
     }
 
-    -- 核心验证：归属于不同运行期存储池的 NodeIndex 具有截然不同的类型
+    -- 核心验证：归属于不同运行期存储池的 NodeIndex 具有迥然各异的类型
     let second_root = NodeIndex<second_storage.ref> { index: 0 }
     assumes root'type == NodeIndex<first_storage.ref>;
     assumes second_root'type == NodeIndex<second_storage.ref>;
@@ -187,10 +187,10 @@ test runtime_dependent_node_index_safety {
 }
 ```
 
-如果有人不小心写串了池子，试图把 `second_root` 当作 `NodeIndex<first_storage.ref>` 传进去：
+如果有人偶有疏忽写串了池子，试图把 `second_root` 当作 `NodeIndex<first_storage.ref>` 传进去：
 
 ```flurry
--- ❌ 编译期直接拒绝：期望类型 NodeIndex<first_storage.ref>，实际传入 NodeIndex<second_storage.ref>
+-- ❌ 编译期直接报错：期望类型 NodeIndex<first_storage.ref>，实际传入 NodeIndex<second_storage.ref>
 fn reject_cross_storage_mix(
     first_storage: *NodeStorage,
     second_storage: *NodeStorage,
@@ -199,7 +199,7 @@ fn reject_cross_storage_mix(
 }
 ```
 
-不需要任何运行期开销，甚至不需要在 `NodeIndex` 里多存半个比特，困扰高性能图计算与游戏引擎多年的“跨池句柄混用 Bug”在编译期被彻底终结。
+无需任何运行期开销，甚至无须在 `NodeIndex` 里多存半个比特，困扰高性能图计算与游戏引擎多年的“跨池句柄混用 Bug”在编译期被终结。
 
 ---
 

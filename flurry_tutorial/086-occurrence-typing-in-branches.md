@@ -1,206 +1,208 @@
-# Flurry 演进手记 (086)：分支中的流敏感类型——Occurrence Typing 与局部条件窄化
+# Flurry 演进手记 (086)：分支中的流敏感类型——Occurrence Typing 与局部类型命题窄化
 
-> **阅读指南**：在上一篇（085）中，我们梳理了 Flurry 编译期类型约束（PTC）的五大类原子命题。在实际编写编译期函数或泛型逻辑时，我们经常会写出 `inline if T is do { Array<'u32, length> => ... }` 或 `inline if value > 0 { ... }` 这样的分支代码。为什么进入 `then` 分支后，原本未知范围的 `value` 就可以直接传给要求正数的函数，或者直接提取出 `Array` 的长度参数 `length`？而在离开分支后，这些局部事实又为什么不会泄漏到外部？本篇我们将介绍 **出现类型（Occurrence Typing / 流敏感类型窄化）** 与分支条件的作用域规则。
-
----
-
-## 一、 问题背景：流不敏感检查的局限
-
-假设我们需要编写两个编译期辅助函数：
-1. 一个函数要求传入的编译期整数 `value` 必须大于 `0`（由 `requires value > 0` 契约约束）；
-2. 另一个函数接收任意类型 `T: Type`，如果 `T` 是元素为 `u32` 的静态数组 `Array<u32, length>`，则返回其长度 `length`；否则返回 `null`。
-
-如果类型检查是“流不敏感（Flow-Insensitive）”的——即一个变量从声明起，其类型和已知约束在整个函数体内保持固定不变——那么即使程序员已经写下了显式的分支判断，检查器也无法利用分支条件：
-
-```flurry
--- 要求编译期正整数的函数
-pure comptime fn checked_positive(value: Integer) -> Integer
-where
-    requires value > 0
-{
-    value
-}
-
--- 在流不敏感视角下会被拒绝的写法（但在 Flurry 中合法）
-pure comptime fn positive_or_one(value: Integer) -> Integer {
-    -- 分支条件已经检查了 value > 0
-    -- 如果检查器不将分支条件记入当前分支的局部上下文，
-    -- 调用 checked_positive(value) 时就无法证明 requires value > 0
-    inline if value > 0 {
-        checked_positive(value)
-    } else {
-        checked_positive(1)
-    }
-}
-```
-
-同样地，当对类型参数 `T: Type` 进行模式匹配时，如果在匹配分支内部不能局部收窄 `T` 的结构身份，就无法直接安全地使用解构出的类型参数。
-
-因此，条件判断（无论是关系比较 `value > 0`，还是类型模式匹配 `T is Array<'u32, length>`）应当在对应分支的作用域内转化为可供类型检查器使用的局部前提。
+> **阅读指南**：在上一篇（085）中，我们梳理了 Flurry 命题类型约束（PTC）的原子命题体系。在编写泛型运行时函数（`fn`）时，它的定义体处于 **ordinary（严格）** normalization 模式——即使具体类型参数 `T` 尚未代入，函数体内的每一个分支也必须在定义期通过类型检查。当我们在泛型运行时函数中使用 `inline if T == u32 { ... }` 或 `inline if T is do { Array<'u32, length> => ... }` 根据编译期类型条件分流时，为什么进入特定分支后，原本类型为未知 `T` 的运行时值 `value` 就能直接传给只接受 `u32` 或特定容器类型的函数？而在离开分支后，这些局部类型事实又为什么免于泄漏到外部？本篇我们将介绍 **出现类型（Occurrence Typing / 流敏感类型窄化）** 在 ordinary normalization 中的作用与作用域规则。
 
 ---
 
-## 二、 核心机制：将分支条件转化为分支内的局部事实
+## 一、 前提辨析：`ordinary` vs `loose` Normalization，以及 `inline` 控制流的定位
 
-在 Flurry 中，上面的 `positive_or_one` 可以直接通过编译。
+在讨论分支类型窄化之前，必须先厘清两条核心边界：
 
-这是因为 Flurry 支持 **Occurrence Typing（出现类型 / 流敏感类型窄化）**。每当控制流进入 `if`、`inline if` 或 `match` 的某个分支时，编译器会将该分支的进入条件作为一条**局部事实**加入当前分支的已知约束环境 $\Gamma$ 中。
+1. **为什么 `inline if` 用于运行时函数（`fn`），而非 `comptime fn`？**
+   - **`comptime fn`（编译期函数）** 整段代码都在编译期执行，其中的普通 `if`、`match`、`for` 本身就是编译期控制流，无需、也不应该加 `inline`。同时，`comptime fn` 采用 **loose** normalization：依赖未知编译期参数的约束检查可以留到调用端（Instantiation）代入具体实参时再兑现。
+   - **普通运行时函数 `fn`** 采用 **ordinary** normalization：定义端必须立刻完成所有分支的操作合法性检查，而无法等待未来某次实例化选中某个分支才去检查。在运行时函数内部，如果希望根据编译期类型或常量条件在编译期裁剪分支，才使用 **`inline if` / `inline when` / `inline for`**。
 
-下面看一个同时包含**类型结构窄化**与**编译期数值范围窄化**的示例：
+2. **PTC 只追踪类型命题，不追踪算术值问题**
+   - PTC（命题类型约束）的职责是处理**类型命题**（例如类型相等 `T == u32`、类型模式匹配 `T is Array<'u32, length>`、结构分类 `Type.predicates.is_tuple(T)`、Trait 满足性等）。
+   - 普通数值上的算术大小比较非属 PTC 的类型命题追踪范畴；程序运行时的数值与内存状态规格由程序验证层负责。
 
 ```flurry
-use std.prelude.*;
-
--- 场景 A：对 Type 进行模式匹配与结构提取
+-- 对比 1：comptime fn 本身就在编译期执行（采用 loose 检查），直接使用普通 match / if
 pure comptime fn word_array_length(T: Type) -> ?usize {
-    inline if T is do {
+    T match {
         Array<'u32, length> => length,
         _ => null,
     }
 }
 
--- 场景 B：对受 requires 契约约束的编译期整数进行分支窄化
-pure comptime fn checked_positive(value: Integer) -> Integer
-where
-    requires value > 0
-{
-    value
+-- 对比 2：运行时泛型函数 fn（采用 ordinary 检查），使用 inline if 在编译期按类型分流
+fn accept_u32(x: u32) -> u32 {
+    x + 1u32
 }
 
-pure comptime fn positive_or_one(value: Integer) -> Integer {
-    inline if value > 0 {
-        -- ✅ 在此分支内，上下文自动获得局部事实：value > 0
-        -- 因此 checked_positive(value) 的 requires value > 0 得以满足
-        checked_positive(value)
+fn dispatch_runtime_value(value: T) -> u32 where T {
+    -- 在 ordinary normalization 中，两个分支都必须在定义期通过类型检查：
+    -- 进入 then 分支时，PTC 将类型命题 `T == u32` 记入当前分支环境，
+    -- 因此将 `value: T` 传给 `accept_u32(x: u32)` 在定义期即可证明合法。
+    inline if T == u32 {
+        accept_u32(value)
     } else {
-        -- 在 else 分支内，局部事实为 not (value > 0)，即 value <= 0
-        -- 这里传入常量 1，满足 1 > 0
-        checked_positive(1)
+        0u32
+    }
+}
+```
+
+如果 `ordinary` 检查是“流脱敏（Flow-Insensitive）”的——即忽略 `inline if T == u32` 这一分支条件，始终只把 `value` 当作未知类型 `T`——那么定义端检查 `accept_u32(value)` 时就会因为无法证明 `T == u32` 而报错。
+
+---
+
+## 二、 核心机制：将 `inline` 分支条件转化为局部类型命题
+
+Flurry 在 `ordinary` normalization 中支持 **Occurrence Typing（出现类型 / 流敏感类型窄化）**。当运行时函数通过 `inline if` 或 `inline if ... is ... do` 对类型条件进行分支判断时，编译器会从分支条件中提取可识别的**类型命题**，将其作为局部事实加入对应分支的约束环境 $\Gamma$ 中。
+
+下面看一个同时包含**类型相等窄化**与**类型模式结构窄化**的运行时泛型函数示例：
+
+```flurry
+use std.prelude.*;
+
+fn sum_u32_pair(pair: Tuple<u32, u32>) -> u32 {
+    let (left, right) = pair;
+    left + right
+}
+
+fn first_u32_element(arr: Array<u32, n>) -> u32
+where
+    n: usize,
+{
+    arr[0usize]
+}
+
+-- 运行时泛型函数：在 ordinary normalization 下检查全部分支
+fn inspect_runtime_container(value: T) -> usize where T {
+    inline if T is do {
+        -- 分支 1：匹配 Array<'u32, length>
+        -- 局部环境获得类型命题 `T == Array<u32, length>` 并引入编译期绑定 `length: usize`
+        Array<'u32, length> => length,
+
+        -- 分支 2：匹配 Tuple<'u32, 'u32>
+        -- 局部环境获得类型命题 `T == Tuple<u32, u32>`，
+        -- 因此类型为 T 的运行时参数 `value` 可直接传给 `sum_u32_pair`
+        Tuple<'u32, 'u32> => sum_u32_pair(value).as(usize),
+
+        -- 兜底分支：未享有上述类型相等命题
+        _ => 0usize,
     }
 }
 
-const MATCHED_LEN = word_array_length(Array<u32, 4>);
-const SKIPPED_LEN = word_array_length(bool);
-const NORMALIZED = positive_or_one(-3);
-
 test {
-    println("matched: {}", MATCHED_LEN is usize);
-    println("skipped: {}", SKIPPED_LEN is null);
-    println("normalized: {}", NORMALIZED);
+    let arr: Array<u32, 4> = [10u32, 20u32, 30u32, 40u32];
+    let pair: Tuple<u32, u32> = (15u32, 27u32);
+
+    assumes inspect_runtime_container(arr) == 4usize;
+    assumes inspect_runtime_container(pair) == 42usize;
+    assumes inspect_runtime_container(true) == 0usize;
 }
 ```
 
 > **复习：类型模式里的单引号 `'u32`**
-> 在 `word_array_length` 的模式分支 `Array<'u32, length> => length` 中：
-> - 无前缀的标识符 `length` 是**新引入的模式绑定变量**，用于捕获数组的第二个类型参数（长度）；
-> - 带单引号前缀的 `'u32` 是**引用已有类型的模式表达式**，表示要求第一个类型参数等于 `u32`。
+> 在 `Array<'u32, length>` 与 `Tuple<'u32, 'u32>` 中：
+> - 无前缀的标识符 `length` 是**新引入的模式绑定变量**，捕获数组的第二个类型参数（长度）；
+> - 带单引号前缀的 `'u32` 是**引用已有类型的模式表达式**，要求对应位置的类型参数等于 `u32`。
 
 ---
 
-## 三、 分支局部事实的生命周期与汇合（Join）规则
+## 三、 分支局部类型事实的生命周期与汇合（Join）规则
 
-分支内的局部事实如何在进入分支时生效、在离开分支时回收？其作用域与汇合规则如下：
+分支内的局部类型命题如何在进入分支时生效、在离开分支时回收？其作用域与汇合规则如下：
 
 ```text
-                  ┌─────────────────────────────────────────┐
-                  │ 1. 分支前环境 Γ_parent                  │
-                  │    已知声明: value : Integer             │
-                  │    分支条件: inline if value > 0        │
-                  └────────────────────┬────────────────────┘
-                                       │
-                 ┌─────────────────────┴─────────────────────┐
-                 ▼ (进入 then 分支)                          ▼ (进入 else 分支)
-┌─────────────────────────────────────┐     ┌─────────────────────────────────────┐
-│ 2a. Then 分支环境 Γ_then            │     │ 2b. Else 分支环境 Γ_else            │
-│   附加局部事实: value > 0           │     │   附加局部事实: not (value > 0)     │
-│                                     │     │                                     │
-│   ▶ 检查 checked_positive(value):   │     │   ▶ 此时已知 value <= 0             │
-│     当前环境蕴涵 value > 0 (通过)   │     │     若在此调 checked_positive(value)│
-│                                     │     │     将因违背前置契约被拒绝          │
-└──────────────────┬──────────────────┘     └──────────────────┬──────────────────┘
-                   │ (离开 then 分支)                          │ (离开 else 分支)
-                   └─────────────────────┬─────────────────────┘
-                                         ▼
-                  ┌─────────────────────────────────────────┐
-                  │ 3. 汇合点 (Join Point) Γ_after          │
-                  │    各分支独有的局部假设已退出作用域      │
-                  │    仅保留【所有可达前驱共同满足】的结论  │
-                  └─────────────────────────────────────────┘
+                   ┌─────────────────────────────────────────┐
+                   │ 1. 分支前环境 Γ_parent                  │
+                   │    已知声明: T : Type, value : T        │
+                   │    分支条件: inline if T == u32         │
+                   └────────────────────┬────────────────────┘
+                                        │
+                  ┌─────────────────────┴─────────────────────┐
+                  ▼ (进入 then 分支)                          ▼ (进入 else 分支)
+ ┌─────────────────────────────────────┐     ┌─────────────────────────────────────┐
+ │ 2a. Then 分支环境 Γ_then            │     │ 2b. Else 分支环境 Γ_else            │
+ │   附加局部类型命题: T == u32        │     │   附加局部类型命题: T != u32        │
+ │                                     │     │                                     │
+ │   ▶ 检查 accept_u32(value):         │     │   ▶ 此时已知 T != u32               │
+ │     由 value : T 与 T == u32        │     │     若在此调用 accept_u32(value)    │
+ │     证得 value : u32 (通过)         │     │     在定义期 ordinary 检查直接报错  │
+ └──────────────────┬──────────────────┘     └──────────────────┬──────────────────┘
+                    │ (离开 then 分支)                          │ (离开 else 分支)
+                    └─────────────────────┬─────────────────────┘
+                                          ▼
+                   ┌─────────────────────────────────────────┐
+                   │ 3. 汇合点 (Join Point) Γ_after          │
+                   │    各分支独有的局部类型假设已退出作用域  │
+                   │    仅保留【所有可达前驱共同满足】的结论  │
+                   └─────────────────────────────────────────┘
 ```
 
-局部事实的生命周期遵循三条核心规则：
-1. **进入分支时生效**：当控制流进入 `then` 分支时，条件本身（如 `value > 0`）加入当前分支环境；进入 `else` 分支或后续互斥 `match` 分支时，前序已排除条件的否定形式（如 `value <= 0`）加入当前分支环境。
-2. **离开分支时失效**：当某个分支检查结束时，仅在该分支内成立的局部事实和模式绑定变量（如 `Array<'u32, length>` 中的 `length`）随之退出作用域，不会泄漏到外层环境或兄弟分支。
-3. **汇合点只保留可达前驱的共同结论**：当多个分支执行完毕并在后续位置汇合时，只有**每一个可达前驱分支都共同满足的结论**才会保留在汇合后的环境 $\Gamma_{\text{after}}$ 中。如果某个分支提前 `return` 或发散（`never`），该不可达分支不会参与汇合。
+局部类型事实的生命周期遵循三条核心规则：
+1. **进入分支时生效**：当控制流进入 `then` 分支或匹配成功的模式臂时，提取出的类型命题（如 `T == u32` 或 `T == Tuple<u32, u32>`）加入当前分支环境；进入 `else` 分支或后续互斥分支时，已排除类型命题的否定形式（如 `T != u32`）加入当前分支环境。
+2. **离开分支时失效**：当某个分支检查结束时，仅在该分支内成立的局部类型事实和模式绑定变量（如 `Array<'u32, length>` 中的 `length`）随之退出作用域，免于泄漏到外层环境或兄弟分支。
+3. **汇合点只保留可达前驱的共同结论**：当多个分支在后续位置汇合时，只有**每一个可达前驱分支都共同满足的类型结论**才会保留在汇合后的环境 $\Gamma_{\text{after}}$ 中。如果某个分支提前 `return` 或发散（`never`），该不可达分支未参与汇合。
 
 ---
 
-## 四、 边界示例：跨分支误用局部假设 vs 卫语句（Early Return）窄化
+## 四、 边界示例：跨分支误用局部类型假设 vs 卫语句（Early Return）窄化
 
-根据上述作用域规则，如果在 `else` 分支或分支外部使用只属于 `then` 分支的窄化结论，编译器会直接报错：
+根据上述作用域规则，如果在 `else` 分支或离开 `inline if` 之后继续把 `value: T` 当作 `u32` 使用，编译器会在定义端 `ordinary` 检查阶段直接报错：
 
 ```flurry
-pure comptime fn checked_positive(value: Integer) -> Integer
-where
-    requires value > 0
-{
-    value
+fn accept_u32(x: u32) -> u32 {
+    x + 1u32
 }
 
--- 负例：在 else 分支或分支外部使用 then 分支的窄化结论
-pure comptime fn broken_branch_assumption(value: Integer) -> Integer {
-    inline if value > 0 {
-        let _ = checked_positive(value);
+-- ❌ 编译期（ordinary 定义检查阶段）直接报错：
+-- 在 else 分支或分支汇合后误用仅属于 then 分支的类型命题 `T == u32`
+fn broken_branch_type_assumption(value: T) -> u32 where T {
+    inline if T == u32 {
+        let _ = accept_u32(value);
     } else {
-        -- ❌ 编译期拒绝：
-        -- 在 else 分支中，已知事实为 value <= 0，无法满足 requires value > 0
-        checked_positive(value)
+        -- ❌ 错误：在 else 分支中已知 T != u32，禁止将 value: T 当作 u32 传给 accept_u32
+        return accept_u32(value);
     }
 
-    -- ❌ 编译期拒绝：
-    -- 离开 inline if 之后，then 分支的局部假设已退出作用域，
-    -- 此时 value 仍为未知正负的 Integer
-    checked_positive(value)
+    -- ❌ 错误：离开 inline if 后，then 分支的局部类型事实已退出作用域，
+    -- 此时 T 重新回到无约束状态，无权调用 accept_u32(value)
+    accept_u32(value)
 }
 ```
 
 ### 利用提前返回（Early Return）收窄后续主干环境
 
-由于汇合点只考虑**可达前驱（Reachable Predecessors）**，如果我们在不满足条件的分支中直接 `return`，那么后续主干代码唯一的可达前驱就是满足条件的分支，从而使窄化后的事实在整个后续主干中保持有效：
+由于汇合点只考虑**可达前驱（Reachable Predecessors）**，如果我们在 `inline if T != u32` 分支中直接 `return`，那么后续主干代码唯一的可达前驱就满足 `not (T != u32)`（即 `T == u32`），从而使该类型命题在后续主干中持续有效：
 
 ```flurry
--- 利用卫语句（Early Return）将窄化事实延续到后续主干
-pure comptime fn normalize_and_double(value: Integer) -> Integer {
-    inline if value <= 0 {
-        -- 不满足正数条件时直接提前返回
-        -- 该分支在此结束，不会到达下方的汇合点
-        return checked_positive(1) * 2;
+-- ✅ 利用卫语句（Early Return）将类型相等事实延续到后续主干
+fn extract_and_double_if_u32(value: T) -> u32 where T {
+    inline if T != u32 {
+        -- 当 T 并非 u32 时直接提前返回，该分支不会到达下方主干
+        return 0u32;
     }
 
-    -- ✅ 能够到达此处，唯一的可达前驱满足 not (value <= 0)，即 value > 0
-    -- 因此在后续主干代码中，value > 0 均作为已知事实成立：
-    let valid = checked_positive(value);
-    valid * 2
+    -- ✅ 能够到达此处，唯一的可达前驱满足 T == u32
+    -- 因此在后续主干代码中，value: T 可直接作为 u32 使用：
+    let stepped = accept_u32(value);
+    stepped * 2u32
+}
+
+test {
+    assumes extract_and_double_if_u32(10u32) == 22u32;
+    assumes extract_and_double_if_u32(true) == 0u32;
 }
 ```
-
-通过这种卫语句写法，无需多层嵌套缩进，Occurrence Typing 就能自动识别出 `value <= 0` 分支已提前返回，并将 `value > 0` 的事实保留到后续主干作用域中。
 
 ---
 
 ## 五、 本篇小结
 
-| 维度 | 核心机制 | 编译器保证与工程效果 |
+| 维度 | 核心机制 | 编译器保证与工程边界 |
 | :--- | :--- | :--- |
-| **类型模式窄化** | `inline if T is do { Array<'u32, length> => ... }` | 在匹配分支内部自动收敛 `T` 的结构身份，并提取类型内嵌参数（如 `length`） |
-| **单引号类型模式** | `'u32` / `'(TypeExpr)` | 区分“匹配已有具体类型（`'u32`）”与“绑定新模式变量（`length`）” |
-| **值与契约窄化** | `inline if value > 0 { ... }` | 将分支条件转化为局部已知事实，用于证明分支内调用的 `requires` 契约 |
-| **分支作用域与汇合** | 分支内生效、出分支失效、汇合取可达前驱交集 | 局部假设不跨分支泄漏；若反例分支提前 `return`，主干自动继承正面事实 |
+| **`ordinary` vs `loose`** | 运行时 `fn` 采用 `ordinary` 检查；`comptime fn` 采用 `loose` 检查 | `inline if/when/for` 用于运行时 `fn` 的编译期分支裁剪；`comptime fn` 直接使用普通控制流 |
+| **PTC 的职责边界** | 仅提取和追踪**类型命题**（类型相等、类型模式、结构分类、Trait 等） | 不在 PTC 中追踪普通算术大小问题 |
+| **类型模式与相等窄化** | `inline if T == u32` / `inline if T is do { ... }` | 在匹配分支内部自动收敛 `T` 的类型身份，使 `value: T` 可按收窄后的类型通过定义期检查 |
+| **分支作用域与汇合** | 分支内生效、出分支失效、汇合取可达前驱共同结论 | 局部类型假设不跨分支泄漏；若反例分支提前 `return`，主干自动继承正面类型命题 |
 
 ---
 
 ## 六、 下一篇预告
 
-当一个泛型函数同时涉及位宽算术约束、类型相等构造与分支局部窄化时，如果某条约束未能满足，我们该如何阅读编译器的诊断反例并定位缺失的 `where requires` 前提？同时，编译期类型约束（PTC）与第三卷介绍的运行期程序状态验证（`verified fn` / `outcomes`）在工程实践中应如何配合？
+当一个泛型函数同时涉及类型相等、Trait 约束、行包含关系与分支局部类型窄化时，如果某条类型约束未能满足，我们该如何阅读编译器的诊断反例并定位缺失的 `where requires` 前提？
 
 下一篇 **《Flurry 演进手记 (087)：读懂类型约束与诊断信息——组合约束推理、残余条件与签名设计》**，我们将总结类型约束的工程实践与诊断方法。

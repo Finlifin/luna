@@ -53,7 +53,7 @@ Flurry 按照**“控制流是否跨函数边界”、“是否允许恢复回�
 
 ### 反例：在 `atomic` 事务块内混入未处理的外部效应
 
-如果把外部效应请求直接写进 `atomic(...) { ... }` 事务块内，编译器会因违反事务纯度边界而直接拒绝：
+如果把外部效应请求直接写进 `atomic(...) { ... }` 事务块内，编译器会因违反事务纯度边界而直接报错：
 
 ```flurry
 effect emit_settled(trace_id: u64, amount: u64) -> bool;
@@ -74,9 +74,9 @@ fn bad_settle_one(
         if primary.* >= amount {
             primary.* -= amount;
         }
-        -- ❌ 编译期拒绝：
+        -- ❌ 编译期报错：
         -- `atomic` 事务在遇到并发冲突时会回滚并重试，
-        -- 未在事务内部闭合消去的外部效应 `emit_settled` 不能在 `atomic` 块中触发
+        -- 未在事务内部闭合消去的外部效应 `emit_settled` 禁止于 `atomic` 块中触发
         let keep_going = emit_settled(1001u64, amount)#;
     }
 }
@@ -196,7 +196,7 @@ test {
 
 在实际编写 Flurry 代码时，可以按以下原则选择合适的控制流机制：
 
-1. **出错后只需单向退出、不需要回到原调用点继续执行**：使用 **`!Err T`（恢复性错误行）** 配合 `expr!`、就地 `! { ... }` 或 `HandleError`（`.use(handler)`）。
+1. **出错后只需单向退出、无需回到原调用点继续执行**：使用 **`!Err T`（恢复性错误行）** 配合 `expr!`、就地 `! { ... }` 或 `HandleError`（`.use(handler)`）。
 2. **跨多层调用栈传递只读配置、日志标识或追踪 ID**：使用 **`^attrs.effects.direct_passing` 的 `#Eff`**，兼顾静态效应行检查与直接参数传递开销。
 3. **向调用方发出策略询问或事件通知，且处理器总是当场恢复**：使用 **普通 Direct Handler**；若处于高频循环热路径，可声明为 **`inline effect`** 进行协同内联。
 4. **需要在中途挂起并稍后恢复（如流式生成器、回溯搜索、自定义协程调度）**：使用 **`catch continuation: builtin.Continuation`** 定界延续。
@@ -209,8 +209,8 @@ test {
 | 控制流类别 | 核心语法 | 类型与语义特征 | 执行模型特征 |
 | :--- | :--- | :--- | :--- |
 | **结构化分支与守卫** | `if`、`expr match`、`let ... else`、`return/break/continue/resume ... while` | 穷尽性检查、模式绑定、扁平化提前退出或恢复 | 局部基本块跳转 |
-| **恢复性错误 (`!Err`)** | `error e`、`expr!`、`expr! { ... }`、`.use(handler)` | **唯一标签行（Unique-Label Row）**，自动合并去重 | 独立值返回 ABI，函数签名不加 `handles` |
-| **只读上下文效应** | `^attrs.effects.direct_passing effect` | 无参数、不捕获延续，安装时求值一次 | 隐式参数直传，请求点直接读取 |
+| **恢复性错误 (`!Err`)** | `error e`、`expr!`、`expr! { ... }`、`.use(handler)` | **唯一标签行（Unique-Label Row）**，自动合并去重 | 独立值返回 ABI，函数签名省略 `handles` |
+| **只读上下文效应** | `^attrs.effects.direct_passing effect` | 无参数、未捕获延续，安装时求值一次 | 隐式参数直传，请求点直接读取 |
 | **直接/内联处理器** | `expr# { op() => { ... resume v; } }`、`inline effect` | **保留同名层次行（Layered-Occurrence Row）**，尾部就地恢复 | 普通函数调用或协同内联，无栈切换 |
 | **定界延续** | `catch continuation: builtin.Continuation` | 一次性仿射资源（One-Shot Affine），支持放弃时自动逆序 `Drop` | 定界切片保持局部变量 `.ref` 地址稳定 |
 | **结构化异步效应** | `async effect` + `.use(runtime)` + `.await` | 请求点返回 `Future<T>`，在 `.await` 处按需挂起 | 就绪值走快路径，挂起复用定界延续与取消清理 |

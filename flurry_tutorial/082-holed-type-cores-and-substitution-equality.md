@@ -4,7 +4,7 @@
 
 在此基础上，本篇我们将深入探讨运行时依赖类型在真实工程中的三个核心问题：
 1. **类型等价边界**：两个同样由 `Sensor<cal>` 构造出来的类型，满足什么条件才算同一个类型？
-2. **复合聚合体的环境共享**：当一个外层结构体 `SensorPair<cal>` 内部包含两个 `Sensor<cal>` 字段时，子字段如何共享外层环境而不重复存储指针？
+2. **复合聚合体的环境共享**：当一个外层结构体 `SensorPair<cal>` 内部包含两个 `Sensor<cal>` 字段时，子字段如何共享外层环境而互异无重存储指针？
 3. **跨函数传递与环境可达性**：当把依赖运行期环境的实例传给下游函数时，参数签名该如何表达环境关联？
 
 ---
@@ -69,15 +69,15 @@ test sensor_dependency_identity {
 
     -- 同一绑定身份构造出的类型相等
     assumes first_sensor'type == Sensor<first_cal.ref>;
-    -- 不同绑定身份构造出的类型不相等（即便校准数值完全一致）
+    -- 不同绑定身份构造出的类型互异（即便校准数值完全一致）
     assumes first_sensor'type != second_sensor'type;
 }
 ```
 
-如果尝试把绑定了 `second_cal.ref` 的传感器赋给要求 `Sensor<first_cal.ref>` 的位置，类型检查会直接拒绝：
+如果尝试把绑定了 `second_cal.ref` 的传感器赋给要求 `Sensor<first_cal.ref>` 的位置，类型检查会直接报错：
 
 ```flurry
--- [编译期拒绝示例] 不同校准环境身份的 Sensor 类型不可混用
+-- [编译期负例] 不同校准环境身份的 Sensor 类型不可混用
 -- fn mix_calibrated_sensors(
 --     first_cal: *Calibration,
 --     second_cal: *Calibration,
@@ -130,7 +130,7 @@ test composed_environment_sharing {
         second: Sensor<cal.ref> { raw: 6 },
     }
 
-    -- 内存体积仅为两个 i32 字段之和（8 字节），不包含任何冗余指针
+    -- 内存体积仅为两个 i32 字段之和（8 字节），排除任何冗余指针
     assumes Type.size_of(SensorPair<cal.ref>) == 8;
 
     unsafe {
@@ -185,6 +185,6 @@ test cross_function_dependent_call {
 
 ## 六、 下一篇预告
 
-既然类型本身可以携带编译期参数或依赖参数，那么当我们在编写泛型代码或编译期反射逻辑时，能不能反过来像匹配普通枚举值一样，直接用 `match` 或 `is` **对一个 `Type` 进行模式匹配**，从中解构出元素类型 `T` 或数组长度 `N`？
+既然类型本身可以携带编译期参数或依赖参数，那么当我们在编写泛型代码或编译期反射逻辑时，能否反过来像匹配普通枚举值一样，直接用 `match` 或 `is` **对一个 `Type` 进行模式匹配**，从中解构出元素类型 `T` 或数组长度 `N`？
 
 下一篇 **《Flurry 演进手记 (083)：在类型自身上做模式匹配——`expr<type_pattern_argument*>` 类型模式详解》**，我们将探索类型级模式匹配的用法。

@@ -10,27 +10,27 @@
 工具越丰富，架构师在动手写第一行代码时就越需要清晰的边界直觉：
 - “我要给结构体自动实现 JSON 序列化、二进制编解码、相等性比较或字段校验，该用 **Comptime 反射 + `inline for` + `derive fn`**，还是去拼 CMTT 代码盒 `< Ψ |- T >`？”
 - “我只是想消除一次小函数调用的开销，该写 `inline fn` 还是 `quote fn`？”
-- “什么时候 `Type.repr_of(Self)` + `inline for` 就不够用了，必须请出 CMTT 的 `< Ψ |- T >` 一等公民代码值，甚至动用 `@define_macro1/2`？”
+- “什么时候 `Type.repr_of(Self)` + `inline for` 就捉襟见肘了，必须请出 CMTT 的 `< Ψ |- T >` 一等公民代码值，甚至动用 `@define_macro1/2`？”
 
 今天，我们就用同一个传感器网关工程需求在不同维度下的演进，为你画出那张压箱底的 **“Flurry 元编程选型决策树”**。
 
 ---
 
-## 一、 问题背景与设计思路：“拿着锤子看什么都是钉子”的两种极端反模式
+## 一、 问题背景与设计思路：“拿着锤子看什么都是钉子”的两种特殊反模式
 
-在元编程实践中，工程师最容易陷入两种极端反模式：
+在元编程实践中，工程师最容易陷入两种特殊反模式：
 1. **“言必称 Token 宏”反模式**：明明只需要遍历结构体的字段做序列化，却像在老旧语言里那样去写拼接 `TokenBuffer` 的语法宏。结果定义期完全没有类型检查，报错位置一团糟，还破坏了卫生性与求值次数。
 2. **“杀鸡用 CMTT 牛刀”反模式**：刚学完第六卷酷炫的 CMTT 上下文代码类型 `< Ψ |- T >`，就连写个简单的结构体字段遍历或异构元组打印，也非要先造一堆 `'(...)` 引用代码盒再用 `~[...]<...>` 拼接。
 
-在 Flurry 中，**80% 以上的日常元编程需求（如 `derive fn` 自动派生、按类型结构分支、遍历结构体字段或异构元组），根本不需要构造 CMTT 代码值，更不需要写宏——直接用 `comptime` 结构反射配合 `inline if` / `inline for` 就能以最自然的直写风格搞定。**
+在 Flurry 中，**80% 以上的日常元编程需求（如 `derive fn` 自动派生、按类型结构分支、遍历结构体字段或异构元组），全然无需构造 CMTT 代码值，更无需写宏——直接用 `comptime` 结构反射配合 `inline if` / `inline for` 就能以最自然的直写风格搞定。**
 
-为了彻底告别“凭感觉瞎选”，我们先亮出 Flurry 元编程的**最小权限递进原则（Principle of Least Metaprogramming Power）**。
+为了告别“凭感觉瞎选”，我们先亮出 Flurry 元编程的**最小权限递进原则（Principle of Least Metaprogramming Power）**。
 
 ---
 
 ## 二、 核心心智模型：Flurry 元编程选型决策树（Decision Tree）
 
-当你面对一个代码复用、编译期计算或代码生成需求时，请自上而下顺着这棵决策树往下走——**一旦在上层节点能解决，绝不往下层走**。
+当你面对一个代码复用、编译期计算或代码生成需求时，请自上而下顺着这棵决策树往下走——**一旦在上层节点能解决，不往下层走**。
 
 ```
 +---------------------------------------------------------------------------------+
@@ -55,9 +55,9 @@
                       │                • 最简单、编译最快、具备独立函数边界与清晰栈帧。
                       ▼ 是 (Yes，需要编译期结构化展开)
        [ 问 4：代码结构能否直接在当前函数/derive fn 内按结构反射就地展开？ ]
-       (即：不需要把“未封闭的代码片段”当成一等公民的值跨函数传递或递归变换)
+       (即：无需把“未封闭的代码片段”当成一等公民的值跨函数传递或递归变换)
                       ├── 能。(占日常元编程 80%+ 场景。)
-                      │            ──► 【 第 3 层（绝对主力）：Comptime 反射 + `inline` 控制流 + `derive fn` 】
+                      │            ──► 【 第 3 层（核心主力）：Comptime 反射 + `inline` 控制流 + `derive fn` 】
                       │                • 查结构体/枚举骨骼：`const repr = Type.repr_of(Self)`
                       │                • 按类型结构分支：   `inline if repr is do { .`struct` => ... }`
                       │                • 展开字段与异构元组：`inline for (i, f) in repr.fields.enumerate()`
@@ -105,7 +105,7 @@ test {
 ### 阶段 3（日常用得最多的主力方案）：`comptime` 结构反射 + `inline if` / `inline for` + `derive fn`（第 3 层）
 
 **诉求**：我们定义了十几个像 `SensorStudent`、`TelemetryPacket` 这样的结构体，以及各种异构元组参数包。现在我们要实现通用的 `Serialize<.json>` 自动派生器，以及异构元组的逐项处理函数。
-**为什么不用 CMTT 或宏？**
+**为什么无须 CMTT 或宏？**
 因为在 Flurry 中，当你写一个 `derive fn` 或泛型函数时，你可以直接调用 **`Type.repr_of(Self)`** 拿到类型在编译期的结构描述，然后用 **`inline if repr is do { ... }`** 判断它是结构体还是枚举，再用 **`inline for (i, field) in repr.fields.enumerate()`** 遍历每一个字段，配合 **`self'get_field(field.name)`** 直接生成运行时的字段访问代码。
 
 让我们画出这套“**编译期拆骨架、运行期跑肌肉**”的黄金工作流：
@@ -181,7 +181,7 @@ where A :- Ready, B :- Ready
 请仔细体会这段 `by_representation_for_json` 的妙处：
 1. **写起来像普通运行时代码一样直观**：你声明了一个普通的运行时局部变量 `var buf = String.new("");`，在 `inline for` 里直接调用 `buf.append(...)`——没有任何 `'(...)` 引用或 `~[...]<...>` 拼接的心智负担。
 2. **不同格式策略按需切换**：你可以用完全相同的反射模式再写一个 `by_representation_for_toml` 或 `by_representation_for_binary`，用户在类型上只需写一行 `derive Serialize<.json>.use(by_representation_for_json) for Student;`。
-3. **100% 静态类型安全**：如果 `Student` 的某个字段没有实现 `Serialize<.json>`，编译器在对派生出的 `impl` 做普通检查时会精准报错，绝不会拖到运行时。
+3. **100% 静态类型安全**：如果 `Student` 的某个字段没有实现 `Serialize<.json>`，编译器在对派生出的 `impl` 做普通检查时会精准报错，不会拖到运行时。
 
 ---
 
@@ -191,7 +191,7 @@ where A :- Ready, B :- Ready
 
 答案非常明确——**只有当你遇到以下三类需求时，才动用 CMTT**：
 1. **代码本身需要作为“一等公民的值”跨函数传递、递归组合或分阶段变换**：比如你在写一个正则表达式/Mini-BPF 编译器或有限状态自动机组装器（第 124～125、136 回），需要把每一条规则编译成一段带自由上下文变量的开放代码 `< packet: Frame, cursor: usize |- bool >`，存进列表、做代数化简，最后再一次性拼接成函数体；或者需要动态生成一组匹配臂 `< Frame -> u32 >` 并通过 `match { use arms }` 注入。
-2. **需要强制在调用点源码级展开，且严格控制实参单次求值与局部 `return` 边界**：使用 **`quote fn`**（注意：`quote fn` **不属于** `comptime fn`，普通实参仍求值一次。）。
+2. **需要强制在调用点源码级展开，且严格控制实参单次求值与局部 `return` 边界**：使用 **`quote fn`**（注意：`quote fn` **非属** `comptime fn`，普通实参仍求值一次。）。
 3. **需要将一段带局部环境依赖（如 `< env: *OrionTestEnv |- void >`）的代码块注入统一的夹具外壳**：使用 **`template fn` / `template test`**。
 
 ```flurry
@@ -209,7 +209,7 @@ pure comptime fn build_port_filter(allowed: u16) -> < port: u16 |- bool > {
 }
 
 fn check_gateway_port(raw_port: u16) -> bool {
-    -- clamp_port 内的 return 不会导致 check_gateway_port 提前返回。
+    -- clamp_port 内的 return 免致 check_gateway_port 提前返回。
     let bounded = clamp_port(raw_port, 1024);
     const filter_code = build_port_filter(80);
     ~[port = bounded]<filter_code>
@@ -227,7 +227,7 @@ quote fn must_expand(x: u32) -> u32 {
     x + 1
 }
 
--- ❌ 编译期直接拒绝：quote fn 不属于 comptime fn，且必须在调用点展开，不能作为运行期函数指针逃逸
+-- ❌ 编译期直接报错：quote fn 并非属 comptime fn，且必须在调用点展开，禁止充当运行期函数指针逃逸
 fn reject_quote_fn_as_pointer() {
     let f_ptr: fn(u32) -> u32 = must_expand;
 }
@@ -251,15 +251,15 @@ fn reject_quote_fn_as_pointer() {
 
 ## 五、 下一篇预告
 
-到现在为止，我们已经彻底理清了从 `comptime` 结构反射（`Type.repr_of` + `inline for`）到 CMTT 与宏系统的完整选型光谱。不管是手写的高阶代码、通过结构反射展开的 `derive fn`，还是用 CMTT 生成的代码，最终都会汇聚为结构清晰的运行期代码。
+到现在为止，我们已经理清了从 `comptime` 结构反射（`Type.repr_of` + `inline for`）到 CMTT 与宏系统的完整选型光谱。无论是手写的高阶代码、通过结构反射展开的 `derive fn`，还是用 CMTT 生成的代码，最终都会汇聚为结构清晰的运行期代码。
 
-这时候，一个关乎运行期极致性能的问题来了：
+这时候，一个关乎运行期高效性能的问题来了：
 在日常编写传感器数据流处理代码时，我们非常喜欢写函数式风格的**高阶组合子管道（Combinator Pipelines）**，比如：
 ```flurry
 stream.map(scale).filter(is_valid).fold(0, add)
 ```
-如果编译器老老实实按字面一步步执行，每调一次 `.map` 或 `.filter` 都要创建中间状态或多次遍历数据；但如果我们为了让它变快而强迫程序员去手写晦涩难懂的单层 `while` 循环，又彻底丧失了组合子抽象的优雅。
+如果编译器老老实实按字面一步步执行，每调一次 `.map` 或 `.filter` 都要创建中间状态或多次遍历数据；但如果我们为了让它变快而强迫程序员去手写晦涩难懂的单层 `while` 循环，又丧失了组合子抽象的优雅。
 
-编译器能不能直接识别这套**组合子代数（Combinator Algebra）**，在严格保持副作用顺序、错误传播与仿射资源清理的前提下，自动把多层流管道化简融合为极致高效的单次遍历？
+编译器能否直接识别这套**组合子代数（Combinator Algebra）**，在严格保持副作用顺序、错误传播与仿射资源清理的前提下，自动把多层流管道化简融合为高度高效的单次遍历？
 
 下一回 **《Flurry 演进手记 (133)：组合子代数（Combinator Algebra）——让编译器认识并化简你的高阶流管道》**，我们将走进 Flurry **程序合成（Program Synthesis）** 的奇妙世界。

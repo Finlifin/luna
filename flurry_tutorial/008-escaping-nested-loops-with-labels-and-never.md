@@ -7,8 +7,8 @@
 2. **硬件就绪守护循环**：在系统启动时，不断轮询硬件状态寄存器，直到硬件就绪并返回 `true`。
 
 如果你写惯了 C、Java 或者 Rust，这两个需求看似简单，却常常逼出两类繁琐的代码：
-- 为了从内层循环跳出外层循环，不得不定义一堆 `var found = false; var skip_row = false;` 布尔标志位，在每层循环末尾写 `if found { break; }`；
-- 在写 `while true { if ready() { return true; } }` 时，明明知道循环绝不可能正常走完，某些编译器却非逼着你在循环大括号后面再写一行永远执行不到的 `return false;`（死代码）。
+- 为了从内层循环跳出外层循环，严禁不定义一堆 `var found = false; var skip_row = false;` 布尔标志位，在每层循环末尾写 `if found { break; }`；
+- 在写 `while true { if ready() { return true; } }` 时，明明知道循环难以正常走完，某些编译器却非逼着你在循环大括号后面再写一行永远执行不到的 `return false;`（死代码）。
 
 让我们从使用布尔标志位的传统写法开始，看看 Flurry 是如何用**统一命名空间的循环标签**与**保守精确的 `never` 出口分析**解决这两个问题的。
 
@@ -85,8 +85,8 @@ fn wait_hardware_ready_initial(port: *bool) -> bool {
 为什么不像 Rust 那样引入专门的 `loop { break 42; }` 让循环也返回值呢？
 原因在于**控制流职责的正交与纯粹**：
 1. 在 `if` 或 `when` 中，每一条分支都是为了计算并汇合出一个结果值；
-2. 而循环的本质是**状态迭代与重复执行**。如果允许 `while cond { break 42; }` 返回值，那当 `cond` 一开始就是 `false`、循环体一次都没跑的时候，整个 `while` 表达式该返回什么值？你不得不为此再去发明 `while ... else` 或者强迫返回 `?T`，反而把简单的循环搞得复杂晦涩。
-3. 在 Flurry 中，如果你需要在找到目标时直接把结果交出去，要么直接用函数级的 **`return (r, c) while val >= limit;`**，要么更新明确声明在循环外的状态变量；而无限循环就是字面意义上的 **`while true`**，不需要多背一个 `loop` 关键字。
+2. 而循环的本质是**状态迭代与重复执行**。如果允许 `while cond { break 42; }` 返回值，那当 `cond` 一开始就是 `false`、循环体一次都没跑的时候，整个 `while` 表达式该返回什么值？你严禁不为此再去发明 `while ... else` 或者强迫返回 `?T`，反而把简单的循环搞得复杂晦涩。
+3. 在 Flurry 中，如果你需要在找到目标时直接把结果交出去，要么直接用函数级的 **`return (r, c) while val >= limit;`**，要么更新明确声明在循环外的状态变量；而无限循环就是字面意义上的 **`while true`**，无需多背一个 `loop` 关键字。
 
 ### 2. 循环标签 `for:label` 与 `while:label`
 
@@ -120,24 +120,24 @@ fn wait_hardware_ready_initial(port: *bool) -> bool {
 
 ### 3. 统一命名空间核心规则：当标签撞上同名局部变量会发生什么？
 
-现在，思考一个极其微妙的安全问题：
+现在，思考一个微妙的安全问题：
 在 C、Rust 或 Java 中，循环标签（如 Rust 的 `'label` 或 Java 的 `label:`）往往存放在一个**独立的标签命名空间**里。这意味着就算你在循环体内部声明了一个叫 `let retry = 1;` 的变量，外层的标签 `retry` 依然活在平行世界里。
 
-但在 Flurry 中，为了杜绝“不同名称类别之间的隐式回退查找与视觉欺骗”，语言采用了严格的**统一命名空间（Unified Namespace）**（详见 `docs/code-organization/scope-and-paths.md`）：
+但在 Flurry 中，为了避免“不同名称类别之间的隐式回退查找与视觉欺骗”，语言采用了严格的**统一命名空间（Unified Namespace）**（详见 `docs/code-organization/scope-and-paths.md`）：
 
-> **类型、值、模块与循环标签（Label）共用同一个命名空间。内层作用域的同名局部绑定可以遮蔽（Shadow）外层的标签；一旦 `break name` 查找到的内层绑定不是一个合法的循环标签，编译器会当场静态报错，绝不偷偷跳过该变量去外层找同名标签。**
+> **类型、值、模块与循环标签（Label）共用同一个命名空间。内层作用域的同名局部绑定可以遮蔽（Shadow）外层的标签；一旦 `break name` 查找到的内层绑定并非一个合法的循环标签，编译器会当场静态报错，不偷偷跳过该变量去外层找同名标签。**
 
 来看看这段被编译器静态拦截的危险代码：
 
 ```flurry
--- ❌ 编译期直接拒绝。
+-- ❌ 编译期直接报错。
 fn shadowed_label_bug() {
     while:retry true {
         -- 在循环内部声明了一个叫 `retry` 的普通 u32 变量，遮蔽了外层的 `:retry` 标签。
         let retry: u32 = 1u32;
 
         -- 此时从最内层作用域向外查找 `retry`，命中的是上面的 `u32` 变量。
-        -- 编译器发现 `retry` 是数值绑定而非循环标签，立即报错拒绝，
+        -- 编译器发现 `retry` 是数值绑定而非循环标签，立即报错，
         -- 不会隐式地跳过 `let retry` 去跳外层的循环。
         break retry;
     }
@@ -145,7 +145,7 @@ fn shadowed_label_bug() {
 ```
 
 为什么要这么严格？
-想象一下在一个长达 80 行的循环里，外层有个标签叫 `:target`，结果维护代码的同事在第 50 行加了一个局部变量 `let target = ...;`。如果编译器允许在不同的命名空间里各找各的，读代码的人看到 `target` 时极易产生严重混淆。统一命名空间遵循最简单的两步法：**第一步只按词法作用域由内向外锁定唯一声明身份；第二步再验证这个身份能不能用在这里**——绝不因为第二步验证不过就倒退回第一步换个人选。
+想象一下在一个长达 80 行的循环里，外层有个标签叫 `:target`，结果维护代码的同事在第 50 行加了一个局部变量 `let target = ...;`。如果编译器允许在不同的命名空间里各找各的，读代码的人看到 `target` 时容易产生严重混淆。统一命名空间遵循最简单的两步法：**第一步只按词法作用域由内向外锁定唯一声明身份；第二步再验证这个身份能否用在这里**——不因为第二步验证不过就倒退回第一步换个人选。
 
 ---
 
@@ -155,7 +155,7 @@ fn shadowed_label_bug() {
 
 在上面的初始写法中，我们在 `while true { ... }` 后面被迫补了一行 `false`，因为担心编译器抱怨“函数声明了返回 `bool`，但最后没有返回值”。
 
-在 Flurry 中，**这行多余的 `false` 完全不需要写。**
+在 Flurry 中，**这行多余的 `false` 全然无须写。**
 
 为什么？因为根据 `docs/control-flow/basic.md`，当一个循环**没有可达的正常出口（No Reachable Normal Exit）**时，编译器会将其内部完成类型推导为底类型 **`never`**。
 
@@ -175,7 +175,7 @@ fn shadowed_label_bug() {
   }                                  ──► 循环正常出口为 never，大括号后无需补假返回值。
 ```
 
-不仅如此，Flurry 编译器的出口分析还能穿透布尔逻辑组合（`not` / `and` / `or`）以及**已知常量构造值的 `match`**。
+非但如此，Flurry 编译器的出口分析还能穿透布尔逻辑组合（`not` / `and` / `or`）以及**已知常量构造值的 `match`**。
 比如在编写硬件仿真测试时，如果我们构造了一个已知的信号枚举去跑状态循环：
 
 ```flurry
@@ -189,21 +189,21 @@ fn simulate_watchdog() -> bool {
         -- 主语是已知的常量构造值 Signal.ready((true, false))
         Signal.ready((true, false)) match {
             -- 编译器按分支顺序静态判定：每次必然命中第一个分支并 `continue`。
-            -- 下面的 `_ => break` 分支永远不可能被选中。
+            -- 下面的 `_ => break` 分支永无可能被选中。
             .ready((true, false)) => continue,
             _ => break,
         }
     }
     -- 编译器确知 `_ => break` 不可达，整个 while true 依然没有正常出口 (never)，
-    -- 因此函数末尾不需要补任何 bool 返回值。
+    -- 因此函数末尾无需补任何 bool 返回值。
 }
 ```
 
-当然，编译器在这件事上保持着绝对的**诚实与保守**（详见 `docs/control-flow/basic.md`）：
+当然，编译器在这件事上保持着严格的**诚实与保守**（详见 `docs/control-flow/basic.md`）：
 - 如果 `break` 受一个**运行时未知条件**控制（比如 `break while port.*;`），编译器就会认为循环有可能正常结束，此时如果你不在循环后面提供返回值，编译器就会报错：
 
 ```flurry
--- ❌ 编译期直接拒绝。
+-- ❌ 编译期直接报错。
 fn might_break_without_return(port: *bool) -> bool {
     while true {
         -- `port.*` 是运行时未知的。如果它为 true，break 就会跳出循环到达函数末尾。
@@ -213,9 +213,9 @@ fn might_break_without_return(port: *bool) -> bool {
 }
 ```
 
-- 同样地，在嵌套循环中，编译器会按 `break` 的**目标标签**精确记账：内层循环里的 `break;` 只给内层循环提供正常出口，不会给外层的 `while:outer true` 提供出口；反之，内层循环里的 `break outer;` 则会直接记作外层 `outer` 循环的可达出口。
+- 同样地，在嵌套循环中，编译器会按 `break` 的**目标标签**精确记账：内层循环里的 `break;` 只给内层循环提供正常出口，免给外层的 `while:outer true` 提供出口；反之，内层循环里的 `break outer;` 则会直接记作外层 `outer` 循环的可达出口。
 
-现在，让我们用 `for:row` / `for:col` 标签、`while` 守卫与 `never` 类型推导，写出清爽无比的 进阶版本：
+现在，让我们用 `for:row` / `for:col` 标签、`while` 守卫与 `never` 类型推导，写出简洁清晰的 进阶版本：
 
 ```flurry
 use std.prelude.*;
@@ -226,7 +226,7 @@ struct Grid4x4 {
     }
 }
 
--- 使用带标签的循环与转移守卫，彻底告别 `stop_all` 布尔标志位。
+-- 使用带标签的循环与转移守卫，告别 `stop_all` 布尔标志位。
 fn scan_hotspot(grid: *Grid4x4, limit: i32) -> ?Tuple<i32, i32> {
     var r = 0i32;
     while:row r < 4i32 {
@@ -275,8 +275,8 @@ test {
 
 | 机制 | 语法形态 | 核心语义与安全契约 |
 | :--- | :--- | :--- |
-| **语句化循环** | `while cond { ... }` / `for pat in expr { ... }` | 循环是语句而非表达式；`break` 不带值；无限循环直接写 `while true` |
-| **循环标签与统一命名空间** | `while:label`、`for:label`、`break label`、`continue label` | 标签与普通变量共用同一命名空间；被同名局部绑定遮蔽时直接静态报错，绝不跨层跳跃查找 |
+| **语句化循环** | `while cond { ... }` / `for pat in expr { ... }` | 循环是语句而非表达式；`break` 未带值；无限循环直接写 `while true` |
+| **循环标签与统一命名空间** | `while:label`、`for:label`、`break label`、`continue label` | 标签与普通变量共用同一命名空间；被同名局部绑定遮蔽时直接静态报错，不跨层跳跃查找 |
 | **出口可达性与 `never`** | 无可达 `break` 的 `while true` | 静态确认无正常出口时循环完成类型为 `never`，后续无需补假返回值；按目标标签精确追踪嵌套 `break` |
 
 ### 下一篇预告
@@ -284,10 +284,10 @@ test {
 在今天的代码里，我们的 `while` 循环条件还只是简单的布尔判断（如 `r < 4i32` 或 `true`）。
 但在真实的传感器固件中，最常见的循环不是数数字，而是**消费一个源源不断的事件流（Event Stream）**：
 - 每次调用 `queue.pop()`，它返回的是一个可选类型 **`?SensorEvent`**（队列空了就返回 `null`）；
-- 拿到 `event` 后，我们还要检查它是不是 `.sample(raw_byte)` 变体；
-- 拿到 `raw_byte` 后，还要调用 `decode_packet(raw_byte)` 检查是不是成功值 `packet!`；
-- 拿到 `packet` 后，还要检查它是不是 `.data { payload }`……
+- 拿到 `event` 后，我们还要检查它是否 `.sample(raw_byte)` 变体；
+- 拿到 `raw_byte` 后，还要调用 `decode_packet(raw_byte)` 检查是否成功值 `packet!`；
+- 拿到 `packet` 后，还要检查它是否 `.data { payload }`……
 
 如果我们用普通的 `while true` 加上一层套一层的 `match`，代码就会像楼梯一样一路向右缩进，变成常见的**“右移金字塔（Pyramid of Doom）”**。
 
-在下一篇 **《Flurry 演进手记 (009)：把流式解析写得像呼吸一样自然——`while ... is ... do` 与 `let ... else`》** 中，我们将把这座缩进金字塔彻底夷为平地。
+在下一篇 **《Flurry 演进手记 (009)：把流式解析写得像呼吸一样自然——`while ... is ... do` 与 `let ... else`》** 中，我们将把这座缩进金字塔完全展平。

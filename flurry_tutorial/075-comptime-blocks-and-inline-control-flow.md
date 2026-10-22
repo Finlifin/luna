@@ -1,4 +1,4 @@
-# Flurry 演进手记 (075)：把循环和分支在编译期彻底摊平——comptime { ... } 块与 inline if / inline for
+# Flurry 演进手记 (075)：把循环和分支在编译期摊平——comptime { ... } 块与 inline if / inline for
 
 欢迎来到《Flurry 演进手记》第四卷的收官之作。
 
@@ -8,7 +8,7 @@
 1. **内联编译期计算块（`comptime { ... }`）**：在算子内部现场计算一个复杂的分块掩码或步长常量，要求编译期直接算出结果，运行时零开销；
 2. **编译期分支裁剪（`inline if` / `inline when`）**：当张量的通道数 `c == 1usize` 时走单通道快速路径，当 `c == 4usize` 时走 SIMD 向量化路径，要求生成的目标机器码里**只包含被选中的那条分支**，没有任何运行时 `if` 跳转；
 3. **编译期循环摊平与异构元组遍历（`inline for`）**：
-   - 把固定小维度的卷积核循环 `0 .. 3` 在编译期彻底展开（Loop Unrolling）成顺序执行的指令；
+   - 把固定小维度的卷积核循环 `0 .. 3` 在编译期展开（Loop Unrolling）成顺序执行的指令；
    - 甚至直接用 `inline for (idx, item) in pack'tuple_enumerate` 遍历一个**每个元素类型都不同**的异构元组 `Tuple<A, B, C>`。
 
 今天，我们就来看看 Flurry 是如何用 `comptime { ... }`、`inline if` 和 `inline for`，让你在运行时函数里享受丝滑的编译期代码内联展开，同时依然坚守类型安全与资源所有权底线的。
@@ -33,7 +33,7 @@ const TILE_AREA = comptime {
 fn compute_buffer_offset(block_idx: usize) -> usize {
     -- 在运行时函数内部直接嵌入 comptime { ... } 块：
     -- stride 在编译期就已经算好为 4096usize，运行时只做一次乘法。
-    let stride = comptime {
+    const stride = comptime {
         let page = 256usize;
         page * 16usize
     }
@@ -43,7 +43,7 @@ fn compute_buffer_offset(block_idx: usize) -> usize {
 
 ---
 
-## `inline if` 与 `inline when`——既要编译期裁剪分支，又要拒绝 C 语言 `#ifdef` 的失明症
+## `inline if` 与 `inline when`——既要编译期裁剪分支，又要报错 C 语言 `#ifdef` 的失明症
 
 在写高性能张量算子时，我们经常要根据编译期参数（比如 `comptime use_fast_math: bool` 或维度 `n: usize`）选择不同的实现路径。
 
@@ -52,9 +52,9 @@ fn compute_buffer_offset(block_idx: usize) -> usize {
 而在 Flurry 中，当你在运行时函数（默认处于 `ordinary` 严格检查模式）中写下 **`inline if`**、**`inline when`** 或 **`inline if ... is ... do`** 时，编译器实现了真正的两全其美：
 
 1. **在定义端 Normalization 阶段（双分支全检）**：
-   在 `ordinary` 模式下，**无论编译期条件选没选中，所有分支都会接受完整的类型检查、契约检查与资源所有权检查。** 绝不允许未选中的分支藏匿语法或类型毒丸。
+   在 `ordinary` 模式下，**无论编译期条件选没选中，所有分支都会接受完整的类型检查、契约检查与资源所有权检查。** 禁止未选中的分支藏匿语法或类型毒丸。
 2. **在调用端 Instantiation 阶段（零开销裁剪）**：
-   当具体编译期参数代入后，编译器在编译期直接选定命中的那条分支；**只有被选中分支里的运行时操作和副作用会进入最终生成的实例**，未被选中的分支在目标代码里彻底消失。
+   当具体编译期参数代入后，编译器在编译期直接选定命中的那条分支；**只有被选中分支里的运行时操作和副作用会进入最终生成的实例**，未被选中的分支在目标代码里消失。
 
 ```
 +-------------------------------------------------------------------------+
@@ -76,7 +76,7 @@ fn compute_buffer_offset(block_idx: usize) -> usize {
 |                                                                         |
 |  【阶段 2：Instantiation（以 use_bias = false 实例化时）】              |
 |    • 编译期判定 `use_bias == false`                                     |
-|    • 分支 A 被彻底剪除，生成的特化函数体等价于：                        |
+|    • 分支 A 被直接剪除，生成的特化函数体等价于：                        |
 |      `fn normalize_channel_false(x: f32) -> f32 { return x; }`          |
 +-------------------------------------------------------------------------+
 ```
@@ -102,7 +102,7 @@ fn tensor_post_process(val: i32, comptime scale_opt: ?i32) -> i32 {
     out
 }
 
--- ❌ 编译期直接拒绝：（哪怕条件恒为 true，else 分支永远不会在运行时执行。）
+-- ❌ 编译期直接报错：（哪怕条件恒为 true，else 分支永免在运行时执行。）
 fn bad_inline_if_branch(x: i32) -> i32 {
     inline if true {
         x + 1i32
@@ -133,7 +133,7 @@ comptime fn is_active_tap(i: Integer) -> bool {
     i != 1
 }
 
--- 将 1D 滤波器核循环在编译期彻底摊平。
+-- 将 1D 滤波器核循环在编译期摊平。
 fn unrolled_tap_accumulate(base: i32) -> i32 {
     var acc = 0i32;
 
@@ -151,8 +151,8 @@ fn unrolled_tap_accumulate(base: i32) -> i32 {
 ### 武器 2：用 `'tuple_enumerate` 遍历异构元组（Heterogeneous Tuple Iteration）
 
 还记得我们在第 069 篇提出的那个难题吗？
-假设我们的多分支神经网络头输出了一个异构元组 `pack: Tuple<A, B>`，其中第 0 个元素是类型 `A`，第 1 个元素是完全不同的类型 `B`。
-在普通语言里，你根本不可能用 `for` 循环去遍历一个元素类型各不相同的元组。
+假设我们的多分支神经网络头输出了一个异构元组 `pack: Tuple<A, B>`，其中第 0 个元素是类型 `A`，第 1 个元素是大相径庭的类型 `B`。
+在普通语言里，你断无可能用 `for` 循环去遍历一个元素类型各互异的元组。
 
 但在 Flurry 中，你只需对元组调用后缀操作 **`'tuple_enumerate`**，然后交给 **`inline for`**。
 
@@ -186,7 +186,7 @@ fn unrolled_tap_accumulate(base: i32) -> i32 {
 
 请注意这里最精妙的宇宙分工：
 - **`index` 活在 $U_1$（编译期 `Integer`）**：因为每一轮是编译期展开的，`index` 在第 0 轮是编译期常数 `0`，在第 1 轮是编译期常数 `1`；
-- **`element` 活在 $U_0$（运行时值）**：在第 0 轮，它的静态类型是 `A`；在第 1 轮，它的静态类型自动变成 `B`。而且它完全不是编译期拷贝，而是真正的运行时元组字段值，**严格遵守 Flurry 的仿射所有权（Affine Ownership / Move 语义）与每轮块末尾的资源析构边界**。
+- **`element` 活在 $U_0$（运行时值）**：在第 0 轮，它的静态类型是 `A`；在第 1 轮，它的静态类型自动变成 `B`。而且它完全并非编译期拷贝，而是真正的运行时元组字段值，**严格遵守 Flurry 的仿射所有权（Affine Ownership / Move 语义）与每轮块末尾的资源析构边界**。
 
 让我们写一段直接消费异构元组 `Tuple<A, B>` 的代码来验证这一特性：
 
@@ -210,13 +210,13 @@ where
 ```
 
 > **🔍 语法小贴士：`inline for` 必须在编译期有界。**
-> 因为 `inline for` 是在编译期将循环体物理展开，它的迭代范围（无论是 `start .. end` 还是元组的长度）必须是编译期已知的有界值。如果你试图把一个运行时才能确定长度的动态变量 `n: usize` 塞给 `inline for i in 0 .. n`，编译器会编译期拒绝。
+> 因为 `inline for` 是在编译期将循环体物理展开，它的迭代范围（无论是 `start .. end` 还是元组的长度）必须是编译期已知的有界值。如果你试图把一个运行时才能确定长度的动态变量 `n: usize` 塞给 `inline for i in 0 .. n`，编译器会编译期报错。
 
 ```flurry
 fn bad_dynamic_inline_for(runtime_len: usize) {
-    -- ❌ 编译期直接拒绝。
+    -- ❌ 编译期直接报错。
     -- `inline for` 的区间上下界必须是编译期可确定的 Integer 值，
-    -- 不能使用运行时动态变量 `runtime_len` 进行编译期展开。
+    -- 无法使用运行时动态变量 `runtime_len` 进行编译期展开。
     inline for i in 0 .. runtime_len {
         let _ = i;
     }

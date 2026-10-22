@@ -1,6 +1,6 @@
 # Flurry 演进手记 (069)：连元组都是一个类型函数——深入 pure comptime fn Tuple<...Es: meta.List<Type>> -> Type
 
-在上一篇中，我们揭示了 Flurry 最核心的一条类型论核心规则：**`pure comptime fn Name(...) -> Type` 拥有 Normal-Form Head（正规形式头部），它的调用本身就是一个有独立身份的终态类型，永远不会把函数体展开。**
+在上一篇中，我们揭示了 Flurry 最核心的一条类型论核心规则：**`pure comptime fn Name(...) -> Type` 拥有 Normal-Form Head（正规形式头部），它的调用本身就是一个有独立身份的终态类型，永免把函数体展开。**
 
 就在你以为这只是用来造 `Tensor<T, ...>` 或自定义泛型容器的机制时，你翻开了 Flurry 的核心库定义，突然看到了这样一行让你瞳孔地震的签名：
 
@@ -8,15 +8,15 @@
 pure comptime fn Tuple<...Es: meta.List<Type>> -> Type
 ```
 
-等等——**连元组（`Tuple`）都不是编译器写死的特殊语法糖，而是一个普通的变参 Normal-Form 类型函数？**
+等等——**连元组（`Tuple`）皆非编译器写死的特殊语法糖，而是一个普通的变参 Normal-Form 类型函数？**
 
-在我们的边缘端神经网络推理引擎中，不仅张量的维度是变长的，模型的输入和输出也经常是**多分支异构元组（Multi-Input / Multi-Output Tuple）**：
+在我们的边缘端神经网络推理引擎中，非但张量的维度是变长的，模型的输入和输出也经常是**多分支异构元组（Multi-Input / Multi-Output Tuple）**：
 - 一个目标检测头同时输出 `(Tensor<f32, 80>, Tensor<f32, 4>)`（类别概率 + 边界框回归）；
 - 一个流水线串联器 `Pipeline` 需要把前一个算子的输出元组 `Tuple<...Outs>`，严丝合缝地拼接到下一个算子的输入参数列表里；
 - 我们甚至希望在编译期写一个类型级函数 ` ConcatTupleTypes(A, B)`，把两个异构元组类型合并成一个新元组类型。
 
 如果在传统语言里，元组 `(A, B)`、`Tuple<A, B, C>` 是硬编码在语法解析器里的不同特种怪物，想对元组的元素列表做编程，你就得写 `Tuple1`、`Tuple2`……一直宏展开到 `Tuple16`。
-今天，我们就来看看 Flurry 是如何用一句 `pure comptime fn Tuple<...Es: meta.List<Type>> -> Type`，把“异构元组”彻底统一进 2LTT 类型计算体系的。
+今天，我们就来看看 Flurry 是如何用一句 `pure comptime fn Tuple<...Es: meta.List<Type>> -> Type`，把“异构元组”统一进 2LTT 类型计算体系的。
 
 ---
 
@@ -84,11 +84,11 @@ pure comptime fn Tuple<...Es: meta.List<Type>> -> Type
 ```
 
 > **💡 核心心智模型：Normal-Form 身份与内部结构视图的分离**
-> 也许你会问：“既然 `Tuple` 是一个不展开函数体的 Normal-Form 头，那为什么我还能对 `Tuple<i32, bool>` 的值做 `.0`、`.1` 下标访问和解构（Destructuring），编译器也知道它的内存布局？”
+> 也许你会问：“既然 `Tuple` 是一个维持未展开态函数体的 Normal-Form 头，那为什么我还能对 `Tuple<i32, bool>` 的值做 `.0`、`.1` 下标访问和解构（Destructuring），编译器也知道它的内存布局？”
 >
 > 答案是：**类型身份（Type Identity）与结构视图（Structural View）各司其职。**
-> - 在**类型等价判断与 trait 匹配**时，`Tuple<i32, bool>` 的身份严格由它的 Normal-Form 头 `Tuple` 和规范化参数 `[i32, bool]` 决定；它永远不会坍缩成某个无头的匿名结构。
-> - 在**字段访问、模式解构与内存布局计算**时，编译器会查询 `Tuple<[i32, bool]>` 对应的内部结构元素视图，但这个内部视图**绝不会替代** `Tuple<...Es>` 作为 Normal-Form 头的语言定义。
+> - 在**类型等价判断与 trait 匹配**时，`Tuple<i32, bool>` 的身份严格由它的 Normal-Form 头 `Tuple` 和规范化参数 `[i32, bool]` 决定；它永免坍缩成某个无头的匿名结构。
+> - 在**字段访问、模式解构与内存布局计算**时，编译器会查询 `Tuple<[i32, bool]>` 对应的内部结构元素视图，但这个内部视图**不会替代** `Tuple<...Es>` 作为 Normal-Form 头的语言定义。
 
 正因为 `Tuple` 遵守严格的 Normal-Form 头部等价规则：
 
@@ -103,7 +103,7 @@ fn test_tuple_identity() {
     let _ = accept_pair(ok_pair);
 
     let wrong_order: Tuple<bool, i32> = (true, 42);
-    -- ❌ 编译期直接拒绝。
+    -- ❌ 编译期直接报错。
     -- 期望类型：Tuple<[i32, bool]>
     -- 实际类型：Tuple<[bool, i32]>
     -- 规范化参数列表 [i32, bool] 与 [bool, i32] 在第 0 个元素处不等价。
@@ -115,7 +115,7 @@ fn test_tuple_identity() {
 
 ## 用 `...` 展开类型列表，自定义变参 Normal-Form 类型函数
 
-既然 `Tuple<...Es: meta.List<Type>>` 的本质是接收一个 `meta.List<Type>`，那是不是意味着：
+既然 `Tuple<...Es: meta.List<Type>>` 的本质是接收一个 `meta.List<Type>`，那是否意味着：
 1. 我们可以在编译期先构造或计算出一个 `meta.List<Type>`（比如 `[T, bool]`），然后再用 **`...` 展开（Splice/Unpack）** 传给 `Tuple`？
 2. 我们自己也能定义像 `Tuple` 一样接收 `...Es: meta.List<Type>` 的变参 Normal-Form 类型函数？
 
@@ -134,10 +134,11 @@ pure comptime fn WithFlagTuple(T: Type) -> Type {
 -- 2. 我们甚至可以自己定义带变参类型列表的 Normal-Form 类型构造器。
 -- 比如定义一个将固定主输出 A 与任意个辅助输出 ...elements 打包的算子包类型：
 pure comptime fn MultiHeadPack<A, ...elements: meta.List<Type>> -> Type {
-    struct {
+    struct MultiHeadPackRepr {
         primary: A,
         auxiliaries: Tuple<...elements>,
     }
+    MultiHeadPackRepr
 }
 ```
 
@@ -162,9 +163,10 @@ pure comptime fn CopiedPack<
     .copy: T = value,
     ...elements: meta.List<Type>
 > -> Type {
-    struct {
+    struct CopiedPackRepr {
         head_tail: Tuple<T, ...elements>,
     }
+    CopiedPackRepr
 }
 ```
 
@@ -206,9 +208,9 @@ pure comptime fn CopiedPack<
 
 ```flurry
 pure comptime fn BadTupleReturn(T: Type) -> Type {
-    -- ❌ 编译期直接拒绝。
+    -- ❌ 编译期直接报错。
     -- (T, bool) 是把两个 Type 值装进了一个二元组里，所以 (T, bool) 的类型是 Tuple<Type, Type>，
-    -- 而不是 Type。函数签名要求返回 Type。
+    -- 而非 Type。函数签名要求返回 Type。
     (T, bool)
 }
 
@@ -222,7 +224,7 @@ pure comptime fn GoodTupleReturn(T: Type) -> Type {
 > **🔍 语法小贴士：`Tuple` 的三条核心原则**
 > 1. **统一签名**：`pure comptime fn Tuple<...Es: meta.List<Type>> -> Type`，所有元组类型都是对这个 Normal-Form 头的调用。
 > 2. **列表构造与展开**：多个类型可以用 `[A, B]` 放进 `meta.List<Type>`，并通过 `Tuple<...list>` 展开为元组类型。
-> 3. **值与类型区分**：运行时元组值用圆括号 `(42, true)` 构造，它的类型是 `Tuple<i32, bool>`；而在编译期写 `(i32, bool)` 得到的是类型为 `Tuple<Type, Type>` 的编译期二元组，不能直接当成 `Type` 返回。
+> 3. **值与类型区分**：运行时元组值用圆括号 `(42, true)` 构造，它的类型是 `Tuple<i32, bool>`；而在编译期写 `(i32, bool)` 得到的是类型为 `Tuple<Type, Type>` 的编译期二元组，禁止直接当成 `Type` 返回。
 
 ---
 
@@ -232,7 +234,7 @@ pure comptime fn GoodTupleReturn(T: Type) -> Type {
 | :--- | :--- | :--- |
 | **`Tuple` 的本质** | `pure comptime fn Tuple<...Es: meta.List<Type>> -> Type` | 无需为不同长度的元组硬编码语法特例，所有元组的类型语义完全统一 |
 | **变参子句收集 `...Es`** | 将 `<A, B, C>` 中的变长类型实参自动收集为 `meta.List<Type>`（即 `[A, B, C]`） | 支持在编译期用列表操作处理异构元组元素类型，再通过 `...list` 展开 |
-| **Normal-Form 身份保持** | `Tuple` 始终保持 Normal-Form 头身份，内部结构视图仅服务于字段访问、解构与布局 | 既保留了元组的操作便利性，又绝不破坏 Normal-Form 类型等价系统的严密性 |
+| **Normal-Form 身份保持** | `Tuple` 始终保持 Normal-Form 头身份，内部结构视图仅服务于字段访问、解构与布局 | 既保留了元组的操作便利性，又完好保留而无损于 Normal-Form 类型等价系统的严密性 |
 | **自定义变参类型构造器** | 开发者也可定义带 `...Es: meta.List<Type>` 的 `pure comptime fn ... -> Type` | 轻松构建多输入/多输出神经网络算子包、异构管道等高级泛型抽象 |
 
 ---
@@ -246,4 +248,4 @@ pure comptime fn GoodTupleReturn(T: Type) -> Type {
 为什么 Flurry 鼓励把普通函数的类型参数、编译期值参数、trait 约束、甚至可选默认类型参数统统写进 `where` 子句？
 在 `where T :- Copy, n: usize, .Acc: Type = T, requires n > 0usize` 这样一行子句里，各个参数之间到底按照什么**阶段依赖顺序（Stage Dependency Order）**来求值和推导？
 
-下一篇 **`070-where-clauses-and-parameter-stage-dependencies.md`**，我们将彻底拆解 Flurry 极具特色的 `where` 子句体系与参数阶段依赖图。
+下一篇 **`070-where-clauses-and-parameter-stage-dependencies.md`**，我们将拆解 Flurry 颇具特色的 `where` 子句体系与参数阶段依赖图。

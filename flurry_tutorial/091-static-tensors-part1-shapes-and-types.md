@@ -1,6 +1,6 @@
 # Flurry 演进手记 (091)：静态形状张量实战（一）：用类型级列表编码维度与秩
 
-> **阅读指南**：欢迎来到第四卷的静态形状张量（Static-Shaped Tensors）专题第一篇。在科学计算、图形学与深度学习系统中，“张量形状（Shape）不匹配”是常见错误来源。本篇我们将结合 `docs/comptime/static-shaped-tensors.md`，设计 `Tensor` 类型构造器：如何用编译期列表 `meta.List<usize>` 与变参语法同时支持 `Tensor<f64, 128, 128>` 和显式形状列表 `Tensor<T, .dims = s>`？如何用精化契约拦截 `0` 维轴？以及为什么一个 0 阶（Rank-0）张量 `Tensor<T>` 在类型系统里可以直接等同于标量类型 `T`？
+> **阅读指南**：欢迎来到第四卷的静态形状张量（Static-Shaped Tensors）专题第一篇。在科学计算、图形学与深度学习系统中，“张量形状（Shape）失配”是常见错误来源。本篇我们将结合 `docs/comptime/static-shaped-tensors.md`，设计 `Tensor` 类型构造器：如何用编译期列表 `meta.List<usize>` 与变参语法同时支持 `Tensor<f64, 128, 128>` 和显式形状列表 `Tensor<T, .dims = s>`？如何用精化契约拦截 `0` 维轴？以及为什么一个 0 阶（Rank-0）张量 `Tensor<T>` 在类型系统里可以直接等同于标量类型 `T`？
 
 ---
 
@@ -71,16 +71,17 @@ pure comptime fn Tensor<
 where
     ensures dims.is_empty() ==> result == T
 {
-    inline if dims.is_empty() {
+    if dims.is_empty() {
         -- 0 阶张量直接退化为标量类型 T。
         T
     } else {
-        -- 非空形状：构造持有连续元素存储的张量结构类型
-        struct {
+        -- 并非空形状：先用标准 struct 定义声明结构类型（或使用类型 Builder API），再返回该类型
+        struct TensorStorage {
             const ElementType: Type = T;
             const SHAPE: meta.List<usize> = dims;
             const RANK: usize = dims.len();
         }
+        TensorStorage
     }
 }
 ```
@@ -108,8 +109,8 @@ where
 ```
 
 > **💡 核心心智模型：Normal-Form 类型头与 Rank-0 等价**
-> 1. **非空形状保留 Normal-Form 类型身份**：当 `dims` 非空时，`Tensor<f64, 128, 128>` 与 `Tensor<f64, .dims = [128, 128]>` 归一化到同一个 Normal-Form 类型头。只有当元素类型 `T` 相等且形状序列逐轴相等时，两个张量类型才相等。
-> 2. **Rank-0 张量与标量等价**：通过 `ensures dims.is_empty() ==> result == T`，PTC 能够证明 `Tensor<f64>`（即 `Tensor<f64, .dims = []>`）等于 `f64`。因此在编写泛化到任意阶数的张量算法时，不需要为标量单独维护一套重载版本。
+> 1. **非空形状保留 Normal-Form 类型身份**：当 `dims` 并非空时，`Tensor<f64, 128, 128>` 与 `Tensor<f64, .dims = [128, 128]>` 归一化到同一个 Normal-Form 类型头。只有当元素类型 `T` 相等且形状序列逐轴相等时，两个张量类型才相等。
+> 2. **Rank-0 张量与标量等价**：通过 `ensures dims.is_empty() ==> result == T`，PTC 能够证明 `Tensor<f64>`（即 `Tensor<f64, .dims = []>`）等于 `f64`。因此在编写泛化到任意阶数的张量算法时，无需为标量单独维护一套重载版本。
 
 ---
 
@@ -148,11 +149,11 @@ fn broken_tensor_shapes(
     b: Tensor<f64, 128, 32>,
 ) {
     -- 负例 1：把 128×64 的张量和 128×32 的张量传给要求同形的函数
-    -- ❌ 编译期拒绝：第 1 轴维度 64 != 32，无法合一为同一个形状列表 s。
+    -- ❌ 编译期报错：第 1 轴维度 64 != 32，无法合一为同一个形状列表 s。
     assert_same_shape(a, b);
 
     -- 负例 2：试图构造包含 0 长度轴的退化张量
-    -- ❌ 编译期拒绝：valid_shape([128, 0]) 求值为 false，违反了 dims 参数的 refines 契约。
+    -- ❌ 编译期报错：valid_shape([128, 0]) 求值为 false，违反了 dims 参数的 refines 契约。
     let _: Tensor<f64, 128, 0> = undefined;
 }
 ```
@@ -165,7 +166,7 @@ fn broken_tensor_shapes(
 | :--- | :--- | :--- |
 | **形状表示（Shape）** | `...dims: meta.List<usize>` | 用一套类型构造器统一表达从 0 维到任意 $n$ 维的张量 |
 | **双重调用形式** | `Tensor<f64, 128, 64>` 与 `Tensor<T, .dims = s>` | 具体代码直接写变参，泛型代码直接供应形状列表 `s` |
-| **合法轴长精化** | `refines { valid_shape(itself) }`（要求每轴 $d > 0$） | 在编译期拒绝 `Tensor<f64, 128, 0>` 这类退化零轴形状 |
+| **合法轴长精化** | `refines { valid_shape(itself) }`（要求每轴 $d > 0$） | 在编译期报错 `Tensor<f64, 128, 0>` 这类退化零轴形状 |
 | **0 阶张量退化** | `Tensor<T>`（空形状 `[]`）`== T` | 标量即为 Rank-0 张量，无需为标量与张量维护两套平行接口 |
 
 ---

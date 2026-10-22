@@ -37,9 +37,9 @@ $$\text{linear\_index} = i_0 \times 128 + i_1 \times 16 + i_2 \times 1$$
 
 | 构造语法 | 编译期行为 | 对运行期生成代码的影响 |
 | :--- | :--- | :--- |
-| **`comptime { ... }`** | 整个代码块在编译期立即执行 | 不生成运行期控制流；产生的常量可在后续代码中直接使用 |
+| **`comptime { ... }`** | 整个代码块在编译期立即执行 | 免于生成运行期控制流；产生的常量可在后续代码中直接使用 |
 | **`inline if cond { A } else { B }`** | `cond` 在编译期求值 | 仅保留被选中的分支进入实例的 runtime 代码 |
-| **`inline when` / `inline if ... is do { ... }`** | 多分支或模式匹配条件在编译期求值 | 编译期确定命中分支，不生成运行期条件跳转 |
+| **`inline when` / `inline if ... is do { ... }`** | 多分支或模式匹配条件在编译期求值 | 编译期确定命中分支，免于生成运行期条件跳转 |
 | **`inline for x in iter { ... }`** | 迭代源 `iter` 的展开结构在编译期确定 | 循环体按迭代项在编译期逐次展开；循环体内的普通运行期语句保留为对应操作序列 |
 
 下面展示 `inline for` 在三维张量 `Tensor<f64, 4, 8, 16>` 上展开线性下标计算的过程：
@@ -80,7 +80,7 @@ pure comptime fn row_major_strides(
     var running: usize = 1;
 
     -- 从最后一轴向第一轴倒推累乘
-    inline for rev_idx in 0 .. rank {
+    for rev_idx in 0 .. rank {
         let axis = rank - 1 - rev_idx;
         strides = [running] ++ strides;
         running = running * shape[axis];
@@ -155,14 +155,14 @@ where
     let dst_rank = target_shape.len();
 
     var out: meta.List<usize> = [];
-    inline for idx in 0 .. dst_rank {
+    for idx in 0 .. dst_rank {
         let offset = dst_rank - idx;
-        let stride = inline if offset > src_rank {
+        let stride = if offset > src_rank {
             -- 规则 3：缺失的前导轴，虚拟步长为 0。
             0
         } else {
             let src_axis = src_rank - offset;
-            inline if source_shape[src_axis] == 1 and target_shape[idx] > 1 {
+            if source_shape[src_axis] == 1 and target_shape[idx] > 1 {
                 -- 规则 2：长度为 1 的扩展轴，虚拟步长为 0。
                 0
             } else {
@@ -175,18 +175,18 @@ where
 }
 ```
 
-需要注意 `inline if` 与 `inline for` 的阶段规则：**它们的分支条件或展开结构必须在编译期（`comptime`）可确定。** 如果用运行期普通变量作为 `inline if` 条件或 `inline for` 边界，编译器会拒绝：
+需要注意 `inline if` 与 `inline for` 的阶段规则：**它们的分支条件或展开结构必须在编译期（`comptime`）可确定。** 如果用运行期普通变量作为 `inline if` 条件或 `inline for` 边界，编译器会报错：
 
 ```flurry
 fn broken_inline_control(runtime_flag: bool, runtime_limit: usize) {
     -- 负例 1：用运行期布尔值驱动 inline if
-    -- ❌ 编译期拒绝：runtime_flag 是运行期参数，无法在编译期确定分支。
+    -- ❌ 编译期报错：runtime_flag 是运行期参数，无法在编译期确定分支。
     inline if runtime_flag {
         println("active");
     }
 
     -- 负例 2：用运行期整数驱动 inline for 展开
-    -- ❌ 编译期拒绝：inline for 必须在编译期确定展开结构。
+    -- ❌ 编译期报错：inline for 必须在编译期确定展开结构。
     inline for i in 0 .. runtime_limit {
         println("{}", i);
     }
@@ -200,7 +200,7 @@ fn broken_inline_control(runtime_flag: bool, runtime_limit: usize) {
 | 编译期特性 | 在静态张量引擎中的角色 | 作用与收益 |
 | :--- | :--- | :--- |
 | **`row_major_strides`** | 编译期倒推累乘计算连续步长列表 | 步长在编译期求出，运行期无需重复计算 |
-| **`broadcast_strides`** | 将缺失前导轴与长度 `1` 扩展轴的步长设为 `0` | 支持不复制输入存储的广播寻址 |
+| **`broadcast_strides`** | 将缺失前导轴与长度 `1` 扩展轴的步长设为 `0` | 支持免于复制输入存储的广播寻址 |
 | **`inline for axis in 0..rank`** | 在编译期将坐标点积循环按阶数展开 | 消除运行期维度循环分支，并使常量步长直接参与折叠 |
 | **阶段边界检查** | 要求 `inline if` / `inline for` 头部在编译期可确定 | 区分编译期展开与运行期动态控制流 |
 
@@ -210,6 +210,6 @@ fn broken_inline_control(runtime_flag: bool, runtime_limit: usize) {
 
 在实际工程中，我们常常需要根据构建配置调整行为：
 - 在本地开发调试（`debug` 模式）时开启跟踪日志，或根据当前包启用了哪些 feature 选择不同实现；
-- 同时保证不同包拥有各自的构建配置视图，上游调用者不能暗中篡改下游依赖包内部的构建条件。
+- 同时保证不同包拥有各自的构建配置视图，上游调用者无法暗中篡改下游依赖包内部的构建条件。
 
 下一篇 **《094 — 构建上下文与编译期配置：`build` 包与包级配置隔离》** 将介绍内置包与 `build` 上下文的隔离规则。

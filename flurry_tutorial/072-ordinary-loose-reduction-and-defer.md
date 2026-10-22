@@ -16,22 +16,22 @@ comptime fn Selected(flag: bool) -> Type {
     }
 }
 ```
-注意看。这里的 `Selected` 是一个带 `if` 分支的 `comptime fn`，它**不是**单点返回的 Normal-Form 头（第 068 篇讲过，只有知道具体 `flag` 是 `true` 还是 `false`，它才能归约成 `i32` 或 `bool`）。
+注意看。这里的 `Selected` 是一个带 `if` 分支的 `comptime fn`，它**并非**单点返回的 Normal-Form 头（第 068 篇讲过，只有知道具体 `flag` 是 `true` 还是 `false`，它才能归约成 `i32` 或 `bool`）。
 
 如果我们在一个普通的运行时函数签名里直接写：
 `fn read_selected(comptime flag: bool, value: Selected(flag)) -> i32`
-在定义端 Normalization 时，`flag` 只是一个未知的符号布尔值，`Selected(flag)` 根本没法算出一个具体的类型。这时候，严格检查的运行时函数签名就会陷入尴尬：算又算不出来，留又不能随便留一个未展开的非 Normal-Form 调用。
+在定义端 Normalization 时，`flag` 只是一个未知的符号布尔值，`Selected(flag)` 根本没法算出一个具体的类型。这时候，严格检查的运行时函数签名就会陷入尴尬：算又无从算出来，留又无法随便留一个未展开的并非 Normal-Form 调用。
 
 今天，我们就来看看 Flurry 是如何用 **Ordinary（严格检查） vs Loose（宽松检查）** 这两个正交强度等级，配合精巧的 **`defer` 延迟表达式**，把这个死结解得干脆利落的。
 
 ---
 
-## 非 Normal-Form 类型函数卡在运行时签名里的困境
+## 并非 Normal-Form 类型函数卡在运行时签名里的困境
 
 让我们先把问题摆在桌面上。
 在第 068 篇中我们学过：
 - 如果一个类型函数是 **Normal-Form 头**（比如 `pure comptime fn Tensor<T, n: usize> -> Type`），那么即使 `T` 和 `n` 是未知的符号变量，`Tensor<T, n>` 本身就已经是一个合法的终态类型（Normal-Form Type），可以直接停留在函数签名里。
-- 但如果一个类型函数**不是** Normal-Form 头（比如根据 `flag: bool` 分支返回 `i32` 或 `bool` 的 `Selected(flag)`，或者根据格式化字符串 `"shape=({}, {})"` 解析出参数元组类型的 `ParseFormat(fmt)`），它必须拿到具体的编译期输入才能算出真正的类型。
+- 但如果一个类型函数**并非** Normal-Form 头（比如根据 `flag: bool` 分支返回 `i32` 或 `bool` 的 `Selected(flag)`，或者根据格式化字符串 `"shape=({}, {})"` 解析出参数元组类型的 `ParseFormat(fmt)`），它必须拿到具体的编译期输入才能算出真正的类型。
 
 ```flurry
 comptime fn Selected(flag: bool) -> Type {
@@ -42,10 +42,10 @@ comptime fn Selected(flag: bool) -> Type {
     }
 }
 
--- ❌ 编译期直接拒绝。
+-- ❌ 编译期直接报错。
 -- 普通运行时函数默认处于 Ordinary（严格）检查模式：
 -- 在定义端 Normalization 时，flag 还是未知的符号变量，
--- Selected(flag) 既不是 Normal-Form 头，又无法在定义端归约为具体类型。
+-- Selected(flag) 既非 Normal-Form 头，又无法在定义端归约为具体类型。
 fn read_selected(comptime flag: bool, value: Selected(flag)) -> i32 {
     0i32
 }
@@ -90,12 +90,12 @@ fn read_selected(comptime flag: bool, value: Selected(flag)) -> i32 {
 |  定义了一个局部的运行时函数 `fn helper(x: T) -> T`：                    |
 |  ——生成这个 helper 的外层块是 Loose 的；                                |
 |  ——但 `helper` 本身作为一个运行时函数，它自己的签名和函数体             |
-|    依然严格执行 **Ordinary（严格）** 检查  绝不会因为外层是 comptime    |
+|    依然严格执行 **Ordinary（严格）** 检查  并不会因为外层是 comptime    |
 |    就退化成无契约的宏模板                                               |
 +-------------------------------------------------------------------------+
 ```
 
-这下你彻底明白了：
+这下你理解了：
 - 在 `comptime fn` 或 `comptime { ... }` 块里，因为处于 **Loose（宽松检查）** 模式，你可以自由地写复杂的类型分支、循环拼装类型；
 - 而在普通的运行时函数 `fn` 里，因为处于 **Ordinary（严格检查）** 模式，编译器要求参数类型在定义端就清清楚楚。
 
@@ -107,7 +107,7 @@ fn read_selected(comptime flag: bool, value: Selected(flag)) -> i32 {
 
 这时候，Flurry 提供了 **`defer expr` 延迟表达式**。
 
-当你写下 `value: defer Selected(flag)` 时，你是在向编译器发出一条极其精准的指令：
+当你写下 `value: defer Selected(flag)` 时，你是在向编译器发出一条十分精准的指令：
 > **“请把 `Selected(flag)` 的具体类型求值推迟（Defer）到调用端 Instantiation 阶段、当 `flag` 已知时再执行。而在定义端 Normalization 阶段，先把 `value` 当作满足已知约束的抽象类型（`Any` + 已知修饰约束）来进行严格检查。”**
 
 让我们看看加上 `defer` 后的 进阶代码是如何丝滑工作的：
@@ -121,7 +121,7 @@ comptime fn Selected(flag: bool) -> Type {
     }
 }
 
--- ✅ 改进写法：使用 defer Selected(flag) 显式推迟非 Normal-Form 类型的具体求值。
+-- ✅ 改进写法：使用 defer Selected(flag) 显式推迟并非 Normal-Form 类型的具体求值。
 fn inspect_selected(
     comptime flag: bool,
     value: defer Selected(flag),
@@ -150,15 +150,15 @@ fn demo_defer() {
     -- Instantiation 阶段算出 Selected(false) == bool，第二个参数必须传 bool。
     let b = inspect_selected(false, true);
 
-    -- ❌ 编译期在调用端直接拒绝。
-    -- 当 flag = true 时，defer Selected(true) 归约为 i32，传入 false (bool) 类型不匹配。
+    -- ❌ 编译期在调用端直接报错。
+    -- 当 flag = true 时，defer Selected(true) 归约为 i32，传入 false (bool) 类型失配。
     let bad = inspect_selected(true, false);
 }
 ```
 
 ### `defer` 的两个典型应用场景
 
-除了参数类型依赖于前面的 `comptime` 参数外，`defer` 还有两个极其强大的用武之地：
+除了参数类型依赖于前面的 `comptime` 参数外，`defer` 还有两个十分强大的用武之地：
 
 #### 场景 A：类型安全的 `format` / 张量打印签名
 想象一下 `print(comptime format: str, args: defer ParseFormat(format))`：
@@ -191,16 +191,16 @@ where
 
 > **⚠️ 重要安全边界：在定义端，未展开的 `defer` 类型只能当 `Any` 用。**
 > 也许你会问：“既然 `value: defer Selected(flag)` 推迟到了调用端才算具体类型，那如果我在普通代码里直接对 `value` 写 `value + 1i32`（没有分支也没有约束），Normalization 会放过它吗？”
-> **绝不会。** 在定义端未展开时，`defer Selected(flag)` 对普通代码只暴露最基础的 `Any`（以及你在 `where`/`requires` 中显式补充的约束）。如果你在普通代码里直接把 `value` 当成 `i32` 做加法，定义端 Normalization 会立刻报错——因为 `Any` 不支持 `+`。
+> **并非如此。** 在定义端未展开时，`defer Selected(flag)` 对普通代码只暴露最基础的 `Any`（以及你在 `where`/`requires` 中显式补充的约束）。如果你在普通代码里直接把 `value` 当成 `i32` 做加法，定义端 Normalization 会立刻报错——因为 `Any` 暂未涵盖 `+`。
 
 ```flurry
 fn bad_defer_use(
     comptime flag: bool,
     value: defer Selected(flag),
 ) -> i32 {
-    -- ❌ 编译期在定义处（Normalization 阶段）直接拒绝。
+    -- ❌ 编译期在定义处（Normalization 阶段）直接报错。
     -- 在未确定 flag 的普通上下文中，value 的已知类型信息只有 Any，
-    -- 编译器绝不允许你盲目假设它一定是 i32 并执行 `+ 1i32`。
+    -- 编译器禁止你盲目假设它一定是 i32 并执行 `+ 1i32`。
     value + 1i32
 }
 ```
@@ -214,7 +214,7 @@ fn bad_defer_use(
 | **`comptime` vs `runtime`** | **执行阶段（Stage）** | 决定代码是在编译期运行（操纵 $U_1$）还是在目标程序运行（操纵 $U_0$） |
 | **`ordinary`（严格检查）** | **检查强度（Strength）** | 普通代码与运行时函数默认强度（即使定义在 `comptime` 块内也保持 `ordinary`）；要求类型在定义端可确定结构或 Normal-Form 头 |
 | **`loose`（宽松检查）** | **检查强度（Strength）** | `comptime fn` 与 `comptime { ... }` 块的内部强度；允许依赖未知编译期参数的动态类型操作留到 Instantiation 阶段归约 |
-| **`defer expr`** | **显式延迟求值** | 将非 Normal-Form 类型表达式或可选子句默认值的具体计算推迟到 Instantiation 阶段；定义端未展开时按 `Any`（加已知约束）严格把关 |
+| **`defer expr`** | **显式延迟求值** | 将并非 Normal-Form 类型表达式或可选子句默认值的具体计算推迟到 Instantiation 阶段；定义端未展开时按 `Any`（加已知约束）严格把关 |
 
 ---
 

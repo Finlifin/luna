@@ -22,9 +22,9 @@ pure comptime fn bad_checked_index(index: Integer, length: Integer) -> Integer {
 }
 ```
 
-这种做法有三个致命问题背景：
-1. **接口契约隐形**：调用者只看函数签名 `(index: Integer, length: Integer) -> Integer`，根本不知道 `index` 和 `length` 之间有什么大小关系要求。
-2. **报错位置滞后**：一旦出错，诊断信息指向的是库函数内部的 `assert` 行，而不是调用者传入非法参数的犯罪现场。
+这种做法有三个严重问题背景：
+1. **接口契约隐形**：调用者只看函数签名 `(index: Integer, length: Integer) -> Integer`，根本无从得知 `index` 和 `length` 之间有什么大小关系要求。
+2. **报错位置滞后**：一旦出错，诊断信息指向的是库函数内部的 `assert` 行，而非调用者传入非法参数的犯罪现场。
 3. **无法进行逻辑传递（Chaining）**：如果你先调了一个函数算出 `step = next_index(index)`，再把 `step` 传给 `bad_checked_index(step, length)`，编译器在符号推导阶段无法利用前一个函数的返回契约去自动证明后一个函数的入口条件。
 
 ---
@@ -57,7 +57,7 @@ $$\text{refinement\_type} \rightarrow \text{\texttt{refines}}\ \{\ expr\ \}\ exp
 | **`itself`** | 全小写（对应值层） | 当前正在被精化或检查的**目标值（Target Value）** | 筛选满足数值或属性条件的值，如 `refines { itself > 0 } usize` |
 
 > **🔍 语法小贴士：大小写即宇宙层次。**
-> 就像我们在第 076、079 回看到的 `Type` vs `type`、`Any` vs `any` 一样，Flurry 始终保持着极其一致的视觉直觉：**首字母大写的 `Itself` 指代类型（`Type`），全小写的 `itself` 指代值（Value）**。一眼扫过去，你就知道筛网是在筛类型本身，还是在筛类型里的值。
+> 就像我们在第 076、079 回看到的 `Type` vs `type`、`Any` vs `any` 一样，Flurry 始终保持着十分一致的视觉直觉：**首字母大写的 `Itself` 指代类型（`Type`），全小写的 `itself` 指代值（Value）**。一眼扫过去，你就知道筛网是在筛类型本身，还是在筛类型里的值。
 
 ---
 
@@ -91,7 +91,7 @@ test {
 如果有人试图把一个普通的标量整数 `7u32` 塞进只收元组的 `accept_tuple`：
 
 ```flurry
--- ❌ 编译期直接拒绝：7u32 的类型是 u32，令 Type.predicates.is_tuple(Itself) 为 false，无法通过精化筛网
+-- ❌ 编译期直接报错：7u32 的类型是 u32，令 Type.predicates.is_tuple(Itself) 为 false，无法通过精化筛网
 fn reject_non_tuple() {
     let bad = accept_tuple(7u32);
 }
@@ -101,7 +101,7 @@ fn reject_non_tuple() {
 
 ## 四、 进阶：`requires` 与 `ensures` 的编译期契约接力
 
-精化约束不仅能直接写在类型前缀 `refines { ... }` 上，还能以 `where requires ...` 和 `where ensures ...` 子句的形式写在函数签名上。
+精化约束非但能直接写在类型前缀 `refines { ... }` 上，还能以 `where requires ...` 和 `where ensures ...` 子句的形式写在函数签名上。
 
 特别要注意的是：在编译期元编程中，我们使用的是数学整数类型 **`Integer`**（任意精度数学整数，没有机器字长回绕溢出问题）。当多个 `pure comptime fn` 组合调用时，前一个函数的 `ensures`（后置保证）会自动成为当前上下文的已知事实，用来证明后一个函数的 `requires`（前置要求）。
 
@@ -164,7 +164,7 @@ test {
 如果调用者在编译期传入了会导致下一步越界的 `index = 3, length = 4`（此时 `3 + 1 < 4` 为假）：
 
 ```flurry
--- ❌ 编译期直接拒绝：传入 (3, 4) 违反了 next_checked_index 的前置契约 `index + 1 < length`
+-- ❌ 编译期直接报错：传入 (3, 4) 违反了 next_checked_index 的前置契约 `index + 1 < length`
 comptime {
     let out_of_bounds = next_checked_index(3, 4);
 }
@@ -178,7 +178,7 @@ comptime {
 
 > **💡 核心心智模型：编译期命题（PTC）与运行期程序验证（Program Verification）各司其职。**
 > - 本篇所讲的 `comptime predicate`、类型上的 `refines { ... }` 以及纯编译期函数上的 `requires / ensures`，全部属于 **PTC（Propositional Type Constraints，命题类型约束）** 的管辖范围。它们只处理**类型关系与编译期纯值命题**。
-> - 至于运行期可变内存状态、指针别名修改、借用生命周期以及所有权资源规格（我们在第 3 卷第 060 回见过的运行期契约），则由专门的**程序验证层（Program Verification Layer）**负责。两者绝不混谈，从而保证了类型检查器本身的纯粹与高效。
+> - 至于运行期可变内存状态、指针别名修改、借用生命周期以及所有权资源规格（我们在第 3 卷第 060 回见过的运行期契约），则由专门的**程序验证层（Program Verification Layer）**负责。两者不混谈，从而保证了类型检查器本身的纯粹与高效。
 
 ---
 
@@ -200,8 +200,8 @@ comptime {
 到现在为止，我们的张量形状和数组长度（比如 `Array<f32, 4>`）依赖的都是**编译期已知常数**。
 
 但是在真实的科学计算与网络协议解析中，大量的张量维度和缓冲区长度是在**运行期**从文件头、网络包或用户输入里读出来的（比如 `let n: usize = read_dim();`）。
-在其他系统级语言里，一旦长度来自运行期变量，你就不能再用定长数组类型 `[f32; N]`，而必须退化到另一套完全割裂的切片或动态容器语法（如 `&[f32]` 或 `Vec<f32>`）；更糟糕的是，如果你用整数下标 `u32` 去索引某个图节点池 `NodeStorage`，你根本没法在类型系统里阻止“拿 A 图的节点下标去查 B 图的数组”。
+在其他系统级语言里，一旦长度来自运行期变量，你就禁止再用定长数组类型 `[f32; N]`，而必须退化到另一套完全割裂的切片或动态容器语法（如 `&[f32]` 或 `Vec<f32>`）；更糟糕的是，如果你用整数下标 `u32` 去索引某个图节点池 `NodeStorage`，你根本没法在类型系统里阻止“拿 A 图的节点下标去查 B 图的数组”。
 
-如果在 Flurry 里，**一个类型不仅能依赖编译期常数，还能直接依赖一个具有稳定身份的运行期变量（如 `Array<f32, n>` 或 `NodeIndex<storage.ref>`）**呢？
+如果在 Flurry 里，**一个类型非但能依赖编译期常数，还能直接依赖一个具有稳定身份的运行期变量（如 `Array<f32, n>` 或 `NodeIndex<storage.ref>`）**呢？
 
 下一回 **《Flurry 演进手记 (081)：当数组长度来自运行时变量——运行时依赖类型（Runtime Dependent Types）入门》**，我们将推开运行期依赖类型的大门。

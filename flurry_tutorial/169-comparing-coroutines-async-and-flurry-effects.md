@@ -12,7 +12,7 @@
 
 ### 路线 A：按帧分配的无栈协程
 
-按帧独立编译的无栈协程在编译单个协程函数时往往不知道调用方的完整上下文，默认策略是在进入协程时动态分配一块协程帧（Coroutine Frame）来保存跨挂起点的局部变量。
+按帧独立编译的无栈协程在编译单个协程函数时往往无从得知调用方的完整上下文，默认策略是在进入协程时动态分配一块协程帧（Coroutine Frame）来保存跨挂起点的局部变量。
 虽然编译器可以尝试通过堆分配消除优化（HALO）将协程帧内联到调用者栈帧中，但在跨编译单元或间接调用场景下往往回退为堆分配。此外，无栈协程只能挂起直接包含挂起点的单层函数；如果深层调用链需要挂起，沿途每一层函数都必须显式改写并逐层转发。
 
 ### 路线 B：编译期状态机展开
@@ -45,7 +45,7 @@ Flurry 的代数效应（`#Eff`）并没有把所有控制流都放进同一种�
 
 ## 二、 错误通道与效应通道的正交边界
 
-在讨论效应分级之前，首先要明确恢复性错误（`!Err T`）与代数效应（`#Eff T`）的边界。如果混淆这两条通道，试图用错误处理分支拦截效应请求或延续清理，编译器会直接拒绝：
+在讨论效应分级之前，首先要明确恢复性错误（`!Err T`）与代数效应（`#Eff T`）的边界。如果混淆这两条通道，试图用错误处理分支拦截效应请求或延续清理，编译器会直接报错：
 
 ```flurry
 effect ask_radius() -> f64;
@@ -56,8 +56,8 @@ enum ParseErr {
 
 -- ❌ 错误示例：混淆 `#ask_radius` 效应请求与 `!ParseErr` 错误处理
 fn bad_compute_area() -> !ParseErr #[ask_radius] f64 {
-    -- 编译错误：`ask_radius()#` 触发的是效应通道，不产生 `!Err` 错误分支；
-    -- 且外层放弃 continuation 时的栈展开清理对业务错误处理分支不可见
+    -- 编译错误：`ask_radius()#` 触发的是效应通道，免生 `!Err` 错误分支；
+    -- 且外层放弃 continuation 时的栈展开清理对业务错误处理分支隐蔽
     let r = ask_radius()! {
         .InvalidNumber => 0.0f64,
     }
@@ -68,14 +68,14 @@ fn bad_compute_area() -> !ParseErr #[ask_radius] f64 {
 ### `!Err` 与 `#Eff` 的独立 ABI
 
 根据 [`effect-abi.md`](../docs/algebraic-effect-and-delimited-continuation/effect-abi.md)：
-- **`!Err T`（错误通道）**：采用值返回 ABI。`error e` 始终是单向退栈，不携带可恢复的挂起帧，因此不需要证据槽或延续对象。
-- **`#Eff T`（效应通道）**：采用证据传递（Evidence Passing）与分级处理器机制。当捕获了 `continuation` 的外层处理器放弃恢复、销毁 `continuation` 时，底层沿着被挂起的栈切片逆序执行局部变量的 `Drop` 析构，直到处理器定界符为止，不会进入用户编写的 `! { ... }` 错误处理分支。
+- **`!Err T`（错误通道）**：采用值返回 ABI。`error e` 始终是单向退栈，不携带可恢复的挂起帧，因此无需证据槽或延续对象。
+- **`#Eff T`（效应通道）**：采用证据传递（Evidence Passing）与分级处理器机制。当捕获了 `continuation` 的外层处理器放弃恢复、销毁 `continuation` 时，底层沿着被挂起的栈切片逆序执行局部变量的 `Drop` 析构，直到处理器定界符为止，跳过进入用户编写的 `! { ... }` 错误处理分支。
 
 ---
 
-## 三、 不捕获延续的三类直接执行路径
+## 三、 未捕获延续的三类直接执行路径
 
-在很多实际场景中，效应处理器并不捕获 `continuation`，而是在处理分支末尾直接 `resume`。针对这类场景，Flurry 提供了三类不涉及栈切换的执行路径：
+在很多实际场景中，效应处理器并未捕获 `continuation`，而是在处理分支末尾直接 `resume`。针对这类场景，Flurry 提供了三类无涉栈切换的执行路径：
 
 1. **`^attrs.effects.direct_passing`（纯值直传）**：处理器安装时求值一次，通过隐式参数槽将值传给被包裹计算，请求点直接读取该值。
 2. **普通直接处理器（Direct Handler）**：不声明 `catch continuation` 且在分支内直接 `resume` 的处理器，编译为带上下文指针的普通函数调用，在当前调用栈上原地执行并返回。
@@ -148,11 +148,11 @@ test {
 当计算确实需要在中途挂起并稍后恢复（即声明 `catch continuation: builtin.Continuation` 或使用 `async effect`）时，Flurry 采用多提示符定界延续（Multi-Prompt Delimited Continuation）：
 
 1. **跨挂起点的局部地址稳定性**：
-   被定界符包裹的计算运行在独立的定界栈切片上。当计算在中途挂起时，捕获 `continuation` 仅移交该定界切片的控制权与上下文，切片内的局部变量不会在内存中按值搬移。因此，在挂起点之前取得的局部指针（`.ref`），在挂起恢复后依然指向原位置，不会因为挂起本身变成自引用移动问题。
+   被定界符包裹的计算运行在独立的定界栈切片上。当计算在中途挂起时，捕获 `continuation` 仅移交该定界切片的控制权与上下文，切片内的局部变量免于在内存中按值搬移。因此，在挂起点之前取得的局部指针（`.ref`），在挂起恢复后依然指向原位置，免因挂起本身变成自引用移动问题。
 2. **一次性仿射延续与尾恢复**：
-   `builtin.Continuation` 是不可 `Copy` 的一次性资源（One-Shot Affine Resource），每次挂起最多恢复一次，恢复时无需复制栈帧。当处理器在尾部直接 `resume` 时，直接切回被恢复的计算体；而在非尾位置通过 `continuation.resume(...)` 手动恢复并继续在处理器后续代码中依赖外层状态时，则需要显式置于 `unsafe` 块中。
+   `builtin.Continuation` 是不可 `Copy` 的一次性资源（One-Shot Affine Resource），每次挂起最多恢复一次，恢复时无需复制栈帧。当处理器在尾部直接 `resume` 时，直接消费该恢复权并切回被恢复的计算体；若分支跳过执行 `resume`，恢复权在离开作用域时自动触发放弃与资源清理。
 3. **跨 C ABI 边界的定界保护**：
-   如果不捕获延续的直接处理器穿过 C ABI 栈帧调用，它只是普通函数调用；但如果试图跨越中间的外部 `^attrs.abi(.c)` 栈帧捕获或放弃定界延续，则会破坏外部 C 栈帧的契约，因此受到严格的边界限制。
+   如果未捕获延续的直接处理器穿过 C ABI 栈帧调用，它只是普通函数调用；但如果试图跨越中间的外部 `^attrs.abi(.c)` 栈帧捕获或放弃定界延续，则会破坏外部 C 栈帧的契约，因此受到严格的边界限制。
 
 下面的示例展示了在挂起点前后安全持有局部变量指针 `.ref` 的定界延续处理：
 
@@ -183,11 +183,9 @@ fn stateful_scanner() -> #[inspect_window] i32 {
 
 fn run_scanner() -> i32 {
     stateful_scanner()# {
-        inspect_window(step, addr_check, catch continuation) => {
+        inspect_window(step, addr_check, continuation) => {
             if step == 1i32 and addr_check.* == 100i32 {
-                -- 在非尾位置通过 continuation.resume 显式恢复需要 unsafe
-                let next_res = unsafe { continuation.resume(true) }
-                next_res
+                resume true;
             } else {
                 -- 不再调用 resume，continuation 离开作用域时自动清理挂起切片上的局部资源
                 999i32
@@ -227,7 +225,7 @@ test {
   ├─ ^attrs.effects.direct_passing (只读上下文)
   │    └──► 安装时求值一次，隐式参数直传，请求点直接读取
   │
-  ├─ 普通 Direct Handler (不捕获 continuation 且直接 resume)
+  ├─ 普通 Direct Handler (未捕获 continuation 且直接 resume)
   │    └──► 编译为带上下文指针的普通函数调用，原地执行返回
   │
   ├─ inline effect (内联策略钩子)

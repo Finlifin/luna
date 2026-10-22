@@ -1,9 +1,9 @@
-# Flurry 演进手记 (196)：终极实战第六层（控制与效应层）：用代数效应 `#Async`、`!Err` 与前后置 `catch` 编排容错流水线
+# Flurry 演进手记 (196)：综合实战第六层（控制与效应层）：用代数效应 `#Async`、`!Err` 与前后置 `catch` 编排容错流水线
 
 在前面的五篇手记中，我们已经为 **Orion 异构流式信号处理引擎** 建好了从协议解码（Layer 1）、分片环形队列（Layer 2 & 3）到 CMTT 展开卷积与 GPU 硬件加速（Layer 4 & 5）的全套数据与算力底座。
 
 现在，我们要进入 **Layer 6（控制与效应层）**，把这些底层算子串成一条 7×24 小时不间断运行的**异步容错流式管线（Fault-Tolerant Streaming Pipeline）**。在真实生产环境中，这条管线必须同时应对三项挑战：
-1. **零捕获开销的分布式追踪上下文**：成千上万个并发采样批次在管线中流转，每个算子都需要读取当前的遥测节点 ID（`trace_node_id`）和退避策略参数，但我们绝不希望每次读取都触发沉重的限定延续（Delimited Continuation）栈帧捕获；
+1. **零捕获开销的分布式追踪上下文**：成千上万个并发采样批次在管线中流转，每个算子都需要读取当前的遥测节点 ID（`trace_node_id`）和退避策略参数，但我们忌讳每次读取都触发沉重的限定延续（Delimited Continuation）栈帧捕获；
 2. **异步非阻塞调度（`#Async`）**：等待 DMA 新帧或等待硬件流完成时，协程需要通过代数效应挂起让出核心；
 3. **瞬态硬件故障重试与降级（`!PipelineErr`）**：当 GPU 队列出现瞬态繁忙（`GpuTransientBusy`）时，管线应当记录统一遥测日志并自动发起有限次重试；当遇到硬件离线（`DeviceOffline`）或重试耗尽时，则自动降级切换到 Layer 4 的 CPU 展开卷积核。
 
@@ -26,14 +26,14 @@
 
 ---
 
-## 一、 边界核心规则：为什么错误（`!Err`）与代数效应（`#Effect`）拥有截然不同的 ABI？
+## 一、 边界核心规则：为什么错误（`!Err`）与代数效应（`#Effect`）拥有迥然各异的 ABI？
 
 在动手写管线之前，我们先重温 `docs/algebraic-effect-and-delimited-continuation/error-handling.md` 与 `docs/algebraic-effect-and-delimited-continuation/error-handling.md` 中最重要的一条架构边界：
-> **错误结果（`!Err`）与代数效应（`#Effect`）具有截然不同的 ABI，函数签名绝不添加 `handles` 子句。**
+> **错误结果（`!Err`）与代数效应（`#Effect`）具有迥然各异的 ABI，函数签名省略添加 `handles` 子句。**
 
-为什么 Flurry 坚决拒绝把错误处理塞进“可恢复代数效应（`resume`）”里？
-- **错误（`!Err`）是单向短路退出的控制流**：一旦函数通过 `return error err`（或尾位置 `error err`）返回错误，它的局部栈帧已经销毁，**绝不存在所谓的“在抛错点原地 `resume` 恢复执行”**。这使得 `!Err` 可以直接编译为寄存器级的标记联合返回（Tagged Value Return），拥有与普通 `return` 完全相同的极致性能。
-- **如果我们需要“失败后重试”怎么办？** 在 Flurry 中，重试不是靠机制般地回到已经死掉的栈帧里去 `resume`，而是用 **`expr! { ... }` 错误消除块配合外层带标签循环（`while:retry_loop`）** 显式重新发起调用。这样既保持了零开销的值返回 ABI，又让重试的副作用边界与最大次数一目了然。
+为什么 Flurry 坚严禁把错误处理塞进“可恢复代数效应（`resume`）”里？
+- **错误（`!Err`）是单向短路退出的控制流**：一旦函数通过 `return error err`（或尾位置 `error err`）返回错误，它的局部栈帧已经销毁，**未存所谓的“在抛错点原地 `resume` 恢复执行”**。这使得 `!Err` 可以直接编译为寄存器级的标记联合返回（Tagged Value Return），拥有与普通 `return` 完全相同的高效性能。
+- **如果我们需要“失败后重试”怎么办？** 在 Flurry 中，重试并非靠机制般地回到已经死掉的栈帧里去 `resume`，而是用 **`expr! { ... }` 错误消除块配合外层带标签循环（`while:retry_loop`）** 显式重新发起调用。这样既保持了零开销的值返回 ABI，又让重试的副作用边界与最大次数一目了然。
 
 ---
 
@@ -41,7 +41,7 @@
 
 在 Orion 管线中，每个信号处理阶段都需要通过无参效应查询当前工作节点的遥测标识 `current_node_id()`，并在发生故障时上报 `record_fault_metric(node_id: u32, fault_code: u32)`。
 - 对于无参数的只读环境配置查询 `current_node_id()`，我们可以直接标上 `^attrs.effects.direct_passing` 属性（见 `docs/algebraic-effect-and-delimited-continuation/direct-passing.md`）：安装处理器时求值一次，调用链隐式传递该结果值；
-- 对于带参数的同步回调 `record_fault_metric(node_id, fault_code)`，使用不捕获 `continuation` 的直接效应声明，每次请求在原栈上原地执行处理分支：
+- 对于带参数的同步回调 `record_fault_metric(node_id, fault_code)`，使用未捕获 `continuation` 的直接效应声明，每次请求在原栈上原地执行处理分支：
 
 ```flurry
 -- 声明无参直接传值效应：安装 handler 时求值一次，沿调用链直接传递结果值。
@@ -103,7 +103,7 @@ fn try_gpu_filter_stage(batch_energy: f32, simulate_busy: bool) -> !PipelineErr 
     batch_energy * 0.95
 }
 
--- CPU 展开滤波兜底函数（来自 Layer 4 的纯安全计算，永不因 GPU 故障失败）
+-- CPU 展开滤波兜底函数（来自 Layer 4 的纯安全计算，永无因 GPU 故障失败）
 pure fn run_cpu_fir_fallback(batch_energy: f32) -> f32 {
     batch_energy * 0.95
 }
@@ -120,7 +120,7 @@ fn process_batch_fault_tolerant(
     -- 使用带标签循环承载有界重试
     while:retry_loop true {
         let result = try_gpu_filter_stage(batch_energy, is_busy)! {
-            -- 【第一段：前置 catch】观察所有错误并记录遥测，绝不吞掉错误。
+            -- 【第一段：前置 catch】观察所有错误并记录遥测，不吞掉错误。
             catch observed_err => {
                 let code: u32 = observed_err match {
                     .GpuTransientBusy(_) => 101,
@@ -142,7 +142,7 @@ fn process_batch_fault_tolerant(
                 run_cpu_fir_fallback(batch_energy)
             },
 
-            -- 如果帧头本身已损坏，不属于硬件算力故障，直接向更外层传播错误。
+            -- 如果帧头本身已损坏，非属硬件算力故障，直接向更外层传播错误。
             PipelineErr.CorruptedBatchHeader => {
                 return error PipelineErr.CorruptedBatchHeader;
             },
@@ -157,7 +157,7 @@ fn process_batch_fault_tolerant(
 ```
 
 看看这段代码是多么清晰：
-1. 无论是瞬态繁忙、设备离线还是帧头损坏，**前置 `catch observed_err`** 都保证了 `record_fault_metric(node_id, code)#` 100% 被执行，绝不会因为某个分支提前 `continue` 或 `return error` 而漏记监控指标；
+1. 无论是瞬态繁忙、设备离线还是帧头损坏，**前置 `catch observed_err`** 都保证了 `record_fault_metric(node_id, code)#` 100% 被执行，免因某个分支提前 `continue` 或 `return error` 而漏记监控指标；
 2. 遇到 `GpuTransientBusy` 时，通过 `#yield_pipeline_tick` 挂起等待一个调度滴答，随后 `continue:retry_loop` 重新执行；
 3. 遇到 `DeviceOffline` 时，**后置 `catch _fallback_err`** 自动接管，无缝切换到 Layer 4 生成的 `run_cpu_fir_fallback`。
 
@@ -165,10 +165,10 @@ fn process_batch_fault_tolerant(
 
 ## 四、 编译器如何拦截带参数的 `direct_passing` 效应声明？（负向示例）
 
-由于 `^attrs.effects.direct_passing` 的语义是在安装 handler 时预先求值一次并沿调用链隐式传递该结果值，因此**被标记的操作绝不能携带运行时请求参数或 `catch continuation` 参数**。如果有人企图给 `^attrs.effects.direct_passing` 效应加上参数，编译器会直接拒绝：
+由于 `^attrs.effects.direct_passing` 的语义是在安装 handler 时预先求值一次并沿调用链隐式传递该结果值，因此**被标记的操作无法携带运行时请求参数或 `catch continuation` 参数**。如果有人企图给 `^attrs.effects.direct_passing` 效应加上参数，编译器会直接报错：
 
 ```flurry
--- ❌ 拒绝例：违背 ^attrs.effects.direct_passing 契约，试图声明带请求参数的直接传值效应
+-- ❌ 负例：违背 ^attrs.effects.direct_passing 契约，试图声明带请求参数的直接传值效应
 ^attrs.effects.direct_passing
 effect bad_lookup_node(channel: u32) -> u32;
 -- 编译错误：effect marked with `^attrs.effects.direct_passing` cannot declare
@@ -186,6 +186,6 @@ effect bad_lookup_node(channel: u32) -> u32;
 
 当 64 个通道的容错流水线在多核 CPU 上全速并发运转时，每个通道算出的滤波能量峰值、信噪比（SNR）与故障降级计数，都需要实时汇总到全局的 **Orion 遥测仪表盘（Telemetry Aggregator）** 中。
 
-如果用传统的读写锁或细粒度互斥锁（Mutex）去同步多通道指标，不仅容易在复合更新时发生死锁或中间状态撕裂（Torn Read），还会阻塞高速滤波协程。
+如果用传统的读写锁或细粒度互斥锁（Mutex）去同步多通道指标，非但容易在复合更新时发生死锁或中间状态撕裂（Torn Read），还会阻塞高速滤波协程。
 
 在下一篇 **第 197 篇（Layer 7：状态协同层）** 中，我们将使用 Flurry 原生的 **`atomic` 软件事务内存（STM）与 P3～P5 纯度守卫**，实现零死锁、乐观并发的多通道实时指标协同汇总。
