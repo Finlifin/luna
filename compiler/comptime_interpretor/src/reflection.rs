@@ -1,5 +1,7 @@
 //! Structure observation for comptime library adapters, independent of layout.
 use super::*;
+mod enums;
+pub use enums::{EnumReflection, ReflectedVariant};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReflectedField {

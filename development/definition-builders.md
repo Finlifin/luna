@@ -185,6 +185,15 @@ not unfolded into structs. The query charges term work, substitution, field coun
 and copied names against the invocation budget. Results have stable S-expression
 dumps. These descriptions grant no field access, visibility or layout permission.
 
+`Interpreter::reflect_enum` provides the corresponding structural query for an
+applied enum: original subject, intrinsic classification, ordered logical variants,
+unit/tuple/named payload shapes and substituted payload types, plus fully qualified
+group paths. Groups do not consume variant indices. No tag value, bit encoding,
+layout or runtime inspection is inferred from the result. Concrete IIR descriptors
+are selected once per query rather than once per variant. Metadata copying and
+payload substitution share the invocation budget; failed queries deliver no
+partial result. Empty enums still check formation predicates and input arity.
+
 This is **not** a working `StructBuilder.new/add_field/build` API. There is no
 new runtime/VM builder value or source-language reflection/builder method yet.
 The internal reflection query does not execute attribute consumers or reflect
@@ -489,3 +498,19 @@ parity, and malformed/unbound field descriptions. Formatting passed at
 `/tmp/luna-tools-fgyqtxbb/result.json`; `git diff --check` passed. This is an internal
 VM query; no source-level reflection spelling or new attribute/default semantics
 are established by these checks.
+
+Internal comptime enum reflection verification (`/home/fin/luna`):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --lib
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+Both exited 0. Interpreter tests: 111 passed at
+`/tmp/luna-tools-ad801tyw/result.json`; formatting:
+`/tmp/luna-tools-goo1_aq7/result.json`. Seven added tests cover group/leaf order,
+all three payload shapes and generic substitution, concrete IIR parity, input and
+phase rejection with recovery, empty-enum formation and intrinsic classification,
+metadata budget failure/retry, opaque payload identity and malformed fields/shapes.
+The focused initial five tests also passed at `/tmp/luna-tools-gur9qs5f/result.json`.
+`git diff --check` passed. Source-level reflection/builder calls remain unconnected.
