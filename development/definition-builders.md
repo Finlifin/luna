@@ -68,12 +68,28 @@ does not account for the table copy or replace the elaborator's own limits.
 The existing lowering consumer still uses structural publication, because its
 ordinary semantic checking happens later in the driver.
 
-Deferred attribute execution is not implemented. The ordinary elaborator now
+Attribute consumer execution is not implemented. The ordinary elaborator now
 checks the attribute table directly, in addition to lowering's pending-semantics
 markers. This prevents generated HIR without those markers from silently losing
 an attribute or configuration. Checked publication rejects such candidates and
 retains their drafts; structural publication alone preserves the metadata for
 later checking. This does not add a new accepted attribute API.
+
+`program::attributes::inspect` provides a separate metadata inspection entrypoint.
+It runs ordinary declaration/body checking and required comptime evaluation,
+using each attribute's lexical owner and structured HIR expression. Prefixes
+must return Object; configuration retains its key and typed payload. It returns
+materialized NIR descriptions in HIR application order, with target, owner and
+source provenance, and a stable S-expression Display. Counts, configuration keys
+and materialization share the elaboration budget. Invalid targets, payloads and
+unsupported modifiers fail without returning a partial list or modifying HIR.
+
+This entrypoint returns **no executable package**. It is an inspection API, not
+an ABI/layout consumer, attribute reflection implementation, or portable closure
+serialization. Normal elaboration and checked builder publication continue to
+reject deferred attributes until their consumer contracts are implemented.
+Generic or runtime-bound metadata is not deferred by this entrypoint; it still
+requires a concrete invocation context. Attribute merging is a separate step.
 
 `comptime_runtime::object` now provides the value-container layer: `Object<V>`
 retains ordered positional and named entries (including duplicates), while
@@ -264,3 +280,24 @@ runtime interface rejection. The focused run also passed all three at
 `/tmp/luna-tools-41ejwznb/result.json`; `git diff --check` passed.
 This enables materializable Object constants, not frozen normal-form Object
 arguments, arbitrary storage export, attribute consumers or source builders.
+
+Attribute inspection follow-up (`/home/fin/luna`):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration -p luna --test definitions --test frontend_cli --no-fail-fast
+```
+
+Final run `/tmp/luna-tools-1rt85u4c/result.json` exited 0: 3 definition
+admission/inspection tests and 212 frontend CLI tests passed (215 total). The
+new inspection test uses structured HIR with deliberately unrelated source text,
+checks typed configuration and positional/named Object data, escaped dumps,
+rejection of a non-Object prefix, successful retry, invalid member rejection and
+unsupported-modifier rejection. Ordinary elaboration still rejects deferred
+attributes. This is generated-HIR coverage; source-level inspection invocation
+and generic/member binding contexts are not yet end-to-end covered.
+
+The first check exposed a method visibility error, corrected before testing.
+The first test build automatically cleaned/retried after a storage quota failure
+and then exposed a Vec-versus-slice mistake in the new fixture; that fixture was
+corrected before the final run. Formatting check exited 0 at
+`/tmp/luna-tools-h3kpl7ce/result.json`; `git diff --check` passed.

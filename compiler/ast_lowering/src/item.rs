@@ -307,9 +307,15 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     return self.lower_function(cursor, modifiers);
                 }
 
-                self.package
-                    .pending_semantics
-                    .push((span, "definition attribute or modifier".into()));
+                self.package.pending_semantics.push((
+                    span,
+                    if kind == NodeKind::Attribute {
+                        "definition attribute"
+                    } else {
+                        "definition attribute or modifier"
+                    }
+                    .into(),
+                ));
                 let lexical_owner = self.current_owner;
                 let target = self.lower_top_level_node(children[1]);
                 // Recurse first: closer attributes apply first. Keep the

@@ -4,6 +4,7 @@
 //! Resource/effect verification remains a separate obligation;
 //! this is a type-elaboration output, not permission to generate executable code.
 mod arguments;
+pub mod attributes;
 mod computed_patterns;
 mod control;
 mod effects;
@@ -246,6 +247,17 @@ pub fn elaborate_packages_for_target(
     protocols: &Protocols,
     target: Option<nir::target::TargetData>,
 ) -> Result<n::Package, Error> {
+    elaborate_with_attributes(package, package_identities, protocols, target, false)
+        .map(|(program, _)| program)
+}
+
+fn elaborate_with_attributes(
+    package: &hir::Package<'_>,
+    package_identities: &BTreeMap<u32, u64>,
+    protocols: &Protocols,
+    target: Option<nir::target::TargetData>,
+    inspect_attributes: bool,
+) -> Result<(n::Package, Vec<attributes::EvaluatedAttribute>), Error> {
     if package
         .pending_semantics
         .iter()
@@ -253,22 +265,42 @@ pub fn elaborate_packages_for_target(
     {
         let arena = hir::HirArena::new();
         let expanded = function_templates::expand(package, &arena)?;
-        return elaborate_packages_for_target(&expanded, package_identities, protocols, target);
+        return elaborate_with_attributes(
+            &expanded,
+            package_identities,
+            protocols,
+            target,
+            inspect_attributes,
+        );
     }
-    if let Some((span, feature)) = package
-        .pending_semantics
-        .iter()
-        .find(|(_, feature)| feature != "test template CMTT expansion")
-    {
+    if let Some((span, feature)) = package.pending_semantics.iter().find(|(_, feature)| {
+        feature != "test template CMTT expansion"
+            && !(inspect_attributes
+                && matches!(
+                    feature.as_str(),
+                    "definition attribute" | "definition configuration"
+                ))
+    }) {
         return Err(error(
             *span,
-            format!("elaboration is not implemented for {feature}"),
+            format!(
+                "elaboration is not implemented for {}",
+                if feature == "definition attribute" {
+                    "definition attribute or modifier"
+                } else {
+                    feature
+                }
+            ),
         ));
     }
     // Generated HIR need not have gone through source lowering, which normally
     // supplies pending_semantics markers. Never silently ignore deferred
     // attributes when a builder supplies their structured representation.
-    if let Some(attribute) = package.definition_attributes.first() {
+    if let Some(attribute) = package
+        .definition_attributes
+        .first()
+        .filter(|_| !inspect_attributes)
+    {
         return Err(error(
             attribute.span,
             if attribute.configuration_key.is_some() {
@@ -1126,6 +1158,11 @@ pub fn elaborate_packages_for_target(
                 .collect(),
         });
     }
+    let attributes = if inspect_attributes {
+        checker.evaluate_attributes()?
+    } else {
+        Vec::new()
+    };
     checker.expand_test_templates(&mut output)?;
     // Body lowering can create private scalar observation packets after the
     // source declaration layouts were collected above.
@@ -1231,7 +1268,7 @@ pub fn elaborate_packages_for_target(
             incompatible_context: false,
         }
     })?;
-    Ok(output)
+    Ok((output, attributes))
 }
 #[derive(Clone)]
 struct CaptureFrame {

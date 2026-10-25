@@ -7447,7 +7447,7 @@ fn intrinsic_enum_attribute_requires_an_enum_and_preserves_other_attribute_check
         let output = sandbox.run(&["input.fl", "--emit", "hir"]);
         let hir = success(&output);
         assert!(hir.contains("(intrinsic true)"), "{hir}");
-        assert!(hir.contains("definition attribute or modifier"), "{hir}");
+        assert!(hir.contains("definition attribute"), "{hir}");
         failure(&sandbox.run(&["input.fl", "--emit", "nir"]), 1);
     }
 }

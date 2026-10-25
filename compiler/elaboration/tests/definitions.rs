@@ -186,3 +186,113 @@ fn generated_definition_attributes_cannot_bypass_semantic_admission() {
     .unwrap();
     assert_eq!(batch.published().num_defs(), 1);
 }
+
+#[test]
+fn inspect_attributes_evaluates_typed_data_without_authorizing_publication() {
+    let arena = HirArena::new();
+    let mut package = Package::new();
+    let mut batch = DefinitionBatch::new(&mut package);
+    let owner = batch.reserve().unwrap();
+    batch
+        .define(
+            OwnerInfo {
+                node: OwnerNode::Item(arena.alloc_item(Item {
+                    owner_id: owner,
+                    ident: Ident::new(Symbol::intern("metadata"), DUMMY_SP),
+                    kind: ItemKind::Mod(ModDef { items: vec![] }),
+                    span: DUMMY_SP,
+                })),
+                nodes: OwnerNodes::new(),
+            },
+            None,
+            None,
+        )
+        .unwrap();
+    batch.publish(&mut 100).unwrap();
+    drop(batch);
+    let flag = Expr {
+        hir_id: HirId::new(owner, ItemLocalId::new(1)),
+        kind: ExprKind::Lit(Lit {
+            kind: LitKind::Bool(true),
+            span: DUMMY_SP,
+        }),
+        span: DUMMY_SP,
+    };
+    let entries = [
+        hir::expr::ObjectEntry::Property(hir::expr::FieldExpr {
+            ident: Ident::new(Symbol::intern("enabled"), DUMMY_SP),
+            expr: &flag,
+            span: DUMMY_SP,
+        }),
+        hir::expr::ObjectEntry::Value(&flag),
+    ];
+    let object = Expr {
+        hir_id: HirId::new(owner, ItemLocalId::new(2)),
+        kind: ExprKind::Object(entries.to_vec()),
+        span: DUMMY_SP,
+    };
+    let attribute = |value, key| DeferredDefinitionAttribute {
+        target: AttributeTarget::Definition(owner),
+        lexical_owner: owner,
+        expression: "ignored text: evaluate the tree".into(),
+        value,
+        configuration_key: key,
+        span: DUMMY_SP,
+    };
+    package.definition_attributes = vec![
+        attribute(&flag, Some("quote\"\\\n".into())),
+        attribute(&object, None),
+    ];
+    package
+        .pending_semantics
+        .push((DUMMY_SP, "definition configuration".into()));
+    package
+        .pending_semantics
+        .push((DUMMY_SP, "definition attribute".into()));
+    let inspect = |p: &Package<'_>| {
+        elaboration::program::attributes::inspect(p, &BTreeMap::new(), &Protocols::default(), None)
+    };
+    let result = inspect(&package).unwrap();
+    assert_eq!(result.len(), 2);
+    assert_eq!(
+        result[0].value.ty,
+        nir::Term::Primitive(nir::Primitive::Bool)
+    );
+    assert_eq!(
+        result[1].value.ty,
+        nir::Term::Primitive(nir::Primitive::Object)
+    );
+    assert!(
+        result[0]
+            .to_string()
+            .contains("(configuration \"quote\\\"\\\\\\n\")")
+    );
+    assert!(result[1].to_string().contains("(configuration)"));
+    let nir::program::ExprKind::Object { names, fields } = &result[1].value.kind else {
+        panic!("prefix did not retain its Object constructor");
+    };
+    assert_eq!(names, &[Some("enabled".into()), None]);
+    assert_eq!(fields.len(), 2);
+    assert!(elaboration::program::elaborate(&package).is_err());
+    package.definition_attributes[1].value = &flag;
+    assert!(inspect(&package).is_err());
+    package.definition_attributes[1].value = &object;
+    assert_eq!(inspect(&package).unwrap().len(), 2);
+    package.definition_attributes[1].target =
+        AttributeTarget::Member(HirId::new(owner, ItemLocalId::new(99)));
+    assert!(
+        inspect(&package)
+            .unwrap_err()
+            .to_string()
+            .contains("missing attribute member")
+    );
+    package.definition_attributes[1].target = AttributeTarget::Definition(owner);
+    package
+        .pending_semantics
+        .push((DUMMY_SP, "definition attribute or modifier".into()));
+    assert!(
+        inspect(&package).is_err(),
+        "inspection must not suppress unsupported modifiers"
+    );
+    assert_eq!(package.definition_attributes.len(), 2);
+}
