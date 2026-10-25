@@ -3115,6 +3115,12 @@ impl Checker<'_, '_> {
                     .collect::<Result<_, _>>()?;
                 K::AnonymousRecord { fields }
             }
+            Value::Object(_) => {
+                return Err(error(
+                    span,
+                    "Object constant materialization is not yet supported",
+                ));
+            }
             Value::Pointer(_) => {
                 return Err(error(
                     span,

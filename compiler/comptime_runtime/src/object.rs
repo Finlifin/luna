@@ -12,6 +12,24 @@ pub enum Entry<V> {
     Value(V),
     Property { key: String, value: V },
 }
+impl<V> Entry<V> {
+    pub fn value(&self) -> &V {
+        match self {
+            Self::Value(value) | Self::Property { value, .. } => value,
+        }
+    }
+    pub fn into_value(self) -> V {
+        match self {
+            Self::Value(value) | Self::Property { value, .. } => value,
+        }
+    }
+    pub fn key(&self) -> Option<&str> {
+        match self {
+            Self::Value(_) => None,
+            Self::Property { key, .. } => Some(key),
+        }
+    }
+}
 
 /// Preserve expression order and duplicate keys until a consumer interprets
 /// them. This is distinct from a record type and from the merged attribute map.

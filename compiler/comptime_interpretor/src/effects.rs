@@ -775,7 +775,7 @@ impl Interpreter<'_> {
             }
             // Unsupported managed/capture representations cannot be made Copy
             // by a host policy that only established their trait classification.
-            Value::Storage(_) | Value::String(_) | Value::Type(_) => {
+            Value::Storage(_) | Value::String(_) | Value::Type(_) | Value::Object(_) => {
                 return Err(self.failure(ErrorKind::Unsupported, Some(source)));
             }
             _ => {}

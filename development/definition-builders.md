@@ -83,8 +83,22 @@ payloads. Entry/key work consumes the caller's shared budget; unique keys have a
 separate limit. Failure returns no partially merged map. Positional entries are
 preserved by Object but are unsupported by this named-property projection; this
 does not assign their general language meaning. Dumps escape keys and use stable
-S-expressions. This container is not yet a VM `Value` variant, source Object
-evaluation, a freezing representation, or an attribute-consumer implementation.
+S-expressions.
+
+The interpreter now has `Value::Object`, using this ordered container. Ownership
+traversal visits all entry payloads, including shared storage and declaration
+references. Immutable-copy accounting covers keys and nested values; embedded
+Type descriptions use normal admission. Comptime representation reads preserve
+storage identity, explicit representation copies create fresh owned cells, and
+owned-graph checkpoints restore cells reachable through Object entries. Runtime
+representation copying and effect copying reject Objects. Normal-term freezing
+and constant materialization also reject them until an encoding and type bridge
+exist; rejection releases deeply nested Object payloads iteratively.
+
+These are VM representation operations, not a source-level Copy promise. Source
+Object type formation/evaluation, its freezing representation and attribute
+consumer execution remain unimplemented. The new value cannot yet be passed as
+an ordinary typed function input because Object has no NIR type admission path.
 
 This is **not** a working `StructBuilder.new/add_field/build` API. There is no
 new runtime/VM builder value, field-reflection API, or source-language builder
@@ -169,3 +183,18 @@ All 7 tests passed, exit 0; `/tmp/luna-tools-yx4rkvap/result.json` records the
 run. Tests cover mixed/nested entries, ordering and duplicate overrides,
 non-Clone borrowed payload identity, unique-key limits, every insufficient
 budget below a successful merge, positional-entry diagnostics and escaped dumps.
+
+VM Object representation checks (same working directory):
+
+```sh
+python3 -B development/check.py --timeout 900 -- check --release -p luna
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor
+```
+
+The final luna check exited 0 at `/tmp/luna-tools-90kw8mvu/result.json`.
+All 217 interpreter tests passed at `/tmp/luna-tools-vkzf04hk/result.json`,
+including seven new Object tests. They verify nested graph traversal and shared
+storage deduplication, embedded-type rejection, snapshot restoration, independent
+owned copies, runtime and budget rejection without input mutation, escaped dumps,
+and iterative disposal of 20,000 nested Objects after unsupported freezing.
+Formatting exited 0 at `/tmp/luna-tools-n15wvcu7/result.json`.

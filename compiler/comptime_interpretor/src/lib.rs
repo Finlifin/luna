@@ -14,7 +14,10 @@ mod iir_execution;
 mod invocation_contracts;
 mod memory;
 mod normal_inputs;
+#[cfg(test)]
+mod object_values;
 mod selected_types;
+pub use comptime_runtime::object::{Entry as ObjectEntry, Object};
 pub use memory::{OwnedGraphCheckpoint, PointerValue, Storage};
 
 use nir::program::InterfaceInstance;
@@ -100,6 +103,9 @@ pub enum Value {
     Tuple(Vec<Value>),
     /// A named structural product; labels survive host calls and storage paths.
     AnonymousRecord(Vec<(String, Value)>),
+    /// Invocation-local ordered metadata, distinct from an anonymous record.
+    /// No normal-term encoding or runtime representation is admitted yet.
+    Object(Object<Value>),
     Record {
         arguments: Vec<Term>,
         declaration: DeclarationId,
@@ -189,6 +195,11 @@ impl Value {
                 Value::AnonymousRecord(fields) => {
                     for (_, child) in fields {
                         visit(child, fuel, depth + 1, closures, storage, visitor)?;
+                    }
+                }
+                Value::Object(object) => {
+                    for entry in object.entries() {
+                        visit(entry.value(), fuel, depth + 1, closures, storage, visitor)?;
                     }
                 }
                 Value::ErrorResult { value, .. } | Value::Newtype { value, .. } => {
@@ -286,6 +297,15 @@ impl Value {
                         (total <= 100_000).then_some(total)
                     })?
                 }
+                Self::Object(object) => {
+                    if object.entries().len() > 100_000 {
+                        return None;
+                    }
+                    object.entries().iter().try_fold(0usize, |n, entry| {
+                        let total = n.checked_add(entry.key().map_or(0, str::len))?;
+                        (total <= 100_000).then_some(total)
+                    })?
+                }
                 Self::Pointer(_)
                 | Self::Storage(_)
                 | Self::Closure(_)
@@ -300,6 +320,7 @@ impl Value {
                 | Self::Variant { fields, .. }
                 | Self::Tuple(fields) => fields.len(),
                 Self::AnonymousRecord(fields) => fields.len(),
+                Self::Object(object) => object.entries().len(),
                 Self::ErrorResult { .. } | Self::Newtype { .. } => 1,
                 _ => 0,
             };
@@ -316,6 +337,12 @@ impl Value {
                 Self::AnonymousRecord(fields) => {
                     pending.extend(fields.iter().map(|(_, v)| (v, depth + 1)))
                 }
+                Self::Object(object) => pending.extend(
+                    object
+                        .entries()
+                        .iter()
+                        .map(|entry| (entry.value(), depth + 1)),
+                ),
                 _ => {}
             }
         }
@@ -782,6 +809,12 @@ impl Value {
                 Value::AnonymousRecord(fields) => {
                     pending.extend(fields.into_iter().map(|(_, value)| value))
                 }
+                Value::Object(object) => pending.extend(
+                    object
+                        .into_entries()
+                        .into_iter()
+                        .map(ObjectEntry::into_value),
+                ),
                 Value::Type(ty) => ty.drop_iteratively(),
                 Value::ErrorResult { ty, value, .. } | Value::Newtype { ty, value } => {
                     ty.drop_iteratively();
@@ -7946,6 +7979,7 @@ impl<'a> Interpreter<'a> {
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Object(object) => object.fmt(f),
             Self::ErrorResult { ty, error, value } => {
                 write!(f, "(error-result (type {ty}) (branch ")?;
                 match error {

@@ -82,6 +82,11 @@ impl Interpreter<'_> {
                     self.admit_embedded_type_descriptions(field, depth + 1)?;
                 }
             }
+            Value::Object(object) => {
+                for entry in object.entries() {
+                    self.admit_embedded_type_descriptions(entry.value(), depth + 1)?;
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -139,6 +144,11 @@ impl Interpreter<'_> {
             Value::AnonymousRecord(fields) => {
                 for (_, field) in fields {
                     self.admit_value_types(field, depth + 1)?;
+                }
+            }
+            Value::Object(object) => {
+                for entry in object.entries() {
+                    self.admit_value_types(entry.value(), depth + 1)?;
                 }
             }
             _ => {} // immutable_copy_work already rejected storage and callables.

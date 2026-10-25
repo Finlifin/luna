@@ -548,6 +548,30 @@ impl<'a> Interpreter<'a> {
             return Err(self.failure(ErrorKind::DepthExhausted, Some(source)));
         }
         Ok(match value {
+            Value::Object(object) => {
+                if !self.comptime_only {
+                    return Err(self.failure(ErrorKind::Unsupported, Some(source)));
+                }
+                self.copy_work(object.entries().len(), source)?;
+                let mut entries = Vec::with_capacity(object.entries().len());
+                for entry in object.entries() {
+                    self.copy_work(entry.key().map_or(0, str::len), source)?;
+                    let value = self.clone_representation(
+                        entry.value(),
+                        source,
+                        depth + 1,
+                        preserve_identity,
+                    )?;
+                    entries.push(match entry {
+                        ObjectEntry::Value(_) => ObjectEntry::Value(value),
+                        ObjectEntry::Property { key, .. } => ObjectEntry::Property {
+                            key: key.clone(),
+                            value,
+                        },
+                    });
+                }
+                Value::Object(Object::from_entries(entries))
+            }
             Value::Storage(_) | Value::Closure(_) if preserve_identity => value.clone(),
             Value::Storage(storage) => {
                 let limit = self
