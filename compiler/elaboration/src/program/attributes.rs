@@ -39,8 +39,15 @@ pub fn inspect(
     protocols: &Protocols,
     target: Option<nir::target::TargetData>,
 ) -> Result<Vec<EvaluatedAttribute>, Error> {
-    elaborate_with_attributes(package, package_identities, protocols, target, true)
-        .map(|(_, attributes)| attributes)
+    elaborate_with_attributes(
+        package,
+        package_identities,
+        protocols,
+        target,
+        true,
+        &mut 1_000_000,
+    )
+    .map(|(_, attributes)| attributes)
 }
 
 impl Checker<'_, '_> {

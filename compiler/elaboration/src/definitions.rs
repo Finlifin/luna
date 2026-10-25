@@ -17,7 +17,35 @@ pub fn publish(
     protocols: &Protocols,
     target: Option<nir::target::TargetData>,
 ) -> Result<(Vec<hir::OwnerId>, nir::program::Package), PublicationError<program::Error>> {
+    publish_with_invocation_budget(
+        batch,
+        structural_fuel,
+        &mut 1_000_000,
+        package_identities,
+        protocols,
+        target,
+    )
+}
+
+/// Reuse the caller's required invocation budget across publication attempts.
+/// Structural rejection does not enter elaboration or consume invocation fuel.
+/// Semantic errors retain consumption while preserving the draft and package.
+/// Other analyses retain their own limits; this does not resume a live VM.
+pub fn publish_with_invocation_budget(
+    batch: &mut DefinitionBatch<'_, '_>,
+    structural_fuel: &mut usize,
+    invocation_steps: &mut u64,
+    package_identities: &BTreeMap<u32, u64>,
+    protocols: &Protocols,
+    target: Option<nir::target::TargetData>,
+) -> Result<(Vec<hir::OwnerId>, nir::program::Package), PublicationError<program::Error>> {
     batch.publish_checked(structural_fuel, |candidate| {
-        program::elaborate_packages_for_target(candidate, package_identities, protocols, target)
+        program::elaborate_packages_with_invocation_budget(
+            candidate,
+            package_identities,
+            protocols,
+            target,
+            invocation_steps,
+        )
     })
 }

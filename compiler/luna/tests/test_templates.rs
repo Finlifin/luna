@@ -206,11 +206,12 @@ fn signature_template_constructor_defaults_preserve_fields_and_overrides() {
 fn signature_template_defaults_preserve_admission_and_scope_checks() {
     for (default, expected) in [
         (
-            "do {var local=not input;while local != input {local=input;break;}local}",
+            "do {var local=not input;while local != input {local=not input;}local}",
             "P3 stability/termination",
         ),
         ("do {input=false;input}", "P3 stability/termination"),
-        // Current ordinary defaults cannot certify this local nominal destructuring.
+        // Without bound cleanup protocols this fixture still lacks the evidence
+        // supplied by the separate Drop-aware nominal destructuring tests.
         (
             "do {let {flag}=Cell {flag:input};flag}",
             "P3 stability/termination",
@@ -225,12 +226,38 @@ fn signature_template_defaults_preserve_admission_and_scope_checks() {
                 format!("fn first(input:bool,.flag:bool={default})->bool {{flag}}")
             };
             let source = format!("struct Cell {{flag:bool}} {source}");
-            let error = compile(&source, Emit::Nir)
-                .err()
-                .expect("unsafe default must be rejected");
+            let error = compile(&source, Emit::Nir).err().unwrap_or_else(|| {
+                panic!("template={template}, {default}: unsafe default must be rejected")
+            });
             assert!(
                 error.contains(expected),
                 "template={template}, {default}: {error}"
+            );
+        }
+    }
+    // An unconditional break provides finite-completion evidence; it must not
+    // be conflated with the potentially nonterminating loop above.
+    for default in ["do {var local=not input;while local != input {local=input;break;}local}"] {
+        for template in [false, true] {
+            let declaration = if template {
+                format!(
+                    "template fn interface(input:bool,.flag:bool={default})->bool;fn first use interface {{flag}}"
+                )
+            } else {
+                format!("fn first(input:bool,.flag:bool={default})->bool {{flag}}")
+            };
+            let source = format!(
+                "struct Cell {{flag:bool}} {declaration}
+                fn run()->bool {{first(true) and not first(false) and first(false,.flag=true)}}"
+            );
+            let Artifact::Nir(package) = compile(&source, Emit::Nir)
+                .unwrap_or_else(|e| panic!("template={template}, {default}: {e}"))
+            else {
+                unreachable!()
+            };
+            assert_eq!(
+                luna::execution::interpret(&package, "run", 100_000).unwrap(),
+                comptime_interpretor::Value::Bool(true)
             );
         }
     }

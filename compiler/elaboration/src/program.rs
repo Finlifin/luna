@@ -248,8 +248,34 @@ pub fn elaborate_packages_for_target(
     protocols: &Protocols,
     target: Option<nir::target::TargetData>,
 ) -> Result<n::Package, Error> {
-    elaborate_with_attributes(package, package_identities, protocols, target, false)
-        .map(|(program, _)| program)
+    elaborate_packages_with_invocation_budget(
+        package,
+        package_identities,
+        protocols,
+        target,
+        &mut 1_000_000,
+    )
+}
+
+/// Share required comptime invocation/preparation fuel across elaborations.
+/// This is not a budget for PTC, template expansion or every semantic pass.
+/// Errors preserve consumed work; no fresh invocation allowance is created.
+pub fn elaborate_packages_with_invocation_budget(
+    package: &hir::Package<'_>,
+    package_identities: &BTreeMap<u32, u64>,
+    protocols: &Protocols,
+    target: Option<nir::target::TargetData>,
+    invocation_steps: &mut u64,
+) -> Result<n::Package, Error> {
+    elaborate_with_attributes(
+        package,
+        package_identities,
+        protocols,
+        target,
+        false,
+        invocation_steps,
+    )
+    .map(|(program, _)| program)
 }
 
 fn elaborate_with_attributes(
@@ -258,6 +284,7 @@ fn elaborate_with_attributes(
     protocols: &Protocols,
     target: Option<nir::target::TargetData>,
     inspect_attributes: bool,
+    invocation_steps: &mut u64,
 ) -> Result<(n::Package, Vec<attributes::EvaluatedAttribute>), Error> {
     if package
         .pending_semantics
@@ -272,6 +299,7 @@ fn elaborate_with_attributes(
             protocols,
             target,
             inspect_attributes,
+            invocation_steps,
         );
     }
     if let Some((span, feature)) = package.pending_semantics.iter().find(|(_, feature)| {
@@ -441,7 +469,7 @@ fn elaborate_with_attributes(
         active_type_defaults: BTreeSet::new(),
         default_uses: BTreeMap::new(),
         contract_uses: BTreeMap::new(),
-        required_steps: 1_000_000,
+        required_steps: *invocation_steps,
         in_required_comptime: false,
         in_staged_input: false,
         preparing_spread: None,
@@ -470,6 +498,31 @@ fn elaborate_with_attributes(
         active_defaults: BTreeSet::new(),
         immutable: BTreeSet::new(),
     };
+    // Account even on unwinding, then preserve the original panic. Candidate
+    // state remains private; this does not recover or reuse a panicking checker.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        elaborate_candidate(
+            &mut checker,
+            package,
+            package_identities,
+            target,
+            inspect_attributes,
+        )
+    }));
+    *invocation_steps = checker.required_steps;
+    match result {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+fn elaborate_candidate<'a, 'h>(
+    checker: &mut Checker<'a, 'h>,
+    package: &'a hir::Package<'h>,
+    package_identities: &BTreeMap<u32, u64>,
+    target: Option<nir::target::TargetData>,
+    inspect_attributes: bool,
+) -> Result<(n::Package, Vec<attributes::EvaluatedAttribute>), Error> {
     // Register all declaration telescopes before interpreting interface arguments.
     for (owner, info) in package.owners() {
         if matches!(&info.node.expect_item().kind, ItemKind::Fn(sig, _) if sig.modifiers.is_test_template)
@@ -1200,7 +1253,7 @@ fn elaborate_with_attributes(
     output.function_parameters = checker.function_parameter_metadata();
     output.functions.append(&mut checker.generated_functions);
     output.alias_contracts = checker.alias_contracts.values().cloned().collect();
-    output.expansion_sources = checker.expansion_sources;
+    output.expansion_sources = std::mem::take(&mut checker.expansion_sources);
     crate::verification::contracts::inherit(&mut output, &mut checker.next_temporary_binding)
         .map_err(|mut failure| {
             failure.source = failure

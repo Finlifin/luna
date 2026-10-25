@@ -186,6 +186,24 @@ failure leaves the original package and drafts intact and never invokes the
 semantic callback. These are structural work units, not a byte-exact allocator
 quota. Callback/elaborator work retains its own limits; this is not yet one
 shared budget for an active VM-to-elaboration session.
+
+`elaboration::definitions::publish_with_invocation_budget` additionally accepts
+the caller's remaining required-comptime-invocation steps. It feeds the ordinary
+checker through `program::elaborate_packages_with_invocation_budget`, passing the
+same allowance to the candidate after function-template expansion and returning the checker's
+remaining balance on success, semantic error or unwind. Structural rejection
+does not invoke this checker and does not debit that allowance. The default
+entrypoints retain their standalone million-step limit. Rechecking an existing
+candidate still costs work; a new publication no longer needs to imply a fresh
+allowance when the caller selects the shared-budget entrypoint.
+
+Delivered Type world admission now returns its VM's remaining steps on failure
+as well as success, including partial preparation-copy work. A failed VM
+constructor cannot expose its remainder, so that reserved allowance is consumed
+instead of refunded. Other analyses (including PTC and template preparation)
+retain their separate limits. This is a reusable invocation-budget boundary,
+not an implementation of source builders, incremental rechecking or live VM
+suspension/resumption.
 The existing lowering consumer still uses structural publication, because its
 ordinary semantic checking happens later in the driver.
 
@@ -750,3 +768,38 @@ publication remain covered. All final commands exited 0. Formatting passed at
 `/tmp/luna-tools-gk8lox6u/result.json`; `git diff --check` passed. This bounds
 candidate copying; it neither removes full-candidate elaboration nor unifies the
 semantic callback's budget with the caller's VM.
+
+Shared invocation-budget verification (`/home/fin/luna`):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration --test delivered_types --test definitions --test generated_methods --test generated_enums
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration --test invocation_budget
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test comptime_memory --test test_templates --test quote_functions
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test test_templates
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+The definition suite passed 14 tests at `/tmp/luna-tools-20ip7s9h/result.json`.
+The required-function invocation test passed at `/tmp/luna-tools-w90hayqm/result.json`
+after correcting its DefId import to the HIR re-export. That build hit a disk
+quota during archive creation; the existing wrapper cleaned rebuildable outputs,
+retried once and completed successfully. Tests cover structural rejection without
+invocation debit, repeated publication sharing the remaining allowance, failure
+without refund of Type-admission VM work, zero-budget rejection of a required
+comptime function, and explicit replenishment/retry with unchanged draft state.
+
+The broader source run (`/tmp/luna-tools-_pm53g29/result.json`) passed 17 comptime
+memory and 104 quote tests, but failed one of 81 template tests. A targeted run
+(`/tmp/luna-tools-b1_bsxpq/result.json`) identified its stale expectation: a loop
+with unconditional break was still required to fail finite-completion checking.
+The test now executes that finite loop for ordinary and templated defaults,
+including explicit override, and uses a nonterminating loop as the rejection
+case. It retains rejection of input mutation, unavailable private bindings and
+nominal destructuring without the cleanup evidence supplied by the separate
+protocol-bound tests. The corrected targeted case passed at
+`/tmp/luna-tools-fjb7z0ku/result.json`; all 81 template tests then passed at
+`/tmp/luna-tools-rd606oed/result.json`. No purity implementation or language
+contract was relaxed. Overall, 217 distinct tests passed across the final
+applicable runs. Formatting passed at `/tmp/luna-tools-4wu_18rz/result.json` and
+`git diff --check` passed. Source builder dispatch and live VM resumption remain
+unimplemented; PTC and other analysis limits remain separate.

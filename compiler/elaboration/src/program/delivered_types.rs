@@ -47,24 +47,33 @@ pub(super) fn admit(
         },
     )
     .map_err(|failure| {
+        // Failed VM construction exposes no remainder: its reserved allowance
+        // cannot be returned to a caller that may retry admission.
+        *steps = 0;
         error(
             Span::default(),
             format!("delivered type world admission failed: {failure}"),
         )
     })?;
-    for (ty, span) in inputs.values() {
-        let mut remaining = vm.remaining_steps();
-        charge(ty, &mut remaining, *span)?;
-        vm.charge_preparation((vm.remaining_steps() - remaining) as usize)
-            .map_err(|failure| error(*span, failure.to_string()))?;
-        vm.validate_immutable_input(
-            &comptime_interpretor::Value::Type(ty.as_ref().clone()),
-            &p(P::Type),
-        )
-        .map_err(|failure| error(*span, format!("delivered type admission failed: {failure}")))?;
-    }
+    let result = (|| {
+        for (ty, span) in inputs.values() {
+            let mut remaining = vm.remaining_steps();
+            let copied = charge(ty, &mut remaining, *span);
+            vm.charge_preparation((vm.remaining_steps() - remaining) as usize)
+                .map_err(|failure| error(*span, failure.to_string()))?;
+            copied?;
+            vm.validate_immutable_input(
+                &comptime_interpretor::Value::Type(ty.as_ref().clone()),
+                &p(P::Type),
+            )
+            .map_err(|failure| {
+                error(*span, format!("delivered type admission failed: {failure}"))
+            })?;
+        }
+        Ok(())
+    })();
     *steps = vm.remaining_steps();
-    Ok(())
+    result
 }
 
 fn charge(ty: &Term, steps: &mut u64, span: Span) -> Result<(), Error> {

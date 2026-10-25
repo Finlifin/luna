@@ -651,3 +651,86 @@ fn assembled_defaults_use_cmtt_splicing_and_ordinary_field_type_checking() {
         comptime_interpretor::Value::Bool(true)
     );
 }
+
+#[test]
+fn publication_reuses_invocation_budget_and_preserves_failed_attempt_consumption() {
+    use elaboration::definitions::publish_with_invocation_budget;
+    let arena = HirArena::new();
+    let mut package = Package::new();
+    let mut batch = DefinitionBatch::new(&mut package);
+    let owner = batch.reserve().unwrap();
+    batch
+        .define(description(&arena, owner, boolean(), None), None, None)
+        .unwrap();
+    let before = batch.to_string();
+    let protocols = Protocols::default();
+    let mut steps = 10_000;
+    assert!(matches!(
+        publish_with_invocation_budget(
+            &mut batch,
+            &mut 0,
+            &mut steps,
+            &identities(),
+            &protocols,
+            None
+        ),
+        Err(PublicationError::Structure(_))
+    ));
+    assert_eq!(steps, 10_000);
+    assert_eq!(batch.to_string(), before);
+    publish_with_invocation_budget(
+        &mut batch,
+        &mut 1000,
+        &mut steps,
+        &identities(),
+        &protocols,
+        None,
+    )
+    .unwrap();
+    let spent = 10_000 - steps;
+    assert!(spent > 0);
+    let after_first = steps;
+    publish_with_invocation_budget(
+        &mut batch,
+        &mut 1000,
+        &mut steps,
+        &identities(),
+        &protocols,
+        None,
+    )
+    .unwrap();
+    assert_eq!(after_first - steps, spent);
+    // Rechecking the same candidate with one fewer step must not silently gain
+    // the default million-step allowance. Failed work also reduces the balance.
+    steps = spent - 1;
+    let available = steps;
+    let before = batch.to_string();
+    assert!(matches!(
+        publish_with_invocation_budget(
+            &mut batch,
+            &mut 1000,
+            &mut steps,
+            &identities(),
+            &protocols,
+            None
+        ),
+        Err(PublicationError::Check(_))
+    ));
+    assert!(steps < available, "remaining {steps}, initial {available}");
+    assert_eq!(steps, 0, "failed final admission must not refund VM work");
+    assert_eq!(batch.to_string(), before);
+    assert_eq!(batch.published().num_defs(), 1);
+    // The owner stays published and no failed candidate replaces it. A caller
+    // may explicitly grant more fuel, then retry without rebuilding its HIR.
+    steps = 10_000;
+    publish_with_invocation_budget(
+        &mut batch,
+        &mut 1000,
+        &mut steps,
+        &identities(),
+        &protocols,
+        None,
+    )
+    .unwrap();
+    assert_eq!(10_000 - steps, spent);
+}
