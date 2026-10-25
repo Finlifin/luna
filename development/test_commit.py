@@ -32,11 +32,25 @@ class CommitManifestTests(unittest.TestCase):
         return subprocess.run(['git', *args], cwd=self.root, check=True,
                               capture_output=True, text=True, timeout=15).stdout
 
-    def invoke(self, paths):
+    def invoke(self, paths, dry_run=False):
         self.manifest.write_text('\n'.join(paths) + '\n')
         argv = ['commit.py', '--manifest', str(self.manifest), '--message-file', str(self.message)]
+        if dry_run:
+            argv.append('--dry-run')
         with patch.object(commit, 'ROOT', self.root), patch('sys.argv', argv):
             return commit.main()
+
+    def test_preview_preserves_head_index_and_worktree(self):
+        (self.root / 'base').write_text('changed\n')
+        (self.root / 'new').write_text('new\n')
+        head = self.git('rev-parse', 'HEAD')
+        status = self.git('status', '--porcelain')
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.invoke(['base', 'new'], dry_run=True), 0)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+        self.assertEqual(self.git('diff', '--cached'), '')
+        self.assertEqual(self.git('status', '--porcelain'), status)
+        self.assertEqual((self.root / 'base').read_text(), 'changed\n')
 
     def test_only_selected_files_are_committed(self):
         (self.root / 'base').write_text('changed\n')

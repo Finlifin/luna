@@ -23,6 +23,8 @@ def main():
     parser.add_argument('--manifest', type=Path, required=True,
                         help='UTF-8 file containing one repository-relative file path per line')
     parser.add_argument('--message-file', type=Path, required=True)
+    parser.add_argument('--dry-run', action='store_true',
+                        help='validate and preview the selection without changing the index or HEAD')
     args = parser.parse_args()
     if git('branch', '--show-current', capture=True).stdout.strip() != 'dev':
         parser.error('this entrypoint commits only on dev')
@@ -41,6 +43,15 @@ def main():
     message = args.message_file.resolve()
     if not message.read_text().strip():
         parser.error('commit message is empty')
+    if args.dry_run:
+        print('Selected paths:')
+        for name in paths:
+            print(f'  {name}')
+        print('Commit message:')
+        print(message.read_text())
+        git('--literal-pathspecs', 'status', '--short', '--', *paths)
+        git('--literal-pathspecs', 'diff', '--stat', '--', *paths)
+        return 0
     # Literal pathspecs prevent manifest entries from selecting other files.
     git('--literal-pathspecs', 'add', '--', *paths)
     git('diff', '--cached', '--check')
