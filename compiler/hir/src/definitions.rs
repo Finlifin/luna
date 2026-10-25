@@ -12,6 +12,8 @@ mod nodes;
 pub use nodes::DefinitionNodes;
 mod structs;
 pub use structs::{TypedField, assemble_struct, assemble_struct_with_defaults};
+mod implementations;
+pub use implementations::assemble_inherent_impl;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
@@ -125,6 +127,8 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
     }
     /// Replace an unfinished description, for example after correcting a failed
     /// validation. Already-published owners cannot be changed through this API.
+    /// `lexical_parent` describes a block-local declaration's enclosing scope;
+    /// membership in structs/traits/impls is represented by their item lists.
     pub fn define(
         &mut self,
         info: OwnerInfo<'hir>,

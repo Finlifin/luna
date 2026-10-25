@@ -47,6 +47,20 @@ The VM-reflection integration test now uses this assembly entrypoint to turn fie
 descriptions into a checked generated struct, rather than assigning raw local IDs
 in the caller. Field-description dumps use escaped S-expressions.
 
+`assemble_inherent_impl` constructs an inherent implementation for a completed
+receiver Type with an indexed receiver node and an ordered member-owner list.
+Members may refer forward to reservations in the same batch. Existence, bodies,
+receiver rules and type formation remain normal publication/elaboration checks.
+Budget preflight covers the member list and node construction. Trait references
+and generic impl clauses continue to use the general HIR representation.
+
+Container membership and block-local lexical scope are distinct: impl methods
+belong in `ImplDef.items`; `DefinitionBatch::define`'s `lexical_parent` is for
+declarations inside a block, not a substitute for impl/struct/trait membership.
+The generated-method integration test combines struct assembly/defaults, an
+inherent impl, an instance method and a consumer in one transaction, then invokes
+the compiled consumer through the interpreter.
+
 ## Implemented: atomic HIR registration
 
 `hir::definitions::DefinitionBatch` reserves owner identities and accepts the
@@ -646,3 +660,22 @@ instance with the field omitted, and executes a generated consumer returning tru
 Formatting passed at `/tmp/luna-tools-61tux6dv/result.json`; `git diff --check`
 passed. This validates compiler-side CMTT default assembly and execution, not the
 source builder API or suspension/resumption of an active builder invocation.
+
+Generated inherent implementation verification (`/home/fin/luna`):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p hir --test impl_assembly --test definitions --test display
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration --test generated_methods --test delivered_types --test definitions
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+All exited 0: 29 HIR tests at `/tmp/luna-tools-kee9k2dp/result.json` and 12
+semantic publication tests at `/tmp/luna-tools-eqe9csk6/result.json` (41 total).
+Assembly checks cover ordered forward members, canonical receiver indexing,
+shared Type ownership, budget preflight, empty impls and invalid owners. The
+integration test rejects an incorrectly typed method body without publishing any
+of the four owners or their bodies, repairs it, publishes the batch, and executes
+the generated instance method twice. Formatting passed at
+`/tmp/luna-tools-cwsv66jd/result.json`; `git diff --check` passed. This remains a
+compiler-side assembly API; source builders and live invocation resumption are
+not implemented by this change.
