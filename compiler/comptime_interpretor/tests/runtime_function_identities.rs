@@ -790,3 +790,86 @@ fn runtime_identity_freezing_is_bounded_and_keeps_aggregate_structure() {
         Err(ErrorKind::Type)
     );
 }
+
+#[test]
+fn indexed_world_lookup_preserves_late_function_collisions_and_duplicate_bodies() {
+    let mut world = package();
+    let prototype = world.functions[0].clone();
+    world.functions.extend((100..612).map(|local| Function {
+        declaration: id(local),
+        ..prototype.clone()
+    }));
+    let mut vm = Interpreter::for_comptime(&world, Budget::default()).unwrap();
+    assert!(
+        matches!(vm.invoke(id(611), vec![]).unwrap(), Value::RuntimeFunction { declaration, .. } if declaration == id(2))
+    );
+    world.runtime_function_identities[0].declaration = id(611);
+    assert!(
+        matches!(Interpreter::new(&world, Budget::default()), Err(error) if error.kind == ErrorKind::InvalidCallPlan)
+    );
+    world.runtime_function_identities[0].declaration = id(2);
+    world
+        .functions
+        .push(world.functions.last().unwrap().clone());
+    assert!(
+        matches!(Interpreter::new(&world, Budget::default()), Err(error) if error.kind == ErrorKind::InvalidCallPlan)
+    );
+    world.functions.pop();
+    assert!(Interpreter::for_comptime(&world, Budget::default()).is_ok());
+}
+
+#[test]
+fn dispatch_implementation_index_checks_missing_and_duplicate_identities() {
+    let mut world = trait_package();
+    let implementation = world.implementations.remove(0);
+    world
+        .implementations
+        .extend((100..164).map(|local| nir::program::Implementation {
+            declaration: id(local),
+            interface: None,
+            methods: vec![],
+            ..implementation.clone()
+        }));
+    world.implementations.push(implementation.clone());
+    world
+        .dispatch_instances
+        .push(nir::program::DispatchInstance {
+            interface_arguments: vec![],
+            interface: id(4),
+            subject: Term::Primitive(Primitive::Bool),
+            implementation: id(6),
+            arguments: vec![],
+            methods: vec![],
+            associated: vec![],
+            associated_initializers: vec![],
+        });
+    let mut omitted = Interpreter::for_comptime(&world, Budget::default()).unwrap();
+    assert_eq!(
+        omitted.invoke(id(1), vec![]).unwrap_err().kind,
+        ErrorKind::UnmaterializedDispatch
+    );
+    world.dispatch_instances[0]
+        .methods
+        .push(nir::program::MethodInstance {
+            method_arguments: vec![Term::Primitive(Primitive::Bool)],
+            member: id(5),
+            body: id(2),
+            arguments: vec![Term::Primitive(Primitive::Bool)],
+        });
+    let mut vm = Interpreter::for_comptime(&world, Budget::default()).unwrap();
+    assert!(matches!(
+        vm.invoke(id(1), vec![]).unwrap(),
+        Value::RuntimeTraitMethod(_)
+    ));
+    world.dispatch_instances[0].implementation = id(999);
+    assert!(
+        matches!(Interpreter::new(&world, Budget::default()), Err(error) if error.kind == ErrorKind::InvalidCallPlan)
+    );
+    world.dispatch_instances[0].implementation = id(6);
+    world.implementations.push(implementation);
+    assert!(
+        matches!(Interpreter::new(&world, Budget::default()), Err(error) if error.kind == ErrorKind::InvalidCallPlan)
+    );
+    world.implementations.pop();
+    assert!(Interpreter::for_comptime(&world, Budget::default()).is_ok());
+}

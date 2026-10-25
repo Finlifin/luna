@@ -131,19 +131,21 @@ pub fn machine_arithmetic_functions(
             message: "invalid implementation parameter domains",
         })?;
     }
+    // Identity membership is queried for every retained callable. Index once:
+    // scanning function vectors here makes snapshot admission quadratic.
+    let body_ids: BTreeSet<_> = package.functions.iter().map(|f| f.declaration).collect();
+    let runtime_ids: BTreeSet<_> = package
+        .runtime_function_identities
+        .iter()
+        .map(|f| f.declaration)
+        .collect();
     let mut quote_ids = BTreeSet::new();
     let mut staged_quote_ids = BTreeSet::new();
     for template in &package.quote_templates {
         if template.phase != Phase::Runtime
             || !quote_ids.insert(template.declaration)
-            || package
-                .functions
-                .iter()
-                .any(|function| function.declaration == template.declaration)
-            || package
-                .runtime_function_identities
-                .iter()
-                .any(|function| function.declaration == template.declaration)
+            || body_ids.contains(&template.declaration)
+            || runtime_ids.contains(&template.declaration)
         {
             return Err(Error {
                 source: template.body.source,
@@ -165,10 +167,7 @@ pub fn machine_arithmetic_functions(
             Term::Function { .. }
         ) || identity.signature.is_comptime_callable()
             || !identity_ids.insert(identity.declaration)
-            || package
-                .functions
-                .iter()
-                .any(|f| f.declaration == identity.declaration)
+            || body_ids.contains(&identity.declaration)
         {
             return Err(Error {
                 source: SourceRange { start: 0, end: 0 },

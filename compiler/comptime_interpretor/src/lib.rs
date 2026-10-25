@@ -1140,16 +1140,24 @@ impl<'a> Interpreter<'a> {
         assumptions: &[nir::program::TraitRequirement],
         budget: Budget,
     ) -> Result<Self, Error> {
+        // Build this once before checking body-free runtime identities. Looking
+        // through the source Vec for each identity makes world setup quadratic.
+        let mut functions = BTreeMap::new();
+        for function in &package.functions {
+            if functions.insert(function.declaration, function).is_some() {
+                return Err(Error {
+                    kind: ErrorKind::InvalidCallPlan,
+                    source: None,
+                });
+            }
+        }
         let mut runtime_function_identities = BTreeMap::new();
         for identity in &package.runtime_function_identities {
             if !matches!(
                 identity.signature.callable_signature(),
                 Term::Function { .. }
             ) || identity.signature.is_comptime_callable()
-                || package
-                    .functions
-                    .iter()
-                    .any(|f| f.declaration == identity.declaration)
+                || functions.contains_key(&identity.declaration)
                 || runtime_function_identities
                     .insert(identity.declaration, identity)
                     .is_some()
@@ -1173,7 +1181,6 @@ impl<'a> Interpreter<'a> {
                 });
             }
         }
-        let mut functions = BTreeMap::new();
         let mut structs = BTreeMap::new();
         let mut enums = BTreeMap::new();
         for definition in &package.enums {
@@ -1192,14 +1199,6 @@ impl<'a> Interpreter<'a> {
         }
         for definition in &package.structs {
             if structs.insert(definition.declaration, definition).is_some() {
-                return Err(Error {
-                    kind: ErrorKind::InvalidCallPlan,
-                    source: None,
-                });
-            }
-        }
-        for function in &package.functions {
-            if functions.insert(function.declaration, function).is_some() {
                 return Err(Error {
                     kind: ErrorKind::InvalidCallPlan,
                     source: None,
@@ -1369,9 +1368,12 @@ impl<'a> Interpreter<'a> {
             }
         }
         let mut worlds = HashMap::new();
-        let mut implementation_ids = BTreeSet::new();
+        let mut implementations = BTreeMap::new();
         for implementation in &package.implementations {
-            if !implementation_ids.insert(implementation.declaration) {
+            if implementations
+                .insert(implementation.declaration, implementation)
+                .is_some()
+            {
                 return Err(invalid());
             }
             let concrete =
@@ -1504,10 +1506,9 @@ impl<'a> Interpreter<'a> {
             if !instance_keys.insert((instance.interface_instance(), instance.subject.clone())) {
                 return Err(invalid());
             }
-            let implementation = package
-                .implementations
-                .iter()
-                .find(|i| i.declaration == instance.implementation)
+            let implementation = implementations
+                .get(&instance.implementation)
+                .copied()
                 .ok_or_else(invalid)?;
             nir::validate_declaration_arguments_in(
                 &implementation.type_parameters,
@@ -1763,10 +1764,9 @@ impl<'a> Interpreter<'a> {
             worlds.insert(key, instance.implementation);
         }
         for instance in &package.dispatch_instances {
-            let implementation = package
-                .implementations
-                .iter()
-                .find(|i| i.declaration == instance.implementation)
+            let implementation = implementations
+                .get(&instance.implementation)
+                .copied()
                 .ok_or_else(invalid)?;
             for capability in &implementation.capabilities {
                 let capability = capability

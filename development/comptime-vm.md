@@ -192,3 +192,59 @@ Final tests additionally exercise a real TypeValue evaluation with a 20-selectio
 chain, exhaustion and retry, and missing-evidence diagnostics retaining the source.
 Formatting passed at `/tmp/luna-tools-k726hsld/result.json`; `git diff --check`
 passed. No source reflection API or builder publication behavior is added here.
+
+## Indexed declaration-world admission
+
+Interpreter construction now builds the function index before checking body-free
+runtime identities, reusing it for collision checks. Phase validation separately
+indexes body and runtime-identity membership for retained quote templates and
+runtime identities. Dispatch admission reuses an implementation-ID map instead
+of scanning all implementations for each instance and again for capabilities.
+Duplicate identities, missing implementations and omitted demanded methods keep
+their rejection behavior. No function body, type contract or phase check is
+removed. Indices add linear storage and replace repeated linear membership scans
+with logarithmic lookup; other world-validation work retains its existing costs.
+
+`compiler/comptime_interpretor/examples/world_construction.rs` measures only
+`Interpreter::for_comptime` construction, including its phase checks. Package
+allocation and VM destruction are outside the timed interval. Each row uses one
+warmup and the median of seven measured runs. Each world has equally many simple
+comptime functions and distinct body-free runtime identities. No timing assertion
+is used as a test gate.
+
+```sh
+python3 -B development/check.py --timeout 900 -- run --release -p comptime_interpretor --example world_construction
+```
+
+Same-host release measurements, microseconds:
+
+| Total declarations | Before | VM index only | VM and phase indices |
+| --- | ---: | ---: | ---: |
+| 2,000 | 1,319 | 759 | 232 |
+| 8,000 | 25,502 | 11,232 | 1,042 |
+| 32,000 | 387,470 | 198,505 | 4,393 |
+
+Reports: `/tmp/luna-tools-2ajlzndp/result.json` (baseline),
+`/tmp/luna-tools-zx2ug_dj/result.json` (intermediate), and
+`/tmp/luna-tools-6ispd10o/result.json` (final), all exit 0. The largest fixture is
+about 88x faster at world construction; this is not a whole-compiler or invocation
+execution speedup, nor a benchmark of implementation-rich dispatch worlds.
+
+Verification in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor -p nir --test runtime_function_identities --test phases --test nominal_types --test normal_inputs --test instance_budget
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --lib
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+85 targeted tests passed at `/tmp/luna-tools-kqcdbw5c/result.json`; 119 VM library
+tests passed at `/tmp/luna-tools-03jtgu97/result.json` (204 total). New checks cover
+collisions at the end of a larger function catalog, duplicate bodies, successful
+lookup, missing/duplicate implementation identities and repair. The first dispatch
+fixture omitted its demanded method and correctly produced UnmaterializedDispatch;
+the final test asserts that rejection before installing the explicit method and
+checking success. Existing phase tests retain quote/runtime/body collision and
+wrong-phase coverage. Formatting passed at `/tmp/luna-tools-osgt43d6/result.json`;
+`git diff --check` passed. Live sessions still borrow a fixed immutable NIR world;
+this optimization does not add active invocation suspension or world replacement.
