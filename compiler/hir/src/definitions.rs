@@ -38,10 +38,38 @@ fn charge(fuel: &mut usize) -> Result<(), Error> {
     Ok(())
 }
 
+#[derive(Clone)]
 struct Definition<'hir> {
     info: OwnerInfo<'hir>,
     identity: Option<DefId>,
     lexical_parent: Option<OwnerId>,
+}
+
+/// Structural rejection and semantic rejection retain their original diagnostics.
+#[derive(Debug)]
+pub enum PublicationError<E> {
+    Structure(Error),
+    Check(E),
+}
+impl<E: fmt::Display> fmt::Display for PublicationError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Structure(error) => write!(f, "(definition-publication (structure {error}))"),
+            Self::Check(error) => write!(
+                f,
+                "(definition-publication (check {:?}))",
+                error.to_string()
+            ),
+        }
+    }
+}
+impl<E: std::error::Error + 'static> std::error::Error for PublicationError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(match self {
+            Self::Structure(error) => error,
+            Self::Check(error) => error,
+        })
+    }
 }
 
 /// Exclusive access prevents a competing publication from stealing reserved
@@ -122,6 +150,37 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
         self.slot(owner)
             .is_some_and(|i| self.definitions[i].is_some())
             || self.package.owner(owner).is_some()
+    }
+    /// Check an isolated candidate containing both published and draft owners.
+    /// Only a successful check installs the candidate and consumes the drafts.
+    /// Errors and unwinding leave the target and drafts unchanged. Side effects
+    /// outside the candidate are not rolled back.
+    ///
+    /// The callback sees immutable HIR and must create fresh semantic state;
+    /// this method cannot roll back a caller's existing inference context.
+    /// Fuel covers structural validation, not package cloning or the callback.
+    /// This initial implementation copies package tables; arena nodes are shared.
+    pub fn publish_checked<T, E>(
+        &mut self,
+        fuel: &mut usize,
+        check: impl FnOnce(&Package<'hir>) -> Result<T, E>,
+    ) -> Result<(Vec<OwnerId>, T), PublicationError<E>> {
+        let mut candidate = self.package.clone();
+        let mut batch = DefinitionBatch {
+            package: &mut candidate,
+            base: self.base,
+            definitions: self.definitions.clone(),
+            bodies: self.bodies.clone(),
+            body_slots: self.body_slots.clone(),
+        };
+        let owners = batch.publish(fuel).map_err(PublicationError::Structure)?;
+        let result = check(&candidate).map_err(PublicationError::Check)?;
+        *self.package = candidate;
+        self.definitions.clear();
+        self.bodies.clear();
+        self.body_slots.clear();
+        self.base = self.package.num_defs();
+        Ok((owners, result))
     }
     /// Check every entry before making any mutation. Budget exhaustion is also
     /// transactional; a caller can supply fresh fuel and retry the same draft.

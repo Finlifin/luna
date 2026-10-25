@@ -442,6 +442,7 @@ impl std::error::Error for InferenceError {}
 
 pub mod associated;
 pub mod capabilities;
+pub mod definitions;
 pub mod materialization;
 pub mod program;
 

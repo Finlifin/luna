@@ -1681,3 +1681,15 @@ fn staged_input_dump_preserves_source_identity_and_order() {
     }
     assert_eq!(first, package.to_string());
 }
+
+#[test]
+fn definition_publication_diagnostics_escape_semantic_messages() {
+    use hir::definitions::{Error, PublicationError};
+    let semantic = PublicationError::Check("invalid ) (type \"name\")\nnext line");
+    assert_eq!(parsed(&semantic).tag(), "definition-publication");
+    let structural: PublicationError<&str> = PublicationError::Structure(Error {
+        kind: "budget exhausted",
+        owner: Some(owner(3)),
+    });
+    assert_eq!(parsed(&structural).tag(), "definition-publication");
+}

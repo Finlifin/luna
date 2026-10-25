@@ -46,16 +46,35 @@ elaboration, and execution remain consumers of ordinary HIR.
 
 ## Still required for source-level builders
 
+### Candidate semantic admission
+
+`elaboration::definitions::publish` now offers a separate checked publication
+entrypoint. It constructs an isolated HIR candidate and runs the ordinary package
+elaborator with the supplied package identities, language protocols, and target.
+Only successful elaboration installs the HIR and returns its checked NIR. Both
+structural and semantic errors preserve the original package and the editable
+draft. Unwinding from a check also leaves them intact. Diagnostics retain the
+distinction between registration failure and elaboration failure.
+
+The checker starts fresh; this is not rollback of an existing checker or arbitrary
+comptime side effects. The initial implementation clones package tables (sharing
+immutable arena nodes) and checks the complete candidate. It is a correctness
+baseline, not the final incremental builder execution design. Structural fuel
+does not account for the table copy or replace the elaborator's own limits.
+The existing lowering consumer still uses structural publication, because its
+ordinary semantic checking happens later in the driver.
+
 This is **not** a working `StructBuilder.new/add_field/build` API. There is no
 new runtime/VM builder value, field-reflection API, or source-language builder
 method in this change. The SoA example still cannot run through this feature.
 
 The next integration must transport owned, invocation-local definition drafts
-from the VM to a candidate elaboration world. This registration batch can install
-their HIR, but is not a transaction for the entire elaborator: name resolution,
-signature/body checking, type obligations, phase checks, and coherence still need
-their normal passes and candidate rollback. Structural registration must never be
-treated as proof of those semantic properties. Neither published HIR nor frozen
+from the VM to a candidate elaboration world. Generated names, attributes and
+use-site permissions still need their normal resolution/lowering paths; the
+batch alone does not synthesize this metadata. The checked entrypoint runs the
+ordinary semantic passes, but cannot extend an already running checker or resume
+a suspended invocation. Structural registration must never be treated as proof
+of semantic properties. Neither published HIR nor frozen
 comptime values may contain active inference variables, waiters, or solver
 transactions.
 
@@ -84,3 +103,18 @@ The final formatting check also exited 0:
 `/tmp/luna-tools-8mz6eg2k/result.json`.
 These checks establish structural registration and the existing module consumer;
 they do not establish source-level definition-builder support.
+
+Checked-publication follow-up (same working directory):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p hir -p elaboration --test definitions --test display --no-fail-fast
+```
+
+Final-source run exited 0 with 26 tests passing: 1 semantic admission test,
+8 registration tests, and 17 Display tests. Evidence:
+`/tmp/luna-tools-dfjcamjm/result.json` and its `stdout.log`. The semantic test
+rejects a generated function whose return annotation is a Boolean value, repairs
+the same draft to use Void, checks the returned NIR's package identity and target,
+then rejects another incomplete batch without changing the published package.
+Registration tests also check callback rejection, unwinding and exhausted fuel.
+Formatting exited 0 at `/tmp/luna-tools-9q6kt_f7/result.json`.

@@ -364,3 +364,49 @@ fn fuel_failure_and_foreign_bodies_leave_the_package_unchanged() {
     batch.publish(&mut 100).unwrap();
     assert_eq!(batch.published().body(body_id).unwrap().value, value);
 }
+
+#[test]
+fn checked_publication_failure_and_unwind_keep_the_original_draft() {
+    use hir::definitions::PublicationError;
+    let arena = HirArena::new();
+    let mut package = Package::new();
+    let mut batch = DefinitionBatch::new(&mut package);
+    let owner = batch.reserve().unwrap();
+    batch
+        .define(module(&arena, owner, vec![]), None, None)
+        .unwrap();
+    let before = batch.to_string();
+    let rejection = batch.publish_checked(&mut 100, |candidate| {
+        assert_eq!(candidate.num_defs(), 1);
+        Err::<(), _>("semantic rejection")
+    });
+    assert!(matches!(
+        rejection,
+        Err(PublicationError::Check("semantic rejection"))
+    ));
+    assert_eq!(batch.to_string(), before);
+    assert_eq!(batch.published().num_defs(), 0);
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = batch.publish_checked(&mut 100, |_| -> Result<(), ()> { panic!("checker panic") });
+    }));
+    assert!(panic.is_err());
+    assert_eq!(batch.to_string(), before);
+    assert_eq!(batch.published().num_defs(), 0);
+    let mut called = false;
+    let rejection = batch.publish_checked(&mut 0, |_| {
+        called = true;
+        Ok::<_, ()>(())
+    });
+    assert!(matches!(rejection, Err(PublicationError::Structure(_))));
+    assert!(!called);
+    let (owners, count) = batch
+        .publish_checked(&mut 100, |candidate| Ok::<_, ()>(candidate.num_defs()))
+        .unwrap();
+    assert_eq!(owners, vec![owner]);
+    assert_eq!(count, 1);
+    assert_eq!(batch.published().num_defs(), 1);
+    assert_eq!(
+        batch.reserve().unwrap().def_id.raw(),
+        owner.def_id.raw() + 1
+    );
+}
