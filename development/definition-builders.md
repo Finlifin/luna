@@ -175,9 +175,20 @@ payloads and nested Objects. NIR traversal, type rewriting, copy budgets and pha
 validation include these entries; runtime construction is rejected. Its freezing
 representation and attribute consumer execution remain unimplemented.
 
+`Interpreter::reflect_struct` now provides an internal comptime structure query
+for applied nominal structs. It retains the exact subject Type and returns fields
+in declaration order with instantiated types. Declaration-world and concrete IIR
+inputs use their existing admission/substitution paths; formation conditions and
+phantom inputs are checked even for empty structs. Recursive pointer fields need
+no target layout. Opaque normal-form heads are preserved in field types and are
+not unfolded into structs. The query charges term work, substitution, field counts
+and copied names against the invocation budget. Results have stable S-expression
+dumps. These descriptions grant no field access, visibility or layout permission.
+
 This is **not** a working `StructBuilder.new/add_field/build` API. There is no
-new runtime/VM builder value, field-reflection API, or source-language builder
-method in this change. The SoA example still cannot run through this feature.
+new runtime/VM builder value or source-language reflection/builder method yet.
+The internal reflection query does not execute attribute consumers or reflect
+field defaults. The SoA example still cannot run through this feature.
 
 The next integration must transport owned, invocation-local definition drafts
 from the VM to a candidate elaboration world. Generated names and use-site
@@ -460,3 +471,21 @@ nested enum collisions, field/clause collisions, invalid member IDs, and templat
 instance binding ownership while allowing external formal/interface references.
 `git diff --check` passed. This adds structural admission checks, not the source
 StructBuilder API or live invocation-to-elaboration integration.
+
+Internal comptime struct reflection verification (`/home/fin/luna`):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --lib
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+The final interpreter run passed 104 tests, exit 0,
+`/tmp/luna-tools-2xq9mp3d/result.json`. Eight reflection tests cover substituted
+fields in declaration order, recursive pointers without a target layout, escaped
+S-expression output, incorrect arity/value inputs and unknown declarations,
+runtime phase rejection, opaque heads, phantom inputs/false formation predicates
+on empty structs, budget failure/retry and name-copy accounting, concrete IIR
+parity, and malformed/unbound field descriptions. Formatting passed at
+`/tmp/luna-tools-fgyqtxbb/result.json`; `git diff --check` passed. This is an internal
+VM query; no source-level reflection spelling or new attribute/default semantics
+are established by these checks.

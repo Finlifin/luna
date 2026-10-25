@@ -18,6 +18,8 @@ mod normal_inputs;
 mod object_values;
 mod objects;
 pub use objects::ObjectProperty;
+mod reflection;
+pub use reflection::{ReflectedField, StructReflection};
 mod selected_types;
 pub use comptime_runtime::object::{Entry as ObjectEntry, Object};
 pub use memory::{OwnedGraphCheckpoint, PointerValue, Storage};
