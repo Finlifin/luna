@@ -114,6 +114,31 @@ impl<V: fmt::Display> fmt::Display for Attributes<'_, V> {
     }
 }
 
+fn insert<'a, V>(
+    values: &mut BTreeMap<&'a str, &'a V>,
+    key: &'a str,
+    value: &'a V,
+    limit: usize,
+    budget: &mut Budget,
+) -> Result<(), MergeError> {
+    // Ordered-map lookup uses O(log n) comparisons, each bounded by the
+    // searched key's byte length plus one. Cover lookup and insertion.
+    let levels = (usize::BITS - values.len().leading_zeros()) as usize + 1;
+    let work = key
+        .len()
+        .saturating_add(1)
+        .saturating_mul(levels)
+        .saturating_mul(16);
+    budget
+        .consume(work)
+        .map_err(|_| MergeError::BudgetExhausted)?;
+    if values.len() >= limit && !values.contains_key(key) {
+        return Err(MergeError::EntryLimit);
+    }
+    values.insert(key, value);
+    Ok(())
+}
+
 /// Apply configuration first, then prefix Objects from inner to outer. Within
 /// one Object, process properties in their retained expression order. This is
 /// the named-property part of the attribute protocol, not general Object lookup
@@ -128,30 +153,6 @@ pub fn merge_named_attributes<'a, V>(
     max_entries: usize,
     budget: &mut Budget,
 ) -> Result<Attributes<'a, V>, MergeError> {
-    fn insert<'a, V>(
-        values: &mut BTreeMap<&'a str, &'a V>,
-        key: &'a str,
-        value: &'a V,
-        limit: usize,
-        budget: &mut Budget,
-    ) -> Result<(), MergeError> {
-        // Ordered-map lookup uses O(log n) comparisons, each bounded by the
-        // searched key's byte length plus one. Cover lookup and insertion.
-        let levels = (usize::BITS - values.len().leading_zeros()) as usize + 1;
-        let work = key
-            .len()
-            .saturating_add(1)
-            .saturating_mul(levels)
-            .saturating_mul(16);
-        budget
-            .consume(work)
-            .map_err(|_| MergeError::BudgetExhausted)?;
-        if values.len() >= limit && !values.contains_key(key) {
-            return Err(MergeError::EntryLimit);
-        }
-        values.insert(key, value);
-        Ok(())
-    }
     budget.consume(1).map_err(|_| MergeError::BudgetExhausted)?;
     let mut values = BTreeMap::new();
     for (key, value) in configuration {
@@ -172,6 +173,23 @@ pub fn merge_named_attributes<'a, V>(
                 }
             }
         }
+    }
+    Ok(Attributes { values })
+}
+
+/// Merge a caller-supplied application-order stream without cloning payloads.
+/// The caller retains provenance in V and is responsible for selecting the
+/// configuration-first, inner-to-outer sequence. Iterator errors abort the merge.
+pub fn merge_named_entries<'a, V: 'a>(
+    entries: impl IntoIterator<Item = Result<(&'a str, &'a V), MergeError>>,
+    max_entries: usize,
+    budget: &mut Budget,
+) -> Result<Attributes<'a, V>, MergeError> {
+    budget.consume(1).map_err(|_| MergeError::BudgetExhausted)?;
+    let mut values = BTreeMap::new();
+    for entry in entries {
+        let (key, value) = entry?;
+        insert(&mut values, key, value, max_entries, budget)?;
     }
     Ok(Attributes { values })
 }

@@ -91,6 +91,19 @@ reject deferred attributes until their consumer contracts are implemented.
 Generic or runtime-bound metadata is not deferred by this entrypoint; it still
 requires a concrete invocation context. Attribute merging is a separate step.
 
+`program::attributes::merge` selects named properties from completed inspection
+data independently for each definition/member target. It applies configurations
+first, then the already inner-to-outer HIR prefix sequence; duplicate keys inside
+one Object keep their last entry. The ordered-entry merge reuses the runtime
+Object layer's bounded map insertion and per-target unique-key limit.
+Selections borrow both their typed expression and original attribute, retaining
+materialization scopes and provenance without copying payloads or closure state.
+The selection dump points back to source/entry/lexical owner instead of repeating
+the entire source Object for every key. Positional entries are rejected by this
+named-property projection, and malformed Object shapes are diagnosed. Failure
+exposes no partial map and leaves inspection data untouched. This API does not
+execute consumers or change the raw `--emit attributes` dump into a merged map.
+
 `comptime_runtime::object` now provides the value-container layer: `Object<V>`
 retains ordered positional and named entries (including duplicates), while
 `merge_named_attributes` produces a separate borrowed map from completed values.
@@ -326,3 +339,27 @@ An intermediate package test incorrectly expected literal paths in the existing
 hex-encoded input protocol; its assertion now checks source resolution/semantic
 identities. Formatting passed at `/tmp/luna-tools-p8d75s7d/result.json`;
 `git diff --check` passed.
+
+Typed attribute merge verification (`/home/fin/luna`):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna -p elaboration -p comptime_runtime --test frontend_cli --test attribute_merge --test object --no-fail-fast
+```
+
+Final run `/tmp/luna-tools-leq2_ws6/result.json` exited 0: 8 Object runtime,
+4 typed merge and 217 frontend CLI tests passed (229 total). Coverage includes
+configuration-before-prefix ordering even with interleaved inputs, last duplicate
+entry selection, target isolation, member identity, source/scoped-origin
+retention, escaped selection dumps, non-Clone borrowed values, malformed and
+positional entries, unique-key limits, every insufficient budget below success,
+and successful retries without input mutation. The source integration test
+compiles actual attribute function calls and verifies the outer prefix wins with
+its original typed value and source descriptor.
+
+The initial formatting run caught an unclosed delimiter in the new fixture; it
+was corrected. The initial test build hit the storage quota and automatically
+cleaned/retried, then passed all 12 local tests at
+`/tmp/luna-tools-qyj1t2hd/result.json`. Final-source formatting check passed at
+`/tmp/luna-tools-7yw9kkl8/result.json`; `git diff --check` passed.
+The merge API does not implement `meta.attrs_of`, typed source property access,
+attribute consumers or source-level definition builders.

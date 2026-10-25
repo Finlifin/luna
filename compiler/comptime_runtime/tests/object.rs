@@ -171,3 +171,39 @@ fn empty_objects_still_spend_fuel_and_dumps_escape_keys() {
     );
     assert_eq!(merged.to_string(), merged.to_string());
 }
+
+#[test]
+fn ordered_entry_stream_preserves_nonclone_payloads_and_aborts_on_error() {
+    use comptime_runtime::object::merge_named_entries;
+    #[derive(Debug)]
+    struct Payload;
+    let first = Payload;
+    let last = Payload;
+    let result = merge_named_entries(
+        [Ok(("key", &first)), Ok(("key", &last))],
+        1,
+        &mut Budget::default(),
+    )
+    .unwrap();
+    assert!(std::ptr::eq(result.get("key").unwrap(), &last));
+    let failure = merge_named_entries(
+        [
+            Ok(("key", &first)),
+            Err(MergeError::PositionalEntry {
+                object: 3,
+                entry: 5,
+            }),
+        ],
+        1,
+        &mut Budget::default(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        failure,
+        MergeError::PositionalEntry {
+            object: 3,
+            entry: 5
+        }
+    );
+    assert!(merge_named_entries([Ok(("key", &first))], 1, &mut Budget::default()).is_ok());
+}

@@ -9075,3 +9075,49 @@ fn package_attribute_inspection_resolves_provider_functions() {
         "{dump}"
     );
 }
+
+#[test]
+fn source_attribute_merge_selects_outer_prefix_and_retains_origin() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        r#"
+        comptime fn metadata(flag:bool)->.Object'builtin {
+            let result = {mode:flag}; result
+        }
+        ^metadata(true) ^metadata(false)
+        struct Decorated { .mode false }
+    "#,
+    );
+    let luna::cli::Command::Compile(options) = luna::cli::parse([
+        sandbox.path("input.fl").into_os_string(),
+        "--emit".into(),
+        "attributes".into(),
+    ])
+    .unwrap() else {
+        panic!()
+    };
+    let luna::frontend::Artifact::Attributes(attributes) =
+        luna::frontend::compile(&options).unwrap()
+    else {
+        panic!()
+    };
+    let merged = elaboration::program::attributes::merge(
+        &attributes,
+        100,
+        &mut comptime_runtime::Budget::default(),
+    )
+    .unwrap();
+    assert_eq!(merged.len(), 1);
+    let selected = merged[0].get("mode").unwrap();
+    assert!(matches!(
+        selected.value.kind,
+        nir::program::ExprKind::Literal(nir::program::Literal::Bool(true))
+    ));
+    assert!(std::ptr::eq(selected.origin, attributes.last().unwrap()));
+    assert_eq!(selected.entry, Some(0));
+    assert_eq!(
+        selected.value.ty,
+        nir::Term::Primitive(nir::Primitive::Bool)
+    );
+}

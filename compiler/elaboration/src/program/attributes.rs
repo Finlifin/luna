@@ -1,5 +1,7 @@
 //! Evaluate metadata for inspection without authorizing attribute consumers.
 use super::*;
+mod merge;
+pub use merge::{MergeFailure, MergedTarget, SelectedValue, merge};
 
 /// An independently materialized attribute in HIR application order. Configuration
 /// entries retain their key; prefixes produce an Object. No merge has happened.
