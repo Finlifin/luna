@@ -7,6 +7,7 @@ use crate::{Body, BodyId, ItemKind, LocalDefId, OwnerId, OwnerInfo, Package};
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use symbol::DefId;
+mod copy_budget;
 mod members;
 mod nodes;
 pub use nodes::DefinitionNodes;
@@ -177,13 +178,16 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
     ///
     /// The callback sees immutable HIR and must create fresh semantic state;
     /// this method cannot roll back a caller's existing inference context.
-    /// Fuel covers structural validation, not package cloning or the callback.
+    /// Fuel covers candidate table copying and structural validation, not the
+    /// callback. Copy preflight completes before allocating the candidate.
     /// This initial implementation copies package tables; arena nodes are shared.
     pub fn publish_checked<T, E>(
         &mut self,
         fuel: &mut usize,
         check: impl FnOnce(&Package<'hir>) -> Result<T, E>,
     ) -> Result<(Vec<OwnerId>, T), PublicationError<E>> {
+        self.charge_candidate_copy(fuel)
+            .map_err(PublicationError::Structure)?;
         let mut candidate = self.package.clone();
         let mut batch = DefinitionBatch {
             package: &mut candidate,

@@ -177,7 +177,15 @@ The checker starts fresh; this is not rollback of an existing checker or arbitra
 comptime side effects. The initial implementation clones package tables (sharing
 immutable arena nodes) and checks the complete candidate. It is a correctness
 baseline, not the final incremental builder execution design. Structural fuel
-does not account for the table copy or replace the elaborator's own limits.
+now covers a copy preflight before candidate allocation: owner and node slots
+(including holes), map capacity, draft tables, pending diagnostic strings and
+attribute expression/configuration strings. Arena references and Arc member
+candidate slices remain shared and are not charged as deep copies. Preflight
+itself is bounded by charging table slots before scanning their owned contents;
+failure leaves the original package and drafts intact and never invokes the
+semantic callback. These are structural work units, not a byte-exact allocator
+quota. Callback/elaborator work retains its own limits; this is not yet one
+shared budget for an active VM-to-elaboration session.
 The existing lowering consumer still uses structural publication, because its
 ordinary semantic checking happens later in the driver.
 
@@ -718,3 +726,27 @@ enum's positional/named payload types and group leaves. Formatting passed at
 `/tmp/luna-tools-72st19a0/result.json`; `git diff --check` passed. Pattern/expression
 encoding validity is not claimed by the structural tests. Source builders and
 live invocation resumption remain separate work.
+
+Candidate-copy budget verification (`/home/fin/luna`):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p hir
+python3 -B development/check.py --timeout 900 -- test --release -p hir --test publication_budget
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration --test definitions --test delivered_types --test generated_methods --test generated_enums
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+The regression failed before the fix at `/tmp/luna-tools-cajy4155/result.json`:
+a sparse published node table escaped the supplied copy budget. After the fix,
+the HIR suite passed 47 tests (3 existing doctests ignored) at
+`/tmp/luna-tools-fu7fk2_9/result.json`. Two further copy-budget cases were added;
+the final 4-case focused suite passed at `/tmp/luna-tools-gtbphqkd/result.json`,
+for 49 distinct HIR tests. The semantic suite passed 13 tests at
+`/tmp/luna-tools-gj3jq08d/result.json` (62 distinct tests overall). Cases exercise
+published sparse node tables, pending text, attribute expressions and keys,
+draft attribute text, retained empty-map capacity, retry and shared Arc payloads.
+Existing semantic rejection/unwind behavior and generated struct/enum/method
+publication remain covered. All final commands exited 0. Formatting passed at
+`/tmp/luna-tools-gk8lox6u/result.json`; `git diff --check` passed. This bounds
+candidate copying; it neither removes full-candidate elaboration nor unifies the
+semantic callback's budget with the caller's VM.
