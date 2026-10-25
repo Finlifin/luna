@@ -75,6 +75,17 @@ an attribute or configuration. Checked publication rejects such candidates and
 retains their drafts; structural publication alone preserves the metadata for
 later checking. This does not add a new accepted attribute API.
 
+`comptime_runtime::object` now provides the value-container layer: `Object<V>`
+retains ordered positional and named entries (including duplicates), while
+`merge_named_attributes` produces a separate borrowed map from completed values.
+It applies configuration first and prefixes inner-to-outer, without cloning
+payloads. Entry/key work consumes the caller's shared budget; unique keys have a
+separate limit. Failure returns no partially merged map. Positional entries are
+preserved by Object but are unsupported by this named-property projection; this
+does not assign their general language meaning. Dumps escape keys and use stable
+S-expressions. This container is not yet a VM `Value` variant, source Object
+evaluation, a freezing representation, or an attribute-consumer implementation.
+
 This is **not** a working `StructBuilder.new/add_field/build` API. There is no
 new runtime/VM builder value, field-reflection API, or source-language builder
 method in this change. The SoA example still cannot run through this feature.
@@ -147,3 +158,14 @@ regressions, fixed by retaining the existing pending-semantics checks before the
 generated-attribute fallback. Four library fixture failures were also repaired:
 the fixtures now copy the split Option/Result unwrap modules and the conversion
 module required by traits. Their original execution assertions remain intact.
+
+Object value-container checks (same working directory):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_runtime --test object
+```
+
+All 7 tests passed, exit 0; `/tmp/luna-tools-yx4rkvap/result.json` records the
+run. Tests cover mixed/nested entries, ordering and duplicate overrides,
+non-Clone borrowed payload identity, unique-key limits, every insufficient
+budget below a successful merge, positional-entry diagnostics and escaped dumps.

@@ -8,3 +8,4 @@ pub mod integer;
 pub use integer::{Budget, Error, Integer};
 pub mod bitvec;
 pub mod machine;
+pub mod object;
