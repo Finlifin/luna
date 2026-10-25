@@ -14,6 +14,8 @@ mod structs;
 pub use structs::{TypedField, assemble_struct, assemble_struct_with_defaults};
 mod implementations;
 pub use implementations::assemble_inherent_impl;
+mod enums;
+pub use enums::assemble_enum;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {

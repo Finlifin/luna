@@ -61,6 +61,24 @@ The generated-method integration test combines struct assembly/defaults, an
 inherent impl, an instance method and a consumer in one transaction, then invokes
 the compiled consumer through the interpreter.
 
+`assemble_enum` reserves and registers outer variants in declaration order. A
+payload callback uses the same `DefinitionNodes` and fuel to build ordinary HIR
+unit, positional, named, pattern, expression or grouped variants. Every direct
+payload root must be reserved under its variant; unfinished reservations and
+exhaustion reject construction. Payload scanning is metered as well as node
+construction. Existing HIR S-expression dumps preserve variant kinds and names.
+The callback owns payload registration, including nested group members and field
+types. This adapter publishes nothing and does not roll back arbitrary callback
+side effects. Configuration metadata, generic clauses, nested definitions and
+intrinsic enum declarations continue through general HIR assembly.
+
+Ordinary checked publication still decides duplicate-name, payload-Type and
+encoding validity. Accepting a pattern/expression payload in the assembler does
+not certify its encoding, coverage or layout. The semantic integration test
+rejects invalid delivered payload types and duplicate variants without changing
+the package, then publishes a repaired enum and reflects its positional/named
+payload types and ordered group leaves.
+
 ## Implemented: atomic HIR registration
 
 `hir::definitions::DefinitionBatch` reserves owner identities and accepts the
@@ -679,3 +697,24 @@ the generated instance method twice. Formatting passed at
 `/tmp/luna-tools-cwsv66jd/result.json`; `git diff --check` passed. This remains a
 compiler-side assembly API; source builders and live invocation resumption are
 not implemented by this change.
+
+Generated enum assembly verification (`/home/fin/luna`):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p hir --test enum_assembly --test definitions --test definition_nodes --test display
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration --test generated_enums --test generated_methods --test delivered_types --test definitions
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+All final commands exited 0: 32 HIR tests at
+`/tmp/luna-tools-s_gt4sk1/result.json` and 13 semantic tests at
+`/tmp/luna-tools-4wa9ookk/result.json` (45 total). The first semantic build failed
+on the new test's VariantShape import; fixing it to nir::program::VariantShape
+resolved that fixture error. Tests cover payload parent/index consistency, order,
+empty assembly, fuel preflight, unfinished registrations, callback exhaustion,
+pattern/expression distinction and escaped dumps. Semantic checks reject a
+non-Type payload and duplicate members atomically, then reflect the repaired
+enum's positional/named payload types and group leaves. Formatting passed at
+`/tmp/luna-tools-72st19a0/result.json`; `git diff --check` passed. Pattern/expression
+encoding validity is not claimed by the structural tests. Source builders and
+live invocation resumption remain separate work.
