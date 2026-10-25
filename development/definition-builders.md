@@ -32,6 +32,17 @@ Types are not accepted merely because assembly succeeded. The current convenienc
 entrypoint constructs fields without defaults or clauses. Contextual default code,
 generic declaration clauses and nested items continue to use the general HIR path.
 
+`assemble_struct_with_defaults` adds a callback for each field in declaration
+order. The callback receives its reserved field identity and the shared node
+builder/budget, constructs and registers child nodes, and returns an unregistered
+default root reserved directly under that field. The assembler validates the
+parent and registers the root. Pending reservations, wrong-parent roots, callback
+errors and exhausted fuel return no OwnerInfo. Existing batches remain editable;
+arena allocation and arbitrary callback side effects are not rolled back. Default
+expressions retain ordinary HIR and CMTT checking rather than becoming trusted
+pretyped code. The callback is a compiler adapter, not a source-language API or
+live interpreter continuation.
+
 The VM-reflection integration test now uses this assembly entrypoint to turn field
 descriptions into a checked generated struct, rather than assigning raw local IDs
 in the caller. Field-description dumps use escaped S-expressions.
@@ -616,3 +627,22 @@ assembler; duplicate names and non-Type descriptions are rejected by ordinary
 semantic publication, preserving drafts until repaired. Formatting passed at
 `/tmp/luna-tools-mrq3aon_/result.json`; `git diff --check` passed. No source builder
 syntax, default-code assembler or invocation suspension/resumption is added.
+
+Generated default-code assembly verification (`/home/fin/luna`):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p hir --test struct_assembly --test definition_nodes --test definitions --test display
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration --test delivered_types --test definitions
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+All exited 0: 34 HIR tests at `/tmp/luna-tools-prci7i44/result.json` and 11 semantic
+publication tests at `/tmp/luna-tools-hf_4lgav/result.json` (45 total). New assembly
+checks cover callback order, optional defaults, canonical default-root indexing,
+wrong parents, unfinished reservations, exhausted fuel and existing-draft retention.
+The semantic/execution test assembles a quote/splice field default, rejects a Char
+result for a Boolean field without publication, repairs the draft, constructs an
+instance with the field omitted, and executes a generated consumer returning true.
+Formatting passed at `/tmp/luna-tools-61tux6dv/result.json`; `git diff --check`
+passed. This validates compiler-side CMTT default assembly and execution, not the
+source builder API or suspension/resumption of an active builder invocation.

@@ -494,3 +494,160 @@ fn assembled_structs_use_ordinary_name_and_type_validation() {
     .unwrap();
     assert_eq!(checked.structs[0].fields, [("value".into(), boolean())]);
 }
+
+#[test]
+fn assembled_defaults_use_cmtt_splicing_and_ordinary_field_type_checking() {
+    use hir::definitions::{TypedField, assemble_struct_with_defaults};
+    let arena = HirArena::new();
+    let mut package = Package::new();
+    let mut batch = DefinitionBatch::new(&mut package);
+    let owner = batch.reserve().unwrap();
+    let inputs = [TypedField {
+        name: Ident::new(Symbol::intern("flag"), DUMMY_SP),
+        ty: Arc::new(boolean()),
+        span: DUMMY_SP,
+    }];
+    let assemble = |valid| {
+        assemble_struct_with_defaults(
+            &arena,
+            owner,
+            Ident::new(Symbol::intern("Generated"), DUMMY_SP),
+            &inputs,
+            DUMMY_SP,
+            &mut 100,
+            |_, field_id, nodes, fuel| {
+                let root_id = nodes.reserve(field_id, fuel)?;
+                let quote_id = nodes.reserve(root_id, fuel)?;
+                let value_id = nodes.reserve(quote_id, fuel)?;
+                let value = arena.alloc_expr(Expr {
+                    hir_id: value_id,
+                    span: DUMMY_SP,
+                    kind: ExprKind::Lit(Lit {
+                        kind: if valid {
+                            LitKind::Bool(true)
+                        } else {
+                            LitKind::Char('x')
+                        },
+                        span: DUMMY_SP,
+                    }),
+                });
+                nodes.register(Node::Expr(value), fuel)?;
+                let quote = arena.alloc_expr(Expr {
+                    hir_id: quote_id,
+                    span: DUMMY_SP,
+                    kind: ExprKind::CodeQuote(value, vec![]),
+                });
+                nodes.register(Node::Expr(quote), fuel)?;
+                Ok(Some(arena.alloc_expr(Expr {
+                    hir_id: root_id,
+                    span: DUMMY_SP,
+                    kind: ExprKind::CodeSplice(quote, vec![]),
+                })))
+            },
+        )
+        .unwrap()
+    };
+    let consumer = batch.reserve().unwrap();
+    let id = |local| HirId::new(consumer, ItemLocalId::new(local));
+    let return_ty = arena.alloc_expr(Expr {
+        hir_id: id(4),
+        span: DUMMY_SP,
+        kind: ExprKind::Builtin(Symbol::intern("bool")),
+    });
+    let base = arena.alloc_expr(Expr {
+        hir_id: id(3),
+        span: DUMMY_SP,
+        kind: ExprKind::DeliveredType(Arc::new(Term::Nominal {
+            declaration: nir::DeclarationId {
+                package: 73,
+                local: owner.def_id.raw(),
+            },
+            arguments: vec![],
+        })),
+    });
+    let construction = arena.alloc_expr(Expr {
+        hir_id: id(2),
+        span: DUMMY_SP,
+        kind: ExprKind::ExtendedApplication(base, &[]),
+    });
+    let body_expr = arena.alloc_expr(Expr {
+        hir_id: id(1),
+        span: DUMMY_SP,
+        kind: ExprKind::Projection(construction, Ident::new(Symbol::intern("flag"), DUMMY_SP)),
+    });
+    let body = BodyId::new(id(1));
+    batch
+        .body(
+            body,
+            Body {
+                params: &[],
+                value: body_expr,
+            },
+        )
+        .unwrap();
+    batch
+        .define(
+            OwnerInfo {
+                node: OwnerNode::Item(arena.alloc_item(Item {
+                    owner_id: consumer,
+                    ident: Ident::new(Symbol::intern("run"), DUMMY_SP),
+                    span: DUMMY_SP,
+                    kind: ItemKind::Fn(
+                        FnSig {
+                            params: &[],
+                            return_ty: Some(return_ty),
+                            return_bind: None,
+                            return_binding: None,
+                            modifiers: Default::default(),
+                            clause_params: &[],
+                            clause_constraints: &[],
+                            span: DUMMY_SP,
+                        },
+                        body,
+                    ),
+                })),
+                nodes: OwnerNodes::new(),
+            },
+            None,
+            None,
+        )
+        .unwrap();
+    batch.define(assemble(false), None, None).unwrap();
+    let before = batch.to_string();
+    assert!(
+        publish(
+            &mut batch,
+            &mut 100,
+            &identities(),
+            &Protocols::default(),
+            None
+        )
+        .is_err()
+    );
+    assert_eq!(batch.to_string(), before);
+    assert_eq!(batch.published().num_defs(), 0);
+    batch.define(assemble(true), None, None).unwrap();
+    let (_, checked) = publish(
+        &mut batch,
+        &mut 100,
+        &identities(),
+        &Protocols::default(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(checked.structs[0].fields[0].1, boolean());
+    let mut vm =
+        comptime_interpretor::Interpreter::new(&checked, comptime_interpretor::Budget::default())
+            .unwrap();
+    assert_eq!(
+        vm.invoke(
+            nir::DeclarationId {
+                package: 73,
+                local: consumer.def_id.raw()
+            },
+            vec![]
+        )
+        .unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}

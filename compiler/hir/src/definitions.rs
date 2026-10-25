@@ -11,7 +11,7 @@ mod members;
 mod nodes;
 pub use nodes::DefinitionNodes;
 mod structs;
-pub use structs::{TypedField, assemble_struct};
+pub use structs::{TypedField, assemble_struct, assemble_struct_with_defaults};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {

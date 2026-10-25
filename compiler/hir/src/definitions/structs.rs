@@ -38,6 +38,34 @@ pub fn assemble_struct<'hir>(
     span: Span,
     fuel: &mut usize,
 ) -> Result<OwnerInfo<'hir>, Error> {
+    assemble_struct_with_defaults(arena, owner, name, fields, span, fuel, |_, _, _, _| {
+        Ok(None)
+    })
+}
+
+/// Build optional defaults under each field's identity. The callback reserves
+/// the default root directly under `field_id`, registers its children, and
+/// returns the unregistered root. This function registers that root and checks
+/// its parent. All expressions retain normal HIR checking and CMTT semantics.
+///
+/// Base field/index work is preflighted; callback work shares the remaining
+/// budget. Failure publishes nothing, but arena allocations and arbitrary
+/// callback side effects are not rolled back. Existing batch entries are untouched
+/// by this assembler. General node construction must register all reserved nodes.
+pub fn assemble_struct_with_defaults<'hir>(
+    arena: &'hir HirArena,
+    owner: OwnerId,
+    name: Ident,
+    fields: &[TypedField],
+    span: Span,
+    fuel: &mut usize,
+    mut make_default: impl FnMut(
+        usize,
+        HirId,
+        &mut DefinitionNodes<'hir>,
+        &mut usize,
+    ) -> Result<Option<&'hir Expr<'hir>>, Error>,
+) -> Result<OwnerInfo<'hir>, Error> {
     let mut nodes = DefinitionNodes::new(owner)?;
     let count = fields.len();
     count
@@ -56,7 +84,7 @@ pub fn assemble_struct<'hir>(
         });
     }
     let mut output = Vec::with_capacity(count);
-    for field in fields {
+    for (index, field) in fields.iter().enumerate() {
         let field_id = nodes.reserve(nodes.root(), fuel)?;
         let ty_id = nodes.reserve(field_id, fuel)?;
         let ty = arena.alloc_expr(Expr {
@@ -65,11 +93,21 @@ pub fn assemble_struct<'hir>(
             span: field.span,
         });
         nodes.register(Node::Expr(ty), fuel)?;
+        let default = make_default(index, field_id, &mut nodes, fuel)?;
+        if let Some(default) = default {
+            if nodes.reserved_parent(default.hir_id) != Some(field_id) {
+                return Err(error(
+                    "field default root must be reserved under its field",
+                    owner,
+                ));
+            }
+            nodes.register(Node::Expr(default), fuel)?;
+        }
         output.push(FieldDef {
             hir_id: field_id,
             ident: field.name,
             ty,
-            default: None,
+            default,
             span: field.span,
         });
     }

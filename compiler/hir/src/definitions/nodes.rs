@@ -30,6 +30,15 @@ impl<'hir> DefinitionNodes<'hir> {
     pub fn root(&self) -> HirId {
         HirId::new(self.owner, ItemLocalId::new(0))
     }
+    /// Observe a reservation's parent while this draft is open.
+    pub fn reserved_parent(&self, id: HirId) -> Option<HirId> {
+        if self.finished || id.owner != self.owner || id.local_id.raw() == 0 {
+            return None;
+        }
+        self.parents
+            .get(id.local_id.raw() as usize)
+            .map(|parent| HirId::new(self.owner, *parent))
+    }
     fn open(&self) -> Result<(), Error> {
         if self.finished {
             Err(error("node draft already finished", self.owner))
