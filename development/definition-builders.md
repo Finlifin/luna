@@ -47,6 +47,13 @@ Publication checks:
 - Indexed HIR nodes agree with their owner/local identities; their parent links
   exist and reach the owner's root without cycles. An indexed root must refer to
   the canonical definition item.
+- Declaration members have distinct, non-root, valid local identities belonging
+  to their declaration, even when no node index was supplied. This includes fields,
+  nested enum variants and record payload fields, parameters, return bindings,
+  clause inputs and constraints. Parameter/type-parameter mirrors must agree.
+  Template instance bindings are local; linked declaration signatures, interfaces
+  and formal references retain their original context. Explicit instance parameter
+  lists and their binding mirrors must agree instead of counting as duplicates.
 - Deferred attributes retain their structured expressions, application order,
   configuration keys and lexical context. Their targets must be draft owners
   (or indexed members of those owners); their lexical owners must exist and
@@ -56,6 +63,12 @@ Container, lexical-parent, and node-parent traversal reuse validated paths rathe
 than repeatedly traversing entire ancestor chains. Body replacement uses an ID
 index. Tests exercise 1,024 nested owners and 1,024 node parents with a validation
 budget proportional to their size.
+
+Nested variants use an explicit iterator stack and charge each member against
+the shared publication budget. Member validation does not recursively validate
+expression ownership, require all children to be indexed, or establish global
+resolver identities for clause inputs. These remain separate assembly/admission
+responsibilities; type and field-name checks still belong to elaboration.
 
 Only after every check passes are all table entries installed. No user callback
 or fallible semantic check runs during that installation. Draft and diagnostic
@@ -427,3 +440,23 @@ incorrect then repaired default types. Semantic failure preserves the unpublishe
 batch and original package; repaired publication retains the indexed FieldDef
 and checked Boolean field type. Formatting passed at
 `/tmp/luna-tools-fq589rme/result.json`; `git diff --check` passed.
+
+Generated declaration member identity verification (`/home/fin/luna`):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p hir
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration --test definitions
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+All exited 0. HIR passed 34 tests (3 existing doctests ignored), report
+`/tmp/luna-tools-xd3hqo0r/result.json`; semantic publication passed 4 tests,
+`/tmp/luna-tools-wk43rtnp/result.json`; formatting passed at
+`/tmp/luna-tools-jqpy1j77/result.json`. Before the fix, the new publication
+regression accepted a foreign-owned field (`/tmp/luna-tools-fgi56_19/result.json`).
+New checks cover foreign/root/duplicate field rejection, draft preservation and
+repair, budget exhaustion and retry, parameter mirrors, return-binding collision,
+nested enum collisions, field/clause collisions, invalid member IDs, and template
+instance binding ownership while allowing external formal/interface references.
+`git diff --check` passed. This adds structural admission checks, not the source
+StructBuilder API or live invocation-to-elaboration integration.

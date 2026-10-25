@@ -7,6 +7,7 @@ use crate::{Body, BodyId, ItemKind, LocalDefId, OwnerId, OwnerInfo, Package};
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use symbol::DefId;
+mod members;
 mod nodes;
 pub use nodes::DefinitionNodes;
 
@@ -316,6 +317,7 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
                 checked_lexical_parents.extend(seen);
             }
             let item = definition.info.node.expect_item();
+            members::validate(item, fuel)?;
             let body = match &item.kind {
                 ItemKind::Fn(_, id)
                 | ItemKind::FunctionTemplateInstance { body: id, .. }
