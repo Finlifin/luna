@@ -122,6 +122,11 @@ snapshots after large temporary scopes.
 
 ## Definition-builder gap
 
+The common HIR registration substrate is now implemented and used for generated
+module definitions; its checks and remaining VM/elaboration work are tracked in
+[definition-builders.md](definition-builders.md). This does not yet expose a
+source-level definition builder.
+
 The author's SoA example is
 `/home/fin/vilya/examples/2026-8-5-typed-Soa.fl`, starting at `StructOfArray`.
 Its `StructBuilder.new`, `add_field`, and `build` operations are not implemented

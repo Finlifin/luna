@@ -74,25 +74,40 @@ fn lower_package_ast(db: &Db) -> Arc<HirPackageBox> {
             )
         })
         .collect();
-    for scope in &scopes {
-        if package.definition_owner(scope.owner_def).is_none() {
-            let owner = package.alloc_owner_id();
-            let item = arena.alloc_item(hir::Item {
-                owner_id: owner,
-                ident: hir::common::Ident::new(scope.name.unwrap(), rustc_span::DUMMY_SP),
-                kind: hir::ItemKind::Mod(hir::item::ModDef { items: Vec::new() }),
-                span: rustc_span::DUMMY_SP,
-            });
-            package.insert_owner(
-                owner,
+    let mut pending_identities = std::collections::BTreeSet::new();
+    let missing: Vec<_> = scopes
+        .iter()
+        .filter(|scope| {
+            package.definition_owner(scope.owner_def).is_none()
+                && pending_identities.insert(scope.owner_def)
+        })
+        .collect();
+    let mut publication_fuel = missing.len().saturating_mul(4).saturating_add(1);
+    let mut generated = hir::definitions::DefinitionBatch::new(&mut package);
+    for scope in missing {
+        let owner = generated
+            .reserve()
+            .expect("generated module owner identity exhausted");
+        let item = arena.alloc_item(hir::Item {
+            owner_id: owner,
+            ident: hir::common::Ident::new(scope.name.unwrap(), rustc_span::DUMMY_SP),
+            kind: hir::ItemKind::Mod(hir::item::ModDef { items: Vec::new() }),
+            span: rustc_span::DUMMY_SP,
+        });
+        generated
+            .define(
                 hir::owner::OwnerInfo {
                     node: hir::owner::OwnerNode::Item(item),
                     nodes: hir::owner::OwnerNodes::new(),
                 },
-            );
-            package.bind_definition(scope.owner_def, owner);
-        }
+                Some(scope.owner_def),
+                None,
+            )
+            .expect("generated module owner must belong to its publication batch");
     }
+    generated
+        .publish(&mut publication_fuel)
+        .expect("resolved generated modules must have complete unique identities");
     for scope in &scopes {
         let owner = package.definition_owner(scope.owner_def).unwrap();
         let mut item = package.owner(owner).unwrap().node.expect_item().clone();

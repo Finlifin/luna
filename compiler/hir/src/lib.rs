@@ -21,6 +21,7 @@ pub mod body;
 pub mod clause;
 pub mod common;
 pub mod decl;
+pub mod definitions;
 mod display;
 pub mod expr;
 pub mod hir_id;

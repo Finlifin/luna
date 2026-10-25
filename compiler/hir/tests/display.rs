@@ -129,6 +129,41 @@ fn id(local: u32) -> HirId {
 fn name(text: &str) -> Ident {
     Ident::new(Symbol::intern(text), DUMMY_SP)
 }
+
+#[test]
+fn generated_definition_drafts_have_structured_escaped_dumps() {
+    let arena = HirArena::new();
+    let mut package = Package::new();
+    let mut batch = hir::definitions::DefinitionBatch::new(&mut package);
+    let owner = batch.reserve().unwrap();
+    let draft = parsed(&batch);
+    assert_eq!(draft.tag(), "definition-batch");
+    draft.field("base").atom(0);
+    draft.field("definitions").field("state").atom("unfinished");
+    let item = arena.alloc_item(Item {
+        owner_id: owner,
+        ident: name("generated\"\\\nname"),
+        kind: ItemKind::Mod(ModDef { items: vec![] }),
+        span: DUMMY_SP,
+    });
+    batch
+        .define(
+            OwnerInfo {
+                node: OwnerNode::Item(item),
+                nodes: OwnerNodes::new(),
+            },
+            Some(DefId::new(5, 6)),
+            None,
+        )
+        .unwrap();
+    let completed = parsed(&batch);
+    assert_eq!(completed.field("definitions").tag(), "definition");
+    assert_eq!(completed.field("definitions").field("item"), &parsed(item));
+    assert_eq!(batch.to_string(), batch.to_string());
+    batch.publish(&mut 100).unwrap();
+    parsed(&batch);
+    parsed(batch.published());
+}
 fn expr(kind: ExprKind<'_>, local: u32) -> Expr<'_> {
     Expr {
         hir_id: id(local),
