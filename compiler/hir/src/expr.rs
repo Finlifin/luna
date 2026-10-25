@@ -36,6 +36,10 @@ pub struct FnTypeModifiers {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind<'hir> {
+    /// A stable Type description delivered by generated code, never source
+    /// syntax or an inference variable. Candidate elaboration must admit it in
+    /// the destination declaration world before publication.
+    DeliveredType(std::sync::Arc<nir::Term>),
     Lit(Lit),
     /// A comptime code value; its body is checked as runtime code.
     CodeQuote(&'hir Expr<'hir>, Vec<CodeSubstitution<'hir>>),

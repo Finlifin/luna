@@ -7,6 +7,7 @@ mod arguments;
 pub mod attributes;
 mod computed_patterns;
 mod control;
+mod delivered_types;
 mod effects;
 mod error_handlers;
 mod extended;
@@ -311,6 +312,7 @@ fn elaborate_with_attributes(
         ));
     }
     let mut checker = Checker {
+        delivered_types: BTreeMap::new(),
         target,
         protocols: protocols.clone(),
         comptime_callee_result: None,
@@ -1268,6 +1270,11 @@ fn elaborate_with_attributes(
             incompatible_context: false,
         }
     })?;
+    delivered_types::admit(
+        &checker.delivered_types,
+        &output,
+        &mut checker.required_steps,
+    )?;
     Ok((output, attributes))
 }
 #[derive(Clone)]
@@ -1321,6 +1328,7 @@ impl ReturnObservations {
 }
 
 struct Checker<'a, 'h> {
+    delivered_types: BTreeMap<n::LocalId, (std::sync::Arc<Term>, Span)>,
     target: Option<nir::target::TargetData>,
     protocols: Protocols,
     /// Only this expression's result is being used as a callee. Argument and
@@ -3408,6 +3416,7 @@ impl Checker<'_, '_> {
         }
         match &expr.kind {
             H::RefinedType { .. }
+            | H::DeliveredType(_)
             | H::RefinementSubject
             | H::EffectQualifiedType(..)
             | H::ErrorQualifiedType(..)
@@ -3496,6 +3505,9 @@ impl Checker<'_, '_> {
         }
     }
     fn type_expr(&mut self, expr: &Expr<'_>) -> Result<Term, Error> {
+        if let H::DeliveredType(ty) = &expr.kind {
+            return self.delivered_type(expr.hir_id, ty, expr.span);
+        }
         if let H::ResolvedLocal(_, id) = expr.kind
             && !self.callable_type_inputs.contains_key(&local(id))
             && !self.generator_data.contains_key(&local(id))

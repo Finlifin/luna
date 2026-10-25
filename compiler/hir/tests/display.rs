@@ -1710,3 +1710,15 @@ fn definition_publication_diagnostics_escape_semantic_messages() {
     });
     assert_eq!(parsed(&structural).tag(), "definition-publication");
 }
+
+#[test]
+fn delivered_type_dump_preserves_stable_description_and_escaping() {
+    let ty = nir::Term::Record(vec![(
+        "field\n\"".into(),
+        nir::Term::Primitive(nir::Primitive::Bool),
+    )]);
+    let expr = hir::ExprKind::DeliveredType(std::sync::Arc::new(ty));
+    let dump = expr.to_string();
+    assert!(dump.starts_with("(delivered-type (type "), "{dump}");
+    assert!(dump.contains("field\\n\\\""), "{dump}");
+}

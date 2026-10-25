@@ -827,6 +827,7 @@ impl Display for ExprKind<'_> {
             Self::TyPlaceholder => form!(f, "ty-placeholder"),
             Self::TyNoReturn => form!(f, "ty-no-return"),
             Self::TyVoid => form!(f, "ty-void"),
+            Self::DeliveredType(ty) => form!(f, "delivered-type", "type" => ty),
             Self::TyAny => form!(f, "ty-any"),
             Self::TyType => form!(f, "ty-type"),
             Self::TySelf => form!(f, "ty-self"),

@@ -82,6 +82,30 @@ elaboration, and execution remain consumers of ordinary HIR.
 
 ## Still required for source-level builders
 
+### Delivered Type inputs
+
+Generated HIR can carry `ExprKind::DeliveredType(Arc<nir::Term>)` directly in a
+field annotation or other Type position. This is a compiler-side input node, not
+new source syntax. HIR depends on the stable NIR term vocabulary for this staging
+edge; the value contains no active inference state, interpreter frame or waiter.
+Its S-expression dump includes the original description. The immutable value
+remains in HIR after publication, so later candidate elaboration does not depend
+on an ephemeral side table or reconstruct source names from normalized types.
+
+Ordinary elaboration charges copying, checks Type sort and closed scope, retains
+each observed input by HIR identity, and rejects inconsistent descriptions for
+one identity. Before returning checked NIR it admits delivered inputs against the
+complete destination declaration world, including nominal/normal-form arguments
+and formation predicates. Unknown foreign identities and unauthorized symbolic
+inputs fail. Default expressions still use ordinary field type checking. A stable
+normal-form description keeps its head; it does not become its body's result.
+Checked DefinitionBatch publication therefore retains the original draft/package
+on any of these failures. Raw structural publication remains only registration.
+
+This bridges completed Type data from VM reflection to candidate definition
+checking. It does not yet resume a suspended invocation, bind generated names,
+expose a source builder, or translate captured runtime dependencies across scopes.
+
 ### Candidate semantic admission
 
 `elaboration::definitions::publish` now offers a separate checked publication
@@ -539,3 +563,24 @@ types, original subject retention, missing/wrong-sort/cyclic selection failure,
 repair and shared-budget exhaustion. Formatting passed at
 `/tmp/luna-tools-hzlh4xgt/result.json`; `git diff --check` passed. Tests exercise
 already-selected VM evidence; they do not add source-level implementation search.
+
+Delivered Type input verification (`/home/fin/luna`):
+
+```sh
+python3 -B development/check.py --timeout 900 -- check --release -p luna
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration --test delivered_types --test definitions
+python3 -B development/check.py --timeout 900 -- test --release -p hir
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+All exited 0. The compiler check passed at `/tmp/luna-tools-bn97_3c1/result.json`.
+Elaboration passed 9 tests at `/tmp/luna-tools-4qc_hsav/result.json`; HIR passed
+35 tests (3 existing doctests ignored) at `/tmp/luna-tools-vh44ps4z/result.json`.
+The 5 new semantic tests cover reflected VM Type data becoming a generated field,
+ordinary default checking and retry, later-batch re-elaboration, non-Type/hole/
+unauthorized-rigid/unknown-nominal/unknown-head rejection, opaque head retention,
+and a false destination formation predicate rejected before publication then
+repaired. The new dump test covers stable descriptions and escaped field names.
+Formatting passed at `/tmp/luna-tools-t_4snacv/result.json`; `git diff --check`
+passed. This is a compiler-side value-to-declaration bridge, not source StructBuilder
+or a resumed live invocation. HIR now has an explicit dependency on stable NIR terms.
