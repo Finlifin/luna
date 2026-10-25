@@ -296,3 +296,97 @@ fn inspect_attributes_evaluates_typed_data_without_authorizing_publication() {
     );
     assert_eq!(package.definition_attributes.len(), 2);
 }
+
+#[test]
+fn generated_struct_nodes_publish_only_after_defaults_typecheck() {
+    fn description<'a>(arena: &'a HirArena, owner: OwnerId, valid: bool) -> OwnerInfo<'a> {
+        let mut nodes = hir::definitions::DefinitionNodes::new(owner).unwrap();
+        let mut fuel = 100;
+        let field_id = nodes.reserve(nodes.root(), &mut fuel).unwrap();
+        let ty_id = nodes.reserve(field_id, &mut fuel).unwrap();
+        let default_id = nodes.reserve(field_id, &mut fuel).unwrap();
+        let ty = arena.alloc_expr(Expr {
+            hir_id: ty_id,
+            kind: ExprKind::Builtin(Symbol::intern("bool")),
+            span: DUMMY_SP,
+        });
+        let default = arena.alloc_expr(Expr {
+            hir_id: default_id,
+            kind: ExprKind::Lit(Lit {
+                kind: if valid {
+                    LitKind::Bool(true)
+                } else {
+                    LitKind::Char('x')
+                },
+                span: DUMMY_SP,
+            }),
+            span: DUMMY_SP,
+        });
+        nodes.register(Node::Expr(ty), &mut fuel).unwrap();
+        nodes.register(Node::Expr(default), &mut fuel).unwrap();
+        let fields = arena.alloc_field_def_slice(vec![FieldDef {
+            hir_id: field_id,
+            ident: Ident::new(Symbol::intern("flag"), DUMMY_SP),
+            ty,
+            default: Some(default),
+            span: DUMMY_SP,
+        }]);
+        nodes
+            .register(Node::FieldDef(&fields[0]), &mut fuel)
+            .unwrap();
+        let item = arena.alloc_item(Item {
+            owner_id: owner,
+            ident: Ident::new(Symbol::intern("Generated"), DUMMY_SP),
+            kind: ItemKind::Struct(StructDef {
+                fields,
+                clause_params: &[],
+                clause_constraints: &[],
+                nested_items: vec![],
+            }),
+            span: DUMMY_SP,
+        });
+        nodes.finish(item, &mut fuel).unwrap()
+    }
+    let arena = HirArena::new();
+    let mut package = Package::new();
+    let mut batch = DefinitionBatch::new(&mut package);
+    let owner = batch.reserve().unwrap();
+    batch
+        .define(description(&arena, owner, false), None, None)
+        .unwrap();
+    let before = batch.to_string();
+    assert!(matches!(
+        publish(
+            &mut batch,
+            &mut 100,
+            &BTreeMap::new(),
+            &Protocols::default(),
+            None
+        ),
+        Err(PublicationError::Check(_))
+    ));
+    assert_eq!(batch.to_string(), before);
+    assert_eq!(batch.published().num_defs(), 0);
+    batch
+        .define(description(&arena, owner, true), None, None)
+        .unwrap();
+    let (_, checked) = publish(
+        &mut batch,
+        &mut 100,
+        &BTreeMap::new(),
+        &Protocols::default(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(checked.structs.len(), 1);
+    assert_eq!(
+        checked.structs[0].fields,
+        vec![("flag".into(), nir::Term::Primitive(nir::Primitive::Bool))]
+    );
+    assert!(matches!(
+        batch
+            .published()
+            .node(HirId::new(owner, ItemLocalId::new(1))),
+        Some(Node::FieldDef(_))
+    ));
+}

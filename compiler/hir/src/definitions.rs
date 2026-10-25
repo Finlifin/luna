@@ -7,6 +7,8 @@ use crate::{Body, BodyId, ItemKind, LocalDefId, OwnerId, OwnerInfo, Package};
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use symbol::DefId;
+mod nodes;
+pub use nodes::DefinitionNodes;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {

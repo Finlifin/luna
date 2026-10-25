@@ -3,6 +3,25 @@
 The intended feature covers most definition kinds, including the SoA example's
 struct construction. This file tracks implementation, not new Flurry syntax.
 
+## Generated node construction
+
+`hir::definitions::DefinitionNodes` provides an owner-local identity/index
+builder shared by all existing HIR node kinds. Reserve a child under an already
+reserved parent, construct arena nodes with those identities, register each once,
+then finish with the canonical definition Item. This permits bottom-up node
+construction while parent reservation order prevents cycles. Foreign, duplicate,
+unreserved and root-node registration is rejected; incomplete drafts and exhausted
+budgets remain repairable. Success transfers the index without cloning nodes and
+seals the node draft. The caller must reserve/register the children it constructs;
+this helper does not recursively discover omitted nodes or perform name resolution.
+
+The resulting OwnerInfo still goes through DefinitionBatch and semantic admission.
+Finishing nodes does not publish a type or prove field/default contracts. To revise
+an already finished description after semantic rejection, construct a fresh node
+draft for the same reserved owner and replace its private batch description.
+Previously published definitions remain immutable. This is compiler-side assembly,
+not an implementation of source `StructBuilder.new/add_field/build` yet.
+
 ## Implemented: atomic HIR registration
 
 `hir::definitions::DefinitionBatch` reserves owner identities and accepts the
@@ -390,3 +409,21 @@ storage lifetime. The focused first two tests also passed at
 `/tmp/luna-tools-h3cbwokd/result.json`; `git diff --check` passed.
 The documented source example does not specify the get failure channel; that
 choice has been asked separately and is not inferred from this internal API.
+
+Generated node-index construction verification (`/home/fin/luna`):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p hir --test definition_nodes --test definitions --test display
+python3 -B development/check.py --timeout 900 -- test --release -p elaboration --test definitions
+```
+
+Both runs exited 0: `/tmp/luna-tools-jl7efvig/result.json` passed 2 node draft,
+9 structural publication and 17 Display tests;
+`/tmp/luna-tools-hooz2c3f/result.json` passed 4 semantic publication/inspection
+tests (32 distinct tests total). New checks exercise bottom-up registration,
+canonical root identity, foreign/unreserved/duplicate/root registration rejection,
+incomplete and budget failure recovery, sealing, and generated struct fields with
+incorrect then repaired default types. Semantic failure preserves the unpublished
+batch and original package; repaired publication retains the indexed FieldDef
+and checked Boolean field type. Formatting passed at
+`/tmp/luna-tools-fq589rme/result.json`; `git diff --check` passed.
