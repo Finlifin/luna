@@ -363,3 +363,30 @@ cleaned/retried, then passed all 12 local tests at
 `/tmp/luna-tools-7yw9kkl8/result.json`; `git diff --check` passed.
 The merge API does not implement `meta.attrs_of`, typed source property access,
 attribute consumers or source-level definition builders.
+
+The VM now exposes `lookup_object_property` as a borrowing, comptime-only
+internal operation. It distinguishes Missing, TypeMismatch and Found without
+choosing the source `Object.get` optional/error policy. The last named entry is
+selected; positional entries do not take part in named lookup. Every stored tag
+and payload is admitted, including shadowed entries, before returning a result.
+Requested type descriptions and key comparisons consume the invocation budget.
+The declared entry type is compared directly: no payload-derived type, implicit
+conversion, normal-form unfolding or Copy permission is introduced. A returned
+borrow does not extend pointer target lifetimes. This does not yet implement
+source `get`, Any packing/unpacking, or `meta.attrs_of`.
+
+Validation in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --lib
+```
+
+`/tmp/luna-tools-g1_34g3v/result.json` exited 0, all 96 unit tests passed. Four
+new tests cover missing/mismatch/found distinctions, last-entry selection,
+borrowed payload identity, runtime rejection, forged shadowed tags, budget
+exhaustion and recovery, opaque type domains and Type payloads, and pointer
+storage lifetime. The focused first two tests also passed at
+`/tmp/luna-tools-5fp39jjc/result.json`. Formatting check passed at
+`/tmp/luna-tools-h3cbwokd/result.json`; `git diff --check` passed.
+The documented source example does not specify the get failure channel; that
+choice has been asked separately and is not inferred from this internal API.

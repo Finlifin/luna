@@ -343,3 +343,190 @@ fn object_evaluation_checks_shape_and_payload_types_even_without_phase_preflight
         ErrorKind::Type
     );
 }
+
+#[test]
+fn property_lookup_distinguishes_missing_and_mismatch_without_copying() {
+    let package = Package::default();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let data = Object::from_entries(vec![
+        ObjectEntry::Property {
+            key: "flag".into(),
+            value: ObjectValue {
+                ty: Term::Primitive(Primitive::Bool),
+                value: Value::Bool(true),
+            },
+        },
+        ObjectEntry::Value(ObjectValue {
+            ty: Term::Primitive(Primitive::Bool),
+            value: Value::Bool(false),
+        }),
+        ObjectEntry::Property {
+            key: "flag".into(),
+            value: ObjectValue {
+                ty: Term::Primitive(Primitive::Char),
+                value: Value::Char('x'),
+            },
+        },
+    ]);
+    let ObjectProperty::TypeMismatch(value) = vm
+        .lookup_object_property(&data, "flag", &Term::Primitive(Primitive::Bool))
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert!(std::ptr::eq(value, data.entries()[2].value()));
+    let ObjectProperty::Found(value) = vm
+        .lookup_object_property(&data, "flag", &Term::Primitive(Primitive::Char))
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert!(std::ptr::eq(value, data.entries()[2].value()));
+    assert!(matches!(
+        vm.lookup_object_property(&data, "absent", &Term::Primitive(Primitive::Bool))
+            .unwrap(),
+        ObjectProperty::Missing
+    ));
+    let mut runtime = Interpreter::new(&package, Budget::default()).unwrap();
+    assert_eq!(
+        runtime
+            .lookup_object_property(&data, "flag", &Term::Primitive(Primitive::Char))
+            .unwrap_err()
+            .kind,
+        ErrorKind::PhaseMismatch
+    );
+}
+
+#[test]
+fn property_lookup_rejects_forged_hidden_tags_and_recovers() {
+    let package = Package::default();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let invalid = Object::from_entries(vec![
+        ObjectEntry::Property {
+            key: "flag".into(),
+            value: ObjectValue {
+                ty: Term::Primitive(Primitive::Char),
+                value: Value::Bool(true),
+            },
+        },
+        ObjectEntry::Property {
+            key: "flag".into(),
+            value: ObjectValue {
+                ty: Term::Primitive(Primitive::Bool),
+                value: Value::Bool(false),
+            },
+        },
+    ]);
+    assert_eq!(
+        vm.lookup_object_property(&invalid, "flag", &Term::Primitive(Primitive::Bool))
+            .unwrap_err()
+            .kind,
+        ErrorKind::Type
+    );
+    let valid = Object::from_entries(vec![invalid.entries()[1].clone()]);
+    assert!(matches!(
+        vm.lookup_object_property(&valid, "flag", &Term::Primitive(Primitive::Bool))
+            .unwrap(),
+        ObjectProperty::Found(_)
+    ));
+    let mut exhausted = Interpreter::for_comptime(
+        &package,
+        Budget {
+            steps: 0,
+            ..Budget::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        exhausted
+            .lookup_object_property(&valid, "flag", &Term::Primitive(Primitive::Bool))
+            .unwrap_err()
+            .kind,
+        ErrorKind::StepsExhausted
+    );
+}
+
+#[test]
+fn property_lookup_keeps_opaque_type_identity_and_type_payloads() {
+    let head = DeclarationId {
+        package: 1,
+        local: 9,
+    };
+    let mut package = Package::default();
+    package.normal_forms.push(nir::normal_forms::Head {
+        role: nir::normal_forms::Role::Opaque,
+        declaration: head,
+        parameters: vec![],
+        requirements: vec![],
+    });
+    let opaque = Term::NormalForm {
+        head,
+        sort: nir::Sort::Type,
+        arguments: vec![],
+    };
+    let data = Object::from_entries(vec![
+        ObjectEntry::Property {
+            key: "flag".into(),
+            value: ObjectValue {
+                ty: Term::Primitive(Primitive::Bool),
+                value: Value::Bool(true),
+            },
+        },
+        ObjectEntry::Property {
+            key: "ty".into(),
+            value: ObjectValue {
+                ty: Term::Primitive(Primitive::Type),
+                value: Value::Type(opaque.clone()),
+            },
+        },
+    ]);
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert!(matches!(
+        vm.lookup_object_property(&data, "flag", &opaque).unwrap(),
+        ObjectProperty::TypeMismatch(_)
+    ));
+    let ObjectProperty::Found(value) = vm
+        .lookup_object_property(&data, "ty", &Term::Primitive(Primitive::Type))
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(value.value, Value::Type(opaque));
+    assert_eq!(
+        vm.lookup_object_property(&data, "flag", &Term::Bool(true))
+            .unwrap_err()
+            .kind,
+        ErrorKind::Type
+    );
+}
+
+#[test]
+fn property_lookup_does_not_copy_or_extend_pointer_storage_lifetime() {
+    let package = Package::default();
+    let storage = Storage::new(Value::Bool(true));
+    let pointee = Term::Primitive(Primitive::Bool);
+    let pointer = storage.pointer(pointee.clone(), vec![]);
+    let ty = Term::Pointer(Box::new(pointee));
+    let data = Object::from_entries(vec![ObjectEntry::Property {
+        key: "pointer".into(),
+        value: ObjectValue {
+            ty: ty.clone(),
+            value: Value::Pointer(pointer),
+        },
+    }]);
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let ObjectProperty::Found(value) = vm.lookup_object_property(&data, "pointer", &ty).unwrap()
+    else {
+        panic!()
+    };
+    assert!(std::ptr::eq(value, data.entries()[0].value()));
+    let Value::Pointer(pointer) = &value.value else {
+        panic!()
+    };
+    assert_eq!(
+        vm.observe_pointer_scalar(pointer).unwrap(),
+        Some(Value::Bool(true))
+    );
+    drop(storage);
+    assert_eq!(vm.observe_pointer_scalar(pointer).unwrap(), None);
+}

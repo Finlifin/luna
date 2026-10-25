@@ -17,6 +17,7 @@ mod normal_inputs;
 #[cfg(test)]
 mod object_values;
 mod objects;
+pub use objects::ObjectProperty;
 mod selected_types;
 pub use comptime_runtime::object::{Entry as ObjectEntry, Object};
 pub use memory::{OwnedGraphCheckpoint, PointerValue, Storage};
