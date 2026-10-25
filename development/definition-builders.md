@@ -103,8 +103,13 @@ has a comptime-only Object primitive, available through `.Object'builtin` and
 ordinary aliases. Typed Objects can be transported through comptime parameters
 and results. Phase checking rejects runtime Object interfaces, including nominal
 containers with Object fields. Object still cannot be a frozen normal-form value
-input. Source Object expressions, its freezing representation and attribute
-consumer execution remain unimplemented.
+input. Source Object expressions now lower to a dedicated NIR constructor and
+evaluate in comptime functions. Entries evaluate once in source order; duplicate
+keys and positional entries survive construction, and an early control transfer
+skips later entries. Type tags remain attached to their values, including Type
+payloads and nested Objects. NIR traversal, type rewriting, copy budgets and phase
+validation include these entries; runtime construction is rejected. Its freezing
+representation and attribute consumer execution remain unimplemented.
 
 This is **not** a working `StructBuilder.new/add_field/build` API. There is no
 new runtime/VM builder value, field-reflection API, or source-language builder
@@ -222,3 +227,21 @@ roundtrip nested typed Objects and opaque normal-form Type payloads through a
 comptime function, reject forged entry labels, recover after rejection, and
 reject runtime Object storage through direct and nominal interfaces.
 Formatting exited 0 at `/tmp/luna-tools-_1187u4v/result.json`.
+
+Source Object construction follow-up (working directory `/home/fin/luna`):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor -p luna -p nir --lib --test frontend_cli --test objects --test phases --no-fail-fast
+```
+
+Final run `/tmp/luna-tools-loafrfwk/result.json` exited 0: 92 interpreter unit,
+75 luna unit, 209 frontend CLI, 5 NIR unit, 2 Object traversal/budget and 28 phase
+tests passed (411 total). Source tests cover mixed/nested entries evaluated once
+in order, retained duplicate keys, Type payloads in pure comptime code, early
+return skipping a recursive later entry, and invalid-name/runtime-call rejection.
+Direct VM checks reject malformed constructors and forged payload type labels.
+The first focused run hit storage quota and automatically cleaned/retried; it
+then exposed invalid test syntax, not an execution failure. Corrected fixtures
+use explicit expression positions and reject parse failures in negative tests.
+Formatting check exited 0 at `/tmp/luna-tools-x_vn8ujt/result.json`;
+`git diff --check` passed.

@@ -4977,7 +4977,7 @@ fn object_expressions_preserve_interleaved_source_entries() {
     let result = sandbox.run(&["input.fl", "--emit", "nir"]);
     assert!(
         !result.status.success(),
-        "Object evaluation is not implemented yet"
+        "runtime Object construction must be rejected"
     );
 }
 
@@ -8808,4 +8808,80 @@ fn object_type_is_available_in_comptime_signatures_but_not_runtime_values() {
         failure(&output, 1);
         assert!(!details(&output).contains("panicked"));
     }
+}
+
+#[test]
+fn comptime_object_expressions_evaluate_mixed_nested_entries_in_order() {
+    let sandbox = Sandbox::new();
+    sandbox.write("input.fl", r#"
+        typealias Metadata = .Object'builtin;
+        comptime fn flip(flag:*bool)->bool {flag.* = not flag.*;flag.*}
+        comptime fn forward(value:Metadata)->Metadata {value}
+        comptime fn build()->Metadata {
+            var flag = false;
+            forward({first:flip(flag.ref),flip(flag.ref),nested:{value:flip(flag.ref)},first:flip(flag.ref)})
+        }
+    "#);
+    let output = sandbox.run(&["input.fl", "--invoke-comptime", "build"]);
+    let dump = success(&output);
+    assert!(dump.trim().starts_with("(object "), "{dump}");
+    assert_eq!(dump.matches("(key \"first\")").count(), 2, "{dump}");
+    assert_eq!(dump.matches("(key \"nested\")").count(), 1, "{dump}");
+    let values: Vec<_> = dump
+        .match_indices("(bool ")
+        .map(|(i, _)| dump[i..].split(')').next().unwrap())
+        .collect();
+    assert_eq!(
+        values,
+        vec!["(bool true", "(bool false", "(bool true", "(bool false"],
+        "{dump}"
+    );
+}
+
+#[test]
+fn object_entries_propagate_returns_without_evaluating_later_entries() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        r#"
+        typealias Metadata = .Object'builtin;
+        comptime fn forever()->bool {forever()}
+        comptime fn build()->Metadata {
+            let result = {first:do {return {};},late:forever()};
+            result
+        }
+    "#,
+    );
+    let output = sandbox.run(&["input.fl", "--invoke-comptime", "build"]);
+    assert_eq!(success(&output).trim(), "(object)");
+}
+
+#[test]
+fn object_expressions_do_not_hide_invalid_names_or_runtime_calls() {
+    let sandbox = Sandbox::new();
+    for source in [
+        "comptime fn build()->.Object'builtin {let result={first:missing()};result}",
+        "fn runtime()->bool {true} comptime fn build()->.Object'builtin {let result={first:runtime()};result}",
+        "fn run()->.Object'builtin {let result={first:true};result}",
+    ] {
+        sandbox.write("input.fl", source);
+        let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+        failure(&output, 1);
+        assert!(!details(&output).contains("parsing failed"));
+        assert!(!details(&output).contains("panicked"));
+    }
+}
+
+#[test]
+fn pure_comptime_objects_preserve_type_values_and_nested_data() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        "pure comptime fn build()->.Object'builtin {let result={ty:bool,nested:{flag:true}};result}",
+    );
+    let output = sandbox.run(&["input.fl", "--invoke-comptime", "build"]);
+    let dump = success(&output);
+    assert!(dump.contains("(type (primitive Type))"), "{dump}");
+    assert!(dump.contains("(bool true)"), "{dump}");
+    assert!(dump.contains("(key \"nested\")"), "{dump}");
 }

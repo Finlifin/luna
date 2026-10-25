@@ -25,9 +25,20 @@ configuration -> .id expr
 
 属性表达式可使用对象表达式，例如 `^{ some_attr: 1 }`。多个前缀属性依次写在被修饰的元素之前。
 
-对象表达式已在 AST lowering 中进入专用 HIR Object 节点。普通项与命名项按源码次序保存在同一个列表中，嵌套对象和重复键也保留原结构；前端不因存储方便而提前分组、合并或重排这些项。这只是表达式表示，对象表达式的类型检查与求值尚未接通。
+对象表达式在 AST lowering 中进入专用 HIR Object 节点，并在 comptime 函数中完成类型检查与求值。普通项与命名项按源码次序求值一次，嵌套对象和重复键保留原结构；前端不因存储方便而提前分组、合并或重排这些项。条目中的控制转移会立即传播，不执行后续条目。
 
-实现进展：编译器内部已有 `.Object'builtin` 类型及 VM Object 值；条目保存各自的类型和值，避免从载荷反推类型而丢失身份。类型可以用于 comptime 函数接口，不能用于 runtime 数据接口。当前仍未接通源码对象表达式的求值、Object 常量物化及通用属性执行；内部值的传递测试不代表本章属性示例已经可执行。
+实现进展：编译器内部已有 `.Object'builtin` 类型及 VM Object 值；条目保存各自的类型和值，避免从载荷反推类型而丢失身份。类型可以用于 comptime 函数接口，不能用于 runtime 数据接口。当前仍未接通 Object 常量物化及通用属性执行；对象表达式可执行不代表本章属性附着示例已经可执行。
+
+下面的函数可以通过 `--invoke-comptime metadata` 求值；此例只构造元数据，不附着属性：
+
+```flurry
+comptime fn metadata() -> .Object'builtin {
+    let result = {enabled:true, nested:{checked:false}, enabled:false};
+    result
+}
+```
+
+结果保留两个 `enabled` 条目。属性合并属于后续消费步骤，不能在对象构造时提前执行。
 
 multi_element 是语法元素列表的通用元记号，base_element 为该列表原本允许的元素。前缀可递归嵌套；这不为任意内部操作数或原始 token 序列增加属性语法。
 

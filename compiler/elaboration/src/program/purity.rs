@@ -1054,6 +1054,7 @@ impl<'a> Analysis<'a> {
                 | K::ErrorConvert { .. }
                 | K::Tuple(_)
                 | K::AnonymousRecord { .. }
+                | K::Object { .. }
                 | K::Call { .. }
                 | K::If { .. }
                 | K::Match { .. }
@@ -2311,7 +2312,7 @@ impl<'a> Analysis<'a> {
             // Finite field calls are safe here when prior fields carry no
             // cleanup responsibility. Owned fields still need totality or
             // partial-construction cleanup evidence, not just stable calls.
-            K::Record { fields, .. }
+            K::Record { fields, .. } | K::Object { fields, .. }
                 if !self.finite
                     || self.resource_scope
                     || fields.iter().all(|field| self.copy_type(&field.ty)) =>
@@ -3516,7 +3517,10 @@ impl<'a> Analysis<'a> {
                     }
                 }
             }
-            K::Record { fields, .. } | K::Tuple(fields) | K::AnonymousRecord { fields } => {
+            K::Record { fields, .. }
+            | K::Object { fields, .. }
+            | K::Tuple(fields)
+            | K::AnonymousRecord { fields } => {
                 let (index, tail) = path.split_first()?;
                 Some(self.loop_code_value_at(fields.get(*index)?, tail, facts, depth + 1))
             }

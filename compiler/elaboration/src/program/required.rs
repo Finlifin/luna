@@ -2489,6 +2489,7 @@ pub(super) fn references(
                 | K::TupleType(fields)
                 | K::Intrinsic { inputs: fields, .. }
                 | K::Tuple(fields)
+                | K::Object { fields, .. }
                 | K::AnonymousRecord { fields }
                 | K::Record { fields, .. }
                 | K::Variant { fields, .. } => pending.extend(fields.iter().map(Node::Expr)),

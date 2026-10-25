@@ -687,6 +687,7 @@ fn transfer_flow(
         }
         K::Tuple(fields)
         | K::Record { fields, .. }
+        | K::Object { fields, .. }
         | K::AnonymousRecord { fields }
         | K::Variant { fields, .. } => {
             // Construction evaluates fields in order but is not a transfer of

@@ -391,6 +391,7 @@ fn scan<'a>(
                     work.push(Work::Expr(value, context.clone()));
                 }
                 K::Tuple(fields)
+                | K::Object { fields, .. }
                 | K::AnonymousRecord { fields }
                 | K::Record { fields, .. }
                 | K::Variant { fields, .. } => {

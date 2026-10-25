@@ -16,6 +16,7 @@ mod memory;
 mod normal_inputs;
 #[cfg(test)]
 mod object_values;
+mod objects;
 mod selected_types;
 pub use comptime_runtime::object::{Entry as ObjectEntry, Object};
 pub use memory::{OwnedGraphCheckpoint, PointerValue, Storage};
@@ -3629,6 +3630,7 @@ impl<'a> Interpreter<'a> {
             K::Literal(..) => self.eval_literal(expr, environment),
             K::Variant { .. } => self.eval_variant(expr, environment),
             K::Record { .. } | K::AnonymousRecord { .. } => self.eval_record(expr, environment),
+            K::Object { .. } => self.eval_object(expr, environment),
             K::Field { .. } | K::AnonymousField { .. } => self.eval_field(expr, environment),
             K::AddressOf(_)
             | K::ReadPointer(_)

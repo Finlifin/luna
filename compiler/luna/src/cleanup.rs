@@ -668,6 +668,7 @@ fn prepare_source_impl(
                         }
                         match &expr.kind {
                             K::Tuple(fields)
+                            | K::Object { fields, .. }
                             | K::AnonymousRecord { fields }
                             | K::Record { fields, .. }
                             | K::Variant { fields, .. } => {

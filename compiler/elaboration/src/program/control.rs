@@ -250,6 +250,7 @@ fn loop_may_transfer(
                 K::Tuple(fields)
                 | K::TypeList(fields)
                 | K::Record { fields, .. }
+                | K::Object { fields, .. }
                 | K::AnonymousRecord { fields }
                 | K::Variant { fields, .. } => {
                     *fuel = fuel

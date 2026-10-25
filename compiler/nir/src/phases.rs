@@ -1074,6 +1074,22 @@ pub fn machine_arithmetic_functions(
                             }
                             work.extend(fields.iter().map(|e| Work::Expr(e, false, ct)));
                         }
+                        K::Object { names, fields } => {
+                            let diverges = fields.iter().any(|field| {
+                                field.ty == crate::Term::Primitive(crate::Primitive::Never)
+                            });
+                            let expected = crate::Term::Primitive(if diverges {
+                                crate::Primitive::Never
+                            } else {
+                                crate::Primitive::Object
+                            });
+                            if !ct || names.len() != fields.len() || expr.ty != expected {
+                                return Err(error(
+                                    "Object construction requires comptime evaluation and matching entries",
+                                ));
+                            }
+                            work.extend(fields.iter().map(|e| Work::Expr(e, false, ct)));
+                        }
                         K::AnonymousField { value, name, index } => {
                             match &value.ty {
                                 crate::Term::Record(fields)

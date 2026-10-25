@@ -349,6 +349,7 @@ impl Analyzer<'_, '_, '_, '_> {
             K::Tuple(fields)
             | K::Record { fields, .. }
             | K::Variant { fields, .. }
+            | K::Object { fields, .. }
             | K::AnonymousRecord { fields } => self.sequence(fields, n, fuel, depth),
             K::WritePointer {
                 pointer: left,

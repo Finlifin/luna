@@ -10950,6 +10950,20 @@ impl Checker<'_, '_> {
             H::CollectedProperties(fields) => {
                 return self.property_packet(expr, fields, expected);
             }
+            H::Object(entries) => {
+                let mut names = Vec::with_capacity(entries.len());
+                let mut fields = Vec::with_capacity(entries.len());
+                for entry in entries {
+                    let (name, value) = match entry {
+                        hir::expr::ObjectEntry::Value(value) => (None, *value),
+                        hir::expr::ObjectEntry::Property(field) => (Some(field.ident.name.as_str().to_owned()), field.expr),
+                    };
+                    names.push(name);
+                    fields.push(self.expr(value, None)?);
+                }
+                let ty = if fields.iter().any(|field| is_never(&field.ty)) { p(P::Never) } else { p(P::Object) };
+                (ty, K::Object { names, fields })
+            }
             H::Tuple(items) => {
                 // A proven type equation can expose a tuple's element contexts
                 // without unfolding an opaque normal-form head. Keep the final
@@ -11950,7 +11964,8 @@ fn stable_default(expr: &n::Expr) -> bool {
         return false;
     }
     match &expr.kind {
-        K::Intrinsic { .. }
+        K::Object { .. }
+        | K::Intrinsic { .. }
         | K::ErrorConvert { .. }
         | K::NewtypeConvert(_)
         | K::BitWindow { .. }

@@ -988,6 +988,12 @@ pub enum ExprKind {
     AnonymousRecord {
         fields: Vec<Expr>,
     },
+    /// Ordered compile-time metadata. None denotes a positional entry;
+    /// duplicate property labels remain distinct until an attribute merge.
+    Object {
+        names: Vec<Option<String>>,
+        fields: Vec<Expr>,
+    },
     Record {
         declaration: DeclarationId,
         fields: Vec<Expr>,
@@ -2707,6 +2713,24 @@ impl fmt::Display for ExprKind {
                 }
                 f.write_str("))")
             }
+            Self::Object { names, fields } => {
+                f.write_str("(object (names")?;
+                for name in names {
+                    match name {
+                        None => f.write_str(" (positional)")?,
+                        Some(name) => {
+                            f.write_str(" (property ")?;
+                            crate::display::string(f, name)?;
+                            f.write_str(")")?;
+                        }
+                    }
+                }
+                f.write_str(") (fields")?;
+                for field in fields {
+                    write!(f, " {field}")?;
+                }
+                f.write_str("))")
+            }
             Self::AnonymousRecord { fields } => {
                 f.write_str("(anonymous-record (fields")?;
                 for field in fields {
@@ -3393,6 +3417,7 @@ impl Expr {
                     | ExprKind::TupleType(_)
                     | ExprKind::Intrinsic { .. }
                     | ExprKind::Tuple(_)
+                    | ExprKind::Object { .. }
                     | ExprKind::AnonymousRecord { .. }
                     | ExprKind::Record { .. }
                     | ExprKind::Variant { .. }
@@ -3509,6 +3534,7 @@ impl Expr {
                 | ExprKind::TupleType(fields)
                 | ExprKind::Intrinsic { inputs: fields, .. }
                 | ExprKind::Tuple(fields)
+                | ExprKind::Object { fields, .. }
                 | ExprKind::AnonymousRecord { fields }
                 | ExprKind::Record { fields, .. }
                 | ExprKind::Variant { fields, .. } => {
@@ -3778,6 +3804,7 @@ impl Expr {
             | ExprKind::TupleType(fields)
             | ExprKind::Intrinsic { inputs: fields, .. }
             | ExprKind::Tuple(fields)
+            | ExprKind::Object { fields, .. }
             | ExprKind::AnonymousRecord { fields }
             | ExprKind::Record { fields, .. }
             | ExprKind::Variant { fields, .. } => {
@@ -4490,6 +4517,7 @@ pub fn checkable_predicate(expression: &Expr) -> bool {
             // and cleanup remain rejected when visiting their children.
             ExprKind::Tuple(fields)
             | ExprKind::Record { fields, .. }
+            | ExprKind::Object { fields, .. }
             | ExprKind::AnonymousRecord { fields }
             | ExprKind::Variant { fields, .. } => pending.extend(fields),
             ExprKind::Match { value, arms } => {

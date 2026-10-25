@@ -3111,6 +3111,7 @@ impl Builder<'_> {
                 }
             }
             K::Variant { fields, .. }
+            | K::Object { fields, .. }
             | K::AnonymousRecord { fields }
             | K::Record { fields, .. }
             | K::FunctionType {

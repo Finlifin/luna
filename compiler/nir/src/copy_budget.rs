@@ -369,6 +369,14 @@ fn charge_node(
                         work.push((Node::Type(ty), depth + 1));
                         0
                     }
+                    K::Object { names, fields } => {
+                        charge_width(steps, names.len().saturating_add(fields.len()))?;
+                        for name in names.iter().flatten() {
+                            charge_width(steps, name.len())?;
+                        }
+                        work.extend(fields.iter().map(|field| (Node::Expr(field), depth + 1)));
+                        0
+                    }
                     K::TypeListValue(types) => {
                         charge_width(steps, types.len())?;
                         work.extend(types.iter().map(|ty| (Node::Type(ty), depth + 1)));

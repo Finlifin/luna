@@ -298,3 +298,48 @@ fn forged_entry_tags_and_runtime_object_signatures_are_rejected() {
         &[]
     ));
 }
+
+#[test]
+fn object_evaluation_checks_shape_and_payload_types_even_without_phase_preflight() {
+    let package = Package::default();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let source = SourceRange { start: 4, end: 8 };
+    let field = Expr {
+        ty: Term::Primitive(Primitive::Bool),
+        source,
+        kind: K::Literal(Literal::Bool(true)),
+    };
+    let mut value = Expr {
+        ty: Term::Primitive(Primitive::Object),
+        source,
+        kind: K::Object {
+            names: vec![],
+            fields: vec![field.clone()],
+        },
+    };
+    assert_eq!(
+        vm.eval(&value, &mut Environment::new()).unwrap_err().kind,
+        ErrorKind::Type
+    );
+    value.kind = K::Object {
+        names: vec![Some("x".into())],
+        fields: vec![field],
+    };
+    let Flow::Value(Value::Object(result)) = vm.eval(&value, &mut Environment::new()).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(
+        result.entries()[0].value().ty,
+        Term::Primitive(Primitive::Bool)
+    );
+    assert_eq!(result.entries()[0].value().value, Value::Bool(true));
+    let K::Object { fields, .. } = &mut value.kind else {
+        panic!()
+    };
+    fields[0].kind = K::Literal(Literal::Char('x'));
+    assert_eq!(
+        vm.eval(&value, &mut Environment::new()).unwrap_err().kind,
+        ErrorKind::Type
+    );
+}

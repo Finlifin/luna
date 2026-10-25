@@ -378,6 +378,7 @@ fn walk_roots<'a>(
                         }
                     }
                     K::Variant { fields, .. }
+                    | K::Object { fields, .. }
                     | K::AnonymousRecord { fields }
                     | K::Record { fields, .. }
                     | K::FunctionType {
@@ -772,6 +773,7 @@ fn walk_mut(
                         }
                     }
                     K::Variant { fields, .. }
+                    | K::Object { fields, .. }
                     | K::AnonymousRecord { fields }
                     | K::Record { fields, .. }
                     | K::FunctionType {
